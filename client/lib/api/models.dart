@@ -105,6 +105,56 @@ class WriteResult {
       );
 }
 
+/// One entry from the server's change log.
+///
+/// Carries metadata only — the client decides what content to fetch. That
+/// keeps the log cheap and means a client can catch up on thousands of changes
+/// without downloading a vault it doesn't cache.
+class Change {
+  const Change({
+    required this.seq,
+    required this.noteId,
+    required this.kind,
+    required this.version,
+    required this.at,
+  });
+
+  final int seq;
+  final String noteId;
+
+  /// `created`, `updated`, `moved` or `deleted`.
+  final String kind;
+  final int version;
+  final String at;
+
+  factory Change.fromJson(Map<String, dynamic> j) => Change(
+        seq: (j['seq'] as num).toInt(),
+        noteId: j['note_id'] as String,
+        kind: j['kind'] as String,
+        version: (j['version'] as num?)?.toInt() ?? 0,
+        at: j['at'] as String? ?? '',
+      );
+}
+
+/// A page of changes plus the server's current log position.
+///
+/// [seq] is what the client stores to resume from; it is the server's latest,
+/// not the last item in [changes], so an empty batch still advances nothing
+/// incorrectly.
+class SyncBatch {
+  const SyncBatch({required this.changes, required this.seq});
+
+  final List<Change> changes;
+  final int seq;
+
+  factory SyncBatch.fromJson(Map<String, dynamic> j) => SyncBatch(
+        changes: (j['changes'] as List)
+            .map((c) => Change.fromJson(c as Map<String, dynamic>))
+            .toList(),
+        seq: (j['seq'] as num).toInt(),
+      );
+}
+
 class SearchHit {
   const SearchHit({
     required this.id,

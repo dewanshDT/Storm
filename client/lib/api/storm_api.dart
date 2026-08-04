@@ -53,6 +53,18 @@ class StormApi {
     return VaultTree.fromJson(json as Map<String, dynamic>);
   }
 
+  /// Changes after [since] — the delta-sync primitive.
+  ///
+  /// Clients store the returned `seq` and pass it back next time, so catching
+  /// up never requires diffing a full vault manifest.
+  Future<SyncBatch> sync({int since = 0, int limit = 500}) async {
+    final json = _decode(await _client.get(
+      _uri('/v1/sync', {'since': '$since', 'limit': '$limit'}),
+      headers: _headers,
+    ));
+    return SyncBatch.fromJson(json as Map<String, dynamic>);
+  }
+
   Future<Note> note(String id) async {
     final json = _decode(await _client.get(_uri('/v1/notes/$id'), headers: _headers));
     return Note.fromJson(json as Map<String, dynamic>);

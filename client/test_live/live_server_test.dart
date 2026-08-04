@@ -1,10 +1,13 @@
 import 'dart:io';
 
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/note_session.dart';
+import 'package:storm/sync/sync_engine.dart';
 
 /// Client-against-real-server integration test.
 ///
@@ -33,8 +36,20 @@ void main() {
     }
   });
 
-  setUp(() => api = StormApi(baseUrl: baseUrl, token: token));
-  tearDown(() => api.dispose());
+  late CacheDb cache;
+  late SyncEngine engine;
+
+  setUp(() {
+    api = StormApi(baseUrl: baseUrl, token: token);
+    cache = CacheDb(NativeDatabase.memory());
+    engine = SyncEngine(api: api, cache: cache);
+  });
+
+  tearDown(() async {
+    engine.dispose();
+    await cache.close();
+    api.dispose();
+  });
 
   /// Unique per run so repeated runs don't collide.
   String scratch(String name) =>
@@ -70,7 +85,7 @@ void main() {
     expect(fetched.content, contains('id:'));
     expect(fetched.content, contains('# Round trip'));
 
-    final session = NoteSession(api);
+    final session = NoteSession(engine);
     await session.open(created.meta.id);
     expect(session.baseVersion, fetched.meta.version);
 
@@ -95,7 +110,7 @@ void main() {
       content: '# Merge\n\nAlpha.\n\nBeta.\n\nGamma.\n\nDelta.\n\nEpsilon.\n',
     );
 
-    final session = NoteSession(api);
+    final session = NoteSession(engine);
     await session.open(created.meta.id);
     final staleBase = session.baseVersion;
     final original = session.buffer;
@@ -128,7 +143,7 @@ void main() {
     final created =
         await api.createNote(path: path, content: '# Conflict\n\nShared.\n');
 
-    final session = NoteSession(api);
+    final session = NoteSession(engine);
     await session.open(created.meta.id);
     final staleBase = session.baseVersion;
     final original = session.buffer;

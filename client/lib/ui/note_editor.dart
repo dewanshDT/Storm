@@ -143,6 +143,7 @@ class _StatusBar extends StatelessWidget {
       SaveState.dirty => ('Unsaved', theme.colorScheme.onSurfaceVariant),
       SaveState.saving => ('Saving…', theme.colorScheme.onSurfaceVariant),
       SaveState.saved => ('Saved', theme.colorScheme.primary),
+      SaveState.queued => ('Queued — offline', theme.colorScheme.tertiary),
       SaveState.failed => ('Failed', theme.colorScheme.error),
     };
 
@@ -155,7 +156,7 @@ class _StatusBar extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-              session.note?.meta.path ?? '',
+              session.meta?.path ?? '',
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               overflow: TextOverflow.ellipsis,

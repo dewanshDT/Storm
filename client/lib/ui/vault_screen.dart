@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
 import '../state/app_state.dart';
+import '../sync/sync_engine.dart';
 import 'note_editor.dart';
 import 'search_panel.dart';
 import 'vault_tree.dart';
@@ -56,30 +57,32 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
 
   Future<void> _renameNote() async {
     final session = ref.read(noteSessionProvider);
-    final note = session.note;
+    final note = session.meta;
     if (note == null) return;
 
     final path = await _promptForPath(
       context,
       title: 'Rename or move',
-      initial: note.meta.path,
+      initial: note.path,
     );
-    if (path == null || path == note.meta.path) return;
+    if (path == null || path == note.path) return;
 
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    try {
-      if (session.isDirty) await session.save();
-      final result = await api.moveNote(id: note.meta.id, newPath: path);
-      ref.invalidate(treeProvider);
-      await ref.read(noteSessionProvider).open(result.meta.id);
-    } on StormApiException catch (e) {
-      _toast(e.message);
+    if (session.isDirty) await session.save();
+    final outcome =
+        await ref.read(syncEngineProvider).move(id: note.id, newPath: path);
+    if (outcome.status == SaveStatus.failed) {
+      _toast(outcome.error ?? 'Could not move the note');
+      return;
     }
+    if (outcome.status == SaveStatus.queued) {
+      _toast('Offline — the move will sync when the server is back');
+    }
+    ref.invalidate(treeProvider);
+    await ref.read(noteSessionProvider).open(note.id);
   }
 
   Future<void> _deleteNote() async {
-    final note = ref.read(noteSessionProvider).note;
+    final note = ref.read(noteSessionProvider).meta;
     if (note == null) return;
 
     final confirmed = await showDialog<bool>(
@@ -87,7 +90,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
       builder: (c) => AlertDialog(
         title: const Text('Delete note?'),
         content: Text(
-          '“${note.meta.path}” will be removed from the vault on the server.',
+          '“${note.path}” will be removed from the vault on the server.',
         ),
         actions: [
           TextButton(
@@ -109,7 +112,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     final api = ref.read(apiProvider);
     if (api == null) return;
     try {
-      await api.deleteNote(note.meta.id);
+      await api.deleteNote(note.id);
       ref.read(noteSessionProvider).close();
       ref.read(openNoteIdProvider.notifier).state = null;
       ref.invalidate(treeProvider);
@@ -172,10 +175,14 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
               onPressed: _deleteNote,
             ),
           ],
+          const _SyncStatus(),
           IconButton(
-            tooltip: 'Refresh',
+            tooltip: 'Sync now',
             icon: const Icon(Icons.refresh),
-            onPressed: () => ref.invalidate(treeProvider),
+            onPressed: () async {
+              await ref.read(syncEngineProvider).sync();
+              ref.invalidate(treeProvider);
+            },
           ),
           const _SettingsButton(),
         ],
@@ -271,6 +278,69 @@ String? validatePath(String path) {
     return "Names can't start with a dot";
   }
   return null;
+}
+
+/// Connection and outbox state.
+///
+/// Offline is never silent: an edit that only exists in the outbox is one the
+/// server has not seen, and the user needs to know that before closing the app.
+class _SyncStatus extends ConsumerWidget {
+  const _SyncStatus();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final engine = ref.watch(syncEngineProvider);
+    final scheme = Theme.of(context).colorScheme;
+
+    if (engine.isSyncing) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 14),
+        child: Center(
+          child: SizedBox(
+            height: 14,
+            width: 14,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+
+    if (engine.isOnline && engine.pendingCount == 0) {
+      return const SizedBox.shrink();
+    }
+
+    final offline = !engine.isOnline;
+    final label = engine.pendingCount > 0
+        ? '${engine.pendingCount} unsent'
+        : 'Offline';
+
+    return Tooltip(
+      message: offline
+          ? 'Cannot reach the server. Edits are saved locally and will sync '
+              'when it comes back.'
+          : 'Waiting to send queued edits.',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            Icon(
+              offline ? Icons.cloud_off : Icons.cloud_upload_outlined,
+              size: 16,
+              color: offline ? scheme.error : scheme.tertiary,
+            ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                color: offline ? scheme.error : scheme.tertiary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _SettingsButton extends ConsumerWidget {

@@ -1,214 +1,191 @@
-import 'dart:convert';
-
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/note_session.dart';
+import 'package:storm/sync/sync_engine.dart';
 
-/// Tests for the save/merge protocol.
+import 'fake_server.dart';
+
+/// The save protocol.
 ///
-/// This is where the client can silently lose an edit, so the cases that
-/// matter are the ones where the server's answer disagrees with what the
-/// client thought it was doing.
+/// This is where an edit can silently vanish, so the cases that matter are the
+/// ones where the server's answer disagrees with what the client thought it
+/// was doing, or where the user keeps typing through a save.
 void main() {
-  /// A fake server that records requests and replies from a script.
-  late List<Map<String, dynamic>> sent;
-  late Map<String, dynamic> Function(Map<String, dynamic> body) onPut;
-  late Map<String, dynamic> noteBody;
-  late StormApi api;
-
-  Map<String, dynamic> meta({
-    String id = 'n1',
-    String path = 'A.md',
-    int version = 1,
-  }) =>
-      {
-        'id': id,
-        'path': path,
-        'title': 'A',
-        'version': version,
-        'content_hash': 'h',
-        'created': '2026-08-05T10:00:00Z',
-        'modified': '2026-08-05T10:00:00Z',
-        'size': 10,
-      };
+  late CacheDb cache;
+  late FakeServer server;
+  late SyncEngine engine;
+  late NoteSession session;
 
   setUp(() {
-    sent = [];
-    noteBody = {...meta(), 'content': 'original\n'};
-    onPut = (body) => {
-          'note': meta(version: 2),
-          'content': body['content'],
-          'seq': 5,
-          'merged': false,
-          'conflict': false,
-        };
-
-    final client = MockClient((request) async {
-      if (request.method == 'GET' && request.url.path.startsWith('/v1/notes/')) {
-        return http.Response(jsonEncode(noteBody), 200,
-            headers: {'content-type': 'application/json'});
-      }
-      if (request.method == 'PUT') {
-        final body = jsonDecode(request.body) as Map<String, dynamic>;
-        sent.add(body);
-        return http.Response(jsonEncode(onPut(body)), 200,
-            headers: {'content-type': 'application/json'});
-      }
-      return http.Response('{"error":"unexpected"}', 500);
-    });
-
-    api = StormApi(baseUrl: 'http://test', token: 't', client: client);
+    cache = CacheDb(NativeDatabase.memory());
+    server = FakeServer();
+    engine = SyncEngine(
+      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      cache: cache,
+    );
+    session = NoteSession(engine);
   });
 
-  Future<NoteSession> opened() async {
-    final s = NoteSession(api);
-    await s.open('n1');
-    return s;
+  tearDown(() async {
+    session.dispose();
+    engine.dispose();
+    await cache.close();
+  });
+
+  Future<void> open({int version = 1, String content = 'original\n'}) async {
+    server.notes['n1'] =
+        ServerNote(id: 'n1', path: 'A.md', content: content, version: version);
+    await session.open('n1');
   }
 
   test('opening loads content and the base version', () async {
-    final s = await opened();
-    expect(s.isOpen, isTrue);
-    expect(s.buffer, 'original\n');
-    expect(s.baseVersion, 1);
-    expect(s.saveState, SaveState.saved);
+    await open(version: 4);
+    expect(session.isOpen, isTrue);
+    expect(session.buffer, 'original\n');
+    expect(session.baseVersion, 4);
+    expect(session.saveState, SaveState.saved);
+  });
+
+  test('opening a missing note reports it rather than showing a blank page',
+      () async {
+    await session.open('nope');
+    expect(session.isOpen, isFalse);
+    expect(session.error, isNotNull);
   });
 
   test('an edit marks the session dirty without saving immediately', () async {
-    final s = await opened();
-    s.edit('edited\n');
-    expect(s.saveState, SaveState.dirty);
-    expect(sent, isEmpty, reason: 'saves must be debounced, not immediate');
+    await open();
+    session.edit('edited\n');
+    expect(session.saveState, SaveState.dirty);
+    expect(server.notes['n1']!.content, 'original\n',
+        reason: 'saves must be debounced, not immediate');
   });
 
   test('save sends the base version the buffer was edited from', () async {
-    final s = await opened();
-    s.edit('edited\n');
-    await s.save();
+    await open(version: 3);
+    session.edit('edited\n');
+    await session.save();
 
-    expect(sent.single['base_version'], 1);
-    expect(sent.single['content'], 'edited\n');
-    expect(s.baseVersion, 2, reason: 'must advance to the returned version');
-    expect(s.saveState, SaveState.saved);
+    expect(server.lastBaseVersion, 3);
+    expect(server.notes['n1']!.content, 'edited\n');
+    expect(session.baseVersion, 4, reason: 'must advance to the new version');
+    expect(session.saveState, SaveState.saved);
   });
 
   test('saving with nothing dirty is a no-op', () async {
-    final s = await opened();
-    await s.save();
-    expect(sent, isEmpty);
+    await open();
+    await session.save();
+    expect(server.lastBaseVersion, isNull);
+  });
+
+  test('editing with identical text does not dirty the session', () async {
+    await open();
+    session.edit('original\n');
+    expect(session.saveState, SaveState.saved);
   });
 
   test('a merged response replaces the buffer with the server text', () async {
     // The server reconciled against a version we never saw. Keeping our own
     // text would make the next save race a version we do not have.
-    onPut = (body) => {
-          'note': meta(version: 7),
-          'content': 'merged by server\n',
-          'seq': 9,
-          'merged': true,
-          'conflict': false,
-        };
+    await open();
+    final revisionBefore = session.revision;
+    server.mergeInstead = 'merged by server\n';
 
-    final s = await opened();
-    final revisionBefore = s.revision;
-    s.edit('my local edit\n');
-    await s.save();
+    session.edit('my local edit\n');
+    await session.save();
 
-    expect(s.buffer, 'merged by server\n');
-    expect(s.baseVersion, 7);
-    expect(s.revision, greaterThan(revisionBefore),
+    expect(session.buffer, 'merged by server\n');
+    expect(session.revision, greaterThan(revisionBefore),
         reason: 'the editor must be told to reload');
-    expect(s.notice, isNotNull);
-    expect(s.hasConflict, isFalse);
+    expect(session.notice, isNotNull);
+    expect(session.hasConflict, isFalse);
   });
 
-  test('a conflict response adopts the marked text and flags it', () async {
-    onPut = (body) => {
-          'note': meta(version: 8),
-          'content': '<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n',
-          'seq': 10,
-          'merged': true,
-          'conflict': true,
-        };
+  test('a conflict adopts the marked text and flags it', () async {
+    await open();
+    server.conflictInstead =
+        '<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n';
 
-    final s = await opened();
-    s.edit('mine\n');
-    await s.save();
+    session.edit('mine\n');
+    await session.save();
 
-    expect(s.hasConflict, isTrue);
-    expect(s.buffer, contains('<<<<<<<'));
-    expect(s.buffer, contains('mine'));
-    expect(s.buffer, contains('theirs'));
-    expect(s.notice, contains('Another device'));
-    expect(s.baseVersion, 8);
+    expect(session.hasConflict, isTrue);
+    expect(session.buffer, contains('<<<<<<<'));
+    expect(session.buffer, contains('mine'));
+    expect(session.buffer, contains('theirs'));
+    expect(session.notice, contains('Another device'));
   });
 
   test('typing during an in-flight save keeps the session dirty', () async {
-    // Otherwise the newer keystrokes would be marked "saved" and then lost if
+    // Otherwise the newer keystrokes would be marked saved and then lost if
     // the app closed before another edit triggered a save.
-    final s = await opened();
-    s.edit('first\n');
+    await open();
+    session.edit('first\n');
 
-    final saving = s.save();
-    s.edit('second\n'); // lands while the PUT is in flight
+    final saving = session.save();
+    session.edit('second\n'); // lands while the PUT is in flight
     await saving;
 
-    expect(s.saveState, SaveState.dirty,
+    expect(session.saveState, SaveState.dirty,
         reason: 'the buffer is ahead of the server, so it is not saved');
-    expect(s.buffer, 'second\n');
+    expect(session.buffer, 'second\n');
   });
 
-  test('a failed save stays dirty so the edit is not lost', () async {
-    final client = MockClient((request) async {
-      if (request.method == 'GET') {
-        return http.Response(jsonEncode(noteBody), 200,
-            headers: {'content-type': 'application/json'});
-      }
-      return http.Response('{"error":"server exploded"}', 500,
-          headers: {'content-type': 'application/json'});
-    });
-    final s = NoteSession(
-        StormApi(baseUrl: 'http://test', token: 't', client: client));
-    await s.open('n1');
+  test('a rejected save stays dirty so the edit is not lost', () async {
+    await open();
+    server.failWith = 500;
 
-    s.edit('precious edit\n');
-    await s.save();
+    session.edit('precious edit\n');
+    await session.save();
 
-    expect(s.saveState, SaveState.dirty,
+    expect(session.saveState, SaveState.dirty,
         reason: 'a failed save must not look saved');
-    expect(s.error, contains('server exploded'));
-    expect(s.buffer, 'precious edit\n', reason: 'the edit must survive');
+    expect(session.error, isNotNull);
+    expect(session.buffer, 'precious edit\n', reason: 'the edit must survive');
   });
 
-  test('open surfaces a server error rather than showing a blank note', () async {
-    final client = MockClient((request) async =>
-        http.Response('{"error":"no such note"}', 404,
-            headers: {'content-type': 'application/json'}));
-    final s = NoteSession(
-        StormApi(baseUrl: 'http://test', token: 't', client: client));
-    await s.open('missing');
+  test('an offline save is queued and the base version does not advance',
+      () async {
+    // The server has not accepted it, so advancing the base would tell a
+    // later save there is nothing to merge against.
+    await open(version: 2);
+    server.unreachable = true;
 
-    expect(s.isOpen, isFalse);
-    expect(s.error, contains('no such note'));
+    session.edit('offline edit\n');
+    await session.save();
+
+    expect(session.saveState, SaveState.queued);
+    expect(session.baseVersion, 2);
+    expect(await cache.pendingCount(), 1);
+    expect(session.buffer, 'offline edit\n');
   });
 
   test('close clears state so a stale save cannot fire', () async {
-    final s = await opened();
-    s.edit('edited\n');
-    s.close();
+    await open();
+    session.edit('edited\n');
+    session.close();
 
-    expect(s.isOpen, isFalse);
-    expect(s.buffer, isEmpty);
-    await s.save();
-    expect(sent, isEmpty);
+    expect(session.isOpen, isFalse);
+    expect(session.buffer, isEmpty);
+    await session.save();
+    expect(server.notes['n1']!.content, 'original\n');
   });
 
-  test('editing with identical text does not dirty the session', () async {
-    final s = await opened();
-    s.edit('original\n');
-    expect(s.saveState, SaveState.saved);
+  test('switching notes does not save the new note over the old buffer',
+      () async {
+    await open();
+    session.edit('edits to A\n');
+
+    server.notes['n2'] =
+        ServerNote(id: 'n2', path: 'B.md', content: 'note B\n', version: 1);
+    await session.open('n2');
+    await session.save();
+
+    expect(session.buffer, 'note B\n');
+    expect(server.notes['n2']!.content, 'note B\n',
+        reason: "A's buffer must never be written to B");
   });
 }

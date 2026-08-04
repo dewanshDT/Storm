@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/models.dart';
 import '../api/storm_api.dart';
+import '../cache/cache_db.dart';
+import '../sync/sync_engine.dart';
 import 'note_session.dart';
 
 /// Connection and appearance settings.
@@ -99,21 +101,51 @@ final apiProvider = Provider<StormApi?>((ref) {
   return api;
 });
 
-/// The vault tree. Invalidate this after any structural change.
-final treeProvider = FutureProvider<VaultTree>((ref) async {
+/// The local cache. One instance for the app's lifetime.
+final cacheProvider = Provider<CacheDb>((ref) {
+  final db = CacheDb();
+  ref.onDispose(db.close);
+  return db;
+});
+
+/// Owns the cache, the outbox and the server connection.
+///
+/// Everything above this reads and writes through it rather than touching
+/// [StormApi], so offline behaviour lives in one place.
+final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
   final api = ref.watch(apiProvider);
-  if (api == null) throw StormApiException(0, 'Not connected');
-  return api.tree();
+  final engine = SyncEngine(
+    api: api ?? StormApi(baseUrl: '', token: ''),
+    cache: ref.watch(cacheProvider),
+  );
+  if (api != null) engine.start();
+  ref.onDispose(engine.dispose);
+  return engine;
+});
+
+/// The vault tree — server when reachable, cache when not.
+final treeProvider = FutureProvider<List<NoteMeta>>((ref) async {
+  final engine = ref.watch(syncEngineProvider);
+  return engine.tree();
 });
 
 /// The currently open note, if any.
 final openNoteIdProvider = StateProvider<String?>((ref) => null);
 
 final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
-  final api = ref.watch(apiProvider);
-  final session = NoteSession(
-    api ?? StormApi(baseUrl: '', token: ''),
-  );
+  final engine = ref.watch(syncEngineProvider);
+  final session = NoteSession(engine);
+
+  // Remote changes reach the open editor. The session decides whether to
+  // adopt them — a local edit in progress always wins.
+  final sub = engine.changes.listen((ids) {
+    if (session.noteId != null && ids.contains(session.noteId)) {
+      session.onRemoteChange();
+    }
+    ref.invalidate(treeProvider);
+  });
+
+  ref.onDispose(sub.cancel);
   ref.onDispose(session.dispose);
   return session;
 });

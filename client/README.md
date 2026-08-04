@@ -19,18 +19,32 @@ On first launch you're asked for the server address and token. The connection is
 verified before it's saved, so a typo surfaces immediately rather than as an
 empty vault later.
 
-## What M2 covers
-
-Online-only: every read and write goes straight to the server. There is no local
-cache and no outbox — those are M3, and they layer *above* `StormApi` rather
-than inside it.
+## What works
 
 - Vault tree with folders derived from note paths
 - Markdown editor with live styling (see `lib/editor/`)
-- Create, rename/move, delete
+- Create, rename/move, delete — all of which work offline
 - Full-text search with highlighted snippets
 - Debounced autosave with merge/conflict handling
+- Offline editing with an outbox that replays on reconnect
+- Live updates pushed from other devices over a WebSocket
 - Light/dark theme, font size
+
+## Offline
+
+`SyncEngine` (`lib/sync/sync_engine.dart`) owns the drift cache, the outbox and
+the server connection. Nothing above it touches `StormApi` directly, so offline
+behaviour lives in one place.
+
+Online/offline is inferred from whether requests actually succeed rather than
+from a connectivity plugin — a device can be on wifi with the homelab
+unreachable, and only a real request distinguishes that. A socket failure is
+queued and retried; an HTTP refusal never is, since retrying a request the
+server already rejected would wedge the queue behind it.
+
+The status bar shows `Offline` or `N unsent` whenever the server does not have
+everything, because an edit that exists only in the outbox is one the user
+needs to know about before closing the app.
 
 ## The save protocol
 
@@ -68,8 +82,8 @@ syntax markers are dimmed rather than hidden.
 ## Tests
 
 ```sh
-flutter test          # 76 tests, no server needed
-flutter test test_live/   # 12 tests against a real storm-server
+flutter test              # 108 tests, no server needed
+flutter test test_live/   # 16 tests against a real storm-server
 ```
 
 `test_live/` sits outside `test/` deliberately, so a plain `flutter test` never

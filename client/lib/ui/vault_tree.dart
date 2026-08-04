@@ -56,11 +56,11 @@ class VaultTreePanel extends ConsumerWidget {
     return tree.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (e, _) => _Error(message: '$e', onRetry: () => ref.invalidate(treeProvider)),
-      data: (vault) {
-        if (vault.notes.isEmpty) {
+      data: (notes) {
+        if (notes.isEmpty) {
           return const _Empty();
         }
-        final root = TreeNode.build(vault.notes);
+        final root = TreeNode.build(notes);
         return ListView(
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [

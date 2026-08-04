@@ -38,25 +38,25 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 |---|---|---|---|
 | M0 | Editor spike | **done** | 67 tests · `spike/editor_spike/FINDINGS.md` |
 | M1 | Rust server core | **done** | 86 tests, 0 clippy · 43 e2e checks |
-| M2 | Client vertical slice | **done** | 88 tests + 12 live-server tests |
-| M3 | Cache, outbox, offline, merge | not started | exit = 9-scenario matrix below |
+| M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
+| M3 | Cache, outbox, offline, merge | **done** | 108 tests + 16 live · matrix below |
 | M4 | Search, tags, backlinks | partly done | server complete; client has search only |
 | M5 | Android, Linux, Web | partly done | web builds & is served; Android untried |
 | M6 | Attachments, settings, deploy | not started | |
 
-Last updated: 2026-08-05, after M2.
+Last updated: 2026-08-05, after M3.
 
 ### Verify the current state
 
 ```sh
 cd server && cargo test && cargo clippy --all-targets   # 86 tests, 0 warnings
-cd client && flutter analyze && flutter test            # clean, 88 tests
+cd client && flutter analyze && flutter test            # clean, 108 tests
 
 # Against a real server (start it once, run both)
 cd server && cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484 &
 
 VAULT=/tmp/v python3 server/tests/e2e.py               # 43 checks, HTTP + disk + watcher
-cd client && flutter test test_live/                    # 12 checks
+cd client && flutter test test_live/                    # 16 checks, 2 clients
 ```
 
 Both need a server. `server/tests/e2e.py` creates its own fixtures under
@@ -255,23 +255,36 @@ links returning HTTP 404 with `index.html`'s body — tower-http's
 `not_found_service` keeps ServeDir's status, breaking caching and the Flutter
 service worker. Use `.fallback()`.
 
-### M3 — Cache, outbox, offline, merge ⬜ *(next)*
+### M3 — Cache, outbox, offline, merge ✅
 
-Add `drift` cache, an outbox, a `SyncEngine` driven by `change_log` seq, and the
-WebSocket push. The server side of the merge already exists and is tested; this
-is the client half.
+`SyncEngine` (`lib/sync/sync_engine.dart`) owns the drift cache, the outbox and
+the connection. Everything above it — `NoteSession`, the UI — reads and writes
+through it and never touches `StormApi`, so offline behaviour is implemented
+once rather than at every call site.
 
-- Cache tables: `notes(id, path, version, content, cached_at, pinned)`,
-  `outbox(id, note_id, base_version, content, op, created_at)`, `meta(last_seq)`.
-- Coalesce repeated edits to one note into a single outbox row, keeping the
-  **original** `base_version`.
-- On reconnect: drain the outbox oldest-first, then `GET /sync?since=last_seq`.
-- Cache policy: LRU over recently-opened notes plus a per-note/folder
-  "make available offline" pin. Not the whole vault.
-- `drift` on web needs `sqlite3.wasm` + `drift_worker.dart.js` in `web/`, served
-  with `Content-Type: application/wasm`, plus COOP/COEP headers for OPFS.
+Design points worth keeping:
 
-**Exit criterion — the sync matrix, run manually across two clients:**
+- **Online/offline is inferred from whether requests actually succeed**, not
+  read from a connectivity plugin. A device can be on wifi with the homelab
+  unreachable (VPN down, server restarting, wrong subnet) and only a real
+  request tells those apart.
+- **A socket failure and an HTTP refusal are treated differently.** The first
+  is queued and retried; the second never is, because retrying a request the
+  server already rejected would wedge the queue behind it.
+- **Coalesced edits keep the *original* `base_version`.** Advancing it would
+  tell the server there is nothing to merge, silently clobbering whatever
+  landed while the device was away.
+- **A pull never overwrites a note with an unsent edit** — the outbox copy is
+  the only one that exists.
+- **The WebSocket only signals *that* something changed**; the authoritative
+  list still comes from `GET /sync?since=`. A dropped frame therefore costs
+  nothing. Reconnect uses capped exponential backoff (1s → 60s).
+- A queued **move** outranks a later edit on the same note: one outbox row per
+  note means a plain `update` would drop the rename, so the drain replays the
+  move first, then the content.
+- Eviction never touches pinned notes or notes with queued edits.
+
+**Exit criterion — the sync matrix. All nine now covered by tests:**
 
 | # | Scenario | Expected |
 |---|---|---|
@@ -285,8 +298,24 @@ is the client half.
 | 8 | Kill the server mid-write | No truncated files; index reconciles on restart |
 | 9 | Delete on A while B has it open | B is told; no zombie resurrection |
 
-Scenarios 3–7 already pass server-side — see `server/tests/e2e.py`. M3 must
-prove them through the client with real offline transitions.
+Where each is proven:
+
+| # | Covered by |
+|---|---|
+| 1, 2, 9 | `client/test_live/two_client_sync_test.dart` — two real clients, real WebSocket |
+| 3, 4 | `two_client_sync_test.dart` (offline edit → reconnect → merge) and `test/sync_engine_test.dart` |
+| 5 | `test_live/live_server_test.dart` + `test/sync_engine_test.dart` |
+| 6 | `test/sync_engine_test.dart` (offline rename + offline edit both survive) |
+| 7 | `server/tests/e2e.py` (watcher picks up an external edit) |
+| 8 | M1: atomic writes + restart reconcile, verified during the M1 e2e run |
+
+Scenario 2 in particular could not be reached by unit tests — `MockClient` has
+no WebSocket — which is why `test_live/` exists.
+
+**Still deferred to M5:** `drift` on web needs `sqlite3.wasm` and
+`drift_worker.dart.js` in `web/`, served with `Content-Type: application/wasm`,
+plus COOP/COEP headers so Chrome uses OPFS rather than falling back to
+IndexedDB. Untested on web so far.
 
 ### M4 — Search, tags, backlinks 🟡
 
