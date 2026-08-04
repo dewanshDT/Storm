@@ -226,6 +226,62 @@ void main() {
     await api.deleteNote(target.meta.id);
   });
 
+  test('tags round-trip through the real index', () async {
+    final marker = 'tag${DateTime.now().microsecondsSinceEpoch}';
+    final created = await api.createNote(
+      path: scratch('tags'),
+      content: '# Tagged\n\nBody with #$marker and #$marker/nested.\n',
+    );
+
+    final tags = await api.tags();
+    final mine = tags.where((t) => t.tag.startsWith(marker)).toList();
+    expect(mine, hasLength(2), reason: 'both the tag and its child are indexed');
+    expect(mine.map((t) => t.topLevel).toSet(), {marker},
+        reason: 'the browser groups these under one root');
+
+    final tagged = await api.notesWithTag(marker);
+    expect(tagged.map((n) => n.id), contains(created.meta.id));
+
+    // A slash in a tag name must survive the URL path.
+    final nested = await api.notesWithTag('$marker/nested');
+    expect(nested.map((n) => n.id), contains(created.meta.id));
+
+    await api.deleteNote(created.meta.id);
+  });
+
+  test('a tag disappears from the index when its note is deleted', () async {
+    final marker = 'gone${DateTime.now().microsecondsSinceEpoch}';
+    final created = await api.createNote(
+      path: scratch('tagdel'),
+      content: '# Temp\n\n#$marker\n',
+    );
+    expect((await api.tags()).any((t) => t.tag == marker), isTrue);
+
+    await api.deleteNote(created.meta.id);
+    expect((await api.tags()).any((t) => t.tag == marker), isFalse,
+        reason: 'the index must not accumulate tags from deleted notes');
+  });
+
+  test('editing a note out of a tag removes it from the index', () async {
+    final marker = 'edit${DateTime.now().microsecondsSinceEpoch}';
+    final created = await api.createNote(
+      path: scratch('tagedit'),
+      content: '# T\n\n#$marker\n',
+    );
+    expect((await api.tags()).any((t) => t.tag == marker), isTrue);
+
+    final fetched = await api.note(created.meta.id);
+    await api.saveNote(
+      id: created.meta.id,
+      baseVersion: fetched.meta.version,
+      content: fetched.content.replaceAll('#$marker', 'no tag now'),
+    );
+
+    expect((await api.tags()).any((t) => t.tag == marker), isFalse,
+        reason: 'reindexing must remove, not just add');
+    await api.deleteNote(created.meta.id);
+  });
+
   test('deleting a note makes it 404 afterwards', () async {
     final created =
         await api.createNote(path: scratch('delete'), content: '# Bye\n');

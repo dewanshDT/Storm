@@ -39,24 +39,24 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M0 | Editor spike | **done** | 67 tests · `spike/editor_spike/FINDINGS.md` |
 | M1 | Rust server core | **done** | 86 tests, 0 clippy · 43 e2e checks |
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
-| M3 | Cache, outbox, offline, merge | **done** | 108 tests + 16 live · matrix below |
-| M4 | Search, tags, backlinks | partly done | server complete; client has search only |
+| M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
+| M4 | Search, tags, backlinks | **done** | 118 tests + 19 live · search p95 1.1ms |
 | M5 | Android, Linux, Web | partly done | web builds & is served; Android untried |
 | M6 | Attachments, settings, deploy | not started | |
 
-Last updated: 2026-08-05, after M3.
+Last updated: 2026-08-05, after M4.
 
 ### Verify the current state
 
 ```sh
 cd server && cargo test && cargo clippy --all-targets   # 86 tests, 0 warnings
-cd client && flutter analyze && flutter test            # clean, 108 tests
+cd client && flutter analyze && flutter test            # clean, 118 tests
 
 # Against a real server (start it once, run both)
 cd server && cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484 &
 
 VAULT=/tmp/v python3 server/tests/e2e.py               # 43 checks, HTTP + disk + watcher
-cd client && flutter test test_live/                    # 16 checks, 2 clients
+cd client && flutter test test_live/                    # 19 checks, 2 clients
 ```
 
 Both need a server. `server/tests/e2e.py` creates its own fixtures under
@@ -312,23 +312,47 @@ Where each is proven:
 Scenario 2 in particular could not be reached by unit tests — `MockClient` has
 no WebSocket — which is why `test_live/` exists.
 
+**Bug found at scale, worth not reintroducing:** `_pull()` fetched a single
+page of changes (limit 500) and then advanced `lastSeq` to the server's
+*latest*, silently skipping everything past the first page. Invisible on a
+small vault; the 600-note vault surfaced it immediately. It now pages until
+caught up, only adopting the server's position when a short page proves there
+is no more. Regression test: `sync_engine_test.dart`, "pages through more
+changes than fit in one response".
+
 **Still deferred to M5:** `drift` on web needs `sqlite3.wasm` and
 `drift_worker.dart.js` in `web/`, served with `Content-Type: application/wasm`,
 plus COOP/COEP headers so Chrome uses OPFS rather than falling back to
 IndexedDB. Untested on web so far.
 
-### M4 — Search, tags, backlinks 🟡
+### M4 — Search, tags, backlinks ✅
 
-Server side is **done and tested**: FTS5 maintained on write, link/tag
-extraction excluding code, backlinks query, and query sanitizing so punctuation
-isn't an FTS5 syntax error.
+Server: FTS5 maintained on write, link/tag extraction that excludes code, a
+backlinks query, and query sanitizing so punctuation isn't an FTS5 syntax
+error.
 
-Client side: search UI with snippets exists. **Still missing: the tag browser
-and the linked-mentions panel.** `backlinksProvider` is already wired in
-`lib/state/app_state.dart` but nothing renders it.
+Client: the sidebar is now Files / Search / Tags. The tag browser groups
+hierarchical tags on their first segment (`proj/storm` under `proj`) — a flat
+list of forty siblings is unusable — while keeping an exact parent tag distinct
+from its children. Linked mentions sit collapsed under the editor rather than
+in a third column: it's a reference, not something to keep in view while
+writing, and a third column doesn't fit on a phone.
 
-*Exit:* full-text search over the real vault under ~100 ms; backlinks match what
-Obsidian shows for spot-checked notes.
+Tags and backlinks are **server-only** by design: resolving them needs the
+whole vault's index, which the client deliberately doesn't hold. Offline the
+panels say so rather than showing an empty list, which would be a different and
+wrong claim.
+
+**Measured against a generated 600-note vault:**
+
+| | |
+|---|---|
+| search | p50 0.9 ms, **p95 1.1 ms** (criterion was ~100 ms) |
+| tags | 33 distinct, 0.3 ms; listing a tag matches its count |
+| backlinks | 0.2 ms, resolved correctly across folders |
+
+Reindexing is subtractive as well as additive — deleting a note, or editing a
+tag out of one, removes it from the index. Covered by live tests.
 
 ### M5 — Android, Linux, Web 🟡
 

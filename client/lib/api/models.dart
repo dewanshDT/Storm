@@ -176,6 +176,23 @@ class SearchHit {
       );
 }
 
+/// A tag and how many notes carry it.
+class TagCount {
+  const TagCount({required this.tag, required this.count});
+
+  final String tag;
+  final int count;
+
+  /// Tags are hierarchical in Obsidian (`proj/sub`), so the browser groups on
+  /// the segment before the first slash.
+  String get topLevel => tag.split('/').first;
+
+  factory TagCount.fromJson(Map<String, dynamic> j) => TagCount(
+        tag: j['tag'] as String,
+        count: (j['count'] as num).toInt(),
+      );
+}
+
 /// Raised for any non-2xx response, carrying the server's message.
 class StormApiException implements Exception {
   StormApiException(this.statusCode, this.message);

@@ -359,20 +359,59 @@ class SyncEngine extends ChangeNotifier {
     if (touched.isNotEmpty) _changes.add(touched);
   }
 
+  /// How many changes to request per page.
+  static const _pageSize = 500;
+
   /// Applies everything that changed on the server since our last position.
+  ///
+  /// Pages until caught up. The server caps a response at [_pageSize], so a
+  /// client that has been away — or is meeting a large vault for the first
+  /// time — has more waiting than one response can carry. Advancing straight
+  /// to the server's latest `seq` after a single page would skip every change
+  /// past the first one, which is silent data loss.
   Future<void> _pull() async {
-    final since = await cache.lastSeq();
-    final SyncBatch batch;
-    try {
-      batch = await api.sync(since: since);
-      _setOnline(true);
-    } catch (_) {
-      _setOnline(false);
-      return;
+    var since = await cache.lastSeq();
+    final touched = <String>{};
+
+    // Bounded so a server that keeps changing can't spin here forever; the
+    // next sync picks up whatever is left.
+    for (var page = 0; page < 100; page++) {
+      final SyncBatch batch;
+      try {
+        batch = await api.sync(since: since, limit: _pageSize);
+        _setOnline(true);
+      } catch (_) {
+        _setOnline(false);
+        if (touched.isNotEmpty) _changes.add(touched);
+        return;
+      }
+
+      final applied = await _applyChanges(batch.changes, touched);
+      if (!applied) {
+        // A request failed mid-page. Everything up to here is committed;
+        // leave `since` where it is so the rest is retried.
+        if (touched.isNotEmpty) _changes.add(touched);
+        return;
+      }
+
+      if (batch.changes.length < _pageSize) {
+        // Caught up: safe to adopt the server's position.
+        await cache.setLastSeq(batch.seq);
+        break;
+      }
+
+      // A full page means there is more. Resume from the last one applied.
+      since = batch.changes.last.seq;
+      await cache.setLastSeq(since);
     }
 
-    final touched = <String>{};
-    for (final change in batch.changes) {
+    await cache.evict();
+    if (touched.isNotEmpty) _changes.add(touched);
+  }
+
+  /// Applies one page. Returns false if the server became unreachable.
+  Future<bool> _applyChanges(List<Change> changes, Set<String> touched) async {
+    for (final change in changes) {
       if (change.kind == 'deleted') {
         await cache.removeNote(change.noteId);
         touched.add(change.noteId);
@@ -397,13 +436,10 @@ class SyncEngine extends ChangeNotifier {
         }
       } catch (_) {
         _setOnline(false);
-        return; // leave lastSeq alone so this batch is retried
+        return false; // leave lastSeq alone so this page is retried
       }
     }
-
-    await cache.setLastSeq(batch.seq);
-    await cache.evict();
-    if (touched.isNotEmpty) _changes.add(touched);
+    return true;
   }
 
   // ---- websocket -----------------------------------------------------

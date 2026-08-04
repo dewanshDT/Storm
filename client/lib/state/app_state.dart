@@ -159,9 +159,32 @@ final searchResultsProvider = FutureProvider<List<SearchHit>>((ref) async {
   return api.search(query);
 });
 
+/// Backlinks for a note — the "linked mentions" panel.
+///
+/// Server-only: resolving these needs the whole vault's link index, which the
+/// client deliberately does not hold. Offline it returns empty rather than
+/// pretending there are none.
 final backlinksProvider =
     FutureProvider.family<List<NoteMeta>, String>((ref, id) async {
   final api = ref.watch(apiProvider);
   if (api == null) return const [];
+  // Re-resolve whenever sync pulls something in, so the panel isn't stale.
+  ref.watch(syncEngineProvider);
   return api.backlinks(id);
+});
+
+final tagsProvider = FutureProvider<List<TagCount>>((ref) async {
+  final api = ref.watch(apiProvider);
+  if (api == null) return const [];
+  ref.watch(syncEngineProvider);
+  return api.tags();
+});
+
+final selectedTagProvider = StateProvider<String?>((ref) => null);
+
+final notesWithTagProvider =
+    FutureProvider.family<List<NoteMeta>, String>((ref, tag) async {
+  final api = ref.watch(apiProvider);
+  if (api == null) return const [];
+  return api.notesWithTag(tag);
 });

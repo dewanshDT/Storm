@@ -125,6 +125,23 @@ class StormApi {
         .toList();
   }
 
+  Future<List<TagCount>> tags() async {
+    final json = _decode(await _client.get(_uri('/v1/tags'), headers: _headers));
+    return (json['tags'] as List)
+        .map((t) => TagCount.fromJson(t as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<NoteMeta>> notesWithTag(String tag) async {
+    final json = _decode(await _client.get(
+      _uri('/v1/tags/${Uri.encodeComponent(tag)}'),
+      headers: _headers,
+    ));
+    return (json['notes'] as List)
+        .map((n) => NoteMeta.fromJson(n as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<List<NoteMeta>> backlinks(String id) async {
     final json =
         _decode(await _client.get(_uri('/v1/notes/$id/backlinks'), headers: _headers));

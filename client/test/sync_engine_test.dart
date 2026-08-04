@@ -274,6 +274,28 @@ void main() {
       expect(await cache.note('other'), isNull);
     });
 
+    test('pages through more changes than fit in one response', () async {
+      // Regression: the pull used to fetch a single page and then jump
+      // lastSeq to the server's latest, silently skipping every change past
+      // the first page. Only a vault larger than the page size shows it.
+      await seed('n1', 'original\n');
+
+      // Bury the note's real change under more than one page of noise.
+      for (var i = 0; i < 600; i++) {
+        server.pushChange('filler$i', 'updated', 1);
+      }
+      server.notes['n1'] =
+          server.notes['n1']!.copyWith(content: 'late change\n', version: 2);
+      server.pushChange('n1', 'updated', 2);
+
+      await engine.sync();
+
+      final cached = await cache.note('n1');
+      expect(cached!.content, 'late change\n',
+          reason: 'a change beyond the first page must still be applied');
+      expect(await cache.lastSeq(), server.seq);
+    });
+
     test('lastSeq advances so the next pull is incremental', () async {
       await seed('n1', 'a\n');
       server.pushChange('n1', 'updated', 2);

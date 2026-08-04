@@ -4,8 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
 import '../sync/sync_engine.dart';
+import 'backlinks_panel.dart';
 import 'note_editor.dart';
 import 'search_panel.dart';
+import 'tags_panel.dart';
 import 'vault_tree.dart';
 
 /// The main shell: vault tree on the left, editor on the right.
@@ -19,9 +21,12 @@ class VaultScreen extends ConsumerStatefulWidget {
   ConsumerState<VaultScreen> createState() => _VaultScreenState();
 }
 
+/// Which view the sidebar is showing.
+enum _Sidebar { files, search, tags }
+
 class _VaultScreenState extends ConsumerState<VaultScreen> {
   final _scaffold = GlobalKey<ScaffoldState>();
-  bool _searching = false;
+  _Sidebar _sidebar = _Sidebar.files;
 
   Future<void> _open(NoteMeta note) async {
     // Flush any pending edit before switching away, or the debounce timer
@@ -132,12 +137,21 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     final wide = MediaQuery.sizeOf(context).width >= 820;
     final hasNote = ref.watch(noteSessionProvider).isOpen;
 
+    final openId = ref.watch(openNoteIdProvider);
+
     final sidebar = Column(
       children: [
+        _SidebarTabs(
+          current: _sidebar,
+          onChanged: (mode) => setState(() => _sidebar = mode),
+        ),
+        const Divider(height: 1),
         Expanded(
-          child: _searching
-              ? SearchPanel(onOpen: _open)
-              : VaultTreePanel(onOpen: _open),
+          child: switch (_sidebar) {
+            _Sidebar.files => VaultTreePanel(onOpen: _open),
+            _Sidebar.search => SearchPanel(onOpen: _open),
+            _Sidebar.tags => TagsPanel(onOpen: _open),
+          },
         ),
       ],
     );
@@ -153,11 +167,6 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
                 onPressed: () => _scaffold.currentState?.openDrawer(),
               ),
         actions: [
-          IconButton(
-            tooltip: _searching ? 'Browse vault' : 'Search',
-            icon: Icon(_searching ? Icons.folder_outlined : Icons.search),
-            onPressed: () => setState(() => _searching = !_searching),
-          ),
           IconButton(
             tooltip: 'New note',
             icon: const Icon(Icons.note_add_outlined),
@@ -203,7 +212,15 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
               ),
             ),
           ],
-          const Expanded(child: NoteEditor()),
+          Expanded(
+            child: Column(
+              children: [
+                const Expanded(child: NoteEditor()),
+                if (openId != null)
+                  BacklinksPanel(noteId: openId, onOpen: _open),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -278,6 +295,58 @@ String? validatePath(String path) {
     return "Names can't start with a dot";
   }
   return null;
+}
+
+/// Files / Search / Tags switcher for the sidebar.
+class _SidebarTabs extends StatelessWidget {
+  const _SidebarTabs({required this.current, required this.onChanged});
+
+  final _Sidebar current;
+  final void Function(_Sidebar) onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    Widget tab(_Sidebar mode, IconData icon, String tooltip) {
+      final selected = mode == current;
+      return Expanded(
+        child: Tooltip(
+          message: tooltip,
+          child: InkWell(
+            onTap: () => onChanged(mode),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    width: 2,
+                    color: selected
+                        ? theme.colorScheme.primary
+                        : Colors.transparent,
+                  ),
+                ),
+              ),
+              child: Icon(
+                icon,
+                size: 18,
+                color: selected
+                    ? theme.colorScheme.primary
+                    : theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        tab(_Sidebar.files, Icons.folder_outlined, 'Files'),
+        tab(_Sidebar.search, Icons.search, 'Search'),
+        tab(_Sidebar.tags, Icons.label_outline, 'Tags'),
+      ],
+    );
+  }
 }
 
 /// Connection and outbox state.
