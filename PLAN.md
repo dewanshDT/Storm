@@ -1,0 +1,343 @@
+# Storm — implementation plan and status
+
+> **This is the living plan. Read it at the start of every session, and update
+> it as part of doing the work — not afterwards.**
+>
+> - Before starting: read the **Status** table and the **Decision log**. The
+>   decisions there are settled; don't relitigate them without a reason, and if
+>   one does change, record why.
+> - While working: when a milestone's state changes, when you learn something
+>   that would have changed an earlier choice, or when you hit a blocker, edit
+>   this file in the same change. A finding that only exists in a chat
+>   transcript is lost.
+> - Before finishing: make sure **Status**, **Blockers**, and the milestone's
+>   own section reflect reality. If a milestone is partly done, say which part.
+>
+> `homelab-notes-app-PRD.md` is the original brief and is **not** maintained —
+> where the two disagree, this file is current. See **Decision log** for what
+> changed and why.
+
+---
+
+## Context
+
+The setup being replaced: Obsidian + Syncthing in a VM on `pve-II`. Syncthing is
+a generic file mover — no note awareness, no real conflict resolution beyond
+`.sync-conflict` copies, no web access, and a whole VM whose only job is
+shuttling `.md` files around.
+
+Storm replaces both: Flutter clients talking to a small Rust server in the
+homelab that owns the canonical vault. Plain markdown on disk stays
+non-negotiable — it's what makes the vault greppable, backupable, and escapable.
+
+---
+
+## Status
+
+| | Milestone | State | Evidence |
+|---|---|---|---|
+| M0 | Editor spike | **done** | 67 tests · `spike/editor_spike/FINDINGS.md` |
+| M1 | Rust server core | **done** | 86 tests, 0 clippy · 43 e2e checks |
+| M2 | Client vertical slice | **done** | 88 tests + 12 live-server tests |
+| M3 | Cache, outbox, offline, merge | not started | exit = 9-scenario matrix below |
+| M4 | Search, tags, backlinks | partly done | server complete; client has search only |
+| M5 | Android, Linux, Web | partly done | web builds & is served; Android untried |
+| M6 | Attachments, settings, deploy | not started | |
+
+Last updated: 2026-08-05, after M2.
+
+### Verify the current state
+
+```sh
+cd server && cargo test && cargo clippy --all-targets   # 86 tests, 0 warnings
+cd client && flutter analyze && flutter test            # clean, 88 tests
+
+# Against a real server (start it once, run both)
+cd server && cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484 &
+
+VAULT=/tmp/v python3 server/tests/e2e.py               # 43 checks, HTTP + disk + watcher
+cd client && flutter test test_live/                    # 12 checks
+```
+
+Both need a server. `server/tests/e2e.py` creates its own fixtures under
+`E2E/` and deletes them afterwards, so it is safe to run repeatedly against any
+vault. The client's live tests live outside `test/` so a plain `flutter test`
+never needs a server.
+
+---
+
+## Architecture
+
+```
+┌──────── clients (Flutter, one Dart codebase) ────────┐
+│  macOS · Linux · Android · Web                       │
+│  editor · UI/tree · drift cache(M3) · sync engine(M3)│
+└──────────────────────┬───────────────────────────────┘
+              REST + WebSocket (LAN HTTP)
+┌──────────────────────┴───────────────────────────────┐
+│ storm-server (Rust, axum)                            │
+│ merge (diffy) · frontmatter · link/tag parser        │
+│ FTS5 · change_log · file watcher · serves web bundle │
+└──────┬──────────────────────────────┬────────────────┘
+  /srv/storm/vault/              /srv/storm/state/index.db
+  canonical plain markdown       derived index + history
+```
+
+`state/` is a **sibling** of `vault/`, never inside it, so the vault directory
+contains nothing but notes.
+
+```
+storm/
+├── PLAN.md                     ← this file
+├── homelab-notes-app-PRD.md    original brief, not maintained
+├── server/                     Rust — see server/README.md
+├── client/                     Flutter — see client/README.md
+└── spike/editor_spike/         M0 throwaway — see its FINDINGS.md
+```
+
+---
+
+## Decision log
+
+Settled. Each entry says what was decided and what would justify revisiting it.
+
+**1. No Rust in the client** *(departs from PRD §4.2)*
+The PRD wanted a shared Rust core so client and server could share merge logic.
+But in the server-of-record model, merging only ever happens server-side — the
+client sends `base_version` and the server resolves. The client needs HTTP, a
+cache and an outbox, all native to Dart. This drops `flutter_rust_bridge` and
+per-target FFI build config entirely.
+*Revisit if:* the client ever needs to merge locally (it shouldn't while the
+server is the only source of record).
+
+**2. 3-way merge, not `yrs` CRDT** *(departs from PRD §6)*
+One authoritative copy plus one user means optimistic concurrency with a diff3
+merge against stored version history covers the real cases. It keeps markdown as
+the only content store — a CRDT needs a binary sidecar per note — and gives
+version history as a byproduct, for one crate (`diffy`).
+*Revisit if:* adjacent-edit conflicts (see M1 findings) turn out to be frequent
+in practice. The wire format already carries `base_version`, which a CRDT would
+subsume rather than contradict.
+
+**3. V1 targets: macOS, Linux, Android, Web.** No iOS.
+
+**4. LAN-only, single shared bearer token.** No TLS, no Tailscale, no public
+exposure. This is *only* defensible on the LAN.
+*Revisit before:* the server is ever reachable from outside the LAN — TLS and
+per-device token rotation must land **first**, not after.
+
+**5. Editor dims syntax markers rather than hiding them.**
+A `TextEditingController` can't change the buffer's character count, so true
+hiding needs zero-width rendering, which breaks caret arithmetic and hit
+testing. V1 ships Obsidian's *source mode with good highlighting*.
+*Revisit if:* a block-based editor (a `ListView` of per-paragraph fields) is
+built — that's what real hiding requires, and it's a much larger job.
+
+**6. Conflicts are written into the note with markers**, never rejected and
+never spawned as a sibling file. Nothing is lost (the pre-merge server text is
+in `note_versions`), it needs no conflict-resolution UI, and the failure mode is
+deleting four lines — strictly better than hunting `.sync-conflict-*` copies.
+
+---
+
+## Data model
+
+A note is a `.md` file. Frontmatter carries identity:
+
+```yaml
+---
+id: 8f3a2c10-...      # stable UUID, assigned once, never reused
+created: 2026-08-05T10:00:00Z
+modified: 2026-08-05T10:04:12Z   # server-owned; clients must not write it
+tags: [homelab, project]
+---
+```
+
+**Frontmatter round-trips losslessly.** Real vaults carry arbitrary keys,
+hand-chosen order, comments and inconsistent quoting. Storm never serializes
+YAML — it replaces or inserts individual *lines* and passes every other byte
+through. Serializing would reorder keys and reformat values, dirtying every file
+in the vault on first scan.
+
+SQLite schema (`state/index.db`): `notes`, `note_versions` (full snapshots),
+`links`, `tags`, `notes_fts` (FTS5), `attachments`, `devices`, `change_log`.
+
+`change_log` is the delta-sync primitive: every mutation from any source (API,
+watcher, startup scan) appends a row, and a client asks `GET /sync?since=<seq>`.
+No manifest diffing.
+
+---
+
+## Milestones
+
+### M0 — Editor spike ✅
+
+Answered the gating question: a Flutter `TextField` with a custom
+`TextEditingController` works.
+
+| Document | typing p95 | caret movement |
+|---|---|---|
+| 1,000 lines | 0.28–0.83 ms | 0.000 ms |
+| 4,800 lines | 3.0–3.8 ms | 0.000 ms |
+
+Findings that constrain later work (detail in `spike/editor_spike/FINDINGS.md`):
+
+- The span tree must flatten back to the buffer **exactly**; any gap or overlap
+  silently corrupts rendered text and every caret offset after it. Asserted
+  across 42 hostile cases.
+- Above ~1,000 lines the cost is span-tree *assembly*, not tokenization — O(lines)
+  per keystroke regardless of caching. `maxStyledLines = 5000` degrades to
+  unstyled as a backstop. On Android assume 3–5× the desktop numbers.
+- `buildTextSpan` re-fires on cursor movement ([flutter#114158]), which the
+  whole-span memo neutralises.
+
+[flutter#114158]: https://github.com/flutter/flutter/issues/114158
+
+### M1 — Rust server core ✅
+
+`server/` — 3,079 lines, 86 tests, 0 clippy warnings, plus 43 end-to-end checks
+against a live server (`server/tests/e2e.py`). Full API and behaviour documented
+in `server/README.md`.
+
+Verified against a realistic fake Obsidian vault: `--dry-run` writes nothing;
+import assigns UUIDs while preserving hand-written frontmatter byte-for-byte;
+restart reconcile is a true no-op; `#not-a-tag` inside a code block is excluded;
+a note survived fast-forward → merge → conflict → move with identity intact.
+
+**Three bugs found here — do not reintroduce:**
+
+1. `set_scalars` computed line indices against the original text while mutating
+   the line vector. Inserting `id` shifted `modified` down, so the next write
+   landed on the `id` line and destroyed it.
+2. The `modified:` timestamp leaked into merges. The server rewrites it on every
+   save, so it differs between base and server in *every* reconciliation —
+   without normalising it out, every concurrent write would conflict.
+3. Conflict marker labels were inverted; the other device's text was labelled
+   `ours`.
+
+**Known limitation:** diff3 is line-based with context, so *adjacent* edits
+conflict even though they don't overlap — deleting a paragraph while another
+device edits the next one is reported as a conflict. Rare for a single-user
+vault. Frequency here is the trigger for revisiting decision 2.
+
+### M2 — Client vertical slice ✅
+
+`client/` — 3,303 lines, 88 tests, plus 12 tests against a live server. See
+`client/README.md`, especially the save-protocol section.
+
+Online-only by design: no cache, no outbox. Those are M3 and layer *above*
+`StormApi`, not inside it.
+
+The save protocol in `lib/state/note_session.dart` is where an edit can silently
+vanish, so it is deliberately paranoid and directly tested:
+- `merged`/`conflict` responses mean the server reconciled against a version this
+  client never saw — it **adopts the server's text**.
+- Typing during an in-flight save keeps the session `dirty`, not `saved`.
+- A *failed* save also stays `dirty`, because the edit exists only in that buffer.
+
+Two bugs fixed: Riverpod 3 API drift (`valueOrNull` → `value`;
+`StateProvider`/`ChangeNotifierProvider` moved to `legacy.dart`), and SPA deep
+links returning HTTP 404 with `index.html`'s body — tower-http's
+`not_found_service` keeps ServeDir's status, breaking caching and the Flutter
+service worker. Use `.fallback()`.
+
+### M3 — Cache, outbox, offline, merge ⬜ *(next)*
+
+Add `drift` cache, an outbox, a `SyncEngine` driven by `change_log` seq, and the
+WebSocket push. The server side of the merge already exists and is tested; this
+is the client half.
+
+- Cache tables: `notes(id, path, version, content, cached_at, pinned)`,
+  `outbox(id, note_id, base_version, content, op, created_at)`, `meta(last_seq)`.
+- Coalesce repeated edits to one note into a single outbox row, keeping the
+  **original** `base_version`.
+- On reconnect: drain the outbox oldest-first, then `GET /sync?since=last_seq`.
+- Cache policy: LRU over recently-opened notes plus a per-note/folder
+  "make available offline" pin. Not the whole vault.
+- `drift` on web needs `sqlite3.wasm` + `drift_worker.dart.js` in `web/`, served
+  with `Content-Type: application/wasm`, plus COOP/COEP headers for OPFS.
+
+**Exit criterion — the sync matrix, run manually across two clients:**
+
+| # | Scenario | Expected |
+|---|---|---|
+| 1 | Edit on A while B is closed | B shows it on next open |
+| 2 | Both online, edit same note A then B | B sees A's change over WS before its own save |
+| 3 | A offline, edit, reconnect | Outbox replays, clean 200 |
+| 4 | A offline edits para 1, B online edits para 3 | Merges cleanly, no markers |
+| 5 | A offline and B edit the same line | Markers, `conflict: true`, pre-merge version recoverable |
+| 6 | A offline renames; B edits content | Both survive — the UUID payoff |
+| 7 | Edit a file with `nvim` on the server | Watcher picks it up, clients update |
+| 8 | Kill the server mid-write | No truncated files; index reconciles on restart |
+| 9 | Delete on A while B has it open | B is told; no zombie resurrection |
+
+Scenarios 3–7 already pass server-side — see `server/tests/e2e.py`. M3 must
+prove them through the client with real offline transitions.
+
+### M4 — Search, tags, backlinks 🟡
+
+Server side is **done and tested**: FTS5 maintained on write, link/tag
+extraction excluding code, backlinks query, and query sanitizing so punctuation
+isn't an FTS5 syntax error.
+
+Client side: search UI with snippets exists. **Still missing: the tag browser
+and the linked-mentions panel.** `backlinksProvider` is already wired in
+`lib/state/app_state.dart` but nothing renders it.
+
+*Exit:* full-text search over the real vault under ~100 ms; backlinks match what
+Obsidian shows for spot-checked notes.
+
+### M5 — Android, Linux, Web 🟡
+
+Web builds and is served by the Rust binary (`--web`), verified end to end.
+Linux is scaffolded but unbuilt. **Android is untried** — needs the SDK and a
+JDK.
+
+*Exit:* the same note edits round-trip across all four platforms.
+
+### M6 — Attachments, settings, deploy ⬜
+
+Attachment upload/download (LWW by mtime), settings, theming. Deploy to an LXC on
+`pve-II` with a systemd unit. Nightly rsync of `vault/` + `state/` to TrueNAS.
+
+---
+
+## Blockers
+
+**macOS builds — needs one sudo command from the user.**
+`/Library/Developer/PrivateFrameworks/DVTDownloads.framework` is v17.0 (Dec 2025,
+from an older Xcode) while `/Applications/Xcode.app` is Xcode 26.6, so
+`IDESimulatorFoundation` fails to load. Not an SPM issue; not a Flutter or Storm
+problem. Fix:
+
+```sh
+sudo xcodebuild -runFirstLaunch
+```
+
+Until then macOS is verified only via `flutter test` and the web build.
+
+**Android toolchain — not installed.** Needs the SDK + a JDK (~10–15 GB). The
+user opted to free disk first; ~27 GB free as of 2026-08-05.
+
+---
+
+## Cutover discipline
+
+Run against a **copy** of the real vault for all of M1–M6, and keep Obsidian +
+Syncthing live throughout. Only after several weeks of parallel running does the
+real vault move over and Syncthing get switched off.
+
+Get the nightly backup working the day the server first touches real data — not
+at M6. `state/` holds version history that the merge depends on, so back up both
+`vault/` and `state/`.
+
+---
+
+## Open items (not v1-blocking)
+
+- Encryption at rest — deferred, per PRD §10.
+- Read-only NAS export of `vault/` for grep and backup tooling. The watcher
+  already makes this safe whenever it's wanted.
+- iOS — same Dart codebase, needs a signing loop. Out of v1 scope.
+- The client stores its token in plain `shared_preferences`.
+  `flutter_secure_storage` is a prerequisite for anything beyond the LAN.

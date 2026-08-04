@@ -1,0 +1,20 @@
+# Rust
+/server/target/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Storm runtime data — never commit a vault or its index
+/vault/
+/state/
+*.db
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
