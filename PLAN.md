@@ -41,10 +41,10 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 118 tests + 19 live · search p95 1.1ms |
-| M5 | Android, Linux, Web | partly done | web builds & is served; Android untried |
+| M5 | Android, Linux, Web | partly done | web wired & served; **needs a browser check** |
 | M6 | Attachments, settings, deploy | not started | |
 
-Last updated: 2026-08-05, after M4.
+Last updated: 2026-08-05, after M4 and the M5 web work.
 
 ### Verify the current state
 
@@ -356,9 +356,50 @@ tag out of one, removes it from the index. Covered by live tests.
 
 ### M5 — Android, Linux, Web 🟡
 
-Web builds and is served by the Rust binary (`--web`), verified end to end.
-Linux is scaffolded but unbuilt. **Android is untried** — needs the SDK and a
-JDK.
+**Web — wired, not yet run in a browser.**
+
+`drift` on web needs two assets that are *not* pulled in by pub. They are now
+committed to `client/web/` and shipped in the bundle:
+
+| | |
+|---|---|
+| `sqlite3.wasm` | 749 KB, from `sqlite3.dart` release `sqlite3-3.5.1` |
+| `drift_worker.js` | 355 KB, from `drift` release `drift-2.34.3` |
+
+Both are version-matched to `pubspec.lock`; bumping `drift` or `sqlite3` means
+re-downloading them.
+
+storm-server sets `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` when `--web` is given. Without
+cross-origin isolation the browser withholds `SharedArrayBuffer` and drift
+silently drops from OPFS to IndexedDB — slower, and on Chrome for Android it
+loses cross-tab safety. Everything Storm serves is same-origin, so isolating
+costs nothing. `application/wasm` is inferred correctly by tower-http.
+
+**Bug this uncovered:** `driftDatabase()` *throws* on web unless a `web:`
+argument is supplied, and `CacheDb` wasn't passing one. It compiled and passed
+every test — native builds ignore the parameter — and would have crashed the
+moment a browser first touched the cache. Now supplied, with an `onResult`
+hook that logs which backend the browser actually allowed.
+
+**Still to verify:** nothing has opened the app in a browser yet. There is no
+Chrome and no webdriver on this machine, so it cannot be automated here.
+Manual check:
+
+```sh
+cd client && flutter build web --release
+cd ../server && cargo run --release -- --vault <v> --state <s> \
+    --token testtoken --port 8484 --web ../client/build/web
+# then open http://127.0.0.1:8484
+```
+
+Watch the console for `storm: cache using …` — it only prints when the browser
+withheld a feature, so silence means OPFS was available.
+
+**Linux:** cannot be built from macOS (`"build linux" only supported on Linux
+hosts`). Needs a Linux machine or a container.
+
+**Android:** untried, needs the SDK and a JDK.
 
 *Exit:* the same note edits round-trip across all four platforms, **and** the
 editor is validated on a real Android device using the spike's perf HUD (see

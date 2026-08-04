@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:drift_flutter/drift_flutter.dart';
 
 part 'cache_db.g.dart';
@@ -61,8 +62,33 @@ class Meta extends Table {
 
 @DriftDatabase(tables: [CachedNotes, Outbox, Meta])
 class CacheDb extends _$CacheDb {
-  CacheDb([QueryExecutor? executor])
-      : super(executor ?? driftDatabase(name: 'storm_cache'));
+  CacheDb([QueryExecutor? executor]) : super(executor ?? _open());
+
+  /// Opens the platform's database.
+  ///
+  /// The `web` options are **not** optional: `driftDatabase()` throws on web
+  /// when they are missing, so omitting them compiles fine and then crashes
+  /// the moment the browser first touches the cache. Both assets are checked
+  /// into `web/` and served by storm-server.
+  static QueryExecutor _open() => driftDatabase(
+        name: 'storm_cache',
+        web: DriftWebOptions(
+          sqlite3Wasm: Uri.parse('sqlite3.wasm'),
+          driftWorker: Uri.parse('drift_worker.js'),
+          onResult: (result) {
+            // Which backend the browser allowed. OPFS needs cross-origin
+            // isolation (the COOP/COEP headers storm-server sets); without it
+            // drift silently drops to IndexedDB, which is slower and loses
+            // cross-tab safety on Chrome for Android. Worth being able to see.
+            if (result.missingFeatures.isNotEmpty) {
+              debugPrint(
+                'storm: cache using ${result.chosenImplementation} — '
+                'missing browser features: ${result.missingFeatures}',
+              );
+            }
+          },
+        ),
+      );
 
   @override
   int get schemaVersion => 1;

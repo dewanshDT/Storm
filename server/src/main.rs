@@ -129,13 +129,29 @@ async fn main() -> Result<()> {
     // The Flutter web client is served by this same binary, so there is one
     // thing to run in the homelab rather than two.
     if let Some(web_dir) = &args.web {
+        use axum::http::HeaderValue;
         use tower_http::services::{ServeDir, ServeFile};
+        use tower_http::set_header::SetResponseHeaderLayer;
+
         let index = web_dir.join("index.html");
         // `fallback` rather than `not_found_service`: the latter serves
         // index.html's body but keeps ServeDir's 404 status, which breaks
         // caching and the Flutter service worker on any deep link.
         app = app
-            .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)));
+            .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)))
+            // Cross-origin isolation. Without these the browser withholds
+            // `SharedArrayBuffer`, and drift's web backend silently falls back
+            // from OPFS to IndexedDB — slower, and on Chrome for Android it
+            // loses cross-tab safety entirely. Everything Storm serves is
+            // same-origin, so isolating costs nothing.
+            .layer(SetResponseHeaderLayer::overriding(
+                axum::http::header::HeaderName::from_static("cross-origin-opener-policy"),
+                HeaderValue::from_static("same-origin"),
+            ))
+            .layer(SetResponseHeaderLayer::overriding(
+                axum::http::header::HeaderName::from_static("cross-origin-embedder-policy"),
+                HeaderValue::from_static("require-corp"),
+            ));
         tracing::info!(path = %web_dir.display(), "serving web client");
     }
 
