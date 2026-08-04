@@ -138,6 +138,20 @@ never spawned as a sibling file. Nothing is lost (the pre-merge server text is
 in `note_versions`), it needs no conflict-resolution UI, and the failure mode is
 deleting four lines — strictly better than hunting `.sync-conflict-*` copies.
 
+**7. `spike/editor_spike/` is a frozen historical artifact, deleted after M5.**
+Its four editor files are byte-identical copies of `client/lib/editor/`. They
+are deliberately *not* deduplicated into a shared package — the spike records
+what was actually built and measured at M0, and restructuring working code to
+remove a duplicate that is about to be deleted isn't worth it.
+
+The catch: the spike's perf harness is what validates the editor on a real
+Android device (M0's numbers are desktop-only). A frozen spike benchmarks
+frozen code. **So if `client/lib/editor/` changes before Android validation,
+re-copy the changed files into the spike first, or the harness measures an
+editor you no longer ship.** Delete the whole directory once M5 signs off; the
+numbers and conclusions live on in its `FINDINGS.md`, which should be moved
+somewhere durable at that point.
+
 ---
 
 ## Data model
@@ -293,7 +307,11 @@ Web builds and is served by the Rust binary (`--web`), verified end to end.
 Linux is scaffolded but unbuilt. **Android is untried** — needs the SDK and a
 JDK.
 
-*Exit:* the same note edits round-trip across all four platforms.
+*Exit:* the same note edits round-trip across all four platforms, **and** the
+editor is validated on a real Android device using the spike's perf HUD (see
+decision 7 — re-copy `client/lib/editor/` into the spike first if it has
+changed). Delete `spike/editor_spike/` once that passes, preserving its
+`FINDINGS.md`.
 
 ### M6 — Attachments, settings, deploy ⬜
 

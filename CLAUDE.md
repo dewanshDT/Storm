@@ -26,7 +26,12 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 |---|---|
 | `server/` | Rust sync server (axum + rusqlite). See `server/README.md`. |
 | `client/` | Flutter app — macOS, Linux, Android, web. See `client/README.md`. |
-| `spike/editor_spike/` | M0 throwaway. `FINDINGS.md` has the editor perf data. |
+| `spike/editor_spike/` | Frozen M0 artifact, deleted after M5. `FINDINGS.md` has the editor perf data. |
+
+`spike/editor_spike/lib/editor/` is a deliberate byte-identical copy of
+`client/lib/editor/` — do not deduplicate it. If you change `client/lib/editor/`,
+re-copy the changed files into the spike, or its perf harness will validate an
+editor that is no longer shipped. See decision 7 in `PLAN.md`.
 
 ## Commands
 
