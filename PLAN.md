@@ -13,7 +13,7 @@
 > - Before finishing: make sure **Status**, **Blockers**, and the milestone's
 >   own section reflect reality. If a milestone is partly done, say which part.
 >
-> `homelab-notes-app-PRD.md` is the original brief and is **not** maintained —
+> `docs/prd.md` is the original brief and is **not** maintained —
 > where the two disagree, this file is current. See **Decision log** for what
 > changed and why.
 
@@ -49,17 +49,14 @@ Last updated: 2026-08-05, after M4 and the M5 web work.
 ### Verify the current state
 
 ```sh
-cd server && cargo test && cargo clippy --all-targets   # 86 tests, 0 warnings
-cd client && flutter analyze && flutter test            # clean, 118 tests
-
-# Against a real server (start it once, run both)
-cd server && cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484 &
-
-VAULT=/tmp/v python3 server/tests/e2e.py               # 43 checks, HTTP + disk + watcher
-cd client && flutter test test_live/                    # 19 checks, 2 clients
+make check       # clippy + analyze + 86 Rust and 118 Dart unit tests
+make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
-Both need a server. `server/tests/e2e.py` creates its own fixtures under
+`make test-live` starts a server, runs both integration suites and tears it
+down, failing fast with the server log if it cannot bind.
+
+Both need a server. `apps/apps/server/tests/e2e.py` creates its own fixtures under
 `E2E/` and deletes them afterwards, so it is safe to run repeatedly against any
 vault. The client's live tests live outside `test/` so a plain `flutter test`
 never needs a server.
@@ -88,12 +85,21 @@ contains nothing but notes.
 
 ```
 storm/
-├── PLAN.md                     ← this file
-├── homelab-notes-app-PRD.md    original brief, not maintained
-├── server/                     Rust — see server/README.md
-├── client/                     Flutter — see client/README.md
-└── spike/editor_spike/         M0 throwaway — see its FINDINGS.md
+├── README.md                 front door
+├── PLAN.md                   ← this file: status, decisions, blockers
+├── CLAUDE.md                 agent guidance + invariants
+├── Makefile                  cross-toolchain tasks (`make help`)
+├── apps/
+│   ├── server/               Rust — see apps/server/README.md
+│   └── client/               Flutter — see apps/client/README.md
+├── docs/prd.md               original brief, not maintained
+└── spike/editor_spike/       frozen M0 artifact, deleted after M5
 ```
+
+A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
+the source of one package, and nesting whole deployable apps inside it buys
+nothing (`src/apps/server/src/main.rs` says "src" twice). Shared code, if any
+ever appears, goes in a sibling `packages/`.
 
 ---
 
@@ -139,14 +145,14 @@ in `note_versions`), it needs no conflict-resolution UI, and the failure mode is
 deleting four lines — strictly better than hunting `.sync-conflict-*` copies.
 
 **7. `spike/editor_spike/` is a frozen historical artifact, deleted after M5.**
-Its four editor files are byte-identical copies of `client/lib/editor/`. They
+Its four editor files are byte-identical copies of `apps/client/lib/editor/`. They
 are deliberately *not* deduplicated into a shared package — the spike records
 what was actually built and measured at M0, and restructuring working code to
 remove a duplicate that is about to be deleted isn't worth it.
 
 The catch: the spike's perf harness is what validates the editor on a real
 Android device (M0's numbers are desktop-only). A frozen spike benchmarks
-frozen code. **So if `client/lib/editor/` changes before Android validation,
+frozen code. **So if `apps/client/lib/editor/` changes before Android validation,
 re-copy the changed files into the spike first, or the harness measures an
 editor you no longer ship.** Delete the whole directory once M5 signs off; the
 numbers and conclusions live on in its `FINDINGS.md`, which should be moved
@@ -209,9 +215,9 @@ Findings that constrain later work (detail in `spike/editor_spike/FINDINGS.md`):
 
 ### M1 — Rust server core ✅
 
-`server/` — 3,079 lines, 86 tests, 0 clippy warnings, plus 43 end-to-end checks
-against a live server (`server/tests/e2e.py`). Full API and behaviour documented
-in `server/README.md`.
+`apps/server/` — 3,079 lines, 86 tests, 0 clippy warnings, plus 43 end-to-end checks
+against a live server (`apps/apps/server/tests/e2e.py`). Full API and behaviour documented
+in `apps/server/README.md`.
 
 Verified against a realistic fake Obsidian vault: `--dry-run` writes nothing;
 import assigns UUIDs while preserving hand-written frontmatter byte-for-byte;
@@ -236,8 +242,8 @@ vault. Frequency here is the trigger for revisiting decision 2.
 
 ### M2 — Client vertical slice ✅
 
-`client/` — 3,303 lines, 88 tests, plus 12 tests against a live server. See
-`client/README.md`, especially the save-protocol section.
+`apps/client/` — the online-only path, since superseded by M3. See
+`apps/client/README.md`, especially the save-protocol section.
 
 Online-only by design: no cache, no outbox. Those are M3 and layer *above*
 `StormApi`, not inside it.
@@ -302,11 +308,11 @@ Where each is proven:
 
 | # | Covered by |
 |---|---|
-| 1, 2, 9 | `client/test_live/two_client_sync_test.dart` — two real clients, real WebSocket |
+| 1, 2, 9 | `apps/client/test_live/two_client_sync_test.dart` — two real clients, real WebSocket |
 | 3, 4 | `two_client_sync_test.dart` (offline edit → reconnect → merge) and `test/sync_engine_test.dart` |
 | 5 | `test_live/live_server_test.dart` + `test/sync_engine_test.dart` |
 | 6 | `test/sync_engine_test.dart` (offline rename + offline edit both survive) |
-| 7 | `server/tests/e2e.py` (watcher picks up an external edit) |
+| 7 | `apps/apps/server/tests/e2e.py` (watcher picks up an external edit) |
 | 8 | M1: atomic writes + restart reconcile, verified during the M1 e2e run |
 
 Scenario 2 in particular could not be reached by unit tests — `MockClient` has
@@ -359,7 +365,7 @@ tag out of one, removes it from the index. Covered by live tests.
 **Web — wired, not yet run in a browser.**
 
 `drift` on web needs two assets that are *not* pulled in by pub. They are now
-committed to `client/web/` and shipped in the bundle:
+committed to `apps/client/web/` and shipped in the bundle:
 
 | | |
 |---|---|
@@ -387,7 +393,7 @@ Chrome and no webdriver on this machine, so it cannot be automated here.
 Manual check:
 
 ```sh
-cd client && flutter build web --release
+cd apps/client && flutter build web --release
 cd ../server && cargo run --release -- --vault <v> --state <s> \
     --token testtoken --port 8484 --web ../client/build/web
 # then open http://127.0.0.1:8484
@@ -403,7 +409,7 @@ hosts`). Needs a Linux machine or a container.
 
 *Exit:* the same note edits round-trip across all four platforms, **and** the
 editor is validated on a real Android device using the spike's perf HUD (see
-decision 7 — re-copy `client/lib/editor/` into the spike first if it has
+decision 7 — re-copy `apps/client/lib/editor/` into the spike first if it has
 changed). Delete `spike/editor_spike/` once that passes, preserving its
 `FINDINGS.md`.
 

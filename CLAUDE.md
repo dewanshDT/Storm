@@ -17,38 +17,41 @@ this repo, and **update it as part of the change** — not afterwards:
 - Leaving `PLAN.md` stale is a defect. A finding that exists only in a chat
   transcript is lost.
 
-`homelab-notes-app-PRD.md` is the original brief and is **not** maintained.
+`docs/prd.md` is the original brief and is **not** maintained.
 Where it and `PLAN.md` disagree, `PLAN.md` is current.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `server/` | Rust sync server (axum + rusqlite). See `server/README.md`. |
-| `client/` | Flutter app — macOS, Linux, Android, web. See `client/README.md`. |
+| `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
+| `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `spike/editor_spike/` | Frozen M0 artifact, deleted after M5. `FINDINGS.md` has the editor perf data. |
+| `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
 
 `spike/editor_spike/lib/editor/` is a deliberate byte-identical copy of
-`client/lib/editor/` — do not deduplicate it. If you change `client/lib/editor/`,
+`apps/client/lib/editor/` — do not deduplicate it. If you change `apps/client/lib/editor/`,
 re-copy the changed files into the spike, or its perf harness will validate an
 editor that is no longer shipped. See decision 7 in `PLAN.md`.
 
 ## Commands
 
-```sh
-# Server
-cd server && cargo test && cargo clippy --all-targets
-cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484
-cargo run -- --vault <real-vault> --state <state> --dry-run   # always first
+Use the Makefile — it encodes the cross-toolchain steps, and `test-live` starts
+and tears down a server around the integration suites.
 
-# Client
-cd client && flutter analyze && flutter test
-flutter test test_live/      # needs a running server
-flutter run -d chrome        # macOS is currently blocked, see PLAN.md
+```sh
+make help                    # every target
+make check                   # clippy + analyze + both unit suites
+make test-live               # integration suites against a real server
+make fmt                     # cargo fmt + dart format (CI enforces both)
+make server VAULT=~/vault    # run the sync server
+make dry-run VAULT=~/vault   # ALWAYS do this before importing a real vault
+make serve-web               # build the web client and serve it
 ```
 
-Both suites must be clean before a change is done. `cargo clippy` is expected to
-emit zero warnings.
+`make check` must be clean before a change is done — clippy runs with
+`-D warnings`, so a warning is a failure. The Makefile targets GNU Make 3.81
+(what macOS ships), so no `.ONESHELL` or `.SHELLFLAGS`.
 
 ## Invariants worth knowing before editing
 

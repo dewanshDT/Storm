@@ -1,5 +1,5 @@
 # Rust
-/server/target/
+/apps/server/target/
 
 # Flutter / Dart
 .dart_tool/
@@ -9,12 +9,25 @@ build/
 .flutter-plugins
 .flutter-plugins-dependencies
 
-# Storm runtime data — never commit a vault or its index
+# Storm runtime data — never commit a vault or its index. The vault is the
+# user's notes; the index holds full version history.
+#
+# Anchored with a leading slash on purpose: bare `state/` matches a directory
+# of that name at ANY depth, which silently untracked apps/client/lib/state/.
 /vault/
 /state/
 *.db
 *.db-shm
 *.db-wal
 
-# OS
+# Local dev scratch: the Makefile's default VAULT/STATE and live-test data.
+/.dev/
+
+# Local overrides
+.env
+*.local
+
+# Editors / OS
+.idea/
+.vscode/
 .DS_Store

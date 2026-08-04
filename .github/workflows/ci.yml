@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push makes an in-flight run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: server (rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  client:
+    name: client (flutter)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: dart format --set-exit-if-changed lib test test_live
+      - run: flutter analyze
+      - run: flutter test
+
+  integration:
+    name: integration (client against a real server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
+      # `make test-live` starts the server, runs both integration suites and
+      # tears the server down, so CI does not need to know that dance.
+      - run: make test-live
+      - name: server log on failure
+        if: failure()
+        run: cat .dev/live-server.log || true
