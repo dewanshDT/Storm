@@ -483,12 +483,35 @@ from the M0 findings.
 
 **Settings** — server URL, token, theme, font size and disconnect all exist.
 
-**Still to do:** deploy properly. The server currently runs on the Ubuntu VM
-from a hand-typed `setsid nohup` line, which has already cost one mistake
-(starting it without `--web`, so the browser got a bare 401). Needs a systemd
-unit, a `make deploy` target wrapping the cross-compile + rsync + restart, and
-the nightly backup of `vault/` and `state/` — the index holds version history
-the merge depends on, so both matter.
+**Deploy — built and verified, awaiting install.**
+
+`deploy/` holds a systemd unit, a nightly backup timer, and an env file for the
+token (kept out of the command line, since `/proc` exposes arguments to every
+local user). `make deploy` cross-compiles the static binary, pushes it with the
+web bundle, restarts, and fails loudly if the service doesn't come back — the
+hand-typed `nohup` line had already cost one mistake, starting the server
+without `--web` so the browser got a bare 401.
+
+The backup covers both halves for different reasons. The vault is plain files,
+so `rsync -a --delete` into a dated directory. The index is **not** rsynced: it
+runs in WAL mode with the server holding it open, so a file copy can catch
+committed pages still in the `-wal` and yield a database that opens but
+silently lacks history. `storm-server --backup-db` uses SQLite's `VACUUM INTO`,
+which is correct against a live database. The script then reopens the snapshot
+to check it works.
+
+Verified end to end locally, against a **running** server: back up, delete the
+vault and state outright, restore by the documented steps, and the server comes
+back with both versions of an edited note still in `note_versions` — the merge
+base, which is the one thing a rescan cannot rebuild.
+
+Two hazards found while building it, both now guarded: the verify step wrote
+its probe to `/dev/null`, and `snapshot_to` deletes its destination first, so
+it would have removed the device node. `snapshot_to` now refuses anything that
+isn't a regular file, with a test.
+
+*Remaining:* running the one-time install on the VM. It needs `sudo`, which is
+the user's to give — see `deploy/README.md`.
 
 ---
 

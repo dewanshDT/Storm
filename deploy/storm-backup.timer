@@ -1,0 +1,11 @@
+[Unit]
+Description=Storm nightly backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# Catch up after the box was off, rather than silently skipping a night.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

@@ -60,6 +60,13 @@ struct Args {
     /// Directory holding the built Flutter web client, served at `/`.
     #[arg(long)]
     web: Option<PathBuf>,
+
+    /// Write a consistent snapshot of the index here and exit.
+    ///
+    /// Safe to run against a live server: SQLite does the right thing, which
+    /// a plain file copy of a WAL-mode database does not.
+    #[arg(long, value_name = "FILE")]
+    backup_db: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -72,6 +79,15 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Backup mode exits before touching the vault or starting anything.
+    if let Some(dest) = &args.backup_db {
+        let db = Db::open(&args.state.join("index.db")).context("opening index")?;
+        db.snapshot_to(dest)
+            .with_context(|| format!("writing snapshot to {}", dest.display()))?;
+        println!("index snapshot written to {}", dest.display());
+        return Ok(());
+    }
 
     let vault = Vault::new(&args.vault).context("opening vault")?;
     let db = Db::open(&args.state.join("index.db")).context("opening index")?;

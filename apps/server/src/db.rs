@@ -335,6 +335,35 @@ impl Db {
         Ok(seq)
     }
 
+    /// Writes a consistent snapshot of the index to [dest].
+    ///
+    /// `VACUUM INTO` rather than copying the file: the database runs in WAL
+    /// mode with the server holding it open, so an rsync of `index.db` can
+    /// catch a torn state with committed pages still sitting in the -wal.
+    /// SQLite does this correctly against a live database, and the result is
+    /// a single compacted file with no sidecars to keep together.
+    pub fn snapshot_to(&self, dest: &Path) -> Result<()> {
+        if dest.exists() {
+            // Only ever replace a regular file. `VACUUM INTO` refuses to write
+            // over anything, so the destination has to be removed first — and
+            // a caller pointing this at /dev/null or a directory must get an
+            // error rather than have it deleted.
+            let meta = std::fs::metadata(dest)
+                .with_context(|| format!("inspecting {}", dest.display()))?;
+            if !meta.is_file() {
+                anyhow::bail!(
+                    "refusing to overwrite {}: not a regular file",
+                    dest.display()
+                );
+            }
+            std::fs::remove_file(dest).with_context(|| format!("replacing {}", dest.display()))?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", params![dest.to_string_lossy()])
+            .with_context(|| format!("snapshotting to {}", dest.display()))?;
+        Ok(())
+    }
+
     // ---- attachments ---------------------------------------------------
 
     pub fn record_attachment(
@@ -490,6 +519,58 @@ mod tests {
     fn record(db: &mut Db, n: &NoteRow, content: &str, kind: &str) -> i64 {
         let e = parse::extract(content);
         db.record_note(n, content, &e, kind, None).unwrap()
+    }
+
+    #[test]
+    fn a_snapshot_is_a_usable_copy() {
+        // The backup has to be openable and complete, not just non-empty —
+        // it is the only copy of version history, which cannot be rebuilt
+        // from the markdown files.
+        let dir = tempdir::TempDir::new("storm-snap").unwrap();
+        let live = dir.path().join("index.db");
+
+        let mut db = Db::open(&live).unwrap();
+        let n = note("a", "A.md", 1);
+        record(&mut db, &n, "# A\n\nsearchable body\n", KIND_CREATED);
+
+        let dest = dir.path().join("backup.db");
+        db.snapshot_to(&dest).unwrap();
+
+        let restored = Db::open(&dest).unwrap();
+        assert_eq!(restored.list_notes().unwrap().len(), 1);
+        assert_eq!(
+            restored.version_content("a", 1).unwrap().unwrap(),
+            "# A\n\nsearchable body\n"
+        );
+        assert_eq!(restored.search("searchable", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_snapshot_refuses_to_clobber_a_non_file() {
+        // The backup script once verified by writing to /dev/null, which this
+        // would have deleted.
+        let dir = tempdir::TempDir::new("storm-snap3").unwrap();
+        let db = Db::open(&dir.path().join("index.db")).unwrap();
+
+        let a_directory = dir.path().join("subdir");
+        std::fs::create_dir(&a_directory).unwrap();
+        assert!(db.snapshot_to(&a_directory).is_err());
+        assert!(a_directory.exists(), "must not have been removed");
+    }
+
+    #[test]
+    fn a_snapshot_overwrites_an_earlier_one() {
+        // Nightly backups reuse the same filename.
+        let dir = tempdir::TempDir::new("storm-snap2").unwrap();
+        let mut db = Db::open(&dir.path().join("index.db")).unwrap();
+        record(&mut db, &note("a", "A.md", 1), "one\n", KIND_CREATED);
+
+        let dest = dir.path().join("backup.db");
+        db.snapshot_to(&dest).unwrap();
+        record(&mut db, &note("b", "B.md", 1), "two\n", KIND_CREATED);
+        db.snapshot_to(&dest).unwrap();
+
+        assert_eq!(Db::open(&dest).unwrap().list_notes().unwrap().len(), 2);
     }
 
     #[test]

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Nightly backup of the vault and the index.
+#
+# Both matter, for different reasons. The vault is the notes. The index holds
+# version history, which the 3-way merge uses as its base and which cannot be
+# rebuilt from the markdown — everything else in state/ can.
+#
+# Run by storm-backup.timer; safe to run by hand.
+
+set -euo pipefail
+
+ENV_FILE="${STORM_ENV_FILE:-/etc/storm/storm.env}"
+[ -r "$ENV_FILE" ] || { echo "cannot read $ENV_FILE" >&2; exit 1; }
+# shellcheck disable=SC1090
+set -a; . "$ENV_FILE"; set +a
+
+: "${STORM_VAULT:?}" "${STORM_STATE:?}" "${STORM_BACKUP_DEST:?}"
+KEEP_DAYS="${STORM_BACKUP_KEEP_DAYS:-30}"
+SERVER_BIN="${STORM_SERVER_BIN:-/usr/local/bin/storm-server}"
+
+stamp="$(date -u +%Y-%m-%d)"
+dest="$STORM_BACKUP_DEST/$stamp"
+mkdir -p "$dest"
+
+echo "storm-backup: $stamp -> $dest"
+
+# The vault is ordinary files; rsync is exactly right for it. --delete keeps
+# the mirror honest about deletions, and the dated directory means an
+# accidental wipe is still recoverable from yesterday's copy.
+rsync -a --delete "$STORM_VAULT/" "$dest/vault/"
+echo "  vault:  $(find "$dest/vault" -type f | wc -l | tr -d ' ') files"
+
+# The index must NOT be rsynced. It runs in WAL mode with the server holding
+# it open, so a file copy can catch committed pages still sitting in the -wal
+# and produce a database that opens but is missing history. The server writes
+# a proper snapshot instead, which is safe against a live database.
+"$SERVER_BIN" --state "$STORM_STATE" --backup-db "$dest/index.db" >/dev/null
+echo "  index:  $(du -h "$dest/index.db" | cut -f1)"
+
+# Prove the snapshot opens before trusting it. A backup nobody has read is a
+# guess, not a backup.
+#
+# Verify into a temp file, never /dev/null: the snapshot path is deleted first
+# if it exists, and pointing that at a device node would remove it.
+verify_tmp="$(mktemp -u "${TMPDIR:-/tmp}/storm-verify-XXXXXX.db")"
+if ! "$SERVER_BIN" --state "$dest" --backup-db "$verify_tmp" >/dev/null 2>&1; then
+    rm -f "$verify_tmp"
+    echo "  ERROR: the snapshot did not open — keeping it, but investigate" >&2
+    exit 1
+fi
+rm -f "$verify_tmp"
+echo "  verified: snapshot opens"
+
+find "$STORM_BACKUP_DEST" -mindepth 1 -maxdepth 1 -type d -mtime "+$KEEP_DAYS" \
+    -print -exec rm -rf {} + | sed 's/^/  pruned: /'
+
+echo "storm-backup: done"

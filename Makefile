@@ -116,6 +116,54 @@ serve-web: web
 		--token $(TOKEN) --port $(PORT) \
 		--web $(abspath $(CLIENT))/build/web
 
+# ---- deployment -----------------------------------------------------
+
+# Override for your own host: make deploy HOST=storm@192.168.1.20
+HOST       ?= proxmox-mcp-vm
+REMOTE_DIR ?= /srv/storm
+
+## build-server: cross-compile a static Linux binary
+build-server:
+	@command -v cargo-zigbuild >/dev/null || { \
+		echo "cargo-zigbuild not found. Install with:" >&2; \
+		echo "  brew install zig && cargo install cargo-zigbuild" >&2; \
+		echo "  rustup target add x86_64-unknown-linux-musl" >&2; \
+		exit 1; \
+	}
+	cd $(SERVER) && cargo zigbuild --release --target x86_64-unknown-linux-musl
+	@ls -la $(SERVER)/target/x86_64-unknown-linux-musl/release/storm-server | \
+		awk '{printf "  %.1f MB static binary\n", $$5/1048576}'
+
+## deploy: build and push the server and web client to HOST
+deploy: build-server web
+	@set -e; \
+	BIN="$(SERVER)/target/x86_64-unknown-linux-musl/release/storm-server"; \
+	echo "--- staging to $(HOST) ---"; \
+	scp -q "$$BIN" "$(HOST):/tmp/storm-server"; \
+	rsync -az --delete "$(CLIENT)/build/web/" "$(HOST):/tmp/storm-web/"; \
+	rsync -az deploy/storm-backup.sh "$(HOST):/tmp/storm-backup.sh"; \
+	echo "--- installing ---"; \
+	ssh "$(HOST)" "set -e; \
+		sudo install -m755 /tmp/storm-server /usr/local/bin/storm-server; \
+		sudo install -m755 /tmp/storm-backup.sh /usr/local/bin/storm-backup.sh; \
+		sudo mkdir -p $(REMOTE_DIR)/web; \
+		sudo rsync -a --delete /tmp/storm-web/ $(REMOTE_DIR)/web/; \
+		sudo chown -R storm:storm $(REMOTE_DIR); \
+		rm -rf /tmp/storm-server /tmp/storm-web /tmp/storm-backup.sh; \
+		sudo systemctl restart storm-server; \
+		sleep 1; \
+		systemctl is-active --quiet storm-server && echo '  storm-server active' \
+			|| { echo '  FAILED — journalctl -u storm-server' >&2; exit 1; }"
+	@echo "--- deployed ---"
+
+## deploy-check: is the deployed server healthy?
+deploy-check:
+	@ssh "$(HOST)" "curl -sf -o /dev/null -w '  health: HTTP %{http_code}\n' \
+		http://127.0.0.1:$(PORT)/v1/health || echo '  server not responding'"
+	@ssh "$(HOST)" "systemctl is-active storm-server | sed 's/^/  systemd: /'"
+	@ssh "$(HOST)" "systemctl list-timers storm-backup.timer --no-pager | \
+		sed -n '2p' | sed 's/^/  backup: /'" 2>/dev/null || true
+
 # ---- housekeeping ---------------------------------------------------
 
 ## codegen: regenerate drift's database code
@@ -129,4 +177,5 @@ clean:
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-client test-live fmt \
-        dry-run server client web serve-web codegen clean
+        dry-run server client web serve-web codegen clean \
+        build-server deploy deploy-check

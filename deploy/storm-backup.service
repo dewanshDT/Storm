@@ -1,0 +1,16 @@
+[Unit]
+Description=Storm nightly backup
+Documentation=https://github.com/dewanshDT/Storm
+After=storm-server.service
+
+[Service]
+Type=oneshot
+User=storm
+Group=storm
+ExecStart=/usr/local/bin/storm-backup.sh
+# The vault and the backup destination; nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/storm

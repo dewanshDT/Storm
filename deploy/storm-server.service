@@ -1,0 +1,59 @@
+# Storm sync server.
+#
+# Install:
+#   sudo cp deploy/storm-server.service /etc/systemd/system/
+#   sudo cp deploy/storm.env.example /etc/storm/storm.env   # then edit it
+#   sudo chmod 600 /etc/storm/storm.env                     # it holds the token
+#   sudo systemctl enable --now storm-server
+#
+# Everything configurable lives in the env file so this unit needs no edits,
+# and so the token is not sitting in a world-readable file under
+# /etc/systemd.
+
+[Unit]
+Description=Storm sync server
+Documentation=https://github.com/dewanshDT/Storm
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=storm
+Group=storm
+EnvironmentFile=/etc/storm/storm.env
+
+# STORM_TOKEN comes from the environment file, never the command line —
+# arguments are visible to every user on the box via /proc.
+ExecStart=/usr/local/bin/storm-server \
+    --vault ${STORM_VAULT} \
+    --state ${STORM_STATE} \
+    --host ${STORM_HOST} \
+    --port ${STORM_PORT} \
+    --web ${STORM_WEB}
+
+Restart=on-failure
+RestartSec=3
+# A vault that fails to reconcile will fail fast and repeatedly; don't spin.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# The server needs its own data and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/srv/storm
+
+# The vault is the user's notes; a runaway must not take the box down with it.
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
