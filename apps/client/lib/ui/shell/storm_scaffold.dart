@@ -58,6 +58,7 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
     // Providers are lazy: without this nothing subscribes to the engine's
     // change stream, so remote edits never reach the open editor.
     ref.watch(syncListenerProvider);
+    final keyboard = keyboardIsOpen(context);
 
     return NewNoteRequest(
       onRequest: _createNote,
@@ -70,7 +71,7 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
         body: Stack(
           children: [
             Positioned.fill(child: widget.child),
-            if (widget.showNav)
+            if (widget.showNav && !keyboard)
               const Positioned(
                 left: 0,
                 right: 0,

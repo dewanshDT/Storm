@@ -44,15 +44,18 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
-| M8 | UI refactor stage 2 — editor | in progress | `docs/storm-ui-refactor.md` §2.6 |
+| M8 | UI refactor stage 2 — editor | **done** | 256 tests · toolbar, links, formatting |
 
-Last updated: 2026-08-05, stage 1 of the UI refactor landed; the M0 spike is
-retired.
+Last updated: 2026-08-05, both stages of the UI refactor landed. The old
+drawer shell (`vault_screen.dart`, `vault_tree.dart`) is still in the tree: it
+is unreferenced by `lib/`, but three test files still drive it, and deleting it
+means porting the create-note-flow and pinning coverage onto the new screens
+first. Gated on a walkthrough of the new shell on device.
 
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 221 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 256 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -187,13 +190,32 @@ every settings change. It listens instead, and pokes `refreshListenable` so
 `redirect` re-runs on the same instance. There is a test asserting the router
 instance survives a settings change.
 
-**11. "Is the keyboard up?" is asked of the view, not of `MediaQuery`.**
-`Scaffold` implements `resizeToAvoidBottomInset` by *removing* the bottom inset
-from its body's `MediaQuery`, so `MediaQuery.viewInsetsOf(context).bottom`
-inside a body always reads zero — exactly where the nav bubble needed it.
-`keyboardIsOpen()` in `nav_bubble.dart` reads `View.of(context).viewInsets`.
-Stage 2's formatting toolbar must use the same helper, or the two halves of that
-swap will disagree.
+**11. "Is the keyboard up?" is asked once per screen, above the `Scaffold`.**
+Both obvious ways to ask are wrong from inside a Scaffold body.
+`MediaQuery.viewInsetsOf` reads zero there, because `resizeToAvoidBottomInset`
+works by *removing* that inset — the removal is the resize. `View.of(context)
+.viewInsets` reads the right number but never rebuilds, since view metrics are
+not an inherited dependency; it would answer once and keep that answer forever.
+So `keyboardIsOpen()` uses `MediaQuery` and every screen calls it above its own
+Scaffold, passing the result down to the nav bubble and the formatting toolbar.
+That single call per screen is what guarantees they are never both visible and
+never both gone.
+
+**12. The toolbar mutates text only through the controller.**
+`StormMarkdownController` owns `toggleInline`, `setBlockPrefix` and
+`insertWikilink`; each computes text *and* selection and assigns `value` once.
+Assigning `text` and `selection` separately fires two notifications with an
+intermediate state whose caret points into a buffer that no longer matches it.
+`wikilinks_test.dart` puts a recording controller behind the toolbar and fails
+if any button reaches past those three methods.
+
+**13. Following a wikilink reads the caret, not a gesture.**
+A tap inside an editable `TextField` is consumed for caret placement, so a
+`TapGestureRecognizer` on a `TextSpan` never fires. The tap does its ordinary
+job and `TextField.onTap` then asks `wikilinkAt()` what the caret landed in.
+Touch follows on a plain tap; a pointer needs Cmd/Ctrl, because clicking into
+text to edit it is the common intent. `contextMenuBuilder` adds "Open …" as the
+discoverable path that does not depend on knowing a modifier key.
 
 ---
 

@@ -81,6 +81,151 @@ class StormMarkdownController extends TextEditingController {
     _memoSpan = null;
   }
 
+  // --- Editing ---------------------------------------------------------
+  //
+  // The formatting toolbar calls these and nothing else. Every one of them
+  // computes the new text *and* the new selection and assigns `value` exactly
+  // once: assigning `text` and `selection` separately fires two notifications,
+  // and the intermediate state has a caret pointing into a buffer that no
+  // longer matches it.
+
+  /// Wraps the selection in [marker], or unwraps it if it is already wrapped.
+  ///
+  /// With a collapsed caret this inserts the pair and sits between them, which
+  /// is what "turn bold on" means when there is nothing selected yet.
+  void toggleInline(String marker) {
+    final sel = selection;
+    if (!sel.isValid) return;
+    final t = text;
+    final start = sel.start;
+    final end = sel.end;
+
+    if (start == end) {
+      final already = _wrappedAt(t, start, end, marker);
+      if (already) return _unwrap(t, start, end, marker);
+      return _apply(
+        t.substring(0, start) + marker + marker + t.substring(start),
+        TextSelection.collapsed(offset: start + marker.length),
+      );
+    }
+
+    // Markers just outside the selection — you selected the word, not the
+    // asterisks around it.
+    if (_wrappedAt(t, start, end, marker)) {
+      return _unwrap(t, start, end, marker);
+    }
+
+    // Markers inside the selection — you selected `**word**` whole.
+    final selected = t.substring(start, end);
+    if (selected.length >= marker.length * 2 &&
+        selected.startsWith(marker) &&
+        selected.endsWith(marker)) {
+      final inner = selected.substring(
+        marker.length,
+        selected.length - marker.length,
+      );
+      return _apply(
+        t.substring(0, start) + inner + t.substring(end),
+        TextSelection(baseOffset: start, extentOffset: start + inner.length),
+      );
+    }
+
+    _apply(
+      t.substring(0, start) + marker + selected + marker + t.substring(end),
+      TextSelection(
+        baseOffset: start + marker.length,
+        extentOffset: end + marker.length,
+      ),
+    );
+  }
+
+  bool _wrappedAt(String t, int start, int end, String marker) {
+    final n = marker.length;
+    if (start - n < 0 || end + n > t.length) return false;
+    return t.substring(start - n, start) == marker &&
+        t.substring(end, end + n) == marker;
+  }
+
+  void _unwrap(String t, int start, int end, String marker) {
+    final n = marker.length;
+    _apply(
+      t.substring(0, start - n) + t.substring(start, end) + t.substring(end + n),
+      start == end
+          ? TextSelection.collapsed(offset: start - n)
+          : TextSelection(baseOffset: start - n, extentOffset: end - n),
+    );
+  }
+
+  /// Sets the block prefix — `## `, `> `, `- `, `1. `, `- [ ] ` — on every line
+  /// the selection touches, replacing whatever prefix was there.
+  ///
+  /// Passing [prefix] that every line already carries removes it, so the same
+  /// toolbar button turns a list on and off. Pass null to strip unconditionally.
+  void setBlockPrefix(String? prefix) {
+    final sel = selection;
+    if (!sel.isValid) return;
+    final t = text;
+    final blockStart = _lineStartAt(t, sel.start);
+    final blockEnd = _lineEndAt(t, sel.end);
+    final lines = t.substring(blockStart, blockEnd).split('\n');
+
+    final stripped = [for (final line in lines) _splitPrefix(line)];
+    // Already uniformly this prefix? Then the button is a toggle-off.
+    final removing = prefix == null ||
+        stripped.every((p) => p.marker == prefix);
+    final target = removing ? '' : prefix;
+
+    final rewritten = [
+      for (final p in stripped) '${p.indent}$target${p.body}',
+    ].join('\n');
+
+    // The caret keeps its place within the first line's *content*, which is
+    // where it visually was — not its raw offset, which the prefix just moved.
+    final firstDelta = target.length - stripped.first.marker.length;
+    _apply(
+      t.substring(0, blockStart) + rewritten + t.substring(blockEnd),
+      sel.isCollapsed
+          ? TextSelection.collapsed(
+              offset: (sel.start + firstDelta).clamp(
+                blockStart,
+                blockStart + rewritten.length,
+              ),
+            )
+          : TextSelection(
+              baseOffset: blockStart,
+              extentOffset: blockStart + rewritten.length,
+            ),
+    );
+  }
+
+  /// Inserts `[[]]` with the caret between the brackets, or wraps the
+  /// selection into a link to a note of that name.
+  ///
+  /// There is no completion behind this yet; it is a bracket-matching
+  /// convenience, and deliberately named for what it does.
+  void insertWikilink() {
+    final sel = selection;
+    if (!sel.isValid) return;
+    final t = text;
+    final inner = t.substring(sel.start, sel.end);
+    _apply(
+      '${t.substring(0, sel.start)}[[$inner]]${t.substring(sel.end)}',
+      inner.isEmpty
+          ? TextSelection.collapsed(offset: sel.start + 2)
+          : TextSelection(
+              baseOffset: sel.start + 2,
+              extentOffset: sel.start + 2 + inner.length,
+            ),
+    );
+  }
+
+  void _apply(String next, TextSelection nextSelection) {
+    value = TextEditingValue(
+      text: next,
+      selection: nextSelection,
+      composing: TextRange.empty,
+    );
+  }
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -340,4 +485,74 @@ class _LineKey {
 
   @override
   int get hashCode => Object.hash(line, context, isFirst, revealed);
+}
+
+
+/// A line split into indent, block marker, and the content after it.
+class _Prefixed {
+  const _Prefixed(this.indent, this.marker, this.body);
+
+  final String indent;
+  final String marker;
+  final String body;
+}
+
+/// Task markers come first: `- [ ] x` is also a valid bullet, and matching it
+/// as one would leave `[ ] ` stranded in the text.
+final _blockMarker = RegExp(
+  r'^(?:[-*+] \[[ xX]\] |#{1,6} |>+ ?|[-*+] |\d+[.)] )',
+);
+final _indent = RegExp(r'^[ \t]*');
+
+_Prefixed _splitPrefix(String line) {
+  final indent = _indent.firstMatch(line)![0]!;
+  final rest = line.substring(indent.length);
+  final m = _blockMarker.matchAsPrefix(rest);
+  if (m == null) return _Prefixed(indent, '', rest);
+  return _Prefixed(indent, m[0]!, rest.substring(m.end));
+}
+
+int _lineStartAt(String t, int offset) {
+  final i = t.lastIndexOf('\n', offset - 1);
+  return i < 0 ? 0 : i + 1;
+}
+
+int _lineEndAt(String t, int offset) {
+  final i = t.indexOf('\n', offset);
+  return i < 0 ? t.length : i;
+}
+
+/// Where a `[[wikilink]]` sits, if the caret at [offset] is inside one.
+///
+/// Taps inside an editable TextField are consumed for caret placement, so a
+/// TapGestureRecognizer on a span never fires. Instead the tap places the caret
+/// as usual and the caller asks this what the caret landed in — the pointer
+/// keeps its ordinary behaviour and nothing fights the selection gesture.
+WikilinkHit? wikilinkAt(String text, int offset) {
+  if (offset < 0 || offset > text.length) return null;
+  final lineStart = _lineStartAt(text, offset);
+  final lineEnd = _lineEndAt(text, offset);
+  final line = text.substring(lineStart, lineEnd);
+
+  for (final m in RegExp(r'\[\[([^\[\]\n]+)\]\]').allMatches(line)) {
+    final start = lineStart + m.start;
+    final end = lineStart + m.end;
+    if (offset >= start && offset <= end) {
+      return WikilinkHit(target: m[1]!.trim(), start: start, end: end);
+    }
+  }
+  return null;
+}
+
+/// A `[[target]]` under the caret, in absolute buffer offsets.
+class WikilinkHit {
+  const WikilinkHit({
+    required this.target,
+    required this.start,
+    required this.end,
+  });
+
+  final String target;
+  final int start;
+  final int end;
 }

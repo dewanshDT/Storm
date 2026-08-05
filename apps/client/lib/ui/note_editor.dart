@@ -1,10 +1,13 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
+import 'editor_toolbar.dart';
 import 'note_properties.dart';
 import 'theme.dart';
 
@@ -16,7 +19,20 @@ import 'theme.dart';
 /// reconciled our text against a version we never saw, and the buffer must be
 /// replaced rather than kept.
 class NoteEditor extends ConsumerStatefulWidget {
-  const NoteEditor({super.key});
+  const NoteEditor({super.key, this.onFollowLink, this.showToolbar = false});
+
+  /// Whether to show the formatting toolbar.
+  ///
+  /// Decided by the screen rather than here, because the answer depends on the
+  /// keyboard inset and this widget lives inside a Scaffold body where that is
+  /// no longer readable. See `keyboardIsOpen`.
+  final bool showToolbar;
+
+  /// Called with a `[[target]]` the user asked to follow.
+  ///
+  /// The editor finds the link; it does not decide what opening one means.
+  /// That belongs to the screen, which owns navigation.
+  final void Function(String target)? onFollowLink;
 
   @override
   ConsumerState<NoteEditor> createState() => _NoteEditorState();
@@ -85,6 +101,63 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     } else {
       session.editBody(_controller.text);
     }
+  }
+
+  /// Follows a wikilink the caret has just landed inside.
+  ///
+  /// A tap inside an editable field is consumed for caret placement, so a
+  /// gesture recogniser on the span never fires. Letting the tap do its normal
+  /// job and then asking where the caret ended up gets the same result without
+  /// fighting the selection gesture.
+  ///
+  /// On touch a tap follows the link. With a pointer it needs Cmd/Ctrl, because
+  /// clicking into text to edit it is the overwhelmingly common intent and
+  /// stealing that would make the note unclickable.
+  void _onEditorTap() {
+    final follow = widget.onFollowLink;
+    if (follow == null) return;
+
+    final hit = wikilinkAt(_controller.text, _controller.selection.baseOffset);
+    if (hit == null) return;
+
+    final isTouch =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+    final modified = HardwareKeyboard.instance.isMetaPressed ||
+        HardwareKeyboard.instance.isControlPressed;
+    if (!isTouch && !modified) return;
+
+    follow(hit.target);
+  }
+
+  /// Adds "Open note" to the selection toolbar when the caret is in a link.
+  ///
+  /// The sanctioned extension point: unlike a gesture recogniser it does not
+  /// compete with selection, and it gives pointer users a way through that
+  /// doesn't depend on knowing about a modifier key.
+  Widget _contextMenu(BuildContext context, EditableTextState state) {
+    final items = [...state.contextMenuButtonItems];
+    final follow = widget.onFollowLink;
+    final hit = follow == null
+        ? null
+        : wikilinkAt(_controller.text, _controller.selection.baseOffset);
+
+    if (hit != null) {
+      items.insert(
+        0,
+        ContextMenuButtonItem(
+          label: 'Open ${hit.target}',
+          onPressed: () {
+            state.hideToolbar();
+            follow!(hit.target);
+          },
+        ),
+      );
+    }
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: state.contextMenuAnchors,
+      buttonItems: items,
+    );
   }
 
   /// Pulls server text into the editor, keeping the caret where it can.
@@ -176,6 +249,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                     cursorWidth: 2,
                     keyboardType: TextInputType.multiline,
                     textCapitalization: TextCapitalization.sentences,
+                    onTap: _onEditorTap,
+                    contextMenuBuilder: _contextMenu,
                     decoration: const InputDecoration(
                       border: InputBorder.none,
                       isDense: true,
@@ -186,6 +261,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
             ),
           ),
         ),
+        // Trades places with the nav bubble, which hides on the same signal.
+        if (widget.showToolbar) EditorToolbar(controller: _controller),
       ],
     );
   }

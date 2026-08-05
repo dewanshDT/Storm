@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
+import 'package:storm/ui/editor_toolbar.dart';
 
 import 'shell_harness.dart';
 
@@ -61,10 +62,29 @@ void main() {
   });
 
   testWidgets('is hidden while the keyboard is up', (tester) async {
-    // Stage 2 puts the formatting toolbar in this space.
     final c = shellContainer();
     await pumpShell(tester, c, keyboard: 300);
 
+    expect(find.byIcon(Icons.more_horiz), findsNothing);
+    await disposeShell(tester, c);
+  });
+
+  testWidgets('trades places with the formatting toolbar in a note',
+      (tester) async {
+    // Both read the same signal, so they must never be on screen together and
+    // never both absent.
+    final c = shellContainer();
+    await pumpShell(tester, c);
+    c.read(routerProvider).go(Routes.note('n0'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EditorToolbar), findsNothing);
+    expect(find.byIcon(Icons.more_horiz), findsOneWidget);
+
+    await pumpShell(tester, c, keyboard: 320);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(EditorToolbar), findsOneWidget);
     expect(find.byIcon(Icons.more_horiz), findsNothing);
     await disposeShell(tester, c);
   });

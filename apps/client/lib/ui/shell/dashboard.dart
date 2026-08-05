@@ -17,6 +17,7 @@ class DashboardScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(syncListenerProvider);
     final notes = ref.watch(treeProvider);
+    final keyboard = keyboardIsOpen(context);
 
     return NewNoteRequest(
       onRequest: () => _create(context, ref),
@@ -43,7 +44,13 @@ class DashboardScreen extends ConsumerWidget {
                 ),
               ),
             ),
-            const Positioned(left: 0, right: 0, bottom: 0, child: NavBubble()),
+            if (!keyboard)
+              const Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: NavBubble(),
+              ),
           ],
         ),
       ),

@@ -8,10 +8,22 @@ import '../theme.dart';
 
 /// Whether a soft keyboard is currently covering the bottom of the screen.
 ///
-/// Stage 2's formatting toolbar swaps in wherever this is true, so both halves
-/// of that trade ask the same question in the same way.
+/// **Call this above a `Scaffold`, not from inside its body.** Both of the
+/// obvious ways to ask are wrong from inside one:
+///
+///  * `MediaQuery.viewInsetsOf` reads zero, because `resizeToAvoidBottomInset`
+///    works by *removing* the bottom inset from the body's MediaQuery — that
+///    removal is the resize.
+///  * `View.of(context).viewInsets` reads the right number but never rebuilds:
+///    view metrics are not an inherited dependency, so the widget would keep
+///    whatever answer it got the first time.
+///
+/// Above the Scaffold the MediaQuery is intact *and* depending on it rebuilds,
+/// so the screen decides and passes the answer down. The nav bubble and the
+/// formatting toolbar both hang off this one call per screen, which is what
+/// keeps them from ever being on screen together.
 bool keyboardIsOpen(BuildContext context) =>
-    View.of(context).viewInsets.bottom > 0;
+    MediaQuery.viewInsetsOf(context).bottom > 0;
 
 /// The floating navigation bubble.
 ///
@@ -35,13 +47,6 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
 
   @override
   Widget build(BuildContext context) {
-    // Hidden while the keyboard is up — the formatting toolbar takes this
-    // space. Asked of the view, not of MediaQuery: the bubble sits in a
-    // Scaffold body, and `resizeToAvoidBottomInset` works by *removing* the
-    // bottom inset from the body's MediaQuery, so it always reads as zero
-    // exactly where it matters.
-    if (keyboardIsOpen(context)) return const SizedBox.shrink();
-
     final scheme = Theme.of(context).colorScheme;
     final uri = GoRouterState.of(context).uri;
 

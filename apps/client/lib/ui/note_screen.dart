@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../router.dart';
 import '../state/app_state.dart';
+import '../state/wikilinks.dart';
 import '../sync/sync_engine.dart';
 import 'attachment_strip.dart';
 import 'backlinks_panel.dart';
@@ -58,6 +59,26 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Opens the note a `[[wikilink]]` points at.
+  ///
+  /// Saves first: following a link replaces the buffer, and an unsaved edit
+  /// left behind would be lost. An unresolved link says so rather than
+  /// creating a note — creating one silently is how a typo becomes a file.
+  Future<void> _followLink(String target) async {
+    final notes = ref.read(treeProvider).value ?? const [];
+    final found = resolveWikilink(notes, target);
+    if (found == null) {
+      _toast('No note called “$target”');
+      return;
+    }
+    if (found.id == widget.noteId) return;
+
+    final session = ref.read(noteSessionProvider);
+    if (session.isDirty) await session.save();
+    if (!mounted) return;
+    context.go(Routes.note(found.id));
   }
 
   Future<void> _togglePin() async {
@@ -180,6 +201,9 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final session = ref.watch(noteSessionProvider);
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     final isPinned = pinned.contains(widget.noteId);
+    // Asked here, above the Scaffold, where the inset is still readable and
+    // depending on it still rebuilds. See keyboardIsOpen.
+    final keyboard = keyboardIsOpen(context);
 
     return NoteContextRequest(
       onRequest: () => setState(() => _showContext = !_showContext),
@@ -264,7 +288,12 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
               Positioned.fill(
                 child: Column(
                   children: [
-                    const Expanded(child: NoteEditor()),
+                    Expanded(
+                      child: NoteEditor(
+                        onFollowLink: _followLink,
+                        showToolbar: keyboard,
+                      ),
+                    ),
                     AttachmentStrip(body: session.body),
                     if (_showContext)
                       BacklinksPanel(
@@ -274,12 +303,13 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                   ],
                 ),
               ),
-              const Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: NavBubble(),
-              ),
+              if (!keyboard)
+                const Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: NavBubble(),
+                ),
             ],
           ),
         ),
