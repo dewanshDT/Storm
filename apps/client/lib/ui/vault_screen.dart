@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
 import '../sync/sync_engine.dart';
-import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
 
 import 'attachment_strip.dart';
 import 'backlinks_panel.dart';
@@ -66,19 +66,27 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     final session = ref.read(noteSessionProvider);
     if (!session.isOpen) return;
 
-    final picked = await FilePicker.pickFiles(withData: true);
-    final file = picked?.files.singleOrNull;
-    if (file == null || file.bytes == null) return;
+    // file_selector rather than file_picker: the latter applies its own Kotlin
+    // Gradle Plugin, which Flutter 3.44's built-in Kotlin refuses to compile,
+    // so its Android class never made it into the APK at all.
+    final file = await openFile();
+    if (file == null) return;
+
+    final bytes = await file.readAsBytes();
+    if (bytes.isEmpty) return;
 
     final result = await ref
         .read(syncEngineProvider)
-        .attach(fileName: file.name, bytes: file.bytes!);
+        .attach(fileName: file.name, bytes: bytes);
     if (result.path == null) {
       _toast(result.error ?? 'Could not upload the attachment');
       return;
     }
 
     // An image embeds; anything else becomes a plain link.
+    final ext = file.name.contains('.')
+        ? file.name.split('.').last.toLowerCase()
+        : '';
     final isImage = const {
       'png',
       'jpg',
@@ -86,7 +94,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
       'gif',
       'webp',
       'bmp',
-    }.contains(file.extension?.toLowerCase());
+    }.contains(ext);
     final link = '${isImage ? '!' : ''}[${file.name}](${result.path})';
 
     final body = session.body;

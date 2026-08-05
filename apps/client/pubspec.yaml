@@ -40,8 +40,7 @@ dependencies:
   drift: ^2.34.3
   drift_flutter: ^0.3.1
   web_socket_channel: ^3.0.3
-  file_picker: ^11.0.3
-
+  file_selector: ^1.1.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

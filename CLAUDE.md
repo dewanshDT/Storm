@@ -53,6 +53,18 @@ make serve-web               # build the web client and serve it
 `-D warnings`, so a warning is a failure. The Makefile targets GNU Make 3.81
 (what macOS ships), so no `.ONESHELL` or `.SHELLFLAGS`.
 
+**Never filter a build's output down to a success pattern.** Piping
+`flutter build` through `grep "✓ Built"` prints nothing when the build *fails*,
+and silence reads exactly like success — a stale APK then installs happily and
+the missing feature looks like a UI bug. Check the exit status, or read the
+tail of the real output.
+
+**Android plugins must support Flutter's built-in Kotlin.** A plugin that
+applies its own Kotlin Gradle Plugin won't have its classes compiled, while
+the generated registrant still references them, so the build fails on a symbol
+that looks like it should exist. Prefer first-party `flutter/packages` plugins
+(`file_selector` over `file_picker`, for instance).
+
 ## Invariants worth knowing before editing
 
 These are load-bearing and each has a regression test. Breaking one loses user
