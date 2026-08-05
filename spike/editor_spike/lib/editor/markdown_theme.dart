@@ -21,24 +21,24 @@ class MarkdownTheme {
   }
 
   factory MarkdownTheme.light(TextStyle base) => MarkdownTheme(
-        base: base,
-        markerColor: const Color(0xFFB0B6C0),
-        accent: const Color(0xFF5B6ABF),
-        codeColor: const Color(0xFFB4426B),
-        codeBackground: const Color(0x0F000000),
-        mutedColor: const Color(0xFF6B7280),
-        highlightBackground: const Color(0x40FFD54F),
-      );
+    base: base,
+    markerColor: const Color(0xFFB0B6C0),
+    accent: const Color(0xFF5B6ABF),
+    codeColor: const Color(0xFFB4426B),
+    codeBackground: const Color(0x0F000000),
+    mutedColor: const Color(0xFF6B7280),
+    highlightBackground: const Color(0x40FFD54F),
+  );
 
   factory MarkdownTheme.dark(TextStyle base) => MarkdownTheme(
-        base: base,
-        markerColor: const Color(0xFF5A6472),
-        accent: const Color(0xFF8FA0F0),
-        codeColor: const Color(0xFFE79AB8),
-        codeBackground: const Color(0x1AFFFFFF),
-        mutedColor: const Color(0xFF9AA3B0),
-        highlightBackground: const Color(0x40FFC107),
-      );
+    base: base,
+    markerColor: const Color(0xFF5A6472),
+    accent: const Color(0xFF8FA0F0),
+    codeColor: const Color(0xFFE79AB8),
+    codeBackground: const Color(0x1AFFFFFF),
+    mutedColor: const Color(0xFF9AA3B0),
+    highlightBackground: const Color(0x40FFC107),
+  );
 
   final TextStyle base;
   final Color markerColor;
@@ -52,14 +52,56 @@ class MarkdownTheme {
 
   TextStyle styleFor(TokenKind kind) => _styles[kind] ?? base;
 
+  /// Syntax on a line the caret isn't on.
+  ///
+  /// Not `fontSize: 0` — Flutter still lays out a glyph box, and a hard zero
+  /// can collapse the line's height. A hair above zero, fully transparent, is
+  /// invisible while keeping the character present so caret offsets stay
+  /// correct.
+  ///
+  /// Built once, not per access: this is read for every hidden run on every
+  /// line, and as a getter calling `copyWith` it allocated thousands of
+  /// TextStyles per rebuild and cost ~6x on a long document.
+  late final TextStyle hiddenMarker = base.copyWith(
+    fontSize: 0.01,
+    color: const Color(0x00000000),
+    letterSpacing: 0,
+    height: base.height,
+  );
+
+  // Value equality is load-bearing, not a nicety. The editor assigns a theme
+  // on every build; without this, each assignment looks like a change, and a
+  // controller that invalidates on "change" ends up churning every frame.
+  @override
+  bool operator ==(Object other) =>
+      other is MarkdownTheme &&
+      other.base == base &&
+      other.markerColor == markerColor &&
+      other.accent == accent &&
+      other.codeColor == codeColor &&
+      other.codeBackground == codeBackground &&
+      other.mutedColor == mutedColor &&
+      other.highlightBackground == highlightBackground;
+
+  @override
+  int get hashCode => Object.hash(
+    base,
+    markerColor,
+    accent,
+    codeColor,
+    codeBackground,
+    mutedColor,
+    highlightBackground,
+  );
+
   Map<TokenKind, TextStyle> _build() {
     // Headings scale down by level. Kept modest — an h1 three times body size
     // makes the caret jump uncomfortably between lines while editing.
     TextStyle heading(double scale) => base.copyWith(
-          fontSize: (base.fontSize ?? 16) * scale,
-          fontWeight: FontWeight.w700,
-          height: 1.35,
-        );
+      fontSize: (base.fontSize ?? 16) * scale,
+      fontWeight: FontWeight.w700,
+      height: 1.35,
+    );
 
     final mono = base.copyWith(
       fontFamily: 'monospace',

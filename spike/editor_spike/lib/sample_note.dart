@@ -24,13 +24,40 @@ String sampleNote(int lines, {int seed = 42}) {
     ..writeln();
 
   const nouns = [
-    'vault', 'note', 'server', 'client', 'cache', 'outbox', 'merge', 'index',
-    'watcher', 'digest', 'frontmatter', 'attachment', 'wikilink', 'tag',
-    'snapshot', 'replica', 'checkpoint', 'transaction', 'manifest', 'cursor',
+    'vault',
+    'note',
+    'server',
+    'client',
+    'cache',
+    'outbox',
+    'merge',
+    'index',
+    'watcher',
+    'digest',
+    'frontmatter',
+    'attachment',
+    'wikilink',
+    'tag',
+    'snapshot',
+    'replica',
+    'checkpoint',
+    'transaction',
+    'manifest',
+    'cursor',
   ];
   const verbs = [
-    'reconciles', 'replays', 'indexes', 'rewrites', 'broadcasts', 'debounces',
-    'hashes', 'prunes', 'resolves', 'streams', 'validates', 'coalesces',
+    'reconciles',
+    'replays',
+    'indexes',
+    'rewrites',
+    'broadcasts',
+    'debounces',
+    'hashes',
+    'prunes',
+    'resolves',
+    'streams',
+    'validates',
+    'coalesces',
   ];
   String noun() => nouns[rng.nextInt(nouns.length)];
   String verb() => verbs[rng.nextInt(verbs.length)];

@@ -93,7 +93,9 @@ class LineResult {
 final _codeSpan = RegExp(r'`([^`\n]+)`');
 final _boldItalic = RegExp(r'\*\*\*([^*\n]+)\*\*\*');
 final _bold = RegExp(r'\*\*([^*\n]+)\*\*|__([^_\n]+)__');
-final _italic = RegExp(r'(?<![*\w])\*([^*\n]+)\*(?![*\w])|(?<![_\w])_([^_\n]+)_(?![_\w])');
+final _italic = RegExp(
+  r'(?<![*\w])\*([^*\n]+)\*(?![*\w])|(?<![_\w])_([^_\n]+)_(?![_\w])',
+);
 final _strike = RegExp(r'~~([^~\n]+)~~');
 final _highlight = RegExp(r'==([^=\n]+)==');
 final _wikilink = RegExp(r'\[\[([^\[\]\n]+)\]\]');
@@ -114,36 +116,37 @@ final _fenceLine = RegExp(r'^\s*(?:```|~~~)');
 /// Returns runs in ascending order. Gaps are implicitly [TokenKind.text]; the
 /// caller fills them, which keeps this function from emitting a token per
 /// unstyled character.
-LineResult tokenizeLine(String line, int offset, BlockContext ctx, int lineIndex) {
+LineResult tokenizeLine(
+  String line,
+  int offset,
+  BlockContext ctx,
+  int lineIndex,
+) {
   // --- Frontmatter -----------------------------------------------------
   // Only a `---` on the very first line opens frontmatter; anywhere else it is
   // a horizontal rule.
   if (ctx.inFrontmatter) {
     final closing = line.trimRight() == '---';
-    return LineResult(
-      [Token(offset, offset + line.length, TokenKind.frontmatter)],
-      BlockContext(inFrontmatter: !closing),
-    );
+    return LineResult([
+      Token(offset, offset + line.length, TokenKind.frontmatter),
+    ], BlockContext(inFrontmatter: !closing));
   }
   if (lineIndex == 0 && line.trimRight() == '---') {
-    return LineResult(
-      [Token(offset, offset + line.length, TokenKind.frontmatter)],
-      const BlockContext(inFrontmatter: true),
-    );
+    return LineResult([
+      Token(offset, offset + line.length, TokenKind.frontmatter),
+    ], const BlockContext(inFrontmatter: true));
   }
 
   // --- Fenced code -----------------------------------------------------
   if (_fenceLine.hasMatch(line)) {
-    return LineResult(
-      [Token(offset, offset + line.length, TokenKind.codeBlock)],
-      BlockContext(inFence: !ctx.inFence),
-    );
+    return LineResult([
+      Token(offset, offset + line.length, TokenKind.codeBlock),
+    ], BlockContext(inFence: !ctx.inFence));
   }
   if (ctx.inFence) {
-    return LineResult(
-      [Token(offset, offset + line.length, TokenKind.codeBlock)],
-      ctx,
-    );
+    return LineResult([
+      Token(offset, offset + line.length, TokenKind.codeBlock),
+    ], ctx);
   }
 
   final tokens = <Token>[];
@@ -171,10 +174,9 @@ LineResult tokenizeLine(String line, int offset, BlockContext ctx, int lineIndex
   }
 
   if (_hrLine.hasMatch(line) && line.trim().length >= 3) {
-    return LineResult(
-      [Token(offset, offset + line.length, TokenKind.horizontalRule)],
-      ctx,
-    );
+    return LineResult([
+      Token(offset, offset + line.length, TokenKind.horizontalRule),
+    ], ctx);
   }
 
   final quote = _blockquoteLine.firstMatch(line);
@@ -223,7 +225,8 @@ void _tokenizeInline(
     _InlineMatch? best;
 
     for (final probe in _probes) {
-      final m = probe.pattern.matchAsPrefix(text, cursor) ??
+      final m =
+          probe.pattern.matchAsPrefix(text, cursor) ??
           probe.pattern.firstMatch(text.substring(cursor));
       if (m == null) continue;
       // firstMatch on a substring reports relative offsets; normalize.

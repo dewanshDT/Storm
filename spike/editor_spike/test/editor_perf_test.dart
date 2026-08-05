@@ -127,22 +127,27 @@ void main() {
         expect(stats(samples).p95, lessThan(kSpanBudgetMs));
       });
 
-      testWidgets('caret movement only — must hit the memo', (tester) async {
+      testWidgets('caret movement within a line must hit the memo',
+          (tester) async {
+        // The flutter#114158 case. Since reveal-on-active-line, the rendered
+        // output depends on which line the caret is in, so the memo covers
+        // movement *within* a line — which is the overwhelmingly common case:
+        // typing, arrow-left/right, click-to-position. Crossing a line
+        // boundary legitimately rebuilds, because the syntax that shows
+        // changes.
         controller.text = sampleNote(lineTarget);
-        var offset = 0;
+        final start = controller.text.indexOf('Plain prose');
+        var offset = start;
 
-        final samples = await measure(tester, 200, (i) {
-          // Selection changes without touching text: the flutter#114158 case.
-          offset = (offset + 7) % controller.text.length;
+        final samples = await measure(tester, 40, (i) {
+          offset = start + (i % 30);
           controller.selection = TextSelection.collapsed(offset: offset);
         });
 
-        report('caret only', samples);
-        final r = stats(samples);
+        report('caret within a line', samples);
         expect(controller.lastServedFromMemo, isTrue);
-        expect(r.p95, lessThan(0.1),
-            reason: 'caret movement must be served from the memo, '
-                'not re-tokenized');
+        expect(stats(samples).p95, lessThan(0.1),
+            reason: 'must be served from the memo, not re-tokenized');
       });
     });
   }

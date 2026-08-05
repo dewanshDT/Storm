@@ -52,6 +52,23 @@ class MarkdownTheme {
 
   TextStyle styleFor(TokenKind kind) => _styles[kind] ?? base;
 
+  /// Syntax on a line the caret isn't on.
+  ///
+  /// Not `fontSize: 0` — Flutter still lays out a glyph box, and a hard zero
+  /// can collapse the line's height. A hair above zero, fully transparent, is
+  /// invisible while keeping the character present so caret offsets stay
+  /// correct.
+  ///
+  /// Built once, not per access: this is read for every hidden run on every
+  /// line, and as a getter calling `copyWith` it allocated thousands of
+  /// TextStyles per rebuild and cost ~6x on a long document.
+  late final TextStyle hiddenMarker = base.copyWith(
+    fontSize: 0.01,
+    color: const Color(0x00000000),
+    letterSpacing: 0,
+    height: base.height,
+  );
+
   // Value equality is load-bearing, not a nicety. The editor assigns a theme
   // on every build; without this, each assignment looks like a change, and a
   // controller that invalidates on "change" ends up churning every frame.
