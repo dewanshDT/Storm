@@ -52,6 +52,31 @@ class MarkdownTheme {
 
   TextStyle styleFor(TokenKind kind) => _styles[kind] ?? base;
 
+  // Value equality is load-bearing, not a nicety. The editor assigns a theme
+  // on every build; without this, each assignment looks like a change, and a
+  // controller that invalidates on "change" ends up churning every frame.
+  @override
+  bool operator ==(Object other) =>
+      other is MarkdownTheme &&
+      other.base == base &&
+      other.markerColor == markerColor &&
+      other.accent == accent &&
+      other.codeColor == codeColor &&
+      other.codeBackground == codeBackground &&
+      other.mutedColor == mutedColor &&
+      other.highlightBackground == highlightBackground;
+
+  @override
+  int get hashCode => Object.hash(
+        base,
+        markerColor,
+        accent,
+        codeColor,
+        codeBackground,
+        mutedColor,
+        highlightBackground,
+      );
+
   Map<TokenKind, TextStyle> _build() {
     // Headings scale down by level. Kept modest — an h1 three times body size
     // makes the caret jump uncomfortably between lines while editing.

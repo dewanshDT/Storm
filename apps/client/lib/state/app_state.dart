@@ -112,6 +112,13 @@ final cacheProvider = Provider<CacheDb>((ref) {
 ///
 /// Everything above this reads and writes through it rather than touching
 /// [StormApi], so offline behaviour lives in one place.
+/// Owns the cache, the outbox and the server connection.
+///
+/// **Watch this only to render status** (online, syncing, unsent count).
+/// `ChangeNotifierProvider` rebuilds its watchers on every `notifyListeners()`,
+/// and the engine notifies on every status tick — so anything that needs the
+/// *instance* rather than the notifications must `ref.read` it, or it gets
+/// torn down and rebuilt several times a second.
 final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
   final api = ref.watch(apiProvider);
   final engine = SyncEngine(
@@ -119,35 +126,57 @@ final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
     cache: ref.watch(cacheProvider),
   );
   if (api != null) engine.start();
-  ref.onDispose(engine.dispose);
+  // No `ref.onDispose(engine.dispose)`: ChangeNotifierProvider already
+  // disposes what it holds, and disposing twice trips ChangeNotifier's
+  // "used after being disposed" assert.
   return engine;
+});
+
+/// Bumped when a sync actually changed data.
+///
+/// Data providers watch this instead of the engine, so a status tick doesn't
+/// trigger a refetch of the tree, the tags and every open backlinks panel.
+final vaultRevisionProvider = StateProvider<int>((ref) => 0);
+
+/// Keeps the open note and the vault views in step with incoming changes.
+///
+/// Instantiated by the shell; nothing else depends on its value.
+final syncListenerProvider = Provider<void>((ref) {
+  // Rebuild only when the connection itself changes, never on a status tick.
+  ref.watch(apiProvider);
+  final engine = ref.read(syncEngineProvider);
+
+  final sub = engine.changes.listen((ids) {
+    final session = ref.read(noteSessionProvider);
+    if (session.noteId != null && ids.contains(session.noteId)) {
+      // The session decides whether to adopt it — a local edit always wins.
+      session.onRemoteChange();
+    }
+    ref.read(vaultRevisionProvider.notifier).state++;
+  });
+
+  ref.onDispose(sub.cancel);
 });
 
 /// The vault tree — server when reachable, cache when not.
 final treeProvider = FutureProvider<List<NoteMeta>>((ref) async {
-  final engine = ref.watch(syncEngineProvider);
-  return engine.tree();
+  ref.watch(apiProvider);
+  ref.watch(vaultRevisionProvider);
+  return ref.read(syncEngineProvider).tree();
 });
 
 /// The currently open note, if any.
 final openNoteIdProvider = StateProvider<String?>((ref) => null);
 
 final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
-  final engine = ref.watch(syncEngineProvider);
-  final session = NoteSession(engine);
-
-  // Remote changes reach the open editor. The session decides whether to
-  // adopt them — a local edit in progress always wins.
-  final sub = engine.changes.listen((ids) {
-    if (session.noteId != null && ids.contains(session.noteId)) {
-      session.onRemoteChange();
-    }
-    ref.invalidate(treeProvider);
-  });
-
-  ref.onDispose(sub.cancel);
-  ref.onDispose(session.dispose);
-  return session;
+  // Deliberately `watch(apiProvider)` + `read(syncEngineProvider)`: the
+  // session must be rebuilt when the server connection changes, but must
+  // survive the engine's status notifications. Watching the engine here reset
+  // the editor mid-open and left the tree showing a selected note with an
+  // empty pane.
+  ref.watch(apiProvider);
+  // Disposal is ChangeNotifierProvider's job — see syncEngineProvider.
+  return NoteSession(ref.read(syncEngineProvider));
 });
 
 final searchQueryProvider = StateProvider<String>((ref) => '');

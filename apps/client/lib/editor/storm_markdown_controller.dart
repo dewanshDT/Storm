@@ -34,10 +34,18 @@ class StormMarkdownController extends TextEditingController {
   static const int maxStyledLines = 5000;
 
   MarkdownTheme _theme;
+
+  /// Changes the styling.
+  ///
+  /// Deliberately does **not** call `notifyListeners()`. To a
+  /// [TextEditingController]'s listeners a notification means "the value
+  /// changed", and callers set the theme from `build()` — so notifying here
+  /// both lies about the text and fires during a build. Dropping the caches is
+  /// enough: the rebuild that set the theme re-runs [buildTextSpan] anyway.
   set theme(MarkdownTheme value) {
     if (value == _theme) return;
     _theme = value;
-    _invalidate();
+    _dropCaches();
   }
 
   MarkdownTheme get theme => _theme;
@@ -53,11 +61,11 @@ class StormMarkdownController extends TextEditingController {
   bool lastServedFromMemo = false;
   bool lastDegraded = false;
 
-  void _invalidate() {
+  /// Discards memoised spans without claiming the text changed.
+  void _dropCaches() {
     _lineCache = {};
     _memoText = null;
     _memoSpan = null;
-    notifyListeners();
   }
 
   @override

@@ -42,7 +42,19 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     super.dispose();
   }
 
+  /// The last text this widget knows about, so a controller notification that
+  /// isn't a text change can't be mistaken for typing.
+  ///
+  /// [TextEditingController] notifies on selection changes and on anything
+  /// else that touches its value. Treating every notification as an edit once
+  /// reported the still-empty controller as a deletion of the whole note, and
+  /// the resulting empty save looped through the server and back.
+  String _lastText = '';
+
   void _onLocalEdit() {
+    if (_controller.text == _lastText) return;
+    _lastText = _controller.text;
+
     final session = ref.read(noteSessionProvider);
     if (!session.isOpen) return;
     session.edit(_controller.text);
@@ -52,6 +64,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   void _adoptServerText(String text) {
     final previousOffset = _controller.selection.baseOffset;
     _controller.removeListener(_onLocalEdit);
+    _lastText = text;
     _controller.value = TextEditingValue(
       text: text,
       // Clamp rather than reset to 0: after a clean merge the user's caret is

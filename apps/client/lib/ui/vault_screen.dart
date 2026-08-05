@@ -136,6 +136,11 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Providers are lazy: without this nothing subscribes to the engine's
+    // change stream, so remote edits would never reach the open editor and the
+    // tree would never refresh after a sync.
+    ref.watch(syncListenerProvider);
+
     final wide = MediaQuery.sizeOf(context).width >= 820;
     final hasNote = ref.watch(noteSessionProvider).isOpen;
 

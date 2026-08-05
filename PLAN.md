@@ -41,10 +41,10 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 118 tests + 19 live · search p95 1.1ms |
-| M5 | Android, Linux, Web | partly done | web wired & served; **needs a browser check** |
+| M5 | Android, Linux, Web | partly done | Android + web + macOS run; Linux and the perf gate open |
 | M6 | Attachments, settings, deploy | not started | |
 
-Last updated: 2026-08-05, after M4 and the M5 web work.
+Last updated: 2026-08-05, after M4 and the M5 Android/web work.
 
 ### Verify the current state
 
@@ -131,6 +131,18 @@ subsume rather than contradict.
 exposure. This is *only* defensible on the LAN.
 *Revisit before:* the server is ever reachable from outside the LAN — TLS and
 per-device token rotation must land **first**, not after.
+
+**8. Ship the server as a bare static binary, not a Docker image.**
+It is a 5.4 MB statically-linked musl binary with no runtime dependencies, so
+Docker's isolation buys nothing. PRD §4.6 chose LXC precisely to avoid a guest
+OS, and Docker on Proxmox means either a VM (the thing being removed) or nested
+containers in an LXC. It would also put a bind mount and a UID/GID mapping
+between the container and the host user who wants to grep, rsync and
+ZFS-snapshot the vault — friction against the property the project exists to
+protect. Cross-compiling with `cargo-zigbuild` removes the only real argument
+for containerising (build reproducibility).
+*Revisit if:* the homelab standardises on Docker/Compose for everything else,
+where ops uniformity would outweigh minimalism.
 
 **5. Editor dims syntax markers rather than hiding them.**
 A `TextEditingController` can't change the buffer's character count, so true
@@ -402,10 +414,41 @@ cd ../server && cargo run --release -- --vault <v> --state <s> \
 Watch the console for `storm: cache using …` — it only prints when the browser
 withheld a feature, so silence means OPFS was available.
 
-**Linux:** cannot be built from macOS (`"build linux" only supported on Linux
-hosts`). Needs a Linux machine or a container.
+**Android — runs, verified against the homelab VM.**
 
-**Android:** untried, needs the SDK and a JDK.
+Toolchain: OpenJDK 21 + cmdline-tools + platform-tools + build-tools 36 +
+platform 36 + NDK 28 + CMake. The NDK is not optional —
+`sqlite3_flutter_libs` compiles SQLite from source. Budget ~12 GB of disk for
+all of it, not the ~600 MB the SDK alone suggests.
+
+Verified end to end on a Pixel 10 (Android 17, API 37) against
+`storm-server` on the Ubuntu VM at `192.168.91.51:8484`, over wifi: vault tree
+loads, folders nest, notes open, and **no note's version moved during 20
+seconds idle** — the save loop and the provider-rebuild bug are both fixed on
+device, not just in tests.
+
+*Still open:* the M0 perf gate on Android. The spike's HUD has not been run on
+a real device, so the editor's typing latency there is still unmeasured — M0's
+numbers are desktop-only and assume a 3–5× penalty.
+
+**macOS — no longer blocked.** `flutter build macos` succeeds and produces
+`storm.app`, even though `DVTDownloads.framework` is still v17.0 against Xcode
+26.6. Whatever was wrong resolved itself; `make client` works.
+
+**Linux:** cannot be built from a macOS host (`"build linux" only supported on
+Linux hosts`). Needs a Linux machine or a container.
+
+**Deploying to a Linux host** does *not* need Rust installed there. Cross-
+compile a static musl binary and copy it:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo install cargo-zigbuild            # needs zig; handles the bundled SQLite C
+cd apps/server && cargo zigbuild --release --target x86_64-unknown-linux-musl
+```
+
+68 s, 5.4 MB, statically linked, zero runtime deps. This is the M6 deploy
+mechanism.
 
 *Exit:* the same note edits round-trip across all four platforms, **and** the
 editor is validated on a real Android device using the spike's perf HUD (see

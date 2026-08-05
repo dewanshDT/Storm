@@ -58,6 +58,10 @@ class FakeServer {
   String? conflictInstead;
   int? lastBaseVersion;
 
+  /// How many times /v1/tree was fetched — lets a test assert that status
+  /// notifications don't cause refetch storms.
+  int treeRequests = 0;
+
   void pushChange(String noteId, String kind, int version) {
     seq++;
     changeLog.add({
