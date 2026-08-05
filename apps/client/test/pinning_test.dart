@@ -7,9 +7,11 @@ import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/sync/sync_engine.dart';
-import 'package:storm/ui/vault_screen.dart';
+
+import 'package:storm/router.dart';
 
 import 'fake_server.dart';
+import 'shell_harness.dart';
 
 /// Keeping notes available offline, and reaching the actions that do it.
 void main() {
@@ -90,97 +92,60 @@ void main() {
   });
 
   group('the note actions stay reachable', () {
-    // Its own cache and engine: ChangeNotifierProvider disposes whatever it
-    // holds, so sharing the outer engine would dispose it twice.
-    ProviderContainer container() {
-      final localCache = CacheDb(NativeDatabase.memory());
-      final localServer = FakeServer();
-      localServer.notes['n1'] = ServerNote(
-        id: 'n1',
-        path: 'Keep.md',
-        content: '# Keep\n',
-        version: 1,
-      );
-      final localApi = StormApi(
-        baseUrl: 'http://test',
-        token: 't',
-        client: localServer.client,
-      );
-      return ProviderContainer(
-        overrides: [
-          cacheProvider.overrideWithValue(localCache),
-          apiProvider.overrideWithValue(localApi),
-          syncEngineProvider.overrideWith(
-            (ref) => SyncEngine(api: localApi, cache: localCache),
-          ),
-        ],
-      );
-    }
-
-    Future<void> pump(
-      WidgetTester tester,
-      ProviderContainer c,
-      Size size,
-    ) async {
-      tester.view.physicalSize = size;
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(tester.view.reset);
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: c,
-          child: const MaterialApp(home: VaultScreen()),
-        ),
-      );
+    /// Opens n0 and returns with its actions menu on screen.
+    Future<void> openMenu(WidgetTester tester, ProviderContainer c) async {
+      c.read(routerProvider).go(Routes.note('n0'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Note actions'));
       await tester.pumpAndSettle();
     }
 
-    testWidgets('on a phone they collapse into a menu, without overflowing', (
-      tester,
-    ) async {
-      // An overflowing AppBar silently drops the icons past its edge, which is
-      // how the attach button looked like it was missing.
-      final c = container();
-      await c.read(noteSessionProvider).open('n1');
-      await pump(tester, c, const Size(411, 900));
+    for (final (name, size) in [
+      ('a phone', const Size(411, 900)),
+      ('a wide screen', const Size(1400, 900)),
+    ]) {
+      testWidgets('all four are in the menu on $name', (tester) async {
+        // One menu at every width, deliberately. The old shell split these
+        // into loose app-bar icons above a breakpoint, and an overflowing
+        // AppBar drops what doesn't fit *silently* — which is how the attach
+        // button looked like it had gone missing.
+        final c = shellContainer();
+        await pumpShell(tester, c, size: size);
+        await openMenu(tester, c);
 
-      expect(tester.takeException(), isNull, reason: 'no layout overflow');
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
+        expect(tester.takeException(), isNull, reason: 'no layout overflow');
+        expect(find.text('Keep offline'), findsOneWidget);
+        expect(find.text('Attach a file'), findsOneWidget);
+        expect(find.text('Rename or move'), findsOneWidget);
+        expect(find.text('Delete'), findsOneWidget);
 
-      await tester.tap(find.byIcon(Icons.more_vert));
+        await disposeShell(tester, c);
+      });
+    }
+
+    testWidgets('pinning from the menu reaches the engine', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      await openMenu(tester, c);
+
+      await tester.tap(find.text('Keep offline'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Keep offline'), findsOneWidget);
-      expect(find.text('Attach a file'), findsOneWidget);
-      expect(find.text('Rename or move'), findsOneWidget);
-      expect(find.text('Delete'), findsOneWidget);
+      expect(await c.read(syncEngineProvider).pinnedIds(), contains('n0'));
+      // And the label flips, so the menu says what tapping it again will do.
+      await tester.tap(find.byTooltip('Note actions'));
+      await tester.pumpAndSettle();
+      expect(find.text('Stop keeping offline'), findsOneWidget);
 
-      await tester.pumpWidget(const SizedBox());
-      c.dispose();
+      await disposeShell(tester, c);
     });
 
-    testWidgets('on a wide screen they are separate icons', (tester) async {
-      final c = container();
-      await c.read(noteSessionProvider).open('n1');
-      await pump(tester, c, const Size(1400, 900));
+    testWidgets('outside a note there are no note actions', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
 
-      expect(tester.takeException(), isNull);
-      expect(find.byIcon(Icons.attach_file), findsOneWidget);
-      expect(find.byIcon(Icons.push_pin_outlined), findsOneWidget);
-      expect(find.byIcon(Icons.more_vert), findsNothing);
-
-      await tester.pumpWidget(const SizedBox());
-      c.dispose();
-    });
-
-    testWidgets('with no note open, note actions are absent', (tester) async {
-      final c = container();
-      await pump(tester, c, const Size(411, 900));
-
-      expect(find.byIcon(Icons.more_vert), findsNothing);
-      expect(find.byIcon(Icons.note_add_outlined), findsOneWidget);
-
-      await tester.pumpWidget(const SizedBox());
-      c.dispose();
+      expect(find.byTooltip('Note actions'), findsNothing);
+      await disposeShell(tester, c);
     });
   });
 }

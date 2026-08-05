@@ -45,7 +45,7 @@ ProviderContainer shellContainer({bool configured = true}) {
   }
 
   final api = StormApi(baseUrl: 'http://test', token: 't', client: server.client);
-  return ProviderContainer(
+  final container = ProviderContainer(
     overrides: [
       cacheProvider.overrideWithValue(cache),
       apiProvider.overrideWithValue(configured ? api : null),
@@ -53,7 +53,14 @@ ProviderContainer shellContainer({bool configured = true}) {
       settingsProvider.overrideWith(() => FakeSettings(configured)),
     ],
   );
+  _servers[container] = server;
+  return container;
 }
+
+/// The fake server behind a container, for asserting what actually reached it.
+final _servers = <ProviderContainer, FakeServer>{};
+
+FakeServer serverOf(ProviderContainer c) => _servers[c]!;
 
 Future<void> pumpShell(
   WidgetTester tester,
@@ -84,6 +91,7 @@ Future<void> pumpShell(
 Future<void> disposeShell(WidgetTester tester, ProviderContainer c) async {
   await tester.pumpWidget(const SizedBox());
   c.dispose();
+  _servers.remove(c);
 }
 
 NoteMeta noteMeta(String path) => NoteMeta(

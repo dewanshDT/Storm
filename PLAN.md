@@ -44,18 +44,18 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
-| M8 | UI refactor stage 2 — editor | **done** | 256 tests · toolbar, links, formatting |
+| M8 | UI refactor stage 2 — editor | **done** | 258 tests · toolbar, links, formatting |
 
-Last updated: 2026-08-05, both stages of the UI refactor landed. The old
-drawer shell (`vault_screen.dart`, `vault_tree.dart`) is still in the tree: it
-is unreferenced by `lib/`, but three test files still drive it, and deleting it
-means porting the create-note-flow and pinning coverage onto the new screens
-first. Gated on a walkthrough of the new shell on device.
+Last updated: 2026-08-05, the UI refactor is complete and the old drawer shell
+is deleted (914 lines). Its three test files were ported onto the new screens
+first rather than dropped — the create-note-flow suite in particular exists
+because of a real red-screen bug, and deleting the UI it drove would have
+silently retired that guard.
 
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 256 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 258 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
