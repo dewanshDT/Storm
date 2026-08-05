@@ -41,10 +41,10 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 118 tests + 19 live · search p95 1.1ms |
-| M5 | Android, Linux, Web | partly done | Android verified on device; Linux + perf gate open |
-| M6 | Attachments, settings, deploy | not started | |
+| M5 | Android, Web (Linux deferred) | **done** | Android + web + macOS verified; perf gate open |
+| M6 | Attachments, settings, deploy | in progress | |
 
-Last updated: 2026-08-05, after Android was verified on a real device.
+Last updated: 2026-08-05, entering M6.
 
 ### Verify the current state
 
@@ -437,8 +437,12 @@ numbers are desktop-only and assume a 3–5× penalty.
 `storm.app`, even though `DVTDownloads.framework` is still v17.0 against Xcode
 26.6. Whatever was wrong resolved itself; `make client` works.
 
-**Linux:** cannot be built from a macOS host (`"build linux" only supported on
-Linux hosts`). Needs a Linux machine or a container.
+**Linux desktop — deferred, deliberately.**
+It cannot be built from a macOS host at all (`"build linux" only supported on
+Linux hosts`), and no Linux workstation is in play. Nothing else depends on
+it: the *server* already runs on Linux (that is where it deploys), and a
+Linux user can reach the vault through the web client, which is served from
+the same binary. Revisit if a Linux desktop actually needs the native app.
 
 **Deploying to a Linux host** does *not* need Rust installed there. Cross-
 compile a static musl binary and copy it:
