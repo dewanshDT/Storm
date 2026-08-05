@@ -462,10 +462,40 @@ decision 7 — re-copy `apps/client/lib/editor/` into the spike first if it has
 changed). Delete `spike/editor_spike/` once that passes, preserving its
 `FINDINGS.md`.
 
-### M6 — Attachments, settings, deploy ⬜
+### M6 — Attachments, settings, deploy 🟡
 
-Attachment upload/download (LWW by mtime), settings, theming. Deploy to an LXC on
-`pve-II` with a systemd unit. Nightly rsync of `vault/` + `state/` to TrueNAS.
+**Attachments — done, both halves.**
+
+They live in the vault beside the notes as ordinary files, so it stays one
+greppable, rsync-able tree with no separate blob store. Opaque blobs: no
+parsing, no merge, last write wins. The startup scan indexes any already on
+disk, so an existing Obsidian vault's images come across without a separate
+import.
+
+Server: `GET/PUT/DELETE /v1/attachments/{path}` plus a listing, capped at
+64 MB (axum's 2 MB default would reject most photographs), with real content
+types so browsers display rather than download. Verified with a real PNG:
+byte-identical round trip, traversal refused including percent-encoded, 70 MB
+rejected with 413.
+
+Client: an attach button uploads and links the file. Never queued offline —
+the outbox is for small text diffs, not megabytes of binary.
+
+**Images can't render inline**, and won't until the editor changes. A
+`WidgetSpan` contributes exactly one character to the span tree while
+`![alt](path)` is many, and the buffer has to match what it renders character
+for character. They appear as a thumbnail strip below the editor instead,
+tappable for a zoomable view. True inline images need the block-based editor
+from the M0 findings.
+
+**Settings** — server URL, token, theme, font size and disconnect all exist.
+
+**Still to do:** deploy properly. The server currently runs on the Ubuntu VM
+from a hand-typed `setsid nohup` line, which has already cost one mistake
+(starting it without `--web`, so the browser got a bare 401). Needs a systemd
+unit, a `make deploy` target wrapping the cross-compile + rsync + restart, and
+the nightly backup of `vault/` and `state/` — the index holds version history
+the merge depends on, so both matter.
 
 ---
 
