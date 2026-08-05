@@ -19,7 +19,9 @@ class Settings {
   const Settings({
     this.baseUrl = '',
     this.token = '',
-    this.darkMode = false,
+    // Dark-first, matching the design. Someone who turns it off has `false`
+    // stored, so this default never overrides a deliberate choice.
+    this.darkMode = true,
     this.fontSize = 16,
   });
 
@@ -55,7 +57,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     return Settings(
       baseUrl: prefs.getString(_kUrl) ?? '',
       token: prefs.getString(_kToken) ?? '',
-      darkMode: prefs.getBool(_kDark) ?? false,
+      darkMode: prefs.getBool(_kDark) ?? true,
       fontSize: prefs.getDouble(_kFont) ?? 16,
     );
   }
