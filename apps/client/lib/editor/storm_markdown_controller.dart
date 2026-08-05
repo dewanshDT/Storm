@@ -243,6 +243,26 @@ class StormMarkdownController extends TextEditingController {
     );
   }
 
+  /// Fills in the `[[…]]` the caret is currently inside.
+  ///
+  /// Replaces the typed query rather than the whole link, so a half-typed
+  /// `[[desi` becomes `[[Design]]` with the caret past the brackets, ready to
+  /// keep writing. Supplies the closing `]]` only when they aren't already
+  /// there — they are when the link came from the toolbar button.
+  void completeWikilink(String target) {
+    final query = activeWikilinkQuery(text, selection.baseOffset);
+    if (query == null) return;
+
+    final closed = text.startsWith(']]', query.end);
+    _apply(
+      text.substring(0, query.start) +
+          target +
+          (closed ? '' : ']]') +
+          text.substring(query.end),
+      TextSelection.collapsed(offset: query.start + target.length + 2),
+    );
+  }
+
   void _apply(String next, TextSelection nextSelection) {
     value = TextEditingValue(
       text: next,
@@ -587,6 +607,42 @@ WikilinkHit? wikilinkAt(String text, int offset) {
     }
   }
   return null;
+}
+
+/// The `[[` the caret is currently typing inside, if any.
+///
+/// Derived from the buffer and the caret rather than tracked as state: a
+/// "currently completing" flag would have to be kept in agreement with every
+/// edit, undo and caret move, and the first disagreement leaves the suggestion
+/// list pointing at text that is no longer there.
+WikilinkQuery? activeWikilinkQuery(String text, int caret) {
+  if (caret < 0 || caret > text.length) return null;
+
+  final open = text.lastIndexOf('[[', caret);
+  if (open < 0 || open + 2 > caret) return null;
+  // A link does not span lines, and anything bracket-ish between the `[[` and
+  // the caret means this is not an open query — `[[a]]` with the caret after
+  // the close is a finished link, not a prompt.
+  if (open < _lineStartAt(text, caret)) return null;
+
+  final query = text.substring(open + 2, caret);
+  if (query.contains('[') || query.contains(']') || query.contains('\n')) {
+    return null;
+  }
+  return WikilinkQuery(query: query, start: open + 2, end: caret);
+}
+
+/// A half-typed `[[query`, and where the query itself sits in the buffer.
+class WikilinkQuery {
+  const WikilinkQuery({
+    required this.query,
+    required this.start,
+    required this.end,
+  });
+
+  final String query;
+  final int start;
+  final int end;
 }
 
 /// A `[[target]]` under the caret, in absolute buffer offsets.

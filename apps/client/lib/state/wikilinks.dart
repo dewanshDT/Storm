@@ -46,3 +46,86 @@ NoteMeta? resolveWikilink(List<NoteMeta> notes, String target) {
 
 bool _exact(String a, String b) => a == b;
 bool _caseless(String a, String b) => a.toLowerCase() == b.toLowerCase();
+
+/// Notes worth offering for a half-typed `[[query`.
+///
+/// Ranked so the thing you meant is first: names that *start* with what you
+/// typed beat names that merely contain it, and a shorter name beats a longer
+/// one, because a query is a prefix of the short name more often than of the
+/// long one. Ties break alphabetically so the order never jitters between
+/// keystrokes.
+///
+/// An empty query lists recent notes rather than nothing — opening `[[` on a
+/// phone should show you somewhere to go, not an empty box.
+List<NoteMeta> suggestWikilinks(
+  List<NoteMeta> notes,
+  String query, {
+  int limit = 8,
+}) {
+  final want = query.trim().toLowerCase();
+  if (want.isEmpty) {
+    final recent = [...notes]
+      ..sort((a, b) => b.modified.compareTo(a.modified));
+    return recent.take(limit).toList();
+  }
+
+  final scored = <(int, String, NoteMeta)>[];
+  for (final note in notes) {
+    final name = wikilinkDisplayName(note);
+    final haystack = name.toLowerCase();
+    final inPath = note.path.toLowerCase();
+
+    final rank = haystack.startsWith(want)
+        ? 0
+        : haystack.contains(want)
+            ? 1
+            : inPath.contains(want)
+                ? 2
+                : -1;
+    if (rank < 0) continue;
+    scored.add((rank, name, note));
+  }
+
+  scored.sort((a, b) {
+    if (a.$1 != b.$1) return a.$1.compareTo(b.$1);
+    if (a.$2.length != b.$2.length) return a.$2.length.compareTo(b.$2.length);
+    return a.$2.toLowerCase().compareTo(b.$2.toLowerCase());
+  });
+  return [for (final s in scored.take(limit)) s.$3];
+}
+
+/// What to call a note in the suggestion list.
+///
+/// The same name the suggestions are *matched* against, so what you see is
+/// what you typed towards — a list that matches on one string and displays
+/// another looks broken even when it is right.
+String wikilinkDisplayName(NoteMeta note) {
+  if (note.title.isNotEmpty) return note.title;
+  final path = note.path.endsWith('.md')
+      ? note.path.substring(0, note.path.length - 3)
+      : note.path;
+  return path.split('/').last;
+}
+
+/// What a completed `[[…]]` should contain for [note].
+///
+/// The bare name when it is unambiguous, the full path when two notes share a
+/// name — writing an ambiguous link would resolve to whichever the resolver
+/// happened to see first.
+String wikilinkTargetFor(List<NoteMeta> notes, NoteMeta note) {
+  final path = note.path.endsWith('.md')
+      ? note.path.substring(0, note.path.length - 3)
+      : note.path;
+  final name = path.split('/').last;
+
+  var sharing = 0;
+  for (final other in notes) {
+    final otherPath = other.path.endsWith('.md')
+        ? other.path.substring(0, other.path.length - 3)
+        : other.path;
+    if (otherPath.split('/').last.toLowerCase() == name.toLowerCase()) {
+      sharing++;
+    }
+  }
+  return sharing > 1 ? path : name;
+}

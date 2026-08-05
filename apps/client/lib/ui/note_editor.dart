@@ -10,6 +10,7 @@ import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'editor_toolbar.dart';
 import 'note_properties.dart';
+import 'wikilink_suggestions.dart';
 import 'theme.dart';
 
 /// The editing pane.
@@ -264,8 +265,12 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
             ),
           ),
         ),
-        // Trades places with the nav bubble, which hides on the same signal.
-        if (widget.showToolbar) EditorToolbar(controller: _controller),
+        // Both belong to the keyboard: suggestions sit directly above the
+        // formatting row, in the space the nav bubble gives up.
+        if (widget.showToolbar) ...[
+          WikilinkSuggestions(controller: _controller),
+          EditorToolbar(controller: _controller),
+        ],
       ],
     );
   }

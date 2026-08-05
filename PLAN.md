@@ -44,7 +44,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
-| M8 | UI refactor stage 2 — editor | **done** | 281 tests · toolbar, links, formatting |
+| M8 | UI refactor stage 2 — editor | **done** | 303 tests · toolbar, links, formatting, autocomplete |
 
 Last updated: 2026-08-05, the UI refactor is complete and the old drawer shell
 is deleted (914 lines). Its three test files were ported onto the new screens
@@ -55,7 +55,7 @@ silently retired that guard.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 281 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 303 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -242,7 +242,15 @@ intermediate state whose caret points into a buffer that no longer matches it.
 `wikilinks_test.dart` puts a recording controller behind the toolbar and fails
 if any button reaches past those three methods.
 
-**17. Following a wikilink reads the caret, not a gesture.**
+**17. Autocomplete state is derived, never tracked.**
+Whether a `[[` is open comes from reading the buffer back from the caret, not
+from a "currently completing" flag. A flag has to be kept in agreement with
+every edit, undo and caret move, and the first disagreement leaves the
+suggestion list offering to complete text that is no longer there. Suggestions
+also display the same string they are matched against — a list that matches on
+one name and shows another looks broken even when it is right.
+
+**18. Following a wikilink reads the caret, not a gesture.**
 A tap inside an editable `TextField` is consumed for caret placement, so a
 `TapGestureRecognizer` on a `TextSpan` never fires. The tap does its ordinary
 job and `TextField.onTap` then asks `wikilinkAt()` what the caret landed in.
@@ -626,10 +634,11 @@ The exception is worth noting: the *fourth* was that the app opened in light
 mode despite a comment claiming dark-first, and only looking at a screenshot
 from the phone caught it. Both halves of the lesson below still hold.
 
-**Deferred, deliberately:** wikilink autocomplete. `docs/storm-ui-refactor.md`
-§2.6 assumed it already existed; nothing in `lib/` matched. The toolbar button
-inserts `[[]]` and places the caret inside. Completion is a feature, not a
-refactor, and gets its own pass.
+**Wikilink autocomplete** landed in its own pass afterwards, as planned.
+`docs/storm-ui-refactor.md` §2.6 had assumed it already existed; nothing in
+`lib/` matched, so it was held back rather than bolted onto a refactor. Typing
+`[[` now offers matching notes above the formatting toolbar, and picking one
+completes the link and steps the caret past the brackets.
 
 **Still not possible:** true inline images and true syntax hiding. Both need the
 block-based editor rewrite of decision 5, for the same reason as always — a
