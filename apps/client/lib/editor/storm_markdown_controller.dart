@@ -159,9 +159,15 @@ class StormMarkdownController extends TextEditingController {
   /// Sets the block prefix — `## `, `> `, `- `, `1. `, `- [ ] ` — on every line
   /// the selection touches, replacing whatever prefix was there.
   ///
-  /// Passing [prefix] that every line already carries removes it, so the same
-  /// toolbar button turns a list on and off. Pass null to strip unconditionally.
-  void setBlockPrefix(String? prefix) {
+  /// Pass null to strip whatever is there.
+  ///
+  /// [toggle] decides what re-applying a prefix a line already has means, and
+  /// the answer depends on how the control is shaped. A lone on/off button —
+  /// bullets, quote — has nowhere else to say "off", so it toggles. A *picker*
+  /// with an explicit Paragraph entry must not: choosing "Heading 1" on a line
+  /// that is already H1 means "make this H1", and quietly deleting the `#` is
+  /// how the heading button came to look like it did nothing at all.
+  void setBlockPrefix(String? prefix, {bool toggle = true}) {
     final sel = selection;
     if (!sel.isValid) return;
     final t = text;
@@ -170,9 +176,8 @@ class StormMarkdownController extends TextEditingController {
     final lines = t.substring(blockStart, blockEnd).split('\n');
 
     final stripped = [for (final line in lines) _splitPrefix(line)];
-    // Already uniformly this prefix? Then the button is a toggle-off.
     final removing = prefix == null ||
-        stripped.every((p) => p.marker == prefix);
+        (toggle && stripped.every((p) => p.marker == prefix));
     final target = removing ? '' : prefix;
 
     final rewritten = [

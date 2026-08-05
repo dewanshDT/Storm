@@ -44,7 +44,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
-| M8 | UI refactor stage 2 — editor | **done** | 258 tests · toolbar, links, formatting |
+| M8 | UI refactor stage 2 — editor | **done** | 265 tests · toolbar, links, formatting |
 
 Last updated: 2026-08-05, the UI refactor is complete and the old drawer shell
 is deleted (914 lines). Its three test files were ported onto the new screens
@@ -55,7 +55,7 @@ silently retired that guard.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 258 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 265 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -201,7 +201,23 @@ Scaffold, passing the result down to the nav bubble and the formatting toolbar.
 That single call per screen is what guarantees they are never both visible and
 never both gone.
 
-**12. The toolbar mutates text only through the controller.**
+**12. A prefix button toggles; a prefix *picker* does not.**
+Re-applying a block prefix a line already has removes it, which is right for the
+bullet and quote buttons — a lone on/off control has nowhere else to say "off".
+It is wrong for the heading picker, which lists Paragraph as its own entry:
+choosing "Heading 1" on a line that is already H1 means "make this H1". Getting
+this backwards is what made the heading button look like it did nothing, since
+most notes open with `# Title` — the exact line you would try it on.
+`setBlockPrefix` takes `toggle:` and the picker passes false.
+
+**13. The formatting toolbar is inside the text field's tap region.**
+`TextField`'s default `onTapOutside` unfocuses on desktop and web, and an
+unfocused field closes the keyboard — which hides the toolbar out from under the
+tap and abandons the caret. `TapRegion(groupId: EditableText)` around the
+toolbar says "this is part of the editor". Android and iOS keep focus anyway, so
+this only bites on desktop and web, which is why it survived the phone.
+
+**14. The toolbar mutates text only through the controller.**
 `StormMarkdownController` owns `toggleInline`, `setBlockPrefix` and
 `insertWikilink`; each computes text *and* selection and assigns `value` once.
 Assigning `text` and `selection` separately fires two notifications with an
@@ -209,7 +225,7 @@ intermediate state whose caret points into a buffer that no longer matches it.
 `wikilinks_test.dart` puts a recording controller behind the toolbar and fails
 if any button reaches past those three methods.
 
-**13. Following a wikilink reads the caret, not a gesture.**
+**15. Following a wikilink reads the caret, not a gesture.**
 A tap inside an editable `TextField` is consumed for caret placement, so a
 `TapGestureRecognizer` on a `TextSpan` never fires. The tap does its ordinary
 job and `TextField.onTap` then asks `wikilinkAt()` what the caret landed in.
@@ -578,7 +594,15 @@ flag kept in agreement with the screen. It also gave the web client deep links
 it never had: `/browse/Projects/Storm` and `/note/:id` now serve the app rather
 than 404.
 
-**Three of the four bugs found here were found by tests, not by running it** —
+**A fifth bug got through anyway, and it is the instructive one.** The heading
+button did nothing on the phone — worse, it silently *stripped* headings. Every
+existing test passed, because they all asserted that a prefix could be added to
+a line that did not have one. Nobody tried the picker on a line that was already
+a heading, which is the first thing a user does, since notes open with
+`# Title`. See decision 12. The lesson is not "write more tests"; it is that a
+test asserting the happy transition is not a test of the control's *semantics*.
+
+**Three of the first four bugs here were found by tests, not by running it** —
 which is new for this layer, and the whole point of writing the suites before
 wiring the screens to real state. See decisions 10–13 for what each one taught.
 The exception is worth noting: the *fourth* was that the app opened in light

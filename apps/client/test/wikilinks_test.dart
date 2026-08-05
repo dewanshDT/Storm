@@ -155,7 +155,7 @@ void main() {
       await tester.tap(find.text('Heading 3'));
       await tester.pumpAndSettle();
 
-      expect(controller.calls, ['setBlockPrefix(### )']);
+      expect(controller.calls, ['setBlockPrefix(### , explicit)']);
     });
 
     testWidgets('Paragraph strips the prefix', (tester) async {
@@ -177,7 +177,7 @@ void main() {
       await tester.tap(find.text('Paragraph'));
       await tester.pumpAndSettle();
 
-      expect(controller.calls, ['setBlockPrefix(null)']);
+      expect(controller.calls, ['setBlockPrefix(null, explicit)']);
     });
   });
 }
@@ -195,7 +195,8 @@ class _RecordingController extends StormMarkdownController {
   void toggleInline(String marker) => calls.add('toggleInline($marker)');
 
   @override
-  void setBlockPrefix(String? prefix) => calls.add('setBlockPrefix($prefix)');
+  void setBlockPrefix(String? prefix, {bool toggle = true}) =>
+      calls.add('setBlockPrefix($prefix${toggle ? '' : ', explicit'})');
 
   @override
   void insertWikilink() => calls.add('insertWikilink()');

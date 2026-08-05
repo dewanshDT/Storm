@@ -19,80 +19,88 @@ class EditorToolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
 
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      elevation: 8,
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 48,
-          // Scrolls rather than wraps: an overflowing bar drops buttons
-          // silently, which is how the attach action once appeared to vanish.
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            children: [
-              _Button(
-                icon: Icons.title,
-                tooltip: 'Heading',
-                // A picker, not a blind cycle: cycling means tapping four
-                // times to find out what you got.
-                onTap: () => _pickHeading(context),
-              ),
-              const _Divider(),
-              _Button(
-                icon: Icons.format_bold,
-                tooltip: 'Bold',
-                onTap: () => controller.toggleInline('**'),
-              ),
-              _Button(
-                icon: Icons.format_italic,
-                tooltip: 'Italic',
-                onTap: () => controller.toggleInline('*'),
-              ),
-              _Button(
-                icon: Icons.code,
-                tooltip: 'Code',
-                onTap: () => controller.toggleInline('`'),
-              ),
-              _Button(
-                icon: Icons.format_strikethrough,
-                tooltip: 'Strikethrough',
-                onTap: () => controller.toggleInline('~~'),
-              ),
-              _Button(
-                icon: Icons.border_color_outlined,
-                tooltip: 'Highlight',
-                onTap: () => controller.toggleInline('=='),
-              ),
-              const _Divider(),
-              _Button(
-                icon: Icons.format_list_bulleted,
-                tooltip: 'Bullet list',
-                onTap: () => controller.setBlockPrefix('- '),
-              ),
-              _Button(
-                icon: Icons.format_list_numbered,
-                tooltip: 'Numbered list',
-                onTap: () => controller.setBlockPrefix('1. '),
-              ),
-              _Button(
-                icon: Icons.check_box_outlined,
-                tooltip: 'Task',
-                onTap: () => controller.setBlockPrefix('- [ ] '),
-              ),
-              _Button(
-                icon: Icons.format_quote,
-                tooltip: 'Quote',
-                onTap: () => controller.setBlockPrefix('> '),
-              ),
-              const _Divider(),
-              _Button(
-                icon: Icons.link,
-                tooltip: 'Link to a note',
-                onTap: controller.insertWikilink,
-              ),
-            ],
+    // The toolbar counts as *inside* the text field for tap purposes.
+    // `TextField`'s default `onTapOutside` unfocuses on desktop and web, and an
+    // unfocused field closes the keyboard — which hides this toolbar mid-tap
+    // and leaves the caret behind. Sharing EditableText's tap-region group is
+    // the sanctioned way to say "this is part of the editor".
+    return TapRegion(
+      groupId: EditableText,
+      child: Material(
+        color: scheme.surfaceContainerHigh,
+        elevation: 8,
+        child: SafeArea(
+          top: false,
+          child: SizedBox(
+            height: 48,
+            // Scrolls rather than wraps: an overflowing bar drops buttons
+            // silently, which is how the attach action once appeared to vanish.
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 6),
+              children: [
+                _Button(
+                  icon: Icons.title,
+                  tooltip: 'Heading',
+                  // A picker, not a blind cycle: cycling means tapping four
+                  // times to find out what you got.
+                  onTap: () => _pickHeading(context),
+                ),
+                const _Divider(),
+                _Button(
+                  icon: Icons.format_bold,
+                  tooltip: 'Bold',
+                  onTap: () => controller.toggleInline('**'),
+                ),
+                _Button(
+                  icon: Icons.format_italic,
+                  tooltip: 'Italic',
+                  onTap: () => controller.toggleInline('*'),
+                ),
+                _Button(
+                  icon: Icons.code,
+                  tooltip: 'Code',
+                  onTap: () => controller.toggleInline('`'),
+                ),
+                _Button(
+                  icon: Icons.format_strikethrough,
+                  tooltip: 'Strikethrough',
+                  onTap: () => controller.toggleInline('~~'),
+                ),
+                _Button(
+                  icon: Icons.border_color_outlined,
+                  tooltip: 'Highlight',
+                  onTap: () => controller.toggleInline('=='),
+                ),
+                const _Divider(),
+                _Button(
+                  icon: Icons.format_list_bulleted,
+                  tooltip: 'Bullet list',
+                  onTap: () => controller.setBlockPrefix('- '),
+                ),
+                _Button(
+                  icon: Icons.format_list_numbered,
+                  tooltip: 'Numbered list',
+                  onTap: () => controller.setBlockPrefix('1. '),
+                ),
+                _Button(
+                  icon: Icons.check_box_outlined,
+                  tooltip: 'Task',
+                  onTap: () => controller.setBlockPrefix('- [ ] '),
+                ),
+                _Button(
+                  icon: Icons.format_quote,
+                  tooltip: 'Quote',
+                  onTap: () => controller.setBlockPrefix('> '),
+                ),
+                const _Divider(),
+                _Button(
+                  icon: Icons.link,
+                  tooltip: 'Link to a note',
+                  onTap: controller.insertWikilink,
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -126,7 +134,11 @@ class EditorToolbar extends StatelessWidget {
       ],
     );
     if (choice == null || !context.mounted) return;
-    controller.setBlockPrefix(choice == paragraph ? null : choice);
+    // Not a toggle: this menu has its own "off" switch just above.
+    controller.setBlockPrefix(
+      choice == paragraph ? null : choice,
+      toggle: false,
+    );
   }
 }
 
