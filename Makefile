@@ -53,6 +53,12 @@ test-live:
 	@cd $(SERVER) && cargo build --quiet
 	@set -e; \
 	ROOT="$$PWD"; \
+	if curl -sf -o /dev/null http://127.0.0.1:$(PORT)/v1/health 2>/dev/null; then \
+		echo "Something is already serving on port $(PORT)." >&2; \
+		echo "The tests would run against it and its vault, not ours." >&2; \
+		echo "Stop it first (pkill -f storm-server) or set PORT=..." >&2; \
+		exit 1; \
+	fi; \
 	rm -rf "$$ROOT/.dev/live-vault" "$$ROOT/.dev/live-state"; \
 	mkdir -p "$$ROOT/.dev/live-vault"; \
 	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/live-vault/Seed.md"; \

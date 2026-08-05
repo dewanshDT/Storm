@@ -61,10 +61,16 @@ void main() {
     }
 
     final after = container.read(noteSessionProvider);
-    expect(identical(after, session), isTrue,
-        reason: 'the session must not be rebuilt by a status notification');
-    expect(after.isOpen, isTrue,
-        reason: 'the editor would otherwise fall back to its empty state');
+    expect(
+      identical(after, session),
+      isTrue,
+      reason: 'the session must not be rebuilt by a status notification',
+    );
+    expect(
+      after.isOpen,
+      isTrue,
+      reason: 'the editor would otherwise fall back to its empty state',
+    );
     expect(after.buffer, contains('body'));
   });
 
@@ -89,8 +95,11 @@ void main() {
     await engine.sync();
     await engine.sync();
 
-    expect(identical(container.read(syncEngineProvider), engine), isTrue,
-        reason: 'a rebuilt engine would drop the cache and the outbox');
+    expect(
+      identical(container.read(syncEngineProvider), engine),
+      isTrue,
+      reason: 'a rebuilt engine would drop the cache and the outbox',
+    );
   });
 
   test('the tree does not refetch on every status tick', () async {
@@ -108,7 +117,10 @@ void main() {
 
     // Some refetching is expected when data actually changes; what must not
     // happen is a request per status notification.
-    expect(server.treeRequests - before, lessThan(3),
-        reason: 'status ticks should not invalidate the tree');
+    expect(
+      server.treeRequests - before,
+      lessThan(3),
+      reason: 'status ticks should not invalidate the tree',
+    );
   });
 }

@@ -86,7 +86,11 @@ class NoteSession extends ChangeNotifier {
       if (_closed) return;
       if (cached == null) {
         _noteId = null;
-        _error = 'That note no longer exists.';
+        // Only the server can say a note is gone. Offline it simply isn't
+        // here yet, which is a different thing and needs different wording.
+        _error = _engine.isOnline
+            ? 'That note no longer exists.'
+            : "That note isn't available offline yet.";
         _saveState = SaveState.failed;
         notifyListeners();
         return;

@@ -68,14 +68,14 @@ class MarkdownTheme {
 
   @override
   int get hashCode => Object.hash(
-        base,
-        markerColor,
-        accent,
-        codeColor,
-        codeBackground,
-        mutedColor,
-        highlightBackground,
-      );
+    base,
+    markerColor,
+    accent,
+    codeColor,
+    codeBackground,
+    mutedColor,
+    highlightBackground,
+  );
 
   Map<TokenKind, TextStyle> _build() {
     // Headings scale down by level. Kept modest — an h1 three times body size

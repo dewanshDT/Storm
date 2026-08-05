@@ -67,8 +67,9 @@ void main() {
     );
   }
 
-  testWidgets('rebuilding the editor never writes an empty note',
-      (tester) async {
+  testWidgets('rebuilding the editor never writes an empty note', (
+    tester,
+  ) async {
     final c = container();
     final session = c.read(noteSessionProvider);
     await session.open('n1');
@@ -85,10 +86,16 @@ void main() {
     // Well past the save debounce.
     await tester.pump(const Duration(seconds: 2));
 
-    expect(server.notes['n1']!.content, body,
-        reason: 'the note must be untouched by rebuilds');
-    expect(server.notes['n1']!.version, versionAfterOpen,
-        reason: 'no write should have happened at all');
+    expect(
+      server.notes['n1']!.content,
+      body,
+      reason: 'the note must be untouched by rebuilds',
+    );
+    expect(
+      server.notes['n1']!.version,
+      versionAfterOpen,
+      reason: 'no write should have happened at all',
+    );
     expect(session.buffer, body);
 
     await tester.pumpWidget(const SizedBox());
@@ -131,7 +138,10 @@ void main() {
       // Without this, every build looks like a theme change.
       const base = TextStyle(fontSize: 16);
       expect(MarkdownTheme.light(base), equals(MarkdownTheme.light(base)));
-      expect(MarkdownTheme.light(base), isNot(equals(MarkdownTheme.dark(base))));
+      expect(
+        MarkdownTheme.light(base),
+        isNot(equals(MarkdownTheme.dark(base))),
+      );
       expect(
         MarkdownTheme.light(base).hashCode,
         MarkdownTheme.light(base).hashCode,

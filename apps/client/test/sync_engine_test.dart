@@ -340,6 +340,84 @@ void main() {
     });
   });
 
+  group('creating a note', () {
+    test('the new note is cached, so it opens immediately', () async {
+      // The reported bug: create succeeded on the server but opening it right
+      // after showed an error, while reopening the app worked. The note
+      // existed remotely and nowhere locally.
+      final created = await engine.create(
+        path: 'New/Note.md',
+        content: '# N\n',
+      );
+      expect(created.error, isNull);
+      expect(created.meta, isNotNull);
+
+      final cached = await cache.note(created.meta!.id);
+      expect(
+        cached,
+        isNotNull,
+        reason: 'a just-created note must be openable without a round trip',
+      );
+      expect(cached!.path, 'New/Note.md');
+    });
+
+    test('a create with the server unreachable reports it plainly', () async {
+      server.unreachable = true;
+      final created = await engine.create(path: 'New/Note.md');
+
+      expect(created.meta, isNull);
+      expect(created.error, contains('Cannot reach the server'));
+      expect(engine.isOnline, isFalse);
+    });
+
+    test('a server refusal surfaces the server message', () async {
+      server.failWith = 400;
+      final created = await engine.create(path: 'Dupe.md');
+      expect(created.meta, isNull);
+      expect(created.error, isNotNull);
+    });
+
+    test('opening a freshly created note works end to end', () async {
+      final created = await engine.create(
+        path: 'New/Note.md',
+        content: '# N\n',
+      );
+      final session = NoteSession(engine);
+      await session.open(created.meta!.id);
+
+      expect(session.isOpen, isTrue, reason: 'this is what showed an error');
+      expect(session.error, isNull);
+      expect(session.buffer, contains('# N'));
+      session.dispose();
+    });
+  });
+
+  group('what "offline" means', () {
+    test('a lost WebSocket does not make the client offline', () async {
+      // The socket only carries push. Every request still works without it,
+      // and treating its closure as offline blocked note creation.
+      await seed('n1', 'body\n');
+      expect(engine.isOnline, isTrue);
+
+      engine.debugSimulateSocketDrop();
+
+      expect(
+        engine.isOnline,
+        isTrue,
+        reason: 'HTTP is what connectivity means, not the socket',
+      );
+      final created = await engine.create(path: 'Still/Works.md');
+      expect(created.meta, isNotNull);
+    });
+
+    test('a failed request is what marks the client offline', () async {
+      await seed('n1', 'body\n');
+      server.unreachable = true;
+      await engine.sync();
+      expect(engine.isOnline, isFalse);
+    });
+  });
+
   group('offline rename (scenario 6)', () {
     test('a move made offline is queued', () async {
       await seed('n1', 'body\n');

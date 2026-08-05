@@ -49,15 +49,13 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     );
     if (path == null) return;
 
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    try {
-      final result = await api.createNote(path: path, content: '');
-      ref.invalidate(treeProvider);
-      await _open(result.meta);
-    } on StormApiException catch (e) {
-      _toast(e.message);
+    final created = await ref.read(syncEngineProvider).create(path: path);
+    if (created.meta == null) {
+      _toast(created.error ?? 'Could not create the note');
+      return;
     }
+    ref.invalidate(treeProvider);
+    await _open(created.meta!);
   }
 
   Future<void> _renameNote() async {

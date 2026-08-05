@@ -113,6 +113,41 @@ class FakeServer {
       );
     }
 
+    if (request.method == 'POST' && path == '/v1/notes') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      final newPath = body['path'] as String;
+      if (notes.values.any((n) => n.path == newPath)) {
+        return http.Response(
+          '{"error":"a note already exists"}',
+          400,
+          headers: j(''),
+        );
+      }
+      final newId = 'gen-${notes.length + 1}';
+      // The real server stamps identity into the file on create.
+      final content =
+          '---\nid: $newId\n---\n\n${body['content'] as String? ?? ''}';
+      final created = ServerNote(
+        id: newId,
+        path: newPath,
+        content: content,
+        version: 1,
+      );
+      notes[newId] = created;
+      pushChange(newId, 'created', 1);
+      return http.Response(
+        jsonEncode({
+          'note': created.meta,
+          'content': created.content,
+          'seq': seq,
+          'merged': false,
+          'conflict': false,
+        }),
+        200,
+        headers: j(''),
+      );
+    }
+
     var id = path.replaceFirst('/v1/notes/', '');
 
     if (id.endsWith('/move')) {

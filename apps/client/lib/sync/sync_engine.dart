@@ -236,6 +236,32 @@ class SyncEngine extends ChangeNotifier {
     return const SaveOutcome(SaveStatus.queued);
   }
 
+  /// Creates a note and caches it, so it can be opened immediately.
+  ///
+  /// Never queued: the client cannot invent a server-assigned id, so this
+  /// requires a reachable server and says so plainly when there isn't one.
+  Future<({NoteMeta? meta, String? error})> create({
+    required String path,
+    String content = '',
+  }) async {
+    try {
+      final result = await api.createNote(path: path, content: content);
+      _setOnline(true);
+      // Without this the note exists on the server but not locally, and
+      // opening it straight away finds nothing.
+      await _storeWrite(result.meta.id, result);
+      return (meta: result.meta, error: null);
+    } on StormApiException catch (e) {
+      return (meta: null, error: e.message);
+    } catch (_) {
+      _setOnline(false);
+      return (
+        meta: null,
+        error: 'Cannot reach the server — new notes need a connection.',
+      );
+    }
+  }
+
   /// Renames or moves a note, queueing it when the server is unreachable.
   ///
   /// The note keeps its id, so a queued move and a concurrent edit from
@@ -496,9 +522,17 @@ class SyncEngine extends ChangeNotifier {
     }
   }
 
+  /// Simulates the change socket closing, for tests.
+  @visibleForTesting
+  void debugSimulateSocketDrop() => _scheduleReconnect();
+
   void _scheduleReconnect() {
     if (_disposed) return;
-    _setOnline(false);
+    // Deliberately does NOT mark the client offline. The socket only delivers
+    // *push*; HTTP is what "online" means. Treating a closed socket as offline
+    // disabled note creation and made freshly created notes unopenable, even
+    // though every request was succeeding. Sockets close routinely — app
+    // backgrounding, wifi handover, a server restart.
     _reconnect?.cancel();
     _reconnect = Timer(Duration(seconds: _backoffSeconds), () {
       // Capped exponential backoff: a server that is down for an hour
