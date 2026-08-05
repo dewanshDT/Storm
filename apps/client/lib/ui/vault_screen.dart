@@ -240,50 +240,77 @@ Future<String?> _promptForPath(
   BuildContext context, {
   required String title,
   required String initial,
-}) async {
-  final controller = TextEditingController(text: initial);
-  String? error;
-
-  final result = await showDialog<String>(
+}) {
+  return showDialog<String>(
     context: context,
-    builder: (c) => StatefulBuilder(
-      builder: (c, setState) {
-        void submit() {
-          final value = controller.text.trim();
-          final problem = validatePath(value);
-          if (problem != null) {
-            setState(() => error = problem);
-            return;
-          }
-          Navigator.pop(c, value.endsWith('.md') ? value : '$value.md');
-        }
-
-        return AlertDialog(
-          title: Text(title),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: InputDecoration(
-              labelText: 'Path in vault',
-              hintText: 'Folder/Note.md',
-              errorText: error,
-              border: const OutlineInputBorder(),
-            ),
-            onSubmitted: (_) => submit(),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(c),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(onPressed: submit, child: const Text('OK')),
-          ],
-        );
-      },
-    ),
+    builder: (_) => _PathDialog(title: title, initial: initial),
   );
-  controller.dispose();
-  return result;
+}
+
+/// The path prompt.
+///
+/// A StatefulWidget rather than a closure holding a controller, because the
+/// controller's lifetime has to match the dialog's. Disposing it as soon as
+/// `showDialog` returned killed it while the route was still animating out
+/// and the field was still mounted, and the next rebuild threw
+/// "A TextEditingController was used after being disposed" — the red screen
+/// that appeared right after naming a new note.
+class _PathDialog extends StatefulWidget {
+  const _PathDialog({required this.title, required this.initial});
+
+  final String title;
+  final String initial;
+
+  @override
+  State<_PathDialog> createState() => _PathDialogState();
+}
+
+class _PathDialogState extends State<_PathDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final value = _controller.text.trim();
+    final problem = validatePath(value);
+    if (problem != null) {
+      setState(() => _error = problem);
+      return;
+    }
+    Navigator.pop(context, value.endsWith('.md') ? value : '$value.md');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: InputDecoration(
+          labelText: 'Path in vault',
+          hintText: 'Folder/Note.md',
+          errorText: _error,
+          border: const OutlineInputBorder(),
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('OK')),
+      ],
+    );
+  }
 }
 
 /// Returns a human-readable problem with [path], or `null` if it is fine.
