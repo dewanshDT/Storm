@@ -29,6 +29,10 @@ pub struct AppState {
 
 pub type Shared = Arc<AppState>;
 
+/// Upload ceiling. Generous for a scanned PDF, small enough that a stray
+/// request can't take down a 4 GB VM.
+pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Errors rendered as JSON rather than bare status codes, so the Flutter
 /// client can show something useful.
 pub struct ApiError(StatusCode, String);
@@ -69,6 +73,16 @@ pub fn router(state: Shared) -> Router {
         .route("/v1/search", get(search))
         .route("/v1/tags", get(tags))
         .route("/v1/tags/{tag}", get(notes_by_tag))
+        .route("/v1/attachments", get(list_attachments))
+        .route(
+            "/v1/attachments/{*path}",
+            get(get_attachment)
+                .put(put_attachment)
+                .delete(delete_attachment),
+        )
+        // Attachments are images and PDFs, well past axum's 2 MB default.
+        // Capped so one upload can't exhaust a small homelab box.
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -356,6 +370,72 @@ async fn notes_by_tag(
     Ok(Json(
         serde_json::json!({ "notes": ix.db.notes_with_tag(&tag)? }),
     ))
+}
+
+// ---- attachments -------------------------------------------------------
+
+async fn list_attachments(State(state): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
+    let ix = state.indexer.lock().await;
+    Ok(Json(
+        serde_json::json!({ "attachments": ix.db.list_attachments()? }),
+    ))
+}
+
+async fn get_attachment(
+    State(state): State<Shared>,
+    Path(path): Path<String>,
+) -> ApiResult<Response> {
+    let ix = state.indexer.lock().await;
+    let bytes = ix.attachment(&path).map_err(|e| not_found(e.to_string()))?;
+
+    Ok(([(header::CONTENT_TYPE, content_type_for(&path))], bytes).into_response())
+}
+
+async fn put_attachment(
+    State(state): State<Shared>,
+    Path(path): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<serde_json::Value>> {
+    if body.is_empty() {
+        return Err(bad_request("empty upload"));
+    }
+    let mut ix = state.indexer.lock().await;
+    ix.put_attachment(&path, &body)
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({ "path": path, "size": body.len() }),
+    ))
+}
+
+async fn delete_attachment(
+    State(state): State<Shared>,
+    Path(path): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut ix = state.indexer.lock().await;
+    ix.delete_attachment(&path)
+        .map_err(|e| not_found(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "deleted": path })))
+}
+
+/// Enough of a MIME table for what a vault actually holds.
+///
+/// Browsers need this to display an image inline rather than download it, and
+/// the web client fetches attachments through the same route.
+fn content_type_for(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
 }
 
 // ---- websocket ---------------------------------------------------------

@@ -45,6 +45,14 @@ pub struct Change {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AttachmentRow {
+    pub path: String,
+    pub hash: String,
+    pub size: i64,
+    pub modified: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub id: String,
     pub path: String,
@@ -325,6 +333,48 @@ impl Db {
         let seq = tx.last_insert_rowid();
         tx.commit()?;
         Ok(seq)
+    }
+
+    // ---- attachments ---------------------------------------------------
+
+    pub fn record_attachment(
+        &self,
+        path: &str,
+        hash: &str,
+        size: i64,
+        modified: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO attachments (path, hash, size, modified)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET
+                hash = excluded.hash,
+                size = excluded.size,
+                modified = excluded.modified",
+            params![path, hash, size, modified],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_attachment(&self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM attachments WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
+    pub fn list_attachments(&self) -> Result<Vec<AttachmentRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, hash, size, modified FROM attachments ORDER BY path")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AttachmentRow {
+                path: r.get(0)?,
+                hash: r.get(1)?,
+                size: r.get(2)?,
+                modified: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // ---- versions ------------------------------------------------------

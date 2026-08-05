@@ -39,6 +39,7 @@ pub struct ReconcileReport {
     pub indexed: usize,
     pub updated: usize,
     pub removed: usize,
+    pub attachments: usize,
     /// Paths that would get `id` frontmatter, populated only on a dry run.
     pub would_assign: Vec<String>,
 }
@@ -134,6 +135,20 @@ impl Indexer {
         }
 
         if !dry_run {
+            // Attachments are indexed too, so the vault's binaries are visible
+            // to clients without a second store.
+            for rel in self.vault.scan_attachments()? {
+                if let Ok(bytes) = self.vault.read_bytes(&rel) {
+                    self.db.record_attachment(
+                        &rel,
+                        &blake3::hash(&bytes).to_hex().to_string(),
+                        bytes.len() as i64,
+                        &now_rfc3339(),
+                    )?;
+                    report.attachments += 1;
+                }
+            }
+
             // Anything indexed but no longer on disk was deleted externally.
             for note in self.db.list_notes()? {
                 if !seen_ids.contains(&note.id) {
@@ -298,6 +313,30 @@ impl Indexer {
             .ok_or_else(|| anyhow!("no note with id {id}"))?;
         self.vault.delete(&current.path)?;
         self.db.delete_note(id, &now_rfc3339())
+    }
+
+    /// Stores an attachment and indexes it.
+    ///
+    /// Attachments are opaque blobs: no parsing, no merge, last write wins by
+    /// modification time. They live in the vault beside the notes, so the
+    /// whole thing stays one tree of ordinary files.
+    pub fn put_attachment(&mut self, rel_path: &str, bytes: &[u8]) -> Result<()> {
+        self.vault.write_bytes(rel_path, bytes)?;
+        self.db.record_attachment(
+            rel_path,
+            &blake3::hash(bytes).to_hex().to_string(),
+            bytes.len() as i64,
+            &now_rfc3339(),
+        )
+    }
+
+    pub fn attachment(&self, rel_path: &str) -> Result<Vec<u8>> {
+        self.vault.read_bytes(rel_path)
+    }
+
+    pub fn delete_attachment(&mut self, rel_path: &str) -> Result<()> {
+        self.vault.delete(rel_path)?;
+        self.db.remove_attachment(rel_path)
     }
 
     /// Re-reads one file after the watcher saw it change externally.
@@ -624,6 +663,64 @@ mod tests {
 
         assert!(ix.refresh_path("A.md").unwrap().is_some());
         assert!(ix.db.get_note(&created.note.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn attachments_round_trip_as_opaque_bytes() {
+        let (_d, mut ix) = indexer();
+        // Deliberately not valid UTF-8 — attachments are blobs, and reading
+        // them as text would corrupt every image in the vault.
+        let bytes: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0xFE, 0x01];
+
+        ix.put_attachment("attachments/logo.png", &bytes).unwrap();
+        assert_eq!(ix.attachment("attachments/logo.png").unwrap(), bytes);
+    }
+
+    #[test]
+    fn attachments_are_indexed_and_removable() {
+        let (_d, mut ix) = indexer();
+        ix.put_attachment("attachments/a.png", &[1, 2, 3]).unwrap();
+        ix.put_attachment("attachments/b.pdf", &[4, 5]).unwrap();
+
+        let listed = ix.db.list_attachments().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].size, 3);
+
+        ix.delete_attachment("attachments/a.png").unwrap();
+        assert_eq!(ix.db.list_attachments().unwrap().len(), 1);
+        assert!(!ix.vault.exists("attachments/a.png"));
+    }
+
+    #[test]
+    fn a_reupload_replaces_the_bytes() {
+        // Last write wins: attachments are not merged.
+        let (_d, mut ix) = indexer();
+        ix.put_attachment("attachments/a.png", &[1, 2, 3]).unwrap();
+        ix.put_attachment("attachments/a.png", &[9]).unwrap();
+
+        assert_eq!(ix.attachment("attachments/a.png").unwrap(), vec![9]);
+        assert_eq!(ix.db.list_attachments().unwrap()[0].size, 1);
+    }
+
+    #[test]
+    fn the_scan_indexes_attachments_already_on_disk() {
+        let (_d, mut ix) = indexer();
+        ix.vault
+            .write_bytes("attachments/existing.png", &[1, 2])
+            .unwrap();
+        ix.vault.write("Note.md", "# Note\n").unwrap();
+
+        let report = ix.reconcile(false).unwrap();
+        assert_eq!(report.scanned, 1, "only markdown counts as a note");
+        assert_eq!(report.attachments, 1);
+        assert_eq!(ix.db.list_attachments().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn attachments_cannot_escape_the_vault() {
+        let (_d, mut ix) = indexer();
+        assert!(ix.put_attachment("../escape.png", &[1]).is_err());
+        assert!(ix.put_attachment("/etc/passwd", &[1]).is_err());
     }
 
     #[test]

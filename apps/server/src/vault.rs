@@ -100,6 +100,73 @@ impl Vault {
         Ok(out)
     }
 
+    /// Reads a file as raw bytes — attachments are opaque blobs.
+    pub fn read_bytes(&self, rel: &str) -> Result<Vec<u8>> {
+        let path = self.resolve(rel)?;
+        fs::read(&path).with_context(|| format!("reading {}", path.display()))
+    }
+
+    /// Writes raw bytes atomically, same as [`Vault::write`].
+    pub fn write_bytes(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        let path = self.resolve(rel)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let tmp = path.with_extension(format!(
+            "{}.storm-tmp",
+            path.extension()
+                .map(|e| e.to_string_lossy())
+                .unwrap_or_default()
+        ));
+        {
+            use std::io::Write;
+            let mut f = fs::File::create(&tmp)
+                .with_context(|| format!("creating temp file {}", tmp.display()))?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, &path)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+        Ok(())
+    }
+
+    /// Every non-markdown file in the vault — the attachments.
+    ///
+    /// Same walk as [`Vault::scan`] but the inverse extension filter, so a
+    /// vault stays one tree of files with no separate blob store.
+    pub fn scan_attachments(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for entry in WalkDir::new(&self.root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                !e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with('.') && e.depth() > 0)
+                    .unwrap_or(false)
+            })
+        {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("md") {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(&self.root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel.contains("storm-tmp") {
+                continue;
+            }
+            out.push(rel);
+        }
+        out.sort();
+        Ok(out)
+    }
+
     pub fn read(&self, rel: &str) -> Result<String> {
         let path = self.resolve(rel)?;
         fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
