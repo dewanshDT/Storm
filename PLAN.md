@@ -41,15 +41,15 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 118 tests + 19 live · search p95 1.1ms |
-| M5 | Android, Linux, Web | partly done | Android + web + macOS run; Linux and the perf gate open |
+| M5 | Android, Linux, Web | partly done | Android verified on device; Linux + perf gate open |
 | M6 | Attachments, settings, deploy | not started | |
 
-Last updated: 2026-08-05, after M4 and the M5 Android/web work.
+Last updated: 2026-08-05, after Android was verified on a real device.
 
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 86 Rust and 118 Dart unit tests
+make check       # clippy + analyze + 86 Rust and 137 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -421,11 +421,13 @@ platform 36 + NDK 28 + CMake. The NDK is not optional —
 `sqlite3_flutter_libs` compiles SQLite from source. Budget ~12 GB of disk for
 all of it, not the ~600 MB the SDK alone suggests.
 
-Verified end to end on a Pixel 10 (Android 17, API 37) against
-`storm-server` on the Ubuntu VM at `192.168.91.51:8484`, over wifi: vault tree
-loads, folders nest, notes open, and **no note's version moved during 20
-seconds idle** — the save loop and the provider-rebuild bug are both fixed on
-device, not just in tests.
+Verified end to end on a Pixel 10 (Android 17, API 37) against `storm-server`
+on an Ubuntu VM at `192.168.91.51:8484`, over wifi: vault tree loads, folders
+nest, notes open, edits save, new notes are created — and **no note's version
+moved during 20 seconds idle**.
+
+That deploy doubles as an M6 rehearsal: a cross-compiled static binary copied
+to a machine with no Rust, no libc setup, nothing.
 
 *Still open:* the M0 perf gate on Android. The spike's HUD has not been run on
 a real device, so the editor's typing latency there is still unmeasured — M0's
@@ -460,6 +462,35 @@ changed). Delete `spike/editor_spike/` once that passes, preserving its
 
 Attachment upload/download (LWW by mtime), settings, theming. Deploy to an LXC on
 `pve-II` with a systemd unit. Nightly rsync of `vault/` + `state/` to TrueNAS.
+
+---
+
+## A lesson worth keeping
+
+Four bugs reached the user in a row, all in the same place: **widget and
+provider wiring, which had no tests at all**, sitting on top of a sync layer
+that had been tested exhaustively. Two of them destroyed data (every note
+truncated to its frontmatter) and none were caught by a fully green suite.
+
+- Watching a `ChangeNotifierProvider` rebuilds on every notification, so the
+  editor session was destroyed mid-open.
+- A theme object without value equality made every frame look like an edit,
+  which saved empty notes in a loop.
+- Note creation bypassed the sync engine, so a new note existed on the server
+  and nowhere locally.
+- A dialog disposed its `TextEditingController` when `showDialog` returned,
+  while the route was still animating out.
+
+Each was found only by running the app on a real device. The pattern: protocol
+correctness was over-tested and *the layer the user actually touches* was not
+tested at all. The UI now has ~19 tests, and the habit worth keeping is to run
+the thing on a device early rather than trusting a green suite to mean working
+software.
+
+Note also that the last of these was reported as "still the same error" after
+two rounds of unrelated fixes. **Get the exception text before changing
+anything** — "red screen" means an unhandled exception, which is a different
+failure from any error state the app renders itself.
 
 ---
 
