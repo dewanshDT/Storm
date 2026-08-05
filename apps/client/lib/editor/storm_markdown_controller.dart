@@ -176,17 +176,36 @@ class StormMarkdownController extends TextEditingController {
     final lines = t.substring(blockStart, blockEnd).split('\n');
 
     final stripped = [for (final line in lines) _splitPrefix(line)];
+
+    // An ordered list is a *sequence*, not a repeated string: `1. ` on every
+    // line is what a numbered list looks like when nobody counted. Numbering
+    // continues from the item above the selection, so extending a list picks
+    // up where it left off instead of restarting.
+    final ordered = prefix != null && orderedMarker.hasMatch(prefix);
+    final firstNumber = ordered ? _orderedNumberBefore(t, blockStart) : 1;
+
     final removing = prefix == null ||
-        (toggle && stripped.every((p) => p.marker == prefix));
-    final target = removing ? '' : prefix;
+        (toggle &&
+            (ordered
+                ? stripped.every((p) => orderedMarker.hasMatch(p.marker))
+                : stripped.every((p) => p.marker == prefix)));
+
+    String markerFor(int index) {
+      if (removing) return '';
+      if (!ordered) return prefix;
+      // Keep whichever delimiter the caller asked for — `1.` and `1)` are both
+      // ordered lists, and switching one under the user would be rude.
+      final delimiter = prefix.contains(')') ? ')' : '.';
+      return '${firstNumber + index}$delimiter ';
+    }
 
     final rewritten = [
-      for (final p in stripped) '${p.indent}$target${p.body}',
+      for (final (i, p) in stripped.indexed) '${p.indent}${markerFor(i)}${p.body}',
     ].join('\n');
 
     // The caret keeps its place within the first line's *content*, which is
     // where it visually was — not its raw offset, which the prefix just moved.
-    final firstDelta = target.length - stripped.first.marker.length;
+    final firstDelta = markerFor(0).length - stripped.first.marker.length;
     _apply(
       t.substring(0, blockStart) + rewritten + t.substring(blockEnd),
       sel.isCollapsed
@@ -517,7 +536,28 @@ _Prefixed _splitPrefix(String line) {
   return _Prefixed(indent, m[0]!, rest.substring(m.end));
 }
 
+/// `1. `, `2) ` — an ordered-list marker, with its trailing space.
+final orderedMarker = RegExp(r'^\d+[.)] ');
+
+/// What number an ordered item inserted at [blockStart] should carry.
+///
+/// Continues the run immediately above it, so extending a list numbers 4, 5, 6
+/// rather than restarting at 1. A blank line or anything unnumbered ends the
+/// run, which is also where markdown itself starts a new list.
+int _orderedNumberBefore(String t, int blockStart) {
+  if (blockStart == 0) return 1;
+  final previousEnd = blockStart - 1;
+  final previousStart = _lineStartAt(t, previousEnd);
+  final previous = t.substring(previousStart, previousEnd);
+  final m = orderedMarker.matchAsPrefix(previous.trimLeft());
+  if (m == null) return 1;
+  return (int.tryParse(RegExp(r'\d+').firstMatch(m[0]!)![0]!) ?? 0) + 1;
+}
+
 int _lineStartAt(String t, int offset) {
+  // `lastIndexOf` throws on a negative start, which offset 0 produces — a
+  // selection anchored at the very first character of the buffer.
+  if (offset <= 0) return 0;
   final i = t.lastIndexOf('\n', offset - 1);
   return i < 0 ? 0 : i + 1;
 }

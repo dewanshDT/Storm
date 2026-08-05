@@ -133,8 +133,15 @@ class EditorToolbar extends StatelessWidget {
         PopupMenuItem(value: paragraph, child: Text('Paragraph')),
       ],
     );
-    if (choice == null || !context.mounted) return;
-    // Not a toggle: this menu has its own "off" switch just above.
+    if (choice == null) return;
+
+    // Deliberately *not* guarded on `context.mounted`. Opening this menu closes
+    // the keyboard, which makes `keyboardIsOpen` false, which unmounts this
+    // toolbar — so by the time a choice comes back, our own context is always
+    // gone. Gating on it meant the heading buttons never did anything at all,
+    // while every other button worked, because the rest apply synchronously.
+    // The controller belongs to the editor and outlives us, so it is safe to
+    // call; nothing below touches `context`.
     controller.setBlockPrefix(
       choice == paragraph ? null : choice,
       toggle: false,

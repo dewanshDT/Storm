@@ -44,7 +44,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
-| M8 | UI refactor stage 2 — editor | **done** | 265 tests · toolbar, links, formatting |
+| M8 | UI refactor stage 2 — editor | **done** | 281 tests · toolbar, links, formatting |
 
 Last updated: 2026-08-05, the UI refactor is complete and the old drawer shell
 is deleted (914 lines). Its three test files were ported onto the new screens
@@ -55,7 +55,7 @@ silently retired that guard.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 265 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 281 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -217,7 +217,24 @@ tap and abandons the caret. `TapRegion(groupId: EditableText)` around the
 toolbar says "this is part of the editor". Android and iOS keep focus anyway, so
 this only bites on desktop and web, which is why it survived the phone.
 
-**14. The toolbar mutates text only through the controller.**
+**14. An async toolbar action must not be gated on the toolbar's own context.**
+Opening the heading menu closes the keyboard, which makes `keyboardIsOpen`
+false, which unmounts the toolbar — so by the time the menu returns a choice,
+`context.mounted` is *always* false. Guarding on it meant headings silently did
+nothing while every other button worked, because the rest apply synchronously.
+The controller belongs to the editor and outlives the toolbar, so it is safe to
+call after the await; what must not be touched is `context`.
+
+**15. An ordered list is a sequence, not a repeated string.**
+`1. ` on every line is what a numbered list looks like when nobody counted.
+`setBlockPrefix` numbers the block, continuing from the item directly above the
+selection so extending a list resumes rather than restarting, and a blank line
+ends the run — which is where markdown starts a new list anyway. Enter inside a
+list continues it through `ListContinuationFormatter`, a `TextInputFormatter`
+because that is the only hook that sees an edit *before* it lands and can move
+text and caret together.
+
+**16. The toolbar mutates text only through the controller.**
 `StormMarkdownController` owns `toggleInline`, `setBlockPrefix` and
 `insertWikilink`; each computes text *and* selection and assigns `value` once.
 Assigning `text` and `selection` separately fires two notifications with an
@@ -225,7 +242,7 @@ intermediate state whose caret points into a buffer that no longer matches it.
 `wikilinks_test.dart` puts a recording controller behind the toolbar and fails
 if any button reaches past those three methods.
 
-**15. Following a wikilink reads the caret, not a gesture.**
+**17. Following a wikilink reads the caret, not a gesture.**
 A tap inside an editable `TextField` is consumed for caret placement, so a
 `TapGestureRecognizer` on a `TextSpan` never fires. The tap does its ordinary
 job and `TextField.onTap` then asks `wikilinkAt()` what the caret landed in.

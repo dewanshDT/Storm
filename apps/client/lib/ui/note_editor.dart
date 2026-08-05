@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../editor/list_continuation.dart';
 import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
@@ -250,6 +251,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                     keyboardType: TextInputType.multiline,
                     textCapitalization: TextCapitalization.sentences,
                     onTap: _onEditorTap,
+                    // Enter inside a list carries the list on.
+                    inputFormatters: const [ListContinuationFormatter()],
                     contextMenuBuilder: _contextMenu,
                     decoration: const InputDecoration(
                       border: InputBorder.none,
