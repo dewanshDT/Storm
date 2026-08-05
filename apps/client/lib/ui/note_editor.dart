@@ -5,6 +5,7 @@ import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
+import 'note_properties.dart';
 
 /// The editing pane.
 ///
@@ -24,6 +25,16 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   late StormMarkdownController _controller;
   final _focus = FocusNode();
   int _seenRevision = -1;
+
+  /// When true the editor shows the whole file, frontmatter included, so the
+  /// raw YAML can be corrected. The properties panel can't write values back —
+  /// doing so would mean re-serialising the user's YAML, which reorders keys
+  /// and drops comments.
+  bool _rawMode = false;
+
+  /// What the editor should currently contain for [session].
+  String _textFor(NoteSession session) =>
+      _rawMode ? session.buffer : session.body;
 
   @override
   void initState() {
@@ -57,7 +68,12 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
 
     final session = ref.read(noteSessionProvider);
     if (!session.isOpen) return;
-    session.edit(_controller.text);
+    // The controller holds the body; the session re-attaches the frontmatter.
+    if (_rawMode) {
+      session.edit(_controller.text);
+    } else {
+      session.editBody(_controller.text);
+    }
   }
 
   /// Pulls server text into the editor, keeping the caret where it can.
@@ -96,8 +112,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     if (session.revision != _seenRevision) {
       _seenRevision = session.revision;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _controller.text != session.buffer) {
-          _adoptServerText(session.buffer);
+        final want = _textFor(session);
+        if (mounted && _controller.text != want) {
+          _adoptServerText(want);
         }
       });
     }
@@ -109,6 +126,21 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     return Column(
       children: [
         _StatusBar(session: session),
+        if (!_rawMode)
+          NoteProperties(
+            frontmatter: session.frontmatter,
+            onEditRaw: () {
+              setState(() => _rawMode = true);
+              _adoptServerText(session.buffer);
+            },
+          ),
+        if (_rawMode)
+          _RawBanner(
+            onDone: () {
+              setState(() => _rawMode = false);
+              _adoptServerText(session.body);
+            },
+          ),
         if (session.notice != null)
           _Notice(
             message: session.notice!,
@@ -140,6 +172,39 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Shown while the frontmatter is being edited as text.
+class _RawBanner extends StatelessWidget {
+  const _RawBanner({required this.onDone});
+
+  final VoidCallback onDone;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.secondaryContainer,
+      padding: const EdgeInsets.fromLTRB(20, 8, 8, 8),
+      child: Row(
+        children: [
+          Icon(Icons.data_object, size: 16, color: scheme.onSecondaryContainer),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Editing raw frontmatter',
+              style: TextStyle(
+                color: scheme.onSecondaryContainer,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          TextButton(onPressed: onDone, child: const Text('Done')),
+        ],
+      ),
     );
   }
 }

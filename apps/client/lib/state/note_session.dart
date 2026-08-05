@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../api/models.dart';
+import '../editor/frontmatter.dart' as fm;
 import '../sync/sync_engine.dart';
 
 /// How long typing must pause before a save fires.
@@ -44,8 +45,24 @@ class NoteSession extends ChangeNotifier {
   int _baseVersion = 0;
   int get baseVersion => _baseVersion;
 
+  /// The whole file, frontmatter included. This is what gets saved, and what
+  /// the merge protocol reasons about.
   String _buffer = '';
   String get buffer => _buffer;
+
+  /// The frontmatter block, verbatim, or `''`. Shown as a properties panel
+  /// rather than as raw text in the editor.
+  String get frontmatter => fm.split(_buffer).frontmatter;
+
+  /// What the editor actually shows and edits.
+  ///
+  /// Keeping the frontmatter out of the text field is the only safe way to
+  /// hide it: the controller's buffer has to match what it renders character
+  /// for character, so anything hidden must not be in the buffer at all.
+  String get body => fm.split(_buffer).body;
+
+  List<fm.NoteProperty> get properties => fm.readProperties(frontmatter);
+  List<String> get tags => fm.readTags(frontmatter);
 
   SaveState _saveState = SaveState.idle;
   SaveState get saveState => _saveState;
@@ -125,7 +142,16 @@ class NoteSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Records a local edit and schedules a save.
+  /// Records an edit to the **body** and schedules a save.
+  ///
+  /// The frontmatter is carried through untouched — the editor never shows it,
+  /// so it must never be able to lose it.
+  void editBody(String newBody) {
+    if (_noteId == null) return;
+    edit(fm.split(_buffer).withBody(newBody));
+  }
+
+  /// Records a local edit to the whole file and schedules a save.
   void edit(String text) {
     if (_noteId == null || text == _buffer) return;
     _buffer = text;

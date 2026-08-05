@@ -28,7 +28,9 @@ void main() {
   late CacheDb cache;
   late FakeServer server;
 
-  const body = '# Ideas\n\nSomeday: #maybe\n';
+  const frontmatter = '---\nid: n1\ntags: [homelab]\n# hand comment\n---\n';
+  const bodyOnly = '\n# Ideas\n\nSomeday: #maybe\n';
+  const body = frontmatter + bodyOnly;
 
   ProviderContainer container() {
     cache = CacheDb(NativeDatabase.memory());
@@ -102,14 +104,80 @@ void main() {
     c.dispose();
   });
 
-  testWidgets('the editor shows the note it was asked to open', (tester) async {
+  testWidgets('the editor shows the body, not the raw frontmatter', (
+    tester,
+  ) async {
     final c = container();
     await c.read(noteSessionProvider).open('n1');
     await pumpEditor(tester, c);
     await tester.pump();
 
-    expect(find.text(body), findsOneWidget);
+    expect(
+      find.text(bodyOnly),
+      findsOneWidget,
+      reason: 'the text field holds the body only',
+    );
+    expect(
+      find.text(body),
+      findsNothing,
+      reason: 'the raw --- block must not be in the editor',
+    );
     expect(find.text('Select a note to start editing'), findsNothing);
+
+    // …and the metadata is rendered as properties instead.
+    expect(find.text('tags'), findsOneWidget);
+    expect(find.text('#homelab'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    c.dispose();
+  });
+
+  testWidgets('editing the body preserves the frontmatter exactly', (
+    tester,
+  ) async {
+    // The editor never shows the frontmatter, so it must be incapable of
+    // losing it — including the hand-written comment.
+    final c = container();
+    final session = c.read(noteSessionProvider);
+    await session.open('n1');
+    await pumpEditor(tester, c);
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), '\n# Ideas\n\nEdited.\n');
+    await tester.pump(const Duration(seconds: 2));
+    await session.save();
+
+    final saved = server.notes['n1']!.content;
+    expect(
+      saved,
+      startsWith(frontmatter),
+      reason: 'frontmatter must survive byte for byte',
+    );
+    expect(saved, contains('# hand comment'));
+    expect(saved, contains('Edited.'));
+    expect(saved, isNot(contains('Someday')));
+
+    await tester.pumpWidget(const SizedBox());
+    c.dispose();
+  });
+
+  testWidgets('a note with no frontmatter shows no properties panel', (
+    tester,
+  ) async {
+    final c = container();
+    // After container(), which builds a fresh FakeServer.
+    server.notes['n2'] = ServerNote(
+      id: 'n2',
+      path: 'Plain.md',
+      content: '# Plain\n\nNo metadata.\n',
+      version: 1,
+    );
+    await c.read(noteSessionProvider).open('n2');
+    await pumpEditor(tester, c);
+    await tester.pump();
+
+    expect(find.text('# Plain\n\nNo metadata.\n'), findsOneWidget);
+    expect(find.text('Details'), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     c.dispose();
