@@ -37,10 +37,10 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | | Milestone | State | Evidence |
 |---|---|---|---|
 | M0 | Editor spike | **done** | 67 tests · `spike/editor_spike/FINDINGS.md` |
-| M1 | Rust server core | **done** | 86 tests, 0 clippy · 43 e2e checks |
+| M1 | Rust server core | **done** | 91 tests, 0 clippy · 43 e2e checks |
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
-| M4 | Search, tags, backlinks | **done** | 118 tests + 19 live · search p95 1.1ms |
+| M4 | Search, tags, backlinks | **done** | 196 tests + 19 live · search p95 1.1ms |
 | M5 | Android, Web (Linux deferred) | **done** | Android + web + macOS verified; perf gate open |
 | M6 | Attachments, settings, deploy | in progress | |
 
@@ -49,14 +49,14 @@ Last updated: 2026-08-05, entering M6.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 86 Rust and 137 Dart unit tests
+make check       # clippy + analyze + 91 Rust and 196 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
 `make test-live` starts a server, runs both integration suites and tears it
 down, failing fast with the server log if it cannot bind.
 
-Both need a server. `apps/apps/server/tests/e2e.py` creates its own fixtures under
+Both need a server. `apps/server/tests/e2e.py` creates its own fixtures under
 `E2E/` and deletes them afterwards, so it is safe to run repeatedly against any
 vault. The client's live tests live outside `test/` so a plain `flutter test`
 never needs a server.
@@ -227,8 +227,8 @@ Findings that constrain later work (detail in `spike/editor_spike/FINDINGS.md`):
 
 ### M1 — Rust server core ✅
 
-`apps/server/` — 3,079 lines, 86 tests, 0 clippy warnings, plus 43 end-to-end checks
-against a live server (`apps/apps/server/tests/e2e.py`). Full API and behaviour documented
+`apps/server/` — 3,527 lines, 91 tests, 0 clippy warnings, plus 43 end-to-end checks
+against a live server (`apps/server/tests/e2e.py`). Full API and behaviour documented
 in `apps/server/README.md`.
 
 Verified against a realistic fake Obsidian vault: `--dry-run` writes nothing;
@@ -324,7 +324,7 @@ Where each is proven:
 | 3, 4 | `two_client_sync_test.dart` (offline edit → reconnect → merge) and `test/sync_engine_test.dart` |
 | 5 | `test_live/live_server_test.dart` + `test/sync_engine_test.dart` |
 | 6 | `test/sync_engine_test.dart` (offline rename + offline edit both survive) |
-| 7 | `apps/apps/server/tests/e2e.py` (watcher picks up an external edit) |
+| 7 | `apps/server/tests/e2e.py` (watcher picks up an external edit) |
 | 8 | M1: atomic writes + restart reconcile, verified during the M1 e2e run |
 
 Scenario 2 in particular could not be reached by unit tests — `MockClient` has

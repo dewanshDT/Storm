@@ -179,6 +179,12 @@ final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
   return NoteSession(ref.read(syncEngineProvider));
 });
 
+/// Which notes are kept available offline.
+final pinnedNotesProvider = FutureProvider<Set<String>>((ref) async {
+  ref.watch(vaultRevisionProvider);
+  return ref.read(syncEngineProvider).pinnedIds();
+});
+
 final searchQueryProvider = StateProvider<String>((ref) => '');
 
 final searchResultsProvider = FutureProvider<List<SearchHit>>((ref) async {

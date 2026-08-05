@@ -149,11 +149,11 @@ which stays correct even when events arrive late, coalesced, or out of order.
 ## Tests
 
 ```sh
-cargo test      # 86 unit tests
+cargo test      # 91 unit tests
 cargo clippy --all-targets
 ```
 
 The unit tests cover the sharp edges: frontmatter byte-preservation, merge
 outcomes, path traversal, tag/link extraction against code blocks, and index
 reconciliation. There is also an end-to-end script that drives a live server
-through the sync matrix (`apps/apps/server/tests/e2e.py`).
+through the sync matrix (`apps/server/tests/e2e.py`).

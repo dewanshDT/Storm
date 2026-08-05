@@ -82,7 +82,7 @@ syntax markers are dimmed rather than hidden.
 ## Tests
 
 ```sh
-flutter test              # 118 tests, no server needed
+flutter test              # 196 tests, no server needed
 flutter test test_live/   # 19 tests against a real storm-server
 ```
 

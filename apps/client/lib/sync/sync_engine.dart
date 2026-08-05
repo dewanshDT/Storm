@@ -64,9 +64,6 @@ class SyncEngine extends ChangeNotifier {
   bool _syncing = false;
   bool get isSyncing => _syncing;
 
-  DateTime? _lastSyncedAt;
-  DateTime? get lastSyncedAt => _lastSyncedAt;
-
   /// Note ids touched by the most recent pull, so open editors can react.
   final _changes = StreamController<Set<String>>.broadcast();
   Stream<Set<String>> get changes => _changes.stream;
@@ -351,8 +348,14 @@ class SyncEngine extends ChangeNotifier {
         : '${base.substring(0, dot)}-$stamp${base.substring(dot)}';
   }
 
+  /// Keeps a note available offline, or stops doing so.
+  ///
+  /// Pinning fetches the note immediately: the point is that it survives
+  /// eviction *and* is actually present, which it wouldn't be if the user
+  /// pinned something they had only seen in the tree.
   Future<void> setPinned(String id, bool pinned) async {
-    await cache.setPinned(id, pinned);
+    // Fetch first: `setPinned` is an UPDATE, so pinning a note that has never
+    // been opened would otherwise touch no row at all.
     if (pinned && _online) {
       try {
         await _store(await api.note(id));
@@ -360,8 +363,12 @@ class SyncEngine extends ChangeNotifier {
         _setOnline(false);
       }
     }
+    await cache.setPinned(id, pinned);
+    _changes.add({id});
     notifyListeners();
   }
+
+  Future<Set<String>> pinnedIds() => cache.pinnedIds();
 
   // ---- syncing -------------------------------------------------------
 
@@ -373,7 +380,6 @@ class SyncEngine extends ChangeNotifier {
     try {
       await _drainOutbox();
       await _pull();
-      _lastSyncedAt = DateTime.now();
     } finally {
       _syncing = false;
       if (!_disposed) notifyListeners();
@@ -586,17 +592,26 @@ class SyncEngine extends ChangeNotifier {
 
   // ---- helpers -------------------------------------------------------
 
-  Future<void> _store(Note note) => cache.putNote(
-    CachedNotesCompanion.insert(
-      id: note.meta.id,
-      path: note.meta.path,
-      title: Value(note.meta.title),
-      version: note.meta.version,
-      content: note.content,
-      modified: Value(note.meta.modified),
-      cachedAt: DateTime.now(),
-    ),
-  );
+  /// Caches a note fetched from the server.
+  ///
+  /// Carries the existing `pinned` flag forward. Without that, every refresh
+  /// of a pinned note silently unpinned it — the insert would fall back to the
+  /// column default and the note would quietly become evictable again.
+  Future<void> _store(Note note) async {
+    final existing = await cache.note(note.meta.id);
+    await cache.putNote(
+      CachedNotesCompanion.insert(
+        id: note.meta.id,
+        path: note.meta.path,
+        title: Value(note.meta.title),
+        version: note.meta.version,
+        content: note.content,
+        modified: Value(note.meta.modified),
+        cachedAt: DateTime.now(),
+        pinned: Value(existing?.pinned ?? false),
+      ),
+    );
+  }
 
   Future<void> _storeWrite(String id, WriteResult result) async {
     final existing = await cache.note(id);

@@ -64,12 +64,19 @@ class VaultTreePanel extends ConsumerWidget {
         if (notes.isEmpty) {
           return const _Empty();
         }
+        final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
         final root = TreeNode.build(notes);
         return ListView(
           padding: const EdgeInsets.symmetric(vertical: 8),
           children: [
             for (final child in root.sortedChildren)
-              _TreeRow(node: child, depth: 0, openId: openId, onOpen: onOpen),
+              _TreeRow(
+                node: child,
+                depth: 0,
+                openId: openId,
+                pinned: pinned,
+                onOpen: onOpen,
+              ),
           ],
         );
       },
@@ -82,12 +89,14 @@ class _TreeRow extends StatefulWidget {
     required this.node,
     required this.depth,
     required this.openId,
+    required this.pinned,
     required this.onOpen,
   });
 
   final TreeNode node;
   final int depth;
   final String? openId;
+  final Set<String> pinned;
   final void Function(NoteMeta) onOpen;
 
   @override
@@ -140,6 +149,7 @@ class _TreeRowState extends State<_TreeRow> {
                 node: child,
                 depth: widget.depth + 1,
                 openId: widget.openId,
+                pinned: widget.pinned,
                 onOpen: widget.onOpen,
               ),
         ],
@@ -155,16 +165,32 @@ class _TreeRowState extends State<_TreeRow> {
             ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
             : null,
         padding: EdgeInsets.fromLTRB(indent + 18, 5, 8, 5),
-        child: Text(
-          // Strip the extension: the vault shows note names, not filenames.
-          note.fileName.endsWith('.md')
-              ? note.fileName.substring(0, note.fileName.length - 3)
-              : note.fileName,
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: selected ? theme.colorScheme.onPrimaryContainer : null,
-            fontWeight: selected ? FontWeight.w600 : null,
-          ),
-          overflow: TextOverflow.ellipsis,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                // Strip the extension: the vault shows note names, not
+                // filenames.
+                note.fileName.endsWith('.md')
+                    ? note.fileName.substring(0, note.fileName.length - 3)
+                    : note.fileName,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: selected ? theme.colorScheme.onPrimaryContainer : null,
+                  fontWeight: selected ? FontWeight.w600 : null,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (widget.pinned.contains(note.id))
+              Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: Icon(
+                  Icons.push_pin,
+                  size: 12,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+          ],
         ),
       ),
     );

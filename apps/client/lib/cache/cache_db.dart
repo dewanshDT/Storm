@@ -106,6 +106,14 @@ class CacheDb extends _$CacheDb {
   Future<void> removeNote(String id) =>
       (delete(cachedNotes)..where((n) => n.id.equals(id))).go();
 
+  /// Ids the user asked to keep available offline.
+  Future<Set<String>> pinnedIds() async {
+    final rows = await (select(
+      cachedNotes,
+    )..where((n) => n.pinned.equals(true))).get();
+    return rows.map((n) => n.id).toSet();
+  }
+
   Future<void> setPinned(String id, bool pinned) =>
       (update(cachedNotes)..where((n) => n.id.equals(id))).write(
         CachedNotesCompanion(pinned: Value(pinned)),
@@ -193,10 +201,4 @@ class CacheDb extends _$CacheDb {
   Future<void> setLastSeq(int seq) => into(
     meta,
   ).insertOnConflictUpdate(MetaCompanion.insert(key: _kLastSeq, value: '$seq'));
-
-  /// Wipes cached content but keeps queued edits, for switching servers.
-  Future<void> clearCache() async {
-    await delete(cachedNotes).go();
-    await (delete(meta)..where((m) => m.key.equals(_kLastSeq))).go();
-  }
 }

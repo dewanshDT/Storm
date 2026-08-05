@@ -61,6 +61,20 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     await _open(created.meta!);
   }
 
+  /// Keeps the open note available offline, or stops.
+  Future<void> _togglePin() async {
+    final note = ref.read(noteSessionProvider).meta;
+    if (note == null) return;
+
+    final pinned = ref.read(pinnedNotesProvider).value ?? const <String>{};
+    final nowPinned = !pinned.contains(note.id);
+    await ref.read(syncEngineProvider).setPinned(note.id, nowPinned);
+    ref.invalidate(pinnedNotesProvider);
+
+    if (!mounted) return;
+    _toast(nowPinned ? 'Kept available offline' : 'No longer kept offline');
+  }
+
   /// Uploads a file and links it from the note at the caret.
   Future<void> _attach() async {
     final session = ref.read(noteSessionProvider);
@@ -224,22 +238,35 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
             icon: const Icon(Icons.note_add_outlined),
             onPressed: _createNote,
           ),
+          // A phone can't fit the note actions as separate icons. Overflowing
+          // an AppBar silently drops the icons past the edge, which is exactly
+          // how the attach button appeared to be "missing" — so on narrow
+          // screens they collapse into a menu instead.
           if (hasNote) ...[
-            IconButton(
-              tooltip: 'Attach a file',
-              icon: const Icon(Icons.attach_file),
-              onPressed: _attach,
-            ),
-            IconButton(
-              tooltip: 'Rename or move',
-              icon: const Icon(Icons.drive_file_rename_outline),
-              onPressed: _renameNote,
-            ),
-            IconButton(
-              tooltip: 'Delete',
-              icon: const Icon(Icons.delete_outline),
-              onPressed: _deleteNote,
-            ),
+            if (wide) ...[
+              _PinButton(onToggle: _togglePin),
+              IconButton(
+                tooltip: 'Attach a file',
+                icon: const Icon(Icons.attach_file),
+                onPressed: _attach,
+              ),
+              IconButton(
+                tooltip: 'Rename or move',
+                icon: const Icon(Icons.drive_file_rename_outline),
+                onPressed: _renameNote,
+              ),
+              IconButton(
+                tooltip: 'Delete',
+                icon: const Icon(Icons.delete_outline),
+                onPressed: _deleteNote,
+              ),
+            ] else
+              _NoteActionsMenu(
+                onPin: _togglePin,
+                onAttach: _attach,
+                onRename: _renameNote,
+                onDelete: _deleteNote,
+              ),
           ],
           const _SyncStatus(),
           IconButton(
@@ -380,6 +407,106 @@ String? validatePath(String path) {
     return "Names can't start with a dot";
   }
   return null;
+}
+
+/// The note actions, as one menu, for screens too narrow for four icons.
+class _NoteActionsMenu extends ConsumerWidget {
+  const _NoteActionsMenu({
+    required this.onPin,
+    required this.onAttach,
+    required this.onRename,
+    required this.onDelete,
+  });
+
+  final VoidCallback onPin;
+  final VoidCallback onAttach;
+  final VoidCallback onRename;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final id = ref.watch(noteSessionProvider).meta?.id;
+    final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
+    final isPinned = id != null && pinned.contains(id);
+
+    return PopupMenuButton<VoidCallback>(
+      tooltip: 'Note actions',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (action) => action(),
+      itemBuilder: (c) => [
+        PopupMenuItem(
+          value: onPin,
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+              size: 20,
+            ),
+            title: Text(isPinned ? 'Stop keeping offline' : 'Keep offline'),
+          ),
+        ),
+        PopupMenuItem(
+          value: onAttach,
+          child: const ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.attach_file, size: 20),
+            title: Text('Attach a file'),
+          ),
+        ),
+        PopupMenuItem(
+          value: onRename,
+          child: const ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.drive_file_rename_outline, size: 20),
+            title: Text('Rename or move'),
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: onDelete,
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              Icons.delete_outline,
+              size: 20,
+              color: Theme.of(c).colorScheme.error,
+            ),
+            title: Text(
+              'Delete',
+              style: TextStyle(color: Theme.of(c).colorScheme.error),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Toggles whether the open note is kept available offline.
+class _PinButton extends ConsumerWidget {
+  const _PinButton({required this.onToggle});
+
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final id = ref.watch(noteSessionProvider).meta?.id;
+    final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
+    final isPinned = id != null && pinned.contains(id);
+
+    return IconButton(
+      tooltip: isPinned
+          ? 'Kept offline — tap to unpin'
+          : 'Keep available offline',
+      icon: Icon(isPinned ? Icons.push_pin : Icons.push_pin_outlined),
+      color: isPinned ? Theme.of(context).colorScheme.primary : null,
+      onPressed: onToggle,
+    );
+  }
 }
 
 /// Files / Search / Tags switcher for the sidebar.
