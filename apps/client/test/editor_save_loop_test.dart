@@ -7,6 +7,7 @@ import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/editor/markdown_theme.dart';
 import 'package:storm/editor/storm_markdown_controller.dart';
+import 'package:storm/editor/storm_markdown_controller.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/note_editor.dart';
@@ -196,6 +197,44 @@ void main() {
     await session.save();
 
     expect(server.notes['n1']!.content, contains('Typed by hand.'));
+
+    await tester.pumpWidget(const SizedBox());
+    c.dispose();
+  });
+
+  testWidgets('a huge note explains why formatting is off', (tester) async {
+    // The styling drops above maxStyledLines to keep typing responsive. Left
+    // unexplained that reads as a bug — the badge that used to show it only
+    // ever existed in the retired M0 spike, not in the app.
+    final c = container();
+    final huge = List.filled(
+      StormMarkdownController.maxStyledLines + 50,
+      '# heading',
+    ).join('\n');
+    server.notes['big'] = ServerNote(
+      id: 'big',
+      path: 'Big.md',
+      content: huge,
+      version: 1,
+    );
+
+    await c.read(noteSessionProvider).open('big');
+    await pumpEditor(tester, c);
+    await tester.pump();
+
+    expect(find.textContaining('Formatting is off above'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    c.dispose();
+  });
+
+  testWidgets('an ordinary note shows no such notice', (tester) async {
+    final c = container();
+    await c.read(noteSessionProvider).open('n1');
+    await pumpEditor(tester, c);
+    await tester.pump();
+
+    expect(find.textContaining('Formatting is off'), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     c.dispose();

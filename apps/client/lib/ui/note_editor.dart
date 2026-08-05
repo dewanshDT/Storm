@@ -32,6 +32,16 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   /// and drops comments.
   bool _rawMode = false;
 
+  /// Whether this note is past the size where styling is dropped.
+  ///
+  /// Derived from the line count rather than read back off the controller.
+  /// `lastDegraded` is written *during* `buildTextSpan`, so reading it here
+  /// would be a frame behind and reacting to it would risk a rebuild loop —
+  /// the exact shape of bug that once wiped every note in the vault.
+  bool _isDegraded(NoteSession session) =>
+      '\n'.allMatches(_textFor(session)).length + 1 >
+      StormMarkdownController.maxStyledLines;
+
   /// What the editor should currently contain for [session].
   String _textFor(NoteSession session) =>
       _rawMode ? session.buffer : session.body;
@@ -141,6 +151,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
               _adoptServerText(session.body);
             },
           ),
+        if (_isDegraded(session)) const _DegradedNotice(),
         if (session.notice != null)
           _Notice(
             message: session.notice!,
@@ -172,6 +183,41 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Shown when a note is too long to style.
+///
+/// Without this the styling simply vanishes on a large note, which reads as a
+/// bug rather than as the deliberate trade it is.
+class _DegradedNotice extends StatelessWidget {
+  const _DegradedNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: scheme.tertiaryContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
+      child: Row(
+        children: [
+          Icon(Icons.speed, size: 16, color: scheme.onTertiaryContainer),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Formatting is off above '
+              '${StormMarkdownController.maxStyledLines} lines, to keep typing '
+              'responsive. The note itself is unchanged.',
+              style: TextStyle(
+                color: scheme.onTertiaryContainer,
+                fontSize: 12.5,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
