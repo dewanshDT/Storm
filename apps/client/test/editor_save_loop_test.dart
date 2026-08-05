@@ -7,7 +7,6 @@ import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/editor/markdown_theme.dart';
 import 'package:storm/editor/storm_markdown_controller.dart';
-import 'package:storm/editor/storm_markdown_controller.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/note_editor.dart';

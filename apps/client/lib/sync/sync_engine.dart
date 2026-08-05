@@ -64,6 +64,14 @@ class SyncEngine extends ChangeNotifier {
   bool _syncing = false;
   bool get isSyncing => _syncing;
 
+  /// When the last sync completed, for the vault bubble to report.
+  ///
+  /// Advanced only on a sync that actually reached the server — saying "synced
+  /// just now" after a failed attempt would be a lie in the one place the user
+  /// looks to find out.
+  DateTime? _lastSyncedAt;
+  DateTime? get lastSyncedAt => _lastSyncedAt;
+
   /// Note ids touched by the most recent pull, so open editors can react.
   final _changes = StreamController<Set<String>>.broadcast();
   Stream<Set<String>> get changes => _changes.stream;
@@ -380,6 +388,7 @@ class SyncEngine extends ChangeNotifier {
     try {
       await _drainOutbox();
       await _pull();
+      if (_online) _lastSyncedAt = DateTime.now();
     } finally {
       _syncing = false;
       if (!_disposed) notifyListeners();

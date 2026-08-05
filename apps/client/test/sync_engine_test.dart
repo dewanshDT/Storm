@@ -392,6 +392,29 @@ void main() {
     });
   });
 
+  group('last-synced time', () {
+    test('advances after a sync that reached the server', () async {
+      await seed('n1', 'body\n');
+      expect(engine.lastSyncedAt, isNull);
+
+      await engine.sync();
+      expect(engine.lastSyncedAt, isNotNull);
+    });
+
+    test('does not advance when the server was unreachable', () async {
+      // The vault bubble reports this; claiming "synced just now" after a
+      // failed attempt would mislead in the one place the user checks.
+      await seed('n1', 'body\n');
+      await engine.sync();
+      final first = engine.lastSyncedAt;
+
+      server.unreachable = true;
+      await engine.sync();
+
+      expect(engine.lastSyncedAt, first);
+    });
+  });
+
   group('what "offline" means', () {
     test('a lost WebSocket does not make the client offline', () async {
       // The socket only carries push. Every request still works without it,

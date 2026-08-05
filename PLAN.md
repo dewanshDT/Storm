@@ -42,14 +42,17 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 196 tests + 19 live · search p95 1.1ms |
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
-| M6 | Attachments, settings, deploy | in progress | |
+| M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
+| M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
+| M8 | UI refactor stage 2 — editor | in progress | `docs/storm-ui-refactor.md` §2.6 |
 
-Last updated: 2026-08-05, M6 in progress; the M0 spike is retired.
+Last updated: 2026-08-05, stage 1 of the UI refactor landed; the M0 spike is
+retired.
 
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 91 Rust and 196 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 221 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -167,6 +170,30 @@ Worth keeping from it: the duplicated editor had to be hand-synced on every
 change, and drifting once would have meant benchmarking code that was no longer
 shipped. If another throwaway ever needs to share code with the app, make it a
 path dependency rather than a copy.
+
+**9. `go_router` owns "where am I", replacing the single-screen shell.**
+The nav bubble's Context slot changes meaning by location, and a second flag
+tracking that alongside the screen state is two things to keep in agreement.
+A router makes it one. It also gave the web client working deep links, which the
+old shell simply did not have — `/browse/Projects/Storm` and `/note/:id` now
+serve the app instead of 404ing.
+*Revisit if:* nested navigators are ever needed for split panes (a non-goal).
+
+**10. The router is refreshed, never rebuilt.**
+`routerProvider` must not `ref.watch(settingsProvider)`. Watching recomputes the
+provider into a *different* `GoRouter` while the `MaterialApp` keeps holding the
+old one — navigation silently stops working and the back stack is discarded on
+every settings change. It listens instead, and pokes `refreshListenable` so
+`redirect` re-runs on the same instance. There is a test asserting the router
+instance survives a settings change.
+
+**11. "Is the keyboard up?" is asked of the view, not of `MediaQuery`.**
+`Scaffold` implements `resizeToAvoidBottomInset` by *removing* the bottom inset
+from its body's `MediaQuery`, so `MediaQuery.viewInsetsOf(context).bottom`
+inside a body always reads zero — exactly where the nav bubble needed it.
+`keyboardIsOpen()` in `nav_bubble.dart` reads `View.of(context).viewInsets`.
+Stage 2's formatting toolbar must use the same helper, or the two halves of that
+swap will disagree.
 
 ---
 

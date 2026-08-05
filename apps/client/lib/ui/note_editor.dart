@@ -6,6 +6,7 @@ import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'note_properties.dart';
+import 'theme.dart';
 
 /// The editing pane.
 ///
@@ -109,10 +110,13 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final dark = Theme.of(context).brightness == Brightness.dark;
 
+    // Serif for the note body only — it is the one place in the app that is
+    // prose rather than chrome, and the distinction is the point.
     final base = TextStyle(
-      fontSize: settings.fontSize,
-      height: 1.55,
-      color: dark ? const Color(0xFFE6E9EF) : const Color(0xFF1F2430),
+      fontFamily: StormTheme.bodyFamily,
+      fontSize: settings.fontSize + 1,
+      height: 1.6,
+      color: Theme.of(context).colorScheme.onSurface,
     );
     _controller.theme = dark
         ? MarkdownTheme.dark(base)
