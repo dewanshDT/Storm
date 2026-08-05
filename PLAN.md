@@ -419,7 +419,7 @@ wrong claim.
 Reindexing is subtractive as well as additive — deleting a note, or editing a
 tag out of one, removes it from the index. Covered by live tests.
 
-### M5 — Android, Linux, Web 🟡
+### M5 — Android, Linux, Web ✅
 
 **Web — wired, not yet run in a browser.**
 
@@ -504,7 +504,7 @@ mechanism.
 
 
 
-### M6 — Attachments, settings, deploy 🟡
+### M6 — Attachments, settings, deploy ✅
 
 **Attachments — done, both halves.**
 
@@ -564,6 +564,40 @@ the user's to give — see `deploy/README.md`.
 
 ---
 
+### M7/M8 — UI refactor ✅
+
+`docs/storm-ui-refactor.md` traded the desktop-first drawer shell for a
+dashboard, a floating nav bubble, a breadcrumb browser and a keyboard
+formatting toolbar. The old shell was 670 lines holding the shell, the note
+actions and the dialogs at once, and it compressed badly at phone width — which
+is the width this project exists for.
+
+**Routing came first**, and paid for itself immediately. The Context slot has to
+answer "where am I", and a router makes that one source of truth instead of a
+flag kept in agreement with the screen. It also gave the web client deep links
+it never had: `/browse/Projects/Storm` and `/note/:id` now serve the app rather
+than 404.
+
+**Three of the four bugs found here were found by tests, not by running it** —
+which is new for this layer, and the whole point of writing the suites before
+wiring the screens to real state. See decisions 10–13 for what each one taught.
+The exception is worth noting: the *fourth* was that the app opened in light
+mode despite a comment claiming dark-first, and only looking at a screenshot
+from the phone caught it. Both halves of the lesson below still hold.
+
+**Deferred, deliberately:** wikilink autocomplete. `docs/storm-ui-refactor.md`
+§2.6 assumed it already existed; nothing in `lib/` matched. The toolbar button
+inserts `[[]]` and places the caret inside. Completion is a feature, not a
+refactor, and gets its own pass.
+
+**Still not possible:** true inline images and true syntax hiding. Both need the
+block-based editor rewrite of decision 5, for the same reason as always — a
+`WidgetSpan` contributes one character where `![alt](path)` is many, so a chip
+"in the text flow" breaks the buffer invariant exactly as inline rendering does.
+`AttachmentStrip` below the editor remains the honest interim.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -582,9 +616,19 @@ truncated to its frontmatter) and none were caught by a fully green suite.
 
 Each was found only by running the app on a real device. The pattern: protocol
 correctness was over-tested and *the layer the user actually touches* was not
-tested at all. The UI now has ~19 tests, and the habit worth keeping is to run
-the thing on a device early rather than trusting a green suite to mean working
-software.
+tested at all.
+
+**The follow-up is evidence the lesson took.** The UI refactor wrote its suites
+before wiring the screens to real state, and four more bugs of exactly this
+family surfaced — a router silently replaced out from under its `MaterialApp`,
+a keyboard-inset check that could never be true, a menu conflating "Paragraph"
+with "dismissed", a toolbar button that could have written text directly.
+*Three of the four were caught by tests, before the app was ever launched.*
+
+The fourth is why the second half of this lesson stands: the app opened in
+light mode despite a comment two lines above the default claiming dark-first,
+and nothing but a screenshot from the phone was ever going to catch that. Tests
+find the wiring; running it finds what the wiring was wrong *about*. Do both.
 
 Note also that the last of these was reported as "still the same error" after
 two rounds of unrelated fixes. **Get the exception text before changing
@@ -595,20 +639,19 @@ failure from any error state the app renders itself.
 
 ## Blockers
 
-**macOS builds — needs one sudo command from the user.**
-`/Library/Developer/PrivateFrameworks/DVTDownloads.framework` is v17.0 (Dec 2025,
-from an older Xcode) while `/Applications/Xcode.app` is Xcode 26.6, so
-`IDESimulatorFoundation` fails to load. Not an SPM issue; not a Flutter or Storm
-problem. Fix:
+**None.** Both former blockers are discharged as of 2026-08-05:
 
-```sh
-sudo xcodebuild -runFirstLaunch
-```
+- *macOS builds* — `flutter doctor` reports Xcode 26.6 healthy, and
+  `flutter build macos --debug` produces a running app. The
+  `DVTDownloads.framework` version skew that needed
+  `sudo xcodebuild -runFirstLaunch` is gone.
+- *Android toolchain* — SDK 36.0.0 is installed; debug APKs build and install
+  on the Pixel over `adb`.
 
-Until then macOS is verified only via `flutter test` and the web build.
-
-**Android toolchain — not installed.** Needs the SDK + a JDK (~10–15 GB). The
-user opted to free disk first; ~27 GB free as of 2026-08-05.
+One thing worth knowing rather than blocking: `flutter doctor` flags no Chrome,
+so `flutter run -d chrome` won't launch. It does not affect `flutter build web`
+— the bundle builds and is served by the server binary (`make serve-web`),
+which is how the web client is actually used.
 
 ---
 
