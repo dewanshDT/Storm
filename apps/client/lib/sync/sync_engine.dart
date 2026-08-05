@@ -310,6 +310,47 @@ class SyncEngine extends ChangeNotifier {
     return const SaveOutcome(SaveStatus.queued);
   }
 
+  /// Uploads an attachment and returns the vault-relative path to link to.
+  ///
+  /// Never queued offline: attachments are large and the outbox is meant for
+  /// small text diffs, so this needs a reachable server and says so.
+  Future<({String? path, String? error})> attach({
+    required String fileName,
+    required List<int> bytes,
+  }) async {
+    final safe = _safeAttachmentName(fileName);
+    final path = 'attachments/$safe';
+    try {
+      await api.uploadAttachment(path, bytes);
+      _setOnline(true);
+      return (path: path, error: null);
+    } on StormApiException catch (e) {
+      return (path: null, error: e.message);
+    } catch (_) {
+      _setOnline(false);
+      return (
+        path: null,
+        error: 'Cannot reach the server — attachments need a connection.',
+      );
+    }
+  }
+
+  /// Makes a filename safe for a vault path, and unique enough not to clobber
+  /// an existing attachment with the same name.
+  String _safeAttachmentName(String fileName) {
+    final cleaned = fileName
+        .split('/')
+        .last
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '-')
+        .replaceAll(RegExp(r'-+'), '-');
+    final base = cleaned.startsWith('.') ? 'file$cleaned' : cleaned;
+    final stamp = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+    final dot = base.lastIndexOf('.');
+    return dot <= 0
+        ? '$base-$stamp'
+        : '${base.substring(0, dot)}-$stamp${base.substring(dot)}';
+  }
+
   Future<void> setPinned(String id, bool pinned) async {
     await cache.setPinned(id, pinned);
     if (pinned && _online) {

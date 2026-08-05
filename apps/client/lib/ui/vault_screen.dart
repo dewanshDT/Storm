@@ -4,6 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
 import '../sync/sync_engine.dart';
+import 'package:file_picker/file_picker.dart';
+
+import 'attachment_strip.dart';
 import 'backlinks_panel.dart';
 import 'note_editor.dart';
 import 'search_panel.dart';
@@ -56,6 +59,42 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
     }
     ref.invalidate(treeProvider);
     await _open(created.meta!);
+  }
+
+  /// Uploads a file and links it from the note at the caret.
+  Future<void> _attach() async {
+    final session = ref.read(noteSessionProvider);
+    if (!session.isOpen) return;
+
+    final picked = await FilePicker.pickFiles(withData: true);
+    final file = picked?.files.singleOrNull;
+    if (file == null || file.bytes == null) return;
+
+    final result = await ref
+        .read(syncEngineProvider)
+        .attach(fileName: file.name, bytes: file.bytes!);
+    if (result.path == null) {
+      _toast(result.error ?? 'Could not upload the attachment');
+      return;
+    }
+
+    // An image embeds; anything else becomes a plain link.
+    final isImage = const {
+      'png',
+      'jpg',
+      'jpeg',
+      'gif',
+      'webp',
+      'bmp',
+    }.contains(file.extension?.toLowerCase());
+    final link = '${isImage ? '!' : ''}[${file.name}](${result.path})';
+
+    final body = session.body;
+    session.editBody(
+      body.endsWith('\n') ? '$body\n$link\n' : '$body\n\n$link\n',
+    );
+    await session.save();
+    if (mounted) _toast('Attached ${file.name}');
   }
 
   Future<void> _renameNote() async {
@@ -179,6 +218,11 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
           ),
           if (hasNote) ...[
             IconButton(
+              tooltip: 'Attach a file',
+              icon: const Icon(Icons.attach_file),
+              onPressed: _attach,
+            ),
+            IconButton(
               tooltip: 'Rename or move',
               icon: const Icon(Icons.drive_file_rename_outline),
               onPressed: _renameNote,
@@ -221,6 +265,7 @@ class _VaultScreenState extends ConsumerState<VaultScreen> {
             child: Column(
               children: [
                 const Expanded(child: NoteEditor()),
+                AttachmentStrip(body: ref.watch(noteSessionProvider).body),
                 if (openId != null)
                   BacklinksPanel(noteId: openId, onOpen: _open),
               ],

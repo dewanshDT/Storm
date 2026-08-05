@@ -145,6 +145,34 @@ class StormApi {
         .toList();
   }
 
+  /// Uploads an attachment. Binary, opaque, last-write-wins on the server.
+  Future<void> uploadAttachment(String path, List<int> bytes) async {
+    final r = await _client.put(
+      _uri('/v1/attachments/$path'),
+      headers: {'Authorization': 'Bearer $token'},
+      body: bytes,
+    );
+    _decode(r);
+  }
+
+  Future<List<int>> attachment(String path) async {
+    final r = await _client.get(
+      _uri('/v1/attachments/$path'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    }
+    return r.bodyBytes;
+  }
+
+  /// A URL an `Image.network` can fetch directly.
+  ///
+  /// The token rides in the query string because Flutter's image widgets
+  /// can't set headers on the request they make.
+  Uri attachmentUrl(String path) =>
+      _uri('/v1/attachments/$path', {'token': token});
+
   Future<List<TagCount>> tags() async {
     final json = _decode(
       await _client.get(_uri('/v1/tags'), headers: _headers),

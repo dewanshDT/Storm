@@ -141,7 +141,7 @@ impl Indexer {
                 if let Ok(bytes) = self.vault.read_bytes(&rel) {
                     self.db.record_attachment(
                         &rel,
-                        &blake3::hash(&bytes).to_hex().to_string(),
+                        blake3::hash(&bytes).to_hex().as_ref(),
                         bytes.len() as i64,
                         &now_rfc3339(),
                     )?;
@@ -324,7 +324,7 @@ impl Indexer {
         self.vault.write_bytes(rel_path, bytes)?;
         self.db.record_attachment(
             rel_path,
-            &blake3::hash(bytes).to_hex().to_string(),
+            blake3::hash(bytes).to_hex().as_ref(),
             bytes.len() as i64,
             &now_rfc3339(),
         )
