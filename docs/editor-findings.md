@@ -5,6 +5,10 @@ custom `TextEditingController` carry Storm's markdown editing experience?**
 
 Run it: `flutter test` (67 tests) · `flutter run -d macos` · `flutter run -d chrome`
 
+> **Closed.** The gate this document was written to answer has been run on a
+> real device — see *Measured on Android* below. The spike itself was deleted
+> once that passed; this file is what it was for.
+
 ## Verdict
 
 **Yes for realistic notes; thin above ~5,000 lines.** Nothing here invalidates the
@@ -104,7 +108,32 @@ sudo xcodebuild -runFirstLaunch
 
 Web and `flutter test` are unaffected; both work today.
 
-## Still outstanding
+## Measured on Android (the gate this existed for)
+
+Pixel 10, Android 17, **profile** build — debug Dart is JIT and would have
+measured the wrong thing. Real rendered frame times sampled through
+`SchedulerBinding.addTimingsCallback`, not span-building in isolation, so this
+is what the device actually does rather than a floor.
+
+The display is capped at 60 Hz (`peak_refresh_rate: 60.0`), so the budget is
+16.7 ms.
+
+| Document | frame p95 | verdict |
+|---|---|---|
+| up to 5,000 lines | **8.6 ms** | passes, ~2x headroom at 60 Hz |
+| 8,000 lines | n/a — unstyled | degrade threshold engaged, as designed |
+
+The desktop measurements assumed a 3–5x device penalty. Against the 0.4–0.8 ms
+span-build figures below, ~8.6 ms of *whole-frame* time on device is consistent
+with that guess, and it holds 60fps at the worst styled size. Real vault notes
+are almost always under 1,000 lines, where there is far more room.
+
+Crossing to 8,000 lines drops the styling and shows a `DEGRADED (unstyled)`
+badge; going back to 5,000 restores it. That is `maxStyledLines = 5000` doing
+its job — a responsive unstyled editor beats a styled one that drops frames —
+and the switch is reversible rather than a one-way cliff.
+
+## Notes that were outstanding when this was written
 
 - Real frame timing on macOS — blocked on the Xcode fix above.
 - Real frame timing on Android, plus IME behaviour with a soft keyboard. Needs the

@@ -27,8 +27,8 @@ readable by Obsidian if you ever want out.
 |---|---|
 | `apps/server` | Rust sync server — [README](apps/server/README.md) |
 | `apps/client` | Flutter app, all four targets — [README](apps/client/README.md) |
-| `spike/editor_spike` | Frozen M0 prototype, deleted after M5 |
 | `docs/prd.md` | Original brief, not maintained |
+| `docs/editor-findings.md` | Editor design constraints and measurements |
 | `PLAN.md` | **Living plan, status and decision log** |
 
 ## Getting started

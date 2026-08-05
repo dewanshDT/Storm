@@ -75,9 +75,9 @@ lib/
 └── ui/           connect screen, vault tree, editor, search
 ```
 
-`lib/editor/` graduated from `spike/editor_spike/` unchanged. See that
-directory's `FINDINGS.md` for the performance characteristics and the reason
-syntax markers are dimmed rather than hidden.
+`lib/editor/` began as the M0 spike. See `docs/editor-findings.md` for its
+performance characteristics, the on-device measurements, and why the buffer has
+to match what is rendered character for character.
 
 ## Tests
 

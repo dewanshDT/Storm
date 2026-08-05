@@ -36,15 +36,15 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 
 | | Milestone | State | Evidence |
 |---|---|---|---|
-| M0 | Editor spike | **done** | 67 tests · `spike/editor_spike/FINDINGS.md` |
+| M0 | Editor spike | **done** | retired · `docs/editor-findings.md` |
 | M1 | Rust server core | **done** | 91 tests, 0 clippy · 43 e2e checks |
 | M2 | Client vertical slice | **done** | superseded by M3 (online-only path) |
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 196 tests + 19 live · search p95 1.1ms |
-| M5 | Android, Web (Linux deferred) | **done** | Android + web + macOS verified; perf gate open |
+| M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | in progress | |
 
-Last updated: 2026-08-05, entering M6.
+Last updated: 2026-08-05, M6 in progress; the M0 spike is retired.
 
 ### Verify the current state
 
@@ -92,8 +92,9 @@ storm/
 ├── apps/
 │   ├── server/               Rust — see apps/server/README.md
 │   └── client/               Flutter — see apps/client/README.md
-├── docs/prd.md               original brief, not maintained
-└── spike/editor_spike/       frozen M0 artifact, deleted after M5
+└── docs/
+    ├── prd.md                original brief, not maintained
+    └── editor-findings.md    M0 editor measurements, incl. on-device
 ```
 
 A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
@@ -156,19 +157,16 @@ never spawned as a sibling file. Nothing is lost (the pre-merge server text is
 in `note_versions`), it needs no conflict-resolution UI, and the failure mode is
 deleting four lines — strictly better than hunting `.sync-conflict-*` copies.
 
-**7. `spike/editor_spike/` is a frozen historical artifact, deleted after M5.**
-Its four editor files are byte-identical copies of `apps/client/lib/editor/`. They
-are deliberately *not* deduplicated into a shared package — the spike records
-what was actually built and measured at M0, and restructuring working code to
-remove a duplicate that is about to be deleted isn't worth it.
+**7. `spike/editor_spike/` — retired.** *(discharged)*
+The M0 spike existed to answer one question and then to hold the perf harness
+until it could run on a real device. Both are done: the gate passed on a Pixel
+10 at 8.6 ms p95 (budget 16.7 ms), and the directory was deleted along with its
+duplicated copy of the editor. Its findings live on in `docs/editor-findings.md`.
 
-The catch: the spike's perf harness is what validates the editor on a real
-Android device (M0's numbers are desktop-only). A frozen spike benchmarks
-frozen code. **So if `apps/client/lib/editor/` changes before Android validation,
-re-copy the changed files into the spike first, or the harness measures an
-editor you no longer ship.** Delete the whole directory once M5 signs off; the
-numbers and conclusions live on in its `FINDINGS.md`, which should be moved
-somewhere durable at that point.
+Worth keeping from it: the duplicated editor had to be hand-synced on every
+change, and drifting once would have meant benchmarking code that was no longer
+shipped. If another throwaway ever needs to share code with the app, make it a
+path dependency rather than a copy.
 
 ---
 
@@ -212,7 +210,7 @@ Answered the gating question: a Flutter `TextField` with a custom
 | 1,000 lines | 0.28–0.83 ms | 0.000 ms |
 | 4,800 lines | 3.0–3.8 ms | 0.000 ms |
 
-Findings that constrain later work (detail in `spike/editor_spike/FINDINGS.md`):
+Findings that constrain later work (detail in `docs/editor-findings.md`):
 
 - The span tree must flatten back to the buffer **exactly**; any gap or overlap
   silently corrupts rendered text and every caret offset after it. Asserted
@@ -429,9 +427,8 @@ moved during 20 seconds idle**.
 That deploy doubles as an M6 rehearsal: a cross-compiled static binary copied
 to a machine with no Rust, no libc setup, nothing.
 
-*Still open:* the M0 perf gate on Android. The spike's HUD has not been run on
-a real device, so the editor's typing latency there is still unmeasured — M0's
-numbers are desktop-only and assume a 3–5× penalty.
+*Closed:* the M0 perf gate ran on the Pixel — **8.6 ms p95** at 5,000 lines
+against a 16.7 ms budget. See `docs/editor-findings.md`.
 
 **macOS — no longer blocked.** `flutter build macos` succeeds and produces
 `storm.app`, even though `DVTDownloads.framework` is still v17.0 against Xcode
@@ -456,11 +453,7 @@ cd apps/server && cargo zigbuild --release --target x86_64-unknown-linux-musl
 68 s, 5.4 MB, statically linked, zero runtime deps. This is the M6 deploy
 mechanism.
 
-*Exit:* the same note edits round-trip across all four platforms, **and** the
-editor is validated on a real Android device using the spike's perf HUD (see
-decision 7 — re-copy `apps/client/lib/editor/` into the spike first if it has
-changed). Delete `spike/editor_spike/` once that passes, preserving its
-`FINDINGS.md`.
+
 
 ### M6 — Attachments, settings, deploy 🟡
 

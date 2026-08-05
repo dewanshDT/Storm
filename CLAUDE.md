@@ -26,13 +26,13 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
-| `spike/editor_spike/` | Frozen M0 artifact, deleted after M5. `FINDINGS.md` has the editor perf data. |
 | `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
+| `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 
-`spike/editor_spike/lib/editor/` is a deliberate byte-identical copy of
-`apps/client/lib/editor/` — do not deduplicate it. If you change `apps/client/lib/editor/`,
-re-copy the changed files into the spike, or its perf harness will validate an
-editor that is no longer shipped. See decision 7 in `PLAN.md`.
+Read `docs/editor-findings.md` before changing anything in
+`apps/client/lib/editor/`. It records the constraint the whole editor rests on
+— the rendered span tree must match the buffer character for character — and
+the on-device numbers that say where the limits are.
 
 ## Commands
 
