@@ -50,7 +50,7 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
       return;
     }
     ref.invalidate(treeProvider);
-    context.go(Routes.note(created.meta!.id));
+    context.push(Routes.note(created.meta!.id));
   }
 
   @override

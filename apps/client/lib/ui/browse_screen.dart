@@ -27,7 +27,12 @@ class BrowseScreen extends ConsumerWidget {
           ? null
           : IconButton(
               icon: const Icon(Icons.arrow_back),
-              onPressed: () => context.go(Routes.folder(_parentOf(folder))),
+              // Pop the stack we drilled down through, so this matches what
+              // the system back gesture does. A deep link has no stack to pop,
+              // so it falls back to walking up a level.
+              onPressed: () => context.canPop()
+                  ? context.pop()
+                  : context.go(Routes.folder(_parentOf(folder))),
             ),
       title: const Text('Directory'),
       child: notes.when(
@@ -210,7 +215,7 @@ class _EntryTile extends ConsumerWidget {
           entry.childCount == 1 ? '1 note' : '${entry.childCount} notes',
         ),
         trailing: const Icon(Icons.chevron_right, size: 18),
-        onTap: () => context.go(Routes.folder(entry.path)),
+        onTap: () => context.push(Routes.folder(entry.path)),
       );
     }
 
@@ -221,7 +226,7 @@ class _EntryTile extends ConsumerWidget {
       trailing: pinned.contains(entry.note!.id)
           ? Icon(Icons.push_pin, size: 13, color: scheme.primary)
           : null,
-      onTap: () => context.go(Routes.note(entry.note!.id)),
+      onTap: () => context.push(Routes.note(entry.note!.id)),
     );
   }
 }

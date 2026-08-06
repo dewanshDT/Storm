@@ -74,7 +74,7 @@ class DashboardScreen extends ConsumerWidget {
       return;
     }
     ref.invalidate(treeProvider);
-    context.go(Routes.note(created.meta!.id));
+    context.push(Routes.note(created.meta!.id));
   }
 }
 
@@ -181,7 +181,7 @@ class _RecentTile extends ConsumerWidget {
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
 
     return InkWell(
-      onTap: () => context.go(Routes.note(note.id)),
+      onTap: () => context.push(Routes.note(note.id)),
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 11),

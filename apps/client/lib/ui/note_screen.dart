@@ -78,7 +78,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final session = ref.read(noteSessionProvider);
     if (session.isDirty) await session.save();
     if (!mounted) return;
-    context.go(Routes.note(found.id));
+    context.push(Routes.note(found.id));
   }
 
   Future<void> _togglePin() async {
@@ -298,7 +298,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                     if (_showContext)
                       BacklinksPanel(
                         noteId: widget.noteId,
-                        onOpen: (note) => context.go(Routes.note(note.id)),
+                        onOpen: (note) => context.push(Routes.note(note.id)),
                       ),
                   ],
                 ),
@@ -320,4 +320,4 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
 
 /// Navigate to a note from anywhere.
 void openNote(BuildContext context, String id) =>
-    context.go(Routes.note(id));
+    context.push(Routes.note(id));

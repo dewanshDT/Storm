@@ -44,7 +44,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
-| M8 | UI refactor stage 2 — editor | **done** | 303 tests · toolbar, links, formatting, autocomplete |
+| M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 
 Last updated: 2026-08-05, the UI refactor is complete and the old drawer shell
 is deleted (914 lines). Its three test files were ported onto the new screens
@@ -55,7 +55,7 @@ silently retired that guard.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 303 Dart unit tests
+make check       # clippy + analyze + 94 Rust and 309 Dart unit tests
 make test-live   # 43 server e2e checks + 19 client integration checks
 ```
 
@@ -242,7 +242,19 @@ intermediate state whose caret points into a buffer that no longer matches it.
 `wikilinks_test.dart` puts a recording controller behind the toolbar and fails
 if any button reaches past those three methods.
 
-**17. Autocomplete state is derived, never tracked.**
+**17. `go` replaces the stack; going *deeper* must `push`.**
+Every navigation used `context.go`, which leaves exactly one route on the
+stack — so the Android back gesture popped it and left the app instead of
+returning anywhere. Two halves to the fix: browse, note, search and tags are
+declared as *children* of the dashboard route, so any location builds a stack
+with the dashboard beneath it (a deep link included); and opening a note or
+drilling into a folder uses `push`, while the nav bubble still uses `go`
+because it swaps top-level destinations rather than descending.
+In-app back buttons hid this completely — they called
+`canPop() ? pop() : go(parent)` and kept working throughout. The regression
+test drives `handlePopRoute`, which is the real system-back signal.
+
+**18. Autocomplete state is derived, never tracked.**
 Whether a `[[` is open comes from reading the buffer back from the caret, not
 from a "currently completing" flag. A flag has to be kept in agreement with
 every edit, undo and caret move, and the first disagreement leaves the
@@ -250,7 +262,7 @@ suggestion list offering to complete text that is no longer there. Suggestions
 also display the same string they are matched against — a list that matches on
 one name and shows another looks broken even when it is right.
 
-**18. Following a wikilink reads the caret, not a gesture.**
+**19. Following a wikilink reads the caret, not a gesture.**
 A tap inside an editable `TextField` is consumed for caret placement, so a
 `TapGestureRecognizer` on a `TextSpan` never fires. The tap does its ordinary
 job and `TextField.onTap` then asks `wikilinkAt()` what the caret landed in.

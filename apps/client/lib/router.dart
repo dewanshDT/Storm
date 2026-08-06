@@ -68,26 +68,32 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: Routes.connect,
         builder: (_, _) => const ConnectScreen(),
       ),
+      // Everything else is a *child* of the dashboard, so navigating to it
+      // builds a stack with the dashboard underneath rather than replacing it.
+      // Flat routes meant `go` left exactly one route on the stack, and the
+      // Android back gesture popped it straight out of the app.
       GoRoute(
         path: Routes.dashboard,
         builder: (_, _) => const DashboardScreen(),
+        routes: [
+          GoRoute(
+            path: 'browse/:path(.*)',
+            builder: (_, state) =>
+                BrowseScreen(folder: Routes.folderOf(state.uri)),
+          ),
+          GoRoute(
+            path: 'browse',
+            builder: (_, _) => const BrowseScreen(folder: ''),
+          ),
+          GoRoute(
+            path: 'note/:id',
+            builder: (_, state) =>
+                NoteScreen(noteId: state.pathParameters['id']!),
+          ),
+          GoRoute(path: 'search', builder: (_, _) => const SearchScreen()),
+          GoRoute(path: 'tags', builder: (_, _) => const TagsScreen()),
+        ],
       ),
-      GoRoute(
-        path: '${Routes.browse}/:path(.*)',
-        builder: (_, state) =>
-            BrowseScreen(folder: Routes.folderOf(state.uri)),
-      ),
-      GoRoute(
-        path: Routes.browse,
-        builder: (_, _) => const BrowseScreen(folder: ''),
-      ),
-      GoRoute(
-        path: '/note/:id',
-        builder: (_, state) =>
-            NoteScreen(noteId: state.pathParameters['id']!),
-      ),
-      GoRoute(path: Routes.search, builder: (_, _) => const SearchScreen()),
-      GoRoute(path: Routes.tags, builder: (_, _) => const TagsScreen()),
     ],
     errorBuilder: (_, state) => Scaffold(
       body: Center(
