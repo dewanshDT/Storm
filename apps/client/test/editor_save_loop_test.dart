@@ -184,7 +184,9 @@ void main() {
     before.selection = const TextSelection.collapsed(offset: 5);
     final revisionBefore = c.read(noteSessionProvider).revision;
 
-    // Toggle a property from the panel.
+    // Edit a property from the panel: add a tag through the `+` badge.
+    await tester.tap(find.byTooltip('Add a value'));
+    await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).first, 'edited');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pumpAndSettle();

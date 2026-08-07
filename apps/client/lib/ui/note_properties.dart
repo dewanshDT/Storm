@@ -588,7 +588,11 @@ class _SelectEditor extends StatelessWidget {
   }
 }
 
-/// Chips with an inline add field, for list-valued properties.
+/// Chips, then an outlined `+` badge that becomes an editable badge in place.
+///
+/// The add affordance is a badge rather than a bare text field beside the
+/// chips: it lines up with what it creates, and an always-present input made
+/// the row look unfinished on a phone.
 class _ListEditor extends StatefulWidget {
   const _ListEditor({required this.items, required this.onChanged});
 
@@ -600,24 +604,15 @@ class _ListEditor extends StatefulWidget {
 }
 
 class _ListEditorState extends State<_ListEditor> {
-  final _controller = TextEditingController();
-  final _focus = FocusNode();
+  bool _adding = false;
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    _focus.dispose();
-    super.dispose();
-  }
-
-  void _add() {
-    final value = _controller.text.trim();
-    if (value.isEmpty) return;
-    if (!widget.items.contains(value)) {
-      widget.onChanged([...widget.items, value]);
+  void _commit(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isNotEmpty && !widget.items.contains(trimmed)) {
+      widget.onChanged([...widget.items, trimmed]);
     }
-    _controller.clear();
-    _focus.requestFocus();
+    // Stay open after a successful entry: adding tags comes in runs.
+    setState(() => _adding = trimmed.isNotEmpty);
   }
 
   @override
@@ -633,28 +628,124 @@ class _ListEditorState extends State<_ListEditor> {
             onRemove: () =>
                 widget.onChanged(widget.items.where((i) => i != item).toList()),
           ),
-        SizedBox(
-          width: 96,
-          child: TextField(
-            controller: _controller,
-            focusNode: _focus,
-            style: Theme.of(context).textTheme.bodySmall,
-            decoration: const InputDecoration(
-              isDense: true,
-              border: InputBorder.none,
-              contentPadding: EdgeInsets.zero,
-              hintText: 'Add…',
-            ),
-            onSubmitted: (_) => _add(),
-            onEditingComplete: _add,
-          ),
-        ),
+        if (_adding)
+          _NewValueChip(
+            onSubmit: _commit,
+            onCancel: () => setState(() => _adding = false),
+          )
+        else
+          _AddValueChip(onTap: () => setState(() => _adding = true)),
       ],
     );
   }
 }
 
+/// An empty badge you type into. Same size and shape as the chip it becomes.
+class _NewValueChip extends StatefulWidget {
+  const _NewValueChip({required this.onSubmit, required this.onCancel});
+
+  final ValueChanged<String> onSubmit;
+  final VoidCallback onCancel;
+
+  @override
+  State<_NewValueChip> createState() => _NewValueChipState();
+}
+
+class _NewValueChipState extends State<_NewValueChip> {
+  final _controller = TextEditingController();
+  final _focus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(_onFocus);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focus.requestFocus();
+    });
+  }
+
+  void _onFocus() {
+    // Tapping away from an empty badge cancels rather than leaving a stray
+    // outline behind.
+    if (!_focus.hasFocus && _controller.text.trim().isEmpty) {
+      widget.onCancel();
+    }
+  }
+
+  @override
+  void dispose() {
+    _focus.removeListener(_onFocus);
+    _focus.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      height: _chipHeight,
+      constraints: const BoxConstraints(minWidth: 64, maxWidth: 180),
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(_chipRadius),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.6)),
+      ),
+      child: TextField(
+        controller: _controller,
+        focusNode: _focus,
+        style: TextStyle(fontSize: 12, color: scheme.primary),
+        cursorHeight: 14,
+        decoration: const InputDecoration(
+          isDense: true,
+          border: InputBorder.none,
+          contentPadding: EdgeInsets.zero,
+        ),
+        onSubmitted: (value) {
+          widget.onSubmit(value);
+          _controller.clear();
+          _focus.requestFocus();
+        },
+      ),
+    );
+  }
+}
+
+/// The `+` badge, styled as a secondary action: outline, no fill.
+class _AddValueChip extends StatelessWidget {
+  const _AddValueChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: 'Add a value',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(_chipRadius),
+        child: Container(
+          height: _chipHeight,
+          width: 34,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(_chipRadius),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          child: Icon(Icons.add, size: 14, color: scheme.onSurfaceVariant),
+        ),
+      ),
+    );
+  }
+}
+
 /// One value in a list property.
+///
+/// Deliberately small. The first version used an `IconButton` for the remove
+/// affordance, whose 20px minimum plus padding pushed every chip to roughly
+/// twice this height — on a phone the list read as a stack of grey slabs.
 class ValueChip extends StatelessWidget {
   const ValueChip({super.key, required this.label, this.onRemove});
 
@@ -665,42 +756,53 @@ class ValueChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
-      padding: EdgeInsets.only(
-        left: 9,
-        right: onRemove == null ? 9 : 3,
-        top: 3,
-        bottom: 3,
-      ),
+      height: _chipHeight,
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: EdgeInsets.only(left: 9, right: onRemove == null ? 9 : 4),
       decoration: BoxDecoration(
         color: scheme.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(11),
+        borderRadius: BorderRadius.circular(_chipRadius),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              color: scheme.primary,
-              fontWeight: FontWeight.w500,
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.1,
+                color: scheme.primary,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
-          if (onRemove != null)
-            IconButton(
-              icon: const Icon(Icons.close, size: 13),
-              color: scheme.primary,
-              visualDensity: VisualDensity.compact,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
-              tooltip: 'Remove $label',
-              onPressed: onRemove,
+          if (onRemove != null) ...[
+            const SizedBox(width: 3),
+            // A plain InkWell, not an IconButton: the latter enforces a
+            // minimum tap target that doubles the chip's height.
+            InkWell(
+              onTap: onRemove,
+              borderRadius: BorderRadius.circular(_chipRadius),
+              child: Tooltip(
+                message: 'Remove $label',
+                child: Padding(
+                  padding: const EdgeInsets.all(3),
+                  child: Icon(Icons.close, size: 12, color: scheme.primary),
+                ),
+              ),
             ),
+          ],
         ],
       ),
     );
   }
 }
+
+/// Chip geometry, shared so a value, a new-value field and the `+` all line up.
+const double _chipHeight = 26;
+const double _chipRadius = 8;
 
 /// A value the list will not write: Storm's own fields, and structures a
 /// key/value row cannot represent.

@@ -27,14 +27,10 @@ bool keyboardIsOpen(BuildContext context) =>
 
 /// The floating navigation bubble.
 ///
-/// Four slots — Directory, Search, New note, Context — collapsed to a single
-/// icon until tapped. Tap expands, matching the app's one interaction rule:
-/// tap is the primary action, long-press is secondary options, everywhere.
-///
-/// Expansion is widget-local state. It is deliberately *not* a Riverpod
-/// provider: the global providers here drive sync and cache, and pushing
-/// ephemeral UI state into them is how the editor once got torn down and
-/// rebuilt mid-open.
+/// Directory, Search, New note, New folder and Context, always shown. It used
+/// to collapse to a single `…` until tapped, which cost a tap before every
+/// navigation and hid where you could go — the bar is small enough that
+/// hiding it bought nothing.
 class NavBubble extends ConsumerStatefulWidget {
   const NavBubble({super.key});
 
@@ -43,8 +39,6 @@ class NavBubble extends ConsumerStatefulWidget {
 }
 
 class _NavBubbleState extends ConsumerState<NavBubble> {
-  bool _expanded = false;
-
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -64,13 +58,7 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
             shadowColor: Colors.black.withValues(alpha: 0.4),
             child: Padding(
               padding: const EdgeInsets.all(5),
-              child: _expanded
-                  ? Row(mainAxisSize: MainAxisSize.min, children: _slots(uri))
-                  : _Slot(
-                      icon: Icons.more_horiz,
-                      tooltip: 'Navigation',
-                      onTap: () => setState(() => _expanded = true),
-                    ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: _slots(uri)),
             ),
           ),
         ),
@@ -79,10 +67,7 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
   }
 
   List<Widget> _slots(Uri uri) {
-    void go(String location) {
-      setState(() => _expanded = false);
-      context.go(location);
-    }
+    void go(String location) => context.go(location);
 
     // On the dashboard there is no vault to browse or search, so the bubble
     // offers what does apply there: a new vault.
@@ -92,23 +77,12 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
         _Slot(
           icon: Icons.add,
           tooltip: 'New vault',
-          onTap: () {
-            setState(() => _expanded = false);
-            NewNoteRequest.of(context)?.call();
-          },
+          onTap: () => NewNoteRequest.of(context)?.call(),
         ),
         _Slot(
           icon: Icons.dns_outlined,
           tooltip: 'Server',
-          onTap: () {
-            setState(() => _expanded = false);
-            context.push(Routes.serverSettings);
-          },
-        ),
-        _Slot(
-          icon: Icons.close,
-          tooltip: 'Close',
-          onTap: () => setState(() => _expanded = false),
+          onTap: () => context.push(Routes.serverSettings),
         ),
       ];
     }
@@ -129,10 +103,7 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
       _Slot(
         icon: Icons.add,
         tooltip: 'New note',
-        onTap: () {
-          setState(() => _expanded = false);
-          NewNoteRequest.of(context)?.call();
-        },
+        onTap: () => NewNoteRequest.of(context)?.call(),
       ),
       // Only where a folder can actually be made — inside a note there is no
       // "here" for it to land in.
@@ -140,17 +111,9 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
         _Slot(
           icon: Icons.create_new_folder_outlined,
           tooltip: 'New folder',
-          onTap: () {
-            setState(() => _expanded = false);
-            NewFolderRequest.of(context)?.call();
-          },
+          onTap: () => NewFolderRequest.of(context)?.call(),
         ),
       _ContextSlot(uri: uri, onGo: go),
-      _Slot(
-        icon: Icons.close,
-        tooltip: 'Close',
-        onTap: () => setState(() => _expanded = false),
-      ),
     ];
   }
 }

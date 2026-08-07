@@ -156,6 +156,34 @@ void main() {
     });
   });
 
+  group('the add badge', () {
+    testWidgets('is an outlined badge, not a bare field', (tester) async {
+      await pump(tester, '---\ntags: [homelab]\n---\nbody\n');
+      // Nothing to type into until it is tapped — an always-present input
+      // left the row looking unfinished on a phone.
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byTooltip('Add a value'), findsOneWidget);
+    });
+
+    testWidgets('opens an empty badge in place', (tester) async {
+      await pump(tester, '---\ntags: [homelab]\n---\nbody\n');
+      await tester.tap(find.byTooltip('Add a value'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('chips stay compact enough for a phone', (tester) async {
+      // The complaint that prompted this: an IconButton's minimum tap target
+      // pushed every chip to roughly twice this height, and the list read as
+      // a stack of grey slabs.
+      await pump(tester, '---\ntags: [homelab, storm]\n---\nbody\n');
+      final chip = tester.getSize(find.byType(ValueChip).first);
+      expect(chip.height, lessThanOrEqualTo(30));
+    });
+  });
+
   group('editing writes frontmatter without reformatting it', () {
     testWidgets('typing a value commits on blur', (tester) async {
       await pump(
@@ -186,6 +214,10 @@ void main() {
       // line and orphans the items beneath it.
       await pump(tester, '---\ntags:\n  - homelab\n  - storm\n---\n\nbody\n');
 
+      // The add affordance is a badge now: tap it, then type into the empty
+      // badge it becomes.
+      await tester.tap(find.byTooltip('Add a value'));
+      await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).first, 'new');
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pumpAndSettle();

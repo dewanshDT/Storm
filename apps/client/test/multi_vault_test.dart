@@ -325,8 +325,6 @@ void main() {
 
       expect(find.text('Archive'), findsNothing);
 
-      await tester.tap(find.byIcon(Icons.more_horiz));
-      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('New folder'));
       await tester.pumpAndSettle();
 
@@ -348,8 +346,6 @@ void main() {
       await pumpShell(tester, c);
       await openVault(tester, c);
 
-      await tester.tap(find.byIcon(Icons.more_horiz));
-      await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('New folder'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField).last, 'Archive');

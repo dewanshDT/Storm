@@ -22,8 +22,6 @@ import 'fake_server.dart';
 void main() {
   /// Opens the new-note dialog the way a user reaches it.
   Future<void> openDialog(WidgetTester tester) async {
-    await tester.tap(find.byIcon(Icons.more_horiz));
-    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
   }

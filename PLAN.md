@@ -47,7 +47,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 | M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
-| M11 | Typed note properties | **done** | 411 Dart tests · frontmatter writer + panel |
+| M11 | Typed note properties | **done** | 413 Dart tests · frontmatter writer + panel |
 
 Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
@@ -71,7 +71,7 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 140 Rust and 409 Dart unit tests
+make check       # clippy + analyze + 140 Rust and 413 Dart unit tests
 make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
@@ -947,6 +947,23 @@ disclosure, with a rule under the whole panel. That reintroduced the split the
 panel existed to remove: some metadata in the list, some behind a mode switch.
 Now every key in the block is a row in file order, editable or read-only, and
 the list runs straight into the prose. See decision 30.
+
+**Two more from a phone screenshot**, which is where this project's UI bugs
+keep being found:
+
+- *Chips were slabs.* `IconButton` enforces a 48px minimum tap target, so a
+  remove affordance built from one pushed every chip to 48px tall and the tag
+  rows read as stacked grey blocks. A plain `InkWell` gets it to 26. The
+  regression test asserts the height, and fails at 48 if the `IconButton` ever
+  comes back.
+- *The add affordance was a bare text field beside the chips*, which left the
+  row looking unfinished. It is a badge now — outlined, secondary, `+` — that
+  becomes an empty editable badge in place, so the control looks like what it
+  creates.
+
+**The nav bubble no longer collapses.** It hid behind a `…` until tapped,
+costing a tap before every navigation and concealing where you could go. The
+bar is five small icons; hiding it bought nothing.
 
 **Still not writable:** nested maps and block scalars. A key/value row cannot
 represent them without guessing at a structure, and writing the guess back
