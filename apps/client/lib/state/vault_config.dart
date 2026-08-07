@@ -14,12 +14,20 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
+import '../ui/accents.dart';
 import '../sync/sync_engine.dart';
 import '../editor/frontmatter_edit.dart' as fme;
 import 'app_state.dart';
 
 /// Where the config note lives, vault-relative.
 const kVaultConfigPath = '_storm/vault.md';
+
+/// The frontmatter key a note's colour lives in.
+///
+/// A plain `color:`, not `storm.color`: it is the user's note, the value is a
+/// readable word, and Obsidian users already reach for this name. The vault's
+/// own colour uses the `storm.` prefix because that file *is* Storm's.
+const kColorKey = 'color';
 
 /// Everything under `_storm/` is Storm's own, and never shown as a note.
 ///
@@ -41,7 +49,8 @@ enum PropertyType {
   datetime('datetime'),
   list('list'),
   select('select'),
-  url('url');
+  url('url'),
+  color('color');
 
   const PropertyType(this.wire);
 
@@ -64,6 +73,7 @@ enum PropertyType {
     PropertyType.list => 'List',
     PropertyType.select => 'Select',
     PropertyType.url => 'Link',
+    PropertyType.color => 'Colour',
   };
 }
 
@@ -71,6 +81,7 @@ enum PropertyType {
 const _kTypePrefix = 'storm.type.';
 const _kOptionsPrefix = 'storm.options.';
 const _kDescription = 'storm.description';
+const _kColor = 'storm.color';
 
 /// A vault's property types and description, read from its config note.
 class VaultConfig {
@@ -79,6 +90,7 @@ class VaultConfig {
     this.options = const {},
     this.description = '',
     this.raw = '',
+    this.color = '',
   });
 
   /// Property key → declared type.
@@ -91,6 +103,9 @@ class VaultConfig {
 
   /// The config note's full content, so a write can splice it.
   final String raw;
+
+  /// The vault's own colour, as written in the config note.
+  final String color;
 
   /// The type of [key], declared or inferred.
   ///
@@ -106,11 +121,14 @@ class VaultConfig {
     final types = <String, PropertyType>{};
     final options = <String, List<String>>{};
     var description = '';
+    var color = '';
 
     for (final span in fme.readSpans(content)) {
       final key = span.key;
       if (key == _kDescription) {
         description = span.displayValue;
+      } else if (key == _kColor) {
+        color = span.displayValue;
       } else if (key.startsWith(_kTypePrefix)) {
         final type = PropertyType.fromWire(span.displayValue);
         if (type != null) types[key.substring(_kTypePrefix.length)] = type;
@@ -130,6 +148,7 @@ class VaultConfig {
       types: types,
       options: options,
       description: description,
+      color: color,
       raw: content,
     );
   }
@@ -144,6 +163,13 @@ class VaultConfig {
 
   String withDescription(String text) =>
       fme.setScalar(raw, _kDescription, text);
+
+  /// The vault's accent, for its card on the dashboard.
+  Accent get accent => Accent.parse(color);
+
+  String withAccent(Accent accent) => accent.isNone
+      ? fme.removeProperty(raw, _kColor)
+      : fme.setScalar(raw, _kColor, accent.name);
 }
 
 /// Guesses a property's type from how its value is written.
@@ -170,6 +196,10 @@ PropertyType inferType(fme.PropertySpan? span) {
 
   final lower = value.toLowerCase();
   if (lower == 'true' || lower == 'false') return PropertyType.checkbox;
+  // Only for the key we own. A note with `theme: sage` means something else.
+  if (span.key == 'color' && !Accent.parse(lower).isNone) {
+    return PropertyType.color;
+  }
   if (_datetime.hasMatch(value)) return PropertyType.datetime;
   if (_date.hasMatch(value)) return PropertyType.date;
   if (lower.startsWith('http://') || lower.startsWith('https://')) {
@@ -232,3 +262,51 @@ Future<bool> saveVaultConfig(WidgetRef ref, String content) async {
 
 /// What a brand-new config note starts as.
 const _seed = '---\n---\n\n# Vault\n';
+
+/// Sets any vault's accent, not only the active one.
+///
+/// The dashboard shows every vault at once, so a long-press has to be able to
+/// colour a vault that is not open. That rules out [saveVaultConfig], which
+/// works through the active vault's providers — this goes straight to the API
+/// for the vault named.
+Future<bool> setVaultAccent(
+  WidgetRef ref,
+  String vaultId,
+  Accent accent,
+) async {
+  final api = ref.read(apiProvider);
+  if (api == null) return false;
+
+  try {
+    final tree = await api.tree(vaultId);
+    final existing = tree.notes
+        .where((n) => n.path == kVaultConfigPath)
+        .firstOrNull;
+
+    if (existing == null) {
+      if (accent.isNone) return true; // nothing to record
+      await api.createNote(
+        vaultId: vaultId,
+        path: kVaultConfigPath,
+        content: VaultConfig.parse(_seed).withAccent(accent),
+      );
+    } else {
+      final note = await api.note(vaultId, existing.id);
+      final updated = VaultConfig.parse(note.content).withAccent(accent);
+      if (updated == note.content) return true;
+      await api.saveNote(
+        vaultId: vaultId,
+        id: existing.id,
+        baseVersion: note.meta.version,
+        content: updated,
+      );
+    }
+  } catch (_) {
+    return false;
+  }
+
+  ref.read(vaultRevisionProvider.notifier).state++;
+  ref.invalidate(vaultAccentsProvider);
+  ref.invalidate(vaultConfigProvider);
+  return true;
+}

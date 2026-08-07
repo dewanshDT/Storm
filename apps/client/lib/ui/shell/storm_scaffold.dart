@@ -4,7 +4,9 @@ import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/vault_config.dart' show kColorKey;
 import '../browse_screen.dart' show createFolder;
+import '../new_note_dialog.dart';
 import 'corner_bubbles.dart';
 import 'vault_gate.dart';
 import 'nav_bubble.dart';
@@ -35,18 +37,22 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
   /// Creating a note is offered from the nav bubble on every screen, so it
   /// lives here rather than being duplicated onto each one.
   Future<void> _createNote() async {
-    // Defaults into the folder being viewed rather than the vault root — a
-    // note made from inside `Projects/Storm` almost always belongs there.
+    // The folder follows where they are rather than being typed — a note made
+    // from inside `Projects/Storm` almost always belongs there.
     final here = Routes.folderOf(GoRouterState.of(context).uri);
-    final path = await promptForPath(
-      context,
-      title: 'New note',
-      initial: here.isEmpty ? 'Untitled.md' : '$here/Untitled.md',
-    );
-    if (path == null || !mounted) return;
+    final wanted = await promptForNewNote(context, folder: here);
+    if (wanted == null || !mounted) return;
 
     final vaultId = VaultGate.of(context);
-    final created = await ref.read(syncEngineProvider).create(path: path);
+    final created = await ref
+        .read(syncEngineProvider)
+        .create(
+          path: noteFileName(wanted.name, folder: here),
+          // A colour chosen up front is just the note's first property.
+          content: wanted.accent.isNone
+              ? ''
+              : '---\n$kColorKey: ${wanted.accent.name}\n---\n\n',
+        );
     if (!mounted) return;
 
     if (created.meta == null) {

@@ -199,6 +199,35 @@ class ProfileBubble extends ConsumerWidget {
                         notifier.save(settings.copyWith(fontSize: v)),
                   ),
                 ),
+                ListTile(
+                  leading: const Icon(Icons.text_fields),
+                  title: const Text('Note font'),
+                  subtitle: Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: SegmentedButton<BodyFont>(
+                      showSelectedIcon: false,
+                      style: const ButtonStyle(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      segments: [
+                        for (final font in BodyFont.values)
+                          ButtonSegment(
+                            value: font,
+                            label: Text(
+                              font.label,
+                              // Each option is set in the face it names, so
+                              // the choice shows what it will do.
+                              style: TextStyle(fontFamily: font.family),
+                            ),
+                          ),
+                      ],
+                      selected: {settings.bodyFont},
+                      onSelectionChanged: (picked) => notifier.save(
+                        settings.copyWith(bodyFont: picked.first),
+                      ),
+                    ),
+                  ),
+                ),
                 const Divider(),
                 ListTile(
                   leading: const Icon(Icons.logout),

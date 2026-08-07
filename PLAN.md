@@ -47,7 +47,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 | M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
-| M11 | Typed note properties | **done** | 413 Dart tests · frontmatter writer + panel |
+| M11 | Typed note properties | **done** | 434 Dart tests · properties, colours, fonts |
 
 Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
@@ -71,7 +71,7 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 140 Rust and 413 Dart unit tests
+make check       # clippy + analyze + 140 Rust and 434 Dart unit tests
 make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
@@ -964,6 +964,32 @@ keep being found:
 **The nav bubble no longer collapses.** It hid behind a `…` until tapped,
 costing a tap before every navigation and concealing where you could go. The
 bar is five small icons; hiding it bought nothing.
+
+**Colours, fonts, and naming a note.** Keep-style accents for notes and
+vaults, a note-font choice, and a new-note dialog that asks for a name.
+
+- *A colour is a word, not a hex.* `color: sage` in the note's frontmatter
+  stays readable, greppable and meaningful in Obsidian or a text editor;
+  `#B7CDB0` would be none of those and would pin the vault to one theme. Each
+  accent carries a light *and* a dark value, because a tint that works on
+  white is a glare on black. A colour the app does not recognise is left as
+  plain text rather than offered a swatch — overwriting somebody else's
+  convention would be worse than not styling it.
+- *Colour is edited in the properties list*, as `PropertyType.color`, not
+  through a separate menu. Decision 30 said the list is the only way
+  frontmatter changes, and a colour is frontmatter like any other value. A
+  vault's colour goes in its own `_storm/vault.md` and is set by long-pressing
+  its card, since a vault has no properties list.
+- *Three fonts, not a font list.* Serif (the bundled Newsreader), the
+  platform sans, and monospace. Every extra family is another megabyte in the
+  APK, and a runtime download is wrong for something that must work offline —
+  the same reasoning that bundled the serif in M7.
+- *A new note asks for a name.* Not `Folder/Note.md`: the folder is wherever
+  you already are and every note is markdown, so neither was a decision worth
+  asking about. Separators become spaces rather than folders, and leading dots
+  are stripped, so a typed name can never escape the vault, hide itself, or
+  invent a directory. A test asserts every generated name passes
+  `validateVaultPath`.
 
 **Still not writable:** nested maps and block scalars. A key/value row cannot
 represent them without guessing at a structure, and writing the guess back

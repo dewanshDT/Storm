@@ -121,6 +121,10 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   `scan_root()` skips `state_dir` and every dot-prefixed directory — the
   `--vault` compatibility shim puts `state/` inside the root, and a naive scan
   would register it as a vault and index the SQLite files in it.
+- **A colour is stored as a word, never a hex value.** `color: sage` in a
+  note, `storm.color:` in a vault's config. The vault has to stay readable
+  outside Storm, and a stored hex would pin it to one theme and mean nothing
+  in Obsidian.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose

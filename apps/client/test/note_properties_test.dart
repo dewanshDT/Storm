@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/state/vault_config.dart';
+import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/note_properties.dart';
 import 'package:storm/ui/theme.dart';
 
@@ -181,6 +182,49 @@ void main() {
       await pump(tester, '---\ntags: [homelab, storm]\n---\nbody\n');
       final chip = tester.getSize(find.byType(ValueChip).first);
       expect(chip.height, lessThanOrEqualTo(30));
+    });
+  });
+
+  group('colour', () {
+    testWidgets('a known colour renders swatches, not a text field', (
+      tester,
+    ) async {
+      await pump(tester, '---\ncolor: sage\n---\nbody\n');
+      expect(find.byType(AccentPicker), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+    });
+
+    testWidgets('picking one writes the word into the note', (tester) async {
+      await pump(tester, '---\ntitle: Storm\ncolor: sage\n---\n\nbody\n');
+
+      await tester.tap(find.byTooltip('Lavender'));
+      await tester.pumpAndSettle();
+
+      final out = contentOf(tester);
+      expect(out, contains('color: lavender'));
+      expect(out, contains('title: Storm'), reason: 'nothing else moves');
+      expect(out, endsWith('---\n\nbody\n'));
+    });
+
+    testWidgets('choosing Default removes the line entirely', (tester) async {
+      // Not `color: none` — a note without a colour should have no colour
+      // line, the same as one that never had one.
+      await pump(tester, '---\ncolor: sage\nkeep: yes\n---\nbody\n');
+
+      await tester.tap(find.byTooltip('Default'));
+      await tester.pumpAndSettle();
+
+      final out = contentOf(tester);
+      expect(out, isNot(contains('color')));
+      expect(out, contains('keep: yes'));
+    });
+
+    testWidgets('an unrecognised colour is left as plain text', (tester) async {
+      // `color: #B7CDB0` is somebody else's convention; showing swatches for
+      // it would offer to overwrite a value we did not understand.
+      await pump(tester, '---\ncolor: chartreuse\n---\nbody\n');
+      expect(find.byType(AccentPicker), findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
     });
   });
 

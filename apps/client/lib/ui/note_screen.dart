@@ -9,7 +9,10 @@ import 'package:go_router/go_router.dart';
 import '../cache/cache_db.dart';
 import '../router.dart';
 import '../state/app_state.dart';
+import '../editor/frontmatter_edit.dart' as fme;
+import '../state/vault_config.dart';
 import '../state/wikilinks.dart';
+import 'accents.dart';
 import '../sync/sync_engine.dart';
 import 'attachment_strip.dart';
 import 'backlinks_panel.dart';
@@ -244,13 +247,24 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     // depending on it still rebuilds. See keyboardIsOpen.
     final keyboard = keyboardIsOpen(context);
     final vaultId = VaultGate.of(context);
+    // The note's own colour, from its `color:` property. A wash rather than
+    // the full card tint: this sits behind a screen of prose, and the card
+    // colour at full strength fights the text.
+    final accent = Accent.parse(
+      fme.findSpan(session.buffer, kColorKey)?.displayValue,
+    );
+    final tint = accent.isNone
+        ? null
+        : accent.wash(Theme.of(context).brightness);
 
     return NoteContextRequest(
       onRequest: () => setState(() => _showContext = !_showContext),
       child: NewNoteRequest(
         onRequest: () {},
         child: Scaffold(
+          backgroundColor: tint,
           appBar: AppBar(
+            backgroundColor: tint,
             leading: IconButton(
               icon: const Icon(Icons.arrow_back),
               onPressed: () => context.canPop()

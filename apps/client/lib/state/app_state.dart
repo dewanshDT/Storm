@@ -7,8 +7,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
+import '../ui/theme.dart';
 import '../sync/sync_engine.dart';
 import 'note_session.dart';
+import '../ui/accents.dart';
 import 'vault_config.dart';
 
 /// Connection and appearance settings.
@@ -26,12 +28,20 @@ class Settings {
     this.darkMode = true,
     this.fontSize = 16,
     this.activeVault = '',
+    this.bodyFont = BodyFont.serif,
   });
 
   final String baseUrl;
   final String token;
   final bool darkMode;
   final double fontSize;
+
+  /// The face note bodies are set in.
+  ///
+  /// Only families that ship with the app or the platform: a runtime download
+  /// is wrong for something that has to work offline, and it would make the
+  /// editor's metrics depend on the network.
+  final BodyFont bodyFont;
 
   /// Which vault the note-level providers are serving.
   ///
@@ -53,12 +63,14 @@ class Settings {
     bool? darkMode,
     double? fontSize,
     String? activeVault,
+    BodyFont? bodyFont,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     token: token ?? this.token,
     darkMode: darkMode ?? this.darkMode,
     fontSize: fontSize ?? this.fontSize,
     activeVault: activeVault ?? this.activeVault,
+    bodyFont: bodyFont ?? this.bodyFont,
   );
 }
 
@@ -68,6 +80,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kDark = 'storm.darkMode';
   static const _kFont = 'storm.fontSize';
   static const _kVault = 'storm.activeVault';
+  static const _kBodyFont = 'storm.bodyFont';
 
   @override
   Future<Settings> build() async {
@@ -78,6 +91,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       darkMode: prefs.getBool(_kDark) ?? true,
       fontSize: prefs.getDouble(_kFont) ?? 16,
       activeVault: prefs.getString(_kVault) ?? '',
+      bodyFont: BodyFont.fromName(prefs.getString(_kBodyFont)),
     );
   }
 
@@ -93,6 +107,39 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setBool(_kDark, cleaned.darkMode);
     await prefs.setDouble(_kFont, cleaned.fontSize);
     await prefs.setString(_kVault, cleaned.activeVault);
+    await prefs.setString(_kBodyFont, cleaned.bodyFont.name);
+  }
+}
+
+/// The faces a note body can be set in.
+///
+/// Three, not a font list: every extra family is another megabyte in the APK,
+/// and these cover the distinction that actually matters — prose, interface,
+/// and fixed-width.
+enum BodyFont {
+  /// The bundled serif. Newsreader, shipped in `assets/fonts/`.
+  serif('serif', 'Serif', StormTheme.bodyFamily),
+
+  /// Whatever the platform uses for its own interface.
+  sans('sans', 'Sans', null),
+
+  /// The platform's fixed-width face.
+  mono('mono', 'Monospace', 'monospace');
+
+  const BodyFont(this.name, this.label, this.family);
+
+  final String name;
+  final String label;
+
+  /// `null` means "the platform default", which is what Flutter does with an
+  /// unset `fontFamily`.
+  final String? family;
+
+  static BodyFont fromName(String? name) {
+    for (final font in BodyFont.values) {
+      if (font.name == name) return font;
+    }
+    return BodyFont.serif;
   }
 }
 
@@ -150,6 +197,34 @@ final vaultsProvider = FutureProvider<List<VaultInfo>>((ref) async {
     await ref.read(cacheProvider).adoptLegacyRows(vaults.first.id);
   }
   return vaults;
+});
+
+/// Each vault's accent, read from its own `_storm/vault.md`.
+///
+/// The dashboard shows every vault at once, so it cannot use
+/// [vaultConfigProvider], which only serves the *active* vault.
+final vaultAccentsProvider = FutureProvider<Map<String, Accent>>((ref) async {
+  ref.watch(vaultRevisionProvider);
+  final api = ref.watch(apiProvider);
+  final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+  if (api == null) return const {};
+
+  final out = <String, Accent>{};
+  for (final vault in vaults) {
+    if (vault.missing) continue;
+    try {
+      final tree = await api.tree(vault.id);
+      final config = tree.notes
+          .where((n) => n.path == kVaultConfigPath)
+          .firstOrNull;
+      if (config == null) continue;
+      final note = await api.note(vault.id, config.id);
+      out[vault.id] = VaultConfig.parse(note.content).accent;
+    } catch (_) {
+      // A vault whose colour cannot be read is simply uncoloured.
+    }
+  }
+  return out;
 });
 
 /// Recently opened notes across every vault — server first, cache when offline.

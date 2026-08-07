@@ -5,7 +5,9 @@ import 'package:go_router/go_router.dart';
 import '../../api/models.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/vault_config.dart';
 import '../server_settings_screen.dart' show createVault;
+import '../accents.dart';
 import 'corner_bubbles.dart' show relativeTime;
 import 'nav_bubble.dart';
 import '../theme.dart';
@@ -109,6 +111,8 @@ class _VaultCard extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     final engine = ref.watch(syncEngineProvider);
     final active = ref.watch(activeVaultProvider) == vault.id;
+    final accent =
+        ref.watch(vaultAccentsProvider).value?[vault.id] ?? Accent.none;
 
     // A missing vault is shown, greyed, rather than hidden. One that vanished
     // from the list would look exactly like one that never existed.
@@ -126,15 +130,20 @@ class _VaultCard extends ConsumerWidget {
               ),
             )
           : () => context.push(Routes.browse(vault.id)),
+      onLongPress: muted
+          ? null
+          : () => _pickVaultColour(context, ref, vault.id, accent),
       child: Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: scheme.surfaceContainerHigh,
+          color: muted
+              ? scheme.surfaceContainerHigh
+              : context.accentSurface(accent),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: muted
                 ? scheme.error.withValues(alpha: 0.5)
-                : scheme.outlineVariant.withValues(alpha: 0.4),
+                : context.accentBorder(accent),
           ),
         ),
         child: Column(
@@ -149,14 +158,14 @@ class _VaultCard extends ConsumerWidget {
                   decoration: BoxDecoration(
                     color: muted
                         ? scheme.error.withValues(alpha: 0.15)
-                        : scheme.primary.withValues(alpha: 0.18),
+                        : scheme.onSurface.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Text(
                     _initial(vault.name),
                     style: TextStyle(
                       fontWeight: FontWeight.w700,
-                      color: muted ? scheme.error : scheme.primary,
+                      color: muted ? scheme.error : scheme.onSurface,
                     ),
                   ),
                 ),
@@ -195,6 +204,39 @@ class _VaultCard extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Long-press a vault card to colour it, Keep-style.
+///
+/// Writes `storm.color` into that vault's own `_storm/vault.md`, so the choice
+/// travels with the vault rather than living on this device.
+Future<void> _pickVaultColour(
+  BuildContext context,
+  WidgetRef ref,
+  String vaultId,
+  Accent current,
+) async {
+  final chosen = await showModalBottomSheet<Accent>(
+    context: context,
+    showDragHandle: true,
+    builder: (c) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+        child: AccentPicker(
+          selected: current,
+          onSelected: (accent) => Navigator.pop(c, accent),
+        ),
+      ),
+    ),
+  );
+  if (chosen == null || chosen == current) return;
+
+  final ok = await setVaultAccent(ref, vaultId, chosen);
+  if (!ok && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Could not save the vault colour')),
     );
   }
 }
@@ -241,14 +283,19 @@ class _Recents extends ConsumerWidget {
 }
 
 /// A full-width card: the note's name, and the vault it came from.
-class _RecentCard extends StatelessWidget {
+class _RecentCard extends ConsumerWidget {
   const _RecentCard({required this.note});
 
   final RecentNote note;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    // The vault's colour, not the note's: this card is about *where* the note
+    // came from, and reading every note's frontmatter to render a list would
+    // cost a fetch per row.
+    final accent =
+        ref.watch(vaultAccentsProvider).value?[note.vaultId] ?? Accent.none;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -258,8 +305,9 @@ class _RecentCard extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: scheme.surfaceContainerHigh,
+            color: context.accentSurface(accent),
             borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: context.accentBorder(accent)),
           ),
           child: Row(
             children: [

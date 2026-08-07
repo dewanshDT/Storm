@@ -10,7 +10,7 @@ abstract final class StormTheme {
   static const indigo = Color(0xFF8FA0F0);
   static const amber = Color(0xFFE8B84B);
 
-  /// Note bodies only. Chrome stays sans, so the two never compete.
+  /// The default note-body face. Chrome stays sans, so the two never compete.
   static const bodyFamily = 'Newsreader';
 
   static ThemeData dark() => _build(Brightness.dark);

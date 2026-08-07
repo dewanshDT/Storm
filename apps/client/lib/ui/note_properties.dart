@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../editor/frontmatter_edit.dart' as fme;
 import '../state/vault_config.dart';
+import 'accents.dart';
 import 'shell/storm_scaffold.dart' show promptForPath;
 
 /// A note's frontmatter, as an editable key/value list.
@@ -83,8 +84,15 @@ class _NotePropertiesState extends ConsumerState<NoteProperties> {
 
   // ---- writes ----------------------------------------------------------
 
-  void _setScalar(String key, String value, {bool raw = false}) =>
-      widget.onChanged(fme.setScalar(widget.content, key, value, raw: raw));
+  void _setScalar(String key, String value, {bool raw = false}) {
+    // A colour cleared back to "Default" should leave no trace, not a bare
+    // `color:` line — the note simply has no colour.
+    if (key == kColorKey && value.isEmpty) {
+      widget.onChanged(fme.removeProperty(widget.content, key));
+      return;
+    }
+    widget.onChanged(fme.setScalar(widget.content, key, value, raw: raw));
+  }
 
   void _setList(String key, List<String> items) =>
       widget.onChanged(fme.setList(widget.content, key, items));
@@ -166,6 +174,7 @@ IconData _iconFor(PropertyType type) => switch (type) {
   PropertyType.list => Icons.label_outline,
   PropertyType.select => Icons.arrow_drop_down_circle_outlined,
   PropertyType.url => Icons.link,
+  PropertyType.color => Icons.palette_outlined,
 };
 
 enum _RowAction { retype, rename, delete }
@@ -346,6 +355,11 @@ class _ValueEditor extends StatelessWidget {
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           formatters: [FilteringTextInputFormatter.allow(RegExp(r'[-0-9.]'))],
         );
+      case PropertyType.color:
+        return _AccentEditor(
+          value: span.displayValue,
+          onChanged: (v) => onValue(v),
+        );
       case PropertyType.url:
       case PropertyType.text:
         return _TextEditor(
@@ -353,6 +367,32 @@ class _ValueEditor extends StatelessWidget {
           onChanged: (v) => onValue(v),
         );
     }
+  }
+}
+
+/// A row of swatches.
+///
+/// Colour is edited here, in the properties list, rather than through a
+/// separate menu — the list is the only way frontmatter changes, and a colour
+/// is frontmatter like any other value.
+class _AccentEditor extends StatelessWidget {
+  const _AccentEditor({required this.value, required this.onChanged});
+
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2, bottom: 4),
+      child: AccentPicker(
+        size: 26,
+        selected: Accent.parse(value),
+        // "Default" clears the key rather than writing `color: none`, so a
+        // note that never had a colour goes back to having no colour line.
+        onSelected: (accent) => onChanged(accent.isNone ? '' : accent.name),
+      ),
+    );
   }
 }
 

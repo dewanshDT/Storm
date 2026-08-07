@@ -11,7 +11,6 @@ import '../state/note_session.dart';
 import 'editor_toolbar.dart';
 import 'note_properties.dart';
 import 'wikilink_suggestions.dart';
-import 'theme.dart';
 
 /// The editing pane.
 ///
@@ -183,10 +182,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final dark = Theme.of(context).brightness == Brightness.dark;
 
-    // Serif for the note body only — it is the one place in the app that is
-    // prose rather than chrome, and the distinction is the point.
+    // The note body only — it is the one place in the app that is prose
+    // rather than chrome, and the distinction is the point. Which face is the
+    // user's choice; the default is the bundled serif.
     final base = TextStyle(
-      fontFamily: StormTheme.bodyFamily,
+      fontFamily: settings.bodyFont.family,
       fontSize: settings.fontSize + 1,
       height: 1.6,
       color: Theme.of(context).colorScheme.onSurface,
