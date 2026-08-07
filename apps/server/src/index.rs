@@ -283,12 +283,26 @@ impl Indexer {
         })
     }
 
+    /// Folders the user created explicitly, which pruning must not remove.
+    ///
+    /// Read fresh on each mutation rather than cached: the set changes through
+    /// the folder API, and a stale copy would either delete a folder someone
+    /// just made or strand one they just removed.
+    fn protected_folders(&self) -> std::collections::HashSet<String> {
+        self.db
+            .list_folders()
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
     pub fn move_note(&mut self, id: &str, new_path: &str) -> Result<WriteResult> {
         let current = self
             .db
             .get_note(id)?
             .ok_or_else(|| anyhow!("no note with id {id}"))?;
-        self.vault.rename(&current.path, new_path)?;
+        self.vault
+            .rename(&current.path, new_path, &self.protected_folders())?;
 
         let content = self.vault.read(new_path)?;
         let row = self.row_for(id, new_path, &content, current.version + 1, Some(&current));
@@ -311,8 +325,98 @@ impl Indexer {
             .db
             .get_note(id)?
             .ok_or_else(|| anyhow!("no note with id {id}"))?;
-        self.vault.delete(&current.path)?;
+        self.vault
+            .delete(&current.path, &self.protected_folders())?;
         self.db.delete_note(id, &now_rfc3339())
+    }
+
+    // ---- folders -------------------------------------------------------
+
+    /// Creates a folder and records it, so pruning leaves it alone.
+    ///
+    /// Recording is the whole point: a folder that exists only as a directory
+    /// disappears the moment the tree around it is tidied.
+    pub fn create_folder(&mut self, path: &str) -> Result<()> {
+        let clean = normalise_folder(path)?;
+        if self.vault.exists(&clean) {
+            return Err(anyhow!("a note already exists at {clean}"));
+        }
+        self.vault.create_dir(&clean)?;
+        self.db.record_folder(&clean, &now_rfc3339())?;
+        Ok(())
+    }
+
+    /// Removes an empty folder. Refuses while it still holds notes — deleting
+    /// someone's notes because they tapped "delete folder" is not a thing this
+    /// should ever do silently.
+    pub fn delete_folder(&mut self, path: &str) -> Result<()> {
+        let clean = normalise_folder(path)?;
+        let contained = self.db.notes_under(&clean)?;
+        if !contained.is_empty() {
+            return Err(anyhow!(
+                "“{clean}” still holds {} note{}",
+                contained.len(),
+                if contained.len() == 1 { "" } else { "s" }
+            ));
+        }
+        self.vault.remove_dir(&clean)?;
+        self.db.forget_folder(&clean)?;
+        Ok(())
+    }
+
+    /// Renames a folder and rewrites every contained note's path.
+    ///
+    /// One directory rename, then one index update per note, each appending a
+    /// `moved` change so clients follow. Notes keep their ids — a move is a
+    /// metadata change, not delete-plus-create.
+    pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<Vec<i64>> {
+        let from = normalise_folder(from)?;
+        let to = normalise_folder(to)?;
+        if from == to {
+            return Ok(Vec::new());
+        }
+        if to.starts_with(&format!("{from}/")) {
+            return Err(anyhow!("cannot move a folder inside itself"));
+        }
+
+        let notes = self.db.notes_under(&from)?;
+        self.vault.rename_dir(&from, &to)?;
+        self.db.rename_folder_records(&from, &to)?;
+
+        let mut seqs = Vec::with_capacity(notes.len());
+        for note in notes {
+            let new_path = format!("{to}{}", &note.path[from.len()..]);
+            let content = self.vault.read(&new_path)?;
+            let row = self.row_for(&note.id, &new_path, &content, note.version + 1, Some(&note));
+            let extracted = parse::extract(&content);
+            seqs.push(
+                self.db
+                    .record_note(&row, &content, &extracted, db::KIND_MOVED, None)?,
+            );
+        }
+        Ok(seqs)
+    }
+
+    /// Every folder in the vault: the ones derived from note paths, plus the
+    /// ones created explicitly. Only the union makes an empty folder visible.
+    pub fn all_folders(&self) -> Result<Vec<String>> {
+        let mut folders: Vec<String> = self
+            .db
+            .list_notes()?
+            .iter()
+            // `_storm/` holds Storm's own configuration, not the user's notes.
+            .filter(|n| !n.path.starts_with("_storm/"))
+            .flat_map(|n| {
+                let parts: Vec<&str> = n.path.split('/').collect();
+                (1..parts.len())
+                    .map(|i| parts[..i].join("/"))
+                    .collect::<Vec<_>>()
+            })
+            .chain(self.db.list_folders()?)
+            .collect();
+        folders.sort();
+        folders.dedup();
+        Ok(folders)
     }
 
     /// Stores an attachment and indexes it.
@@ -335,7 +439,7 @@ impl Indexer {
     }
 
     pub fn delete_attachment(&mut self, rel_path: &str) -> Result<()> {
-        self.vault.delete(rel_path)?;
+        self.vault.delete(rel_path, &self.protected_folders())?;
         self.db.remove_attachment(rel_path)
     }
 
@@ -398,6 +502,20 @@ impl Indexer {
 /// Blanks the server-owned `modified` field so it can't cause a conflict.
 fn normalise(content: &str) -> String {
     frontmatter::set_scalars(content, &[("modified", VOLATILE)])
+}
+
+/// Canonical form for a folder path: no leading or trailing slash, and
+/// validated by the same rules as a note path.
+///
+/// `Vault::resolve` already rejects `..`, absolute paths and dotted segments;
+/// running the folder through it here means the folder API cannot be a way
+/// around the checks the note API enforces.
+fn normalise_folder(path: &str) -> Result<String> {
+    let clean = path.trim().trim_matches('/');
+    if clean.is_empty() {
+        return Err(anyhow!("the vault root is not a folder you can change"));
+    }
+    Ok(clean.to_string())
 }
 
 pub fn now_rfc3339() -> String {
@@ -482,7 +600,7 @@ mod tests {
         ix.vault.write("A.md", "# A\n").unwrap();
         ix.reconcile(false).unwrap();
 
-        ix.vault.delete("A.md").unwrap();
+        ix.vault.delete("A.md", &Default::default()).unwrap();
         let report = ix.reconcile(false).unwrap();
         assert_eq!(report.removed, 1);
         assert!(ix.db.list_notes().unwrap().is_empty());
@@ -659,7 +777,7 @@ mod tests {
     fn refresh_handles_external_deletion() {
         let (_d, mut ix) = indexer();
         let created = ix.create_note("A.md", "# A\n").unwrap();
-        ix.vault.delete("A.md").unwrap();
+        ix.vault.delete("A.md", &Default::default()).unwrap();
 
         assert!(ix.refresh_path("A.md").unwrap().is_some());
         assert!(ix.db.get_note(&created.note.id).unwrap().is_none());
@@ -737,5 +855,213 @@ mod tests {
         ix.delete_note(&created.note.id).unwrap();
         assert!(!ix.vault.exists("A.md"));
         assert!(ix.db.get_note(&created.note.id).unwrap().is_none());
+    }
+
+    // ---- folders -------------------------------------------------------
+
+    #[test]
+    fn a_created_folder_survives_the_delete_that_empties_it() {
+        // The regression this whole feature turns on. Before the `folders`
+        // table, creating a folder and removing its only note deleted the
+        // folder too — silently, at the next tidy-up.
+        let (_d, mut ix) = indexer();
+        ix.create_folder("Projects").unwrap();
+        let note = ix.create_note("Projects/A.md", "# A\n").unwrap();
+
+        ix.delete_note(&note.note.id).unwrap();
+
+        assert!(ix.all_folders().unwrap().contains(&"Projects".to_string()));
+    }
+
+    #[test]
+    fn a_derived_folder_is_still_pruned_when_emptied() {
+        // Folders that only ever existed because a note was inside them keep
+        // the old behaviour — otherwise every transient directory sticks.
+        let (_d, mut ix) = indexer();
+        let note = ix.create_note("Derived/A.md", "# A\n").unwrap();
+        ix.delete_note(&note.note.id).unwrap();
+        assert!(!ix.all_folders().unwrap().contains(&"Derived".to_string()));
+    }
+
+    #[test]
+    fn an_empty_created_folder_appears_in_the_tree() {
+        let (_d, mut ix) = indexer();
+        ix.create_folder("Empty").unwrap();
+        assert_eq!(ix.all_folders().unwrap(), vec!["Empty".to_string()]);
+    }
+
+    #[test]
+    fn folders_are_the_union_of_derived_and_created() {
+        let (_d, mut ix) = indexer();
+        ix.create_note("Daily/2026/A.md", "# A\n").unwrap();
+        ix.create_folder("Archive").unwrap();
+
+        let folders = ix.all_folders().unwrap();
+        assert_eq!(folders, vec!["Archive", "Daily", "Daily/2026"]);
+    }
+
+    #[test]
+    fn deleting_a_folder_refuses_while_it_holds_notes() {
+        let (_d, mut ix) = indexer();
+        ix.create_folder("Projects").unwrap();
+        let note = ix.create_note("Projects/A.md", "# A\n").unwrap();
+
+        let err = ix.delete_folder("Projects").unwrap_err().to_string();
+        assert!(err.contains("1 note"), "unhelpful message: {err}");
+        assert!(ix.vault.exists("Projects/A.md"), "notes must be untouched");
+
+        ix.delete_note(&note.note.id).unwrap();
+        ix.delete_folder("Projects").unwrap();
+        assert!(ix.all_folders().unwrap().is_empty());
+    }
+
+    #[test]
+    fn renaming_a_folder_rewrites_every_contained_note_path() {
+        let (_d, mut ix) = indexer();
+        let a = ix.create_note("Old/A.md", "# A\n").unwrap();
+        let b = ix.create_note("Old/Sub/B.md", "# B\n").unwrap();
+
+        let seqs = ix.rename_folder("Old", "New").unwrap();
+        assert_eq!(seqs.len(), 2, "one `moved` change per note");
+
+        // Ids survive: a move is a metadata change, not delete-plus-create.
+        assert_eq!(
+            ix.db.get_note(&a.note.id).unwrap().unwrap().path,
+            "New/A.md"
+        );
+        assert_eq!(
+            ix.db.get_note(&b.note.id).unwrap().unwrap().path,
+            "New/Sub/B.md"
+        );
+        assert!(ix.vault.exists("New/Sub/B.md"));
+        assert!(!ix.vault.exists("Old/A.md"));
+    }
+
+    #[test]
+    fn renaming_a_folder_carries_its_created_record() {
+        let (_d, mut ix) = indexer();
+        ix.create_folder("Old").unwrap();
+        ix.create_folder("Old/Inner").unwrap();
+
+        ix.rename_folder("Old", "New").unwrap();
+
+        let folders = ix.all_folders().unwrap();
+        assert!(folders.contains(&"New".to_string()));
+        assert!(folders.contains(&"New/Inner".to_string()));
+        assert!(!folders.iter().any(|f| f.starts_with("Old")));
+    }
+
+    #[test]
+    fn a_folder_cannot_be_moved_inside_itself() {
+        let (_d, mut ix) = indexer();
+        ix.create_note("Projects/A.md", "# A\n").unwrap();
+        assert!(ix.rename_folder("Projects", "Projects/Nested").is_err());
+        assert!(ix.vault.exists("Projects/A.md"));
+    }
+
+    #[test]
+    fn folder_paths_go_through_the_same_checks_as_note_paths() {
+        let (_d, mut ix) = indexer();
+        for bad in ["", "/", "   ", ".."] {
+            assert!(
+                ix.create_folder(bad).is_err(),
+                "should have rejected {bad:?}"
+            );
+        }
+        // Escapes are caught by `Vault::resolve`, which the folder API reuses
+        // rather than reimplementing.
+        assert!(ix.create_folder("../escape").is_err());
+        assert!(ix.create_folder(".hidden").is_err());
+    }
+
+    #[test]
+    fn trailing_slashes_do_not_make_a_second_folder() {
+        let (_d, mut ix) = indexer();
+        ix.create_folder("Projects").unwrap();
+        ix.create_folder("Projects/").unwrap();
+        assert_eq!(ix.all_folders().unwrap(), vec!["Projects".to_string()]);
+    }
+
+    // ---- recents -------------------------------------------------------
+
+    #[test]
+    fn opening_a_note_does_not_change_it() {
+        // Opening is not an edit. If it bumped `version` or wrote to the
+        // change log, every device would resync because someone looked.
+        let (_d, mut ix) = indexer();
+        let created = ix.create_note("A.md", "# A\n").unwrap();
+        let seq_before = ix.db.latest_seq().unwrap();
+
+        ix.db
+            .touch_note_access(&created.note.id, "2026-08-07T10:00:00Z")
+            .unwrap();
+
+        let after = ix.db.get_note(&created.note.id).unwrap().unwrap();
+        assert_eq!(after.version, created.note.version);
+        assert_eq!(ix.db.latest_seq().unwrap(), seq_before);
+    }
+
+    #[test]
+    fn recents_come_back_newest_first() {
+        let (_d, mut ix) = indexer();
+        let a = ix.create_note("A.md", "# A\n").unwrap();
+        let b = ix.create_note("B.md", "# B\n").unwrap();
+
+        ix.db
+            .touch_note_access(&a.note.id, "2026-08-07T09:00:00Z")
+            .unwrap();
+        ix.db
+            .touch_note_access(&b.note.id, "2026-08-07T11:00:00Z")
+            .unwrap();
+
+        let recents = ix.db.recent_notes(10).unwrap();
+        assert_eq!(recents[0].note_id, b.note.id);
+        assert_eq!(recents[1].note_id, a.note.id);
+
+        // Re-opening moves it to the top rather than adding a second row.
+        ix.db
+            .touch_note_access(&a.note.id, "2026-08-07T12:00:00Z")
+            .unwrap();
+        let recents = ix.db.recent_notes(10).unwrap();
+        assert_eq!(recents.len(), 2);
+        assert_eq!(recents[0].note_id, a.note.id);
+    }
+
+    #[test]
+    fn storms_own_config_note_is_not_counted_or_listed() {
+        // `_storm/vault.md` is an ordinary note so it syncs and stays
+        // greppable, but it is Storm's configuration, not the user's writing.
+        // Counting it would make every vault card read one too high.
+        let (_d, mut ix) = indexer();
+        ix.create_note("Real.md", "# Real\n").unwrap();
+        ix.create_note("_storm/vault.md", "---\nstorm.type.due: date\n---\n")
+            .unwrap();
+
+        assert_eq!(ix.db.count_notes().unwrap(), 1);
+        assert!(!ix.all_folders().unwrap().contains(&"_storm".to_string()));
+    }
+
+    #[test]
+    fn the_underscore_in_storm_is_escaped_not_a_wildcard() {
+        // `_` is a LIKE wildcard. Unescaped, `_storm/%` would also swallow a
+        // real folder called `astorm/`.
+        let (_d, mut ix) = indexer();
+        ix.create_note("astorm/Note.md", "# A\n").unwrap();
+        ix.create_note("_storm/vault.md", "---\n---\n").unwrap();
+
+        assert_eq!(ix.db.count_notes().unwrap(), 1);
+        assert!(ix.all_folders().unwrap().contains(&"astorm".to_string()));
+    }
+
+    #[test]
+    fn a_deleted_note_leaves_the_recents_list() {
+        let (_d, mut ix) = indexer();
+        let created = ix.create_note("A.md", "# A\n").unwrap();
+        ix.db
+            .touch_note_access(&created.note.id, "2026-08-07T10:00:00Z")
+            .unwrap();
+
+        ix.delete_note(&created.note.id).unwrap();
+        assert!(ix.db.recent_notes(10).unwrap().is_empty());
     }
 }

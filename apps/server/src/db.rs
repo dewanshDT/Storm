@@ -16,7 +16,19 @@ use std::path::Path;
 
 pub struct Db {
     conn: Connection,
+    /// Which vault this index belongs to. Stamped onto every [`Change`] so one
+    /// WebSocket can carry every vault's events and the client can tell them
+    /// apart. Empty for a database opened outside a vault (backup mode).
+    vault_id: String,
 }
+
+/// Bumped only for schema changes that *alter* existing structure.
+///
+/// Every table below is created with `IF NOT EXISTS`, so pure additions need no
+/// version check — an old database simply gains the new table on the next boot.
+/// A future change that alters or drops a column does need one, and this is
+/// where it goes.
+const SCHEMA_VERSION: i64 = 1;
 
 /// A note's indexed metadata. Content lives on disk, not here.
 #[derive(Debug, Clone, Serialize)]
@@ -38,10 +50,24 @@ pub struct NoteRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct Change {
     pub seq: i64,
+    pub vault_id: String,
     pub note_id: String,
     pub kind: String,
     pub version: i64,
     pub at: String,
+}
+
+/// A note the user opened, for the cross-vault recents list.
+///
+/// `opened_at` comes from `note_access` and `modified` from `notes`, so the
+/// dashboard can distinguish "you looked at this" from "this changed".
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentRow {
+    pub note_id: String,
+    pub path: String,
+    pub title: String,
+    pub modified: String,
+    pub opened_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,28 +92,31 @@ pub const KIND_DELETED: &str = "deleted";
 pub const KIND_MOVED: &str = "moved";
 
 impl Db {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, vault_id: impl Into<String>) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating state dir {}", parent.display()))?;
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening database {}", path.display()))?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, vault_id.into())
     }
 
-    #[cfg(test)]
+    /// A throwaway index that touches no disk.
+    ///
+    /// Used by tests, and by `--dry-run`, which has to run a real reconcile to
+    /// report what an import *would* do without writing an index for it.
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, "in-memory".into())
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(conn: Connection, vault_id: String) -> Result<Self> {
         // WAL keeps the file watcher's writes from blocking API reads.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
-        let db = Self { conn };
+        let db = Self { conn, vault_id };
         db.assert_fts5()?;
         db.migrate()?;
         Ok(db)
@@ -180,8 +209,40 @@ impl Db {
                 body,
                 tokenize = 'unicode61 remove_diacritics 2'
             );
+
+            -- Folders the user created explicitly, as opposed to the ones
+            -- derived from note paths.
+            --
+            -- This table exists for exactly one reason: `prune_empty_parents`
+            -- deletes directories that become empty, so without an exemption a
+            -- folder created on purpose vanishes the moment its last note is
+            -- moved or deleted. See `Vault::prune_empty_parents`.
+            CREATE TABLE IF NOT EXISTS folders (
+                path     TEXT PRIMARY KEY,
+                created  TEXT NOT NULL
+            );
+
+            -- When a note was last opened, feeding the cross-vault recents
+            -- list.
+            --
+            -- Deliberately NOT a column on `notes`: `record_note` rewrites that
+            -- row on every index update and would clobber it, and an "opened"
+            -- timestamp must not bump `version` or append to `change_log`.
+            CREATE TABLE IF NOT EXISTS note_access (
+                note_id    TEXT PRIMARY KEY,
+                opened_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_access_at ON note_access(opened_at);
             "#,
         )?;
+
+        let current: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if current < SCHEMA_VERSION {
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(())
     }
 
@@ -324,6 +385,7 @@ impl Db {
         tx.execute("DELETE FROM links WHERE src_id = ?1", params![id])?;
         tx.execute("DELETE FROM tags WHERE note_id = ?1", params![id])?;
         tx.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![id])?;
+        tx.execute("DELETE FROM note_access WHERE note_id = ?1", params![id])?;
         // note_versions is kept deliberately: a delete that arrives while
         // another device was editing must still be recoverable.
         tx.execute(
@@ -427,9 +489,14 @@ impl Db {
             "SELECT seq, note_id, kind, version, at FROM change_log
              WHERE seq > ?1 ORDER BY seq LIMIT ?2",
         )?;
+        let vault_id = self.vault_id.clone();
         let rows = stmt.query_map(params![since, limit], |row| {
             Ok(Change {
                 seq: row.get(0)?,
+                // Not a column: `seq` is already per vault because each vault
+                // has its own database. The id is carried on the wire so one
+                // socket can serve every vault.
+                vault_id: vault_id.clone(),
                 note_id: row.get(1)?,
                 kind: row.get(2)?,
                 version: row.get(3)?,
@@ -445,6 +512,107 @@ impl Db {
             .query_row("SELECT COALESCE(MAX(seq), 0) FROM change_log", [], |r| {
                 r.get(0)
             })?)
+    }
+
+    // ---- folders -------------------------------------------------------
+
+    /// Records a folder as explicitly created, exempting it from pruning.
+    pub fn record_folder(&self, path: &str, at: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO folders (path, created) VALUES (?1, ?2)",
+            params![path, at],
+        )?;
+        Ok(())
+    }
+
+    pub fn forget_folder(&self, path: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM folders WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
+    /// Re-points recorded folders after a folder rename, `from` and everything
+    /// beneath it.
+    pub fn rename_folder_records(&mut self, from: &str, to: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE OR REPLACE folders SET path = ?2 WHERE path = ?1",
+            params![from, to],
+        )?;
+        tx.execute(
+            "UPDATE OR REPLACE folders
+             SET path = ?2 || substr(path, length(?1) + 1)
+             WHERE path LIKE ?1 || '/%'",
+            params![from, to],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_folders(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM folders ORDER BY path")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Notes at or below `folder`, used to decide whether a folder is empty and
+    /// to rewrite paths on rename.
+    pub fn notes_under(&self, folder: &str) -> Result<Vec<NoteRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, title, version, content_hash, created, modified, size
+             FROM notes WHERE path LIKE ?1 || '/%' ORDER BY path",
+        )?;
+        let rows = stmt.query_map(params![folder], Self::note_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ---- recents -------------------------------------------------------
+
+    /// Stamps a note as opened now. Idempotent, and never touches `notes`.
+    pub fn touch_note_access(&self, note_id: &str, at: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO note_access (note_id, opened_at) VALUES (?1, ?2)
+             ON CONFLICT(note_id) DO UPDATE SET opened_at = excluded.opened_at",
+            params![note_id, at],
+        )?;
+        Ok(())
+    }
+
+    /// Most recently opened notes in this vault. The caller merges across
+    /// vaults; each one only has to return its own top `limit`.
+    pub fn recent_notes(&self, limit: i64) -> Result<Vec<RecentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.note_id, n.path, n.title, n.modified, a.opened_at
+             FROM note_access a JOIN notes n ON n.id = a.note_id
+             ORDER BY a.opened_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(RecentRow {
+                note_id: r.get(0)?,
+                path: r.get(1)?,
+                title: r.get(2)?,
+                modified: r.get(3)?,
+                opened_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Notes the user would recognise as theirs.
+    ///
+    /// `_storm/` holds Storm's own per-vault configuration, kept as ordinary
+    /// markdown so it syncs and stays greppable. Counting it would make every
+    /// vault card on the dashboard read one too high.
+    pub fn count_notes(&self) -> Result<i64> {
+        // `_` is a LIKE wildcard, so it has to be escaped — an unescaped
+        // `_storm/%` would also exclude `astorm/`, `1storm/` and so on.
+        Ok(self.conn.query_row(
+            r"SELECT COUNT(*) FROM notes WHERE path NOT LIKE '\_storm/%' ESCAPE '\'",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     // ---- search, tags, backlinks ---------------------------------------
@@ -529,14 +697,14 @@ mod tests {
         let dir = tempdir::TempDir::new("storm-snap").unwrap();
         let live = dir.path().join("index.db");
 
-        let mut db = Db::open(&live).unwrap();
+        let mut db = Db::open(&live, "v1").unwrap();
         let n = note("a", "A.md", 1);
         record(&mut db, &n, "# A\n\nsearchable body\n", KIND_CREATED);
 
         let dest = dir.path().join("backup.db");
         db.snapshot_to(&dest).unwrap();
 
-        let restored = Db::open(&dest).unwrap();
+        let restored = Db::open(&dest, "v1").unwrap();
         assert_eq!(restored.list_notes().unwrap().len(), 1);
         assert_eq!(
             restored.version_content("a", 1).unwrap().unwrap(),
@@ -550,7 +718,7 @@ mod tests {
         // The backup script once verified by writing to /dev/null, which this
         // would have deleted.
         let dir = tempdir::TempDir::new("storm-snap3").unwrap();
-        let db = Db::open(&dir.path().join("index.db")).unwrap();
+        let db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
 
         let a_directory = dir.path().join("subdir");
         std::fs::create_dir(&a_directory).unwrap();
@@ -562,7 +730,7 @@ mod tests {
     fn a_snapshot_overwrites_an_earlier_one() {
         // Nightly backups reuse the same filename.
         let dir = tempdir::TempDir::new("storm-snap2").unwrap();
-        let mut db = Db::open(&dir.path().join("index.db")).unwrap();
+        let mut db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
         record(&mut db, &note("a", "A.md", 1), "one\n", KIND_CREATED);
 
         let dest = dir.path().join("backup.db");
@@ -570,7 +738,10 @@ mod tests {
         record(&mut db, &note("b", "B.md", 1), "two\n", KIND_CREATED);
         db.snapshot_to(&dest).unwrap();
 
-        assert_eq!(Db::open(&dest).unwrap().list_notes().unwrap().len(), 2);
+        assert_eq!(
+            Db::open(&dest, "v1").unwrap().list_notes().unwrap().len(),
+            2
+        );
     }
 
     #[test]

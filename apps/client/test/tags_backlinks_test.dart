@@ -6,6 +6,7 @@ import 'package:http/testing.dart';
 
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_api.dart';
+import 'fake_server.dart';
 
 /// Tag and backlink parsing, and the grouping the tag browser relies on.
 void main() {
@@ -13,7 +14,10 @@ void main() {
     baseUrl: 'http://test',
     token: 't',
     client: MockClient((request) async {
-      if (request.url.path == path) {
+      // These routes are vault-scoped now. The fixtures name the unscoped
+      // path, so the prefix is added here rather than in six places.
+      if (request.url.path ==
+          '/v1/vaults/${FakeServer.primaryVault}${path.substring('/v1'.length)}') {
         return http.Response(
           jsonEncode(body),
           200,
@@ -37,7 +41,7 @@ void main() {
         ],
       });
 
-      final tags = await api.tags();
+      final tags = await api.tags(FakeServer.primaryVault);
       expect(tags, hasLength(2));
       expect(tags.first.tag, 'homelab');
       expect(tags.first.count, 12);
@@ -85,10 +89,10 @@ void main() {
         }),
       );
 
-      await api.notesWithTag('proj/storm');
+      await api.notesWithTag(FakeServer.primaryVault, 'proj/storm');
       expect(
         seen,
-        '/v1/tags/proj%2Fstorm',
+        '/v1/vaults/${FakeServer.primaryVault}/tags/proj%2Fstorm',
         reason: 'an unencoded slash would look like a nested route',
       );
     });
@@ -107,7 +111,7 @@ void main() {
         ],
       });
 
-      final notes = await api.notesWithTag('homelab');
+      final notes = await api.notesWithTag(FakeServer.primaryVault, 'homelab');
       expect(notes.single.id, 'n1');
     });
   });
@@ -128,7 +132,7 @@ void main() {
         ],
       });
 
-      final back = await api.backlinks('n1');
+      final back = await api.backlinks(FakeServer.primaryVault, 'n1');
       expect(back, hasLength(1));
       expect(back.single.title, 'Source');
       expect(
@@ -145,7 +149,7 @@ void main() {
           'title': 'Lonely',
           'backlinks': <dynamic>[],
         });
-        expect(await api.backlinks('n1'), isEmpty);
+        expect(await api.backlinks(FakeServer.primaryVault, 'n1'), isEmpty);
       },
     );
   });
@@ -163,7 +167,7 @@ void main() {
         ],
       });
 
-      final hits = await api.search('quick');
+      final hits = await api.search(FakeServer.primaryVault, 'quick');
       expect(hits.single.snippet, contains('<<quick>>'));
     });
 
@@ -182,7 +186,7 @@ void main() {
         }),
       );
 
-      expect(await api.search('   '), isEmpty);
+      expect(await api.search(FakeServer.primaryVault, '   '), isEmpty);
       expect(called, isFalse);
     });
   });

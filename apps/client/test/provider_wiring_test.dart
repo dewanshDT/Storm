@@ -8,6 +8,7 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/state/note_session.dart';
 
 import 'fake_server.dart';
+import 'shell_harness.dart';
 
 /// Provider lifetimes.
 ///
@@ -21,13 +22,18 @@ import 'fake_server.dart';
 /// engine ticked, the session was recreated empty, and the editor fell back to
 /// "Select a note to start editing" while the tree still showed the note as
 /// selected.
-void main() {
-  late CacheDb cache;
-  late FakeServer server;
+/// One test's container and the server behind it.
+///
+/// Deliberately *not* shared `late` fields. These tests leave async work in
+/// flight — a sync that completes after the test body returns — and with a
+/// shared fixture that work lands on the next test's server, which showed up
+/// as request counts from one test failing another's assertion.
+typedef Fixture = ({ProviderContainer container, FakeServer server});
 
-  ProviderContainer makeContainer() {
-    cache = CacheDb(NativeDatabase.memory());
-    server = FakeServer();
+void main() {
+  Future<Fixture> makeFixture() async {
+    final cache = CacheDb(NativeDatabase.memory());
+    final server = FakeServer();
     server.notes['n1'] = ServerNote(
       id: 'n1',
       path: 'A.md',
@@ -35,18 +41,25 @@ void main() {
       version: 1,
     );
 
-    return ProviderContainer(
+    final container = ProviderContainer(
       overrides: [
         cacheProvider.overrideWithValue(cache),
         apiProvider.overrideWithValue(
           StormApi(baseUrl: 'http://test', token: 't', client: server.client),
         ),
+        // The engine takes its vault from settings, so these have to say
+        // which one is open or every cache key would be blank.
+        settingsProvider.overrideWith(() => FakeSettings(true)),
       ],
     );
+    // Settings load asynchronously, and the engine takes its vault from them.
+    // Reading before they resolve would build an engine with no vault.
+    await container.read(settingsProvider.future);
+    return (container: container, server: server);
   }
 
   test('the note session survives sync-engine status ticks', () async {
-    final container = makeContainer();
+    final (:container, :server) = await makeFixture();
     addTearDown(container.dispose);
 
     final session = container.read(noteSessionProvider);
@@ -75,7 +88,7 @@ void main() {
   });
 
   test('opening a note leaves it open and readable', () async {
-    final container = makeContainer();
+    final (:container, :server) = await makeFixture();
     addTearDown(container.dispose);
 
     final session = container.read(noteSessionProvider);
@@ -88,7 +101,7 @@ void main() {
   });
 
   test('the engine itself is not rebuilt by its own notifications', () async {
-    final container = makeContainer();
+    final (:container, :server) = await makeFixture();
     addTearDown(container.dispose);
 
     final engine = container.read(syncEngineProvider);
@@ -103,7 +116,7 @@ void main() {
   });
 
   test('the tree does not refetch on every status tick', () async {
-    final container = makeContainer();
+    final (:container, :server) = await makeFixture();
     addTearDown(container.dispose);
 
     await container.read(treeProvider.future);

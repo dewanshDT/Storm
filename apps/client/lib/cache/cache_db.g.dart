@@ -9,6 +9,18 @@ class $CachedNotesTable extends CachedNotes
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $CachedNotesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _vaultIdMeta = const VerificationMeta(
+    'vaultId',
+  );
+  @override
+  late final GeneratedColumn<String> vaultId = GeneratedColumn<String>(
+    'vault_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(kLegacyVault),
+  );
   static const VerificationMeta _idMeta = const VerificationMeta('id');
   @override
   late final GeneratedColumn<String> id = GeneratedColumn<String>(
@@ -97,6 +109,7 @@ class $CachedNotesTable extends CachedNotes
   );
   @override
   List<GeneratedColumn> get $columns => [
+    vaultId,
     id,
     path,
     title,
@@ -118,6 +131,12 @@ class $CachedNotesTable extends CachedNotes
   }) {
     final context = VerificationContext();
     final data = instance.toColumns(true);
+    if (data.containsKey('vault_id')) {
+      context.handle(
+        _vaultIdMeta,
+        vaultId.isAcceptableOrUnknown(data['vault_id']!, _vaultIdMeta),
+      );
+    }
     if (data.containsKey('id')) {
       context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
     } else if (isInserting) {
@@ -177,11 +196,15 @@ class $CachedNotesTable extends CachedNotes
   }
 
   @override
-  Set<GeneratedColumn> get $primaryKey => {id};
+  Set<GeneratedColumn> get $primaryKey => {vaultId, id};
   @override
   CachedNote map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
     return CachedNote(
+      vaultId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}vault_id'],
+      )!,
       id: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}id'],
@@ -224,6 +247,11 @@ class $CachedNotesTable extends CachedNotes
 }
 
 class CachedNote extends DataClass implements Insertable<CachedNote> {
+  /// Which vault this note belongs to.
+  ///
+  /// Part of the primary key: note ids are unique per vault, not per server,
+  /// and two vaults routinely hold the same *path*.
+  final String vaultId;
   final String id;
   final String path;
   final String title;
@@ -238,6 +266,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   /// User asked to keep this available offline, so eviction must skip it.
   final bool pinned;
   const CachedNote({
+    required this.vaultId,
     required this.id,
     required this.path,
     required this.title,
@@ -250,6 +279,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    map['vault_id'] = Variable<String>(vaultId);
     map['id'] = Variable<String>(id);
     map['path'] = Variable<String>(path);
     map['title'] = Variable<String>(title);
@@ -263,6 +293,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
 
   CachedNotesCompanion toCompanion(bool nullToAbsent) {
     return CachedNotesCompanion(
+      vaultId: Value(vaultId),
       id: Value(id),
       path: Value(path),
       title: Value(title),
@@ -280,6 +311,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   }) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return CachedNote(
+      vaultId: serializer.fromJson<String>(json['vaultId']),
       id: serializer.fromJson<String>(json['id']),
       path: serializer.fromJson<String>(json['path']),
       title: serializer.fromJson<String>(json['title']),
@@ -294,6 +326,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   Map<String, dynamic> toJson({ValueSerializer? serializer}) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
+      'vaultId': serializer.toJson<String>(vaultId),
       'id': serializer.toJson<String>(id),
       'path': serializer.toJson<String>(path),
       'title': serializer.toJson<String>(title),
@@ -306,6 +339,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   }
 
   CachedNote copyWith({
+    String? vaultId,
     String? id,
     String? path,
     String? title,
@@ -315,6 +349,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
     DateTime? cachedAt,
     bool? pinned,
   }) => CachedNote(
+    vaultId: vaultId ?? this.vaultId,
     id: id ?? this.id,
     path: path ?? this.path,
     title: title ?? this.title,
@@ -326,6 +361,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   );
   CachedNote copyWithCompanion(CachedNotesCompanion data) {
     return CachedNote(
+      vaultId: data.vaultId.present ? data.vaultId.value : this.vaultId,
       id: data.id.present ? data.id.value : this.id,
       path: data.path.present ? data.path.value : this.path,
       title: data.title.present ? data.title.value : this.title,
@@ -340,6 +376,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   @override
   String toString() {
     return (StringBuffer('CachedNote(')
+          ..write('vaultId: $vaultId, ')
           ..write('id: $id, ')
           ..write('path: $path, ')
           ..write('title: $title, ')
@@ -354,6 +391,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
 
   @override
   int get hashCode => Object.hash(
+    vaultId,
     id,
     path,
     title,
@@ -367,6 +405,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is CachedNote &&
+          other.vaultId == this.vaultId &&
           other.id == this.id &&
           other.path == this.path &&
           other.title == this.title &&
@@ -378,6 +417,7 @@ class CachedNote extends DataClass implements Insertable<CachedNote> {
 }
 
 class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
+  final Value<String> vaultId;
   final Value<String> id;
   final Value<String> path;
   final Value<String> title;
@@ -388,6 +428,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
   final Value<bool> pinned;
   final Value<int> rowid;
   const CachedNotesCompanion({
+    this.vaultId = const Value.absent(),
     this.id = const Value.absent(),
     this.path = const Value.absent(),
     this.title = const Value.absent(),
@@ -399,6 +440,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
     this.rowid = const Value.absent(),
   });
   CachedNotesCompanion.insert({
+    this.vaultId = const Value.absent(),
     required String id,
     required String path,
     this.title = const Value.absent(),
@@ -414,6 +456,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
        content = Value(content),
        cachedAt = Value(cachedAt);
   static Insertable<CachedNote> custom({
+    Expression<String>? vaultId,
     Expression<String>? id,
     Expression<String>? path,
     Expression<String>? title,
@@ -425,6 +468,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
+      if (vaultId != null) 'vault_id': vaultId,
       if (id != null) 'id': id,
       if (path != null) 'path': path,
       if (title != null) 'title': title,
@@ -438,6 +482,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
   }
 
   CachedNotesCompanion copyWith({
+    Value<String>? vaultId,
     Value<String>? id,
     Value<String>? path,
     Value<String>? title,
@@ -449,6 +494,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
     Value<int>? rowid,
   }) {
     return CachedNotesCompanion(
+      vaultId: vaultId ?? this.vaultId,
       id: id ?? this.id,
       path: path ?? this.path,
       title: title ?? this.title,
@@ -464,6 +510,9 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (vaultId.present) {
+      map['vault_id'] = Variable<String>(vaultId.value);
+    }
     if (id.present) {
       map['id'] = Variable<String>(id.value);
     }
@@ -497,6 +546,7 @@ class CachedNotesCompanion extends UpdateCompanion<CachedNote> {
   @override
   String toString() {
     return (StringBuffer('CachedNotesCompanion(')
+          ..write('vaultId: $vaultId, ')
           ..write('id: $id, ')
           ..write('path: $path, ')
           ..write('title: $title, ')
@@ -516,6 +566,18 @@ class $OutboxTable extends Outbox with TableInfo<$OutboxTable, OutboxData> {
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $OutboxTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _vaultIdMeta = const VerificationMeta(
+    'vaultId',
+  );
+  @override
+  late final GeneratedColumn<String> vaultId = GeneratedColumn<String>(
+    'vault_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(kLegacyVault),
+  );
   static const VerificationMeta _noteIdMeta = const VerificationMeta('noteId');
   @override
   late final GeneratedColumn<String> noteId = GeneratedColumn<String>(
@@ -581,6 +643,7 @@ class $OutboxTable extends Outbox with TableInfo<$OutboxTable, OutboxData> {
   );
   @override
   List<GeneratedColumn> get $columns => [
+    vaultId,
     noteId,
     baseVersion,
     content,
@@ -600,6 +663,12 @@ class $OutboxTable extends Outbox with TableInfo<$OutboxTable, OutboxData> {
   }) {
     final context = VerificationContext();
     final data = instance.toColumns(true);
+    if (data.containsKey('vault_id')) {
+      context.handle(
+        _vaultIdMeta,
+        vaultId.isAcceptableOrUnknown(data['vault_id']!, _vaultIdMeta),
+      );
+    }
     if (data.containsKey('note_id')) {
       context.handle(
         _noteIdMeta,
@@ -648,11 +717,15 @@ class $OutboxTable extends Outbox with TableInfo<$OutboxTable, OutboxData> {
   }
 
   @override
-  Set<GeneratedColumn> get $primaryKey => {noteId};
+  Set<GeneratedColumn> get $primaryKey => {vaultId, noteId};
   @override
   OutboxData map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
     return OutboxData(
+      vaultId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}vault_id'],
+      )!,
       noteId: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}note_id'],
@@ -687,6 +760,7 @@ class $OutboxTable extends Outbox with TableInfo<$OutboxTable, OutboxData> {
 }
 
 class OutboxData extends DataClass implements Insertable<OutboxData> {
+  final String vaultId;
   final String noteId;
   final int baseVersion;
   final String content;
@@ -699,6 +773,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   final String? newPath;
   final DateTime queuedAt;
   const OutboxData({
+    required this.vaultId,
     required this.noteId,
     required this.baseVersion,
     required this.content,
@@ -709,6 +784,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    map['vault_id'] = Variable<String>(vaultId);
     map['note_id'] = Variable<String>(noteId);
     map['base_version'] = Variable<int>(baseVersion);
     map['content'] = Variable<String>(content);
@@ -722,6 +798,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
 
   OutboxCompanion toCompanion(bool nullToAbsent) {
     return OutboxCompanion(
+      vaultId: Value(vaultId),
       noteId: Value(noteId),
       baseVersion: Value(baseVersion),
       content: Value(content),
@@ -739,6 +816,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   }) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return OutboxData(
+      vaultId: serializer.fromJson<String>(json['vaultId']),
       noteId: serializer.fromJson<String>(json['noteId']),
       baseVersion: serializer.fromJson<int>(json['baseVersion']),
       content: serializer.fromJson<String>(json['content']),
@@ -751,6 +829,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   Map<String, dynamic> toJson({ValueSerializer? serializer}) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
+      'vaultId': serializer.toJson<String>(vaultId),
       'noteId': serializer.toJson<String>(noteId),
       'baseVersion': serializer.toJson<int>(baseVersion),
       'content': serializer.toJson<String>(content),
@@ -761,6 +840,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   }
 
   OutboxData copyWith({
+    String? vaultId,
     String? noteId,
     int? baseVersion,
     String? content,
@@ -768,6 +848,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
     Value<String?> newPath = const Value.absent(),
     DateTime? queuedAt,
   }) => OutboxData(
+    vaultId: vaultId ?? this.vaultId,
     noteId: noteId ?? this.noteId,
     baseVersion: baseVersion ?? this.baseVersion,
     content: content ?? this.content,
@@ -777,6 +858,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   );
   OutboxData copyWithCompanion(OutboxCompanion data) {
     return OutboxData(
+      vaultId: data.vaultId.present ? data.vaultId.value : this.vaultId,
       noteId: data.noteId.present ? data.noteId.value : this.noteId,
       baseVersion: data.baseVersion.present
           ? data.baseVersion.value
@@ -791,6 +873,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
   @override
   String toString() {
     return (StringBuffer('OutboxData(')
+          ..write('vaultId: $vaultId, ')
           ..write('noteId: $noteId, ')
           ..write('baseVersion: $baseVersion, ')
           ..write('content: $content, ')
@@ -803,11 +886,12 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
 
   @override
   int get hashCode =>
-      Object.hash(noteId, baseVersion, content, op, newPath, queuedAt);
+      Object.hash(vaultId, noteId, baseVersion, content, op, newPath, queuedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is OutboxData &&
+          other.vaultId == this.vaultId &&
           other.noteId == this.noteId &&
           other.baseVersion == this.baseVersion &&
           other.content == this.content &&
@@ -817,6 +901,7 @@ class OutboxData extends DataClass implements Insertable<OutboxData> {
 }
 
 class OutboxCompanion extends UpdateCompanion<OutboxData> {
+  final Value<String> vaultId;
   final Value<String> noteId;
   final Value<int> baseVersion;
   final Value<String> content;
@@ -825,6 +910,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
   final Value<DateTime> queuedAt;
   final Value<int> rowid;
   const OutboxCompanion({
+    this.vaultId = const Value.absent(),
     this.noteId = const Value.absent(),
     this.baseVersion = const Value.absent(),
     this.content = const Value.absent(),
@@ -834,6 +920,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
     this.rowid = const Value.absent(),
   });
   OutboxCompanion.insert({
+    this.vaultId = const Value.absent(),
     required String noteId,
     required int baseVersion,
     required String content,
@@ -846,6 +933,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
        content = Value(content),
        queuedAt = Value(queuedAt);
   static Insertable<OutboxData> custom({
+    Expression<String>? vaultId,
     Expression<String>? noteId,
     Expression<int>? baseVersion,
     Expression<String>? content,
@@ -855,6 +943,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
+      if (vaultId != null) 'vault_id': vaultId,
       if (noteId != null) 'note_id': noteId,
       if (baseVersion != null) 'base_version': baseVersion,
       if (content != null) 'content': content,
@@ -866,6 +955,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
   }
 
   OutboxCompanion copyWith({
+    Value<String>? vaultId,
     Value<String>? noteId,
     Value<int>? baseVersion,
     Value<String>? content,
@@ -875,6 +965,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
     Value<int>? rowid,
   }) {
     return OutboxCompanion(
+      vaultId: vaultId ?? this.vaultId,
       noteId: noteId ?? this.noteId,
       baseVersion: baseVersion ?? this.baseVersion,
       content: content ?? this.content,
@@ -888,6 +979,9 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (vaultId.present) {
+      map['vault_id'] = Variable<String>(vaultId.value);
+    }
     if (noteId.present) {
       map['note_id'] = Variable<String>(noteId.value);
     }
@@ -915,6 +1009,7 @@ class OutboxCompanion extends UpdateCompanion<OutboxData> {
   @override
   String toString() {
     return (StringBuffer('OutboxCompanion(')
+          ..write('vaultId: $vaultId, ')
           ..write('noteId: $noteId, ')
           ..write('baseVersion: $baseVersion, ')
           ..write('content: $content, ')
@@ -1132,12 +1227,415 @@ class MetaCompanion extends UpdateCompanion<MetaData> {
   }
 }
 
+class $RecentsTable extends Recents with TableInfo<$RecentsTable, Recent> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $RecentsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _vaultIdMeta = const VerificationMeta(
+    'vaultId',
+  );
+  @override
+  late final GeneratedColumn<String> vaultId = GeneratedColumn<String>(
+    'vault_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _noteIdMeta = const VerificationMeta('noteId');
+  @override
+  late final GeneratedColumn<String> noteId = GeneratedColumn<String>(
+    'note_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _vaultNameMeta = const VerificationMeta(
+    'vaultName',
+  );
+  @override
+  late final GeneratedColumn<String> vaultName = GeneratedColumn<String>(
+    'vault_name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _pathMeta = const VerificationMeta('path');
+  @override
+  late final GeneratedColumn<String> path = GeneratedColumn<String>(
+    'path',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _openedAtMeta = const VerificationMeta(
+    'openedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> openedAt = GeneratedColumn<DateTime>(
+    'opened_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    vaultId,
+    noteId,
+    vaultName,
+    path,
+    title,
+    openedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'recents';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Recent> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('vault_id')) {
+      context.handle(
+        _vaultIdMeta,
+        vaultId.isAcceptableOrUnknown(data['vault_id']!, _vaultIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_vaultIdMeta);
+    }
+    if (data.containsKey('note_id')) {
+      context.handle(
+        _noteIdMeta,
+        noteId.isAcceptableOrUnknown(data['note_id']!, _noteIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_noteIdMeta);
+    }
+    if (data.containsKey('vault_name')) {
+      context.handle(
+        _vaultNameMeta,
+        vaultName.isAcceptableOrUnknown(data['vault_name']!, _vaultNameMeta),
+      );
+    }
+    if (data.containsKey('path')) {
+      context.handle(
+        _pathMeta,
+        path.isAcceptableOrUnknown(data['path']!, _pathMeta),
+      );
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    }
+    if (data.containsKey('opened_at')) {
+      context.handle(
+        _openedAtMeta,
+        openedAt.isAcceptableOrUnknown(data['opened_at']!, _openedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_openedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {vaultId, noteId};
+  @override
+  Recent map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Recent(
+      vaultId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}vault_id'],
+      )!,
+      noteId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}note_id'],
+      )!,
+      vaultName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}vault_name'],
+      )!,
+      path: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}path'],
+      )!,
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      )!,
+      openedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}opened_at'],
+      )!,
+    );
+  }
+
+  @override
+  $RecentsTable createAlias(String alias) {
+    return $RecentsTable(attachedDatabase, alias);
+  }
+}
+
+class Recent extends DataClass implements Insertable<Recent> {
+  final String vaultId;
+  final String noteId;
+  final String vaultName;
+  final String path;
+  final String title;
+  final DateTime openedAt;
+  const Recent({
+    required this.vaultId,
+    required this.noteId,
+    required this.vaultName,
+    required this.path,
+    required this.title,
+    required this.openedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['vault_id'] = Variable<String>(vaultId);
+    map['note_id'] = Variable<String>(noteId);
+    map['vault_name'] = Variable<String>(vaultName);
+    map['path'] = Variable<String>(path);
+    map['title'] = Variable<String>(title);
+    map['opened_at'] = Variable<DateTime>(openedAt);
+    return map;
+  }
+
+  RecentsCompanion toCompanion(bool nullToAbsent) {
+    return RecentsCompanion(
+      vaultId: Value(vaultId),
+      noteId: Value(noteId),
+      vaultName: Value(vaultName),
+      path: Value(path),
+      title: Value(title),
+      openedAt: Value(openedAt),
+    );
+  }
+
+  factory Recent.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Recent(
+      vaultId: serializer.fromJson<String>(json['vaultId']),
+      noteId: serializer.fromJson<String>(json['noteId']),
+      vaultName: serializer.fromJson<String>(json['vaultName']),
+      path: serializer.fromJson<String>(json['path']),
+      title: serializer.fromJson<String>(json['title']),
+      openedAt: serializer.fromJson<DateTime>(json['openedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'vaultId': serializer.toJson<String>(vaultId),
+      'noteId': serializer.toJson<String>(noteId),
+      'vaultName': serializer.toJson<String>(vaultName),
+      'path': serializer.toJson<String>(path),
+      'title': serializer.toJson<String>(title),
+      'openedAt': serializer.toJson<DateTime>(openedAt),
+    };
+  }
+
+  Recent copyWith({
+    String? vaultId,
+    String? noteId,
+    String? vaultName,
+    String? path,
+    String? title,
+    DateTime? openedAt,
+  }) => Recent(
+    vaultId: vaultId ?? this.vaultId,
+    noteId: noteId ?? this.noteId,
+    vaultName: vaultName ?? this.vaultName,
+    path: path ?? this.path,
+    title: title ?? this.title,
+    openedAt: openedAt ?? this.openedAt,
+  );
+  Recent copyWithCompanion(RecentsCompanion data) {
+    return Recent(
+      vaultId: data.vaultId.present ? data.vaultId.value : this.vaultId,
+      noteId: data.noteId.present ? data.noteId.value : this.noteId,
+      vaultName: data.vaultName.present ? data.vaultName.value : this.vaultName,
+      path: data.path.present ? data.path.value : this.path,
+      title: data.title.present ? data.title.value : this.title,
+      openedAt: data.openedAt.present ? data.openedAt.value : this.openedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Recent(')
+          ..write('vaultId: $vaultId, ')
+          ..write('noteId: $noteId, ')
+          ..write('vaultName: $vaultName, ')
+          ..write('path: $path, ')
+          ..write('title: $title, ')
+          ..write('openedAt: $openedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(vaultId, noteId, vaultName, path, title, openedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Recent &&
+          other.vaultId == this.vaultId &&
+          other.noteId == this.noteId &&
+          other.vaultName == this.vaultName &&
+          other.path == this.path &&
+          other.title == this.title &&
+          other.openedAt == this.openedAt);
+}
+
+class RecentsCompanion extends UpdateCompanion<Recent> {
+  final Value<String> vaultId;
+  final Value<String> noteId;
+  final Value<String> vaultName;
+  final Value<String> path;
+  final Value<String> title;
+  final Value<DateTime> openedAt;
+  final Value<int> rowid;
+  const RecentsCompanion({
+    this.vaultId = const Value.absent(),
+    this.noteId = const Value.absent(),
+    this.vaultName = const Value.absent(),
+    this.path = const Value.absent(),
+    this.title = const Value.absent(),
+    this.openedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  RecentsCompanion.insert({
+    required String vaultId,
+    required String noteId,
+    this.vaultName = const Value.absent(),
+    this.path = const Value.absent(),
+    this.title = const Value.absent(),
+    required DateTime openedAt,
+    this.rowid = const Value.absent(),
+  }) : vaultId = Value(vaultId),
+       noteId = Value(noteId),
+       openedAt = Value(openedAt);
+  static Insertable<Recent> custom({
+    Expression<String>? vaultId,
+    Expression<String>? noteId,
+    Expression<String>? vaultName,
+    Expression<String>? path,
+    Expression<String>? title,
+    Expression<DateTime>? openedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (vaultId != null) 'vault_id': vaultId,
+      if (noteId != null) 'note_id': noteId,
+      if (vaultName != null) 'vault_name': vaultName,
+      if (path != null) 'path': path,
+      if (title != null) 'title': title,
+      if (openedAt != null) 'opened_at': openedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  RecentsCompanion copyWith({
+    Value<String>? vaultId,
+    Value<String>? noteId,
+    Value<String>? vaultName,
+    Value<String>? path,
+    Value<String>? title,
+    Value<DateTime>? openedAt,
+    Value<int>? rowid,
+  }) {
+    return RecentsCompanion(
+      vaultId: vaultId ?? this.vaultId,
+      noteId: noteId ?? this.noteId,
+      vaultName: vaultName ?? this.vaultName,
+      path: path ?? this.path,
+      title: title ?? this.title,
+      openedAt: openedAt ?? this.openedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (vaultId.present) {
+      map['vault_id'] = Variable<String>(vaultId.value);
+    }
+    if (noteId.present) {
+      map['note_id'] = Variable<String>(noteId.value);
+    }
+    if (vaultName.present) {
+      map['vault_name'] = Variable<String>(vaultName.value);
+    }
+    if (path.present) {
+      map['path'] = Variable<String>(path.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (openedAt.present) {
+      map['opened_at'] = Variable<DateTime>(openedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('RecentsCompanion(')
+          ..write('vaultId: $vaultId, ')
+          ..write('noteId: $noteId, ')
+          ..write('vaultName: $vaultName, ')
+          ..write('path: $path, ')
+          ..write('title: $title, ')
+          ..write('openedAt: $openedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$CacheDb extends GeneratedDatabase {
   _$CacheDb(QueryExecutor e) : super(e);
   $CacheDbManager get managers => $CacheDbManager(this);
   late final $CachedNotesTable cachedNotes = $CachedNotesTable(this);
   late final $OutboxTable outbox = $OutboxTable(this);
   late final $MetaTable meta = $MetaTable(this);
+  late final $RecentsTable recents = $RecentsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -1146,11 +1644,13 @@ abstract class _$CacheDb extends GeneratedDatabase {
     cachedNotes,
     outbox,
     meta,
+    recents,
   ];
 }
 
 typedef $$CachedNotesTableCreateCompanionBuilder =
     CachedNotesCompanion Function({
+      Value<String> vaultId,
       required String id,
       required String path,
       Value<String> title,
@@ -1163,6 +1663,7 @@ typedef $$CachedNotesTableCreateCompanionBuilder =
     });
 typedef $$CachedNotesTableUpdateCompanionBuilder =
     CachedNotesCompanion Function({
+      Value<String> vaultId,
       Value<String> id,
       Value<String> path,
       Value<String> title,
@@ -1183,6 +1684,11 @@ class $$CachedNotesTableFilterComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnFilters<String> get vaultId => $composableBuilder(
+    column: $table.vaultId,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<String> get id => $composableBuilder(
     column: $table.id,
     builder: (column) => ColumnFilters(column),
@@ -1233,6 +1739,11 @@ class $$CachedNotesTableOrderingComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnOrderings<String> get vaultId => $composableBuilder(
+    column: $table.vaultId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get id => $composableBuilder(
     column: $table.id,
     builder: (column) => ColumnOrderings(column),
@@ -1283,6 +1794,9 @@ class $$CachedNotesTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  GeneratedColumn<String> get vaultId =>
+      $composableBuilder(column: $table.vaultId, builder: (column) => column);
+
   GeneratedColumn<String> get id =>
       $composableBuilder(column: $table.id, builder: (column) => column);
 
@@ -1339,6 +1853,7 @@ class $$CachedNotesTableTableManager
               $$CachedNotesTableAnnotationComposer($db: db, $table: table),
           updateCompanionCallback:
               ({
+                Value<String> vaultId = const Value.absent(),
                 Value<String> id = const Value.absent(),
                 Value<String> path = const Value.absent(),
                 Value<String> title = const Value.absent(),
@@ -1349,6 +1864,7 @@ class $$CachedNotesTableTableManager
                 Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => CachedNotesCompanion(
+                vaultId: vaultId,
                 id: id,
                 path: path,
                 title: title,
@@ -1361,6 +1877,7 @@ class $$CachedNotesTableTableManager
               ),
           createCompanionCallback:
               ({
+                Value<String> vaultId = const Value.absent(),
                 required String id,
                 required String path,
                 Value<String> title = const Value.absent(),
@@ -1371,6 +1888,7 @@ class $$CachedNotesTableTableManager
                 Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => CachedNotesCompanion.insert(
+                vaultId: vaultId,
                 id: id,
                 path: path,
                 title: title,
@@ -1405,6 +1923,7 @@ typedef $$CachedNotesTableProcessedTableManager =
     >;
 typedef $$OutboxTableCreateCompanionBuilder =
     OutboxCompanion Function({
+      Value<String> vaultId,
       required String noteId,
       required int baseVersion,
       required String content,
@@ -1415,6 +1934,7 @@ typedef $$OutboxTableCreateCompanionBuilder =
     });
 typedef $$OutboxTableUpdateCompanionBuilder =
     OutboxCompanion Function({
+      Value<String> vaultId,
       Value<String> noteId,
       Value<int> baseVersion,
       Value<String> content,
@@ -1432,6 +1952,11 @@ class $$OutboxTableFilterComposer extends Composer<_$CacheDb, $OutboxTable> {
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnFilters<String> get vaultId => $composableBuilder(
+    column: $table.vaultId,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<String> get noteId => $composableBuilder(
     column: $table.noteId,
     builder: (column) => ColumnFilters(column),
@@ -1471,6 +1996,11 @@ class $$OutboxTableOrderingComposer extends Composer<_$CacheDb, $OutboxTable> {
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnOrderings<String> get vaultId => $composableBuilder(
+    column: $table.vaultId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get noteId => $composableBuilder(
     column: $table.noteId,
     builder: (column) => ColumnOrderings(column),
@@ -1511,6 +2041,9 @@ class $$OutboxTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  GeneratedColumn<String> get vaultId =>
+      $composableBuilder(column: $table.vaultId, builder: (column) => column);
+
   GeneratedColumn<String> get noteId =>
       $composableBuilder(column: $table.noteId, builder: (column) => column);
 
@@ -1560,6 +2093,7 @@ class $$OutboxTableTableManager
               $$OutboxTableAnnotationComposer($db: db, $table: table),
           updateCompanionCallback:
               ({
+                Value<String> vaultId = const Value.absent(),
                 Value<String> noteId = const Value.absent(),
                 Value<int> baseVersion = const Value.absent(),
                 Value<String> content = const Value.absent(),
@@ -1568,6 +2102,7 @@ class $$OutboxTableTableManager
                 Value<DateTime> queuedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OutboxCompanion(
+                vaultId: vaultId,
                 noteId: noteId,
                 baseVersion: baseVersion,
                 content: content,
@@ -1578,6 +2113,7 @@ class $$OutboxTableTableManager
               ),
           createCompanionCallback:
               ({
+                Value<String> vaultId = const Value.absent(),
                 required String noteId,
                 required int baseVersion,
                 required String content,
@@ -1586,6 +2122,7 @@ class $$OutboxTableTableManager
                 required DateTime queuedAt,
                 Value<int> rowid = const Value.absent(),
               }) => OutboxCompanion.insert(
+                vaultId: vaultId,
                 noteId: noteId,
                 baseVersion: baseVersion,
                 content: content,
@@ -1742,6 +2279,218 @@ typedef $$MetaTableProcessedTableManager =
       MetaData,
       PrefetchHooks Function()
     >;
+typedef $$RecentsTableCreateCompanionBuilder =
+    RecentsCompanion Function({
+      required String vaultId,
+      required String noteId,
+      Value<String> vaultName,
+      Value<String> path,
+      Value<String> title,
+      required DateTime openedAt,
+      Value<int> rowid,
+    });
+typedef $$RecentsTableUpdateCompanionBuilder =
+    RecentsCompanion Function({
+      Value<String> vaultId,
+      Value<String> noteId,
+      Value<String> vaultName,
+      Value<String> path,
+      Value<String> title,
+      Value<DateTime> openedAt,
+      Value<int> rowid,
+    });
+
+class $$RecentsTableFilterComposer extends Composer<_$CacheDb, $RecentsTable> {
+  $$RecentsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get vaultId => $composableBuilder(
+    column: $table.vaultId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get noteId => $composableBuilder(
+    column: $table.noteId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get vaultName => $composableBuilder(
+    column: $table.vaultName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get path => $composableBuilder(
+    column: $table.path,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get openedAt => $composableBuilder(
+    column: $table.openedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$RecentsTableOrderingComposer
+    extends Composer<_$CacheDb, $RecentsTable> {
+  $$RecentsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get vaultId => $composableBuilder(
+    column: $table.vaultId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get noteId => $composableBuilder(
+    column: $table.noteId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get vaultName => $composableBuilder(
+    column: $table.vaultName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get path => $composableBuilder(
+    column: $table.path,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get openedAt => $composableBuilder(
+    column: $table.openedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$RecentsTableAnnotationComposer
+    extends Composer<_$CacheDb, $RecentsTable> {
+  $$RecentsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get vaultId =>
+      $composableBuilder(column: $table.vaultId, builder: (column) => column);
+
+  GeneratedColumn<String> get noteId =>
+      $composableBuilder(column: $table.noteId, builder: (column) => column);
+
+  GeneratedColumn<String> get vaultName =>
+      $composableBuilder(column: $table.vaultName, builder: (column) => column);
+
+  GeneratedColumn<String> get path =>
+      $composableBuilder(column: $table.path, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get openedAt =>
+      $composableBuilder(column: $table.openedAt, builder: (column) => column);
+}
+
+class $$RecentsTableTableManager
+    extends
+        RootTableManager<
+          _$CacheDb,
+          $RecentsTable,
+          Recent,
+          $$RecentsTableFilterComposer,
+          $$RecentsTableOrderingComposer,
+          $$RecentsTableAnnotationComposer,
+          $$RecentsTableCreateCompanionBuilder,
+          $$RecentsTableUpdateCompanionBuilder,
+          (Recent, BaseReferences<_$CacheDb, $RecentsTable, Recent>),
+          Recent,
+          PrefetchHooks Function()
+        > {
+  $$RecentsTableTableManager(_$CacheDb db, $RecentsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$RecentsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$RecentsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$RecentsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> vaultId = const Value.absent(),
+                Value<String> noteId = const Value.absent(),
+                Value<String> vaultName = const Value.absent(),
+                Value<String> path = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<DateTime> openedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => RecentsCompanion(
+                vaultId: vaultId,
+                noteId: noteId,
+                vaultName: vaultName,
+                path: path,
+                title: title,
+                openedAt: openedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String vaultId,
+                required String noteId,
+                Value<String> vaultName = const Value.absent(),
+                Value<String> path = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                required DateTime openedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => RecentsCompanion.insert(
+                vaultId: vaultId,
+                noteId: noteId,
+                vaultName: vaultName,
+                path: path,
+                title: title,
+                openedAt: openedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$RecentsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$CacheDb,
+      $RecentsTable,
+      Recent,
+      $$RecentsTableFilterComposer,
+      $$RecentsTableOrderingComposer,
+      $$RecentsTableAnnotationComposer,
+      $$RecentsTableCreateCompanionBuilder,
+      $$RecentsTableUpdateCompanionBuilder,
+      (Recent, BaseReferences<_$CacheDb, $RecentsTable, Recent>),
+      Recent,
+      PrefetchHooks Function()
+    >;
 
 class $CacheDbManager {
   final _$CacheDb _db;
@@ -1751,4 +2500,6 @@ class $CacheDbManager {
   $$OutboxTableTableManager get outbox =>
       $$OutboxTableTableManager(_db, _db.outbox);
   $$MetaTableTableManager get meta => $$MetaTableTableManager(_db, _db.meta);
+  $$RecentsTableTableManager get recents =>
+      $$RecentsTableTableManager(_db, _db.recents);
 }

@@ -25,6 +25,7 @@ void main() {
     engine = SyncEngine(
       api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
       cache: cache,
+      vaultId: FakeServer.primaryVault,
     );
     session = NoteSession(engine);
   });
@@ -178,7 +179,7 @@ void main() {
 
       expect(session.saveState, SaveState.queued);
       expect(session.baseVersion, 2);
-      expect(await cache.pendingCount(), 1);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 1);
       expect(session.buffer, 'offline edit\n');
     },
   );

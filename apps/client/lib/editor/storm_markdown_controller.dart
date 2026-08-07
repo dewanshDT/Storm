@@ -81,6 +81,200 @@ class StormMarkdownController extends TextEditingController {
     _memoSpan = null;
   }
 
+  // --- Editing ---------------------------------------------------------
+  //
+  // The formatting toolbar calls these and nothing else. Every one of them
+  // computes the new text *and* the new selection and assigns `value` exactly
+  // once: assigning `text` and `selection` separately fires two notifications,
+  // and the intermediate state has a caret pointing into a buffer that no
+  // longer matches it.
+
+  /// Wraps the selection in [marker], or unwraps it if it is already wrapped.
+  ///
+  /// With a collapsed caret this inserts the pair and sits between them, which
+  /// is what "turn bold on" means when there is nothing selected yet.
+  void toggleInline(String marker) {
+    final sel = selection;
+    if (!sel.isValid) return;
+    final t = text;
+    final start = sel.start;
+    final end = sel.end;
+
+    if (start == end) {
+      final already = _wrappedAt(t, start, end, marker);
+      if (already) return _unwrap(t, start, end, marker);
+      return _apply(
+        t.substring(0, start) + marker + marker + t.substring(start),
+        TextSelection.collapsed(offset: start + marker.length),
+      );
+    }
+
+    // Markers just outside the selection — you selected the word, not the
+    // asterisks around it.
+    if (_wrappedAt(t, start, end, marker)) {
+      return _unwrap(t, start, end, marker);
+    }
+
+    // Markers inside the selection — you selected `**word**` whole.
+    final selected = t.substring(start, end);
+    if (selected.length >= marker.length * 2 &&
+        selected.startsWith(marker) &&
+        selected.endsWith(marker)) {
+      final inner = selected.substring(
+        marker.length,
+        selected.length - marker.length,
+      );
+      return _apply(
+        t.substring(0, start) + inner + t.substring(end),
+        TextSelection(baseOffset: start, extentOffset: start + inner.length),
+      );
+    }
+
+    _apply(
+      t.substring(0, start) + marker + selected + marker + t.substring(end),
+      TextSelection(
+        baseOffset: start + marker.length,
+        extentOffset: end + marker.length,
+      ),
+    );
+  }
+
+  bool _wrappedAt(String t, int start, int end, String marker) {
+    final n = marker.length;
+    if (start - n < 0 || end + n > t.length) return false;
+    return t.substring(start - n, start) == marker &&
+        t.substring(end, end + n) == marker;
+  }
+
+  void _unwrap(String t, int start, int end, String marker) {
+    final n = marker.length;
+    _apply(
+      t.substring(0, start - n) +
+          t.substring(start, end) +
+          t.substring(end + n),
+      start == end
+          ? TextSelection.collapsed(offset: start - n)
+          : TextSelection(baseOffset: start - n, extentOffset: end - n),
+    );
+  }
+
+  /// Sets the block prefix — `## `, `> `, `- `, `1. `, `- [ ] ` — on every line
+  /// the selection touches, replacing whatever prefix was there.
+  ///
+  /// Pass null to strip whatever is there.
+  ///
+  /// [toggle] decides what re-applying a prefix a line already has means, and
+  /// the answer depends on how the control is shaped. A lone on/off button —
+  /// bullets, quote — has nowhere else to say "off", so it toggles. A *picker*
+  /// with an explicit Paragraph entry must not: choosing "Heading 1" on a line
+  /// that is already H1 means "make this H1", and quietly deleting the `#` is
+  /// how the heading button came to look like it did nothing at all.
+  void setBlockPrefix(String? prefix, {bool toggle = true}) {
+    final sel = selection;
+    if (!sel.isValid) return;
+    final t = text;
+    final blockStart = _lineStartAt(t, sel.start);
+    final blockEnd = _lineEndAt(t, sel.end);
+    final lines = t.substring(blockStart, blockEnd).split('\n');
+
+    final stripped = [for (final line in lines) _splitPrefix(line)];
+
+    // An ordered list is a *sequence*, not a repeated string: `1. ` on every
+    // line is what a numbered list looks like when nobody counted. Numbering
+    // continues from the item above the selection, so extending a list picks
+    // up where it left off instead of restarting.
+    final ordered = prefix != null && orderedMarker.hasMatch(prefix);
+    final firstNumber = ordered ? _orderedNumberBefore(t, blockStart) : 1;
+
+    final removing =
+        prefix == null ||
+        (toggle &&
+            (ordered
+                ? stripped.every((p) => orderedMarker.hasMatch(p.marker))
+                : stripped.every((p) => p.marker == prefix)));
+
+    String markerFor(int index) {
+      if (removing) return '';
+      if (!ordered) return prefix;
+      // Keep whichever delimiter the caller asked for — `1.` and `1)` are both
+      // ordered lists, and switching one under the user would be rude.
+      final delimiter = prefix.contains(')') ? ')' : '.';
+      return '${firstNumber + index}$delimiter ';
+    }
+
+    final rewritten = [
+      for (final (i, p) in stripped.indexed)
+        '${p.indent}${markerFor(i)}${p.body}',
+    ].join('\n');
+
+    // The caret keeps its place within the first line's *content*, which is
+    // where it visually was — not its raw offset, which the prefix just moved.
+    final firstDelta = markerFor(0).length - stripped.first.marker.length;
+    _apply(
+      t.substring(0, blockStart) + rewritten + t.substring(blockEnd),
+      sel.isCollapsed
+          ? TextSelection.collapsed(
+              offset: (sel.start + firstDelta).clamp(
+                blockStart,
+                blockStart + rewritten.length,
+              ),
+            )
+          : TextSelection(
+              baseOffset: blockStart,
+              extentOffset: blockStart + rewritten.length,
+            ),
+    );
+  }
+
+  /// Inserts `[[]]` with the caret between the brackets, or wraps the
+  /// selection into a link to a note of that name.
+  ///
+  /// There is no completion behind this yet; it is a bracket-matching
+  /// convenience, and deliberately named for what it does.
+  void insertWikilink() {
+    final sel = selection;
+    if (!sel.isValid) return;
+    final t = text;
+    final inner = t.substring(sel.start, sel.end);
+    _apply(
+      '${t.substring(0, sel.start)}[[$inner]]${t.substring(sel.end)}',
+      inner.isEmpty
+          ? TextSelection.collapsed(offset: sel.start + 2)
+          : TextSelection(
+              baseOffset: sel.start + 2,
+              extentOffset: sel.start + 2 + inner.length,
+            ),
+    );
+  }
+
+  /// Fills in the `[[…]]` the caret is currently inside.
+  ///
+  /// Replaces the typed query rather than the whole link, so a half-typed
+  /// `[[desi` becomes `[[Design]]` with the caret past the brackets, ready to
+  /// keep writing. Supplies the closing `]]` only when they aren't already
+  /// there — they are when the link came from the toolbar button.
+  void completeWikilink(String target) {
+    final query = activeWikilinkQuery(text, selection.baseOffset);
+    if (query == null) return;
+
+    final closed = text.startsWith(']]', query.end);
+    _apply(
+      text.substring(0, query.start) +
+          target +
+          (closed ? '' : ']]') +
+          text.substring(query.end),
+      TextSelection.collapsed(offset: query.start + target.length + 2),
+    );
+  }
+
+  void _apply(String next, TextSelection nextSelection) {
+    value = TextEditingValue(
+      text: next,
+      selection: nextSelection,
+      composing: TextRange.empty,
+    );
+  }
+
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -340,4 +534,130 @@ class _LineKey {
 
   @override
   int get hashCode => Object.hash(line, context, isFirst, revealed);
+}
+
+/// A line split into indent, block marker, and the content after it.
+class _Prefixed {
+  const _Prefixed(this.indent, this.marker, this.body);
+
+  final String indent;
+  final String marker;
+  final String body;
+}
+
+/// Task markers come first: `- [ ] x` is also a valid bullet, and matching it
+/// as one would leave `[ ] ` stranded in the text.
+final _blockMarker = RegExp(
+  r'^(?:[-*+] \[[ xX]\] |#{1,6} |>+ ?|[-*+] |\d+[.)] )',
+);
+final _indent = RegExp(r'^[ \t]*');
+
+_Prefixed _splitPrefix(String line) {
+  final indent = _indent.firstMatch(line)![0]!;
+  final rest = line.substring(indent.length);
+  final m = _blockMarker.matchAsPrefix(rest);
+  if (m == null) return _Prefixed(indent, '', rest);
+  return _Prefixed(indent, m[0]!, rest.substring(m.end));
+}
+
+/// `1. `, `2) ` — an ordered-list marker, with its trailing space.
+final orderedMarker = RegExp(r'^\d+[.)] ');
+
+/// What number an ordered item inserted at [blockStart] should carry.
+///
+/// Continues the run immediately above it, so extending a list numbers 4, 5, 6
+/// rather than restarting at 1. A blank line or anything unnumbered ends the
+/// run, which is also where markdown itself starts a new list.
+int _orderedNumberBefore(String t, int blockStart) {
+  if (blockStart == 0) return 1;
+  final previousEnd = blockStart - 1;
+  final previousStart = _lineStartAt(t, previousEnd);
+  final previous = t.substring(previousStart, previousEnd);
+  final m = orderedMarker.matchAsPrefix(previous.trimLeft());
+  if (m == null) return 1;
+  return (int.tryParse(RegExp(r'\d+').firstMatch(m[0]!)![0]!) ?? 0) + 1;
+}
+
+int _lineStartAt(String t, int offset) {
+  // `lastIndexOf` throws on a negative start, which offset 0 produces — a
+  // selection anchored at the very first character of the buffer.
+  if (offset <= 0) return 0;
+  final i = t.lastIndexOf('\n', offset - 1);
+  return i < 0 ? 0 : i + 1;
+}
+
+int _lineEndAt(String t, int offset) {
+  final i = t.indexOf('\n', offset);
+  return i < 0 ? t.length : i;
+}
+
+/// Where a `[[wikilink]]` sits, if the caret at [offset] is inside one.
+///
+/// Taps inside an editable TextField are consumed for caret placement, so a
+/// TapGestureRecognizer on a span never fires. Instead the tap places the caret
+/// as usual and the caller asks this what the caret landed in — the pointer
+/// keeps its ordinary behaviour and nothing fights the selection gesture.
+WikilinkHit? wikilinkAt(String text, int offset) {
+  if (offset < 0 || offset > text.length) return null;
+  final lineStart = _lineStartAt(text, offset);
+  final lineEnd = _lineEndAt(text, offset);
+  final line = text.substring(lineStart, lineEnd);
+
+  for (final m in RegExp(r'\[\[([^\[\]\n]+)\]\]').allMatches(line)) {
+    final start = lineStart + m.start;
+    final end = lineStart + m.end;
+    if (offset >= start && offset <= end) {
+      return WikilinkHit(target: m[1]!.trim(), start: start, end: end);
+    }
+  }
+  return null;
+}
+
+/// The `[[` the caret is currently typing inside, if any.
+///
+/// Derived from the buffer and the caret rather than tracked as state: a
+/// "currently completing" flag would have to be kept in agreement with every
+/// edit, undo and caret move, and the first disagreement leaves the suggestion
+/// list pointing at text that is no longer there.
+WikilinkQuery? activeWikilinkQuery(String text, int caret) {
+  if (caret < 0 || caret > text.length) return null;
+
+  final open = text.lastIndexOf('[[', caret);
+  if (open < 0 || open + 2 > caret) return null;
+  // A link does not span lines, and anything bracket-ish between the `[[` and
+  // the caret means this is not an open query — `[[a]]` with the caret after
+  // the close is a finished link, not a prompt.
+  if (open < _lineStartAt(text, caret)) return null;
+
+  final query = text.substring(open + 2, caret);
+  if (query.contains('[') || query.contains(']') || query.contains('\n')) {
+    return null;
+  }
+  return WikilinkQuery(query: query, start: open + 2, end: caret);
+}
+
+/// A half-typed `[[query`, and where the query itself sits in the buffer.
+class WikilinkQuery {
+  const WikilinkQuery({
+    required this.query,
+    required this.start,
+    required this.end,
+  });
+
+  final String query;
+  final int start;
+  final int end;
+}
+
+/// A `[[target]]` under the caret, in absolute buffer offsets.
+class WikilinkHit {
+  const WikilinkHit({
+    required this.target,
+    required this.start,
+    required this.end,
+  });
+
+  final String target;
+  final int start;
+  final int end;
 }

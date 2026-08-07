@@ -30,6 +30,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Clean URLs for the web client's deep links.
+  flutter_web_plugins:
+    sdk: flutter
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -41,7 +44,11 @@ dependencies:
   drift_flutter: ^0.3.1
   web_socket_channel: ^3.0.3
   file_selector: ^1.1.0
+  go_router: ^17.4.0
 dev_dependencies:
+  # Used by test/cache_migration_test.dart to build a pre-migration schema
+  # by hand — the only way to exercise the upgrade path for real.
+  sqlite3: ^3.5.1
   flutter_test:
     sdk: flutter
 
@@ -64,6 +71,16 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Serif for note bodies only; chrome stays sans. Bundled rather than fetched
+  # at runtime — the whole point of this app is that it works offline.
+  # Newsreader (OFL), variable weight, so two files cover every weight.
+  fonts:
+    - family: Newsreader
+      fonts:
+        - asset: assets/fonts/Newsreader.ttf
+        - asset: assets/fonts/Newsreader-Italic.ttf
+          style: italic
 
   # To add assets to your application, add an assets section, like this:
   # assets:

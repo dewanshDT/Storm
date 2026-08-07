@@ -9,6 +9,7 @@ import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/attachment_strip.dart';
+import 'fake_server.dart';
 
 /// Attachment upload and the preview strip.
 void main() {
@@ -34,7 +35,14 @@ void main() {
             headers: {'content-type': 'application/json'},
           );
         }
-        final path = request.url.path.replaceFirst('/v1/attachments/', '');
+        // Attachment routes are vault-scoped now; strip the prefix so this
+        // fake still keys uploads by their vault-relative path.
+        final path = Uri.decodeFull(
+          request.url.path.replaceFirst(
+            '/v1/vaults/${FakeServer.primaryVault}/attachments/',
+            '',
+          ),
+        );
         uploaded[path] = request.bodyBytes;
         return http.Response(
           jsonEncode({'path': path, 'size': request.bodyBytes.length}),
@@ -46,6 +54,7 @@ void main() {
       engine = SyncEngine(
         api: StormApi(baseUrl: 'http://test', token: 't', client: client),
         cache: cache,
+        vaultId: FakeServer.primaryVault,
       );
     });
 
@@ -102,7 +111,7 @@ void main() {
 
       expect(result.path, isNull);
       expect(result.error, contains('Cannot reach the server'));
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
     });
 
     test('a server refusal surfaces', () async {
@@ -152,9 +161,15 @@ Some text.
   group('attachment URLs', () {
     test('carry the token, since image widgets cannot set headers', () {
       final api = StormApi(baseUrl: 'http://host:8484', token: 'secret');
-      final url = api.attachmentUrl('attachments/x.png');
+      final url = api.attachmentUrl(
+        FakeServer.primaryVault,
+        'attachments/x.png',
+      );
 
-      expect(url.path, '/v1/attachments/attachments/x.png');
+      expect(
+        url.path,
+        '/v1/vaults/${FakeServer.primaryVault}/attachments/attachments/x.png',
+      );
       expect(url.queryParameters['token'], 'secret');
       api.dispose();
     });

@@ -4,11 +4,14 @@ The Storm sync server: a single Rust binary that owns the canonical vault.
 
 ```
 /srv/storm/
-├── vault/          canonical markdown — greppable, rsync-able, Obsidian-readable
-│   ├── Daily/2026-08-05.md
-│   └── Projects/Ideas.md
+├── vaults/                 the storage root: one directory per vault
+│   ├── personal/           canonical markdown — greppable, rsync-able,
+│   │   ├── Daily/2026-08-07.md      Obsidian-readable
+│   │   └── Projects/Ideas.md
+│   └── work/
 └── state/
-    └── index.db    derived index + version history (rebuildable from vault/)
+    ├── vaults.json         registry: root + id/name/directory per vault
+    └── <vault-id>/index.db derived index + version history, one per vault
 ```
 
 `state/` is a **sibling** of `vault/`, never inside it, so the vault directory
@@ -16,20 +19,24 @@ contains nothing but your notes.
 
 ## Running it
 
-Point it at a **copy** of your vault first. The `--dry-run` pass writes nothing
-and reports what an import would change:
+Point it at a **copy** of your vaults first. The `--dry-run` pass writes
+nothing and reports what an import would change, per vault:
 
 ```sh
-cargo run -- --vault /srv/storm/vault --state /srv/storm/state --dry-run
+cargo run -- --vault-root /srv/storm/vaults --state /srv/storm/state --dry-run
 ```
 
 ```
 Dry run — nothing was written.
 
-  markdown files found : 1284
-  would add `id` to    : 1284
-      Daily/2026-08-05.md
-      ...
+  storage root : /srv/storm/vaults
+  vaults       : 2
+
+  personal
+      markdown files found : 1284
+      would add `id` to    : 1284
+          Daily/2026-08-05.md
+          ...
 
 Run again without --dry-run to apply.
 ```
@@ -38,7 +45,7 @@ Then for real:
 
 ```sh
 cargo run --release -- \
-  --vault /srv/storm/vault \
+  --vault-root /srv/storm/vaults \
   --state /srv/storm/state \
   --host 0.0.0.0 --port 8484 \
   --token "$(openssl rand -hex 32)" \
@@ -54,7 +61,8 @@ ever reachable from outside it.
 
 ## Importing an existing Obsidian vault
 
-There is no separate importer — the startup scan *is* the importer. It walks the
+There is no separate importer — the startup scan *is* the importer, and it runs
+per vault. It walks the
 vault, adds `id`/`created`/`modified` frontmatter to any note missing it, and
 builds the index. Running it again is a no-op.
 
@@ -87,17 +95,59 @@ on a handshake.
 | | |
 |---|---|
 | `GET /v1/health` | liveness, unauthenticated |
-| `GET /v1/tree` | all notes + derived folder list + current `seq` |
-| `GET /v1/sync?since=&limit=` | changes after `seq` — the delta-sync primitive |
-| `GET /v1/notes/{id}` | metadata + content |
-| `POST /v1/notes` | `{path, content}` |
-| `PUT /v1/notes/{id}` | `{base_version, content, device_id?}` — see below |
-| `POST /v1/notes/{id}/move` | `{new_path}` |
-| `DELETE /v1/notes/{id}` | |
-| `GET /v1/search?q=&limit=` | FTS5 with highlighted snippets |
-| `GET /v1/notes/{id}/backlinks` | linked mentions |
-| `GET /v1/tags`, `GET /v1/tags/{tag}` | tag browser |
-| `WS /v1/stream` | change events pushed to connected clients |
+| `GET /v1/vaults` | every vault: id, name, directory, note count, missing |
+| `POST /v1/vaults` | `{name}` — creates the directory under the root |
+| `PATCH /v1/vaults/{v}` | `{name}` — display name only, nothing moves |
+| `DELETE /v1/vaults/{v}` | unregisters. **Never deletes files.** |
+| `GET /v1/config` | storage root, state directory, vault count |
+| `PUT /v1/config` | `{vault_root, orphan_ok?}` — see below |
+| `GET /v1/recents?limit=` | recently opened notes, across every vault |
+| `WS /v1/stream` | change events for every vault, each tagged `vault_id` |
+
+Everything note-shaped is scoped to a vault:
+
+| | |
+|---|---|
+| `GET /v1/vaults/{v}/tree` | all notes + folders + current `seq` |
+| `GET /v1/vaults/{v}/sync?since=&limit=` | changes after `seq` — the delta-sync primitive |
+| `GET /v1/vaults/{v}/notes/{id}` | metadata + content |
+| `POST /v1/vaults/{v}/notes` | `{path, content}` |
+| `PUT /v1/vaults/{v}/notes/{id}` | `{base_version, content, device_id?}` — see below |
+| `POST /v1/vaults/{v}/notes/{id}/move` | `{new_path}` |
+| `POST /v1/vaults/{v}/notes/{id}/opened` | records an open, for the recents list |
+| `DELETE /v1/vaults/{v}/notes/{id}` | |
+| `POST /v1/vaults/{v}/folders` | `{path}` — creates an explicit folder |
+| `POST /v1/vaults/{v}/folders/rename` | `{from, to}` — moves every note under it |
+| `DELETE /v1/vaults/{v}/folders/{path}` | refused unless empty |
+| `GET /v1/vaults/{v}/search?q=&limit=` | FTS5 with highlighted snippets |
+| `GET /v1/vaults/{v}/notes/{id}/backlinks` | linked mentions |
+| `GET /v1/vaults/{v}/tags`, `/tags/{tag}` | tag browser |
+
+A vault id that was never registered is a `404`; one whose directory has gone
+is a `409`, and stays in the registry rather than disappearing.
+
+### Vaults, folders, and the storage root
+
+`--vault-root` is a directory *containing* vaults. Each subdirectory is one;
+`state/vaults.json` maps a stable UUID to the directory and a display name, so
+a rename does not orphan the index. The root is rescanned at startup, on a root
+change, and on vault create/delete — not continuously.
+
+**Folders are recorded, not only derived.** The tree still derives folders from
+note paths, but a folder created through the API is also written to a `folders`
+table and exempted from the empty-directory pruning that runs after a delete or
+move. Without that exemption a folder made on purpose would vanish the moment
+its last note left.
+
+**`PUT /v1/config` never moves files.** It points the server at directories
+someone has already moved. If none of the registered vaults are found under the
+new root it returns `409` naming what would be orphaned, unless the caller
+passes `orphan_ok` — because a server that boots healthy with zero vaults reads
+as "my notes are gone".
+
+`--vault` is accepted for one release and means "the parent of this is the
+storage root". It refuses to start if that path is missing, rather than coming
+up empty.
 
 ### The PUT is the whole sync design
 
