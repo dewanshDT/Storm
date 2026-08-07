@@ -6,7 +6,9 @@ import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
 import '../state/vault_config.dart';
+import 'breakpoints.dart';
 import 'shell/storm_scaffold.dart';
+import 'shell/vault_sidebar.dart' show NoNoteSelected;
 import 'shell/vault_gate.dart';
 
 /// One folder at a time, with a breadcrumb back up.
@@ -27,6 +29,10 @@ class BrowseScreen extends ConsumerWidget {
     // Folders created on purpose. Without these an empty folder would be
     // invisible, because everything else here is derived from note paths.
     final known = ref.watch(vaultFoldersProvider);
+
+    // On a wide screen the sidebar *is* the browser, so this route's pane is
+    // the empty state rather than the same list twice.
+    if (context.isExpanded) return const NoNoteSelected();
 
     return StormScaffold(
       leading: folder.isEmpty
@@ -56,7 +62,7 @@ class BrowseScreen extends ConsumerWidget {
                     : ListView.builder(
                         padding: const EdgeInsets.only(bottom: 110),
                         itemCount: entries.length,
-                        itemBuilder: (c, i) => _EntryTile(entry: entries[i]),
+                        itemBuilder: (c, i) => EntryTile(entry: entries[i]),
                       ),
               ),
             ],
@@ -217,10 +223,43 @@ class _Crumb extends StatelessWidget {
   }
 }
 
-class _EntryTile extends ConsumerWidget {
-  const _EntryTile({required this.entry});
+/// One row in a folder listing.
+///
+/// Shared by the phone's drill-down browser and the wide screen's folder tree.
+/// The two navigate differently — one replaces the screen, the other expands
+/// in place — but a folder row has to look and behave the same in both, right
+/// down to the long-press actions.
+class EntryTile extends ConsumerWidget {
+  const EntryTile({
+    super.key,
+    required this.entry,
+    this.onFolderTap,
+    this.leading,
+    this.selected = false,
+    this.replaceRoute = false,
+    this.contentPadding,
+  });
 
   final BrowseEntry entry;
+
+  /// What tapping a folder does. Null means the browser's behaviour: push the
+  /// folder as a screen. The tree passes its own, to expand in place.
+  final VoidCallback? onFolderTap;
+
+  /// Replaces the folder icon, so the tree can show its twisty.
+  final Widget? leading;
+
+  /// Marks the note currently open, for the tree.
+  final bool selected;
+
+  /// Navigate with `go` rather than `push`.
+  ///
+  /// True in the sidebar: the tree stays put and only the pane beside it
+  /// changes, so stacking a route per note would make the back gesture walk
+  /// through everything you had merely glanced at.
+  final bool replaceRoute;
+
+  final EdgeInsetsGeometry? contentPadding;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -229,13 +268,20 @@ class _EntryTile extends ConsumerWidget {
 
     if (entry.isFolder) {
       return ListTile(
-        leading: Icon(Icons.folder_outlined, color: scheme.primary),
+        contentPadding: contentPadding,
+        leading: leading ?? Icon(Icons.folder_outlined, color: scheme.primary),
         title: Text(entry.name),
-        subtitle: Text(
-          entry.childCount == 1 ? '1 note' : '${entry.childCount} notes',
-        ),
-        trailing: const Icon(Icons.chevron_right, size: 18),
-        onTap: () => context.push(Routes.folder(vaultId, entry.path)),
+        subtitle: onFolderTap != null
+            ? null
+            : Text(
+                entry.childCount == 1 ? '1 note' : '${entry.childCount} notes',
+              ),
+        trailing: onFolderTap != null
+            ? null
+            : const Icon(Icons.chevron_right, size: 18),
+        onTap:
+            onFolderTap ??
+            () => context.push(Routes.folder(vaultId, entry.path)),
         // Long-press rather than a visible menu per row: renaming and deleting
         // folders are rare next to walking into them.
         onLongPress: () => _folderActions(context, ref, vaultId, entry),
@@ -244,12 +290,18 @@ class _EntryTile extends ConsumerWidget {
 
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     return ListTile(
-      leading: Icon(Icons.description_outlined, color: scheme.onSurfaceVariant),
+      contentPadding: contentPadding,
+      selected: selected,
+      leading:
+          leading ??
+          Icon(Icons.description_outlined, color: scheme.onSurfaceVariant),
       title: Text(entry.name),
       trailing: pinned.contains(entry.note!.id)
           ? Icon(Icons.push_pin, size: 13, color: scheme.primary)
           : null,
-      onTap: () => context.push(Routes.note(vaultId, entry.note!.id)),
+      onTap: () => replaceRoute
+          ? context.go(Routes.note(vaultId, entry.note!.id))
+          : context.push(Routes.note(vaultId, entry.note!.id)),
     );
   }
 }

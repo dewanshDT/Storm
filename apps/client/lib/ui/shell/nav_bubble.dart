@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../router.dart';
-import '../../state/app_state.dart';
+import '../breakpoints.dart';
+import 'vault_actions.dart';
 import '../theme.dart';
 
 /// Whether a soft keyboard is currently covering the bottom of the screen.
@@ -31,6 +31,11 @@ bool keyboardIsOpen(BuildContext context) =>
 /// to collapse to a single `…` until tapped, which cost a tap before every
 /// navigation and hid where you could go — the bar is small enough that
 /// hiding it bought nothing.
+///
+/// A phone shape. On a wide screen the same actions live in the sidebar's
+/// toolbar instead, so this hides itself rather than floating in the middle of
+/// a 2000px window. Both draw [vaultActions], so the two placements cannot
+/// drift into offering different things.
 class NavBubble extends ConsumerStatefulWidget {
   const NavBubble({super.key});
 
@@ -43,6 +48,9 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final uri = GoRouterState.of(context).uri;
+
+    // The sidebar carries these on a wide screen.
+    if (context.isExpanded) return const SizedBox.shrink();
 
     return SafeArea(
       minimum: const EdgeInsets.only(bottom: 16),
@@ -58,129 +66,33 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
             shadowColor: Colors.black.withValues(alpha: 0.4),
             child: Padding(
               padding: const EdgeInsets.all(5),
-              child: Row(mainAxisSize: MainAxisSize.min, children: _slots(uri)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final action in vaultActions(context, ref, uri))
+                    _Slot(action: action),
+                ],
+              ),
             ),
           ),
         ),
       ),
     );
   }
-
-  List<Widget> _slots(Uri uri) {
-    void go(String location) => context.go(location);
-
-    // On the dashboard there is no vault to browse or search, so the bubble
-    // offers what does apply there: a new vault.
-    final vaultId = Routes.vaultOf(uri);
-    if (vaultId.isEmpty) {
-      return [
-        _Slot(
-          icon: Icons.add,
-          tooltip: 'New vault',
-          onTap: () => NewNoteRequest.of(context)?.call(),
-        ),
-        _Slot(
-          icon: Icons.dns_outlined,
-          tooltip: 'Server',
-          onTap: () => context.push(Routes.serverSettings),
-        ),
-      ];
-    }
-
-    return [
-      _Slot(
-        icon: Icons.folder_outlined,
-        tooltip: 'Directory',
-        selected: uri.path.startsWith(Routes.browse(vaultId)),
-        onTap: () => go(Routes.browse(vaultId)),
-      ),
-      _Slot(
-        icon: Icons.search,
-        tooltip: 'Search',
-        selected: uri.path == Routes.search(vaultId),
-        onTap: () => go(Routes.search(vaultId)),
-      ),
-      _Slot(
-        icon: Icons.add,
-        tooltip: 'New note',
-        onTap: () => NewNoteRequest.of(context)?.call(),
-      ),
-      // Only where a folder can actually be made — inside a note there is no
-      // "here" for it to land in.
-      if (NewFolderRequest.of(context) != null)
-        _Slot(
-          icon: Icons.create_new_folder_outlined,
-          tooltip: 'New folder',
-          onTap: () => NewFolderRequest.of(context)?.call(),
-        ),
-      _ContextSlot(uri: uri, onGo: go),
-    ];
-  }
-}
-
-/// The dynamic fourth slot.
-///
-/// Its meaning follows the router, not a separately maintained flag: the tag
-/// browser at the vault root, and the open note's linked mentions inside a
-/// note. One source of truth for "where am I".
-class _ContextSlot extends ConsumerWidget {
-  const _ContextSlot({required this.uri, required this.onGo});
-
-  final Uri uri;
-  final void Function(String) onGo;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final vaultId = Routes.vaultOf(uri);
-    final segments = uri.pathSegments;
-    // `/v/<vault>/note/<id>` — the marker is the segment after the vault.
-    final inNote = segments.length > 3 && segments[2] == 'note';
-
-    if (!inNote) {
-      return _Slot(
-        icon: Icons.label_outline,
-        tooltip: 'Tags',
-        selected: uri.path == Routes.tags(vaultId),
-        onTap: () => onGo(Routes.tags(vaultId)),
-      );
-    }
-
-    final id = segments.length > 3 ? segments[3] : null;
-    final mentions = id == null
-        ? 0
-        : (ref.watch(backlinksProvider(id)).value?.length ?? 0);
-
-    return _Slot(
-      icon: Icons.hub_outlined,
-      tooltip: mentions == 1 ? '1 linked mention' : '$mentions linked mentions',
-      badge: mentions > 0,
-      onTap: () => NoteContextRequest.of(context)?.call(),
-    );
-  }
 }
 
 class _Slot extends StatelessWidget {
-  const _Slot({
-    required this.icon,
-    required this.tooltip,
-    required this.onTap,
-    this.selected = false,
-    this.badge = false,
-  });
+  const _Slot({required this.action});
 
-  final IconData icon;
-  final String tooltip;
-  final VoidCallback onTap;
-  final bool selected;
-  final bool badge;
+  final VaultAction action;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Tooltip(
-      message: tooltip,
+      message: action.tooltip,
       child: InkWell(
-        onTap: onTap,
+        onTap: action.onTap,
         borderRadius: BorderRadius.circular(21),
         child: Padding(
           padding: const EdgeInsets.all(11),
@@ -188,12 +100,14 @@ class _Slot extends StatelessWidget {
             clipBehavior: Clip.none,
             children: [
               Icon(
-                icon,
+                action.icon,
                 size: 22,
-                color: selected ? scheme.primary : scheme.onSurfaceVariant,
+                color: action.selected
+                    ? scheme.primary
+                    : scheme.onSurfaceVariant,
               ),
-              if (badge)
-                Positioned(
+              if ((action.badge ?? 0) > 0)
+                const Positioned(
                   right: -2,
                   top: -2,
                   child: StormStatusDot(status: StormStatus.syncing, size: 7),
