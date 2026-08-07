@@ -31,6 +31,7 @@ void main() {
     engine = SyncEngine(
       api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
       cache: cache,
+      vaultId: FakeServer.primaryVault,
     );
   });
 
@@ -43,11 +44,11 @@ void main() {
     test('a pinned note is fetched immediately', () async {
       // Pinning something only seen in the tree has to actually bring it
       // down, or "available offline" is a lie.
-      expect(await cache.note('n1'), isNull);
+      expect(await cache.note(FakeServer.primaryVault, 'n1'), isNull);
 
       await engine.setPinned('n1', true);
 
-      final cached = await cache.note('n1');
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(cached, isNotNull);
       expect(cached!.pinned, isTrue);
       expect(cached.content, contains('# Keep'));
@@ -74,9 +75,13 @@ void main() {
       }
       await engine.setPinned('x0', true);
 
-      final evicted = await cache.evict(keep: 3);
+      final evicted = await cache.evict(FakeServer.primaryVault, keep: 3);
       expect(evicted, greaterThan(0));
-      expect(await cache.note('x0'), isNotNull, reason: 'pinned');
+      expect(
+        await cache.note(FakeServer.primaryVault, 'x0'),
+        isNotNull,
+        reason: 'pinned',
+      );
     });
 
     test('pinning reaches the change stream so the UI refreshes', () async {
@@ -94,7 +99,7 @@ void main() {
   group('the note actions stay reachable', () {
     /// Opens n0 and returns with its actions menu on screen.
     Future<void> openMenu(WidgetTester tester, ProviderContainer c) async {
-      c.read(routerProvider).go(Routes.note('n0'));
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Note actions'));
       await tester.pumpAndSettle();

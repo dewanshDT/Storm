@@ -45,18 +45,23 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
 | M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
+| M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
+| M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
 
-Last updated: 2026-08-05, the UI refactor is complete and the old drawer shell
-is deleted (914 lines). Its three test files were ported onto the new screens
-first rather than dropped — the create-note-flow suite in particular exists
-because of a real red-screen bug, and deleting the UI it drove would have
-silently retired that guard.
+Last updated: 2026-08-07, multi-vault is built and both gates are green.
+`docs/storm-multi-vault.md` is the design; decisions 20–25 record the choices.
+
+**Not yet deployed.** M9 breaks the wire format — every note-shaped route gains
+a `/v1/vaults/{id}` segment — so client and server must go out together, and the
+VM needs a one-time directory move first. That move is the only step in this
+project so far that touches the real vault's location: see
+**Cutover discipline** and `deploy/README.md`.
 
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 94 Rust and 309 Dart unit tests
-make test-live   # 43 server e2e checks + 19 client integration checks
+make check       # clippy + analyze + 138 Rust and 326 Dart unit tests
+make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
 `make test-live` starts a server, runs both integration suites and tears it
@@ -89,18 +94,34 @@ never needs a server.
 `state/` is a **sibling** of `vault/`, never inside it, so the vault directory
 contains nothing but notes.
 
+M9 changes the left-hand box to a storage *root* holding one directory per
+vault, and the right-hand box to one index per vault plus a registry:
+
+```
+  /srv/storm/vaults/<dir>/       /srv/storm/state/vaults.json
+  canonical plain markdown       registry: root + id/name/dir
+                                 /srv/storm/state/<vault-id>/index.db
+                                 derived index + history, per vault
+```
+
+The sibling rule survives unchanged, and gains a companion: the storage root
+holds vault directories and nothing else that Storm reads.
+
 ```
 storm/
 ├── README.md                 front door
 ├── PLAN.md                   ← this file: status, decisions, blockers
 ├── CLAUDE.md                 agent guidance + invariants
 ├── Makefile                  cross-toolchain tasks (`make help`)
+├── deploy/                   systemd units, env template, backup script
 ├── apps/
 │   ├── server/               Rust — see apps/server/README.md
 │   └── client/               Flutter — see apps/client/README.md
 └── docs/
     ├── prd.md                original brief, not maintained
-    └── editor-findings.md    M0 editor measurements, incl. on-device
+    ├── editor-findings.md    M0 editor measurements, incl. on-device
+    ├── storm-ui-refactor.md  M7/M8 design brief
+    └── storm-multi-vault.md  M9/M10 design brief
 ```
 
 A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
@@ -270,6 +291,78 @@ Touch follows on a plain tap; a pointer needs Cmd/Ctrl, because clicking into
 text to edit it is the common intent. `contextMenuBuilder` adds "Open …" as the
 discoverable path that does not depend on knowing a modifier key.
 
+**20. One server hosting many vaults, not one server per vault**
+*(departs from PRD §3)*
+The PRD deferred multi-vault entirely ("one vault per app install initially").
+The alternative that needs no server change at all is N processes, one per
+vault, with the client holding a list of `(url, token)` connections — but that
+is N systemd units, N backup runs and N ports to remember, and there is then no
+single thing a "vault storage root" setting could refer to. One server owning a
+root directory keeps the homelab surface at one unit, one token and one backup,
+and makes the root a real setting rather than a fiction.
+*Revisit if:* vaults ever need different access control. Per-vault tokens are
+the natural shape and would push back toward separate processes.
+
+**21. Vaults are tracked by UUID; `vaults.json` maps id to directory.**
+The same reasoning that makes notes path-independent (see **Data model**, and
+the invariant in `CLAUDE.md`). If the directory name were the id, renaming a
+vault would orphan its index and its clients' cached notes. A registry keeps
+display name, directory and id independent, so renaming either is an edit
+rather than a migration. It is plain JSON rather than a SQLite database because
+it is the one piece of state a human might need to fix by hand when something
+has gone wrong, and the vault-is-greppable ethos should extend to it.
+
+**22. Per-vault index and per-vault `seq`; the change stream stays global.**
+`notes.path` is `UNIQUE` and `attachments.path` is a primary key, so two vaults
+in one database would collide on any shared path — `Daily/2026-08-07.md` exists
+in most vaults. One `index.db` per vault sidesteps that entirely and needs no
+schema migration, at the cost of splitting `change_log.seq`, which was the sync
+protocol's single global cursor. So the cursor becomes per vault too. The
+WebSocket does *not* split: one socket carries every vault's changes with a
+`vault_id` on each frame, because the alternative is one socket per vault held
+open for vaults nobody is looking at.
+
+**23. Recents are recorded server-side and served across vaults.**
+`docs/storm-ui-refactor.md` §2.1 defined "Recent" as recently *edited*
+specifically to avoid tracking a second timestamp. Multi-vault breaks that
+bargain: sorting by `modified` across vaults means fetching every vault's tree
+on every dashboard load, and the dashboard is the home screen. A `note_access`
+table and one `GET /v1/recents` is one call regardless of vault count, is
+genuinely "opened" rather than "edited", and gives the same list on the phone
+and the desktop. It is a separate table, not a column on `notes`, because
+`record_note` rewrites the notes row on every index update and an "opened"
+timestamp must not bump `version` or append to `change_log`.
+
+**24. The active vault is routed, with a persisted mirror — not a provider
+family.**
+The structurally pure option is `syncEngineProvider.family(vaultId)` and a
+vault argument threaded through every consumer. But `apiProvider` already
+rebuilds on any settings change and `syncEngineProvider` already watches it, so
+putting `activeVault` in `Settings` gets engine teardown, socket close and
+session rebuild from machinery that exists and is already tested — at roughly a
+tenth of the diff. The hazard it buys is a stale frame where the route says one
+vault and the providers still hold another; a `VaultGate` at the `/v/:vault`
+route closes it by refusing to build children until the two agree, which is the
+same post-frame reconciliation `NoteScreen._load` already does.
+*Revisit if:* two vaults ever need to be live at once — split panes, dragging a
+note between vaults, or cross-vault search. The family is the right answer then
+and this becomes the wrong shape rather than a slow one.
+
+**25. Storm never moves vault directories, and refuses a root change that
+orphans every vault.**
+Changing the storage root points the server at directories an admin has already
+moved; it does not relocate anything. Relocating on the user's behalf would
+make a mistyped path a data move. But the honest version of that has a failure
+mode this project has already been burned by twice: point the root somewhere
+empty and the server boots perfectly healthy with zero vaults, files safe on
+disk and invisible to every client — which reads as "my notes are gone". So
+both directions are made loud instead. At runtime, `PUT /v1/config` refuses with
+`409` and names every vault that would be orphaned, unless the caller passes
+`orphan_ok`. At boot, a `--vault` path that does not exist exits non-zero with
+both paths in the message rather than starting empty. A vault whose directory
+has vanished stays in the registry marked `missing`; it is never quietly
+dropped.
+
 ---
 
 ## Data model
@@ -297,6 +390,23 @@ SQLite schema (`state/index.db`): `notes`, `note_versions` (full snapshots),
 `change_log` is the delta-sync primitive: every mutation from any source (API,
 watcher, startup scan) appends a row, and a client asks `GET /sync?since=<seq>`.
 No manifest diffing.
+
+**M9 makes this per vault**: the index moves to `state/<vault-id>/index.db`, so
+`seq` and every table above are scoped to one vault, and a client's sync cursor
+is per vault too. Two tables are added, both pure `CREATE TABLE IF NOT EXISTS`
+additions that need no migration mechanism:
+
+- `folders (path, created)` — folders created explicitly rather than derived
+  from note paths. It exists for exactly one reason: `prune_empty_parents`
+  deletes directories that become empty, and without an exemption a new empty
+  folder disappears the moment its last note leaves.
+- `note_access (note_id, opened_at)` — when a note was last opened, feeding the
+  cross-vault recents list. Separate from `notes` on purpose; see decision 23.
+
+A `PRAGMA user_version` guard lands with them so the next change that needs an
+*altered* column has somewhere to live. Additions never did.
+
+The registry lives outside any index, at `state/vaults.json`.
 
 ---
 
@@ -660,6 +770,63 @@ block-based editor rewrite of decision 5, for the same reason as always — a
 
 ---
 
+### M9/M10 — Multi-vault, folders, storage root ✅
+
+One server owns a storage root; each directory under it is a vault, tracked by
+UUID via `state/vaults.json`. Every note-shaped route gained a
+`/v1/vaults/{id}` segment, `AppState` went from one `Mutex<Indexer>` to a
+`RwLock<VaultSet>` of them, and the dashboard became a grid of vaults over a
+cross-vault "recently opened" list. Folders became a real thing you can create,
+rename and delete. Full design in `docs/storm-multi-vault.md`.
+
+**The watcher got simpler, not harder.** The obvious shape was one watcher per
+vault plus a shutdown path for each. Watching the *root* and attributing each
+event by directory prefix means adding or removing a vault needs no watcher
+work at all, and a root change just respawns the one watcher.
+
+**Three things that looked small and were not:**
+
+1. *The client cache had no migration strategy at all.* `cache_db.dart` was
+   `schemaVersion => 1` with no `MigrationStrategy`, so the default only ever
+   ran `createAll`. Adding `vaultId` meant writing the first real migration
+   this project has had. `Outbox` rows are edits that exist nowhere else, so
+   when the vault cannot be inferred the migration stamps them `legacy` and
+   leaves them, rather than guessing which vault they belong to.
+2. *`Meta.lastSeq` was a single global key.* Two vaults would have overwritten
+   each other's sync cursor — silent, and indistinguishable from randomly
+   missed changes. It is `lastSeq:<vaultId>` now.
+3. *The `--vault` compatibility shim puts `state/` inside the root.*
+   `--vault /srv/storm/vault` implies root `/srv/storm`, which contains
+   `/srv/storm/state`, and a naive scan would have registered `state` as a
+   vault and indexed the SQLite files in it. `scan_root()` skips `state_dir`
+   unconditionally; `registry.rs` has a test for exactly that layout.
+
+**Two bugs the new tests caught, both the same shape.** Cached writes were not
+stamped with the vault, so every read missed and the editor opened empty. And
+`treeProvider` read the engine without watching the active vault, so switching
+vaults kept showing the previous one's notes. Both were invisible to the type
+checker and to every existing test; both are the "scoped thing still treated as
+global" failure this milestone is made of.
+
+**The gate test that was not.** The first version of "switching vaults never
+shows stale notes" passed with `VaultGate`'s guard deleted — `pumpAndSettle`
+waits out the exact frame the gate exists for. The version that ships pumps a
+single frame, and deleting the guard fails it. *A test that passes when you
+remove the thing it names is not a test of that thing.*
+
+**Known limitation, stated rather than discovered:** the registry rescans at
+startup, on a root change, and on vault create/delete — not continuously. A
+directory dropped into the root over rsync does not appear until a restart. The
+root watcher covers note edits inside registered vaults; it does not register
+new vaults.
+
+**Deliberately not in this pass:** cross-vault search, tags and backlinks (each
+vault has its own FTS index); per-vault tokens; two vaults live at once; moving
+a note between vaults; and deleting a vault's files from the app — removing a
+vault unregisters it and leaves every byte on disk.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -726,6 +893,17 @@ real vault move over and Syncthing get switched off.
 Get the nightly backup working the day the server first touches real data — not
 at M6. `state/` holds version history that the merge depends on, so back up both
 `vault/` and `state/`.
+
+**M9 adds the first step that moves the real vault's location.**
+`/srv/storm/vault` becomes `/srv/storm/vaults/<name>`, and the server then moves
+`state/index.db` into the new vault's own state directory on first boot. Take a
+backup of all of `/srv/storm` immediately before the move, and verify it opens —
+`deploy/storm-backup.sh` already reopens its snapshot for exactly this reason.
+`note_versions` is the merge base and cannot be rebuilt from the markdown, so a
+lost index is a lost merge history even though no note is lost.
+
+Do it with the server stopped, and check `GET /v1/vaults` returns one vault
+before pointing any client at it.
 
 ---
 

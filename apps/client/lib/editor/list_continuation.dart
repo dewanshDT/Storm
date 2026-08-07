@@ -84,7 +84,9 @@ TextEditingValue? listContinuation(String text, int caret) {
 /// Task markers are checked first: `- [ ] x` is also a valid bullet, and
 /// matching it as one would leave `[ ] ` stranded in the continued line.
 String? _listMarker(String rest) {
-  final m = RegExp(r'^(?:[-*+] \[[ xX]\] |[-*+] |\d+[.)] )').matchAsPrefix(rest);
+  final m = RegExp(
+    r'^(?:[-*+] \[[ xX]\] |[-*+] |\d+[.)] )',
+  ).matchAsPrefix(rest);
   return m?[0];
 }
 

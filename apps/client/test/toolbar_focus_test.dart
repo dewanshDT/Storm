@@ -8,6 +8,7 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/editor_toolbar.dart';
 
 import 'shell_harness.dart';
+import 'fake_server.dart';
 
 /// Reported from the phone: the buttons above the keyboard do nothing, and
 /// Heading 1 in particular leaves the text alone.
@@ -17,11 +18,12 @@ import 'shell_harness.dart';
 /// re-applying a prefix a line already had was treated as a toggle-off.
 void main() {
   group('the heading picker is a choice, not a toggle', () {
-    testWidgets('picking H1 on a line that is already H1 leaves it H1',
-        (tester) async {
+    testWidgets('picking H1 on a line that is already H1 leaves it H1', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(411, 900));
-      c.read(routerProvider).go(Routes.note('n0'));
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
       await pumpShell(tester, c, size: const Size(411, 900), keyboard: 320);
       await tester.pumpAndSettle();
@@ -32,7 +34,11 @@ void main() {
       final ctrl = tester.widget<TextField>(field).controller!;
       ctrl.selection = const TextSelection.collapsed(offset: 4);
       await tester.pump();
-      expect(ctrl.text.split('\n').first, '# Welcome.md', reason: 'precondition');
+      expect(
+        ctrl.text.split('\n').first,
+        '# Welcome.md',
+        reason: 'precondition',
+      );
 
       await tester.tap(find.byIcon(Icons.title));
       await tester.pumpAndSettle();
@@ -74,46 +80,55 @@ void main() {
     });
   });
 
-  testWidgets('tapping the toolbar does not steal focus from the editor',
-      (tester) async {
-    // TextField's default onTapOutside unfocuses on desktop and web, and an
-    // unfocused field closes the keyboard, which hides the toolbar mid-tap.
-    final controller = StormMarkdownController(
-      theme: MarkdownTheme.dark(const TextStyle()),
-      text: 'hello world',
-    );
-    final focus = FocusNode();
-    addTearDown(focus.dispose);
+  testWidgets(
+    'tapping the toolbar does not steal focus from the editor',
+    (tester) async {
+      // TextField's default onTapOutside unfocuses on desktop and web, and an
+      // unfocused field closes the keyboard, which hides the toolbar mid-tap.
+      final controller = StormMarkdownController(
+        theme: MarkdownTheme.dark(const TextStyle()),
+        text: 'hello world',
+      );
+      final focus = FocusNode();
+      addTearDown(focus.dispose);
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: Column(
-            children: [
-              Expanded(
-                child: TextField(controller: controller, focusNode: focus),
-              ),
-              EditorToolbar(controller: controller),
-            ],
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                Expanded(
+                  child: TextField(controller: controller, focusNode: focus),
+                ),
+                EditorToolbar(controller: controller),
+              ],
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    await tester.tap(find.byType(TextField));
-    await tester.pumpAndSettle();
-    controller.selection = const TextSelection(baseOffset: 6, extentOffset: 11);
-    await tester.pump();
-    expect(focus.hasFocus, isTrue, reason: 'precondition');
+      await tester.tap(find.byType(TextField));
+      await tester.pumpAndSettle();
+      controller.selection = const TextSelection(
+        baseOffset: 6,
+        extentOffset: 11,
+      );
+      await tester.pump();
+      expect(focus.hasFocus, isTrue, reason: 'precondition');
 
-    await tester.tap(find.byIcon(Icons.format_bold));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.format_bold));
+      await tester.pumpAndSettle();
 
-    expect(controller.text, 'hello **world**');
-    expect(focus.hasFocus, isTrue,
-        reason: 'an unfocused field closes the keyboard and hides the toolbar');
-    // Run on the platforms whose onTapOutside actually unfocuses.
-  }, variant: TargetPlatformVariant.desktop());
+      expect(controller.text, 'hello **world**');
+      expect(
+        focus.hasFocus,
+        isTrue,
+        reason: 'an unfocused field closes the keyboard and hides the toolbar',
+      );
+      // Run on the platforms whose onTapOutside actually unfocuses.
+    },
+    variant: TargetPlatformVariant.desktop(),
+  );
 }
 
 StormMarkdownController _controller(String text, {required int offset}) {

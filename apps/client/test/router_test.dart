@@ -6,6 +6,7 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/browse_screen.dart';
 
 import 'shell_harness.dart';
+import 'fake_server.dart';
 
 /// Routing and the shell.
 ///
@@ -27,18 +28,19 @@ void main() {
       await pumpShell(tester, c);
 
       expect(find.text('Storm'), findsOneWidget);
-      expect(find.text('Recent'), findsOneWidget);
+      expect(find.text('Recently opened'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
-    testWidgets('disconnecting sends an open app back to connect',
-        (tester) async {
+    testWidgets('disconnecting sends an open app back to connect', (
+      tester,
+    ) async {
       // The regression that motivated `refreshListenable`: watching settings
       // rebuilt the provider into a *new* GoRouter while the MaterialApp kept
       // the old one, so this redirect never fired.
       final c = shellContainer();
       await pumpShell(tester, c);
-      expect(find.text('Recent'), findsOneWidget);
+      expect(find.text('Recently opened'), findsOneWidget);
 
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
@@ -52,13 +54,16 @@ void main() {
       await pumpShell(tester, c);
       final before = c.read(routerProvider);
 
-      await c.read(settingsProvider.notifier).save(
-            const Settings(baseUrl: 'http://other', token: 'u'),
-          );
+      await c
+          .read(settingsProvider.notifier)
+          .save(const Settings(baseUrl: 'http://other', token: 'u'));
       await tester.pumpAndSettle();
 
-      expect(identical(c.read(routerProvider), before), isTrue,
-          reason: 'a replaced router silently stops navigating');
+      expect(
+        identical(c.read(routerProvider), before),
+        isTrue,
+        reason: 'a replaced router silently stops navigating',
+      );
       await disposeShell(tester, c);
     });
   });
@@ -68,21 +73,24 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      c.read(routerProvider).go(Routes.note('n0'));
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
 
       expect(c.read(openNoteIdProvider), 'n0');
       await disposeShell(tester, c);
     });
 
-    testWidgets('a deep link into a nested folder shows its breadcrumb',
-        (tester) async {
+    testWidgets('a deep link into a nested folder shows its breadcrumb', (
+      tester,
+    ) async {
       // The reason for a real router: this location has to be reachable
       // directly, not only by tapping through.
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      c.read(routerProvider).go(Routes.folder('Projects/Storm'));
+      c
+          .read(routerProvider)
+          .go(Routes.folder(FakeServer.primaryVault, 'Projects/Storm'));
       await tester.pumpAndSettle();
 
       expect(find.text('Vault'), findsOneWidget);
@@ -96,7 +104,7 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      c.read(routerProvider).go(Routes.browse);
+      c.read(routerProvider).go(Routes.browse(FakeServer.primaryVault));
       await tester.pumpAndSettle();
       expect(find.text('Daily'), findsOneWidget);
 
@@ -130,10 +138,9 @@ void main() {
 
       // A nested folder shows only its own children, not the whole subtree.
       expect(childrenOfFolder(notes, 'Projects').map((e) => e.name), ['Storm']);
-      expect(
-        childrenOfFolder(notes, 'Projects/Storm').map((e) => e.name),
-        ['Design'],
-      );
+      expect(childrenOfFolder(notes, 'Projects/Storm').map((e) => e.name), [
+        'Design',
+      ]);
     });
 
     test('an empty or unknown folder yields nothing', () {
@@ -158,7 +165,9 @@ void main() {
       testWidgets('the directory does not overflow on $name', (tester) async {
         final c = shellContainer();
         await pumpShell(tester, c, size: size);
-        c.read(routerProvider).go(Routes.folder('Projects/Storm'));
+        c
+            .read(routerProvider)
+            .go(Routes.folder(FakeServer.primaryVault, 'Projects/Storm'));
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         await disposeShell(tester, c);
@@ -167,7 +176,7 @@ void main() {
       testWidgets('an open note does not overflow on $name', (tester) async {
         final c = shellContainer();
         await pumpShell(tester, c, size: size);
-        c.read(routerProvider).go(Routes.note('n0'));
+        c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         await disposeShell(tester, c);

@@ -5,6 +5,7 @@ import 'package:storm/router.dart';
 import 'package:storm/ui/shell/storm_scaffold.dart';
 
 import 'shell_harness.dart';
+import 'fake_server.dart';
 
 /// The "new note" flow, end to end through the real screens.
 ///
@@ -23,13 +24,14 @@ void main() {
   Future<void> openDialog(WidgetTester tester) async {
     await tester.tap(find.byIcon(Icons.more_horiz));
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.add));
+    await tester.tap(find.byTooltip('New note'));
     await tester.pumpAndSettle();
   }
 
   testWidgets('creating a note does not throw', (tester) async {
     final c = shellContainer();
     await pumpShell(tester, c);
+    await openVault(tester, c);
 
     await openDialog(tester);
     expect(find.text('New note'), findsOneWidget, reason: 'dialog should open');
@@ -60,22 +62,27 @@ void main() {
     // open, so creating one has to navigate rather than mutate a flag.
     final c = shellContainer();
     await pumpShell(tester, c);
+    await openVault(tester, c);
 
     await openDialog(tester);
     await tester.enterText(find.byType(TextField).last, 'Notes/Fresh.md');
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();
 
-    final created = serverOf(c).notes.values.firstWhere(
-          (n) => n.path == 'Notes/Fresh.md',
-        );
-    expect(c.read(routerProvider).state.uri.path, Routes.note(created.id));
+    final created = serverOf(
+      c,
+    ).notes.values.firstWhere((n) => n.path == 'Notes/Fresh.md');
+    expect(
+      c.read(routerProvider).state.uri.path,
+      Routes.note(FakeServer.primaryVault, created.id),
+    );
     await disposeShell(tester, c);
   });
 
   testWidgets('cancelling the dialog does not throw either', (tester) async {
     final c = shellContainer();
     await pumpShell(tester, c);
+    await openVault(tester, c);
 
     await openDialog(tester);
     await tester.tap(find.text('Cancel'));
@@ -85,10 +92,12 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  testWidgets('an invalid path is rejected without closing the dialog',
-      (tester) async {
+  testWidgets('an invalid path is rejected without closing the dialog', (
+    tester,
+  ) async {
     final c = shellContainer();
     await pumpShell(tester, c);
+    await openVault(tester, c);
 
     await openDialog(tester);
     await tester.enterText(find.byType(TextField).last, '../escape.md');

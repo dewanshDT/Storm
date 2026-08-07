@@ -9,6 +9,7 @@ import 'package:storm/state/wikilinks.dart';
 import 'package:storm/ui/wikilink_suggestions.dart';
 
 import 'shell_harness.dart';
+import 'fake_server.dart';
 
 /// Completing a `[[` as you type it.
 ///
@@ -16,15 +17,18 @@ import 'shell_harness.dart';
 /// Typing a full note name by hand on a phone is the difference between links
 /// being usable and being theoretical.
 void main() {
-  NoteMeta meta(String path, {String title = '', String modified = '2026-08-01'}) =>
-      NoteMeta(
-        id: path,
-        path: path,
-        title: title,
-        version: 1,
-        modified: modified,
-        size: 0,
-      );
+  NoteMeta meta(
+    String path, {
+    String title = '',
+    String modified = '2026-08-01',
+  }) => NoteMeta(
+    id: path,
+    path: path,
+    title: title,
+    version: 1,
+    modified: modified,
+    size: 0,
+  );
 
   StormMarkdownController on(String text, {required int caret}) {
     final c = StormMarkdownController(
@@ -87,16 +91,18 @@ void main() {
     });
 
     test('shorter names win ties, so the exact thing is first', () {
-      final names = suggestWikilinks(notes, 'design').map((n) => n.path).toList();
+      final names = suggestWikilinks(
+        notes,
+        'design',
+      ).map((n) => n.path).toList();
       expect(names.first, 'Design.md');
       expect(names[1], 'Projects/Design System.md');
     });
 
     test('matches a folder in the path too', () {
-      expect(
-        suggestWikilinks(notes, 'projects').map((n) => n.path),
-        ['Projects/Design System.md'],
-      );
+      expect(suggestWikilinks(notes, 'projects').map((n) => n.path), [
+        'Projects/Design System.md',
+      ]);
     });
 
     test('an empty query offers recent notes rather than nothing', () {
@@ -167,11 +173,12 @@ void main() {
   });
 
   group('in the editor', () {
-    testWidgets('typing [[ offers notes, and tapping one completes the link',
-        (tester) async {
+    testWidgets('typing [[ offers notes, and tapping one completes the link', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(411, 900));
-      c.read(routerProvider).go(Routes.note('n0'));
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
       await pumpShell(tester, c, size: const Size(411, 900), keyboard: 320);
       await tester.pumpAndSettle();
@@ -181,7 +188,11 @@ void main() {
       await tester.pumpAndSettle();
       final ctrl = tester.widget<TextField>(field).controller!;
 
-      expect(find.byType(ActionChip), findsNothing, reason: 'nothing typed yet');
+      expect(
+        find.byType(ActionChip),
+        findsNothing,
+        reason: 'nothing typed yet',
+      );
 
       // Open a link at the end of the note.
       ctrl.value = TextEditingValue(
@@ -197,16 +208,21 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(ctrl.text, endsWith('[[Design]]'));
-      expect(find.byType(ActionChip), findsNothing,
-          reason: 'a finished link is not a query');
+      expect(
+        find.byType(ActionChip),
+        findsNothing,
+        reason: 'a finished link is not a query',
+      );
 
       await disposeShell(tester, c);
     });
 
-    testWidgets('the strip is absent when the keyboard is down', (tester) async {
+    testWidgets('the strip is absent when the keyboard is down', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(411, 900));
-      c.read(routerProvider).go(Routes.note('n0'));
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
 
       expect(find.byType(WikilinkSuggestions), findsNothing);

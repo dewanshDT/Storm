@@ -84,18 +84,47 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
       context.go(location);
     }
 
+    // On the dashboard there is no vault to browse or search, so the bubble
+    // offers what does apply there: a new vault.
+    final vaultId = Routes.vaultOf(uri);
+    if (vaultId.isEmpty) {
+      return [
+        _Slot(
+          icon: Icons.add,
+          tooltip: 'New vault',
+          onTap: () {
+            setState(() => _expanded = false);
+            NewNoteRequest.of(context)?.call();
+          },
+        ),
+        _Slot(
+          icon: Icons.dns_outlined,
+          tooltip: 'Server',
+          onTap: () {
+            setState(() => _expanded = false);
+            context.push(Routes.serverSettings);
+          },
+        ),
+        _Slot(
+          icon: Icons.close,
+          tooltip: 'Close',
+          onTap: () => setState(() => _expanded = false),
+        ),
+      ];
+    }
+
     return [
       _Slot(
         icon: Icons.folder_outlined,
         tooltip: 'Directory',
-        selected: uri.path.startsWith(Routes.browse),
-        onTap: () => go(Routes.browse),
+        selected: uri.path.startsWith(Routes.browse(vaultId)),
+        onTap: () => go(Routes.browse(vaultId)),
       ),
       _Slot(
         icon: Icons.search,
         tooltip: 'Search',
-        selected: uri.path == Routes.search,
-        onTap: () => go(Routes.search),
+        selected: uri.path == Routes.search(vaultId),
+        onTap: () => go(Routes.search(vaultId)),
       ),
       _Slot(
         icon: Icons.add,
@@ -105,6 +134,17 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
           NewNoteRequest.of(context)?.call();
         },
       ),
+      // Only where a folder can actually be made — inside a note there is no
+      // "here" for it to land in.
+      if (NewFolderRequest.of(context) != null)
+        _Slot(
+          icon: Icons.create_new_folder_outlined,
+          tooltip: 'New folder',
+          onTap: () {
+            setState(() => _expanded = false);
+            NewFolderRequest.of(context)?.call();
+          },
+        ),
       _ContextSlot(uri: uri, onGo: go),
       _Slot(
         icon: Icons.close,
@@ -128,18 +168,21 @@ class _ContextSlot extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final inNote = uri.pathSegments.firstOrNull == 'note';
+    final vaultId = Routes.vaultOf(uri);
+    final segments = uri.pathSegments;
+    // `/v/<vault>/note/<id>` — the marker is the segment after the vault.
+    final inNote = segments.length > 3 && segments[2] == 'note';
 
     if (!inNote) {
       return _Slot(
         icon: Icons.label_outline,
         tooltip: 'Tags',
-        selected: uri.path == Routes.tags,
-        onTap: () => onGo(Routes.tags),
+        selected: uri.path == Routes.tags(vaultId),
+        onTap: () => onGo(Routes.tags(vaultId)),
       );
     }
 
-    final id = uri.pathSegments.length > 1 ? uri.pathSegments[1] : null;
+    final id = segments.length > 3 ? segments[3] : null;
     final mentions = id == null
         ? 0
         : (ref.watch(backlinksProvider(id)).value?.length ?? 0);
@@ -190,10 +233,7 @@ class _Slot extends StatelessWidget {
                 Positioned(
                   right: -2,
                   top: -2,
-                  child: StormStatusDot(
-                    status: StormStatus.syncing,
-                    size: 7,
-                  ),
+                  child: StormStatusDot(status: StormStatus.syncing, size: 7),
                 ),
             ],
           ),
@@ -214,12 +254,29 @@ class NewNoteRequest extends InheritedWidget {
 
   final VoidCallback onRequest;
 
-  static VoidCallback? of(BuildContext context) => context
-      .dependOnInheritedWidgetOfExactType<NewNoteRequest>()
-      ?.onRequest;
+  static VoidCallback? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<NewNoteRequest>()?.onRequest;
 
   @override
   bool updateShouldNotify(NewNoteRequest old) => false;
+}
+
+/// Same, for creating a folder. Absent on screens where there is no folder to
+/// create one inside, which is what hides the slot.
+class NewFolderRequest extends InheritedWidget {
+  const NewFolderRequest({
+    super.key,
+    required this.onRequest,
+    required super.child,
+  });
+
+  final VoidCallback onRequest;
+
+  static VoidCallback? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<NewFolderRequest>()?.onRequest;
+
+  @override
+  bool updateShouldNotify(NewFolderRequest old) => false;
 }
 
 /// Same, for the Context slot inside a note.

@@ -117,6 +117,7 @@ class WriteResult {
 class Change {
   const Change({
     required this.seq,
+    required this.vaultId,
     required this.noteId,
     required this.kind,
     required this.version,
@@ -124,6 +125,10 @@ class Change {
   });
 
   final int seq;
+
+  /// Which vault this happened in. One WebSocket carries every vault's
+  /// changes, so a listener must filter on this rather than assume.
+  final String vaultId;
   final String noteId;
 
   /// `created`, `updated`, `moved` or `deleted`.
@@ -133,10 +138,106 @@ class Change {
 
   factory Change.fromJson(Map<String, dynamic> j) => Change(
     seq: (j['seq'] as num).toInt(),
+    vaultId: j['vault_id'] as String? ?? '',
     noteId: j['note_id'] as String,
     kind: j['kind'] as String,
     version: (j['version'] as num?)?.toInt() ?? 0,
     at: j['at'] as String? ?? '',
+  );
+}
+
+/// One vault on the server.
+class VaultInfo {
+  const VaultInfo({
+    required this.id,
+    required this.name,
+    required this.dir,
+    required this.noteCount,
+    required this.missing,
+  });
+
+  final String id;
+  final String name;
+
+  /// Directory name under the storage root.
+  final String dir;
+  final int noteCount;
+
+  /// The directory is gone. Kept in the list rather than hidden — a vault that
+  /// silently disappears looks identical to one that never existed.
+  final bool missing;
+
+  factory VaultInfo.fromJson(Map<String, dynamic> j) => VaultInfo(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? '',
+    dir: j['dir'] as String? ?? '',
+    noteCount: (j['note_count'] as num?)?.toInt() ?? 0,
+    missing: j['missing'] as bool? ?? false,
+  );
+}
+
+/// A recently opened note, from any vault.
+class RecentNote {
+  const RecentNote({
+    required this.vaultId,
+    required this.vaultName,
+    required this.noteId,
+    required this.path,
+    required this.title,
+    required this.modified,
+    required this.openedAt,
+  });
+
+  final String vaultId;
+  final String vaultName;
+  final String noteId;
+  final String path;
+  final String title;
+  final String modified;
+  final String openedAt;
+
+  /// The folder holding it, or `''` at the vault root.
+  String get folder {
+    final i = path.lastIndexOf('/');
+    return i < 0 ? '' : path.substring(0, i);
+  }
+
+  String get fileName {
+    final i = path.lastIndexOf('/');
+    final name = i < 0 ? path : path.substring(i + 1);
+    return name.endsWith('.md') ? name.substring(0, name.length - 3) : name;
+  }
+
+  /// What to show: the note's heading when it has one, else its file name.
+  String get displayTitle => title.isEmpty ? fileName : title;
+
+  factory RecentNote.fromJson(Map<String, dynamic> j) => RecentNote(
+    vaultId: j['vault_id'] as String,
+    vaultName: j['vault_name'] as String? ?? '',
+    noteId: j['note_id'] as String,
+    path: j['path'] as String? ?? '',
+    title: j['title'] as String? ?? '',
+    modified: j['modified'] as String? ?? '',
+    openedAt: j['opened_at'] as String? ?? '',
+  );
+}
+
+/// Server-level settings, chiefly where vaults are stored.
+class ServerConfig {
+  const ServerConfig({
+    required this.vaultRoot,
+    required this.stateDir,
+    required this.vaultCount,
+  });
+
+  final String vaultRoot;
+  final String stateDir;
+  final int vaultCount;
+
+  factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
+    vaultRoot: j['vault_root'] as String? ?? '',
+    stateDir: j['state_dir'] as String? ?? '',
+    vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
   );
 }
 

@@ -32,15 +32,13 @@ void main() {
         childrenOfFolder(notes, '').map((e) => e.name),
         containsAll(['Welcome', 'Daily', 'Projects']),
       );
-      expect(
-        childrenOfFolder(notes, 'Daily').map((e) => e.name),
-        ['2026-08-05'],
-      );
+      expect(childrenOfFolder(notes, 'Daily').map((e) => e.name), [
+        '2026-08-05',
+      ]);
       expect(childrenOfFolder(notes, 'Projects').map((e) => e.name), ['Storm']);
-      expect(
-        childrenOfFolder(notes, 'Projects/Storm').map((e) => e.name),
-        ['Design'],
-      );
+      expect(childrenOfFolder(notes, 'Projects/Storm').map((e) => e.name), [
+        'Design',
+      ]);
     });
 
     test('folders sort before notes, each alphabetically', () {

@@ -17,11 +17,17 @@ import 'package:storm/sync/sync_engine.dart';
 /// each client gets its own cache and its own connection, exactly as two
 /// devices would.
 ///
-///   cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484
+///   cargo run -- --vault-root /tmp/vaults --state /tmp/s --token testtoken
 ///   flutter test test_live/
+///
+/// The vault under test is whichever one the server reports first, so this
+/// runs against whatever the harness seeded.
 void main() {
   const baseUrl = 'http://127.0.0.1:8484';
   const token = 'testtoken';
+
+  /// Resolved once, from the running server.
+  late String vaultId;
 
   late _Client a;
   late _Client b;
@@ -37,11 +43,21 @@ void main() {
     } catch (_) {
       fail('No server on 127.0.0.1:8484 — start storm-server first.');
     }
+
+    // Every note-shaped route is vault-scoped; ask the server which vault
+    // rather than assuming a name.
+    final probe = StormApi(baseUrl: baseUrl, token: token);
+    final vaults = await probe.vaults();
+    probe.dispose();
+    if (vaults.isEmpty) {
+      fail('The server has no vaults — the harness should have seeded one.');
+    }
+    vaultId = vaults.first.id;
   });
 
   setUp(() {
-    a = _Client(baseUrl, token);
-    b = _Client(baseUrl, token);
+    a = _Client(baseUrl, token, vaultId);
+    b = _Client(baseUrl, token, vaultId);
   });
 
   tearDown(() async {
@@ -67,6 +83,7 @@ void main() {
 
   test('scenario 1: an edit on A reaches B on next open', () async {
     final created = await a.api.createNote(
+      vaultId: vaultId,
       path: scratch('s1'),
       content: '# One\n',
     );
@@ -82,11 +99,12 @@ void main() {
     final onB = await b.engine.openNote(id);
     expect(onB!.content, contains('From A.'));
 
-    await a.api.deleteNote(id);
+    await a.api.deleteNote(vaultId, id);
   });
 
   test('scenario 2: B is pushed A\'s change over the WebSocket', () async {
     final created = await a.api.createNote(
+      vaultId: vaultId,
       path: scratch('s2'),
       content: '# Two\n',
     );
@@ -104,7 +122,7 @@ void main() {
     expect(saved.status, SaveStatus.saved);
 
     final arrived = await eventually(() async {
-      final cached = await b.cache.note(id);
+      final cached = await b.cache.note(vaultId, id);
       return cached != null && cached.content.contains('Pushed from A.');
     });
     expect(
@@ -113,13 +131,14 @@ void main() {
       reason: "B should have been pushed A's change without polling",
     );
 
-    await a.api.deleteNote(id);
+    await a.api.deleteNote(vaultId, id);
   });
 
   test(
     'scenario 9: a delete on A is noticed by B, with no resurrection',
     () async {
       final created = await a.api.createNote(
+        vaultId: vaultId,
         path: scratch('s9'),
         content: '# Nine\n',
       );
@@ -129,18 +148,18 @@ void main() {
       await session.open(id);
       expect(session.isOpen, isTrue);
 
-      await a.api.deleteNote(id);
+      await a.api.deleteNote(vaultId, id);
       await b.engine.sync();
       await session.onRemoteChange();
 
       expect(session.isOpen, isFalse);
       expect(session.notice, contains('deleted'));
-      expect(await b.cache.note(id), isNull);
+      expect(await b.cache.note(vaultId, id), isNull);
 
       // And B must not recreate it by saving a stale buffer.
       await session.save();
       await expectLater(
-        a.api.note(id),
+        a.api.note(vaultId, id),
         throwsA(
           isA<StormApiException>().having(
             (e) => e.isNotFound,
@@ -160,6 +179,7 @@ void main() {
       // non-overlapping edits, reconciled by the server on reconnect.
       final body = '# Merge\n\nAlpha.\n\nBeta.\n\nGamma.\n\nDelta.\n\nOmega.\n';
       final created = await a.api.createNote(
+        vaultId: vaultId,
         path: scratch('merge'),
         content: body,
       );
@@ -192,7 +212,7 @@ void main() {
       b.reconnect(baseUrl, token);
       await b.engine.sync();
 
-      final merged = await a.api.note(id);
+      final merged = await a.api.note(vaultId, id);
       expect(merged.content, contains('edited on A'));
       expect(merged.content, contains('edited on B offline'));
       expect(
@@ -200,23 +220,25 @@ void main() {
         isNot(contains('<<<<<<<')),
         reason: 'non-overlapping edits should merge cleanly',
       );
-      expect(await b.cache.pendingCount(), 0);
+      expect(await b.cache.pendingCount(vaultId), 0);
 
-      await a.api.deleteNote(id);
+      await a.api.deleteNote(vaultId, id);
     },
   );
 }
 
 /// One simulated device: its own cache, engine and connection.
 class _Client {
-  _Client(String baseUrl, String token)
+  _Client(String baseUrl, String token, this.vaultId)
     : cache = CacheDb(NativeDatabase.memory()) {
     engine = SyncEngine(
       api: StormApi(baseUrl: baseUrl, token: token),
       cache: cache,
+      vaultId: vaultId,
     );
   }
 
+  final String vaultId;
   final CacheDb cache;
   late SyncEngine engine;
 
@@ -227,6 +249,7 @@ class _Client {
     final replacement = SyncEngine(
       api: StormApi(baseUrl: baseUrl, token: token),
       cache: cache,
+      vaultId: vaultId,
     );
     engine.dispose();
     engine = replacement;

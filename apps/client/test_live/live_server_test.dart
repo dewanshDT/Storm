@@ -19,11 +19,17 @@ import 'package:storm/sync/sync_engine.dart';
 /// Lives outside `test/` so a plain `flutter test` doesn't need a server.
 /// Run it explicitly, with a server up:
 ///
-///   cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484
+///   cargo run -- --vault-root /tmp/vaults --state /tmp/s --token testtoken
 ///   flutter test test_live/
+///
+/// The vault under test is whichever one the server reports first, so this
+/// runs against whatever the harness seeded.
 void main() {
   const baseUrl = 'http://127.0.0.1:8484';
   const token = 'testtoken';
+
+  /// Resolved once, from the running server.
+  late String vaultId;
   late StormApi api;
 
   setUpAll(() async {
@@ -37,6 +43,16 @@ void main() {
     } catch (_) {
       fail('No server on 127.0.0.1:8484 — start storm-server first.');
     }
+
+    // Every note-shaped route is vault-scoped; ask the server which vault
+    // rather than assuming a name.
+    final probe = StormApi(baseUrl: baseUrl, token: token);
+    final vaults = await probe.vaults();
+    probe.dispose();
+    if (vaults.isEmpty) {
+      fail('The server has no vaults — the harness should have seeded one.');
+    }
+    vaultId = vaults.first.id;
   });
 
   late CacheDb cache;
@@ -45,7 +61,7 @@ void main() {
   setUp(() {
     api = StormApi(baseUrl: baseUrl, token: token);
     cache = CacheDb(NativeDatabase.memory());
-    engine = SyncEngine(api: api, cache: cache);
+    engine = SyncEngine(api: api, cache: cache, vaultId: vaultId);
   });
 
   tearDown(() async {
@@ -61,7 +77,7 @@ void main() {
   test('rejects a bad token the way the client expects', () async {
     final bad = StormApi(baseUrl: baseUrl, token: 'wrong');
     await expectLater(
-      bad.tree(),
+      bad.tree(vaultId),
       throwsA(
         isA<StormApiException>().having(
           (e) => e.isUnauthorized,
@@ -74,7 +90,7 @@ void main() {
   });
 
   test('parses the vault tree the server actually returns', () async {
-    final tree = await api.tree();
+    final tree = await api.tree(vaultId);
     expect(tree.seq, greaterThanOrEqualTo(0));
     for (final note in tree.notes) {
       expect(note.id, isNotEmpty);
@@ -88,13 +104,14 @@ void main() {
     () async {
       final path = scratch('roundtrip');
       final created = await api.createNote(
+        vaultId: vaultId,
         path: path,
         content: '# Round trip\n',
       );
       expect(created.meta.path, path);
 
       // The server stamps identity into the file; the client must see it.
-      final fetched = await api.note(created.meta.id);
+      final fetched = await api.note(vaultId, created.meta.id);
       expect(fetched.content, contains('id:'));
       expect(fetched.content, contains('# Round trip'));
 
@@ -108,11 +125,11 @@ void main() {
       expect(session.saveState, SaveState.saved);
       expect(session.error, isNull);
 
-      final reread = await api.note(created.meta.id);
+      final reread = await api.note(vaultId, created.meta.id);
       expect(reread.content, contains('Added by the client.'));
       expect(reread.meta.version, greaterThan(fetched.meta.version));
 
-      await api.deleteNote(created.meta.id);
+      await api.deleteNote(vaultId, created.meta.id);
     },
   );
 
@@ -121,6 +138,7 @@ void main() {
     () async {
       final path = scratch('merge');
       final created = await api.createNote(
+        vaultId: vaultId,
         path: path,
         content: '# Merge\n\nAlpha.\n\nBeta.\n\nGamma.\n\nDelta.\n\nEpsilon.\n',
       );
@@ -132,6 +150,7 @@ void main() {
 
       // Another device writes first, editing a far-away region.
       await api.saveNote(
+        vaultId: vaultId,
         id: created.meta.id,
         baseVersion: staleBase,
         content: original.replaceAll('Alpha.', 'Alpha from desktop.'),
@@ -155,7 +174,7 @@ void main() {
         reason: 'the client must adopt the version the server returned',
       );
 
-      await api.deleteNote(created.meta.id);
+      await api.deleteNote(vaultId, created.meta.id);
     },
   );
 
@@ -164,6 +183,7 @@ void main() {
     () async {
       final path = scratch('conflict');
       final created = await api.createNote(
+        vaultId: vaultId,
         path: path,
         content: '# Conflict\n\nShared.\n',
       );
@@ -174,6 +194,7 @@ void main() {
       final original = session.buffer;
 
       await api.saveNote(
+        vaultId: vaultId,
         id: created.meta.id,
         baseVersion: staleBase,
         content: original.replaceAll('Shared.', 'Desktop wins.'),
@@ -192,34 +213,43 @@ void main() {
         lessThan(session.buffer.indexOf('=======')),
       );
 
-      await api.deleteNote(created.meta.id);
+      await api.deleteNote(vaultId, created.meta.id);
     },
   );
 
   test('move preserves note identity', () async {
     final from = scratch('move-from');
-    final created = await api.createNote(path: from, content: '# Move me\n');
+    final created = await api.createNote(
+      vaultId: vaultId,
+      path: from,
+      content: '# Move me\n',
+    );
     final to = scratch('move-to');
 
-    final moved = await api.moveNote(id: created.meta.id, newPath: to);
+    final moved = await api.moveNote(
+      vaultId: vaultId,
+      id: created.meta.id,
+      newPath: to,
+    );
     expect(moved.meta.id, created.meta.id);
     expect(moved.meta.path, to);
 
-    final fetched = await api.note(created.meta.id);
+    final fetched = await api.note(vaultId, created.meta.id);
     expect(fetched.meta.path, to);
 
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
   });
 
   test('search returns hits the client can render', () async {
     final path = scratch('search');
     final marker = 'zqxjkvw${DateTime.now().microsecondsSinceEpoch}';
     final created = await api.createNote(
+      vaultId: vaultId,
       path: path,
       content: '# Search\n\n$marker\n',
     );
 
-    final hits = await api.search(marker);
+    final hits = await api.search(vaultId, marker);
     expect(hits, hasLength(1));
     expect(hits.single.id, created.meta.id);
     expect(
@@ -228,43 +258,46 @@ void main() {
       reason: 'the client renders <<..>> as highlight spans',
     );
 
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
   });
 
   test('search tolerates punctuation without erroring', () async {
     // FTS5 would treat these as syntax; the server sanitizes them.
     for (final query in ['foo-bar', 'NEAR(a b)', 'a "quoted" b', '((']) {
-      await expectLater(api.search(query), completes, reason: query);
+      await expectLater(api.search(vaultId, query), completes, reason: query);
     }
   });
 
   test('backlinks resolve through the real index', () async {
     final targetPath = scratch('backlink-target');
     final target = await api.createNote(
+      vaultId: vaultId,
       path: targetPath,
       content: '# BacklinkTarget\n',
     );
     final sourcePath = scratch('backlink-source');
     final source = await api.createNote(
+      vaultId: vaultId,
       path: sourcePath,
       content: '# Source\n\nSee [[BacklinkTarget]].\n',
     );
 
-    final back = await api.backlinks(target.meta.id);
+    final back = await api.backlinks(vaultId, target.meta.id);
     expect(back.map((n) => n.id), contains(source.meta.id));
 
-    await api.deleteNote(source.meta.id);
-    await api.deleteNote(target.meta.id);
+    await api.deleteNote(vaultId, source.meta.id);
+    await api.deleteNote(vaultId, target.meta.id);
   });
 
   test('tags round-trip through the real index', () async {
     final marker = 'tag${DateTime.now().microsecondsSinceEpoch}';
     final created = await api.createNote(
+      vaultId: vaultId,
       path: scratch('tags'),
       content: '# Tagged\n\nBody with #$marker and #$marker/nested.\n',
     );
 
-    final tags = await api.tags();
+    final tags = await api.tags(vaultId);
     final mine = tags.where((t) => t.tag.startsWith(marker)).toList();
     expect(
       mine,
@@ -277,27 +310,28 @@ void main() {
       reason: 'the browser groups these under one root',
     );
 
-    final tagged = await api.notesWithTag(marker);
+    final tagged = await api.notesWithTag(vaultId, marker);
     expect(tagged.map((n) => n.id), contains(created.meta.id));
 
     // A slash in a tag name must survive the URL path.
-    final nested = await api.notesWithTag('$marker/nested');
+    final nested = await api.notesWithTag(vaultId, '$marker/nested');
     expect(nested.map((n) => n.id), contains(created.meta.id));
 
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
   });
 
   test('a tag disappears from the index when its note is deleted', () async {
     final marker = 'gone${DateTime.now().microsecondsSinceEpoch}';
     final created = await api.createNote(
+      vaultId: vaultId,
       path: scratch('tagdel'),
       content: '# Temp\n\n#$marker\n',
     );
-    expect((await api.tags()).any((t) => t.tag == marker), isTrue);
+    expect((await api.tags(vaultId)).any((t) => t.tag == marker), isTrue);
 
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
     expect(
-      (await api.tags()).any((t) => t.tag == marker),
+      (await api.tags(vaultId)).any((t) => t.tag == marker),
       isFalse,
       reason: 'the index must not accumulate tags from deleted notes',
     );
@@ -306,35 +340,38 @@ void main() {
   test('editing a note out of a tag removes it from the index', () async {
     final marker = 'edit${DateTime.now().microsecondsSinceEpoch}';
     final created = await api.createNote(
+      vaultId: vaultId,
       path: scratch('tagedit'),
       content: '# T\n\n#$marker\n',
     );
-    expect((await api.tags()).any((t) => t.tag == marker), isTrue);
+    expect((await api.tags(vaultId)).any((t) => t.tag == marker), isTrue);
 
-    final fetched = await api.note(created.meta.id);
+    final fetched = await api.note(vaultId, created.meta.id);
     await api.saveNote(
+      vaultId: vaultId,
       id: created.meta.id,
       baseVersion: fetched.meta.version,
       content: fetched.content.replaceAll('#$marker', 'no tag now'),
     );
 
     expect(
-      (await api.tags()).any((t) => t.tag == marker),
+      (await api.tags(vaultId)).any((t) => t.tag == marker),
       isFalse,
       reason: 'reindexing must remove, not just add',
     );
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
   });
 
   test('deleting a note makes it 404 afterwards', () async {
     final created = await api.createNote(
+      vaultId: vaultId,
       path: scratch('delete'),
       content: '# Bye\n',
     );
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
 
     await expectLater(
-      api.note(created.meta.id),
+      api.note(vaultId, created.meta.id),
       throwsA(
         isA<StormApiException>().having(
           (e) => e.isNotFound,
@@ -347,12 +384,16 @@ void main() {
 
   test('creating over an existing path is refused', () async {
     final path = scratch('dupe');
-    final created = await api.createNote(path: path, content: '# One\n');
+    final created = await api.createNote(
+      vaultId: vaultId,
+      path: path,
+      content: '# One\n',
+    );
     await expectLater(
-      api.createNote(path: path, content: '# Two\n'),
+      api.createNote(vaultId: vaultId, path: path, content: '# Two\n'),
       throwsA(isA<StormApiException>()),
     );
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
   });
 
   test('unicode content survives the round trip', () async {
@@ -360,15 +401,16 @@ void main() {
     // mangle this into latin-1 mojibake.
     const content = '# 日本語\n\nEmoji 🎉 and accents: café, naïve.\n';
     final created = await api.createNote(
+      vaultId: vaultId,
       path: scratch('unicode'),
       content: content,
     );
 
-    final fetched = await api.note(created.meta.id);
+    final fetched = await api.note(vaultId, created.meta.id);
     expect(fetched.content, contains('日本語'));
     expect(fetched.content, contains('🎉'));
     expect(fetched.content, contains('café'));
 
-    await api.deleteNote(created.meta.id);
+    await api.deleteNote(vaultId, created.meta.id);
   });
 }

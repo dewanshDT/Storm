@@ -240,7 +240,7 @@ class NoteSession extends ChangeNotifier {
     final id = _noteId;
     if (id == null || isDirty || _saveState == SaveState.queued) return;
 
-    final cached = await _engine.cache.note(id);
+    final cached = await _engine.cache.note(_engine.vaultId, id);
     if (_closed || _noteId != id) return;
 
     if (cached == null) {

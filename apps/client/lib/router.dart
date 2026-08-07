@@ -7,7 +7,9 @@ import 'ui/browse_screen.dart';
 import 'ui/connect_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/search_screen.dart';
+import 'ui/server_settings_screen.dart';
 import 'ui/shell/dashboard.dart';
+import 'ui/shell/vault_gate.dart';
 import 'ui/tags_screen.dart';
 
 /// Where the app can be.
@@ -18,23 +20,38 @@ import 'ui/tags_screen.dart';
 /// single-screen shell simply didn't have.
 abstract final class Routes {
   static const dashboard = '/';
-  static const browse = '/browse';
-  static const search = '/search';
-  static const tags = '/tags';
   static const connect = '/connect';
+  static const serverSettings = '/settings/server';
 
-  static String note(String id) => '/note/$id';
+  /// Everything note-shaped hangs off the vault, so a deep link carries which
+  /// vault it means and back always retraces the real path.
+  static String vault(String vaultId) => '/v/$vaultId';
 
-  /// `/browse/Daily/2026` — the folder path is the rest of the URL, so a
-  /// breadcrumb is just the segments of the current location.
-  static String folder(String path) =>
-      path.isEmpty ? browse : '$browse/${Uri.encodeFull(path)}';
+  static String browse(String vaultId) => '${vault(vaultId)}/browse';
+  static String search(String vaultId) => '${vault(vaultId)}/search';
+  static String tags(String vaultId) => '${vault(vaultId)}/tags';
+  static String note(String vaultId, String id) => '${vault(vaultId)}/note/$id';
 
-  /// The folder a `/browse/...` location refers to, or `''` for the root.
+  /// `/v/<id>/browse/Daily/2026` — the folder path is the rest of the URL, so
+  /// a breadcrumb is just the segments of the current location.
+  static String folder(String vaultId, String path) => path.isEmpty
+      ? browse(vaultId)
+      : '${browse(vaultId)}/${Uri.encodeFull(path)}';
+
+  /// The folder a `/v/<id>/browse/...` location refers to, or `''` for the
+  /// vault root.
   static String folderOf(Uri uri) {
     final segments = uri.pathSegments;
-    if (segments.isEmpty || segments.first != 'browse') return '';
-    return Uri.decodeFull(segments.skip(1).join('/'));
+    final at = segments.indexOf('browse');
+    if (at < 0) return '';
+    return Uri.decodeFull(segments.skip(at + 1).join('/'));
+  }
+
+  /// The vault a location belongs to, or `''` outside one.
+  static String vaultOf(Uri uri) {
+    final segments = uri.pathSegments;
+    if (segments.length < 2 || segments.first != 'v') return '';
+    return segments[1];
   }
 }
 
@@ -64,10 +81,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       return atConnect ? Routes.dashboard : null;
     },
     routes: [
-      GoRoute(
-        path: Routes.connect,
-        builder: (_, _) => const ConnectScreen(),
-      ),
+      GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
       // builds a stack with the dashboard underneath rather than replacing it.
       // Flat routes meant `go` left exactly one route on the stack, and the
@@ -77,21 +91,34 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, _) => const DashboardScreen(),
         routes: [
           GoRoute(
-            path: 'browse/:path(.*)',
+            path: 'settings/server',
+            builder: (_, _) => const ServerSettingsScreen(),
+          ),
+          // Every vault-scoped screen sits under a `VaultGate`, which makes the
+          // route's vault active before its children build. Without it there is
+          // a frame where the providers still hold the previous vault's notes.
+          GoRoute(
+            path: 'v/:vault/browse/:path(.*)',
             builder: (_, state) =>
-                BrowseScreen(folder: Routes.folderOf(state.uri)),
+                _gate(state, BrowseScreen(folder: Routes.folderOf(state.uri))),
           ),
           GoRoute(
-            path: 'browse',
-            builder: (_, _) => const BrowseScreen(folder: ''),
+            path: 'v/:vault/browse',
+            builder: (_, state) => _gate(state, const BrowseScreen(folder: '')),
           ),
           GoRoute(
-            path: 'note/:id',
+            path: 'v/:vault/note/:id',
             builder: (_, state) =>
-                NoteScreen(noteId: state.pathParameters['id']!),
+                _gate(state, NoteScreen(noteId: state.pathParameters['id']!)),
           ),
-          GoRoute(path: 'search', builder: (_, _) => const SearchScreen()),
-          GoRoute(path: 'tags', builder: (_, _) => const TagsScreen()),
+          GoRoute(
+            path: 'v/:vault/search',
+            builder: (_, state) => _gate(state, const SearchScreen()),
+          ),
+          GoRoute(
+            path: 'v/:vault/tags',
+            builder: (_, state) => _gate(state, const TagsScreen()),
+          ),
         ],
       ),
     ],
@@ -108,6 +135,10 @@ final routerProvider = Provider<GoRouter>((ref) {
   ref.onDispose(router.dispose);
   return router;
 });
+
+/// Wraps a vault-scoped screen so the route's vault is active before it builds.
+Widget _gate(GoRouterState state, Widget child) =>
+    VaultGate(vaultId: state.pathParameters['vault']!, child: child);
 
 /// Nudges GoRouter to re-run its redirect without replacing the router.
 class _RouterRefresh extends ChangeNotifier {

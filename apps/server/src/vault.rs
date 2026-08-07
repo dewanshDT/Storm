@@ -15,6 +15,7 @@
 //!    though v1 is LAN-only.
 
 use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
@@ -205,16 +206,20 @@ impl Vault {
         Ok(())
     }
 
-    pub fn delete(&self, rel: &str) -> Result<()> {
+    /// Deletes a note, pruning any directories it leaves empty.
+    ///
+    /// `keep` holds vault-relative paths of folders the user created on
+    /// purpose; see [`Vault::prune_empty_parents`].
+    pub fn delete(&self, rel: &str, keep: &HashSet<String>) -> Result<()> {
         let path = self.resolve(rel)?;
         if path.exists() {
             fs::remove_file(&path).with_context(|| format!("deleting {}", path.display()))?;
-            self.prune_empty_parents(&path);
+            self.prune_empty_parents(&path, keep);
         }
         Ok(())
     }
 
-    pub fn rename(&self, from: &str, to: &str) -> Result<()> {
+    pub fn rename(&self, from: &str, to: &str, keep: &HashSet<String>) -> Result<()> {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
         if dst.exists() {
@@ -225,16 +230,75 @@ impl Vault {
         }
         fs::rename(&src, &dst)
             .with_context(|| format!("moving {} to {}", src.display(), dst.display()))?;
-        self.prune_empty_parents(&src);
+        self.prune_empty_parents(&src, keep);
         Ok(())
+    }
+
+    /// Creates a directory. Used by the explicit "new folder" operation; note
+    /// writes still create their own parents implicitly.
+    pub fn create_dir(&self, rel: &str) -> Result<()> {
+        let path = self.resolve(rel)?;
+        if path.is_file() {
+            bail!("a file already exists at {rel}");
+        }
+        fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Removes an empty directory. Refuses if anything is still inside.
+    pub fn remove_dir(&self, rel: &str) -> Result<()> {
+        let path = self.resolve(rel)?;
+        if !path.is_dir() {
+            bail!("no such folder: {rel}");
+        }
+        let empty = fs::read_dir(&path)?.next().is_none();
+        if !empty {
+            bail!("folder is not empty: {rel}");
+        }
+        fs::remove_dir(&path).with_context(|| format!("removing {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Renames a directory and everything under it.
+    pub fn rename_dir(&self, from: &str, to: &str) -> Result<()> {
+        let src = self.resolve(from)?;
+        let dst = self.resolve(to)?;
+        if !src.is_dir() {
+            bail!("no such folder: {from}");
+        }
+        if dst.exists() {
+            bail!("destination already exists: {to}");
+        }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&src, &dst)
+            .with_context(|| format!("moving {} to {}", src.display(), dst.display()))?;
+        Ok(())
+    }
+
+    /// Vault-relative, forward-slashed path for an absolute path inside the
+    /// vault. `None` for the root itself or anything outside.
+    fn relative(&self, path: &Path) -> Option<String> {
+        let rel = path.strip_prefix(&self.root).ok()?;
+        let s = rel.to_string_lossy().replace('\\', "/");
+        if s.is_empty() { None } else { Some(s) }
     }
 
     /// Removes directories left empty by a delete or move, so the tree doesn't
     /// accumulate empty folders. Stops at the vault root.
-    fn prune_empty_parents(&self, from: &Path) {
+    ///
+    /// **Stops at any folder in `keep`.** Those are folders the user created
+    /// explicitly, recorded in the `folders` table. Without the exemption a
+    /// folder made on purpose would vanish the moment its last note was moved
+    /// or deleted, which is the entire reason that table exists.
+    fn prune_empty_parents(&self, from: &Path, keep: &HashSet<String>) {
         let mut dir = from.parent();
         while let Some(d) = dir {
             if d == self.root || !d.starts_with(&self.root) {
+                break;
+            }
+            if self.relative(d).is_some_and(|rel| keep.contains(&rel)) {
                 break;
             }
             let empty = fs::read_dir(d)
@@ -308,6 +372,15 @@ mod tests {
         let dir = tempdir::TempDir::new("storm-vault").unwrap();
         let vault = Vault::new(dir.path()).unwrap();
         (dir, vault)
+    }
+
+    /// No folder is exempt from pruning — the pre-`folders` behaviour.
+    fn nothing() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    fn keeping(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|p| p.to_string()).collect()
     }
 
     #[test]
@@ -405,7 +478,7 @@ mod tests {
     fn rename_moves_and_prunes() {
         let (_d, v) = temp_vault();
         v.write("Old/A.md", "body\n").unwrap();
-        v.rename("Old/A.md", "New/B.md").unwrap();
+        v.rename("Old/A.md", "New/B.md", &nothing()).unwrap();
 
         assert!(!v.exists("Old/A.md"));
         assert_eq!(v.read("New/B.md").unwrap(), "body\n");
@@ -418,7 +491,7 @@ mod tests {
         let (_d, v) = temp_vault();
         v.write("A.md", "a\n").unwrap();
         v.write("B.md", "b\n").unwrap();
-        assert!(v.rename("A.md", "B.md").is_err());
+        assert!(v.rename("A.md", "B.md", &nothing()).is_err());
         assert_eq!(v.read("B.md").unwrap(), "b\n");
     }
 
@@ -426,7 +499,7 @@ mod tests {
     fn delete_prunes_empty_parents() {
         let (_d, v) = temp_vault();
         v.write("Deep/Nested/A.md", "x\n").unwrap();
-        v.delete("Deep/Nested/A.md").unwrap();
+        v.delete("Deep/Nested/A.md", &nothing()).unwrap();
         assert!(!v.root().join("Deep").exists());
         assert!(v.root().exists());
     }
@@ -436,8 +509,84 @@ mod tests {
         let (_d, v) = temp_vault();
         v.write("Folder/A.md", "a\n").unwrap();
         v.write("Folder/B.md", "b\n").unwrap();
-        v.delete("Folder/A.md").unwrap();
+        v.delete("Folder/A.md", &nothing()).unwrap();
         assert!(v.exists("Folder/B.md"));
+    }
+
+    #[test]
+    fn a_recorded_folder_survives_the_delete_that_empties_it() {
+        // The whole reason the `folders` table exists. Without the exemption,
+        // creating a folder and then removing its only note would silently
+        // delete the folder too.
+        let (_d, v) = temp_vault();
+        v.write("Keep/A.md", "x\n").unwrap();
+        v.delete("Keep/A.md", &keeping(&["Keep"])).unwrap();
+        assert!(v.root().join("Keep").is_dir());
+    }
+
+    #[test]
+    fn pruning_stops_at_the_recorded_folder_not_above_it() {
+        let (_d, v) = temp_vault();
+        v.write("Keep/Inner/Deeper/A.md", "x\n").unwrap();
+        v.delete("Keep/Inner/Deeper/A.md", &keeping(&["Keep"]))
+            .unwrap();
+
+        // Everything below the recorded folder goes; the folder itself stays.
+        assert!(v.root().join("Keep").is_dir());
+        assert!(!v.root().join("Keep/Inner").exists());
+    }
+
+    #[test]
+    fn an_unrecorded_folder_is_still_pruned() {
+        let (_d, v) = temp_vault();
+        v.write("Derived/A.md", "x\n").unwrap();
+        v.delete("Derived/A.md", &keeping(&["SomethingElse"]))
+            .unwrap();
+        assert!(!v.root().join("Derived").exists());
+    }
+
+    #[test]
+    fn remove_dir_refuses_a_non_empty_folder() {
+        let (_d, v) = temp_vault();
+        v.write("Folder/A.md", "a\n").unwrap();
+        assert!(v.remove_dir("Folder").is_err());
+        assert!(v.exists("Folder/A.md"));
+
+        v.delete("Folder/A.md", &keeping(&["Folder"])).unwrap();
+        v.remove_dir("Folder").unwrap();
+        assert!(!v.root().join("Folder").exists());
+    }
+
+    #[test]
+    fn rename_dir_moves_the_whole_subtree() {
+        let (_d, v) = temp_vault();
+        v.write("Old/A.md", "a\n").unwrap();
+        v.write("Old/Sub/B.md", "b\n").unwrap();
+        v.rename_dir("Old", "New").unwrap();
+
+        assert_eq!(v.read("New/A.md").unwrap(), "a\n");
+        assert_eq!(v.read("New/Sub/B.md").unwrap(), "b\n");
+        assert!(!v.root().join("Old").exists());
+    }
+
+    #[test]
+    fn rename_dir_refuses_to_clobber() {
+        let (_d, v) = temp_vault();
+        v.write("A/x.md", "x\n").unwrap();
+        v.write("B/y.md", "y\n").unwrap();
+        assert!(v.rename_dir("A", "B").is_err());
+        assert!(v.exists("B/y.md"));
+    }
+
+    #[test]
+    fn create_dir_is_idempotent_and_refuses_over_a_file() {
+        let (_d, v) = temp_vault();
+        v.create_dir("New/Nested").unwrap();
+        v.create_dir("New/Nested").unwrap();
+        assert!(v.root().join("New/Nested").is_dir());
+
+        v.write("Taken.md", "x\n").unwrap();
+        assert!(v.create_dir("Taken.md").is_err());
     }
 
     #[test]

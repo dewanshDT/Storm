@@ -4,7 +4,9 @@ import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../browse_screen.dart' show createFolder;
 import 'corner_bubbles.dart';
+import 'vault_gate.dart';
 import 'nav_bubble.dart';
 
 /// Every screen inside the vault: content, the floating nav bubble, and the
@@ -33,13 +35,17 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
   /// Creating a note is offered from the nav bubble on every screen, so it
   /// lives here rather than being duplicated onto each one.
   Future<void> _createNote() async {
+    // Defaults into the folder being viewed rather than the vault root — a
+    // note made from inside `Projects/Storm` almost always belongs there.
+    final here = Routes.folderOf(GoRouterState.of(context).uri);
     final path = await promptForPath(
       context,
       title: 'New note',
-      initial: 'Untitled.md',
+      initial: here.isEmpty ? 'Untitled.md' : '$here/Untitled.md',
     );
     if (path == null || !mounted) return;
 
+    final vaultId = VaultGate.of(context);
     final created = await ref.read(syncEngineProvider).create(path: path);
     if (!mounted) return;
 
@@ -50,7 +56,13 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
       return;
     }
     ref.invalidate(treeProvider);
-    context.push(Routes.note(created.meta!.id));
+    context.push(Routes.note(vaultId, created.meta!.id));
+  }
+
+  /// Creating a folder, offered alongside it.
+  Future<void> _createFolder() async {
+    final here = Routes.folderOf(GoRouterState.of(context).uri);
+    await createFolder(context, ref, VaultGate.of(context), here);
   }
 
   @override
@@ -62,23 +74,26 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
 
     return NewNoteRequest(
       onRequest: _createNote,
-      child: Scaffold(
-        appBar: AppBar(
-          leading: widget.leading,
-          title: widget.title,
-          actions: widget.actions,
-        ),
-        body: Stack(
-          children: [
-            Positioned.fill(child: widget.child),
-            if (widget.showNav && !keyboard)
-              const Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: NavBubble(),
-              ),
-          ],
+      child: NewFolderRequest(
+        onRequest: _createFolder,
+        child: Scaffold(
+          appBar: AppBar(
+            leading: widget.leading,
+            title: widget.title,
+            actions: widget.actions,
+          ),
+          body: Stack(
+            children: [
+              Positioned.fill(child: widget.child),
+              if (widget.showNav && !keyboard)
+                const Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: NavBubble(),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -107,8 +122,8 @@ class DashboardHeader extends StatelessWidget implements PreferredSizeWidget {
                 child: Text(
                   'Storm',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ),
@@ -129,18 +144,27 @@ Future<String?> promptForPath(
   BuildContext context, {
   required String title,
   required String initial,
+  bool isFolder = false,
 }) {
   return showDialog<String>(
     context: context,
-    builder: (_) => _PathDialog(title: title, initial: initial),
+    builder: (_) =>
+        _PathDialog(title: title, initial: initial, isFolder: isFolder),
   );
 }
 
 class _PathDialog extends StatefulWidget {
-  const _PathDialog({required this.title, required this.initial});
+  const _PathDialog({
+    required this.title,
+    required this.initial,
+    this.isFolder = false,
+  });
 
   final String title;
   final String initial;
+
+  /// Folders take no `.md`, and the field says so.
+  final bool isFolder;
 
   @override
   State<_PathDialog> createState() => _PathDialogState();
@@ -165,7 +189,12 @@ class _PathDialogState extends State<_PathDialog> {
       setState(() => _error = problem);
       return;
     }
-    Navigator.pop(context, value.endsWith('.md') ? value : '$value.md');
+    // Notes get `.md` appended; folders must not, or every new folder would
+    // be called `Projects.md`.
+    Navigator.pop(
+      context,
+      widget.isFolder || value.endsWith('.md') ? value : '$value.md',
+    );
   }
 
   @override
@@ -176,8 +205,8 @@ class _PathDialogState extends State<_PathDialog> {
         controller: _controller,
         autofocus: true,
         decoration: InputDecoration(
-          labelText: 'Path in vault',
-          hintText: 'Folder/Note.md',
+          labelText: widget.isFolder ? 'Folder name' : 'Path in vault',
+          hintText: widget.isFolder ? 'Projects' : 'Folder/Note.md',
           errorText: _error,
           border: const OutlineInputBorder(),
         ),

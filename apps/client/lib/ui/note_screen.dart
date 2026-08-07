@@ -12,6 +12,7 @@ import 'backlinks_panel.dart';
 import 'note_editor.dart';
 import 'shell/nav_bubble.dart';
 import 'shell/storm_scaffold.dart';
+import 'shell/vault_gate.dart';
 
 /// One note, opened from a route.
 ///
@@ -78,7 +79,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final session = ref.read(noteSessionProvider);
     if (session.isDirty) await session.save();
     if (!mounted) return;
-    context.push(Routes.note(found.id));
+    context.push(Routes.note(VaultGate.of(context), found.id));
   }
 
   Future<void> _togglePin() async {
@@ -185,7 +186,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final api = ref.read(apiProvider);
     if (api == null) return;
     try {
-      await api.deleteNote(note.id);
+      await api.deleteNote(ref.read(activeVaultProvider), note.id);
       ref.read(noteSessionProvider).close();
       ref.read(openNoteIdProvider.notifier).state = null;
       ref.invalidate(treeProvider);
@@ -204,6 +205,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     // Asked here, above the Scaffold, where the inset is still readable and
     // depending on it still rebuilds. See keyboardIsOpen.
     final keyboard = keyboardIsOpen(context);
+    final vaultId = VaultGate.of(context);
 
     return NoteContextRequest(
       onRequest: () => setState(() => _showContext = !_showContext),
@@ -213,8 +215,9 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           appBar: AppBar(
             leading: IconButton(
               icon: const Icon(Icons.arrow_back),
-              onPressed: () =>
-                  context.canPop() ? context.pop() : context.go(Routes.dashboard),
+              onPressed: () => context.canPop()
+                  ? context.pop()
+                  : context.go(Routes.dashboard),
             ),
             title: Text(
               session.meta?.fileName ?? '',
@@ -273,9 +276,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                       ),
                       title: Text(
                         'Delete',
-                        style: TextStyle(
-                          color: Theme.of(c).colorScheme.error,
-                        ),
+                        style: TextStyle(color: Theme.of(c).colorScheme.error),
                       ),
                     ),
                   ),
@@ -298,7 +299,8 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                     if (_showContext)
                       BacklinksPanel(
                         noteId: widget.noteId,
-                        onOpen: (note) => context.push(Routes.note(note.id)),
+                        onOpen: (note) =>
+                            context.push(Routes.note(vaultId, note.id)),
                       ),
                   ],
                 ),
@@ -318,6 +320,6 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
   }
 }
 
-/// Navigate to a note from anywhere.
+/// Navigate to a note from anywhere within a vault.
 void openNote(BuildContext context, String id) =>
-    context.push(Routes.note(id));
+    context.push(Routes.note(VaultGate.of(context), id));

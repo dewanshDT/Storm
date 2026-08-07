@@ -64,8 +64,7 @@ List<NoteMeta> suggestWikilinks(
 }) {
   final want = query.trim().toLowerCase();
   if (want.isEmpty) {
-    final recent = [...notes]
-      ..sort((a, b) => b.modified.compareTo(a.modified));
+    final recent = [...notes]..sort((a, b) => b.modified.compareTo(a.modified));
     return recent.take(limit).toList();
   }
 
@@ -78,10 +77,10 @@ List<NoteMeta> suggestWikilinks(
     final rank = haystack.startsWith(want)
         ? 0
         : haystack.contains(want)
-            ? 1
-            : inPath.contains(want)
-                ? 2
-                : -1;
+        ? 1
+        : inPath.contains(want)
+        ? 2
+        : -1;
     if (rank < 0) continue;
     scored.add((rank, name, note));
   }

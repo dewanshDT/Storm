@@ -11,8 +11,12 @@
 SERVER := apps/server
 CLIENT := apps/client
 
-# Overridable: make server VAULT=~/my-vault
-VAULT ?= .dev/vault
+# Overridable: make server VAULT_ROOT=~/my-vaults
+#
+# VAULT_ROOT is a directory *containing* one directory per vault, not a vault
+# itself. Pointing it at a vault would make the server treat that vault's own
+# folders as vaults.
+VAULT_ROOT ?= .dev/vaults
 STATE ?= .dev/state
 TOKEN ?= testtoken
 PORT  ?= 8484
@@ -25,7 +29,7 @@ help:
 	@echo
 	@sed -n 's/^## //p' $(MAKEFILE_LIST) | awk -F': ' '{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Variables: VAULT=$(VAULT) STATE=$(STATE) TOKEN=$(TOKEN) PORT=$(PORT)"
+	@echo "Variables: VAULT_ROOT=$(VAULT_ROOT) STATE=$(STATE) TOKEN=$(TOKEN) PORT=$(PORT)"
 
 # ---- checks ---------------------------------------------------------
 
@@ -59,11 +63,11 @@ test-live:
 		echo "Stop it first (pkill -f storm-server) or set PORT=..." >&2; \
 		exit 1; \
 	fi; \
-	rm -rf "$$ROOT/.dev/live-vault" "$$ROOT/.dev/live-state"; \
-	mkdir -p "$$ROOT/.dev/live-vault"; \
-	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/live-vault/Seed.md"; \
+	rm -rf "$$ROOT/.dev/live-vaults" "$$ROOT/.dev/live-state"; \
+	mkdir -p "$$ROOT/.dev/live-vaults/primary"; \
+	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/live-vaults/primary/Seed.md"; \
 	"$$ROOT/$(SERVER)/target/debug/storm-server" \
-		--vault "$$ROOT/.dev/live-vault" --state "$$ROOT/.dev/live-state" \
+		--vault-root "$$ROOT/.dev/live-vaults" --state "$$ROOT/.dev/live-state" \
 		--token $(TOKEN) --port $(PORT) > "$$ROOT/.dev/live-server.log" 2>&1 & \
 	SERVER_PID=$$!; \
 	trap 'kill $$SERVER_PID 2>/dev/null; true' EXIT; \
@@ -77,7 +81,7 @@ test-live:
 		sleep 0.5; \
 	done; \
 	echo "--- server e2e ---"; \
-	VAULT="$$ROOT/.dev/live-vault" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
+	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/
 
@@ -88,16 +92,17 @@ fmt:
 
 # ---- running --------------------------------------------------------
 
-## dry-run: report what importing VAULT would change, writing nothing
+## dry-run: report what importing every vault under VAULT_ROOT would change
 dry-run:
+	@mkdir -p $(VAULT_ROOT)
 	cd $(SERVER) && cargo run -- \
-		--vault $(abspath $(VAULT)) --state $(abspath $(STATE)) --dry-run
+		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) --dry-run
 
-## server: run the sync server against VAULT
+## server: run the sync server against VAULT_ROOT
 server:
-	@mkdir -p $(VAULT)
+	@mkdir -p $(VAULT_ROOT)
 	cd $(SERVER) && cargo run -- \
-		--vault $(abspath $(VAULT)) --state $(abspath $(STATE)) \
+		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) \
 		--token $(TOKEN) --port $(PORT)
 
 ## client: run the Flutter app on this machine
@@ -110,9 +115,9 @@ web:
 
 ## serve-web: build the web client and serve it from the server binary
 serve-web: web
-	@mkdir -p $(VAULT)
+	@mkdir -p $(VAULT_ROOT)
 	cd $(SERVER) && cargo run --release -- \
-		--vault $(abspath $(VAULT)) --state $(abspath $(STATE)) \
+		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) \
 		--token $(TOKEN) --port $(PORT) \
 		--web $(abspath $(CLIENT))/build/web
 

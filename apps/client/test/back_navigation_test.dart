@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/router.dart';
 
 import 'shell_harness.dart';
+import 'fake_server.dart';
 
 /// The Android back gesture.
 ///
@@ -26,19 +27,42 @@ void main() {
   String locationOf(ProviderContainer c) =>
       c.read(routerProvider).state.uri.path;
 
-  testWidgets('back from a note returns to the dashboard', (tester) async {
+  testWidgets('back from a vault returns to the dashboard', (tester) async {
+    // Tapped, not `go`n: opening a vault from the dashboard is what has to
+    // push. The dashboard lists vaults now, so this is the first hop.
     final c = shellContainer();
     await pumpShell(tester, c);
 
-    // Tapped, not `go`n: opening from the dashboard is what has to push.
-    // The fake server uses each note's id as its title, so that is the label.
-    await tester.tap(find.text('n0'));
+    await tester.tap(find.text('Primary'));
     await tester.pumpAndSettle();
-    expect(locationOf(c), Routes.note('n0'));
+    expect(locationOf(c), Routes.browse(FakeServer.primaryVault));
 
     expect(await systemBack(tester), isTrue, reason: 'must not leave the app');
     expect(locationOf(c), Routes.dashboard);
-    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('Recently opened'), findsOneWidget);
+
+    await disposeShell(tester, c);
+  });
+
+  testWidgets('back from a note returns to the vault it was opened from', (
+    tester,
+  ) async {
+    final c = shellContainer();
+    await pumpShell(tester, c);
+
+    await tester.tap(find.text('Primary'));
+    await tester.pumpAndSettle();
+    // The fake server uses each note's id as its title, so that is the label.
+    await tester.tap(find.text('Welcome'));
+    await tester.pumpAndSettle();
+    expect(locationOf(c), startsWith('/v/'));
+    expect(locationOf(c), contains('/note/'));
+
+    expect(await systemBack(tester), isTrue);
+    expect(locationOf(c), Routes.browse(FakeServer.primaryVault));
+
+    expect(await systemBack(tester), isTrue);
+    expect(locationOf(c), Routes.dashboard);
 
     await disposeShell(tester, c);
   });
@@ -47,36 +71,39 @@ void main() {
     final c = shellContainer();
     await pumpShell(tester, c);
 
-    c.read(routerProvider).go(Routes.browse);
-    await tester.pumpAndSettle();
+    await openVault(tester, c);
     await tester.tap(find.text('Projects'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Storm'));
     await tester.pumpAndSettle();
-    expect(locationOf(c), Routes.folder('Projects/Storm'));
+    expect(
+      locationOf(c),
+      Routes.folder(FakeServer.primaryVault, 'Projects/Storm'),
+    );
 
     expect(await systemBack(tester), isTrue);
-    expect(locationOf(c), Routes.folder('Projects'));
+    expect(locationOf(c), Routes.folder(FakeServer.primaryVault, 'Projects'));
 
     expect(await systemBack(tester), isTrue);
-    expect(locationOf(c), Routes.browse);
+    expect(locationOf(c), Routes.browse(FakeServer.primaryVault));
 
     await disposeShell(tester, c);
   });
 
-  testWidgets('back from a note opened in a folder returns to that folder',
-      (tester) async {
+  testWidgets('back from a note opened in a folder returns to that folder', (
+    tester,
+  ) async {
     final c = shellContainer();
     await pumpShell(tester, c);
 
-    c.read(routerProvider).go(Routes.folder('Daily'));
+    c.read(routerProvider).go(Routes.folder(FakeServer.primaryVault, 'Daily'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('2026-08-05'));
     await tester.pumpAndSettle();
-    expect(locationOf(c), startsWith('/note/'));
+    expect(locationOf(c), contains('/note/'));
 
     expect(await systemBack(tester), isTrue);
-    expect(locationOf(c), Routes.folder('Daily'));
+    expect(locationOf(c), Routes.folder(FakeServer.primaryVault, 'Daily'));
 
     await disposeShell(tester, c);
   });
@@ -86,7 +113,7 @@ void main() {
     final c = shellContainer();
     await pumpShell(tester, c);
 
-    c.read(routerProvider).go(Routes.note('n0'));
+    c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
     await tester.pumpAndSettle();
 
     expect(await systemBack(tester), isTrue);
@@ -95,14 +122,19 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  testWidgets('switching destinations does not pile up a stack',
-      (tester) async {
+  testWidgets('switching destinations does not pile up a stack', (
+    tester,
+  ) async {
     // The nav bubble swaps top-level destinations, so back from any of them
     // goes home rather than replaying everywhere you have been.
     final c = shellContainer();
     await pumpShell(tester, c);
 
-    for (final location in [Routes.browse, Routes.search, Routes.tags]) {
+    for (final location in [
+      Routes.browse(FakeServer.primaryVault),
+      Routes.search(FakeServer.primaryVault),
+      Routes.tags(FakeServer.primaryVault),
+    ]) {
       c.read(routerProvider).go(location);
       await tester.pumpAndSettle();
     }

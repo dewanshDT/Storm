@@ -50,10 +50,18 @@ class SaveOutcome {
 /// homelab unreachable — VPN down, server restarting, wrong subnet — and only
 /// a real request distinguishes that from working.
 class SyncEngine extends ChangeNotifier {
-  SyncEngine({required this.api, required this.cache});
+  SyncEngine({required this.api, required this.cache, required this.vaultId});
 
   final StormApi api;
   final CacheDb cache;
+
+  /// The vault this engine serves.
+  ///
+  /// One engine per active vault: switching vaults rebuilds `apiProvider`,
+  /// which disposes this engine and closes its socket. Every cache key and
+  /// every request carries it, so two vaults can never share a sync cursor or
+  /// see each other's notes.
+  final String vaultId;
 
   bool _online = true;
   bool get isOnline => _online;
@@ -86,7 +94,7 @@ class SyncEngine extends ChangeNotifier {
   // ---- lifecycle -----------------------------------------------------
 
   Future<void> start() async {
-    _pending = await cache.pendingCount();
+    _pending = await cache.pendingCount(vaultId);
     notifyListeners();
     await sync();
     _openSocket();
@@ -118,19 +126,19 @@ class SyncEngine extends ChangeNotifier {
   /// When online it still refetches in the background; the caller is told via
   /// [changes] if the server's copy differed.
   Future<CachedNote?> openNote(String id) async {
-    final cached = await cache.note(id);
+    final cached = await cache.note(vaultId, id);
 
     if (!_online) return cached;
 
     try {
-      final fresh = await api.note(id);
+      final fresh = await api.note(vaultId, id);
       await _store(fresh);
       _setOnline(true);
-      return cache.note(id);
+      return cache.note(vaultId, id);
     } on StormApiException catch (e) {
       // A definite answer from the server: it is reachable, the note is gone.
       if (e.isNotFound) {
-        await cache.removeNote(id);
+        await cache.removeNote(vaultId, id);
         return null;
       }
       rethrow;
@@ -140,6 +148,15 @@ class SyncEngine extends ChangeNotifier {
     }
   }
 
+  /// Folders from the last successful tree fetch.
+  ///
+  /// Held here rather than fetched separately so an *empty* folder — one that
+  /// exists only because someone created it — can be shown without a second
+  /// request. Folders derived from note paths are recomputed by the browser
+  /// anyway; these are the ones it could not know about.
+  List<String> _folders = const [];
+  List<String> get folders => _folders;
+
   /// The vault tree — from the server when reachable, else from the cache.
   ///
   /// The offline tree only lists notes that happen to be cached, which is
@@ -147,14 +164,15 @@ class SyncEngine extends ChangeNotifier {
   Future<List<NoteMeta>> tree() async {
     if (_online) {
       try {
-        final vault = await api.tree();
+        final vault = await api.tree(vaultId);
+        _folders = vault.folders;
         _setOnline(true);
         return vault.notes;
       } catch (_) {
         _setOnline(false);
       }
     }
-    final cached = await cache.allNotes();
+    final cached = await cache.allNotes(vaultId);
     return cached
         .map(
           (n) => NoteMeta(
@@ -185,13 +203,14 @@ class SyncEngine extends ChangeNotifier {
 
     try {
       final result = await api.saveNote(
+        vaultId: vaultId,
         id: id,
         baseVersion: baseVersion,
         content: content,
       );
       _setOnline(true);
       await _storeWrite(id, result);
-      await cache.dequeue(id);
+      await cache.dequeue(vaultId, id);
       await _refreshPending();
 
       if (result.conflict) {
@@ -220,12 +239,18 @@ class SyncEngine extends ChangeNotifier {
   }
 
   Future<SaveOutcome> _queue(String id, int baseVersion, String content) async {
-    await cache.enqueue(noteId: id, baseVersion: baseVersion, content: content);
+    await cache.enqueue(
+      vaultId: vaultId,
+      noteId: id,
+      baseVersion: baseVersion,
+      content: content,
+    );
     // Keep the cache showing the user's own text while it waits.
-    final existing = await cache.note(id);
+    final existing = await cache.note(vaultId, id);
     if (existing != null) {
       await cache.putNote(
         CachedNotesCompanion(
+          vaultId: Value(vaultId),
           id: Value(id),
           path: Value(existing.path),
           title: Value(existing.title),
@@ -250,7 +275,11 @@ class SyncEngine extends ChangeNotifier {
     String content = '',
   }) async {
     try {
-      final result = await api.createNote(path: path, content: content);
+      final result = await api.createNote(
+        vaultId: vaultId,
+        path: path,
+        content: content,
+      );
       _setOnline(true);
       // Without this the note exists on the server but not locally, and
       // opening it straight away finds nothing.
@@ -277,7 +306,11 @@ class SyncEngine extends ChangeNotifier {
   }) async {
     if (_online) {
       try {
-        final result = await api.moveNote(id: id, newPath: newPath);
+        final result = await api.moveNote(
+          vaultId: vaultId,
+          id: id,
+          newPath: newPath,
+        );
         _setOnline(true);
         await _storeWrite(id, result);
         return SaveOutcome(SaveStatus.saved, version: result.meta.version);
@@ -288,8 +321,9 @@ class SyncEngine extends ChangeNotifier {
       }
     }
 
-    final cached = await cache.note(id);
+    final cached = await cache.note(vaultId, id);
     await cache.enqueue(
+      vaultId: vaultId,
       noteId: id,
       baseVersion: cached?.version ?? 0,
       content: cached?.content ?? '',
@@ -300,6 +334,7 @@ class SyncEngine extends ChangeNotifier {
     if (cached != null) {
       await cache.putNote(
         CachedNotesCompanion(
+          vaultId: Value(vaultId),
           id: Value(id),
           path: Value(newPath),
           title: Value(cached.title),
@@ -326,7 +361,7 @@ class SyncEngine extends ChangeNotifier {
     final safe = _safeAttachmentName(fileName);
     final path = 'attachments/$safe';
     try {
-      await api.uploadAttachment(path, bytes);
+      await api.uploadAttachment(vaultId, path, bytes);
       _setOnline(true);
       return (path: path, error: null);
     } on StormApiException catch (e) {
@@ -366,17 +401,17 @@ class SyncEngine extends ChangeNotifier {
     // been opened would otherwise touch no row at all.
     if (pinned && _online) {
       try {
-        await _store(await api.note(id));
+        await _store(await api.note(vaultId, id));
       } catch (_) {
         _setOnline(false);
       }
     }
-    await cache.setPinned(id, pinned);
+    await cache.setPinned(vaultId, id, pinned);
     _changes.add({id});
     notifyListeners();
   }
 
-  Future<Set<String>> pinnedIds() => cache.pinnedIds();
+  Future<Set<String>> pinnedIds() => cache.pinnedIds(vaultId);
 
   // ---- syncing -------------------------------------------------------
 
@@ -401,25 +436,27 @@ class SyncEngine extends ChangeNotifier {
   /// server merges against that rather than clobbering whatever landed while
   /// this device was away.
   Future<void> _drainOutbox() async {
-    final queued = await cache.pending();
+    final queued = await cache.pending(vaultId);
     if (queued.isEmpty) return;
 
     final touched = <String>{};
     for (final item in queued) {
       try {
         if (item.op == 'delete') {
-          await api.deleteNote(item.noteId);
-          await cache.removeNote(item.noteId);
+          await api.deleteNote(vaultId, item.noteId);
+          await cache.removeNote(vaultId, item.noteId);
         } else if (item.op == 'move') {
           // Move first, then push the content it was queued with. Both are
           // keyed by id, so neither depends on the path being current.
           final moved = await api.moveNote(
+            vaultId: vaultId,
             id: item.noteId,
             newPath: item.newPath!,
           );
           await _storeWrite(item.noteId, moved);
           if (item.content.isNotEmpty && item.content != moved.content) {
             final saved = await api.saveNote(
+              vaultId: vaultId,
               id: item.noteId,
               baseVersion: item.baseVersion,
               content: item.content,
@@ -428,21 +465,22 @@ class SyncEngine extends ChangeNotifier {
           }
         } else {
           final result = await api.saveNote(
+            vaultId: vaultId,
             id: item.noteId,
             baseVersion: item.baseVersion,
             content: item.content,
           );
           await _storeWrite(item.noteId, result);
         }
-        await cache.dequeue(item.noteId);
+        await cache.dequeue(vaultId, item.noteId);
         touched.add(item.noteId);
         _setOnline(true);
       } on StormApiException catch (e) {
         // The note was deleted elsewhere, or the server refused outright.
         // Retrying forever would wedge the queue behind one bad entry.
         if (e.isNotFound) {
-          await cache.dequeue(item.noteId);
-          await cache.removeNote(item.noteId);
+          await cache.dequeue(vaultId, item.noteId);
+          await cache.removeNote(vaultId, item.noteId);
           touched.add(item.noteId);
         }
         // Any other refusal: leave it queued for a human to notice.
@@ -468,7 +506,7 @@ class SyncEngine extends ChangeNotifier {
   /// to the server's latest `seq` after a single page would skip every change
   /// past the first one, which is silent data loss.
   Future<void> _pull() async {
-    var since = await cache.lastSeq();
+    var since = await cache.lastSeq(vaultId);
     final touched = <String>{};
 
     // Bounded so a server that keeps changing can't spin here forever; the
@@ -476,7 +514,7 @@ class SyncEngine extends ChangeNotifier {
     for (var page = 0; page < 100; page++) {
       final SyncBatch batch;
       try {
-        batch = await api.sync(since: since, limit: _pageSize);
+        batch = await api.sync(vaultId, since: since, limit: _pageSize);
         _setOnline(true);
       } catch (_) {
         _setOnline(false);
@@ -494,16 +532,16 @@ class SyncEngine extends ChangeNotifier {
 
       if (batch.changes.length < _pageSize) {
         // Caught up: safe to adopt the server's position.
-        await cache.setLastSeq(batch.seq);
+        await cache.setLastSeq(vaultId, batch.seq);
         break;
       }
 
       // A full page means there is more. Resume from the last one applied.
       since = batch.changes.last.seq;
-      await cache.setLastSeq(since);
+      await cache.setLastSeq(vaultId, since);
     }
 
-    await cache.evict();
+    await cache.evict(vaultId);
     if (touched.isNotEmpty) _changes.add(touched);
   }
 
@@ -511,25 +549,25 @@ class SyncEngine extends ChangeNotifier {
   Future<bool> _applyChanges(List<Change> changes, Set<String> touched) async {
     for (final change in changes) {
       if (change.kind == 'deleted') {
-        await cache.removeNote(change.noteId);
+        await cache.removeNote(vaultId, change.noteId);
         touched.add(change.noteId);
         continue;
       }
 
       // Only pull content for notes we actually hold. The tree comes from
       // /v1/tree, so there is no need to hydrate the whole vault.
-      final held = await cache.note(change.noteId);
+      final held = await cache.note(vaultId, change.noteId);
       if (held == null) continue;
 
       // Don't overwrite a note whose local edit hasn't been sent yet.
-      if (await cache.outboxFor(change.noteId) != null) continue;
+      if (await cache.outboxFor(vaultId, change.noteId) != null) continue;
 
       try {
-        await _store(await api.note(change.noteId));
+        await _store(await api.note(vaultId, change.noteId));
         touched.add(change.noteId);
       } on StormApiException catch (e) {
         if (e.isNotFound) {
-          await cache.removeNote(change.noteId);
+          await cache.removeNote(vaultId, change.noteId);
           touched.add(change.noteId);
         }
       } catch (_) {
@@ -607,9 +645,10 @@ class SyncEngine extends ChangeNotifier {
   /// of a pinned note silently unpinned it — the insert would fall back to the
   /// column default and the note would quietly become evictable again.
   Future<void> _store(Note note) async {
-    final existing = await cache.note(note.meta.id);
+    final existing = await cache.note(vaultId, note.meta.id);
     await cache.putNote(
       CachedNotesCompanion.insert(
+        vaultId: Value(vaultId),
         id: note.meta.id,
         path: note.meta.path,
         title: Value(note.meta.title),
@@ -623,9 +662,10 @@ class SyncEngine extends ChangeNotifier {
   }
 
   Future<void> _storeWrite(String id, WriteResult result) async {
-    final existing = await cache.note(id);
+    final existing = await cache.note(vaultId, id);
     await cache.putNote(
       CachedNotesCompanion.insert(
+        vaultId: Value(vaultId),
         id: id,
         path: result.meta.path,
         title: Value(result.meta.title),
@@ -639,7 +679,7 @@ class SyncEngine extends ChangeNotifier {
   }
 
   Future<void> _refreshPending() async {
-    _pending = await cache.pendingCount();
+    _pending = await cache.pendingCount(vaultId);
     if (!_disposed) notifyListeners();
   }
 }

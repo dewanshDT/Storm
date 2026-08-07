@@ -86,7 +86,11 @@ void main() {
       c.setBlockPrefix('## ');
 
       expect(c.text, '## title');
-      expect(c.selection.baseOffset, 5, reason: 'still before the third letter');
+      expect(
+        c.selection.baseOffset,
+        5,
+        reason: 'still before the third letter',
+      );
     });
 
     test('replaces one prefix with another rather than stacking', () {
@@ -233,9 +237,16 @@ void main() {
           style: const TextStyle(fontSize: 16),
           withComposing: false,
         );
-        expect(flatten(span), c.text, reason: 'span diverged from buffer: $label');
-        expect(c.selection.end, lessThanOrEqualTo(c.text.length),
-            reason: 'caret past the end of the buffer: $label');
+        expect(
+          flatten(span),
+          c.text,
+          reason: 'span diverged from buffer: $label',
+        );
+        expect(
+          c.selection.end,
+          lessThanOrEqualTo(c.text.length),
+          reason: 'caret past the end of the buffer: $label',
+        );
       }
 
       check('initial');

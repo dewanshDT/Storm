@@ -54,7 +54,11 @@ void main() {
         // The real one schedules a reconnect timer when the socket fails,
         // and `testWidgets` fails any test that leaves a timer pending.
         syncEngineProvider.overrideWith(
-          (ref) => SyncEngine(api: api, cache: cache),
+          (ref) => SyncEngine(
+            api: api,
+            cache: cache,
+            vaultId: FakeServer.primaryVault,
+          ),
         ),
       ],
     );

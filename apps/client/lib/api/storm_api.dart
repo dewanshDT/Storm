@@ -6,9 +6,12 @@ import 'models.dart';
 
 /// REST client for `storm-server`.
 ///
-/// M2 is online-only: every read and write goes straight to the server with no
-/// local cache and no outbox. Those arrive in M3, layered *above* this class
-/// rather than inside it, so this stays a thin transport.
+/// A thin transport for one *server*. The vault is a parameter of each call
+/// rather than a property of the client: one server hosts many vaults, and the
+/// dashboard has to read across all of them.
+///
+/// Caching and the outbox live above this class, in [SyncEngine], so this stays
+/// transport only.
 class StormApi {
   StormApi({required this.baseUrl, required this.token, http.Client? client})
     : _client = client ?? http.Client();
@@ -25,6 +28,15 @@ class StormApi {
 
   Uri _uri(String path, [Map<String, String>? query]) =>
       Uri.parse('$baseUrl$path').replace(queryParameters: query);
+
+  /// Vault-scoped path. Vault ids are UUIDs, but encoded anyway so a
+  /// hand-edited registry cannot produce a malformed URL.
+  String _v(String vaultId, String path) =>
+      '/v1/vaults/${Uri.encodeComponent(vaultId)}$path';
+
+  /// Percent-encodes a vault path for a URL, keeping its separators — folder
+  /// and attachment names routinely contain spaces.
+  String _path(String p) => p.split('/').map(Uri.encodeComponent).join('/');
 
   /// Decodes a response, converting any non-2xx into [StormApiException].
   dynamic _decode(http.Response r) {
@@ -44,45 +56,167 @@ class StormApi {
   }
 
   /// Verifies the server is reachable and the token is accepted.
+  ///
+  /// Uses the vault list rather than a tree: it needs no vault to exist yet,
+  /// so a brand-new server verifies just as well as a populated one.
   Future<void> checkConnection() async {
-    _decode(await _client.get(_uri('/v1/tree'), headers: _headers));
+    _decode(await _client.get(_uri('/v1/vaults'), headers: _headers));
   }
 
-  Future<VaultTree> tree() async {
+  Future<VaultTree> tree(String vaultId) async {
     final json = _decode(
-      await _client.get(_uri('/v1/tree'), headers: _headers),
+      await _client.get(_uri(_v(vaultId, '/tree')), headers: _headers),
     );
     return VaultTree.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Every vault this server hosts.
+  Future<List<VaultInfo>> vaults() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/vaults'), headers: _headers),
+    );
+    return (json['vaults'] as List)
+        .map((v) => VaultInfo.fromJson(v as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<VaultInfo> createVault(String name) async {
+    final json = _decode(
+      await _client.post(
+        _uri('/v1/vaults'),
+        headers: _headers,
+        body: jsonEncode({'name': name}),
+      ),
+    );
+    return VaultInfo.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<void> renameVault(String vaultId, String name) async {
+    _decode(
+      await _client.patch(
+        _uri('/v1/vaults/${Uri.encodeComponent(vaultId)}'),
+        headers: _headers,
+        body: jsonEncode({'name': name}),
+      ),
+    );
+  }
+
+  /// Unregisters a vault. The server never deletes its files.
+  Future<void> removeVault(String vaultId) async {
+    _decode(
+      await _client.delete(
+        _uri('/v1/vaults/${Uri.encodeComponent(vaultId)}'),
+        headers: _headers,
+      ),
+    );
+  }
+
+  /// Recently opened notes across every vault, newest first.
+  Future<List<RecentNote>> recents({int limit = 20}) async {
+    final json = _decode(
+      await _client.get(
+        _uri('/v1/recents', {'limit': '$limit'}),
+        headers: _headers,
+      ),
+    );
+    return (json['recents'] as List)
+        .map((r) => RecentNote.fromJson(r as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<ServerConfig> config() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/config'), headers: _headers),
+    );
+    return ServerConfig.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Points the server at a different storage root.
+  ///
+  /// Never moves files. Throws with a 409 when the new root holds none of the
+  /// registered vaults, unless [orphanOk] — see the server's `put_config`.
+  Future<void> setVaultRoot(String path, {bool orphanOk = false}) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config'),
+        headers: _headers,
+        body: jsonEncode({'vault_root': path, 'orphan_ok': orphanOk}),
+      ),
+    );
+  }
+
+  Future<void> createFolder(String vaultId, String path) async {
+    _decode(
+      await _client.post(
+        _uri(_v(vaultId, '/folders')),
+        headers: _headers,
+        body: jsonEncode({'path': path}),
+      ),
+    );
+  }
+
+  Future<void> deleteFolder(String vaultId, String path) async {
+    _decode(
+      await _client.delete(
+        _uri(_v(vaultId, '/folders/${_path(path)}')),
+        headers: _headers,
+      ),
+    );
+  }
+
+  Future<void> renameFolder(String vaultId, String from, String to) async {
+    _decode(
+      await _client.post(
+        _uri(_v(vaultId, '/folders/rename')),
+        headers: _headers,
+        body: jsonEncode({'from': from, 'to': to}),
+      ),
+    );
+  }
+
+  /// Records that a note was opened, for the cross-vault recents list.
+  Future<void> markOpened(String vaultId, String id) async {
+    _decode(
+      await _client.post(
+        _uri(_v(vaultId, '/notes/$id/opened')),
+        headers: _headers,
+      ),
+    );
   }
 
   /// Changes after [since] — the delta-sync primitive.
   ///
   /// Clients store the returned `seq` and pass it back next time, so catching
   /// up never requires diffing a full vault manifest.
-  Future<SyncBatch> sync({int since = 0, int limit = 500}) async {
+  Future<SyncBatch> sync(
+    String vaultId, {
+    int since = 0,
+    int limit = 500,
+  }) async {
     final json = _decode(
       await _client.get(
-        _uri('/v1/sync', {'since': '$since', 'limit': '$limit'}),
+        _uri(_v(vaultId, '/sync'), {'since': '$since', 'limit': '$limit'}),
         headers: _headers,
       ),
     );
     return SyncBatch.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<Note> note(String id) async {
+  Future<Note> note(String vaultId, String id) async {
     final json = _decode(
-      await _client.get(_uri('/v1/notes/$id'), headers: _headers),
+      await _client.get(_uri(_v(vaultId, '/notes/$id')), headers: _headers),
     );
     return Note.fromJson(json as Map<String, dynamic>);
   }
 
   Future<WriteResult> createNote({
+    required String vaultId,
     required String path,
     String content = '',
   }) async {
     final json = _decode(
       await _client.post(
-        _uri('/v1/notes'),
+        _uri(_v(vaultId, '/notes')),
         headers: _headers,
         body: jsonEncode({'path': path, 'content': content}),
       ),
@@ -95,6 +229,7 @@ class StormApi {
   /// [baseVersion] is the version this client last read. The server uses it to
   /// decide between a fast-forward and a 3-way merge — see the README.
   Future<WriteResult> saveNote({
+    required String vaultId,
     required String id,
     required int baseVersion,
     required String content,
@@ -102,7 +237,7 @@ class StormApi {
   }) async {
     final json = _decode(
       await _client.put(
-        _uri('/v1/notes/$id'),
+        _uri(_v(vaultId, '/notes/$id')),
         headers: _headers,
         body: jsonEncode({
           'base_version': baseVersion,
@@ -115,12 +250,13 @@ class StormApi {
   }
 
   Future<WriteResult> moveNote({
+    required String vaultId,
     required String id,
     required String newPath,
   }) async {
     final json = _decode(
       await _client.post(
-        _uri('/v1/notes/$id/move'),
+        _uri(_v(vaultId, '/notes/$id/move')),
         headers: _headers,
         body: jsonEncode({'new_path': newPath}),
       ),
@@ -128,15 +264,21 @@ class StormApi {
     return WriteResult.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<void> deleteNote(String id) async {
-    _decode(await _client.delete(_uri('/v1/notes/$id'), headers: _headers));
+  Future<void> deleteNote(String vaultId, String id) async {
+    _decode(
+      await _client.delete(_uri(_v(vaultId, '/notes/$id')), headers: _headers),
+    );
   }
 
-  Future<List<SearchHit>> search(String query, {int limit = 50}) async {
+  Future<List<SearchHit>> search(
+    String vaultId,
+    String query, {
+    int limit = 50,
+  }) async {
     if (query.trim().isEmpty) return const [];
     final json = _decode(
       await _client.get(
-        _uri('/v1/search', {'q': query, 'limit': '$limit'}),
+        _uri(_v(vaultId, '/search'), {'q': query, 'limit': '$limit'}),
         headers: _headers,
       ),
     );
@@ -146,18 +288,22 @@ class StormApi {
   }
 
   /// Uploads an attachment. Binary, opaque, last-write-wins on the server.
-  Future<void> uploadAttachment(String path, List<int> bytes) async {
+  Future<void> uploadAttachment(
+    String vaultId,
+    String path,
+    List<int> bytes,
+  ) async {
     final r = await _client.put(
-      _uri('/v1/attachments/$path'),
+      _uri(_v(vaultId, '/attachments/${_path(path)}')),
       headers: {'Authorization': 'Bearer $token'},
       body: bytes,
     );
     _decode(r);
   }
 
-  Future<List<int>> attachment(String path) async {
+  Future<List<int>> attachment(String vaultId, String path) async {
     final r = await _client.get(
-      _uri('/v1/attachments/$path'),
+      _uri(_v(vaultId, '/attachments/${_path(path)}')),
       headers: {'Authorization': 'Bearer $token'},
     );
     if (r.statusCode < 200 || r.statusCode >= 300) {
@@ -170,22 +316,22 @@ class StormApi {
   ///
   /// The token rides in the query string because Flutter's image widgets
   /// can't set headers on the request they make.
-  Uri attachmentUrl(String path) =>
-      _uri('/v1/attachments/$path', {'token': token});
+  Uri attachmentUrl(String vaultId, String path) =>
+      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': token});
 
-  Future<List<TagCount>> tags() async {
+  Future<List<TagCount>> tags(String vaultId) async {
     final json = _decode(
-      await _client.get(_uri('/v1/tags'), headers: _headers),
+      await _client.get(_uri(_v(vaultId, '/tags')), headers: _headers),
     );
     return (json['tags'] as List)
         .map((t) => TagCount.fromJson(t as Map<String, dynamic>))
         .toList();
   }
 
-  Future<List<NoteMeta>> notesWithTag(String tag) async {
+  Future<List<NoteMeta>> notesWithTag(String vaultId, String tag) async {
     final json = _decode(
       await _client.get(
-        _uri('/v1/tags/${Uri.encodeComponent(tag)}'),
+        _uri(_v(vaultId, '/tags/${Uri.encodeComponent(tag)}')),
         headers: _headers,
       ),
     );
@@ -194,9 +340,12 @@ class StormApi {
         .toList();
   }
 
-  Future<List<NoteMeta>> backlinks(String id) async {
+  Future<List<NoteMeta>> backlinks(String vaultId, String id) async {
     final json = _decode(
-      await _client.get(_uri('/v1/notes/$id/backlinks'), headers: _headers),
+      await _client.get(
+        _uri(_v(vaultId, '/notes/$id/backlinks')),
+        headers: _headers,
+      ),
     );
     return (json['backlinks'] as List)
         .map((n) => NoteMeta.fromJson(n as Map<String, dynamic>))

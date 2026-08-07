@@ -149,7 +149,9 @@ class StormMarkdownController extends TextEditingController {
   void _unwrap(String t, int start, int end, String marker) {
     final n = marker.length;
     _apply(
-      t.substring(0, start - n) + t.substring(start, end) + t.substring(end + n),
+      t.substring(0, start - n) +
+          t.substring(start, end) +
+          t.substring(end + n),
       start == end
           ? TextSelection.collapsed(offset: start - n)
           : TextSelection(baseOffset: start - n, extentOffset: end - n),
@@ -184,7 +186,8 @@ class StormMarkdownController extends TextEditingController {
     final ordered = prefix != null && orderedMarker.hasMatch(prefix);
     final firstNumber = ordered ? _orderedNumberBefore(t, blockStart) : 1;
 
-    final removing = prefix == null ||
+    final removing =
+        prefix == null ||
         (toggle &&
             (ordered
                 ? stripped.every((p) => orderedMarker.hasMatch(p.marker))
@@ -200,7 +203,8 @@ class StormMarkdownController extends TextEditingController {
     }
 
     final rewritten = [
-      for (final (i, p) in stripped.indexed) '${p.indent}${markerFor(i)}${p.body}',
+      for (final (i, p) in stripped.indexed)
+        '${p.indent}${markerFor(i)}${p.body}',
     ].join('\n');
 
     // The caret keeps its place within the first line's *content*, which is
@@ -270,6 +274,7 @@ class StormMarkdownController extends TextEditingController {
       composing: TextRange.empty,
     );
   }
+
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -530,7 +535,6 @@ class _LineKey {
   @override
   int get hashCode => Object.hash(line, context, isFirst, revealed);
 }
-
 
 /// A line split into indent, block marker, and the content after it.
 class _Prefixed {

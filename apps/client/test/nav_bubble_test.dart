@@ -5,6 +5,7 @@ import 'package:storm/router.dart';
 import 'package:storm/ui/editor_toolbar.dart';
 
 import 'shell_harness.dart';
+import 'fake_server.dart';
 
 /// The navigation bubble.
 ///
@@ -16,6 +17,9 @@ void main() {
     testWidgets('starts collapsed and opens on tap', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c);
+      // Inside a vault: the browse/search/new-note slots only exist there.
+      // On the dashboard the bubble offers vault-level actions instead.
+      await openVault(tester, c);
 
       expect(find.byIcon(Icons.more_horiz), findsOneWidget);
       expect(find.byIcon(Icons.search), findsNothing);
@@ -23,9 +27,9 @@ void main() {
       await tester.tap(find.byIcon(Icons.more_horiz));
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
-      expect(find.byIcon(Icons.search), findsOneWidget);
-      expect(find.byIcon(Icons.add), findsOneWidget);
+      expect(find.byTooltip('Directory'), findsOneWidget);
+      expect(find.byTooltip('Search'), findsOneWidget);
+      expect(find.byTooltip('New note'), findsOneWidget);
       expect(find.byIcon(Icons.more_horiz), findsNothing);
       await disposeShell(tester, c);
     });
@@ -33,10 +37,11 @@ void main() {
     testWidgets('closes again', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c);
+      await openVault(tester, c);
 
       await tester.tap(find.byIcon(Icons.more_horiz));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(Icons.close));
+      await tester.tap(find.byTooltip('Close'));
       await tester.pumpAndSettle();
 
       expect(find.byIcon(Icons.more_horiz), findsOneWidget);
@@ -49,10 +54,11 @@ void main() {
       // covering its content.
       final c = shellContainer();
       await pumpShell(tester, c);
+      await openVault(tester, c);
 
       await tester.tap(find.byIcon(Icons.more_horiz));
       await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(Icons.folder_outlined));
+      await tester.tap(find.byTooltip('Directory'));
       await tester.pumpAndSettle();
 
       expect(find.text('Vault'), findsOneWidget);
@@ -69,13 +75,14 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  testWidgets('trades places with the formatting toolbar in a note',
-      (tester) async {
+  testWidgets('trades places with the formatting toolbar in a note', (
+    tester,
+  ) async {
     // Both read the same signal, so they must never be on screen together and
     // never both absent.
     final c = shellContainer();
     await pumpShell(tester, c);
-    c.read(routerProvider).go(Routes.note('n0'));
+    c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
     await tester.pumpAndSettle();
 
     expect(find.byType(EditorToolbar), findsNothing);
@@ -93,11 +100,12 @@ void main() {
     testWidgets('offers tags outside a note', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c);
+      await openVault(tester, c);
 
       await tester.tap(find.byIcon(Icons.more_horiz));
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.label_outline), findsOneWidget);
+      expect(find.byTooltip('Tags'), findsOneWidget);
       expect(find.byIcon(Icons.hub_outlined), findsNothing);
       await disposeShell(tester, c);
     });
@@ -106,13 +114,13 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      c.read(routerProvider).go(Routes.note('n0'));
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.more_horiz));
       await tester.pumpAndSettle();
 
       expect(find.byIcon(Icons.hub_outlined), findsOneWidget);
-      expect(find.byIcon(Icons.label_outline), findsNothing);
+      expect(find.byTooltip('Tags'), findsNothing);
       await disposeShell(tester, c);
     });
   });

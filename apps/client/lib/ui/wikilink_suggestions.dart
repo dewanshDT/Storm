@@ -26,7 +26,10 @@ class WikilinkSuggestions extends ConsumerWidget {
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: controller,
       builder: (context, value, _) {
-        final query = activeWikilinkQuery(value.text, value.selection.baseOffset);
+        final query = activeWikilinkQuery(
+          value.text,
+          value.selection.baseOffset,
+        );
         if (query == null || !value.selection.isCollapsed) {
           return const SizedBox.shrink();
         }

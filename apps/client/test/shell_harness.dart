@@ -44,12 +44,24 @@ ProviderContainer shellContainer({bool configured = true}) {
     );
   }
 
-  final api = StormApi(baseUrl: 'http://test', token: 't', client: server.client);
+  final api = StormApi(
+    baseUrl: 'http://test',
+    token: 't',
+    client: server.client,
+  );
   final container = ProviderContainer(
     overrides: [
       cacheProvider.overrideWithValue(cache),
       apiProvider.overrideWithValue(configured ? api : null),
-      syncEngineProvider.overrideWith((ref) => SyncEngine(api: api, cache: cache)),
+      // The engine follows the active vault exactly as it does in the app, so
+      // a test that switches vaults exercises the real teardown.
+      syncEngineProvider.overrideWith(
+        (ref) => SyncEngine(
+          api: api,
+          cache: cache,
+          vaultId: ref.watch(activeVaultProvider),
+        ),
+      ),
       settingsProvider.overrideWith(() => FakeSettings(configured)),
     ],
   );
@@ -95,26 +107,48 @@ Future<void> disposeShell(WidgetTester tester, ProviderContainer c) async {
 }
 
 NoteMeta noteMeta(String path) => NoteMeta(
-      id: path,
-      path: path,
-      title: '',
-      version: 1,
-      modified: '2026-08-05T10:00:00Z',
-      size: 0,
-    );
+  id: path,
+  path: path,
+  title: '',
+  version: 1,
+  modified: '2026-08-05T10:00:00Z',
+  size: 0,
+);
 
 /// Settings without SharedPreferences, so the router's redirect can be driven
 /// directly.
 class FakeSettings extends SettingsNotifier {
-  FakeSettings(this.configured);
+  FakeSettings(this.configured, {this.activeVault = FakeServer.primaryVault});
 
   final bool configured;
 
+  /// Which vault starts active, as the real app persists it across launches.
+  final String activeVault;
+
   @override
   Future<Settings> build() async => configured
-      ? const Settings(baseUrl: 'http://test', token: 't', darkMode: true)
+      ? Settings(
+          baseUrl: 'http://test',
+          token: 't',
+          darkMode: true,
+          activeVault: activeVault,
+        )
       : const Settings();
 
   @override
   Future<void> save(Settings next) async => state = AsyncData(next);
+}
+
+/// Opens a vault's browser and waits for `VaultGate` to accept it.
+///
+/// Navigating is not enough on its own: the gate holds a spinner for one frame
+/// while the route's vault becomes active, and anything asserted before that
+/// would be asserting against the previous vault.
+Future<void> openVault(
+  WidgetTester tester,
+  ProviderContainer c, {
+  String vaultId = FakeServer.primaryVault,
+}) async {
+  c.read(routerProvider).go(Routes.browse(vaultId));
+  await tester.pumpAndSettle();
 }

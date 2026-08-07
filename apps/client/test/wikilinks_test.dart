@@ -9,13 +9,13 @@ import 'package:storm/ui/editor_toolbar.dart';
 
 void main() {
   NoteMeta meta(String path, {String title = ''}) => NoteMeta(
-        id: path,
-        path: path,
-        title: title,
-        version: 1,
-        modified: '2026-08-05T10:00:00Z',
-        size: 0,
-      );
+    id: path,
+    path: path,
+    title: title,
+    version: 1,
+    modified: '2026-08-05T10:00:00Z',
+    size: 0,
+  );
 
   group('resolveWikilink', () {
     final notes = [
@@ -27,20 +27,29 @@ void main() {
 
     test('matches a bare filename', () {
       expect(resolveWikilink(notes, 'Ideas')?.path, 'Projects/Ideas.md');
-      expect(resolveWikilink(notes, 'Design')?.path, 'Projects/Storm/Design.md');
+      expect(
+        resolveWikilink(notes, 'Design')?.path,
+        'Projects/Storm/Design.md',
+      );
     });
 
     test('matches a full path, with or without the extension', () {
-      expect(resolveWikilink(notes, 'Daily/2026-08-05')?.path,
-          'Daily/2026-08-05.md');
-      expect(resolveWikilink(notes, 'Daily/2026-08-05.md')?.path,
-          'Daily/2026-08-05.md');
+      expect(
+        resolveWikilink(notes, 'Daily/2026-08-05')?.path,
+        'Daily/2026-08-05.md',
+      );
+      expect(
+        resolveWikilink(notes, 'Daily/2026-08-05.md')?.path,
+        'Daily/2026-08-05.md',
+      );
     });
 
     test('matches a frontmatter title', () {
       expect(resolveWikilink(notes, 'Welcome to Storm')?.path, 'Welcome.md');
-      expect(resolveWikilink(notes, 'Storm Design')?.path,
-          'Projects/Storm/Design.md');
+      expect(
+        resolveWikilink(notes, 'Storm Design')?.path,
+        'Projects/Storm/Design.md',
+      );
     });
 
     test('falls back to a case-insensitive match', () {
@@ -105,8 +114,11 @@ void main() {
         expect(controller.calls, [expected], reason: 'button $icon');
       }
 
-      expect(controller.directWrites, 0,
-          reason: 'the toolbar assigned text or value itself');
+      expect(
+        controller.directWrites,
+        0,
+        reason: 'the toolbar assigned text or value itself',
+      );
     });
 
     testWidgets('dismissing the heading menu changes nothing', (tester) async {
@@ -186,7 +198,7 @@ void main() {
 /// reaches past them to the raw value.
 class _RecordingController extends StormMarkdownController {
   _RecordingController()
-      : super(theme: MarkdownTheme.dark(const TextStyle()), text: 'x');
+    : super(theme: MarkdownTheme.dark(const TextStyle()), text: 'x');
 
   final List<String> calls = [];
   int directWrites = 0;

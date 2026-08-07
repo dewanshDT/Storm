@@ -6,6 +6,7 @@ import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
 import 'shell/storm_scaffold.dart';
+import 'shell/vault_gate.dart';
 
 /// One folder at a time, with a breadcrumb back up.
 ///
@@ -21,6 +22,10 @@ class BrowseScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final notes = ref.watch(treeProvider);
+    final vaultId = VaultGate.of(context);
+    // Folders created on purpose. Without these an empty folder would be
+    // invisible, because everything else here is derived from note paths.
+    final known = ref.watch(vaultFoldersProvider);
 
     return StormScaffold(
       leading: folder.isEmpty
@@ -32,17 +37,17 @@ class BrowseScreen extends ConsumerWidget {
               // so it falls back to walking up a level.
               onPressed: () => context.canPop()
                   ? context.pop()
-                  : context.go(Routes.folder(_parentOf(folder))),
+                  : context.go(Routes.folder(vaultId, _parentOf(folder))),
             ),
       title: const Text('Directory'),
       child: notes.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('$e')),
         data: (list) {
-          final entries = _childrenOf(list, folder);
+          final entries = _childrenOf(list, folder, known);
           return Column(
             children: [
-              _Breadcrumbs(folder: folder),
+              _Breadcrumbs(folder: folder, vaultId: vaultId),
               const Divider(height: 1),
               Expanded(
                 child: entries.isEmpty
@@ -63,14 +68,10 @@ class BrowseScreen extends ConsumerWidget {
 
 /// A folder or a note directly inside the folder being viewed.
 class BrowseEntry {
-  const BrowseEntry.folder(this.name, this.path)
-      : note = null,
-        childCount = 0;
+  const BrowseEntry.folder(this.name, this.path) : note = null, childCount = 0;
   const BrowseEntry.folderWith(this.name, this.path, this.childCount)
-      : note = null;
-  const BrowseEntry.note(this.name, this.note)
-      : path = '',
-        childCount = 0;
+    : note = null;
+  const BrowseEntry.note(this.name, this.note) : path = '', childCount = 0;
 
   final String name;
   final String path;
@@ -89,10 +90,17 @@ String _parentOf(String folder) {
 ///
 /// Derived from note paths, exactly as the vault's folders are: the server
 /// has no separate folder record because the vault is a directory of files.
-List<BrowseEntry> childrenOfFolder(List<NoteMeta> notes, String folder) =>
-    _childrenOf(notes, folder);
+List<BrowseEntry> childrenOfFolder(
+  List<NoteMeta> notes,
+  String folder, [
+  List<String> knownFolders = const [],
+]) => _childrenOf(notes, folder, knownFolders);
 
-List<BrowseEntry> _childrenOf(List<NoteMeta> notes, String folder) {
+List<BrowseEntry> _childrenOf(
+  List<NoteMeta> notes,
+  String folder,
+  List<String> knownFolders,
+) {
   final prefix = folder.isEmpty ? '' : '$folder/';
   final folders = <String, int>{};
   final direct = <BrowseEntry>[];
@@ -111,10 +119,19 @@ List<BrowseEntry> _childrenOf(List<NoteMeta> notes, String folder) {
     }
   }
 
-  final folderEntries = folders.entries
-      .map((e) => BrowseEntry.folderWith(e.key, '$prefix${e.key}', e.value))
-      .toList()
-    ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+  // Folders the server knows about that no note put here — the empty ones.
+  for (final known in knownFolders) {
+    if (!known.startsWith(prefix)) continue;
+    final rest = known.substring(prefix.length);
+    if (rest.isEmpty || rest.contains('/')) continue;
+    folders.putIfAbsent(rest, () => 0);
+  }
+
+  final folderEntries =
+      folders.entries
+          .map((e) => BrowseEntry.folderWith(e.key, '$prefix${e.key}', e.value))
+          .toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
   direct.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
@@ -122,15 +139,15 @@ List<BrowseEntry> _childrenOf(List<NoteMeta> notes, String folder) {
   return [...folderEntries, ...direct];
 }
 
-String _stripExtension(String fileName) =>
-    fileName.endsWith('.md')
-        ? fileName.substring(0, fileName.length - 3)
-        : fileName;
+String _stripExtension(String fileName) => fileName.endsWith('.md')
+    ? fileName.substring(0, fileName.length - 3)
+    : fileName;
 
 class _Breadcrumbs extends StatelessWidget {
-  const _Breadcrumbs({required this.folder});
+  const _Breadcrumbs({required this.folder, required this.vaultId});
 
   final String folder;
+  final String vaultId;
 
   @override
   Widget build(BuildContext context) {
@@ -140,7 +157,7 @@ class _Breadcrumbs extends StatelessWidget {
     final crumbs = <Widget>[
       _Crumb(
         label: 'Vault',
-        onTap: () => context.go(Routes.browse),
+        onTap: () => context.go(Routes.browse(vaultId)),
         muted: parts.isNotEmpty,
       ),
     ];
@@ -151,7 +168,7 @@ class _Breadcrumbs extends StatelessWidget {
         ..add(
           _Crumb(
             label: parts[i],
-            onTap: () => context.go(Routes.folder(path)),
+            onTap: () => context.go(Routes.folder(vaultId, path)),
             muted: i != parts.length - 1,
           ),
         );
@@ -162,9 +179,7 @@ class _Breadcrumbs extends StatelessWidget {
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 14),
-        children: [
-          for (final c in crumbs) Center(child: c),
-        ],
+        children: [for (final c in crumbs) Center(child: c)],
       ),
     );
   }
@@ -206,6 +221,7 @@ class _EntryTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final vaultId = VaultGate.of(context);
 
     if (entry.isFolder) {
       return ListTile(
@@ -215,7 +231,10 @@ class _EntryTile extends ConsumerWidget {
           entry.childCount == 1 ? '1 note' : '${entry.childCount} notes',
         ),
         trailing: const Icon(Icons.chevron_right, size: 18),
-        onTap: () => context.push(Routes.folder(entry.path)),
+        onTap: () => context.push(Routes.folder(vaultId, entry.path)),
+        // Long-press rather than a visible menu per row: renaming and deleting
+        // folders are rare next to walking into them.
+        onLongPress: () => _folderActions(context, ref, vaultId, entry),
       );
     }
 
@@ -226,7 +245,105 @@ class _EntryTile extends ConsumerWidget {
       trailing: pinned.contains(entry.note!.id)
           ? Icon(Icons.push_pin, size: 13, color: scheme.primary)
           : null,
-      onTap: () => context.push(Routes.note(entry.note!.id)),
+      onTap: () => context.push(Routes.note(vaultId, entry.note!.id)),
     );
   }
 }
+
+Future<void> _folderActions(
+  BuildContext context,
+  WidgetRef ref,
+  String vaultId,
+  BrowseEntry entry,
+) async {
+  final action = await showModalBottomSheet<String>(
+    context: context,
+    builder: (c) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.drive_file_rename_outline),
+            title: Text('Rename “${entry.name}”'),
+            onTap: () => Navigator.pop(c, 'rename'),
+          ),
+          ListTile(
+            leading: Icon(
+              Icons.delete_outline,
+              color: Theme.of(c).colorScheme.error,
+            ),
+            title: const Text('Delete folder'),
+            onTap: () => Navigator.pop(c, 'delete'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (action == null || !context.mounted) return;
+
+  final api = ref.read(apiProvider);
+  if (api == null) return;
+
+  if (action == 'rename') {
+    final name = await promptForPath(
+      context,
+      title: 'Rename folder',
+      initial: entry.name,
+      isFolder: true,
+    );
+    if (name == null || !context.mounted) return;
+    final parent = entry.path.contains('/')
+        ? entry.path.substring(0, entry.path.lastIndexOf('/'))
+        : '';
+    final to = parent.isEmpty ? name : '$parent/$name';
+    try {
+      await api.renameFolder(vaultId, entry.path, to);
+      ref.read(vaultRevisionProvider.notifier).state++;
+      ref.invalidate(treeProvider);
+    } on StormApiException catch (e) {
+      if (context.mounted) _toast(context, e.message);
+    }
+    return;
+  }
+
+  try {
+    await api.deleteFolder(vaultId, entry.path);
+    ref.read(vaultRevisionProvider.notifier).state++;
+    ref.invalidate(treeProvider);
+  } on StormApiException catch (e) {
+    // The server refuses a folder that still holds notes rather than taking
+    // them with it. Surfacing its wording keeps the count accurate.
+    if (context.mounted) _toast(context, e.message);
+  }
+}
+
+/// Creates a folder inside [parent] (`''` at the vault root).
+Future<void> createFolder(
+  BuildContext context,
+  WidgetRef ref,
+  String vaultId,
+  String parent,
+) async {
+  final name = await promptForPath(
+    context,
+    title: 'New folder',
+    initial: '',
+    isFolder: true,
+  );
+  if (name == null || name.trim().isEmpty || !context.mounted) return;
+
+  final api = ref.read(apiProvider);
+  if (api == null) return;
+  final path = parent.isEmpty ? name : '$parent/$name';
+  try {
+    await api.createFolder(vaultId, path);
+    ref.read(vaultRevisionProvider.notifier).state++;
+    ref.invalidate(treeProvider);
+  } on StormApiException catch (e) {
+    if (context.mounted) _toast(context, e.message);
+  }
+}
+
+void _toast(BuildContext context, String message) => ScaffoldMessenger.of(
+  context,
+).showSnackBar(SnackBar(content: Text(message)));

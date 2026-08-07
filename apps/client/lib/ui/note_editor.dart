@@ -125,7 +125,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final isTouch =
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
-    final modified = HardwareKeyboard.instance.isMetaPressed ||
+    final modified =
+        HardwareKeyboard.instance.isMetaPressed ||
         HardwareKeyboard.instance.isControlPressed;
     if (!isTouch && !modified) return;
 
