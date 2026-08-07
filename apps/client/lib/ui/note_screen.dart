@@ -1,8 +1,12 @@
+import 'dart:async';
+
+import 'package:drift/drift.dart' show Value;
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../cache/cache_db.dart';
 import '../router.dart';
 import '../state/app_state.dart';
 import '../state/wikilinks.dart';
@@ -52,7 +56,41 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       if (!mounted) return;
       ref.read(openNoteIdProvider.notifier).state = widget.noteId;
       await ref.read(noteSessionProvider).open(widget.noteId);
+      if (!mounted) return;
+      unawaited(_recordOpen());
     });
+  }
+
+  /// Tells the server this note was opened, for the dashboard's recents.
+  ///
+  /// Fire-and-forget, and never surfaced: failing to record an open is not
+  /// worth a message, and must not stop the note from being read.
+  Future<void> _recordOpen() async {
+    final vaultId = ref.read(activeVaultProvider);
+    final api = ref.read(apiProvider);
+    if (api == null || vaultId.isEmpty) return;
+
+    // Mirrored locally first so it shows immediately and survives being
+    // offline; the server's copy wins at the next dashboard refresh.
+    final meta = ref.read(noteSessionProvider).meta;
+    if (meta != null) {
+      await ref
+          .read(cacheProvider)
+          .noteOpened(
+            RecentsCompanion.insert(
+              vaultId: vaultId,
+              noteId: meta.id,
+              path: Value(meta.path),
+              title: Value(meta.title),
+              openedAt: DateTime.now(),
+            ),
+          );
+    }
+    try {
+      await api.markOpened(vaultId, widget.noteId);
+    } catch (_) {
+      // Offline. The local mirror already carries it.
+    }
   }
 
   void _toast(String message) {

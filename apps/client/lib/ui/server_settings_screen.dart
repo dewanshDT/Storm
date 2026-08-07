@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
+import 'browse_screen.dart' show describeFailure;
 
 /// Where vaults live on the server, and which ones exist.
 ///
@@ -86,8 +87,8 @@ Future<void> createVault(BuildContext context, WidgetRef ref) async {
     await api.createVault(name.trim());
     ref.invalidate(vaultsProvider);
     ref.invalidate(serverConfigProvider);
-  } on StormApiException catch (e) {
-    if (context.mounted) _toast(context, e.message);
+  } catch (e) {
+    if (context.mounted) _toast(context, describeFailure(e));
   }
 }
 
@@ -154,13 +155,14 @@ class _RootCard extends ConsumerWidget {
 
     try {
       await api.setVaultRoot(path.trim());
-    } on StormApiException catch (e) {
+    } catch (e) {
       if (!context.mounted) return;
       // A 409 means none of the registered vaults were found there. The server
       // refuses rather than applying it, and only proceeds once the user has
-      // read what would be left behind.
-      if (e.statusCode != 409) {
-        _toast(context, e.message);
+      // read what would be left behind. Anything that is not a refusal — a
+      // dead socket, say — is just reported.
+      if (e is! StormApiException || e.statusCode != 409) {
+        _toast(context, describeFailure(e));
         return;
       }
       final proceed = await showDialog<bool>(
@@ -186,8 +188,8 @@ class _RootCard extends ConsumerWidget {
       if (proceed != true) return;
       try {
         await api.setVaultRoot(path.trim(), orphanOk: true);
-      } on StormApiException catch (e2) {
-        if (context.mounted) _toast(context, e2.message);
+      } catch (e2) {
+        if (context.mounted) _toast(context, describeFailure(e2));
         return;
       }
     }
@@ -250,8 +252,8 @@ class _VaultRow extends ConsumerWidget {
     try {
       await api.renameVault(vault.id, name.trim());
       ref.invalidate(vaultsProvider);
-    } on StormApiException catch (e) {
-      if (context.mounted) _toast(context, e.message);
+    } catch (e) {
+      if (context.mounted) _toast(context, describeFailure(e));
     }
   }
 
@@ -284,8 +286,8 @@ class _VaultRow extends ConsumerWidget {
       await api.removeVault(vault.id);
       ref.invalidate(vaultsProvider);
       ref.invalidate(serverConfigProvider);
-    } on StormApiException catch (e) {
-      if (context.mounted) _toast(context, e.message);
+    } catch (e) {
+      if (context.mounted) _toast(context, describeFailure(e));
     }
   }
 }

@@ -119,7 +119,7 @@ class CacheDb extends _$CacheDb {
   );
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   /// v1 held one vault's notes with no way to say which.
   ///
@@ -127,14 +127,43 @@ class CacheDb extends _$CacheDb {
   /// discarded: [Outbox] rows are edits that exist nowhere else, and throwing
   /// them away to simplify a migration is data loss. [adoptLegacyRows] moves
   /// them to the real vault once the server says which one it is.
+  ///
+  /// **v2 shipped broken and v3 repairs it.** v2 used `addColumn`, which
+  /// cannot move a primary key — so the tables kept v1's `PRIMARY KEY(id)`
+  /// while drift went on generating `ON CONFLICT(vault_id, id)`. SQLite
+  /// rejects that outright, so *every* cache write threw. Recreating the
+  /// table with `alterTable` is the only way to change a primary key in
+  /// SQLite, and a device that already ran v2 has to be repaired rather than
+  /// left on a schema no write can succeed against.
   @override
   MigrationStrategy get migration => MigrationStrategy(
     onCreate: (m) => m.createAll(),
     onUpgrade: (m, from, to) async {
       if (from < 2) {
-        await m.addColumn(cachedNotes, cachedNotes.vaultId);
-        await m.addColumn(outbox, outbox.vaultId);
+        // Straight from v1: add the column and move the key in one rebuild,
+        // stamping existing rows with the sentinel.
+        await m.alterTable(
+          TableMigration(
+            cachedNotes,
+            newColumns: [cachedNotes.vaultId],
+            columnTransformer: {
+              cachedNotes.vaultId: const Constant(kLegacyVault),
+            },
+          ),
+        );
+        await m.alterTable(
+          TableMigration(
+            outbox,
+            newColumns: [outbox.vaultId],
+            columnTransformer: {outbox.vaultId: const Constant(kLegacyVault)},
+          ),
+        );
         await m.createTable(recents);
+      } else if (from < 3) {
+        // Already on broken v2: the column is there and may already hold a
+        // real vault id, so copy it as-is and only rebuild the key.
+        await m.alterTable(TableMigration(cachedNotes));
+        await m.alterTable(TableMigration(outbox));
       }
     },
   );

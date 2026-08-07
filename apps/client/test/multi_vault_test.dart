@@ -1,4 +1,6 @@
 import 'package:drift/drift.dart' show Value;
+import 'package:storm/api/storm_api.dart';
+import 'package:storm/sync/sync_engine.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -313,6 +315,8 @@ void main() {
     });
   });
 
+  offlineConflation();
+
   group('folders', () {
     testWidgets('a new folder appears in the browser', (tester) async {
       final c = shellContainer();
@@ -403,5 +407,104 @@ void main() {
 
       await disposeShell(tester, c);
     });
+  });
+}
+
+/// A failing *local* cache must never be reported as a failing *server*.
+///
+/// This is the shape that put "Cannot reach the server" in front of a note the
+/// server had already created, and then made every later read fail as offline.
+class _BrokenCache extends CacheDb {
+  _BrokenCache() : super(NativeDatabase.memory());
+
+  @override
+  Future<void> putNote(CachedNotesCompanion note) async =>
+      throw Exception('simulated cache failure');
+}
+
+void offlineConflation() {
+  test('creating a note succeeds even when the cache write fails', () async {
+    final cache = _BrokenCache();
+    addTearDown(cache.close);
+    final server = FakeServer();
+    final engine = SyncEngine(
+      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      cache: cache,
+      vaultId: FakeServer.primaryVault,
+    );
+    addTearDown(engine.dispose);
+
+    final created = await engine.create(path: 'New.md');
+
+    expect(
+      created.error,
+      isNull,
+      reason:
+          'the server created it; a local cache problem is not an error '
+          'the user can act on',
+    );
+    expect(created.meta, isNotNull);
+    expect(
+      engine.isOnline,
+      isTrue,
+      reason:
+          'a cache failure must not mark the client offline — everything '
+          'after it then fails as offline too',
+    );
+  });
+
+  test('a note still opens when it cannot be cached', () async {
+    final cache = _BrokenCache();
+    addTearDown(cache.close);
+    final server = FakeServer();
+    server.notes['n1'] = ServerNote(
+      id: 'n1',
+      path: 'A.md',
+      content: '# A',
+      version: 1,
+    );
+    final engine = SyncEngine(
+      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      cache: cache,
+      vaultId: FakeServer.primaryVault,
+    );
+    addTearDown(engine.dispose);
+
+    final opened = await engine.openNote('n1');
+    expect(
+      opened?.content,
+      '# A',
+      reason:
+          'returning null here renders as "not available offline yet" for '
+          'a note the server just handed us',
+    );
+    expect(engine.isOnline, isTrue);
+  });
+
+  test('sync advances its cursor even when caching fails', () async {
+    // The stall behind "sync got slow": a cache failure left `lastSeq` where
+    // it was, so every sync re-pulled the same page and failed the same way.
+    final cache = _BrokenCache();
+    addTearDown(cache.close);
+    final server = FakeServer();
+    server.notes['n1'] = ServerNote(
+      id: 'n1',
+      path: 'A.md',
+      content: '# A',
+      version: 1,
+    );
+    server.pushChange('n1', 'updated', 2);
+
+    final engine = SyncEngine(
+      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      cache: cache,
+      vaultId: FakeServer.primaryVault,
+    );
+    addTearDown(engine.dispose);
+
+    await engine.sync();
+
+    expect(await cache.lastSeq(FakeServer.primaryVault), server.seq);
+    expect(engine.isOnline, isTrue);
   });
 }

@@ -51,7 +51,11 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 Last updated: 2026-08-07, multi-vault is built and both gates are green.
 `docs/storm-multi-vault.md` is the design; decisions 20–25 record the choices.
 
-**Deployed to the VM on 2026-08-07**, client and server together — M9 breaks
+**Deployed to the VM on 2026-08-07**, and fixed the same day after four bugs
+were reported from the phone — all four traced to one broken cache migration
+and the error handling that disguised it. See the milestone section.
+
+Deployed client and server together — M9 breaks
 the wire format, so they cannot go separately. The migration ran clean: the
 reconcile reported `scanned=7 indexed=0 updated=0`, which is the proof that the
 index was *carried over* rather than rebuilt, and 106 version snapshots across
@@ -802,7 +806,34 @@ work at all, and a root change just respawns the one watcher.
    vault and indexed the SQLite files in it. `scan_root()` skips `state_dir`
    unconditionally; `registry.rs` has a test for exactly that layout.
 
-**Two bugs the new tests caught, both the same shape.** Cached writes were not
+**The migration shipped broken, and the tests said it was fine.** `addColumn`
+cannot change a primary key, and v2 moved both cache tables from
+`PRIMARY KEY(id)` to `PRIMARY KEY(vaultId, id)`. The column arrived; the key
+did not. Drift then generated `ON CONFLICT(vault_id, id)`, SQLite rejected it
+outright, and **every cache write threw** on the phone.
+
+The migration test passed throughout because it opened
+`NativeDatabase.memory()`, which runs `onCreate` and produces a *correct*
+schema — it never executed the upgrade path at all. *A migration test that
+never migrates is not a migration test.* `test/cache_migration_test.dart` now
+builds the v1 schema by hand, stamps `user_version`, and opens `CacheDb` over
+it. Schema v3 rebuilds both tables with `alterTable`, and carries a separate
+repair branch for devices that already ran the broken v2 — their `user_version`
+is 2, so without it no later upgrade would ever fire and they would be stuck on
+a schema no write can succeed against.
+
+**What made it unreadable was a second mistake: cache failures were reported as
+network failures.** `create` wrapped its cache write in the same `try` as the
+request, so a local schema error surfaced as "Cannot reach the server — new
+notes need a connection", marked the client offline, and made everything after
+it fail as offline too — while the note sat on the server perfectly fine.
+`_applyChanges` did the same and worse: it returned `false`, pinning `lastSeq`,
+so every sync re-pulled the same page and failed the same way. That is what
+"sync got slow" actually was. Cache writes now go through `_cache`, which logs
+and continues. *The server is the copy of record; a local cache failure is
+never a network one.*
+
+**Two more bugs the new tests caught, both the same shape.** Cached writes were not
 stamped with the vault, so every read missed and the editor opened empty. And
 `treeProvider` read the engine without watching the active vault, so switching
 vaults kept showing the previous one's notes. Both were invisible to the type

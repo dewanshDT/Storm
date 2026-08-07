@@ -132,9 +132,10 @@ class SyncEngine extends ChangeNotifier {
 
     try {
       final fresh = await api.note(vaultId, id);
-      await _store(fresh);
       _setOnline(true);
-      return cache.note(vaultId, id);
+      // Outside the network judgement: see `_cache`.
+      await _cache(() => _store(fresh), 'caching $id');
+      return await cache.note(vaultId, id) ?? _asCached(fresh);
     } on StormApiException catch (e) {
       // A definite answer from the server: it is reachable, the note is gone.
       if (e.isNotFound) {
@@ -274,17 +275,14 @@ class SyncEngine extends ChangeNotifier {
     required String path,
     String content = '',
   }) async {
+    final WriteResult result;
     try {
-      final result = await api.createNote(
+      result = await api.createNote(
         vaultId: vaultId,
         path: path,
         content: content,
       );
       _setOnline(true);
-      // Without this the note exists on the server but not locally, and
-      // opening it straight away finds nothing.
-      await _storeWrite(result.meta.id, result);
-      return (meta: result.meta, error: null);
     } on StormApiException catch (e) {
       return (meta: null, error: e.message);
     } catch (_) {
@@ -293,6 +291,42 @@ class SyncEngine extends ChangeNotifier {
         meta: null,
         error: 'Cannot reach the server — new notes need a connection.',
       );
+    }
+
+    // Caching happens *outside* the block above on purpose. It is a local
+    // concern, and folding it in made a broken cache schema report itself as
+    // "cannot reach the server" and mark the client offline — after which
+    // everything else failed as offline too, while the note sat on the server
+    // perfectly fine.
+    await _cache(() => _storeWrite(result.meta.id, result), 'caching $path');
+    return (meta: result.meta, error: null);
+  }
+
+  /// A server note shaped like a cached row, for when the cache write failed.
+  ///
+  /// Returning `null` there would render as "not available offline yet" for a
+  /// note the server just handed us.
+  CachedNote _asCached(Note note) => CachedNote(
+    vaultId: vaultId,
+    id: note.meta.id,
+    path: note.meta.path,
+    title: note.meta.title,
+    version: note.meta.version,
+    content: note.content,
+    modified: note.meta.modified,
+    cachedAt: DateTime.now(),
+    pinned: false,
+  );
+
+  /// Runs a cache write, logging rather than throwing.
+  ///
+  /// The server is the copy of record; a local cache failure must never be
+  /// mistaken for a network one, and must never mark the client offline.
+  Future<void> _cache(Future<void> Function() write, String what) async {
+    try {
+      await write();
+    } catch (e) {
+      debugPrint('storm: $what failed locally (the server has it): $e');
     }
   }
 
@@ -562,18 +596,26 @@ class SyncEngine extends ChangeNotifier {
       // Don't overwrite a note whose local edit hasn't been sent yet.
       if (await cache.outboxFor(vaultId, change.noteId) != null) continue;
 
+      final Note fresh;
       try {
-        await _store(await api.note(vaultId, change.noteId));
-        touched.add(change.noteId);
+        fresh = await api.note(vaultId, change.noteId);
       } on StormApiException catch (e) {
         if (e.isNotFound) {
           await cache.removeNote(vaultId, change.noteId);
           touched.add(change.noteId);
         }
+        continue;
       } catch (_) {
         _setOnline(false);
         return false; // leave lastSeq alone so this page is retried
       }
+
+      // Storing is local, and failing to store must not stall the cursor.
+      // Conflating the two meant a bad cache schema pinned `lastSeq` forever:
+      // every sync re-pulled the same page, failed the same way, and flipped
+      // the client offline — which read as "sync got slow".
+      await _cache(() => _store(fresh), 'caching ${change.noteId}');
+      touched.add(change.noteId);
     }
     return true;
   }

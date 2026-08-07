@@ -300,8 +300,8 @@ Future<void> _folderActions(
       await api.renameFolder(vaultId, entry.path, to);
       ref.read(vaultRevisionProvider.notifier).state++;
       ref.invalidate(treeProvider);
-    } on StormApiException catch (e) {
-      if (context.mounted) _toast(context, e.message);
+    } catch (e) {
+      if (context.mounted) _toast(context, describeFailure(e));
     }
     return;
   }
@@ -310,10 +310,10 @@ Future<void> _folderActions(
     await api.deleteFolder(vaultId, entry.path);
     ref.read(vaultRevisionProvider.notifier).state++;
     ref.invalidate(treeProvider);
-  } on StormApiException catch (e) {
+  } catch (e) {
     // The server refuses a folder that still holds notes rather than taking
     // them with it. Surfacing its wording keeps the count accurate.
-    if (context.mounted) _toast(context, e.message);
+    if (context.mounted) _toast(context, describeFailure(e));
   }
 }
 
@@ -339,10 +339,20 @@ Future<void> createFolder(
     await api.createFolder(vaultId, path);
     ref.read(vaultRevisionProvider.notifier).state++;
     ref.invalidate(treeProvider);
-  } on StormApiException catch (e) {
-    if (context.mounted) _toast(context, e.message);
+  } catch (e) {
+    if (context.mounted) _toast(context, describeFailure(e));
   }
 }
+
+/// Turns any failure into something the user can read.
+///
+/// A `StormApiException` is the server saying no, and its wording is the best
+/// available. Anything else is the server not answering at all — which used to
+/// escape as an unhandled exception and put a red screen in front of a folder
+/// that had, in some cases, actually been created.
+String describeFailure(Object e) => e is StormApiException
+    ? e.message
+    : 'Could not reach the server. Try again when it is back.';
 
 void _toast(BuildContext context, String message) => ScaffoldMessenger.of(
   context,
