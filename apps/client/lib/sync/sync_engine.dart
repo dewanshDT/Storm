@@ -640,6 +640,14 @@ class SyncEngine extends ChangeNotifier {
     try {
       final channel = WebSocketChannel.connect(uri);
       _ws = channel;
+
+      // `connect` reports a failed handshake through `ready`, not by
+      // throwing. With nothing listening to it, an unreachable host — no DNS,
+      // no route, server down — becomes an *unhandled* async error in the
+      // zone. Reconnection is driven by the stream's `onError` below; this
+      // exists purely so the rejection is observed.
+      unawaited(channel.ready.catchError((Object _) {}));
+
       _wsSub = channel.stream.listen(
         (_) {
           _setOnline(true);

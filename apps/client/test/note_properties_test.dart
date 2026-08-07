@@ -2,10 +2,25 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:storm/state/app_state.dart';
 import 'package:storm/state/vault_config.dart';
 import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/note_properties.dart';
 import 'package:storm/ui/theme.dart';
+
+/// Settings without SharedPreferences, so the panel's own options can be
+/// driven directly.
+class _Settings extends SettingsNotifier {
+  _Settings({required this.showNoteId});
+
+  final bool showNoteId;
+
+  @override
+  Future<Settings> build() async => Settings(showNoteId: showNoteId);
+
+  @override
+  Future<void> save(Settings next) async => state = AsyncData(next);
+}
 
 /// The properties panel.
 ///
@@ -19,6 +34,7 @@ void main() {
     String content, {
     Size size = const Size(411, 900),
     VaultConfig config = const VaultConfig(),
+    bool showNoteId = false,
   }) async {
     var current = content;
     tester.view.physicalSize = size;
@@ -27,7 +43,12 @@ void main() {
 
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [vaultConfigProvider.overrideWith((ref) async => config)],
+        overrides: [
+          vaultConfigProvider.overrideWith((ref) async => config),
+          settingsProvider.overrideWith(
+            () => _Settings(showNoteId: showNoteId),
+          ),
+        ],
         child: MaterialApp(
           theme: StormTheme.dark(),
           home: Scaffold(
@@ -116,14 +137,48 @@ void main() {
     testWidgets('storm-owned fields are shown, read-only', (tester) async {
       await pump(
         tester,
-        '---\nid: abc\nmodified: 2026-08-07T00:00:00Z\n---\nbody\n',
+        '---\ncreated: 2026-08-05T07:22:02Z\nmodified: 2026-08-07T00:00:00Z'
+        '\n---\nbody\n',
       );
       // Visible in the list — there is no raw mode to find them in — but
       // with no input, because the server rewrites them on every save.
-      expect(find.text('id'), findsOneWidget);
+      expect(find.text('created'), findsOneWidget);
       expect(find.text('modified'), findsOneWidget);
-      expect(find.text('abc'), findsOneWidget);
       expect(find.byType(TextField), findsNothing);
+    });
+
+    testWidgets('the id is hidden unless asked for', (tester) async {
+      // A UUID nobody reads, costing the top row of every note.
+      await pump(tester, '---\nid: abc\ntitle: Storm\n---\nbody\n');
+      expect(find.text('id'), findsNothing);
+      expect(find.text('title'), findsOneWidget);
+    });
+
+    testWidgets('turning the setting on shows it', (tester) async {
+      await pump(
+        tester,
+        '---\nid: abc\ntitle: Storm\n---\nbody\n',
+        showNoteId: true,
+      );
+      expect(find.text('id'), findsOneWidget);
+      expect(find.text('abc'), findsOneWidget);
+    });
+
+    testWidgets('timestamps are formatted, not raw', (tester) async {
+      // The server writes RFC3339 with nanoseconds. Precise, and unreadable.
+      await pump(
+        tester,
+        '---\ncreated: 2026-08-05T07:22:02.019607805Z\n---\nbody\n',
+      );
+      expect(find.textContaining('Aug 2026'), findsOneWidget);
+      expect(find.textContaining('019607805'), findsNothing);
+    });
+
+    testWidgets('a read-only value that is not a date is left alone', (
+      tester,
+    ) async {
+      await pump(tester, '---\nmeta:\n  a: 1\n---\nbody\n');
+      expect(find.text('Nested value'), findsOneWidget);
     });
 
     testWidgets('a nested value is listed, read-only', (tester) async {
@@ -145,7 +200,7 @@ void main() {
           'meta:\n  x: 1\n'
           'text: |\n  line\n'
           '---\nbody\n';
-      await pump(tester, src);
+      await pump(tester, src, showNoteId: true);
       for (final key in ['id', 'title', 'tags', 'meta', 'text']) {
         expect(find.text(key), findsOneWidget, reason: '"$key" is missing');
       }

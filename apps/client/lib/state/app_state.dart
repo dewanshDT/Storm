@@ -29,6 +29,7 @@ class Settings {
     this.fontSize = 16,
     this.activeVault = '',
     this.bodyFont = BodyFont.serif,
+    this.showNoteId = false,
   });
 
   final String baseUrl;
@@ -42,6 +43,14 @@ class Settings {
   /// is wrong for something that has to work offline, and it would make the
   /// editor's metrics depend on the network.
   final BodyFont bodyFont;
+
+  /// Whether the properties list shows a note's `id`.
+  ///
+  /// Off by default. It is a UUID Storm assigned and nobody reads it, so it
+  /// costs a row at the top of every note for information that only matters
+  /// when something has gone wrong. Available rather than removed, because
+  /// the list is the only place frontmatter is visible at all.
+  final bool showNoteId;
 
   /// Which vault the note-level providers are serving.
   ///
@@ -64,6 +73,7 @@ class Settings {
     double? fontSize,
     String? activeVault,
     BodyFont? bodyFont,
+    bool? showNoteId,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     token: token ?? this.token,
@@ -71,6 +81,7 @@ class Settings {
     fontSize: fontSize ?? this.fontSize,
     activeVault: activeVault ?? this.activeVault,
     bodyFont: bodyFont ?? this.bodyFont,
+    showNoteId: showNoteId ?? this.showNoteId,
   );
 }
 
@@ -81,6 +92,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kFont = 'storm.fontSize';
   static const _kVault = 'storm.activeVault';
   static const _kBodyFont = 'storm.bodyFont';
+  static const _kShowId = 'storm.showNoteId';
 
   @override
   Future<Settings> build() async {
@@ -92,6 +104,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       fontSize: prefs.getDouble(_kFont) ?? 16,
       activeVault: prefs.getString(_kVault) ?? '',
       bodyFont: BodyFont.fromName(prefs.getString(_kBodyFont)),
+      showNoteId: prefs.getBool(_kShowId) ?? false,
     );
   }
 
@@ -108,6 +121,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setDouble(_kFont, cleaned.fontSize);
     await prefs.setString(_kVault, cleaned.activeVault);
     await prefs.setString(_kBodyFont, cleaned.bodyFont.name);
+    await prefs.setBool(_kShowId, cleaned.showNoteId);
   }
 }
 

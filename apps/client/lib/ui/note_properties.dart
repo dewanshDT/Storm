@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../editor/frontmatter_edit.dart' as fme;
+import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'accents.dart';
 import 'shell/storm_scaffold.dart' show promptForPath;
@@ -55,7 +56,15 @@ class _NotePropertiesState extends ConsumerState<NoteProperties> {
     // File order, everything in one list. Segregating Storm's own fields
     // behind a disclosure made the panel a place where some metadata lived
     // and some hid; the list should just be what the block says.
-    final spans = fme.readSpans(widget.content);
+    //
+    // The one exception is `id`, off by default: it is a UUID nobody reads,
+    // and it cost the top row of every note. The setting turns it back on
+    // rather than the value being unreachable.
+    final showId = ref.watch(settingsProvider).value?.showNoteId ?? false;
+    final spans = [
+      for (final span in fme.readSpans(widget.content))
+        if (showId || span.key != 'id') span,
+    ];
 
     return Padding(
       // No divider. The properties run straight into the prose, which is what
@@ -533,11 +542,10 @@ class _DateEditor extends StatelessWidget {
   }
 
   String _format(DateTime d) {
-    final date = '${d.day} ${_months[d.month - 1]} ${d.year}';
-    if (!withTime) return date;
+    if (!withTime) return formatDay(d);
     final hh = d.hour.toString().padLeft(2, '0');
     final mm = d.minute.toString().padLeft(2, '0');
-    return '$date, $hh:$mm';
+    return '${formatDay(d)}, $hh:$mm';
   }
 
   Future<void> _pick(BuildContext context, DateTime? current) async {
@@ -569,6 +577,25 @@ class _DateEditor extends StatelessWidget {
       '${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
 }
+
+/// Renders a timestamp for reading, or returns it unchanged.
+///
+/// Anything that is not a date passes straight through: this runs on every
+/// read-only value, and a key whose value merely resembles a date should not
+/// be quietly rewritten on screen.
+String formatStamp(String value) {
+  final parsed = DateTime.tryParse(value.trim());
+  if (parsed == null) return value;
+  final local = parsed.toLocal();
+  final hh = local.hour.toString().padLeft(2, '0');
+  final mm = local.minute.toString().padLeft(2, '0');
+  return '${formatDay(local)}, $hh:$mm';
+}
+
+/// `7 Aug 2026`.
+String formatDay(DateTime d) => '${d.day} ${_months[d.month - 1]} ${d.year}';
+
+bool _looksLikeStamp(String value) => DateTime.tryParse(value.trim()) != null;
 
 const _months = [
   'Jan',
@@ -861,7 +888,10 @@ class _ReadOnlyValue extends StatelessWidget {
     final text = switch (span.form) {
       fme.PropertyForm.nested => 'Nested value',
       fme.PropertyForm.blockScalar => 'Multi-line text',
-      _ => span.displayValue,
+      // `created` and `modified` are RFC3339 with nanoseconds — precise, and
+      // unreadable. Shown in local time, which is also the timezone the
+      // reader is standing in.
+      _ => formatStamp(span.displayValue),
     };
     final structural =
         span.form == fme.PropertyForm.nested ||
@@ -874,7 +904,11 @@ class _ReadOnlyValue extends StatelessWidget {
         style: theme.textTheme.bodySmall?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,
           fontStyle: structural ? FontStyle.italic : null,
-          fontFamily: structural ? null : 'monospace',
+          // Monospace only for values that are still raw, so a formatted date
+          // reads as prose rather than as data.
+          fontFamily: structural || _looksLikeStamp(span.displayValue)
+              ? null
+              : 'monospace',
         ),
       ),
     );

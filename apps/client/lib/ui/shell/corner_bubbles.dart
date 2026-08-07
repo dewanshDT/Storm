@@ -228,6 +228,16 @@ class ProfileBubble extends ConsumerWidget {
                     ),
                   ),
                 ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.fingerprint),
+                  title: const Text('Show note id'),
+                  subtitle: const Text(
+                    'The identifier Storm assigns each note',
+                  ),
+                  value: settings.showNoteId,
+                  onChanged: (v) =>
+                      notifier.save(settings.copyWith(showNoteId: v)),
+                ),
                 const Divider(),
                 ListTile(
                   leading: const Icon(Icons.logout),

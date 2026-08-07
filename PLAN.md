@@ -47,7 +47,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 | M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
-| M11 | Typed note properties | **done** | 434 Dart tests · properties, colours, fonts |
+| M11 | Typed note properties | **done** | 438 Dart tests · properties, colours, fonts |
 
 Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
@@ -71,7 +71,7 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 140 Rust and 434 Dart unit tests
+make check       # clippy + analyze + 140 Rust and 438 Dart unit tests
 make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
@@ -965,6 +965,15 @@ keep being found:
 costing a tap before every navigation and concealing where you could go. The
 bar is five small icons; hiding it bought nothing.
 
+**An unobserved Future, found by a full-suite run.** `WebSocketChannel.connect`
+reports a failed handshake through `ready`, not by throwing, and nothing was
+listening to it — so an unreachable host became an *unhandled* async error in
+the zone. It surfaced only when two new tests shifted the timing, and it passes
+in isolation either way; the evidence is the full suite, which fails without
+the fix. Reconnection was always driven by the stream's `onError`; the missing
+piece was simply observing the rejection. *On a device with no DNS this was
+noise in the log at best.*
+
 **Colours, fonts, and naming a note.** Keep-style accents for notes and
 vaults, a note-font choice, and a new-note dialog that asks for a name.
 
@@ -984,6 +993,16 @@ vaults, a note-font choice, and a new-note dialog that asks for a name.
   platform sans, and monospace. Every extra family is another megabyte in the
   APK, and a runtime download is wrong for something that must work offline —
   the same reasoning that bundled the serif in M7.
+- *The `id` is hidden by default*, behind a setting. It is a UUID nobody
+  reads, and it cost the top row of every note. Off rather than removed,
+  because the list is the only place frontmatter is visible at all — this is
+  the one exception to decision 30, and it is the user's switch, not a hiding
+  place.
+- *Read-only timestamps are formatted.* The server writes RFC3339 with
+  nanoseconds, which is precise and unreadable; `created` and `modified` show
+  as `5 Aug 2026, 12:52` in local time. Anything that does not parse as a date
+  passes through untouched, so a value that merely resembles one is never
+  quietly rewritten on screen.
 - *A new note asks for a name.* Not `Folder/Note.md`: the folder is wherever
   you already are and every note is markdown, so neither was a decision worth
   asking about. Separators become spaces rather than folders, and leading dots
