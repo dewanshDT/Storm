@@ -128,9 +128,10 @@ void main() {
     );
     expect(find.text('Select a note to start editing'), findsNothing);
 
-    // …and the metadata is rendered as properties instead.
+    // …and the metadata is rendered as editable properties instead. The chip
+    // shows the value, not `#homelab`: a list property is not always tags.
     expect(find.text('tags'), findsOneWidget);
-    expect(find.text('#homelab'), findsOneWidget);
+    expect(find.text('homelab'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     c.dispose();
@@ -147,7 +148,10 @@ void main() {
     await pumpEditor(tester, c);
     await tester.pump();
 
-    await tester.enterText(find.byType(TextField), '\n# Ideas\n\nEdited.\n');
+    await tester.enterText(
+      find.byKey(const Key('note-body')),
+      '\n# Ideas\n\nEdited.\n',
+    );
     await tester.pump(const Duration(seconds: 2));
     await session.save();
 
@@ -160,6 +164,46 @@ void main() {
     expect(saved, contains('# hand comment'));
     expect(saved, contains('Edited.'));
     expect(saved, isNot(contains('Someday')));
+
+    await tester.pumpWidget(const SizedBox());
+    c.dispose();
+  });
+
+  testWidgets('editing a property does not disturb the body', (tester) async {
+    // The seam between the panel and the editor. `editProperties` must not go
+    // through `_adopt`, which bumps `revision` — the body editor reacts to
+    // that by replacing its entire text value, so a property keystroke would
+    // reset the caret in the prose on every character.
+    final c = container();
+    await c.read(noteSessionProvider).open('n1');
+    await pumpEditor(tester, c);
+    await tester.pump();
+
+    final field = find.byKey(const Key('note-body'));
+    final before = tester.widget<TextField>(field).controller!;
+    before.selection = const TextSelection.collapsed(offset: 5);
+    final revisionBefore = c.read(noteSessionProvider).revision;
+
+    // Toggle a property from the panel.
+    await tester.enterText(find.byType(TextField).first, 'edited');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(
+      c.read(noteSessionProvider).revision,
+      revisionBefore,
+      reason: 'a property edit must not look like an adopted server buffer',
+    );
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      bodyOnly,
+      reason: 'the prose must be untouched',
+    );
+    expect(
+      c.read(noteSessionProvider).buffer,
+      contains('edited'),
+      reason: 'the edit still reached the file',
+    );
 
     await tester.pumpWidget(const SizedBox());
     c.dispose();
@@ -195,7 +239,10 @@ void main() {
     await pumpEditor(tester, c);
     await tester.pump();
 
-    await tester.enterText(find.byType(TextField), '$body\nTyped by hand.\n');
+    await tester.enterText(
+      find.byKey(const Key('note-body')),
+      '$body\nTyped by hand.\n',
+    );
     await tester.pump(const Duration(seconds: 2));
     await session.save();
 

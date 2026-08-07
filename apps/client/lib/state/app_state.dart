@@ -9,6 +9,7 @@ import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import '../sync/sync_engine.dart';
 import 'note_session.dart';
+import 'vault_config.dart';
 
 /// Connection and appearance settings.
 ///
@@ -159,7 +160,9 @@ final recentsProvider = FutureProvider<List<RecentNote>>((ref) async {
   if (api == null) return const [];
 
   try {
-    final fresh = await api.recents(limit: 20);
+    final fresh = (await api.recents(
+      limit: 20,
+    )).where((r) => !isVaultConfigPath(r.path)).toList();
     await cache.replaceRecents([
       for (final r in fresh)
         RecentsCompanion.insert(
@@ -306,7 +309,9 @@ final searchResultsProvider = FutureProvider<List<SearchHit>>((ref) async {
   final vaultId = ref.watch(activeVaultProvider);
   final query = ref.watch(searchQueryProvider);
   if (api == null || vaultId.isEmpty || query.trim().isEmpty) return const [];
-  return api.search(vaultId, query);
+  final hits = await api.search(vaultId, query);
+  // Storm's own config note is not a search result.
+  return hits.where((h) => !isVaultConfigPath(h.path)).toList();
 });
 
 /// Backlinks for a note — the "linked mentions" panel.

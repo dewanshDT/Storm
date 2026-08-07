@@ -31,6 +31,7 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
+| `docs/storm-properties.md` | M11 design brief — typed frontmatter properties. |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
@@ -85,7 +86,14 @@ data quietly.
   `state/` directory, never inside the vault.
 - **Frontmatter is never serialized.** Storm rewrites individual *lines* and
   passes every other byte through. Running a user's YAML through a serializer
-  reorders keys and drops comments, dirtying the whole vault.
+  reorders keys and drops comments, dirtying the whole vault. There are two
+  writers and both obey this: `frontmatter.rs` `set_scalars` on the server, and
+  `lib/editor/frontmatter_edit.dart` on the client.
+- **A value that spans lines is spliced as a range, never as one line.** The
+  server's writer replaces a key's single line, which is right for stamping
+  `id` and wrong for anything else: aimed at a `tags:` block list it orphans
+  the `- item` children and leaves invalid YAML. The client's writer knows the
+  span, and refuses to write a nested map or a block scalar at all.
 - **The server owns `modified:`.** Clients must not write it, and it is
   normalised out of all three sides before a merge — otherwise every concurrent
   write conflicts on that line.

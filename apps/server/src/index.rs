@@ -404,6 +404,8 @@ impl Indexer {
             .db
             .list_notes()?
             .iter()
+            // `_storm/` holds Storm's own configuration, not the user's notes.
+            .filter(|n| !n.path.starts_with("_storm/"))
             .flat_map(|n| {
                 let parts: Vec<&str> = n.path.split('/').collect();
                 (1..parts.len())
@@ -1023,6 +1025,32 @@ mod tests {
         let recents = ix.db.recent_notes(10).unwrap();
         assert_eq!(recents.len(), 2);
         assert_eq!(recents[0].note_id, a.note.id);
+    }
+
+    #[test]
+    fn storms_own_config_note_is_not_counted_or_listed() {
+        // `_storm/vault.md` is an ordinary note so it syncs and stays
+        // greppable, but it is Storm's configuration, not the user's writing.
+        // Counting it would make every vault card read one too high.
+        let (_d, mut ix) = indexer();
+        ix.create_note("Real.md", "# Real\n").unwrap();
+        ix.create_note("_storm/vault.md", "---\nstorm.type.due: date\n---\n")
+            .unwrap();
+
+        assert_eq!(ix.db.count_notes().unwrap(), 1);
+        assert!(!ix.all_folders().unwrap().contains(&"_storm".to_string()));
+    }
+
+    #[test]
+    fn the_underscore_in_storm_is_escaped_not_a_wildcard() {
+        // `_` is a LIKE wildcard. Unescaped, `_storm/%` would also swallow a
+        // real folder called `astorm/`.
+        let (_d, mut ix) = indexer();
+        ix.create_note("astorm/Note.md", "# A\n").unwrap();
+        ix.create_note("_storm/vault.md", "---\n---\n").unwrap();
+
+        assert_eq!(ix.db.count_notes().unwrap(), 1);
+        assert!(ix.all_folders().unwrap().contains(&"astorm".to_string()));
     }
 
     #[test]

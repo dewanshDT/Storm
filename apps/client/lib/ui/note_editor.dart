@@ -216,14 +216,6 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     return Column(
       children: [
         _StatusBar(session: session),
-        if (!_rawMode)
-          NoteProperties(
-            frontmatter: session.frontmatter,
-            onEditRaw: () {
-              setState(() => _rawMode = true);
-              _adoptServerText(session.buffer);
-            },
-          ),
         if (_rawMode)
           _RawBanner(
             onDone: () {
@@ -245,21 +237,42 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 820),
-                  child: TextField(
-                    controller: _controller,
-                    focusNode: _focus,
-                    maxLines: null,
-                    cursorWidth: 2,
-                    keyboardType: TextInputType.multiline,
-                    textCapitalization: TextCapitalization.sentences,
-                    onTap: _onEditorTap,
-                    // Enter inside a list carries the list on.
-                    inputFormatters: const [ListContinuationFormatter()],
-                    contextMenuBuilder: _contextMenu,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Inside the scroll view and inside the same 820px
+                      // column as the prose. Pinned above it, the panel was
+                      // full-width while the text was centred and capped —
+                      // and it cost a phone's first screen permanently.
+                      if (!_rawMode)
+                        NoteProperties(
+                          content: session.buffer,
+                          onChanged: session.editProperties,
+                          onEditRaw: () {
+                            setState(() => _rawMode = true);
+                            _adoptServerText(session.buffer);
+                          },
+                        ),
+                      TextField(
+                        // Named so tests can tell the prose apart from the
+                        // property inputs above it.
+                        key: const Key('note-body'),
+                        controller: _controller,
+                        focusNode: _focus,
+                        maxLines: null,
+                        cursorWidth: 2,
+                        keyboardType: TextInputType.multiline,
+                        textCapitalization: TextCapitalization.sentences,
+                        onTap: _onEditorTap,
+                        // Enter inside a list carries the list on.
+                        inputFormatters: const [ListContinuationFormatter()],
+                        contextMenuBuilder: _contextMenu,
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          isDense: true,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),

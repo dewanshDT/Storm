@@ -1,4 +1,5 @@
 import '../api/models.dart';
+import 'vault_config.dart';
 
 /// Resolves `[[target]]` to a note, the way a vault of files implies.
 ///
@@ -27,6 +28,8 @@ NoteMeta? resolveWikilink(List<NoteMeta> notes, String target) {
 
   for (final compare in [_exact, _caseless]) {
     for (final note in notes) {
+      // Storm's own config note is not a link target.
+      if (isVaultConfigPath(note.path)) continue;
       final path = note.path;
       final pathNoExt = path.endsWith('.md')
           ? path.substring(0, path.length - 3)
@@ -63,13 +66,16 @@ List<NoteMeta> suggestWikilinks(
   int limit = 8,
 }) {
   final want = query.trim().toLowerCase();
+  // Never suggest Storm's own config note.
+  final visible = notes.where((n) => !isVaultConfigPath(n.path)).toList();
   if (want.isEmpty) {
-    final recent = [...notes]..sort((a, b) => b.modified.compareTo(a.modified));
+    final recent = [...visible]
+      ..sort((a, b) => b.modified.compareTo(a.modified));
     return recent.take(limit).toList();
   }
 
   final scored = <(int, String, NoteMeta)>[];
-  for (final note in notes) {
+  for (final note in visible) {
     final name = wikilinkDisplayName(note);
     final haystack = name.toLowerCase();
     final inPath = note.path.toLowerCase();

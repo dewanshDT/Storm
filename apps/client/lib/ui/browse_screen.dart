@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
+import '../state/vault_config.dart';
 import 'shell/storm_scaffold.dart';
 import 'shell/vault_gate.dart';
 
@@ -106,6 +107,8 @@ List<BrowseEntry> _childrenOf(
   final direct = <BrowseEntry>[];
 
   for (final note in notes) {
+    // `_storm/` is Storm's own configuration, not the user's notes.
+    if (isVaultConfigPath(note.path)) continue;
     if (!note.path.startsWith(prefix)) continue;
     final rest = note.path.substring(prefix.length);
     if (rest.isEmpty) continue;
@@ -121,6 +124,7 @@ List<BrowseEntry> _childrenOf(
 
   // Folders the server knows about that no note put here — the empty ones.
   for (final known in knownFolders) {
+    if (isVaultConfigPath('$known/')) continue;
     if (!known.startsWith(prefix)) continue;
     final rest = known.substring(prefix.length);
     if (rest.isEmpty || rest.contains('/')) continue;

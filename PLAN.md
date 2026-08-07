@@ -47,9 +47,13 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 | M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
+| M11 | Typed note properties | **done** | 409 Dart tests · frontmatter writer + panel |
 
-Last updated: 2026-08-07, multi-vault is built and both gates are green.
-`docs/storm-multi-vault.md` is the design; decisions 20–25 record the choices.
+Last updated: 2026-08-07. Multi-vault is built and deployed; typed note
+properties (M11) are built and **not yet deployed** — the client changed, the
+server did not, so only the app and the web bundle need to go out.
+`docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
+decisions 20–29 record the choices.
 
 **Deployed to the VM on 2026-08-07**, and fixed the same day after four bugs
 were reported from the phone — all four traced to one broken cache migration
@@ -65,7 +69,7 @@ a reset to 1.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 138 Rust and 326 Dart unit tests
+make check       # clippy + analyze + 140 Rust and 409 Dart unit tests
 make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
@@ -126,7 +130,8 @@ storm/
     ├── prd.md                original brief, not maintained
     ├── editor-findings.md    M0 editor measurements, incl. on-device
     ├── storm-ui-refactor.md  M7/M8 design brief
-    └── storm-multi-vault.md  M9/M10 design brief
+    ├── storm-multi-vault.md  M9/M10 design brief
+    └── storm-properties.md   M11 design brief
 ```
 
 A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
@@ -367,6 +372,41 @@ both directions are made loud instead. At runtime, `PUT /v1/config` refuses with
 both paths in the message rather than starting empty. A vault whose directory
 has vanished stays in the registry marked `missing`; it is never quietly
 dropped.
+
+**26. Property values live in the note; property *types* live in a hidden
+vault note.**
+`_storm/vault.md` is an ordinary markdown note carrying `storm.type.<key>`,
+`storm.options.<key>` and a vault description. A note rather than a server
+table, because it then syncs, merges, versions and backs up with everything
+else — no endpoint, no schema, no wire change — and it stays greppable and
+hand-editable, which is the property the whole vault is built around. It is
+hidden from browse, search, recents and wikilinks, and excluded from the
+server's note count so a vault card does not read one too high.
+*Revisit if:* types ever need to differ per device, or a vault grows enough
+config that a note stops being a sensible container.
+
+**27. The client gets its own frontmatter writer.**
+`set_scalars` could not be reused. It replaces a key's *single line*, which is
+correct for stamping `id` and destructive for anything else: aimed at a `tags:`
+block list it orphans the `- item` children and produces invalid YAML. It also
+normalises CRLF, drops trailing comments, and does no quoting at all — safe
+only because its callers write UUIDs and timestamps. `frontmatter_edit.dart`
+keeps the same principle (splice lines, never serialize) with a span model that
+knows where a value starts and ends.
+*Revisit if:* the two writers ever disagree about which bytes are frontmatter.
+Each points at the other in a comment for that reason.
+
+**28. A list keeps the form it was written in.**
+Block stays block, inline stays inline, and block indentation is copied from
+the existing items. Normalising to inline would have been one line of code, and
+would mean the first tag edit silently reformats a file the user did not ask to
+reformat — the same objection that made frontmatter line-surgery in the first
+place.
+
+**29. A local failure is never reported as a network failure.**
+Carried forward from M9/M10's bug, and now structural: cache writes go through
+`_cache`, which logs and continues, and `create` no longer wraps its cache
+write in the same `try` as its request. The server is the copy of record.
 
 ---
 
@@ -856,6 +896,39 @@ new vaults.
 vault has its own FTS index); per-vault tokens; two vaults live at once; moving
 a note between vaults; and deleting a vault's files from the app — removing a
 vault unregisters it and leaves every byte on disk.
+
+---
+
+### M11 — Typed note properties ✅
+
+`docs/storm-properties.md`. The frontmatter block became an editable key/value
+list — key chip on the left, an input suited to the type on the right, `+` to
+add one — instead of a read-only strip of raw YAML above the note.
+
+**The panel was read-only for a good reason, and the reason had a hole in it.**
+Its doc comment said writing values back means re-serialising the user's YAML.
+True, and the server doesn't re-serialise either: it splices lines. So the
+client got a second writer on the same principle, richer than the server's
+because a user's metadata is not a UUID — see decision 27.
+
+**Three bugs the tests caught before the device did**, all in the writer, all
+about context:
+
+1. A comma inside an *inline list item* has to be quoted or the item splits in
+   two. A comma inside a scalar does not. Quoting had to learn where it was.
+2. A checkbox writing `true` was being quoted into the *string* `"true"`,
+   because `true` is on the "YAML would misread this" list. Correct for text a
+   user typed, wrong for a boolean the UI generated — hence `raw:`.
+3. A negative number was quoted for the same reason, since `-` starts a flow
+   sequence.
+
+**One layout bug found the same way.** A fixed-width chip cannot hold a text
+label at every font size; the test font made "Add property" 69px too wide. The
+sketch had it right — the `+` button carries no label.
+
+**Still not writable:** nested maps and block scalars. A key/value row cannot
+represent them without guessing at a structure, and writing the guess back
+would destroy it. They render read-only and point at "Edit raw".
 
 ---
 

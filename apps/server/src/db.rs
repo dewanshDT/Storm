@@ -600,10 +600,19 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Notes the user would recognise as theirs.
+    ///
+    /// `_storm/` holds Storm's own per-vault configuration, kept as ordinary
+    /// markdown so it syncs and stays greppable. Counting it would make every
+    /// vault card on the dashboard read one too high.
     pub fn count_notes(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))?)
+        // `_` is a LIKE wildcard, so it has to be escaped — an unescaped
+        // `_storm/%` would also exclude `astorm/`, `1storm/` and so on.
+        Ok(self.conn.query_row(
+            r"SELECT COUNT(*) FROM notes WHERE path NOT LIKE '\_storm/%' ESCAPE '\'",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     // ---- search, tags, backlinks ---------------------------------------
