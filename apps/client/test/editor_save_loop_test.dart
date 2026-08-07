@@ -225,7 +225,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('# Plain\n\nNo metadata.\n'), findsOneWidget);
-    expect(find.text('Details'), findsNothing);
+    expect(find.byType(Divider), findsNothing);
 
     await tester.pumpWidget(const SizedBox());
     c.dispose();

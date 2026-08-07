@@ -17,15 +17,17 @@ import 'shell/storm_scaffold.dart' show promptForPath;
 /// doesn't re-serialise either — it splices lines. [fme] does the same, only
 /// richer, so this can write.
 ///
-/// What it still refuses to write is anything it cannot represent honestly: a
-/// nested map or a block scalar renders read-only, and "Edit raw" hands over
-/// the real text — see [onEditRaw].
+/// **This list is the only way to edit frontmatter.** There is no raw-YAML
+/// mode behind it: every key in the block gets a row, in file order, so
+/// nothing is reachable only by falling back to editing text. Rows Storm owns
+/// (`id`, `created`, `modified`) and values a key/value row cannot represent
+/// (a nested map, a block scalar) are shown read-only rather than hidden —
+/// visible and honest beats editable and wrong.
 class NoteProperties extends ConsumerStatefulWidget {
   const NoteProperties({
     super.key,
     required this.content,
     required this.onChanged,
-    this.onEditRaw,
   });
 
   /// The note's whole file, frontmatter included.
@@ -35,16 +37,11 @@ class NoteProperties extends ConsumerStatefulWidget {
   /// anything itself; the session owns the buffer.
   final ValueChanged<String> onChanged;
 
-  /// Opens the raw block for editing. Null hides the affordance.
-  final VoidCallback? onEditRaw;
-
   @override
   ConsumerState<NoteProperties> createState() => _NotePropertiesState();
 }
 
 class _NotePropertiesState extends ConsumerState<NoteProperties> {
-  bool _showManaged = false;
-
   /// Fields Storm owns. The server re-asserts `id` and `modified` on every
   /// save, so offering them as editable would be a lie.
   static const _managed = {'id', 'created', 'modified'};
@@ -54,47 +51,31 @@ class _NotePropertiesState extends ConsumerState<NoteProperties> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    // File order, everything in one list. Segregating Storm's own fields
+    // behind a disclosure made the panel a place where some metadata lived
+    // and some hid; the list should just be what the block says.
     final spans = fme.readSpans(widget.content);
-    final own = spans.where((s) => !_managed.contains(s.key)).toList();
-    final managed = spans.where((s) => _managed.contains(s.key)).toList();
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 18),
+      // No divider. The properties run straight into the prose, which is what
+      // makes it read as one document instead of two panes.
+      padding: const EdgeInsets.only(bottom: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          for (final span in own)
+          for (final span in spans)
             _PropertyRow(
               key: ValueKey(span.key),
               span: span,
               type: _config.typeOf(span.key, span),
               options: _config.optionsFor(span.key),
+              readOnly: _managed.contains(span.key) || !span.isEditable,
               onValue: (value, {bool raw = false}) =>
                   _setScalar(span.key, value, raw: raw),
               onItems: (items) => _setList(span.key, items),
               onMenu: (action) => _menu(span, action),
             ),
           _AddProperty(onAdd: _add),
-          if (managed.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            _ManagedToggle(
-              expanded: _showManaged,
-              onToggle: () => setState(() => _showManaged = !_showManaged),
-              onEditRaw: widget.onEditRaw,
-            ),
-            if (_showManaged)
-              for (final span in managed) _ManagedRow(span: span),
-          ] else if (widget.onEditRaw != null) ...[
-            const SizedBox(height: 4),
-            _ManagedToggle(
-              expanded: false,
-              onToggle: null,
-              onEditRaw: widget.onEditRaw,
-            ),
-          ],
-          const SizedBox(height: 10),
-          Divider(height: 1, color: theme.dividerColor),
         ],
       ),
     );
@@ -201,6 +182,7 @@ class _PropertyRow extends StatelessWidget {
     required this.span,
     required this.type,
     required this.options,
+    required this.readOnly,
     required this.onValue,
     required this.onItems,
     required this.onMenu,
@@ -209,6 +191,11 @@ class _PropertyRow extends StatelessWidget {
   final fme.PropertySpan span;
   final PropertyType type;
   final List<String> options;
+
+  /// Shown, never written: Storm's own fields, and values a key/value row
+  /// cannot represent.
+  final bool readOnly;
+
   final ValueSink onValue;
   final ValueChanged<List<String>> onItems;
   final ValueChanged<_RowAction> onMenu;
@@ -222,23 +209,23 @@ class _PropertyRow extends StatelessWidget {
         children: [
           _KeyChip(
             label: span.key,
-            icon: _iconFor(type),
-            enabled: span.isEditable,
+            icon: readOnly ? Icons.lock_outline : _iconFor(type),
+            enabled: !readOnly,
             onMenu: onMenu,
           ),
           const SizedBox(width: 10),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(top: 2),
-              child: span.isEditable
-                  ? _ValueEditor(
+              child: readOnly
+                  ? _ReadOnlyValue(span: span)
+                  : _ValueEditor(
                       span: span,
                       type: type,
                       options: options,
                       onValue: onValue,
                       onItems: onItems,
-                    )
-                  : _Unrepresentable(span: span),
+                    ),
             ),
           ),
         ],
@@ -715,30 +702,38 @@ class ValueChip extends StatelessWidget {
   }
 }
 
-/// A nested map or block scalar: shown, never written.
-class _Unrepresentable extends StatelessWidget {
-  const _Unrepresentable({required this.span});
+/// A value the list will not write: Storm's own fields, and structures a
+/// key/value row cannot represent.
+///
+/// Shown rather than hidden. There is no raw-YAML mode to fall back to, so a
+/// property that did not appear here would be invisible — and metadata you
+/// cannot see is worse than metadata you cannot edit.
+class _ReadOnlyValue extends StatelessWidget {
+  const _ReadOnlyValue({required this.span});
 
   final fme.PropertySpan span;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final text = switch (span.form) {
+      fme.PropertyForm.nested => 'Nested value',
+      fme.PropertyForm.blockScalar => 'Multi-line text',
+      _ => span.displayValue,
+    };
+    final structural =
+        span.form == fme.PropertyForm.nested ||
+        span.form == fme.PropertyForm.blockScalar;
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Icon(Icons.lock_outline, size: 13, color: scheme.onSurfaceVariant),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              span.form == fme.PropertyForm.nested
-                  ? 'Nested value — use Edit raw'
-                  : 'Multi-line text — use Edit raw',
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-            ),
-          ),
-        ],
+      child: SelectableText(
+        text.isEmpty ? '—' : text,
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+          fontStyle: structural ? FontStyle.italic : null,
+          fontFamily: structural ? null : 'monospace',
+        ),
       ),
     );
   }
@@ -777,108 +772,6 @@ class _AddProperty extends StatelessWidget {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _ManagedToggle extends StatelessWidget {
-  const _ManagedToggle({
-    required this.expanded,
-    required this.onToggle,
-    required this.onEditRaw,
-  });
-
-  final bool expanded;
-  final VoidCallback? onToggle;
-  final VoidCallback? onEditRaw;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Row(
-      children: [
-        if (onToggle != null)
-          Flexible(
-            child: InkWell(
-              onTap: onToggle,
-              borderRadius: BorderRadius.circular(6),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      expanded ? Icons.expand_less : Icons.expand_more,
-                      size: 16,
-                      color: scheme.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        expanded ? 'Hide details' : 'Details',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        const Spacer(),
-        if (onEditRaw != null)
-          TextButton(
-            onPressed: onEditRaw,
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-            ),
-            child: const Text('Edit raw', style: TextStyle(fontSize: 12)),
-          ),
-      ],
-    );
-  }
-}
-
-class _ManagedRow extends StatelessWidget {
-  const _ManagedRow({required this.span});
-
-  final fme.PropertySpan span;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 132,
-            child: Text(
-              span.key,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontWeight: FontWeight.w500,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: SelectableText(
-              span.displayValue,
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

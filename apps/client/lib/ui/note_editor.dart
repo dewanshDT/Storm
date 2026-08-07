@@ -45,11 +45,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   final _focus = FocusNode();
   int _seenRevision = -1;
 
-  /// When true the editor shows the whole file, frontmatter included, so the
-  /// raw YAML can be corrected. The properties panel can't write values back —
-  /// doing so would mean re-serialising the user's YAML, which reorders keys
-  /// and drops comments.
-  bool _rawMode = false;
+  // There is no raw-YAML mode. Frontmatter is edited only through the
+  // properties list, which shows every key in the block — including the ones
+  // it will not write — so nothing is reachable only by editing text.
 
   /// Whether this note is past the size where styling is dropped.
   ///
@@ -62,8 +60,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
       StormMarkdownController.maxStyledLines;
 
   /// What the editor should currently contain for [session].
-  String _textFor(NoteSession session) =>
-      _rawMode ? session.buffer : session.body;
+  ///
+  /// Always the body. The frontmatter is not in the buffer at all — the
+  /// controller's text has to match what it renders character for character,
+  /// so anything hidden must be absent rather than merely unstyled.
+  String _textFor(NoteSession session) => session.body;
 
   @override
   void initState() {
@@ -98,11 +99,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final session = ref.read(noteSessionProvider);
     if (!session.isOpen) return;
     // The controller holds the body; the session re-attaches the frontmatter.
-    if (_rawMode) {
-      session.edit(_controller.text);
-    } else {
-      session.editBody(_controller.text);
-    }
+    session.editBody(_controller.text);
   }
 
   /// Follows a wikilink the caret has just landed inside.
@@ -216,13 +213,6 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     return Column(
       children: [
         _StatusBar(session: session),
-        if (_rawMode)
-          _RawBanner(
-            onDone: () {
-              setState(() => _rawMode = false);
-              _adoptServerText(session.body);
-            },
-          ),
         if (_isDegraded(session)) const _DegradedNotice(),
         if (session.notice != null)
           _Notice(
@@ -244,15 +234,10 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                       // column as the prose. Pinned above it, the panel was
                       // full-width while the text was centred and capped —
                       // and it cost a phone's first screen permanently.
-                      if (!_rawMode)
-                        NoteProperties(
-                          content: session.buffer,
-                          onChanged: session.editProperties,
-                          onEditRaw: () {
-                            setState(() => _rawMode = true);
-                            _adoptServerText(session.buffer);
-                          },
-                        ),
+                      NoteProperties(
+                        content: session.buffer,
+                        onChanged: session.editProperties,
+                      ),
                       TextField(
                         // Named so tests can tell the prose apart from the
                         // property inputs above it.
@@ -326,38 +311,6 @@ class _DegradedNotice extends StatelessWidget {
 }
 
 /// Shown while the frontmatter is being edited as text.
-class _RawBanner extends StatelessWidget {
-  const _RawBanner({required this.onDone});
-
-  final VoidCallback onDone;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      color: scheme.secondaryContainer,
-      padding: const EdgeInsets.fromLTRB(20, 8, 8, 8),
-      child: Row(
-        children: [
-          Icon(Icons.data_object, size: 16, color: scheme.onSecondaryContainer),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'Editing raw frontmatter',
-              style: TextStyle(
-                color: scheme.onSecondaryContainer,
-                fontSize: 13,
-              ),
-            ),
-          ),
-          TextButton(onPressed: onDone, child: const Text('Done')),
-        ],
-      ),
-    );
-  }
-}
-
 class _StatusBar extends StatelessWidget {
   const _StatusBar({required this.session});
 

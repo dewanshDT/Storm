@@ -47,24 +47,26 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 | M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
-| M11 | Typed note properties | **done** | 409 Dart tests · frontmatter writer + panel |
+| M11 | Typed note properties | **done** | 411 Dart tests · frontmatter writer + panel |
 
-Last updated: 2026-08-07. Multi-vault is built and deployed; typed note
-properties (M11) are built and **not yet deployed** — the client changed, the
-server did not, so only the app and the web bundle need to go out.
+Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
-decisions 20–29 record the choices.
+decisions 20–30 record the choices.
 
-**Deployed to the VM on 2026-08-07**, and fixed the same day after four bugs
-were reported from the phone — all four traced to one broken cache migration
-and the error handling that disguised it. See the milestone section.
+**M9/M10 deployment.** Client and server together — M9 breaks the wire format,
+so they cannot go separately. The migration ran clean: the reconcile reported
+`scanned=7 indexed=0 updated=0`, which is the proof that the index was *carried
+over* rather than rebuilt, and 106 version snapshots across 11 notes survived
+with it. Notes kept their real versions (v32, v25, v11), not a reset to 1. Four
+bugs came back from the phone the same day, all traced to one broken cache
+migration and the error handling that disguised it — see the M9/M10 section.
 
-Deployed client and server together — M9 breaks
-the wire format, so they cannot go separately. The migration ran clean: the
-reconcile reported `scanned=7 indexed=0 updated=0`, which is the proof that the
-index was *carried over* rather than rebuilt, and 106 version snapshots across
-11 notes survived with it. Notes kept their real versions (v32, v25, v11), not
-a reset to 1.
+**M11 deployment.** Server, web and APK, each verified by comparing the local
+build's sha256 against `/proc/<pid>/exe`, the bytes served over HTTP, and the
+installed package. *The server did change* — the `_storm/` exclusion touches
+`db.rs` and `index.rs` — which a first reading of the diff missed. **Check
+which files a commit touched before claiming a component is unaffected;** a
+summary written from memory is not evidence.
 
 ### Verify the current state
 
@@ -407,6 +409,19 @@ place.
 Carried forward from M9/M10's bug, and now structural: cache writes go through
 `_cache`, which logs and continues, and `create` no longer wraps its cache
 write in the same `try` as its request. The server is the copy of record.
+
+**30. The properties list is the only way to edit frontmatter.**
+Raw-YAML mode is gone. It existed as the escape hatch for anything the panel
+could not represent, and that made the panel a place where *some* metadata
+lived while the rest hid behind a mode switch — the split the panel was
+supposed to remove. Now every key in the block gets a row in file order:
+editable where the writer can represent it, read-only where it cannot
+(`id`/`created`/`modified`, nested maps, block scalars). Shown rather than
+hidden, because metadata you cannot see is worse than metadata you cannot
+edit. No disclosure, no divider under the list.
+*The cost, accepted:* a malformed frontmatter block can no longer be repaired
+from inside the app. The vault is plain markdown; that is what it is for.
+*Revisit if:* users hit unrepairable blocks in practice.
 
 ---
 
@@ -926,9 +941,18 @@ about context:
 label at every font size; the test font made "Add property" 69px too wide. The
 sketch had it right — the `+` button carries no label.
 
+**Then raw mode went, on the user's call.** The first build kept an "Edit raw"
+escape hatch and folded `id`/`created`/`modified` behind a "Details"
+disclosure, with a rule under the whole panel. That reintroduced the split the
+panel existed to remove: some metadata in the list, some behind a mode switch.
+Now every key in the block is a row in file order, editable or read-only, and
+the list runs straight into the prose. See decision 30.
+
 **Still not writable:** nested maps and block scalars. A key/value row cannot
 represent them without guessing at a structure, and writing the guess back
-would destroy it. They render read-only and point at "Edit raw".
+would destroy it. They are listed read-only, alongside Storm's own fields —
+see decision 30, which removed raw mode and with it the last place metadata
+could hide.
 
 ---
 

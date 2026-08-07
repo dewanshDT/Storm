@@ -36,7 +36,6 @@ void main() {
                 builder: (context, setState) => NoteProperties(
                   content: current,
                   onChanged: (next) => setState(() => current = next),
-                  onEditRaw: () {},
                 ),
               ),
             ),
@@ -113,22 +112,47 @@ void main() {
       expect(find.byType(DropdownButton<String>), findsOneWidget);
     });
 
-    testWidgets('managed fields are not editable', (tester) async {
+    testWidgets('storm-owned fields are shown, read-only', (tester) async {
       await pump(
         tester,
         '---\nid: abc\nmodified: 2026-08-07T00:00:00Z\n---\nbody\n',
       );
-      // No key chip for them, so no menu and no input.
+      // Visible in the list — there is no raw mode to find them in — but
+      // with no input, because the server rewrites them on every save.
+      expect(find.text('id'), findsOneWidget);
+      expect(find.text('modified'), findsOneWidget);
+      expect(find.text('abc'), findsOneWidget);
       expect(find.byType(TextField), findsNothing);
-      expect(find.text('Details'), findsOneWidget);
     });
 
-    testWidgets('a nested value says so instead of showing a dash', (
-      tester,
-    ) async {
-      await pump(tester, '---\nmeta:\n  a: 1\n  b: 2\n---\nbody\n');
-      expect(find.textContaining('Edit raw'), findsWidgets);
-      expect(find.textContaining('Nested value'), findsOneWidget);
+    testWidgets('a nested value is listed, read-only', (tester) async {
+      await pump(tester, '---\nmeta:\n  a: 1\n  b: 2\nafter: x\n---\nbody\n');
+      expect(find.text('meta'), findsOneWidget);
+      expect(find.text('Nested value'), findsOneWidget);
+      // And it does not swallow the property after it.
+      expect(find.text('after'), findsOneWidget);
+    });
+
+    testWidgets('every frontmatter key gets a row', (tester) async {
+      // The guarantee that replaced raw mode: nothing is reachable only by
+      // editing text, so nothing may be missing from this list.
+      const src =
+          '---\n'
+          'id: abc\n'
+          'title: Storm\n'
+          'tags: [a, b]\n'
+          'meta:\n  x: 1\n'
+          'text: |\n  line\n'
+          '---\nbody\n';
+      await pump(tester, src);
+      for (final key in ['id', 'title', 'tags', 'meta', 'text']) {
+        expect(find.text(key), findsOneWidget, reason: '"$key" is missing');
+      }
+    });
+
+    testWidgets('there is no separator under the properties', (tester) async {
+      await pump(tester, '---\ntitle: Storm\n---\nbody\n');
+      expect(find.byType(Divider), findsNothing);
     });
   });
 
