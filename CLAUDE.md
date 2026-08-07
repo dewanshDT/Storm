@@ -32,6 +32,7 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
 | `docs/storm-properties.md` | M11 design brief — typed frontmatter properties. |
+| `docs/storm-adaptive.md` | M12 design brief — the wide-screen layout. |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
@@ -125,6 +126,10 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   note, `storm.color:` in a vault's config. The vault has to stay readable
   outside Storm, and a stored hex would pin it to one theme and mean nothing
   in Obsidian.
+- **The phone layout is the default; wide-screen behaviour is additive.**
+  There is one breakpoint (900px, `lib/ui/breakpoints.dart`). A change that
+  alters what renders below it is a defect, not a design choice — every
+  adaptive test asserts both sides for that reason.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose
