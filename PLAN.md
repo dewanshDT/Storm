@@ -51,11 +51,12 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 Last updated: 2026-08-07, multi-vault is built and both gates are green.
 `docs/storm-multi-vault.md` is the design; decisions 20–25 record the choices.
 
-**Not yet deployed.** M9 breaks the wire format — every note-shaped route gains
-a `/v1/vaults/{id}` segment — so client and server must go out together, and the
-VM needs a one-time directory move first. That move is the only step in this
-project so far that touches the real vault's location: see
-**Cutover discipline** and `deploy/README.md`.
+**Deployed to the VM on 2026-08-07**, client and server together — M9 breaks
+the wire format, so they cannot go separately. The migration ran clean: the
+reconcile reported `scanned=7 indexed=0 updated=0`, which is the proof that the
+index was *carried over* rather than rebuilt, and 106 version snapshots across
+11 notes survived with it. Notes kept their real versions (v32, v25, v11), not
+a reset to 1.
 
 ### Verify the current state
 
@@ -868,7 +869,20 @@ failure from any error state the app renders itself.
 
 ## Blockers
 
-**None.** Both former blockers are discharged as of 2026-08-05:
+**None for development.** Two things about the deployment are worth knowing:
+
+- *The VM has no systemd unit.* `sudo` needs a password there, so the server
+  runs as a hand-started process via `/home/dewansh/storm/run.sh` and **will
+  not survive a reboot**. Installing `deploy/storm-server.service` is a
+  one-time `sudo` step that only the user can take. `make deploy` also targets
+  `/srv/storm` and `systemctl`, neither of which exists on that box — the
+  deployment is manual until the unit is installed.
+- *The shared token is still `testtoken`.* It is at least off the command line
+  now (in `/home/dewansh/.storm-env`, mode 600), so `/proc` no longer exposes
+  it to every local user. Rotating it means updating the phone and the browser
+  at the same time, so it is the user's call.
+
+Both former build blockers are discharged as of 2026-08-05:
 
 - *macOS builds* — `flutter doctor` reports Xcode 26.6 healthy, and
   `flutter build macos --debug` produces a running app. The
@@ -904,6 +918,12 @@ lost index is a lost merge history even though no note is lost.
 
 Do it with the server stopped, and check `GET /v1/vaults` returns one vault
 before pointing any client at it.
+
+**Done on 2026-08-07.** Backup at `/home/dewansh/storm-backup-20260807-053117`
+on the VM; `/home/dewansh/.storm-last-backup` holds the path. The one thing to
+know if it ever has to be repeated: `pkill -f "storm-server --vault"` run over
+SSH matches *its own command line* and kills the session before the next step.
+Use a pattern that cannot match the invoking shell.
 
 ---
 
