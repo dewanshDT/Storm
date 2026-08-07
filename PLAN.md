@@ -42,15 +42,37 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M3 | Cache, outbox, offline, merge | **done** | sync matrix below |
 | M4 | Search, tags, backlinks | **done** | 196 tests + 19 live · search p95 1.1ms |
 | M5 | Android, Web (Linux deferred) | **done** | perf gate passed on device: 8.6 ms p95 |
-| M6 | Attachments, settings, deploy | in progress | |
+| M6 | Attachments, settings, deploy | **done** | deployed to the VM; backup/restore verified |
+| M7 | UI refactor stage 1 — shell | **done** | 221 tests · web deep links serve 200 |
+| M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
+| M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
+| M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
+| M11 | Typed note properties | **done** | 438 Dart tests · properties, colours, fonts |
 
-Last updated: 2026-08-05, M6 in progress; the M0 spike is retired.
+Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
+`docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
+decisions 20–30 record the choices.
+
+**M9/M10 deployment.** Client and server together — M9 breaks the wire format,
+so they cannot go separately. The migration ran clean: the reconcile reported
+`scanned=7 indexed=0 updated=0`, which is the proof that the index was *carried
+over* rather than rebuilt, and 106 version snapshots across 11 notes survived
+with it. Notes kept their real versions (v32, v25, v11), not a reset to 1. Four
+bugs came back from the phone the same day, all traced to one broken cache
+migration and the error handling that disguised it — see the M9/M10 section.
+
+**M11 deployment.** Server, web and APK, each verified by comparing the local
+build's sha256 against `/proc/<pid>/exe`, the bytes served over HTTP, and the
+installed package. *The server did change* — the `_storm/` exclusion touches
+`db.rs` and `index.rs` — which a first reading of the diff missed. **Check
+which files a commit touched before claiming a component is unaffected;** a
+summary written from memory is not evidence.
 
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 91 Rust and 196 Dart unit tests
-make test-live   # 43 server e2e checks + 19 client integration checks
+make check       # clippy + analyze + 140 Rust and 438 Dart unit tests
+make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
 `make test-live` starts a server, runs both integration suites and tears it
@@ -83,18 +105,35 @@ never needs a server.
 `state/` is a **sibling** of `vault/`, never inside it, so the vault directory
 contains nothing but notes.
 
+M9 changes the left-hand box to a storage *root* holding one directory per
+vault, and the right-hand box to one index per vault plus a registry:
+
+```
+  /srv/storm/vaults/<dir>/       /srv/storm/state/vaults.json
+  canonical plain markdown       registry: root + id/name/dir
+                                 /srv/storm/state/<vault-id>/index.db
+                                 derived index + history, per vault
+```
+
+The sibling rule survives unchanged, and gains a companion: the storage root
+holds vault directories and nothing else that Storm reads.
+
 ```
 storm/
 ├── README.md                 front door
 ├── PLAN.md                   ← this file: status, decisions, blockers
 ├── CLAUDE.md                 agent guidance + invariants
 ├── Makefile                  cross-toolchain tasks (`make help`)
+├── deploy/                   systemd units, env template, backup script
 ├── apps/
 │   ├── server/               Rust — see apps/server/README.md
 │   └── client/               Flutter — see apps/client/README.md
 └── docs/
     ├── prd.md                original brief, not maintained
-    └── editor-findings.md    M0 editor measurements, incl. on-device
+    ├── editor-findings.md    M0 editor measurements, incl. on-device
+    ├── storm-ui-refactor.md  M7/M8 design brief
+    ├── storm-multi-vault.md  M9/M10 design brief
+    └── storm-properties.md   M11 design brief
 ```
 
 A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
@@ -168,6 +207,222 @@ change, and drifting once would have meant benchmarking code that was no longer
 shipped. If another throwaway ever needs to share code with the app, make it a
 path dependency rather than a copy.
 
+**9. `go_router` owns "where am I", replacing the single-screen shell.**
+The nav bubble's Context slot changes meaning by location, and a second flag
+tracking that alongside the screen state is two things to keep in agreement.
+A router makes it one. It also gave the web client working deep links, which the
+old shell simply did not have — `/browse/Projects/Storm` and `/note/:id` now
+serve the app instead of 404ing.
+*Revisit if:* nested navigators are ever needed for split panes (a non-goal).
+
+**10. The router is refreshed, never rebuilt.**
+`routerProvider` must not `ref.watch(settingsProvider)`. Watching recomputes the
+provider into a *different* `GoRouter` while the `MaterialApp` keeps holding the
+old one — navigation silently stops working and the back stack is discarded on
+every settings change. It listens instead, and pokes `refreshListenable` so
+`redirect` re-runs on the same instance. There is a test asserting the router
+instance survives a settings change.
+
+**11. "Is the keyboard up?" is asked once per screen, above the `Scaffold`.**
+Both obvious ways to ask are wrong from inside a Scaffold body.
+`MediaQuery.viewInsetsOf` reads zero there, because `resizeToAvoidBottomInset`
+works by *removing* that inset — the removal is the resize. `View.of(context)
+.viewInsets` reads the right number but never rebuilds, since view metrics are
+not an inherited dependency; it would answer once and keep that answer forever.
+So `keyboardIsOpen()` uses `MediaQuery` and every screen calls it above its own
+Scaffold, passing the result down to the nav bubble and the formatting toolbar.
+That single call per screen is what guarantees they are never both visible and
+never both gone.
+
+**12. A prefix button toggles; a prefix *picker* does not.**
+Re-applying a block prefix a line already has removes it, which is right for the
+bullet and quote buttons — a lone on/off control has nowhere else to say "off".
+It is wrong for the heading picker, which lists Paragraph as its own entry:
+choosing "Heading 1" on a line that is already H1 means "make this H1". Getting
+this backwards is what made the heading button look like it did nothing, since
+most notes open with `# Title` — the exact line you would try it on.
+`setBlockPrefix` takes `toggle:` and the picker passes false.
+
+**13. The formatting toolbar is inside the text field's tap region.**
+`TextField`'s default `onTapOutside` unfocuses on desktop and web, and an
+unfocused field closes the keyboard — which hides the toolbar out from under the
+tap and abandons the caret. `TapRegion(groupId: EditableText)` around the
+toolbar says "this is part of the editor". Android and iOS keep focus anyway, so
+this only bites on desktop and web, which is why it survived the phone.
+
+**14. An async toolbar action must not be gated on the toolbar's own context.**
+Opening the heading menu closes the keyboard, which makes `keyboardIsOpen`
+false, which unmounts the toolbar — so by the time the menu returns a choice,
+`context.mounted` is *always* false. Guarding on it meant headings silently did
+nothing while every other button worked, because the rest apply synchronously.
+The controller belongs to the editor and outlives the toolbar, so it is safe to
+call after the await; what must not be touched is `context`.
+
+**15. An ordered list is a sequence, not a repeated string.**
+`1. ` on every line is what a numbered list looks like when nobody counted.
+`setBlockPrefix` numbers the block, continuing from the item directly above the
+selection so extending a list resumes rather than restarting, and a blank line
+ends the run — which is where markdown starts a new list anyway. Enter inside a
+list continues it through `ListContinuationFormatter`, a `TextInputFormatter`
+because that is the only hook that sees an edit *before* it lands and can move
+text and caret together.
+
+**16. The toolbar mutates text only through the controller.**
+`StormMarkdownController` owns `toggleInline`, `setBlockPrefix` and
+`insertWikilink`; each computes text *and* selection and assigns `value` once.
+Assigning `text` and `selection` separately fires two notifications with an
+intermediate state whose caret points into a buffer that no longer matches it.
+`wikilinks_test.dart` puts a recording controller behind the toolbar and fails
+if any button reaches past those three methods.
+
+**17. `go` replaces the stack; going *deeper* must `push`.**
+Every navigation used `context.go`, which leaves exactly one route on the
+stack — so the Android back gesture popped it and left the app instead of
+returning anywhere. Two halves to the fix: browse, note, search and tags are
+declared as *children* of the dashboard route, so any location builds a stack
+with the dashboard beneath it (a deep link included); and opening a note or
+drilling into a folder uses `push`, while the nav bubble still uses `go`
+because it swaps top-level destinations rather than descending.
+In-app back buttons hid this completely — they called
+`canPop() ? pop() : go(parent)` and kept working throughout. The regression
+test drives `handlePopRoute`, which is the real system-back signal.
+
+**18. Autocomplete state is derived, never tracked.**
+Whether a `[[` is open comes from reading the buffer back from the caret, not
+from a "currently completing" flag. A flag has to be kept in agreement with
+every edit, undo and caret move, and the first disagreement leaves the
+suggestion list offering to complete text that is no longer there. Suggestions
+also display the same string they are matched against — a list that matches on
+one name and shows another looks broken even when it is right.
+
+**19. Following a wikilink reads the caret, not a gesture.**
+A tap inside an editable `TextField` is consumed for caret placement, so a
+`TapGestureRecognizer` on a `TextSpan` never fires. The tap does its ordinary
+job and `TextField.onTap` then asks `wikilinkAt()` what the caret landed in.
+Touch follows on a plain tap; a pointer needs Cmd/Ctrl, because clicking into
+text to edit it is the common intent. `contextMenuBuilder` adds "Open …" as the
+discoverable path that does not depend on knowing a modifier key.
+
+**20. One server hosting many vaults, not one server per vault**
+*(departs from PRD §3)*
+The PRD deferred multi-vault entirely ("one vault per app install initially").
+The alternative that needs no server change at all is N processes, one per
+vault, with the client holding a list of `(url, token)` connections — but that
+is N systemd units, N backup runs and N ports to remember, and there is then no
+single thing a "vault storage root" setting could refer to. One server owning a
+root directory keeps the homelab surface at one unit, one token and one backup,
+and makes the root a real setting rather than a fiction.
+*Revisit if:* vaults ever need different access control. Per-vault tokens are
+the natural shape and would push back toward separate processes.
+
+**21. Vaults are tracked by UUID; `vaults.json` maps id to directory.**
+The same reasoning that makes notes path-independent (see **Data model**, and
+the invariant in `CLAUDE.md`). If the directory name were the id, renaming a
+vault would orphan its index and its clients' cached notes. A registry keeps
+display name, directory and id independent, so renaming either is an edit
+rather than a migration. It is plain JSON rather than a SQLite database because
+it is the one piece of state a human might need to fix by hand when something
+has gone wrong, and the vault-is-greppable ethos should extend to it.
+
+**22. Per-vault index and per-vault `seq`; the change stream stays global.**
+`notes.path` is `UNIQUE` and `attachments.path` is a primary key, so two vaults
+in one database would collide on any shared path — `Daily/2026-08-07.md` exists
+in most vaults. One `index.db` per vault sidesteps that entirely and needs no
+schema migration, at the cost of splitting `change_log.seq`, which was the sync
+protocol's single global cursor. So the cursor becomes per vault too. The
+WebSocket does *not* split: one socket carries every vault's changes with a
+`vault_id` on each frame, because the alternative is one socket per vault held
+open for vaults nobody is looking at.
+
+**23. Recents are recorded server-side and served across vaults.**
+`docs/storm-ui-refactor.md` §2.1 defined "Recent" as recently *edited*
+specifically to avoid tracking a second timestamp. Multi-vault breaks that
+bargain: sorting by `modified` across vaults means fetching every vault's tree
+on every dashboard load, and the dashboard is the home screen. A `note_access`
+table and one `GET /v1/recents` is one call regardless of vault count, is
+genuinely "opened" rather than "edited", and gives the same list on the phone
+and the desktop. It is a separate table, not a column on `notes`, because
+`record_note` rewrites the notes row on every index update and an "opened"
+timestamp must not bump `version` or append to `change_log`.
+
+**24. The active vault is routed, with a persisted mirror — not a provider
+family.**
+The structurally pure option is `syncEngineProvider.family(vaultId)` and a
+vault argument threaded through every consumer. But `apiProvider` already
+rebuilds on any settings change and `syncEngineProvider` already watches it, so
+putting `activeVault` in `Settings` gets engine teardown, socket close and
+session rebuild from machinery that exists and is already tested — at roughly a
+tenth of the diff. The hazard it buys is a stale frame where the route says one
+vault and the providers still hold another; a `VaultGate` at the `/v/:vault`
+route closes it by refusing to build children until the two agree, which is the
+same post-frame reconciliation `NoteScreen._load` already does.
+*Revisit if:* two vaults ever need to be live at once — split panes, dragging a
+note between vaults, or cross-vault search. The family is the right answer then
+and this becomes the wrong shape rather than a slow one.
+
+**25. Storm never moves vault directories, and refuses a root change that
+orphans every vault.**
+Changing the storage root points the server at directories an admin has already
+moved; it does not relocate anything. Relocating on the user's behalf would
+make a mistyped path a data move. But the honest version of that has a failure
+mode this project has already been burned by twice: point the root somewhere
+empty and the server boots perfectly healthy with zero vaults, files safe on
+disk and invisible to every client — which reads as "my notes are gone". So
+both directions are made loud instead. At runtime, `PUT /v1/config` refuses with
+`409` and names every vault that would be orphaned, unless the caller passes
+`orphan_ok`. At boot, a `--vault` path that does not exist exits non-zero with
+both paths in the message rather than starting empty. A vault whose directory
+has vanished stays in the registry marked `missing`; it is never quietly
+dropped.
+
+**26. Property values live in the note; property *types* live in a hidden
+vault note.**
+`_storm/vault.md` is an ordinary markdown note carrying `storm.type.<key>`,
+`storm.options.<key>` and a vault description. A note rather than a server
+table, because it then syncs, merges, versions and backs up with everything
+else — no endpoint, no schema, no wire change — and it stays greppable and
+hand-editable, which is the property the whole vault is built around. It is
+hidden from browse, search, recents and wikilinks, and excluded from the
+server's note count so a vault card does not read one too high.
+*Revisit if:* types ever need to differ per device, or a vault grows enough
+config that a note stops being a sensible container.
+
+**27. The client gets its own frontmatter writer.**
+`set_scalars` could not be reused. It replaces a key's *single line*, which is
+correct for stamping `id` and destructive for anything else: aimed at a `tags:`
+block list it orphans the `- item` children and produces invalid YAML. It also
+normalises CRLF, drops trailing comments, and does no quoting at all — safe
+only because its callers write UUIDs and timestamps. `frontmatter_edit.dart`
+keeps the same principle (splice lines, never serialize) with a span model that
+knows where a value starts and ends.
+*Revisit if:* the two writers ever disagree about which bytes are frontmatter.
+Each points at the other in a comment for that reason.
+
+**28. A list keeps the form it was written in.**
+Block stays block, inline stays inline, and block indentation is copied from
+the existing items. Normalising to inline would have been one line of code, and
+would mean the first tag edit silently reformats a file the user did not ask to
+reformat — the same objection that made frontmatter line-surgery in the first
+place.
+
+**29. A local failure is never reported as a network failure.**
+Carried forward from M9/M10's bug, and now structural: cache writes go through
+`_cache`, which logs and continues, and `create` no longer wraps its cache
+write in the same `try` as its request. The server is the copy of record.
+
+**30. The properties list is the only way to edit frontmatter.**
+Raw-YAML mode is gone. It existed as the escape hatch for anything the panel
+could not represent, and that made the panel a place where *some* metadata
+lived while the rest hid behind a mode switch — the split the panel was
+supposed to remove. Now every key in the block gets a row in file order:
+editable where the writer can represent it, read-only where it cannot
+(`id`/`created`/`modified`, nested maps, block scalars). Shown rather than
+hidden, because metadata you cannot see is worse than metadata you cannot
+edit. No disclosure, no divider under the list.
+*The cost, accepted:* a malformed frontmatter block can no longer be repaired
+from inside the app. The vault is plain markdown; that is what it is for.
+*Revisit if:* users hit unrepairable blocks in practice.
+
 ---
 
 ## Data model
@@ -195,6 +450,23 @@ SQLite schema (`state/index.db`): `notes`, `note_versions` (full snapshots),
 `change_log` is the delta-sync primitive: every mutation from any source (API,
 watcher, startup scan) appends a row, and a client asks `GET /sync?since=<seq>`.
 No manifest diffing.
+
+**M9 makes this per vault**: the index moves to `state/<vault-id>/index.db`, so
+`seq` and every table above are scoped to one vault, and a client's sync cursor
+is per vault too. Two tables are added, both pure `CREATE TABLE IF NOT EXISTS`
+additions that need no migration mechanism:
+
+- `folders (path, created)` — folders created explicitly rather than derived
+  from note paths. It exists for exactly one reason: `prune_empty_parents`
+  deletes directories that become empty, and without an exemption a new empty
+  folder disappears the moment its last note leaves.
+- `note_access (note_id, opened_at)` — when a note was last opened, feeding the
+  cross-vault recents list. Separate from `notes` on purpose; see decision 23.
+
+A `PRAGMA user_version` guard lands with them so the next change that needs an
+*altered* column has somewhere to live. Additions never did.
+
+The registry lives outside any index, at `state/vaults.json`.
 
 ---
 
@@ -370,7 +642,7 @@ wrong claim.
 Reindexing is subtractive as well as additive — deleting a note, or editing a
 tag out of one, removes it from the index. Covered by live tests.
 
-### M5 — Android, Linux, Web 🟡
+### M5 — Android, Linux, Web ✅
 
 **Web — wired, not yet run in a browser.**
 
@@ -455,7 +727,7 @@ mechanism.
 
 
 
-### M6 — Attachments, settings, deploy 🟡
+### M6 — Attachments, settings, deploy ✅
 
 **Attachments — done, both halves.**
 
@@ -515,6 +787,237 @@ the user's to give — see `deploy/README.md`.
 
 ---
 
+### M7/M8 — UI refactor ✅
+
+`docs/storm-ui-refactor.md` traded the desktop-first drawer shell for a
+dashboard, a floating nav bubble, a breadcrumb browser and a keyboard
+formatting toolbar. The old shell was 670 lines holding the shell, the note
+actions and the dialogs at once, and it compressed badly at phone width — which
+is the width this project exists for.
+
+**Routing came first**, and paid for itself immediately. The Context slot has to
+answer "where am I", and a router makes that one source of truth instead of a
+flag kept in agreement with the screen. It also gave the web client deep links
+it never had: `/browse/Projects/Storm` and `/note/:id` now serve the app rather
+than 404.
+
+**A fifth bug got through anyway, and it is the instructive one.** The heading
+button did nothing on the phone — worse, it silently *stripped* headings. Every
+existing test passed, because they all asserted that a prefix could be added to
+a line that did not have one. Nobody tried the picker on a line that was already
+a heading, which is the first thing a user does, since notes open with
+`# Title`. See decision 12. The lesson is not "write more tests"; it is that a
+test asserting the happy transition is not a test of the control's *semantics*.
+
+**Three of the first four bugs here were found by tests, not by running it** —
+which is new for this layer, and the whole point of writing the suites before
+wiring the screens to real state. See decisions 10–13 for what each one taught.
+The exception is worth noting: the *fourth* was that the app opened in light
+mode despite a comment claiming dark-first, and only looking at a screenshot
+from the phone caught it. Both halves of the lesson below still hold.
+
+**Wikilink autocomplete** landed in its own pass afterwards, as planned.
+`docs/storm-ui-refactor.md` §2.6 had assumed it already existed; nothing in
+`lib/` matched, so it was held back rather than bolted onto a refactor. Typing
+`[[` now offers matching notes above the formatting toolbar, and picking one
+completes the link and steps the caret past the brackets.
+
+**Still not possible:** true inline images and true syntax hiding. Both need the
+block-based editor rewrite of decision 5, for the same reason as always — a
+`WidgetSpan` contributes one character where `![alt](path)` is many, so a chip
+"in the text flow" breaks the buffer invariant exactly as inline rendering does.
+`AttachmentStrip` below the editor remains the honest interim.
+
+---
+
+### M9/M10 — Multi-vault, folders, storage root ✅
+
+One server owns a storage root; each directory under it is a vault, tracked by
+UUID via `state/vaults.json`. Every note-shaped route gained a
+`/v1/vaults/{id}` segment, `AppState` went from one `Mutex<Indexer>` to a
+`RwLock<VaultSet>` of them, and the dashboard became a grid of vaults over a
+cross-vault "recently opened" list. Folders became a real thing you can create,
+rename and delete. Full design in `docs/storm-multi-vault.md`.
+
+**The watcher got simpler, not harder.** The obvious shape was one watcher per
+vault plus a shutdown path for each. Watching the *root* and attributing each
+event by directory prefix means adding or removing a vault needs no watcher
+work at all, and a root change just respawns the one watcher.
+
+**Three things that looked small and were not:**
+
+1. *The client cache had no migration strategy at all.* `cache_db.dart` was
+   `schemaVersion => 1` with no `MigrationStrategy`, so the default only ever
+   ran `createAll`. Adding `vaultId` meant writing the first real migration
+   this project has had. `Outbox` rows are edits that exist nowhere else, so
+   when the vault cannot be inferred the migration stamps them `legacy` and
+   leaves them, rather than guessing which vault they belong to.
+2. *`Meta.lastSeq` was a single global key.* Two vaults would have overwritten
+   each other's sync cursor — silent, and indistinguishable from randomly
+   missed changes. It is `lastSeq:<vaultId>` now.
+3. *The `--vault` compatibility shim puts `state/` inside the root.*
+   `--vault /srv/storm/vault` implies root `/srv/storm`, which contains
+   `/srv/storm/state`, and a naive scan would have registered `state` as a
+   vault and indexed the SQLite files in it. `scan_root()` skips `state_dir`
+   unconditionally; `registry.rs` has a test for exactly that layout.
+
+**The migration shipped broken, and the tests said it was fine.** `addColumn`
+cannot change a primary key, and v2 moved both cache tables from
+`PRIMARY KEY(id)` to `PRIMARY KEY(vaultId, id)`. The column arrived; the key
+did not. Drift then generated `ON CONFLICT(vault_id, id)`, SQLite rejected it
+outright, and **every cache write threw** on the phone.
+
+The migration test passed throughout because it opened
+`NativeDatabase.memory()`, which runs `onCreate` and produces a *correct*
+schema — it never executed the upgrade path at all. *A migration test that
+never migrates is not a migration test.* `test/cache_migration_test.dart` now
+builds the v1 schema by hand, stamps `user_version`, and opens `CacheDb` over
+it. Schema v3 rebuilds both tables with `alterTable`, and carries a separate
+repair branch for devices that already ran the broken v2 — their `user_version`
+is 2, so without it no later upgrade would ever fire and they would be stuck on
+a schema no write can succeed against.
+
+**What made it unreadable was a second mistake: cache failures were reported as
+network failures.** `create` wrapped its cache write in the same `try` as the
+request, so a local schema error surfaced as "Cannot reach the server — new
+notes need a connection", marked the client offline, and made everything after
+it fail as offline too — while the note sat on the server perfectly fine.
+`_applyChanges` did the same and worse: it returned `false`, pinning `lastSeq`,
+so every sync re-pulled the same page and failed the same way. That is what
+"sync got slow" actually was. Cache writes now go through `_cache`, which logs
+and continues. *The server is the copy of record; a local cache failure is
+never a network one.*
+
+**Two more bugs the new tests caught, both the same shape.** Cached writes were not
+stamped with the vault, so every read missed and the editor opened empty. And
+`treeProvider` read the engine without watching the active vault, so switching
+vaults kept showing the previous one's notes. Both were invisible to the type
+checker and to every existing test; both are the "scoped thing still treated as
+global" failure this milestone is made of.
+
+**The gate test that was not.** The first version of "switching vaults never
+shows stale notes" passed with `VaultGate`'s guard deleted — `pumpAndSettle`
+waits out the exact frame the gate exists for. The version that ships pumps a
+single frame, and deleting the guard fails it. *A test that passes when you
+remove the thing it names is not a test of that thing.*
+
+**Known limitation, stated rather than discovered:** the registry rescans at
+startup, on a root change, and on vault create/delete — not continuously. A
+directory dropped into the root over rsync does not appear until a restart. The
+root watcher covers note edits inside registered vaults; it does not register
+new vaults.
+
+**Deliberately not in this pass:** cross-vault search, tags and backlinks (each
+vault has its own FTS index); per-vault tokens; two vaults live at once; moving
+a note between vaults; and deleting a vault's files from the app — removing a
+vault unregisters it and leaves every byte on disk.
+
+---
+
+### M11 — Typed note properties ✅
+
+`docs/storm-properties.md`. The frontmatter block became an editable key/value
+list — key chip on the left, an input suited to the type on the right, `+` to
+add one — instead of a read-only strip of raw YAML above the note.
+
+**The panel was read-only for a good reason, and the reason had a hole in it.**
+Its doc comment said writing values back means re-serialising the user's YAML.
+True, and the server doesn't re-serialise either: it splices lines. So the
+client got a second writer on the same principle, richer than the server's
+because a user's metadata is not a UUID — see decision 27.
+
+**Three bugs the tests caught before the device did**, all in the writer, all
+about context:
+
+1. A comma inside an *inline list item* has to be quoted or the item splits in
+   two. A comma inside a scalar does not. Quoting had to learn where it was.
+2. A checkbox writing `true` was being quoted into the *string* `"true"`,
+   because `true` is on the "YAML would misread this" list. Correct for text a
+   user typed, wrong for a boolean the UI generated — hence `raw:`.
+3. A negative number was quoted for the same reason, since `-` starts a flow
+   sequence.
+
+**One layout bug found the same way.** A fixed-width chip cannot hold a text
+label at every font size; the test font made "Add property" 69px too wide. The
+sketch had it right — the `+` button carries no label.
+
+**Then raw mode went, on the user's call.** The first build kept an "Edit raw"
+escape hatch and folded `id`/`created`/`modified` behind a "Details"
+disclosure, with a rule under the whole panel. That reintroduced the split the
+panel existed to remove: some metadata in the list, some behind a mode switch.
+Now every key in the block is a row in file order, editable or read-only, and
+the list runs straight into the prose. See decision 30.
+
+**Two more from a phone screenshot**, which is where this project's UI bugs
+keep being found:
+
+- *Chips were slabs.* `IconButton` enforces a 48px minimum tap target, so a
+  remove affordance built from one pushed every chip to 48px tall and the tag
+  rows read as stacked grey blocks. A plain `InkWell` gets it to 26. The
+  regression test asserts the height, and fails at 48 if the `IconButton` ever
+  comes back.
+- *The add affordance was a bare text field beside the chips*, which left the
+  row looking unfinished. It is a badge now — outlined, secondary, `+` — that
+  becomes an empty editable badge in place, so the control looks like what it
+  creates.
+
+**The nav bubble no longer collapses.** It hid behind a `…` until tapped,
+costing a tap before every navigation and concealing where you could go. The
+bar is five small icons; hiding it bought nothing.
+
+**An unobserved Future, found by a full-suite run.** `WebSocketChannel.connect`
+reports a failed handshake through `ready`, not by throwing, and nothing was
+listening to it — so an unreachable host became an *unhandled* async error in
+the zone. It surfaced only when two new tests shifted the timing, and it passes
+in isolation either way; the evidence is the full suite, which fails without
+the fix. Reconnection was always driven by the stream's `onError`; the missing
+piece was simply observing the rejection. *On a device with no DNS this was
+noise in the log at best.*
+
+**Colours, fonts, and naming a note.** Keep-style accents for notes and
+vaults, a note-font choice, and a new-note dialog that asks for a name.
+
+- *A colour is a word, not a hex.* `color: sage` in the note's frontmatter
+  stays readable, greppable and meaningful in Obsidian or a text editor;
+  `#B7CDB0` would be none of those and would pin the vault to one theme. Each
+  accent carries a light *and* a dark value, because a tint that works on
+  white is a glare on black. A colour the app does not recognise is left as
+  plain text rather than offered a swatch — overwriting somebody else's
+  convention would be worse than not styling it.
+- *Colour is edited in the properties list*, as `PropertyType.color`, not
+  through a separate menu. Decision 30 said the list is the only way
+  frontmatter changes, and a colour is frontmatter like any other value. A
+  vault's colour goes in its own `_storm/vault.md` and is set by long-pressing
+  its card, since a vault has no properties list.
+- *Three fonts, not a font list.* Serif (the bundled Newsreader), the
+  platform sans, and monospace. Every extra family is another megabyte in the
+  APK, and a runtime download is wrong for something that must work offline —
+  the same reasoning that bundled the serif in M7.
+- *The `id` is hidden by default*, behind a setting. It is a UUID nobody
+  reads, and it cost the top row of every note. Off rather than removed,
+  because the list is the only place frontmatter is visible at all — this is
+  the one exception to decision 30, and it is the user's switch, not a hiding
+  place.
+- *Read-only timestamps are formatted.* The server writes RFC3339 with
+  nanoseconds, which is precise and unreadable; `created` and `modified` show
+  as `5 Aug 2026, 12:52` in local time. Anything that does not parse as a date
+  passes through untouched, so a value that merely resembles one is never
+  quietly rewritten on screen.
+- *A new note asks for a name.* Not `Folder/Note.md`: the folder is wherever
+  you already are and every note is markdown, so neither was a decision worth
+  asking about. Separators become spaces rather than folders, and leading dots
+  are stripped, so a typed name can never escape the vault, hide itself, or
+  invent a directory. A test asserts every generated name passes
+  `validateVaultPath`.
+
+**Still not writable:** nested maps and block scalars. A key/value row cannot
+represent them without guessing at a structure, and writing the guess back
+would destroy it. They are listed read-only, alongside Storm's own fields —
+see decision 30, which removed raw mode and with it the last place metadata
+could hide.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -533,9 +1036,19 @@ truncated to its frontmatter) and none were caught by a fully green suite.
 
 Each was found only by running the app on a real device. The pattern: protocol
 correctness was over-tested and *the layer the user actually touches* was not
-tested at all. The UI now has ~19 tests, and the habit worth keeping is to run
-the thing on a device early rather than trusting a green suite to mean working
-software.
+tested at all.
+
+**The follow-up is evidence the lesson took.** The UI refactor wrote its suites
+before wiring the screens to real state, and four more bugs of exactly this
+family surfaced — a router silently replaced out from under its `MaterialApp`,
+a keyboard-inset check that could never be true, a menu conflating "Paragraph"
+with "dismissed", a toolbar button that could have written text directly.
+*Three of the four were caught by tests, before the app was ever launched.*
+
+The fourth is why the second half of this lesson stands: the app opened in
+light mode despite a comment two lines above the default claiming dark-first,
+and nothing but a screenshot from the phone was ever going to catch that. Tests
+find the wiring; running it finds what the wiring was wrong *about*. Do both.
 
 Note also that the last of these was reported as "still the same error" after
 two rounds of unrelated fixes. **Get the exception text before changing
@@ -546,20 +1059,32 @@ failure from any error state the app renders itself.
 
 ## Blockers
 
-**macOS builds — needs one sudo command from the user.**
-`/Library/Developer/PrivateFrameworks/DVTDownloads.framework` is v17.0 (Dec 2025,
-from an older Xcode) while `/Applications/Xcode.app` is Xcode 26.6, so
-`IDESimulatorFoundation` fails to load. Not an SPM issue; not a Flutter or Storm
-problem. Fix:
+**None for development.** Two things about the deployment are worth knowing:
 
-```sh
-sudo xcodebuild -runFirstLaunch
-```
+- *The VM has no systemd unit.* `sudo` needs a password there, so the server
+  runs as a hand-started process via `/home/dewansh/storm/run.sh` and **will
+  not survive a reboot**. Installing `deploy/storm-server.service` is a
+  one-time `sudo` step that only the user can take. `make deploy` also targets
+  `/srv/storm` and `systemctl`, neither of which exists on that box — the
+  deployment is manual until the unit is installed.
+- *The shared token is still `testtoken`.* It is at least off the command line
+  now (in `/home/dewansh/.storm-env`, mode 600), so `/proc` no longer exposes
+  it to every local user. Rotating it means updating the phone and the browser
+  at the same time, so it is the user's call.
 
-Until then macOS is verified only via `flutter test` and the web build.
+Both former build blockers are discharged as of 2026-08-05:
 
-**Android toolchain — not installed.** Needs the SDK + a JDK (~10–15 GB). The
-user opted to free disk first; ~27 GB free as of 2026-08-05.
+- *macOS builds* — `flutter doctor` reports Xcode 26.6 healthy, and
+  `flutter build macos --debug` produces a running app. The
+  `DVTDownloads.framework` version skew that needed
+  `sudo xcodebuild -runFirstLaunch` is gone.
+- *Android toolchain* — SDK 36.0.0 is installed; debug APKs build and install
+  on the Pixel over `adb`.
+
+One thing worth knowing rather than blocking: `flutter doctor` flags no Chrome,
+so `flutter run -d chrome` won't launch. It does not affect `flutter build web`
+— the bundle builds and is served by the server binary (`make serve-web`),
+which is how the web client is actually used.
 
 ---
 
@@ -572,6 +1097,23 @@ real vault move over and Syncthing get switched off.
 Get the nightly backup working the day the server first touches real data — not
 at M6. `state/` holds version history that the merge depends on, so back up both
 `vault/` and `state/`.
+
+**M9 adds the first step that moves the real vault's location.**
+`/srv/storm/vault` becomes `/srv/storm/vaults/<name>`, and the server then moves
+`state/index.db` into the new vault's own state directory on first boot. Take a
+backup of all of `/srv/storm` immediately before the move, and verify it opens —
+`deploy/storm-backup.sh` already reopens its snapshot for exactly this reason.
+`note_versions` is the merge base and cannot be rebuilt from the markdown, so a
+lost index is a lost merge history even though no note is lost.
+
+Do it with the server stopped, and check `GET /v1/vaults` returns one vault
+before pointing any client at it.
+
+**Done on 2026-08-07.** Backup at `/home/dewansh/storm-backup-20260807-053117`
+on the VM; `/home/dewansh/.storm-last-backup` holds the path. The one thing to
+know if it ever has to be repeated: `pkill -f "storm-server --vault"` run over
+SSH matches *its own command line* and kills the session before the next step.
+Use a pattern that cannot match the invoking shell.
 
 ---
 

@@ -25,7 +25,7 @@ EnvironmentFile=/etc/storm/storm.env
 # STORM_TOKEN comes from the environment file, never the command line —
 # arguments are visible to every user on the box via /proc.
 ExecStart=/usr/local/bin/storm-server \
-    --vault ${STORM_VAULT} \
+    --vault-root ${STORM_VAULT_ROOT} \
     --state ${STORM_STATE} \
     --host ${STORM_HOST} \
     --port ${STORM_PORT} \
@@ -50,6 +50,9 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+# The storage root must stay inside this. Moving it elsewhere (through the
+# app's server settings, or the env file) needs this line widened first, or
+# the server will refuse the new root as unwritable.
 ReadWritePaths=/srv/storm
 
 # The vault is the user's notes; a runaway must not take the box down with it.

@@ -151,6 +151,21 @@ class NoteSession extends ChangeNotifier {
     edit(fm.split(_buffer).withBody(newBody));
   }
 
+  /// Records an edit to the **whole file** made by the properties panel.
+  ///
+  /// The mirror image of [editBody]: the panel splices frontmatter lines and
+  /// hands back the complete file, body carried through untouched.
+  ///
+  /// Goes through [edit], so it gets the debounce, the base version, the merge
+  /// protocol and the offline outbox for free — and, crucially, **does not
+  /// bump [revision]**. Only `_adopt` does that, and the body editor reacts to
+  /// it by replacing its entire text value; a property keystroke that bumped
+  /// it would reset the caret in the note body on every character.
+  void editProperties(String wholeFile) {
+    if (_noteId == null) return;
+    edit(wholeFile);
+  }
+
   /// Records a local edit to the whole file and schedules a save.
   void edit(String text) {
     if (_noteId == null || text == _buffer) return;
@@ -240,7 +255,7 @@ class NoteSession extends ChangeNotifier {
     final id = _noteId;
     if (id == null || isDirty || _saveState == SaveState.queued) return;
 
-    final cached = await _engine.cache.note(id);
+    final cached = await _engine.cache.note(_engine.vaultId, id);
     if (_closed || _noteId != id) return;
 
     if (cached == null) {

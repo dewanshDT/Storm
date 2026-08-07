@@ -26,13 +26,20 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
+| `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
+| `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
+| `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
+| `docs/storm-properties.md` | M11 design brief — typed frontmatter properties. |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
 — the rendered span tree must match the buffer character for character — and
 the on-device numbers that say where the limits are.
+
+Read `docs/storm-multi-vault.md` before touching vault resolution, the registry,
+the watcher, or the client's cache schema.
 
 ## Commands
 
@@ -44,10 +51,15 @@ make help                    # every target
 make check                   # clippy + analyze + both unit suites
 make test-live               # integration suites against a real server
 make fmt                     # cargo fmt + dart format (CI enforces both)
-make server VAULT=~/vault    # run the sync server
-make dry-run VAULT=~/vault   # ALWAYS do this before importing a real vault
+make server VAULT_ROOT=~/vaults   # run the sync server
+make dry-run VAULT_ROOT=~/vaults  # ALWAYS do this before importing a real vault
 make serve-web               # build the web client and serve it
 ```
+
+`VAULT_ROOT` points at a directory *containing* vaults, not at a vault —
+pointing it at one would make the server treat that vault's own folders as
+vaults. Every target needs a `## name: description` line above it or
+`make help` won't list it.
 
 `make check` must be clean before a change is done — clippy runs with
 `-D warnings`, so a warning is a failure. The Makefile targets GNU Make 3.81
@@ -74,7 +86,14 @@ data quietly.
   `state/` directory, never inside the vault.
 - **Frontmatter is never serialized.** Storm rewrites individual *lines* and
   passes every other byte through. Running a user's YAML through a serializer
-  reorders keys and drops comments, dirtying the whole vault.
+  reorders keys and drops comments, dirtying the whole vault. There are two
+  writers and both obey this: `frontmatter.rs` `set_scalars` on the server, and
+  `lib/editor/frontmatter_edit.dart` on the client.
+- **A value that spans lines is spliced as a range, never as one line.** The
+  server's writer replaces a key's single line, which is right for stamping
+  `id` and wrong for anything else: aimed at a `tags:` block list it orphans
+  the `- item` children and leaves invalid YAML. The client's writer knows the
+  span, and refuses to write a nested map or a block scalar at all.
 - **The server owns `modified:`.** Clients must not write it, and it is
   normalised out of all three sides before a merge — otherwise every concurrent
   write conflicts on that line.
@@ -84,6 +103,32 @@ data quietly.
   text.** Keeping local text makes the next save race a version it never had.
 - **Notes are tracked by UUID, not path.** Renames and moves are metadata
   updates.
+
+From M9/M10 (`docs/storm-multi-vault.md`):
+
+- **A vault is a directory under the storage root, tracked by UUID.**
+  `state/vaults.json` maps id → directory and display name, so renaming either
+  is a registry edit. If the directory name were the identity, a rename would
+  orphan the vault's index and every client's cached notes.
+- **Each vault has its own index at `state/<vault-id>/index.db`.**
+  `change_log.seq` is therefore per vault, and so is a client's sync cursor.
+  One shared cursor would have two vaults overwriting each other's position,
+  which surfaces as randomly missed changes rather than as an error.
+- **Explicitly created folders are recorded and exempt from pruning.** The
+  server deletes directories that become empty; without the `folders` table
+  exemption a new empty folder disappears on the next delete or move.
+- **The storage root holds vault directories and nothing else Storm reads.**
+  `scan_root()` skips `state_dir` and every dot-prefixed directory — the
+  `--vault` compatibility shim puts `state/` inside the root, and a naive scan
+  would register it as a vault and index the SQLite files in it.
+- **A colour is stored as a word, never a hex value.** `color: sage` in a
+  note, `storm.color:` in a vault's config. The vault has to stay readable
+  outside Storm, and a stored hex would pin it to one theme and mean nothing
+  in Obsidian.
+- **Storm never moves vault directories.** Changing the storage root points the
+  server at directories someone already moved. A change that would orphan every
+  registered vault is refused rather than applied quietly, and a vault whose
+  directory is gone stays in the registry marked `missing`.
 
 ## Style
 

@@ -26,6 +26,7 @@ void main() {
     engine = SyncEngine(
       api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
       cache: cache,
+      vaultId: FakeServer.primaryVault,
     );
   });
 
@@ -56,14 +57,14 @@ void main() {
 
       expect(out.status, SaveStatus.saved);
       expect(server.notes['n1']!.content, 'edited\n');
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
     });
 
     test('the cache mirrors what the server accepted', () async {
       await seed('n1', 'original\n');
       await engine.save(id: 'n1', baseVersion: 1, content: 'edited\n');
 
-      final cached = await cache.note('n1');
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(cached!.content, 'edited\n');
       expect(cached.version, 2);
     });
@@ -103,7 +104,7 @@ void main() {
 
       final out = await engine.save(id: 'n1', baseVersion: 1, content: 'x\n');
       expect(out.status, SaveStatus.failed);
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
     });
   });
 
@@ -119,7 +120,7 @@ void main() {
       );
       expect(out.status, SaveStatus.queued);
       expect(engine.isOnline, isFalse);
-      expect(await cache.pendingCount(), 1);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 1);
     });
 
     test('the cache shows the user their own text while queued', () async {
@@ -127,7 +128,7 @@ void main() {
       server.unreachable = true;
       await engine.save(id: 'n1', baseVersion: 1, content: 'offline edit\n');
 
-      final cached = await cache.note('n1');
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(cached!.content, 'offline edit\n');
     });
 
@@ -152,8 +153,12 @@ void main() {
         await engine.save(id: 'n1', baseVersion: 3, content: 'second\n');
         await engine.save(id: 'n1', baseVersion: 3, content: 'third\n');
 
-        expect(await cache.pendingCount(), 1, reason: 'should coalesce');
-        final queued = await cache.outboxFor('n1');
+        expect(
+          await cache.pendingCount(FakeServer.primaryVault),
+          1,
+          reason: 'should coalesce',
+        );
+        final queued = await cache.outboxFor(FakeServer.primaryVault, 'n1');
         expect(queued!.content, 'third\n');
         expect(queued.baseVersion, 3);
       },
@@ -178,7 +183,7 @@ void main() {
       server.unreachable = false;
       await engine.sync();
 
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
       expect(server.notes['n1']!.content, 'offline edit\n');
       expect(
         server.lastBaseVersion,
@@ -196,8 +201,8 @@ void main() {
       server.mergeInstead = 'merged on the server\n';
       await engine.sync();
 
-      expect(await cache.pendingCount(), 0);
-      final cached = await cache.note('n1');
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(cached!.content, 'merged on the server\n');
     });
 
@@ -212,8 +217,8 @@ void main() {
       server.unreachable = false;
       await engine.sync();
 
-      expect(await cache.pendingCount(), 0);
-      expect(await cache.note('n1'), isNull);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
+      expect(await cache.note(FakeServer.primaryVault, 'n1'), isNull);
     });
 
     test('multiple queued notes all replay', () async {
@@ -222,12 +227,12 @@ void main() {
       server.unreachable = true;
       await engine.save(id: 'n1', baseVersion: 1, content: 'a edited\n');
       await engine.save(id: 'n2', baseVersion: 1, content: 'b edited\n');
-      expect(await cache.pendingCount(), 2);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 2);
 
       server.unreachable = false;
       await engine.sync();
 
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
       expect(server.notes['n1']!.content, 'a edited\n');
       expect(server.notes['n2']!.content, 'b edited\n');
     });
@@ -239,7 +244,11 @@ void main() {
 
       await engine.sync(); // still down
 
-      expect(await cache.pendingCount(), 1, reason: 'the edit must survive');
+      expect(
+        await cache.pendingCount(FakeServer.primaryVault),
+        1,
+        reason: 'the edit must survive',
+      );
       expect(engine.isOnline, isFalse);
     });
   });
@@ -255,7 +264,7 @@ void main() {
 
       await engine.sync();
 
-      final cached = await cache.note('n1');
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(cached!.content, 'changed elsewhere\n');
     });
 
@@ -265,7 +274,7 @@ void main() {
       server.pushChange('n1', 'deleted', 1);
 
       await engine.sync();
-      expect(await cache.note('n1'), isNull);
+      expect(await cache.note(FakeServer.primaryVault, 'n1'), isNull);
     });
 
     test('a pull never clobbers an unsent local edit', () async {
@@ -301,7 +310,7 @@ void main() {
       server.pushChange('other', 'created', 1);
 
       await engine.sync();
-      expect(await cache.note('other'), isNull);
+      expect(await cache.note(FakeServer.primaryVault, 'other'), isNull);
     });
 
     test('pages through more changes than fit in one response', () async {
@@ -322,13 +331,13 @@ void main() {
 
       await engine.sync();
 
-      final cached = await cache.note('n1');
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(
         cached!.content,
         'late change\n',
         reason: 'a change beyond the first page must still be applied',
       );
-      expect(await cache.lastSeq(), server.seq);
+      expect(await cache.lastSeq(FakeServer.primaryVault), server.seq);
     });
 
     test('lastSeq advances so the next pull is incremental', () async {
@@ -336,7 +345,7 @@ void main() {
       server.pushChange('n1', 'updated', 2);
       await engine.sync();
 
-      expect(await cache.lastSeq(), server.seq);
+      expect(await cache.lastSeq(FakeServer.primaryVault), server.seq);
     });
   });
 
@@ -352,7 +361,10 @@ void main() {
       expect(created.error, isNull);
       expect(created.meta, isNotNull);
 
-      final cached = await cache.note(created.meta!.id);
+      final cached = await cache.note(
+        FakeServer.primaryVault,
+        created.meta!.id,
+      );
       expect(
         cached,
         isNotNull,
@@ -392,6 +404,29 @@ void main() {
     });
   });
 
+  group('last-synced time', () {
+    test('advances after a sync that reached the server', () async {
+      await seed('n1', 'body\n');
+      expect(engine.lastSyncedAt, isNull);
+
+      await engine.sync();
+      expect(engine.lastSyncedAt, isNotNull);
+    });
+
+    test('does not advance when the server was unreachable', () async {
+      // The vault bubble reports this; claiming "synced just now" after a
+      // failed attempt would mislead in the one place the user checks.
+      await seed('n1', 'body\n');
+      await engine.sync();
+      final first = engine.lastSyncedAt;
+
+      server.unreachable = true;
+      await engine.sync();
+
+      expect(engine.lastSyncedAt, first);
+    });
+  });
+
   group('what "offline" means', () {
     test('a lost WebSocket does not make the client offline', () async {
       // The socket only carries push. Every request still works without it,
@@ -426,7 +461,7 @@ void main() {
       final out = await engine.move(id: 'n1', newPath: 'Moved/Here.md');
       expect(out.status, SaveStatus.queued);
 
-      final queued = await cache.outboxFor('n1');
+      final queued = await cache.outboxFor(FakeServer.primaryVault, 'n1');
       expect(queued!.op, 'move');
       expect(queued.newPath, 'Moved/Here.md');
     });
@@ -436,7 +471,7 @@ void main() {
       server.unreachable = true;
       await engine.move(id: 'n1', newPath: 'Moved/Here.md');
 
-      final cached = await cache.note('n1');
+      final cached = await cache.note(FakeServer.primaryVault, 'n1');
       expect(cached!.path, 'Moved/Here.md');
     });
 
@@ -448,7 +483,7 @@ void main() {
       server.unreachable = false;
       await engine.sync();
 
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
       expect(server.notes['n1']!.path, 'Moved/Here.md');
       expect(
         server.notes.containsKey('n1'),
@@ -468,7 +503,7 @@ void main() {
       server.unreachable = false;
       await engine.sync();
 
-      expect(await cache.pendingCount(), 0);
+      expect(await cache.pendingCount(FakeServer.primaryVault), 0);
       expect(server.notes['n1']!.path, 'Renamed.md');
       expect(server.notes['n1']!.content, 'edited offline\n');
     });
@@ -479,22 +514,30 @@ void main() {
       for (var i = 0; i < 10; i++) {
         await seed('n$i', 'content $i\n');
       }
-      await cache.setPinned('n0', true);
+      await cache.setPinned(FakeServer.primaryVault, 'n0', true);
 
       server.unreachable = true;
       await engine.save(id: 'n1', baseVersion: 1, content: 'queued\n');
       server.unreachable = false;
 
-      final evicted = await cache.evict(keep: 2);
+      final evicted = await cache.evict(FakeServer.primaryVault, keep: 2);
       expect(evicted, greaterThan(0));
 
-      expect(await cache.note('n0'), isNotNull, reason: 'pinned');
-      expect(await cache.note('n1'), isNotNull, reason: 'has a queued edit');
+      expect(
+        await cache.note(FakeServer.primaryVault, 'n0'),
+        isNotNull,
+        reason: 'pinned',
+      );
+      expect(
+        await cache.note(FakeServer.primaryVault, 'n1'),
+        isNotNull,
+        reason: 'has a queued edit',
+      );
     });
 
     test('evicting nothing when under the limit', () async {
       await seed('n1', 'a\n');
-      expect(await cache.evict(keep: 100), 0);
+      expect(await cache.evict(FakeServer.primaryVault, keep: 100), 0);
     });
   });
 

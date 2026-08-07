@@ -38,6 +38,7 @@ class AttachmentStrip extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.watch(apiProvider);
+    final vaultId = ref.watch(activeVaultProvider);
     if (api == null) return const SizedBox.shrink();
 
     final paths = imagePaths(body);
@@ -55,7 +56,7 @@ class AttachmentStrip extends ConsumerWidget {
         itemCount: paths.length,
         separatorBuilder: (_, _) => const SizedBox(width: 10),
         itemBuilder: (c, i) {
-          final url = api.attachmentUrl(paths[i]);
+          final url = api.attachmentUrl(vaultId, paths[i]);
           return InkWell(
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(

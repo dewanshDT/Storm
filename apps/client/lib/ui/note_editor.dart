@@ -1,11 +1,16 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../editor/list_continuation.dart';
 import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
+import 'editor_toolbar.dart';
 import 'note_properties.dart';
+import 'wikilink_suggestions.dart';
 
 /// The editing pane.
 ///
@@ -15,7 +20,20 @@ import 'note_properties.dart';
 /// reconciled our text against a version we never saw, and the buffer must be
 /// replaced rather than kept.
 class NoteEditor extends ConsumerStatefulWidget {
-  const NoteEditor({super.key});
+  const NoteEditor({super.key, this.onFollowLink, this.showToolbar = false});
+
+  /// Whether to show the formatting toolbar.
+  ///
+  /// Decided by the screen rather than here, because the answer depends on the
+  /// keyboard inset and this widget lives inside a Scaffold body where that is
+  /// no longer readable. See `keyboardIsOpen`.
+  final bool showToolbar;
+
+  /// Called with a `[[target]]` the user asked to follow.
+  ///
+  /// The editor finds the link; it does not decide what opening one means.
+  /// That belongs to the screen, which owns navigation.
+  final void Function(String target)? onFollowLink;
 
   @override
   ConsumerState<NoteEditor> createState() => _NoteEditorState();
@@ -26,11 +44,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   final _focus = FocusNode();
   int _seenRevision = -1;
 
-  /// When true the editor shows the whole file, frontmatter included, so the
-  /// raw YAML can be corrected. The properties panel can't write values back —
-  /// doing so would mean re-serialising the user's YAML, which reorders keys
-  /// and drops comments.
-  bool _rawMode = false;
+  // There is no raw-YAML mode. Frontmatter is edited only through the
+  // properties list, which shows every key in the block — including the ones
+  // it will not write — so nothing is reachable only by editing text.
 
   /// Whether this note is past the size where styling is dropped.
   ///
@@ -43,8 +59,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
       StormMarkdownController.maxStyledLines;
 
   /// What the editor should currently contain for [session].
-  String _textFor(NoteSession session) =>
-      _rawMode ? session.buffer : session.body;
+  ///
+  /// Always the body. The frontmatter is not in the buffer at all — the
+  /// controller's text has to match what it renders character for character,
+  /// so anything hidden must be absent rather than merely unstyled.
+  String _textFor(NoteSession session) => session.body;
 
   @override
   void initState() {
@@ -79,11 +98,65 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final session = ref.read(noteSessionProvider);
     if (!session.isOpen) return;
     // The controller holds the body; the session re-attaches the frontmatter.
-    if (_rawMode) {
-      session.edit(_controller.text);
-    } else {
-      session.editBody(_controller.text);
+    session.editBody(_controller.text);
+  }
+
+  /// Follows a wikilink the caret has just landed inside.
+  ///
+  /// A tap inside an editable field is consumed for caret placement, so a
+  /// gesture recogniser on the span never fires. Letting the tap do its normal
+  /// job and then asking where the caret ended up gets the same result without
+  /// fighting the selection gesture.
+  ///
+  /// On touch a tap follows the link. With a pointer it needs Cmd/Ctrl, because
+  /// clicking into text to edit it is the overwhelmingly common intent and
+  /// stealing that would make the note unclickable.
+  void _onEditorTap() {
+    final follow = widget.onFollowLink;
+    if (follow == null) return;
+
+    final hit = wikilinkAt(_controller.text, _controller.selection.baseOffset);
+    if (hit == null) return;
+
+    final isTouch =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+    final modified =
+        HardwareKeyboard.instance.isMetaPressed ||
+        HardwareKeyboard.instance.isControlPressed;
+    if (!isTouch && !modified) return;
+
+    follow(hit.target);
+  }
+
+  /// Adds "Open note" to the selection toolbar when the caret is in a link.
+  ///
+  /// The sanctioned extension point: unlike a gesture recogniser it does not
+  /// compete with selection, and it gives pointer users a way through that
+  /// doesn't depend on knowing about a modifier key.
+  Widget _contextMenu(BuildContext context, EditableTextState state) {
+    final items = [...state.contextMenuButtonItems];
+    final follow = widget.onFollowLink;
+    final hit = follow == null
+        ? null
+        : wikilinkAt(_controller.text, _controller.selection.baseOffset);
+
+    if (hit != null) {
+      items.insert(
+        0,
+        ContextMenuButtonItem(
+          label: 'Open ${hit.target}',
+          onPressed: () {
+            state.hideToolbar();
+            follow!(hit.target);
+          },
+        ),
+      );
     }
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: state.contextMenuAnchors,
+      buttonItems: items,
+    );
   }
 
   /// Pulls server text into the editor, keeping the caret where it can.
@@ -109,10 +182,14 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final dark = Theme.of(context).brightness == Brightness.dark;
 
+    // The note body only — it is the one place in the app that is prose
+    // rather than chrome, and the distinction is the point. Which face is the
+    // user's choice; the default is the bundled serif.
     final base = TextStyle(
-      fontSize: settings.fontSize,
-      height: 1.55,
-      color: dark ? const Color(0xFFE6E9EF) : const Color(0xFF1F2430),
+      fontFamily: settings.bodyFont.family,
+      fontSize: settings.fontSize + 1,
+      height: 1.6,
+      color: Theme.of(context).colorScheme.onSurface,
     );
     _controller.theme = dark
         ? MarkdownTheme.dark(base)
@@ -136,21 +213,6 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     return Column(
       children: [
         _StatusBar(session: session),
-        if (!_rawMode)
-          NoteProperties(
-            frontmatter: session.frontmatter,
-            onEditRaw: () {
-              setState(() => _rawMode = true);
-              _adoptServerText(session.buffer);
-            },
-          ),
-        if (_rawMode)
-          _RawBanner(
-            onDone: () {
-              setState(() => _rawMode = false);
-              _adoptServerText(session.body);
-            },
-          ),
         if (_isDegraded(session)) const _DegradedNotice(),
         if (session.notice != null)
           _Notice(
@@ -165,23 +227,49 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 820),
-                  child: TextField(
-                    controller: _controller,
-                    focusNode: _focus,
-                    maxLines: null,
-                    cursorWidth: 2,
-                    keyboardType: TextInputType.multiline,
-                    textCapitalization: TextCapitalization.sentences,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Inside the scroll view and inside the same 820px
+                      // column as the prose. Pinned above it, the panel was
+                      // full-width while the text was centred and capped —
+                      // and it cost a phone's first screen permanently.
+                      NoteProperties(
+                        content: session.buffer,
+                        onChanged: session.editProperties,
+                      ),
+                      TextField(
+                        // Named so tests can tell the prose apart from the
+                        // property inputs above it.
+                        key: const Key('note-body'),
+                        controller: _controller,
+                        focusNode: _focus,
+                        maxLines: null,
+                        cursorWidth: 2,
+                        keyboardType: TextInputType.multiline,
+                        textCapitalization: TextCapitalization.sentences,
+                        onTap: _onEditorTap,
+                        // Enter inside a list carries the list on.
+                        inputFormatters: const [ListContinuationFormatter()],
+                        contextMenuBuilder: _contextMenu,
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          isDense: true,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
             ),
           ),
         ),
+        // Both belong to the keyboard: suggestions sit directly above the
+        // formatting row, in the space the nav bubble gives up.
+        if (widget.showToolbar) ...[
+          WikilinkSuggestions(controller: _controller),
+          EditorToolbar(controller: _controller),
+        ],
       ],
     );
   }
@@ -223,38 +311,6 @@ class _DegradedNotice extends StatelessWidget {
 }
 
 /// Shown while the frontmatter is being edited as text.
-class _RawBanner extends StatelessWidget {
-  const _RawBanner({required this.onDone});
-
-  final VoidCallback onDone;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      color: scheme.secondaryContainer,
-      padding: const EdgeInsets.fromLTRB(20, 8, 8, 8),
-      child: Row(
-        children: [
-          Icon(Icons.data_object, size: 16, color: scheme.onSecondaryContainer),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'Editing raw frontmatter',
-              style: TextStyle(
-                color: scheme.onSecondaryContainer,
-                fontSize: 13,
-              ),
-            ),
-          ),
-          TextButton(onPressed: onDone, child: const Text('Done')),
-        ],
-      ),
-    );
-  }
-}
-
 class _StatusBar extends StatelessWidget {
   const _StatusBar({required this.session});
 
