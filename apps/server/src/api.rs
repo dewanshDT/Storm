@@ -61,6 +61,9 @@ pub struct AppState {
     /// persisted copy; this one exists so the gate can read it without taking
     /// the vault lock on every request.
     pub mcp_enabled: std::sync::atomic::AtomicBool,
+    /// Whether MCP may change the vault. Read per request, so the switch takes
+    /// effect on the next call rather than the next restart.
+    pub mcp_writable: std::sync::atomic::AtomicBool,
 }
 
 pub type Shared = Arc<AppState>;
@@ -391,6 +394,8 @@ struct ConfigResponse {
     vault_count: usize,
     /// Whether `/mcp` is answering. The app shows this and can change it.
     mcp_enabled: bool,
+    /// Whether MCP may create, edit and delete notes.
+    mcp_writable: bool,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -400,12 +405,17 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         state_dir: state.state_dir.display().to_string(),
         vault_count: vaults.registry.vaults.len(),
         mcp_enabled: vaults.registry.mcp_enabled,
+        mcp_writable: vaults.registry.mcp_writable,
     }))
 }
 
 #[derive(Deserialize)]
 struct McpBody {
     enabled: bool,
+    /// Absent means read-only. Callers that do not know about writes therefore
+    /// cannot turn them on by omission.
+    #[serde(default)]
+    writable: bool,
 }
 
 /// Switches the MCP endpoint on or off, now and across restarts.
@@ -425,14 +435,27 @@ async fn put_mcp(
     {
         let mut vaults = state.vaults.write().await;
         vaults.registry.mcp_enabled = body.enabled;
+        // Writes cannot outlive the endpoint being on: leaving them armed while
+        // MCP is off would mean switching MCP back on silently restores write
+        // access someone thought they had revoked.
+        vaults.registry.mcp_writable = body.enabled && body.writable;
         vaults.registry.save(&state.state_dir)?;
     }
+    let ordering = std::sync::atomic::Ordering::Relaxed;
+    state.mcp_enabled.store(body.enabled, ordering);
     state
-        .mcp_enabled
-        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
+        .mcp_writable
+        .store(body.enabled && body.writable, ordering);
 
-    tracing::info!(enabled = body.enabled, "MCP endpoint toggled");
-    Ok(Json(serde_json::json!({ "mcp_enabled": body.enabled })))
+    tracing::info!(
+        enabled = body.enabled,
+        writable = body.enabled && body.writable,
+        "MCP endpoint toggled"
+    );
+    Ok(Json(serde_json::json!({
+        "mcp_enabled": body.enabled,
+        "mcp_writable": body.enabled && body.writable,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -678,13 +701,9 @@ async fn create_note(
     Path(vault): Path<String>,
     Json(body): Json<CreateBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .create_note(&body.path, &body.content)
-        .map_err(|e| bad_request(e.to_string()))?;
-    broadcast_latest(&state, &ix, result.seq);
-    Ok(Json(result))
+    Ok(Json(
+        crate::ops::create_note(&state, &vault, &body.path, &body.content).await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -700,18 +719,17 @@ async fn put_note(
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<PutBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .put_note(
+    Ok(Json(
+        crate::ops::update_note(
+            &state,
+            &vault,
             &id,
             body.base_version,
             &body.content,
             body.device_id.as_deref(),
         )
-        .map_err(|e| not_found(e.to_string()))?;
-    broadcast_latest(&state, &ix, result.seq);
-    Ok(Json(result))
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -729,7 +747,7 @@ async fn move_note(
     let result = ix
         .move_note(&id, &body.new_path)
         .map_err(|e| bad_request(e.to_string()))?;
-    broadcast_latest(&state, &ix, result.seq);
+    crate::ops::broadcast_latest(&state, &ix, result.seq);
     Ok(Json(result))
 }
 
@@ -737,10 +755,7 @@ async fn delete_note(
     State(state): State<Shared>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let seq = ix.delete_note(&id).map_err(|e| not_found(e.to_string()))?;
-    broadcast_latest(&state, &ix, seq);
+    let seq = crate::ops::delete_note(&state, &vault, &id).await?;
     Ok(Json(serde_json::json!({ "seq": seq })))
 }
 
@@ -795,7 +810,7 @@ async fn rename_folder(
     // One `moved` per contained note, so every client follows the rename
     // rather than discovering it at the next full tree fetch.
     for seq in &seqs {
-        broadcast_latest(&state, &ix, *seq);
+        crate::ops::broadcast_latest(&state, &ix, *seq);
     }
     Ok(Json(serde_json::json!({
         "from": body.from,
@@ -958,17 +973,6 @@ async fn push_changes(mut socket: WebSocket, state: Shared) {
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
-    }
-}
-
-/// Publishes the change identified by `seq` to every connected client.
-fn broadcast_latest(state: &Shared, ix: &Indexer, seq: i64) {
-    if let Ok(Some(change)) = ix
-        .db
-        .changes_since(seq - 1, 1)
-        .map(|c| c.into_iter().next())
-    {
-        let _ = state.events.send(change);
     }
 }
 

@@ -229,6 +229,7 @@ class ServerConfig {
     required this.stateDir,
     required this.vaultCount,
     required this.mcpEnabled,
+    required this.mcpWritable,
   });
 
   final String vaultRoot;
@@ -242,11 +243,18 @@ class ServerConfig {
   /// against a server that cannot serve it.
   final bool mcpEnabled;
 
+  /// Whether MCP may create, edit and delete notes, rather than only read.
+  ///
+  /// Absent reads as false for the same reason as [mcpEnabled]: a server that
+  /// does not know about writes must never appear to have them switched on.
+  final bool mcpWritable;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
     vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
+    mcpWritable: j['mcp_writable'] as bool? ?? false,
   );
 }
 

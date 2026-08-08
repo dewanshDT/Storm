@@ -76,6 +76,10 @@ class FakeServer {
   /// Whether the server would serve `/mcp`. Off by default, as the real one is.
   bool mcpEnabled = false;
 
+  /// Whether MCP may change the vault. Off unless explicitly turned on, and
+  /// disarmed with the endpoint, exactly as the real server does it.
+  bool mcpWritable = false;
+
   /// Answers `GET /v1/config` without `mcp_enabled`, the way a server built
   /// before the switch existed does.
   bool omitMcpField = false;
@@ -194,8 +198,9 @@ class FakeServer {
     if (path == '/v1/config/mcp' && request.method == 'PUT') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       mcpEnabled = body['enabled'] as bool;
+      mcpWritable = mcpEnabled && (body['writable'] as bool? ?? false);
       return http.Response(
-        jsonEncode({'mcp_enabled': mcpEnabled}),
+        jsonEncode({'mcp_enabled': mcpEnabled, 'mcp_writable': mcpWritable}),
         200,
         headers: j(''),
       );
@@ -217,6 +222,7 @@ class FakeServer {
           'state_dir': '/srv/storm/state',
           'vault_count': vaults.length,
           if (!omitMcpField) 'mcp_enabled': mcpEnabled,
+          if (!omitMcpField) 'mcp_writable': mcpWritable,
         }),
         200,
         headers: j(''),

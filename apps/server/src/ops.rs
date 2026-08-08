@@ -260,6 +260,76 @@ pub async fn note_version(
         .ok_or_else(|| not_found("no such version"))
 }
 
+/// Pushes a write to every connected client over the WebSocket.
+///
+/// In `ops` rather than in a handler because a write that never reaches the
+/// other devices is exactly the divergence this module exists to prevent: an
+/// agent's edit has to land on the phone the same way a phone's edit lands on
+/// the laptop, without waiting for someone to pull to refresh.
+pub fn broadcast_latest(state: &Shared, ix: &crate::index::Indexer, seq: i64) {
+    if let Ok(Some(change)) = ix
+        .db
+        .changes_since(seq - 1, 1)
+        .map(|c| c.into_iter().next())
+    {
+        let _ = state.events.send(change);
+    }
+}
+
+// ---- writes ------------------------------------------------------------
+//
+// The same three operations the Flutter client performs, reached the same way.
+// Nothing here is an MCP-specific write path: an agent's edit goes through the
+// identical `base_version` + diff3 merge a phone's does, so two writers racing
+// resolve exactly as two devices would.
+
+pub async fn create_note(
+    state: &Shared,
+    vault: &str,
+    path: &str,
+    content: &str,
+) -> ApiResult<crate::index::WriteResult> {
+    let handle = vault_of(state, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let result = ix
+        .create_note(path, content)
+        .map_err(|e| crate::api::bad_request(e.to_string()))?;
+    broadcast_latest(state, &ix, result.seq);
+    Ok(result)
+}
+
+/// Replaces a note's content, merging against the version the caller read.
+///
+/// `base_version` is not optional and there is no "just overwrite" path: it is
+/// the whole reason a second writer is safe here. When the note has moved on,
+/// the server merges and the result says so — `merged` or `conflict` — and the
+/// caller is expected to adopt the returned text rather than resend its own,
+/// which is the same contract the Flutter client obeys.
+pub async fn update_note(
+    state: &Shared,
+    vault: &str,
+    id: &str,
+    base_version: i64,
+    content: &str,
+    device_id: Option<&str>,
+) -> ApiResult<crate::index::WriteResult> {
+    let handle = vault_of(state, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let result = ix
+        .put_note(id, base_version, content, device_id)
+        .map_err(|e| not_found(e.to_string()))?;
+    broadcast_latest(state, &ix, result.seq);
+    Ok(result)
+}
+
+pub async fn delete_note(state: &Shared, vault: &str, id: &str) -> ApiResult<i64> {
+    let handle = vault_of(state, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let seq = ix.delete_note(id).map_err(|e| not_found(e.to_string()))?;
+    broadcast_latest(state, &ix, seq);
+    Ok(seq)
+}
+
 // ---- search and tags ---------------------------------------------------
 
 pub async fn search(
