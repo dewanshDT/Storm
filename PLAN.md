@@ -1327,6 +1327,33 @@ failure from any error state the app renders itself.
 
 ---
 
+### The storage root the VM was actually serving
+
+Found on 2026-08-08 while fixing the root persistence, and worth keeping because
+the symptom was invisible: `state/vaults.json` said the root was
+`/mnt/media/Docs/storm` — an NFS mount from `nas.lan`, set from the app — while
+the server was serving `/home/dewansh/storm/vaults`, whose newest note was from
+2026-08-07 10:56. The registry was being overwritten by `--vault-root` on every
+restart, so **each restart quietly moved the user back onto a stale copy**, and
+the `shit 💩` vault reported `missing` only because its directory exists solely
+under the real root.
+
+Nothing was lost — the stale copy is still at `/home/dewansh/storm/vaults` —
+but it is the closest this project has come to the failure it is written to
+avoid. Two things followed from it:
+
+- The fix landed with every vault reconciling `indexed=0 updated=0` against the
+  NAS root, which is the proof the index had been built from *those* files and
+  the home copy was the impostor.
+- `run.sh` no longer passes `--vault-root`. The storage root lives in
+  `state/vaults.json` and is set from the app; a flag beside it would only be a
+  second, misleading answer.
+
+**A backup was taken before the switch** (`/home/dewansh/.storm-last-backup`),
+and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
+
+---
+
 ## Blockers
 
 **None for development.** Two things about the deployment are worth knowing:
