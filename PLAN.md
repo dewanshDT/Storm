@@ -468,6 +468,18 @@ sandbox. Nothing so far is: the LAN server is reachable with `network.client`,
 and ATS does not apply because `package:http` uses `dart:io` sockets rather
 than `NSURLSession`.
 
+**36. One logo, generated icons — and three source images, not one.**
+`apps/client/assets/logo.svg` is the only drawing; every icon in the repo comes
+from `tool/make_icons.py` plus `icons_launcher`. Three PNGs rather than one
+because the platforms want different *pictures*: macOS the margin Apple
+reserves around an icon, Android full bleed because its launcher masks, and an
+adaptive foreground on transparency so the system can shift it. Linux is off —
+that handler emits only snap packaging, which Storm does not use.
+*Revisit if:* an SVG rasteriser is ever installed. `make_icons.py` renders
+through `qlmanage`, the only renderer macOS ships, and works around its
+flattening of transparency; `_render` is the single function that would change,
+and regenerating icons would stop needing a Mac.
+
 ---
 
 ## Data model

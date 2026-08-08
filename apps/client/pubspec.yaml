@@ -60,6 +60,48 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   drift_dev: ^2.34.0
   build_runner: ^2.15.1
+  icons_launcher: ^3.1.0
+
+# App icons, generated from `assets/logo.svg`:
+#
+#   python3 tool/make_icons.py     # SVG -> the three PNGs below
+#   dart run icons_launcher:create # PNGs -> every platform's icon files
+#
+# Three source images rather than one, because the platforms genuinely differ:
+# macOS wants the margin Apple reserves around an icon, Android's launcher
+# supplies its own mask and needs full bleed, and an adaptive icon needs its
+# foreground on a transparent background so the system can move it. See
+# `tool/make_icons.py` for how each is produced.
+icons_launcher:
+  image_path: "assets/icon/storm_icon.png"
+  platforms:
+    android:
+      enable: true
+      image_path: "assets/icon/storm_icon_full.png"
+      # The card's mint, as a colour rather than an image — the background of
+      # an adaptive icon is parallaxed and cropped, and a flat colour is the
+      # one thing that survives that intact.
+      adaptive_background_color: "#96f2d7"
+      adaptive_foreground_image: "assets/icon/storm_mark.png"
+      adaptive_round_image: "assets/icon/storm_icon_full.png"
+      # Android 13 themed icons: the system tints by alpha, so the mark alone
+      # is exactly the right layer.
+      adaptive_monochrome_image: "assets/icon/storm_mark.png"
+    macos:
+      enable: true
+      image_path: "assets/icon/storm_icon.png"
+    # Off deliberately. The Linux handler's only output is snap packaging —
+    # a snapcraft.yaml with a placeholder dbus name and `Categories=Entertainment`
+    # — and Storm is not shipped as a snap. Checking that in would describe a
+    # packaging story that does not exist. Flutter's Linux runner has no other
+    # icon slot; there is nowhere for one to go until there is a package.
+    linux:
+      enable: false
+    web:
+      enable: true
+      image_path: "assets/icon/storm_icon.png"
+      maskable_image_path: "assets/icon/storm_icon_full.png"
+      favicon_path: "assets/icon/storm_icon.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
