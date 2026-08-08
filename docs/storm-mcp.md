@@ -20,6 +20,18 @@
 >    never parsed `_storm/vault.md` — it only excluded `_storm/` from note
 >    counts. Small, since `frontmatter::get_scalar` exists, but not a wrapper.
 >
+> Two more the *deployment* earned, on 2026-08-08:
+>
+> 4. **`_storm/vault.md` was discoverable.** The brief says nothing about it
+>    because the exclusion looked handled — but it lived in the Flutter client,
+>    at five call sites, not in the query. One `NOT_CONFIG` predicate in
+>    `db.rs` now covers search, recents and tags. Not the tree: the client reads
+>    that note for a vault's colour and property types.
+> 5. **On/off had to be a runtime setting, not a boot flag.** `--mcp` decided
+>    whether the route was mounted, so switching AI access off meant an SSH
+>    session. `/mcp` is now always mounted behind a gate, persisted in
+>    `state/vaults.json`, with a switch in the app under **Server ▸ AI access**.
+>
 > And three SDK/spec defaults that would each have shipped as a bug: rmcp
 > restricts `Host` to loopback (the LAN address is refused with nothing naming
 > the cause), `structuredContent` must be a JSON object though rmcp will send a

@@ -145,6 +145,20 @@ class StormApi {
     );
   }
 
+  /// Switches the server's MCP endpoint on or off.
+  ///
+  /// Persisted server-side, so it survives a restart — the setting is the
+  /// server's, not this device's.
+  Future<void> setMcpEnabled(bool enabled) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/mcp'),
+        headers: _headers,
+        body: jsonEncode({'enabled': enabled}),
+      ),
+    );
+  }
+
   Future<void> createFolder(String vaultId, String path) async {
     _decode(
       await _client.post(

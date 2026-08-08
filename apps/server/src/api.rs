@@ -57,6 +57,10 @@ pub struct AppState {
     /// Notifies the watcher that the root moved, so it can be respawned
     /// against the new one. Sends the new root.
     pub root_changed: broadcast::Sender<PathBuf>,
+    /// Whether `/mcp` answers. Mirrors `Registry::mcp_enabled`, which is the
+    /// persisted copy; this one exists so the gate can read it without taking
+    /// the vault lock on every request.
+    pub mcp_enabled: std::sync::atomic::AtomicBool,
 }
 
 pub type Shared = Arc<AppState>;
@@ -165,19 +169,27 @@ pub async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
 /// a layer only to the routes registered *above* it, so `/mcp` has to be nested
 /// before `require_token` or it would be the one unauthenticated route on the
 /// server. `mcp_requires_the_bearer_token` is the test that holds this.
-pub fn router(state: Shared, mcp: Option<crate::mcp::McpOptions>) -> Router {
-    let mut router = Router::new().route("/v1/health", get(health));
+pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
+    // Always mounted, never conditionally: whether MCP answers is a runtime
+    // setting the app can toggle, and a route that only exists when a flag was
+    // passed at boot could not be turned on without a restart the client has no
+    // way to perform.
+    let mcp_router = Router::new()
+        .fallback_service(crate::mcp::service(state.clone(), mcp))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_mcp_enabled,
+        ));
 
-    if let Some(options) = mcp {
-        router = router.nest_service("/mcp", crate::mcp::service(state.clone(), options));
-    }
-
-    router
+    Router::new()
+        .route("/v1/health", get(health))
+        .nest("/mcp", mcp_router)
         // Server-level: which vaults exist and where they live.
         .route("/v1/vaults", get(list_vaults).post(create_vault))
         .route("/v1/vaults/{vault}", patch(rename_vault))
         .route("/v1/vaults/{vault}", delete(remove_vault))
         .route("/v1/config", get(get_config).put(put_config))
+        .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/recents", get(recents))
         // Vault-scoped: everything that touches notes.
         .route("/v1/vaults/{vault}/tree", get(tree))
@@ -253,6 +265,27 @@ async fn require_token(
         Some(t) if constant_time_eq(&t, &state.token) => next.run(request).await,
         _ => ApiError(StatusCode::UNAUTHORIZED, "invalid or missing token".into()).into_response(),
     }
+}
+
+/// Refuses `/mcp` while MCP is switched off.
+///
+/// A 404 rather than a 403: to a client that has not been told otherwise, a
+/// disabled endpoint and an absent one are the same thing, and the message says
+/// which this is. It runs *after* `require_token`, so an unauthenticated caller
+/// gets 401 first and this never confirms the endpoint exists to a stranger.
+async fn require_mcp_enabled(
+    State(state): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.mcp_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        return next.run(request).await;
+    }
+    ApiError(
+        StatusCode::NOT_FOUND,
+        "MCP is switched off on this server. Turn it on in Storm's server settings.".into(),
+    )
+    .into_response()
 }
 
 /// Compares without leaking length or position through timing.
@@ -356,6 +389,8 @@ struct ConfigResponse {
     vault_root: String,
     state_dir: String,
     vault_count: usize,
+    /// Whether `/mcp` is answering. The app shows this and can change it.
+    mcp_enabled: bool,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -364,7 +399,40 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         vault_root: vaults.registry.root.display().to_string(),
         state_dir: state.state_dir.display().to_string(),
         vault_count: vaults.registry.vaults.len(),
+        mcp_enabled: vaults.registry.mcp_enabled,
     }))
+}
+
+#[derive(Deserialize)]
+struct McpBody {
+    enabled: bool,
+}
+
+/// Switches the MCP endpoint on or off, now and across restarts.
+///
+/// Its own route rather than a field on `PUT /v1/config`, because that one
+/// re-points the storage root — a heavyweight operation with an orphan check
+/// and a watcher respawn. Toggling a read-only endpoint should not have to send
+/// a `vault_root` it does not want to change.
+///
+/// The atomic is set *after* the registry is saved: if the write fails the
+/// endpoint keeps its old state, which is the honest outcome. The other order
+/// would report success while the setting silently reverted on next boot.
+async fn put_mcp(
+    State(state): State<Shared>,
+    Json(body): Json<McpBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.mcp_enabled = body.enabled;
+        vaults.registry.save(&state.state_dir)?;
+    }
+    state
+        .mcp_enabled
+        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
+
+    tracing::info!(enabled = body.enabled, "MCP endpoint toggled");
+    Ok(Json(serde_json::json!({ "mcp_enabled": body.enabled })))
 }
 
 #[derive(Deserialize)]

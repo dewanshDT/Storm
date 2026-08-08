@@ -285,6 +285,42 @@ check("no token is refused", status == 401, status)
 status, _ = rpc("tools/list", token="wrong-token")
 check("a wrong token is refused", status == 401, status)
 
+print("== the config note is not one of the user's notes ==")
+# `_storm/vault.md` is Storm's own per-vault configuration, kept as ordinary
+# markdown. The Flutter client filtered it at five separate call sites, so MCP —
+# a new caller — saw it. The rule now lives in the query.
+rest(
+    "POST",
+    f"/v1/vaults/{vault}/notes",
+    {"path": "_storm/scratch.md", "content": "---\ntags:\n  - internal\n---\n\nrotating internals\n"},
+)
+result, _ = call("search", {"vault": vault, "query": "rotating"})
+paths = [h["path"] for h in structured(result).get("hits", [])]
+check("search does not return _storm/", not any(p.startswith("_storm/") for p in paths), paths)
+check("search still returns the user's note", "MCP/Tornado.md" in paths, paths)
+
+result, _ = call("list_tags", {"vault": vault})
+tags = [t["tag"] for t in structured(result).get("tags", [])]
+check("tags from _storm/ are not listed", "internal" not in tags, tags)
+
+result, _ = call("recent_notes")
+rpaths = [r["path"] for r in structured(result).get("recents", [])]
+check("recents does not return _storm/", not any(p.startswith("_storm/") for p in rpaths), rpaths)
+
+print("== the endpoint can be switched off and on ==")
+status, _ = rest("PUT", "/v1/config/mcp", {"enabled": False})
+check("toggling off succeeds", status == 200, status)
+status, body = rpc("tools/list")
+check("mcp refuses while off", status == 404, status)
+_, cfg = rest("GET", "/v1/config")
+check("config reports it off", cfg.get("mcp_enabled") is False, cfg)
+
+status, _ = rest("PUT", "/v1/config/mcp", {"enabled": True})
+status, body = rpc("tools/list")
+check("mcp answers again once on", status == 200 and "result" in body, status)
+_, cfg = rest("GET", "/v1/config")
+check("config reports it on", cfg.get("mcp_enabled") is True, cfg)
+
 print("== nothing leaks a filesystem path ==")
 blob = json.dumps(seen_payloads)
 check(
