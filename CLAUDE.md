@@ -78,6 +78,15 @@ the generated registrant still references them, so the build fails on a symbol
 that looks like it should exist. Prefer first-party `flutter/packages` plugins
 (`file_selector` over `file_picker`, for instance).
 
+**A release APK has no network unless the *main* manifest grants it.** Flutter's
+template declares `android.permission.INTERNET` in
+`android/app/src/{debug,profile}/AndroidManifest.xml` only, so hot reload can
+reach the host — every debug build works, and the first release build on a
+phone cannot open a socket at all. The kernel refuses it with `EPERM`, which
+the app reports as "Couldn't reach the server", indistinguishable from a wrong
+address. `test/android_manifest_test.dart` guards it. **A hash-verified install
+proves the bytes arrived, not that the app works** — open it.
+
 **The macOS app is sandboxed, so its entitlements are part of the build.**
 `macos/Runner/{DebugProfile,Release}.entitlements` must grant
 `network.client` — without it the app builds, launches and then reports the
