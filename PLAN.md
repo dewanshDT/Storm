@@ -49,6 +49,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
 | M11 | Typed note properties | **done** | properties, colours, fonts |
 | M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
+| M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 
 Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
@@ -479,6 +480,64 @@ that handler emits only snap packaging, which Storm does not use.
 through `qlmanage`, the only renderer macOS ships, and works around its
 flattening of transparency; `_render` is the single function that would change,
 and regenerating icons would stop needing a Mac.
+
+**40. The stored storage root wins over the flag.**
+`state/vaults.json` is the source of truth for where vaults live; `--vault-root`
+seeds a registry that does not exist yet, and a disagreement between the two is
+logged rather than quietly resolved. Found by asking the obvious question of a
+feature that had shipped: `Registry::load` overwrote the parsed root with its
+argument, so a root set in the app was written to the file, ignored on the next
+boot, and then *erased* by the next save — with any vault adopted under the new
+root left registered as `missing`, which is the "where did my notes go" shape
+decision 25 exists to prevent. A setting that does not survive a restart is not
+a setting.
+*Revisit if:* the root ever needs to be changed on a server whose registry
+cannot be reached — in which case the honest answer is editing `vaults.json`,
+which the module is deliberately written to allow.
+
+**37. MCP is a caller of the domain layer, so the domain layer had to exist.**
+`ops.rs` holds one plain async fn per operation; `api.rs` handlers and `mcp.rs`
+tools both call it and neither owns logic. The brief's "MCP is never a second
+implementation" could not be honoured by discipline alone — the logic lived
+inside axum handlers a second caller cannot reach. **A new operation goes in
+`ops.rs`.** One added to a handler is invisible to MCP; one added to a tool is
+the drift this prevents.
+*Revisit if:* an operation is genuinely HTTP-shaped — streaming, or a WebSocket
+— in which case it stays in `api.rs` and MCP simply doesn't offer it.
+
+**38. Writes exist, and are off unless switched on.** *(supersedes the runway)*
+Originally: read tools now, writes after the freshly cut-over vault had had
+ordinary use. The user overrode that on 2026-08-08, which is their call — so
+`create_note`, `update_note` and `delete_note` ship, and the caution moved from
+the calendar into the design instead.
+
+Read-only is the default and a first-class mode, not a disabled state:
+`mcp_writable` is a second flag that defaults false, cannot be on while the
+endpoint is off, and **filters the tool router** — a read-only server does not
+advertise the write tools at all, so an agent cannot pick one it was never
+shown. Writes go through the same `put_note` with `base_version` and diff3 the
+Flutter client uses, so an agent racing a phone resolves exactly as two phones
+would, and `ops::broadcast_latest` means an agent's edit reaches every connected
+device rather than waiting for a pull.
+*Revisit if:* an agent turns out to need `move_note`, `tag_note` or
+`append_to_note` — all Phase 2 designs, all the same shape.
+
+**38a. Still no trash, and MCP does not get one of its own.**
+`delete_note` removes the file immediately, exactly as the Flutter client's
+delete does. `note_versions` still holds the text, so it is recoverable from the
+index, but nothing in the vault is. Adding a trash only for MCP would make
+agent-deleted and user-deleted notes behave differently, which is its own bug
+class — if trash is worth having it is a Storm feature decided once, for every
+client. The settings screen says this before write access is granted.
+
+**39. MCP speaks HTTP only; `rmcp` is pinned exactly.**
+No stdio shim: Claude Code connects to HTTP MCP servers directly with a bearer
+header, so a shim would be a second thing to maintain for no capability. The pin
+is `=3.1.2` because rmcp shipped five releases in the eleven days around the
+2026-07-28 spec revision, and it is still Tier 2 — `ProtocolVersion::LATEST` is
+2025-11-25, which Storm follows rather than announcing a revision the SDK's own
+transport treats as provisional.
+*Revisit if:* rmcp reaches Tier 1, or a client Storm wants only speaks stdio.
 
 ---
 
@@ -1108,6 +1167,127 @@ assert; it made every tap in the tree actually ripple.
 
 ---
 
+### M13 — MCP, read-only ✅
+
+**Deployed 2026-08-08.** Server only — `git diff` over `apps/client` between the
+APK on the phone and this commit is empty, so the mobile app needed no rebuild;
+the phone is already running this code. Binary verified by comparing the local
+build's sha256 against `/proc/<pid>/exe` on the VM
+(`54c158cf…3801be1`), and the client-facing routes (`/v1/vaults`, `/v1/recents`,
+`/tree`, the web bundle) all answer 200 over the LAN afterwards.
+
+Two things the deploy itself taught:
+
+- ***`make build-server` failed and left the previous binary in place.***
+  `~/.cargo/bin` is not on a non-interactive shell's PATH, so the target's
+  `command -v cargo-zigbuild` guard fired — and the stale 6 MB binary from
+  2026-08-07 was still sitting at the output path, which a deploy that only
+  checked "does the file exist" would have shipped. Worse, `rustc` on PATH is
+  **Homebrew's**, which has no `x86_64-unknown-linux-musl` target even though
+  `rustup` has it installed; the build has to run with
+  `~/.rustup/toolchains/stable-aarch64-apple-darwin/bin` first. Always compare
+  the artefact's timestamp and hash, never its existence.
+- *The VM binds `--host 0.0.0.0`*, so `mcp::allowed_hosts` correctly returns an
+  empty list and logs `allowed_hosts=[]` at startup. The LAN check that matters
+  was then done for real: `initialize` from this Mac against
+  `http://192.168.91.51:8484/mcp`, which carries `Host: 192.168.91.51:8484` and
+  would have been refused by rmcp's default.
+
+Rollback is one command: `storm-server.prev` and `run.sh.prev` sit beside the
+live ones, and the pre-swap index snapshot is at the path in
+`/home/dewansh/.storm-last-backup`.
+
+**Two things the first live use turned up**, both fixed the same day:
+
+- ***Storm's own config note was discoverable as one of the user's notes.***
+  Searching the real vault through MCP returned `_storm/vault.md`. Pre-existing
+  REST behaviour, not new — but the Flutter client had been filtering `_storm/`
+  at **five separate call sites**, so the rule lived in the callers rather than
+  in the query, and MCP was a caller that did not know it. Now one `NOT_CONFIG`
+  predicate in `db.rs` covers search, recents, tags and tag listings.
+  Deliberately *not* the tree or `get_note_by_path`: the client reads that note
+  to load a vault's colour and property types.
+- ***The endpoint could only be switched at boot.*** `--mcp` decided whether the
+  route was mounted, so turning MCP off meant an SSH session — for the one
+  setting most likely to be wanted in a hurry. `/mcp` is now always mounted
+  behind a gate, the setting is persisted in `state/vaults.json`, and the app
+  has a switch under **Server ▸ AI access**. `--mcp` is an override at boot, not
+  the source of truth.
+
+**A release APK could never reach the server, and three deploys hid it.**
+Reported from the phone as *"Couldn't reach the server … OS Error: Operation
+not permitted, errno = 1"*. `EPERM` on `connect` is Android refusing the socket
+outright: Flutter's template declares `INTERNET` in the **debug** and
+**profile** manifests only, so hot reload can talk to the host machine, and
+`android/app/src/main/AndroidManifest.xml` had never carried it. Every debug
+APT this project has installed worked; the switch to
+`flutter build apk --release` for the icon deploy is what exposed it.
+
+The deeper mistake is the verification, not the manifest. Each of those deploys
+was "verified" by comparing the local APK's sha256 against the installed
+package — which proves the bytes arrived and nothing else. **The app was never
+opened.** A hash match is not a working app, and it took the user reporting a
+red error screen to find out. `test/android_manifest_test.dart` guards the
+permission now, and the fix was confirmed by launching the app on the device
+and seeing the vault list, not by another hash.
+
+Same class as the macOS entitlements finding two milestones earlier: a platform
+permission that fails silently, at the socket, long after everything that could
+have caught it has passed.
+
+The switch also repeated a mistake this project has already made once: a
+`SwitchListTile` inside a colour-carrying `Container` trips Flutter's
+"ink splashes may be invisible" assertion, exactly as the M12 sidebar did.
+Decision 34's `Material` fix was in `PLAN.md` and still got re-made — worth
+knowing that a recorded lesson is not the same as a remembered one.
+
+
+`docs/storm-mcp.md`, Phase 1. Nine read tools at `/mcp`, behind `--mcp` and the
+same bearer token. Write tools are designed and deliberately not built yet.
+
+**The brief's Principle needed a refactor to be true, not just discipline.**
+"MCP is never a second way to touch markdown" is unachievable while every
+operation lives inside an axum handler: a handler takes extractors and returns
+HTTP types, so a second caller physically cannot reach it and would have to
+re-derive vault resolution, the 404-vs-409 rule and FTS sanitising. `ops.rs` is
+that refactor — one plain async fn per operation, called by the handler and by
+the tool. The 81-check `e2e.py` suite, unchanged, is what proves the extraction
+did not alter REST.
+
+**Two claims in the brief did not survive contact.** `get_note_history` was
+described as backed by existing plumbing: `note_versions` is populated and
+`version_content` reads one revision, but nothing *listed* them and neither was
+on a route, so this milestone added `Db::list_versions` and two REST routes —
+the Flutter client could not see history either. And `get_vault`'s description
+was said to come from `_storm/vault.md`; the server had never parsed that note,
+only excluded it from counts.
+
+**Three defaults that would have shipped as bugs**, each found by reading the
+SDK and the spec rather than by testing:
+
+1. *rmcp restricts `Host` to loopback by default*, as DNS-rebinding protection.
+   Storm is reached at a LAN address, so every request from the phone or
+   another laptop would have been refused with nothing naming the `Host` header
+   as the cause.
+2. *`structuredContent` must be a JSON object.* rmcp types it as any `Value`
+   and will happily send a bare array, which is what the first nine tools did.
+   List results are now wrapped under the REST envelopes' own keys.
+3. *A missing vault was a protocol error.* The spec reserves those for
+   malformed requests and says clients need not show them to the model, while
+   tool execution errors are the ones carrying "actionable feedback that
+   language models can use to self-correct". An agent holding a stale note id
+   is exactly that case, so 4xx now returns `isError: true` with the message
+   REST would give; only a server fault is a protocol error.
+
+Each of the three has a test, and each test was verified by breaking the code:
+mounting `/mcp` below the auth layer (unauthenticated calls returned 200),
+reverting the error mapping, and unwrapping the lists. The last one initially
+*crashed* the suite rather than reporting — a list where a dict was expected —
+which is a worse signal than a failure, so the payload accessor now normalises
+and the run reports all eight failures.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1144,6 +1324,33 @@ Note also that the last of these was reported as "still the same error" after
 two rounds of unrelated fixes. **Get the exception text before changing
 anything** — "red screen" means an unhandled exception, which is a different
 failure from any error state the app renders itself.
+
+---
+
+### The storage root the VM was actually serving
+
+Found on 2026-08-08 while fixing the root persistence, and worth keeping because
+the symptom was invisible: `state/vaults.json` said the root was
+`/mnt/media/Docs/storm` — an NFS mount from `nas.lan`, set from the app — while
+the server was serving `/home/dewansh/storm/vaults`, whose newest note was from
+2026-08-07 10:56. The registry was being overwritten by `--vault-root` on every
+restart, so **each restart quietly moved the user back onto a stale copy**, and
+the `shit 💩` vault reported `missing` only because its directory exists solely
+under the real root.
+
+Nothing was lost — the stale copy is still at `/home/dewansh/storm/vaults` —
+but it is the closest this project has come to the failure it is written to
+avoid. Two things followed from it:
+
+- The fix landed with every vault reconciling `indexed=0 updated=0` against the
+  NAS root, which is the proof the index had been built from *those* files and
+  the home copy was the impostor.
+- `run.sh` no longer passes `--vault-root`. The storage root lives in
+  `state/vaults.json` and is set from the app; a flag beside it would only be a
+  second, misleading answer.
+
+**A backup was taken before the switch** (`/home/dewansh/.storm-last-backup`),
+and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
 
 ---
 

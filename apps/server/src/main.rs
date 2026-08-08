@@ -12,7 +12,9 @@ mod api;
 mod db;
 mod frontmatter;
 mod index;
+mod mcp;
 mod merge;
+mod ops;
 mod parse;
 mod registry;
 mod vault;
@@ -69,6 +71,14 @@ struct Args {
     /// Directory holding the built Flutter web client, served at `/`.
     #[arg(long)]
     web: Option<PathBuf>,
+
+    /// Serve the Model Context Protocol endpoint at `/mcp`.
+    ///
+    /// Read-only tools over the same vaults and the same bearer token. Off by
+    /// default: it is a new surface on the notes, and turning one on should be
+    /// a decision rather than a side effect of upgrading.
+    #[arg(long)]
+    mcp: bool,
 
     /// Write consistent snapshots of every vault index into this directory,
     /// then exit.
@@ -265,6 +275,24 @@ async fn main() -> Result<()> {
         .with_context(|| format!("resolving state directory {}", args.state.display()))?;
 
     let mut registry = Registry::load(&state_dir, &root).context("reading the vault registry")?;
+
+    // The registry's root wins, because it is a setting the app can change and
+    // one that does not survive a restart is not a setting. The flag seeds the
+    // first run. When both are given and disagree, say so rather than silently
+    // picking one: that mismatch used to end with the app's choice erased and
+    // every vault adopted under it left registered as `missing`.
+    let asked_for_root = args.vault_root.is_some() || args.vault.is_some();
+    if asked_for_root && registry.root != root {
+        tracing::warn!(
+            stored = %registry.root.display(),
+            requested = %root.display(),
+            "the stored storage root differs from the one on the command line; \
+             using the stored one. Change it in Storm's server settings, or edit \
+             state/vaults.json — Storm never moves vault directories."
+        );
+    }
+    let root = registry.root.clone();
+
     let adopted = registry.scan_root(&state_dir, &index::now_rfc3339())?;
     for dir in &adopted {
         tracing::info!(dir = %dir, "adopted a new vault");
@@ -301,7 +329,7 @@ async fn main() -> Result<()> {
     }
 
     registry.save(&state_dir).context("saving the registry")?;
-    let vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
+    let mut vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
 
     let token = args.token.unwrap_or_else(|| {
         let generated = uuid::Uuid::new_v4().to_string();
@@ -313,12 +341,32 @@ async fn main() -> Result<()> {
 
     let (events, _) = broadcast::channel(1024);
     let (root_changed, _) = broadcast::channel(4);
+
+    // `--mcp` turns it on at boot; otherwise the persisted setting decides, so
+    // a toggle made from the app survives a restart. The flag is an override
+    // rather than the source of truth, which is why it also persists — a server
+    // started with it and then switched off in the app stays off.
+    let mcp_enabled = args.mcp || vault_set.registry.mcp_enabled;
+    if mcp_enabled != vault_set.registry.mcp_enabled {
+        vault_set.registry.mcp_enabled = mcp_enabled;
+        vault_set.registry.save(&state_dir)?;
+    }
+    let mcp_writable = mcp_enabled && vault_set.registry.mcp_writable;
+    tracing::info!(
+        enabled = mcp_enabled,
+        writable = mcp_writable,
+        allowed_hosts = ?mcp::allowed_hosts(&args.host, args.port),
+        "MCP endpoint at /mcp (read-only tools, same bearer token)"
+    );
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
         token,
         state_dir: state_dir.clone(),
         root_changed,
+        mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
+        mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -327,7 +375,12 @@ async fn main() -> Result<()> {
     watcher::spawn(root.clone(), state.clone()).context("starting file watcher")?;
     tracing::info!(path = %root.display(), "watching the storage root for external edits");
 
-    let mut app = api::router(state);
+    let mut app = api::router(
+        state,
+        mcp::McpOptions {
+            allowed_hosts: mcp::allowed_hosts(&args.host, args.port),
+        },
+    );
 
     // The Flutter web client is served by this same binary, so there is one
     // thing to run in the homelab rather than two.
@@ -380,6 +433,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 8484,
             token: None,
+            mcp: false,
             dry_run: false,
             web: None,
             backup_db: None,
