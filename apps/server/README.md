@@ -99,8 +99,9 @@ on a handshake.
 | `POST /v1/vaults` | `{name}` — creates the directory under the root |
 | `PATCH /v1/vaults/{v}` | `{name}` — display name only, nothing moves |
 | `DELETE /v1/vaults/{v}` | unregisters. **Never deletes files.** |
-| `GET /v1/config` | storage root, state directory, vault count |
+| `GET /v1/config` | storage root, state directory, vault count, MCP state |
 | `PUT /v1/config` | `{vault_root, orphan_ok?}` — see below |
+| `PUT /v1/config/mcp` | `{enabled, writable?}` — persisted, see MCP below |
 | `GET /v1/recents?limit=` | recently opened notes, across every vault |
 | `WS /v1/stream` | change events for every vault, each tagged `vault_id` |
 
@@ -132,6 +133,12 @@ is a `409`, and stays in the registry rather than disappearing.
 `state/vaults.json` maps a stable UUID to the directory and a display name, so
 a rename does not orphan the index. The root is rescanned at startup, on a root
 change, and on vault create/delete — not continuously.
+
+**The stored root wins.** `state/vaults.json` holds the storage root, and that
+is the setting; `--vault-root` only seeds a registry that does not exist yet. If
+both are given and disagree, the server logs a warning naming each and uses the
+stored one. Change it in the app under Server, or by editing `vaults.json` —
+either way Storm still never moves the directories.
 
 **Folders are recorded, not only derived.** The tree still derives folders from
 note paths, but a folder created through the API is also written to a `folders`
@@ -179,10 +186,19 @@ Two behaviours worth knowing:
 
 ## MCP
 
-The Model Context Protocol is served at `/mcp`, so an agent can search and read
-the vaults. Nine read-only tools: `list_vaults`, `get_vault`, `search`,
-`get_note`, `get_related_notes`, `list_tags`, `recent_notes`,
-`get_note_history`, `get_note_version`. No write tools — see decision 38.
+The Model Context Protocol is served at `/mcp`, so an agent can work with the
+vaults. Nine read tools — `list_vaults`, `get_vault`, `search`, `get_note`,
+`get_related_notes`, `list_tags`, `recent_notes`, `get_note_history`,
+`get_note_version` — and three write tools, `create_note`, `update_note` and
+`delete_note`, served only in read-write mode.
+
+**Read-only is a mode, not a disabled state.** The write tools are filtered out
+of the router when `mcp_writable` is off, so a read-only server does not
+advertise them at all — an agent cannot choose a tool it was never shown.
+`update_note` carries `base_version` into the same diff3 merge the Flutter
+client uses, and `create_note` stamps `source: ai` through the frontmatter
+line-splicer. There is no trash: `delete_note` removes the file at once, exactly
+as the client's delete does, and only `note_versions` still holds the text.
 
 **Off by default, and switched at runtime.** The setting lives in
 `state/vaults.json` beside the storage root, so it survives a restart, and the
@@ -199,7 +215,11 @@ curl -X PUT http://host:8484/v1/config/mcp -H "Authorization: Bearer $TOKEN" \
 storm-server --vault-root ~/vaults --state ~/state --token "$STORM_TOKEN" --mcp
 ```
 
-`GET /v1/config` reports `mcp_enabled`.
+`GET /v1/config` reports `mcp_enabled` and `mcp_writable`.
+
+MCP resolves vaults through the same registry the REST API uses — the same root,
+the same `vault_of`, no path handling of its own — so it always sees whatever
+storage root is currently in force.
 
 Same bearer token as everything else, because `/mcp` is nested above the auth
 middleware in `api.rs`. That ordering is load-bearing: axum applies a layer only

@@ -159,6 +159,13 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose
   directory is gone stays in the registry marked `missing`.
+- **The stored storage root wins over `--vault-root`.** `state/vaults.json` is
+  the source of truth; the flag seeds a registry that does not exist yet, and a
+  disagreement is logged rather than silently resolved. `Registry::load` used to
+  overwrite the parsed root with its argument, so a root chosen in the app was
+  recorded, ignored on the next boot, then erased by the next save — with every
+  vault adopted under it left registered as `missing`. **A setting that does not
+  survive a restart is not a setting.**
 
 ## Style
 

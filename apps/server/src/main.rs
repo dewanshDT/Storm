@@ -275,6 +275,24 @@ async fn main() -> Result<()> {
         .with_context(|| format!("resolving state directory {}", args.state.display()))?;
 
     let mut registry = Registry::load(&state_dir, &root).context("reading the vault registry")?;
+
+    // The registry's root wins, because it is a setting the app can change and
+    // one that does not survive a restart is not a setting. The flag seeds the
+    // first run. When both are given and disagree, say so rather than silently
+    // picking one: that mismatch used to end with the app's choice erased and
+    // every vault adopted under it left registered as `missing`.
+    let asked_for_root = args.vault_root.is_some() || args.vault.is_some();
+    if asked_for_root && registry.root != root {
+        tracing::warn!(
+            stored = %registry.root.display(),
+            requested = %root.display(),
+            "the stored storage root differs from the one on the command line; \
+             using the stored one. Change it in Storm's server settings, or edit \
+             state/vaults.json — Storm never moves vault directories."
+        );
+    }
+    let root = registry.root.clone();
+
     let adopted = registry.scan_root(&state_dir, &index::now_rfc3339())?;
     for dir in &adopted {
         tracing::info!(dir = %dir, "adopted a new vault");

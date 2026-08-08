@@ -481,6 +481,20 @@ through `qlmanage`, the only renderer macOS ships, and works around its
 flattening of transparency; `_render` is the single function that would change,
 and regenerating icons would stop needing a Mac.
 
+**40. The stored storage root wins over the flag.**
+`state/vaults.json` is the source of truth for where vaults live; `--vault-root`
+seeds a registry that does not exist yet, and a disagreement between the two is
+logged rather than quietly resolved. Found by asking the obvious question of a
+feature that had shipped: `Registry::load` overwrote the parsed root with its
+argument, so a root set in the app was written to the file, ignored on the next
+boot, and then *erased* by the next save — with any vault adopted under the new
+root left registered as `missing`, which is the "where did my notes go" shape
+decision 25 exists to prevent. A setting that does not survive a restart is not
+a setting.
+*Revisit if:* the root ever needs to be changed on a server whose registry
+cannot be reached — in which case the honest answer is editing `vaults.json`,
+which the module is deliberately written to allow.
+
 **37. MCP is a caller of the domain layer, so the domain layer had to exist.**
 `ops.rs` holds one plain async fn per operation; `api.rs` handlers and `mcp.rs`
 tools both call it and neither owns logic. The brief's "MCP is never a second
