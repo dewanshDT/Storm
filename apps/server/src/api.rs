@@ -110,7 +110,7 @@ pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Errors rendered as JSON rather than bare status codes, so the Flutter
 /// client can show something useful.
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -124,19 +124,19 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-fn bad_request(msg: impl Into<String>) -> ApiError {
+pub fn bad_request(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
 
-fn not_found(msg: impl Into<String>) -> ApiError {
+pub fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, msg.into())
 }
 
-fn conflict(msg: impl Into<String>) -> ApiError {
+pub fn conflict(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::CONFLICT, msg.into())
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Resolves a vault id to its open handle.
 ///
@@ -144,7 +144,7 @@ type ApiResult<T> = Result<T, ApiError>;
 /// registered vault whose directory has gone is a 409 — the difference between
 /// "never existed" and "is not where it should be" is the whole point of
 /// keeping missing vaults in the registry.
-async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
+pub async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
     let vaults = state.vaults.read().await;
     if let Some(handle) = vaults.get(id) {
         return Ok(handle);
@@ -158,9 +158,21 @@ async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
     }
 }
 
-pub fn router(state: Shared) -> Router {
-    Router::new()
-        .route("/v1/health", get(health))
+/// Builds the HTTP surface.
+///
+/// `mcp` mounts the Model Context Protocol endpoint. It is a parameter rather
+/// than something bolted on afterwards for a load-bearing reason: axum applies
+/// a layer only to the routes registered *above* it, so `/mcp` has to be nested
+/// before `require_token` or it would be the one unauthenticated route on the
+/// server. `mcp_requires_the_bearer_token` is the test that holds this.
+pub fn router(state: Shared, mcp: Option<crate::mcp::McpOptions>) -> Router {
+    let mut router = Router::new().route("/v1/health", get(health));
+
+    if let Some(options) = mcp {
+        router = router.nest_service("/mcp", crate::mcp::service(state.clone(), options));
+    }
+
+    router
         // Server-level: which vaults exist and where they live.
         .route("/v1/vaults", get(list_vaults).post(create_vault))
         .route("/v1/vaults/{vault}", patch(rename_vault))
@@ -177,6 +189,11 @@ pub fn router(state: Shared) -> Router {
         .route("/v1/vaults/{vault}/notes/{id}/move", post(move_note))
         .route("/v1/vaults/{vault}/notes/{id}/opened", post(mark_opened))
         .route("/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
+        .route("/v1/vaults/{vault}/notes/{id}/versions", get(note_versions))
+        .route(
+            "/v1/vaults/{vault}/notes/{id}/versions/{version}",
+            get(note_version),
+        )
         .route("/v1/vaults/{vault}/folders", post(create_folder))
         .route("/v1/vaults/{vault}/folders/rename", post(rename_folder))
         .route("/v1/vaults/{vault}/folders/{*path}", delete(delete_folder))
@@ -257,38 +274,9 @@ async fn health() -> impl IntoResponse {
 
 // ---- vaults ------------------------------------------------------------
 
-#[derive(Serialize)]
-struct VaultInfo {
-    id: String,
-    name: String,
-    dir: String,
-    note_count: i64,
-    /// The directory is gone. The entry is kept so the vault can be repaired
-    /// rather than silently forgotten.
-    missing: bool,
-}
-
 async fn list_vaults(State(state): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
-    let vaults = state.vaults.read().await;
-    let mut out = Vec::with_capacity(vaults.registry.vaults.len());
-
-    for entry in &vaults.registry.vaults {
-        let (note_count, missing) = match vaults.get(&entry.id) {
-            Some(handle) => {
-                let ix = handle.indexer.lock().await;
-                (ix.db.count_notes().unwrap_or(0), false)
-            }
-            None => (0, true),
-        };
-        out.push(VaultInfo {
-            id: entry.id.clone(),
-            name: entry.name.clone(),
-            dir: entry.dir.clone(),
-            note_count,
-            missing,
-        });
-    }
-    Ok(Json(serde_json::json!({ "vaults": out })))
+    let vaults = crate::ops::list_vaults(&state).await?;
+    Ok(Json(serde_json::json!({ "vaults": vaults })))
 }
 
 #[derive(Deserialize)]
@@ -490,17 +478,6 @@ impl<T> ContextMsg<T> for std::io::Result<T> {
 
 // ---- recents -----------------------------------------------------------
 
-#[derive(Serialize)]
-struct RecentEntry {
-    vault_id: String,
-    vault_name: String,
-    note_id: String,
-    path: String,
-    title: String,
-    modified: String,
-    opened_at: String,
-}
-
 #[derive(Deserialize)]
 struct RecentsQuery {
     #[serde(default = "default_recents_limit")]
@@ -511,42 +488,12 @@ fn default_recents_limit() -> i64 {
     20
 }
 
-/// Recently opened notes across every vault.
-///
-/// One call regardless of vault count. Sorting by the server's `modified`
-/// instead would mean fetching every vault's whole tree on every load of the
-/// home screen.
 async fn recents(
     State(state): State<Shared>,
     Query(q): Query<RecentsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let limit = q.limit.clamp(1, 200);
-    let vaults = state.vaults.read().await;
-    let mut all: Vec<RecentEntry> = Vec::new();
-
-    for entry in &vaults.registry.vaults {
-        let Some(handle) = vaults.get(&entry.id) else {
-            continue;
-        };
-        let ix = handle.indexer.lock().await;
-        // Each vault only has to give up its own top `limit`; the merge below
-        // takes the overall newest.
-        for row in ix.db.recent_notes(limit)? {
-            all.push(RecentEntry {
-                vault_id: entry.id.clone(),
-                vault_name: entry.name.clone(),
-                note_id: row.note_id,
-                path: row.path,
-                title: row.title,
-                modified: row.modified,
-                opened_at: row.opened_at,
-            });
-        }
-    }
-
-    all.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
-    all.truncate(limit as usize);
-    Ok(Json(serde_json::json!({ "recents": all })))
+    let recents = crate::ops::recents(&state, q.limit).await?;
+    Ok(Json(serde_json::json!({ "recents": recents })))
 }
 
 #[derive(Serialize)]
@@ -604,25 +551,33 @@ async fn sync(
     Ok(Json(SyncResponse { changes, seq }))
 }
 
-#[derive(Serialize)]
-struct NoteResponse {
-    #[serde(flatten)]
-    note: crate::db::NoteRow,
-    content: String,
-}
-
 async fn get_note(
     State(state): State<Shared>,
     Path((vault, id)): Path<(String, String)>,
-) -> ApiResult<Json<NoteResponse>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let note = ix
-        .db
-        .get_note(&id)?
-        .ok_or_else(|| not_found("no such note"))?;
-    let content = ix.vault.read(&note.path)?;
-    Ok(Json(NoteResponse { note, content }))
+) -> ApiResult<Json<crate::ops::NoteDetail>> {
+    Ok(Json(crate::ops::get_note(&state, &vault, &id).await?))
+}
+
+/// Every stored revision of a note, newest first, without their content.
+///
+/// Added with MCP but not only for it: no client could see a note's history
+/// before this, even though `note_versions` has been populated since M1.
+async fn note_versions(
+    State(state): State<Shared>,
+    Path((vault, id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let versions = crate::ops::note_history(&state, &vault, &id).await?;
+    Ok(Json(serde_json::json!({ "versions": versions })))
+}
+
+async fn note_version(
+    State(state): State<Shared>,
+    Path((vault, id, version)): Path<(String, String, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let content = crate::ops::note_version(&state, &vault, &id, version).await?;
+    Ok(Json(
+        serde_json::json!({ "version": version, "content": content }),
+    ))
 }
 
 /// Records that a note was opened, feeding the cross-vault recents list.
@@ -797,44 +752,17 @@ async fn search(
     Path(vault): Path<String>,
     Query(q): Query<SearchQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    // FTS5 treats bare punctuation as syntax; a user typing `foo-bar` should
-    // get a search, not a parse error.
-    let sanitized = sanitize_fts_query(&q.q);
-    if sanitized.is_empty() {
-        return Ok(Json(serde_json::json!({ "hits": [] })));
-    }
-    let hits = ix
-        .db
-        .search(&sanitized, q.limit.clamp(1, 500))
-        .map_err(|e| bad_request(e.to_string()))?;
+    let hits = crate::ops::search(&state, &vault, &q.q, q.limit).await?;
     Ok(Json(serde_json::json!({ "hits": hits })))
-}
-
-/// Quotes each term so FTS5 special characters can't produce a syntax error.
-fn sanitize_fts_query(raw: &str) -> String {
-    raw.split_whitespace()
-        .map(|term| term.replace('"', ""))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 async fn backlinks(
     State(state): State<Shared>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let note = ix
-        .db
-        .get_note(&id)?
-        .ok_or_else(|| not_found("no such note"))?;
-    let links = ix.db.backlinks(&note.title)?;
+    let links = crate::ops::backlinks(&state, &vault, &id).await?;
     Ok(Json(
-        serde_json::json!({ "title": note.title, "backlinks": links }),
+        serde_json::json!({ "title": links.title, "backlinks": links.notes }),
     ))
 }
 
@@ -842,14 +770,7 @@ async fn tags(
     State(state): State<Shared>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let tags: Vec<_> = ix
-        .db
-        .all_tags()?
-        .into_iter()
-        .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
-        .collect();
+    let tags = crate::ops::list_tags(&state, &vault).await?;
     Ok(Json(serde_json::json!({ "tags": tags })))
 }
 
@@ -1040,15 +961,5 @@ mod tests {
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
         assert!(validate_root(&root, &state).is_ok());
-    }
-
-    #[test]
-    fn fts_queries_are_sanitized() {
-        assert_eq!(sanitize_fts_query("hello world"), "\"hello\" \"world\"");
-        // Characters that would otherwise be FTS5 syntax errors.
-        assert_eq!(sanitize_fts_query("foo-bar"), "\"foo-bar\"");
-        assert_eq!(sanitize_fts_query("NEAR(a b)"), "\"NEAR(a\" \"b)\"");
-        assert_eq!(sanitize_fts_query("  "), "");
-        assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"hi\"");
     }
 }

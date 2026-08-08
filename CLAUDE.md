@@ -87,6 +87,13 @@ the attachment picker. `test/macos_entitlements_test.dart` guards both, because
 neither failure says anything about entitlements. `make install-mac` builds the
 release app and puts it in `/Applications`.
 
+**A new server operation goes in `apps/server/src/ops.rs`.** REST handlers and
+MCP tools are both thin callers of it — a handler holds extractors and `Json`,
+a tool holds params and structured content, and neither holds logic. Adding an
+operation to `api.rs` alone makes it invisible to MCP; adding one to `mcp.rs`
+alone starts the divergence `ops.rs` exists to prevent. `tests/e2e.py` is what
+proves an extraction left REST unchanged.
+
 ## Invariants worth knowing before editing
 
 These are load-bearing and each has a regression test. Breaking one loses user

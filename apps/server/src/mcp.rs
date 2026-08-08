@@ -1,0 +1,374 @@
+//! Model Context Protocol — read-only tools over the same operations REST uses.
+//!
+//! Every tool here is params → [`crate::ops`] → structured content. Nothing in
+//! this file reaches for `Db` or the filesystem directly, and nothing
+//! reimplements a rule that already exists: vault resolution, FTS sanitising
+//! and the not-found cases all come from `ops`, so MCP and REST cannot drift
+//! apart. That is the whole point of `docs/storm-mcp.md`'s Principle, and the
+//! reason `ops` exists at all.
+//!
+//! **Read-only, deliberately.** Write tools are designed but wait until the
+//! freshly cut-over vault has had ordinary runtime, because every milestone
+//! that reached production found bugs no suite caught first, and a second
+//! writer is exactly that kind of new path.
+//!
+//! Notes are addressed by `vault + note_id`, never by a path — the same
+//! contract the REST API already has. Responses do carry the vault-relative
+//! path, which is structure a caller needs, but an absolute filesystem path
+//! must never appear in one; `mcp_e2e.py` asserts it.
+
+use std::sync::Arc;
+
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use serde::Deserialize;
+
+use crate::api::Shared;
+
+/// How the endpoint is configured at startup.
+#[derive(Debug, Clone)]
+pub struct McpOptions {
+    /// `Host` headers to accept, empty meaning any.
+    pub allowed_hosts: Vec<String>,
+}
+
+/// Which `Host` headers the MCP endpoint should accept.
+///
+/// rmcp defaults this to loopback only, as DNS-rebinding protection. That
+/// default is wrong for Storm and fails in a way that is hard to read: the
+/// server is reached at its LAN address, so every request from another machine
+/// would be refused with nothing pointing at the `Host` header as the cause.
+///
+/// So the bind address is added to the list. When binding to a wildcard the
+/// list is emptied, because the header will carry whichever address the client
+/// used and we cannot enumerate those. That is an acceptable trade here and not
+/// a general one: the rebinding attack it defends against is a browser being
+/// tricked into posting to the server, which the bearer token already refuses —
+/// and this whole design is LAN-only per decision 4.
+pub fn allowed_hosts(host: &str, port: u16) -> Vec<String> {
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        return Vec::new();
+    }
+    vec![
+        "localhost".into(),
+        format!("localhost:{port}"),
+        host.to_string(),
+        format!("{host}:{port}"),
+    ]
+}
+
+/// The tower service to nest at `/mcp`.
+pub fn service(
+    state: Shared,
+    options: McpOptions,
+) -> StreamableHttpService<Storm, LocalSessionManager> {
+    // Built with `with_*` rather than a struct literal: the config is
+    // `#[non_exhaustive]`, which is rmcp saying it expects to grow fields.
+    let config = StreamableHttpServerConfig::default()
+        // The 2026-07-28 revision removed sessions (SEP-2567), so requests
+        // negotiating it are served statelessly whatever this says. Setting it
+        // false keeps older clients on the same path rather than giving Storm
+        // two behaviours to reason about — and with read-only tools there is no
+        // per-session state worth keeping anyway.
+        .with_legacy_session_mode(false)
+        // Plain JSON responses instead of an SSE stream. Every tool here is a
+        // single request/response with no progress to report, and it keeps the
+        // e2e test a plain POST rather than a stream parser.
+        .with_json_response(true)
+        .with_allowed_hosts(options.allowed_hosts);
+
+    StreamableHttpService::new(
+        move || Ok(Storm::new(state.clone())),
+        Arc::new(LocalSessionManager::default()),
+        config,
+    )
+}
+
+// ---- tool parameters ---------------------------------------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VaultParams {
+    /// The vault's id, as returned by `list_vaults`.
+    pub vault: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NoteParams {
+    /// The vault's id, as returned by `list_vaults`.
+    pub vault: String,
+    /// The note's id. Notes are addressed by id, never by file path.
+    pub note_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchParams {
+    /// The vault's id, as returned by `list_vaults`.
+    pub vault: String,
+    /// Words to look for. Punctuation is quoted for you, so `foo-bar` is safe.
+    pub query: String,
+    /// How many hits to return. Defaults to 20, capped at 500.
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RelatedParams {
+    pub vault: String,
+    pub note_id: String,
+    /// How many tag-related notes to return. Defaults to 20.
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VersionParams {
+    pub vault: String,
+    pub note_id: String,
+    /// A version number from `get_note_history`.
+    pub version: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecentParams {
+    /// How many notes to return across all vaults. Defaults to 20.
+    pub limit: Option<i64>,
+}
+
+// ---- the handler -------------------------------------------------------
+
+/// Holds only the shared state.
+///
+/// No `tool_router` field, though the SDK's example carries one: `#[tool_handler]`
+/// resolves the router through the static `Self::tool_router()` that
+/// `#[tool_router]` generates, so a field would never be read. Storm is
+/// constructed per request by the service factory anyway, and with read-only
+/// tools there is nothing per-connection worth keeping.
+#[derive(Clone)]
+pub struct Storm {
+    state: Shared,
+}
+
+/// Renders an operation's result as a tool result.
+///
+/// Two details here are the spec's, not preference.
+///
+/// **The value must be a JSON object.** "Structured content is returned as a
+/// JSON object in the `structuredContent` field" — so a bare array or string is
+/// out of spec even though `rmcp` types the field as any `Value` and will
+/// happily send one. Callers returning a list pass a key to wrap it under, and
+/// those keys are the REST envelopes' own (`vaults`, `hits`, `tags`), so the
+/// two surfaces read the same.
+///
+/// **A missing vault is a tool error, not a protocol error.** The spec draws
+/// the line at self-correction: tool execution errors "contain actionable
+/// feedback that language models can use to self-correct", and clients *should*
+/// pass them to the model, while protocol errors are for malformed requests and
+/// clients need not surface them at all. "No such note" is exactly the former —
+/// an agent holding a stale id should be told so and retry. So anything `ops`
+/// reports as a 4xx comes back as `isError: true` carrying the same message
+/// REST would give; only a genuine server fault becomes a protocol error.
+fn respond<T: serde::Serialize>(
+    result: crate::api::ApiResult<T>,
+    key: Option<&str>,
+) -> Result<CallToolResult, ErrorData> {
+    match result {
+        Ok(value) => {
+            let json = serde_json::to_value(&value)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let object = match key {
+                Some(key) => serde_json::json!({ key: json }),
+                None => json,
+            };
+            debug_assert!(
+                object.is_object(),
+                "structuredContent must be a JSON object; pass a key to wrap {object}"
+            );
+            Ok(CallToolResult::structured(object))
+        }
+        Err(e) if e.0.is_server_error() => Err(ErrorData::internal_error(e.1, None)),
+        Err(e) => Ok(CallToolResult::structured_error(
+            serde_json::json!({ "error": e.1 }),
+        )),
+    }
+}
+
+/// A result that is already object-shaped.
+fn respond_object<T: serde::Serialize>(
+    result: crate::api::ApiResult<T>,
+) -> Result<CallToolResult, ErrorData> {
+    respond(result, None)
+}
+
+#[tool_router]
+impl Storm {
+    pub fn new(state: Shared) -> Self {
+        Self { state }
+    }
+
+    #[tool(
+        description = "List the vaults on this Storm server, with their ids, names and note counts. Call this first — every other tool needs a vault id."
+    )]
+    async fn list_vaults(&self) -> Result<CallToolResult, ErrorData> {
+        respond(crate::ops::list_vaults(&self.state).await, Some("vaults"))
+    }
+
+    #[tool(
+        description = "Describe one vault: its note count, its folders, and the description its owner wrote for it."
+    )]
+    async fn get_vault(
+        &self,
+        Parameters(VaultParams { vault }): Parameters<VaultParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::get_vault(&self.state, &vault).await)
+    }
+
+    #[tool(
+        description = "Full-text search one vault, returning matching notes with a highlighted snippet from each. The fastest way to find a note."
+    )]
+    async fn search(
+        &self,
+        Parameters(SearchParams {
+            vault,
+            query,
+            limit,
+        }): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::search(&self.state, &vault, &query, limit.unwrap_or(20)).await,
+            Some("hits"),
+        )
+    }
+
+    #[tool(description = "Read one note in full: its markdown content and its metadata.")]
+    async fn get_note(
+        &self,
+        Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::get_note(&self.state, &vault, &note_id).await)
+    }
+
+    #[tool(
+        description = "Notes related to this one: those linking to it, and those sharing its tags. Every relation is exact and says why it is one — there is no semantic guessing here."
+    )]
+    async fn get_related_notes(
+        &self,
+        Parameters(RelatedParams {
+            vault,
+            note_id,
+            limit,
+        }): Parameters<RelatedParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(
+            crate::ops::related(&self.state, &vault, &note_id, limit.unwrap_or(20)).await,
+        )
+    }
+
+    #[tool(description = "Every tag in a vault with how many notes carry it.")]
+    async fn list_tags(
+        &self,
+        Parameters(VaultParams { vault }): Parameters<VaultParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::list_tags(&self.state, &vault).await,
+            Some("tags"),
+        )
+    }
+
+    #[tool(
+        description = "Notes opened most recently, across every vault. Good for 'what was I working on'."
+    )]
+    async fn recent_notes(
+        &self,
+        Parameters(RecentParams { limit }): Parameters<RecentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::recents(&self.state, limit.unwrap_or(20)).await,
+            Some("recents"),
+        )
+    }
+
+    #[tool(
+        description = "A note's revision history: version numbers, when each was written and by which device. Content is not included — fetch one with get_note_version."
+    )]
+    async fn get_note_history(
+        &self,
+        Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::note_history(&self.state, &vault, &note_id).await,
+            Some("versions"),
+        )
+    }
+
+    #[tool(description = "The full text of one earlier revision of a note.")]
+    async fn get_note_version(
+        &self,
+        Parameters(VersionParams {
+            vault,
+            note_id,
+            version,
+        }): Parameters<VersionParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::note_version(&self.state, &vault, &note_id, version).await,
+            Some("content"),
+        )
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for Storm {
+    fn get_info(&self) -> ServerInfo {
+        // Field-by-field on a default, because these models are
+        // `#[non_exhaustive]` — see the config above.
+        let mut info = ServerInfo::default();
+        // The SDK's default, deliberately, rather than the newest constant it
+        // knows. `ProtocolVersion::LATEST` is 2025-11-25 — rmcp knows
+        // 2026-07-28 but has not promoted it, which is the same Tier 2 caveat
+        // `docs/storm-mcp.md` records. Following the default means Storm moves
+        // when the SDK does, rather than announcing a revision its own
+        // transport treats as provisional.
+        info.protocol_version = ProtocolVersion::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = Implementation::new("storm", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some(
+            "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+             addressed by vault id and note id — never by file path. Start with list_vaults, \
+             then search to find notes and get_note to read one. These tools are read-only."
+                .into(),
+        );
+        info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_concrete_bind_address_is_allowed_with_and_without_its_port() {
+        // The failure this prevents: rmcp's default list is loopback only, so
+        // a phone or laptop reaching the server at its LAN address gets every
+        // request refused, and nothing in the error mentions the Host header.
+        let hosts = allowed_hosts("192.168.91.51", 8484);
+        assert!(hosts.contains(&"192.168.91.51:8484".to_string()));
+        assert!(hosts.contains(&"192.168.91.51".to_string()));
+        assert!(hosts.contains(&"localhost:8484".to_string()));
+    }
+
+    #[test]
+    fn a_wildcard_bind_allows_any_host() {
+        // Binding to 0.0.0.0 means the Host header carries whichever address
+        // the client used, which cannot be enumerated ahead of time. Empty is
+        // rmcp's "allow all".
+        for wildcard in ["0.0.0.0", "::", "[::]"] {
+            assert!(
+                allowed_hosts(wildcard, 8484).is_empty(),
+                "{wildcard} should not restrict hosts"
+            );
+        }
+    }
+}

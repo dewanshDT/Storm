@@ -482,6 +482,30 @@ impl Db {
             .optional()?)
     }
 
+    /// Every stored revision of a note, newest first, without the content.
+    ///
+    /// `note_versions` holds a full snapshot per version rather than a diff
+    /// (see the schema), so a long-lived note's history is megabytes of text.
+    /// Selecting `length(content)` instead of `content` keeps a history listing
+    /// proportional to the number of revisions rather than to their size —
+    /// which matters most for the caller most likely to ask for one, an agent
+    /// deciding which revision is worth fetching.
+    pub fn list_versions(&self, note_id: &str) -> Result<Vec<crate::ops::VersionInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT version, created_at, device_id, length(content)
+             FROM note_versions WHERE note_id = ?1 ORDER BY version DESC",
+        )?;
+        let rows = stmt.query_map(params![note_id], |r| {
+            Ok(crate::ops::VersionInfo {
+                version: r.get(0)?,
+                created_at: r.get(1)?,
+                device_id: r.get(2)?,
+                size: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     // ---- change log ----------------------------------------------------
 
     pub fn changes_since(&self, since: i64, limit: i64) -> Result<Vec<Change>> {
@@ -687,6 +711,37 @@ mod tests {
     fn record(db: &mut Db, n: &NoteRow, content: &str, kind: &str) -> i64 {
         let e = parse::extract(content);
         db.record_note(n, content, &e, kind, None).unwrap()
+    }
+
+    #[test]
+    fn a_history_lists_every_version_newest_first_without_content() {
+        let dir = tempdir::TempDir::new("storm-history").unwrap();
+        let mut db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+
+        record(&mut db, &note("a", "A.md", 1), "one\n", KIND_CREATED);
+        record(&mut db, &note("a", "A.md", 2), "two two\n", KIND_UPDATED);
+        record(&mut db, &note("a", "A.md", 3), "three\n", KIND_UPDATED);
+        // A second note, so the query is proved to filter by note rather than
+        // returning whatever is in the table.
+        record(&mut db, &note("b", "B.md", 1), "elsewhere\n", KIND_CREATED);
+
+        let history = db.list_versions("a").unwrap();
+        assert_eq!(
+            history.iter().map(|v| v.version).collect::<Vec<_>>(),
+            vec![3, 2, 1],
+            "newest first, and only this note's"
+        );
+        // `size` is the stored snapshot's length, which is what makes a
+        // listing useful without shipping the bodies.
+        assert_eq!(history[1].size, "two two\n".len() as i64);
+        assert!(!history[0].created_at.is_empty());
+    }
+
+    #[test]
+    fn a_history_is_empty_rather_than_an_error_for_an_unknown_note() {
+        let dir = tempdir::TempDir::new("storm-history2").unwrap();
+        let db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+        assert!(db.list_versions("nope").unwrap().is_empty());
     }
 
     #[test]
