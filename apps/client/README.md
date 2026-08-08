@@ -40,6 +40,31 @@ Two things specific to macOS, both consequences of the app being sandboxed:
   does; it can be re-enabled under System Settings ▸ Privacy & Security ▸ Local
   Network.
 
+## App icons
+
+`assets/logo.svg` is the source. Everything else is generated:
+
+```sh
+python3 tool/make_icons.py       # SVG   -> three PNGs in assets/icon/
+dart run icons_launcher:create   # PNGs  -> every platform's icon files
+```
+
+Three PNGs rather than one because the platforms want different pictures, not
+different sizes of the same one: macOS wants the margin Apple reserves around
+an icon, Android's launcher applies its own mask and needs full bleed, and an
+adaptive icon needs its foreground transparent so the system can shift it
+against the background. The generated files are checked in, so neither command
+is part of a build.
+
+`tool/make_icons.py` explains its own oddities — the short version is that
+`icons_launcher` cannot read SVG, this Mac has no SVG rasteriser, and macOS's
+own renderer (`qlmanage`) flattens transparency, so the two images that need an
+alpha channel have it reconstructed afterwards in stdlib Python. Regenerating
+icons therefore needs a Mac. Rendering them is the only step that does.
+
+Linux is deliberately switched off in the config: the only thing that handler
+produces is snap packaging, and Storm isn't shipped as a snap.
+
 ## What works
 
 - A dashboard of the server's vaults, over the notes you opened most recently
