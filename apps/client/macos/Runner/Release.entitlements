@@ -4,5 +4,16 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<!-- Load-bearing. The sandbox blocks outgoing sockets by default, so
+	     without this every request and the sync WebSocket fail — and they fail
+	     as "couldn't reach the server", which is indistinguishable from a wrong
+	     address. `test/macos_entitlements_test.dart` is the guard. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- The attachment picker (`openFile()` in note_screen.dart). Powerbox will
+	     not extend the sandbox to the file the user chose unless the app asks
+	     for it here, so the picker would open and the read would fail. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
 </dict>
 </plist>

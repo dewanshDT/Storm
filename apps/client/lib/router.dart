@@ -9,7 +9,7 @@ import 'ui/note_screen.dart';
 import 'ui/search_screen.dart';
 import 'ui/server_settings_screen.dart';
 import 'ui/shell/dashboard.dart';
-import 'ui/shell/vault_gate.dart';
+import 'ui/shell/vault_shell.dart';
 import 'ui/tags_screen.dart';
 
 /// Where the app can be.
@@ -94,30 +94,43 @@ final routerProvider = Provider<GoRouter>((ref) {
             path: 'settings/server',
             builder: (_, _) => const ServerSettingsScreen(),
           ),
-          // Every vault-scoped screen sits under a `VaultGate`, which makes the
-          // route's vault active before its children build. Without it there is
-          // a frame where the providers still hold the previous vault's notes.
-          GoRoute(
-            path: 'v/:vault/browse/:path(.*)',
-            builder: (_, state) =>
-                _gate(state, BrowseScreen(folder: Routes.folderOf(state.uri))),
-          ),
-          GoRoute(
-            path: 'v/:vault/browse',
-            builder: (_, state) => _gate(state, const BrowseScreen(folder: '')),
-          ),
-          GoRoute(
-            path: 'v/:vault/note/:id',
-            builder: (_, state) =>
-                _gate(state, NoteScreen(noteId: state.pathParameters['id']!)),
-          ),
-          GoRoute(
-            path: 'v/:vault/search',
-            builder: (_, state) => _gate(state, const SearchScreen()),
-          ),
-          GoRoute(
-            path: 'v/:vault/tags',
-            builder: (_, state) => _gate(state, const TagsScreen()),
+          // Every vault-scoped screen sits inside `VaultShell`, which carries
+          // the `VaultGate` — making the route's vault active before its
+          // children build, since otherwise there is a frame where the
+          // providers still hold the previous vault's notes — and, on a wide
+          // screen, the folder tree beside it.
+          //
+          // A `ShellRoute` rather than wrapping each child: the shell is built
+          // once and only the pane inside it changes, which is what lets the
+          // sidebar hold its expansion state across opening a note. The paths
+          // are unchanged, so the back stack behaves exactly as decision 17
+          // describes — `back_navigation_test.dart` is the proof.
+          ShellRoute(
+            builder: (_, _, child) => VaultShell(child: child),
+            routes: [
+              GoRoute(
+                path: 'v/:vault/browse/:path(.*)',
+                builder: (_, state) =>
+                    BrowseScreen(folder: Routes.folderOf(state.uri)),
+              ),
+              GoRoute(
+                path: 'v/:vault/browse',
+                builder: (_, _) => const BrowseScreen(folder: ''),
+              ),
+              GoRoute(
+                path: 'v/:vault/note/:id',
+                builder: (_, state) =>
+                    NoteScreen(noteId: state.pathParameters['id']!),
+              ),
+              GoRoute(
+                path: 'v/:vault/search',
+                builder: (_, _) => const SearchScreen(),
+              ),
+              GoRoute(
+                path: 'v/:vault/tags',
+                builder: (_, _) => const TagsScreen(),
+              ),
+            ],
           ),
         ],
       ),
@@ -135,10 +148,6 @@ final routerProvider = Provider<GoRouter>((ref) {
   ref.onDispose(router.dispose);
   return router;
 });
-
-/// Wraps a vault-scoped screen so the route's vault is active before it builds.
-Widget _gate(GoRouterState state, Widget child) =>
-    VaultGate(vaultId: state.pathParameters['vault']!, child: child);
 
 /// Nudges GoRouter to re-run its redirect without replacing the router.
 class _RouterRefresh extends ChangeNotifier {
