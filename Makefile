@@ -68,7 +68,7 @@ test-live:
 	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/live-vaults/primary/Seed.md"; \
 	"$$ROOT/$(SERVER)/target/debug/storm-server" \
 		--vault-root "$$ROOT/.dev/live-vaults" --state "$$ROOT/.dev/live-state" \
-		--token $(TOKEN) --port $(PORT) > "$$ROOT/.dev/live-server.log" 2>&1 & \
+		--token $(TOKEN) --port $(PORT) --mcp > "$$ROOT/.dev/live-server.log" 2>&1 & \
 	SERVER_PID=$$!; \
 	trap 'kill $$SERVER_PID 2>/dev/null; true' EXIT; \
 	for i in $$(seq 1 60); do \
@@ -82,6 +82,8 @@ test-live:
 	done; \
 	echo "--- server e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
+	echo "--- mcp e2e ---"; \
+	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/
 

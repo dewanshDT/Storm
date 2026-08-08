@@ -177,6 +177,42 @@ Two behaviours worth knowing:
   one is reported as a conflict. Rare for a single-user vault. If it turns out
   not to be, that's the signal to revisit `yrs`.
 
+## MCP
+
+The Model Context Protocol is served at `/mcp`, so an agent can search and read
+the vaults. Nine read-only tools: `list_vaults`, `get_vault`, `search`,
+`get_note`, `get_related_notes`, `list_tags`, `recent_notes`,
+`get_note_history`, `get_note_version`. No write tools — see decision 38.
+
+**Off by default, and switched at runtime.** The setting lives in
+`state/vaults.json` beside the storage root, so it survives a restart, and the
+Flutter app can change it under **Server ▸ AI access**. While off, `/mcp`
+answers 404 to every request.
+
+```sh
+# Turn it on from the app, or from the API:
+curl -X PUT http://host:8484/v1/config/mcp -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' -d '{"enabled":true}'
+
+# --mcp turns it on at boot. It is an override, not the source of truth:
+# switching it off in the app later sticks, until the flag is passed again.
+storm-server --vault-root ~/vaults --state ~/state --token "$STORM_TOKEN" --mcp
+```
+
+`GET /v1/config` reports `mcp_enabled`.
+
+Same bearer token as everything else, because `/mcp` is nested above the auth
+middleware in `api.rs`. That ordering is load-bearing: axum applies a layer only
+to routes registered above it, so mounting `/mcp` after it would leave the one
+unauthenticated route on the server. `tests/mcp_e2e.py` checks it.
+
+Point a client at `http://<host>:<port>/mcp` with `Authorization: Bearer
+<token>`. If it is reached at a LAN address and every call fails, suspect the
+`Host` header before the token: the SDK restricts hosts to loopback by default,
+and `mcp::allowed_hosts` widens that to the address the server was bound to. A
+wildcard bind (`--host 0.0.0.0`) cannot enumerate them, so the check is disabled
+and logged at startup.
+
 ## External edits
 
 The vault stays greppable and can be exported read-only over the NAS share, so

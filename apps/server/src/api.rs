@@ -57,6 +57,13 @@ pub struct AppState {
     /// Notifies the watcher that the root moved, so it can be respawned
     /// against the new one. Sends the new root.
     pub root_changed: broadcast::Sender<PathBuf>,
+    /// Whether `/mcp` answers. Mirrors `Registry::mcp_enabled`, which is the
+    /// persisted copy; this one exists so the gate can read it without taking
+    /// the vault lock on every request.
+    pub mcp_enabled: std::sync::atomic::AtomicBool,
+    /// Whether MCP may change the vault. Read per request, so the switch takes
+    /// effect on the next call rather than the next restart.
+    pub mcp_writable: std::sync::atomic::AtomicBool,
 }
 
 pub type Shared = Arc<AppState>;
@@ -110,7 +117,7 @@ pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Errors rendered as JSON rather than bare status codes, so the Flutter
 /// client can show something useful.
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -124,19 +131,19 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-fn bad_request(msg: impl Into<String>) -> ApiError {
+pub fn bad_request(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
 
-fn not_found(msg: impl Into<String>) -> ApiError {
+pub fn not_found(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, msg.into())
 }
 
-fn conflict(msg: impl Into<String>) -> ApiError {
+pub fn conflict(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::CONFLICT, msg.into())
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Resolves a vault id to its open handle.
 ///
@@ -144,7 +151,7 @@ type ApiResult<T> = Result<T, ApiError>;
 /// registered vault whose directory has gone is a 409 — the difference between
 /// "never existed" and "is not where it should be" is the whole point of
 /// keeping missing vaults in the registry.
-async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
+pub async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
     let vaults = state.vaults.read().await;
     if let Some(handle) = vaults.get(id) {
         return Ok(handle);
@@ -158,14 +165,34 @@ async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
     }
 }
 
-pub fn router(state: Shared) -> Router {
+/// Builds the HTTP surface.
+///
+/// `mcp` mounts the Model Context Protocol endpoint. It is a parameter rather
+/// than something bolted on afterwards for a load-bearing reason: axum applies
+/// a layer only to the routes registered *above* it, so `/mcp` has to be nested
+/// before `require_token` or it would be the one unauthenticated route on the
+/// server. `mcp_requires_the_bearer_token` is the test that holds this.
+pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
+    // Always mounted, never conditionally: whether MCP answers is a runtime
+    // setting the app can toggle, and a route that only exists when a flag was
+    // passed at boot could not be turned on without a restart the client has no
+    // way to perform.
+    let mcp_router = Router::new()
+        .fallback_service(crate::mcp::service(state.clone(), mcp))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_mcp_enabled,
+        ));
+
     Router::new()
         .route("/v1/health", get(health))
+        .nest("/mcp", mcp_router)
         // Server-level: which vaults exist and where they live.
         .route("/v1/vaults", get(list_vaults).post(create_vault))
         .route("/v1/vaults/{vault}", patch(rename_vault))
         .route("/v1/vaults/{vault}", delete(remove_vault))
         .route("/v1/config", get(get_config).put(put_config))
+        .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/recents", get(recents))
         // Vault-scoped: everything that touches notes.
         .route("/v1/vaults/{vault}/tree", get(tree))
@@ -177,6 +204,11 @@ pub fn router(state: Shared) -> Router {
         .route("/v1/vaults/{vault}/notes/{id}/move", post(move_note))
         .route("/v1/vaults/{vault}/notes/{id}/opened", post(mark_opened))
         .route("/v1/vaults/{vault}/notes/{id}/backlinks", get(backlinks))
+        .route("/v1/vaults/{vault}/notes/{id}/versions", get(note_versions))
+        .route(
+            "/v1/vaults/{vault}/notes/{id}/versions/{version}",
+            get(note_version),
+        )
         .route("/v1/vaults/{vault}/folders", post(create_folder))
         .route("/v1/vaults/{vault}/folders/rename", post(rename_folder))
         .route("/v1/vaults/{vault}/folders/{*path}", delete(delete_folder))
@@ -238,6 +270,27 @@ async fn require_token(
     }
 }
 
+/// Refuses `/mcp` while MCP is switched off.
+///
+/// A 404 rather than a 403: to a client that has not been told otherwise, a
+/// disabled endpoint and an absent one are the same thing, and the message says
+/// which this is. It runs *after* `require_token`, so an unauthenticated caller
+/// gets 401 first and this never confirms the endpoint exists to a stranger.
+async fn require_mcp_enabled(
+    State(state): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.mcp_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+        return next.run(request).await;
+    }
+    ApiError(
+        StatusCode::NOT_FOUND,
+        "MCP is switched off on this server. Turn it on in Storm's server settings.".into(),
+    )
+    .into_response()
+}
+
 /// Compares without leaking length or position through timing.
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
@@ -257,38 +310,9 @@ async fn health() -> impl IntoResponse {
 
 // ---- vaults ------------------------------------------------------------
 
-#[derive(Serialize)]
-struct VaultInfo {
-    id: String,
-    name: String,
-    dir: String,
-    note_count: i64,
-    /// The directory is gone. The entry is kept so the vault can be repaired
-    /// rather than silently forgotten.
-    missing: bool,
-}
-
 async fn list_vaults(State(state): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
-    let vaults = state.vaults.read().await;
-    let mut out = Vec::with_capacity(vaults.registry.vaults.len());
-
-    for entry in &vaults.registry.vaults {
-        let (note_count, missing) = match vaults.get(&entry.id) {
-            Some(handle) => {
-                let ix = handle.indexer.lock().await;
-                (ix.db.count_notes().unwrap_or(0), false)
-            }
-            None => (0, true),
-        };
-        out.push(VaultInfo {
-            id: entry.id.clone(),
-            name: entry.name.clone(),
-            dir: entry.dir.clone(),
-            note_count,
-            missing,
-        });
-    }
-    Ok(Json(serde_json::json!({ "vaults": out })))
+    let vaults = crate::ops::list_vaults(&state).await?;
+    Ok(Json(serde_json::json!({ "vaults": vaults })))
 }
 
 #[derive(Deserialize)]
@@ -368,6 +392,10 @@ struct ConfigResponse {
     vault_root: String,
     state_dir: String,
     vault_count: usize,
+    /// Whether `/mcp` is answering. The app shows this and can change it.
+    mcp_enabled: bool,
+    /// Whether MCP may create, edit and delete notes.
+    mcp_writable: bool,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -376,7 +404,58 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         vault_root: vaults.registry.root.display().to_string(),
         state_dir: state.state_dir.display().to_string(),
         vault_count: vaults.registry.vaults.len(),
+        mcp_enabled: vaults.registry.mcp_enabled,
+        mcp_writable: vaults.registry.mcp_writable,
     }))
+}
+
+#[derive(Deserialize)]
+struct McpBody {
+    enabled: bool,
+    /// Absent means read-only. Callers that do not know about writes therefore
+    /// cannot turn them on by omission.
+    #[serde(default)]
+    writable: bool,
+}
+
+/// Switches the MCP endpoint on or off, now and across restarts.
+///
+/// Its own route rather than a field on `PUT /v1/config`, because that one
+/// re-points the storage root — a heavyweight operation with an orphan check
+/// and a watcher respawn. Toggling a read-only endpoint should not have to send
+/// a `vault_root` it does not want to change.
+///
+/// The atomic is set *after* the registry is saved: if the write fails the
+/// endpoint keeps its old state, which is the honest outcome. The other order
+/// would report success while the setting silently reverted on next boot.
+async fn put_mcp(
+    State(state): State<Shared>,
+    Json(body): Json<McpBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.mcp_enabled = body.enabled;
+        // Writes cannot outlive the endpoint being on: leaving them armed while
+        // MCP is off would mean switching MCP back on silently restores write
+        // access someone thought they had revoked.
+        vaults.registry.mcp_writable = body.enabled && body.writable;
+        vaults.registry.save(&state.state_dir)?;
+    }
+    let ordering = std::sync::atomic::Ordering::Relaxed;
+    state.mcp_enabled.store(body.enabled, ordering);
+    state
+        .mcp_writable
+        .store(body.enabled && body.writable, ordering);
+
+    tracing::info!(
+        enabled = body.enabled,
+        writable = body.enabled && body.writable,
+        "MCP endpoint toggled"
+    );
+    Ok(Json(serde_json::json!({
+        "mcp_enabled": body.enabled,
+        "mcp_writable": body.enabled && body.writable,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -490,17 +569,6 @@ impl<T> ContextMsg<T> for std::io::Result<T> {
 
 // ---- recents -----------------------------------------------------------
 
-#[derive(Serialize)]
-struct RecentEntry {
-    vault_id: String,
-    vault_name: String,
-    note_id: String,
-    path: String,
-    title: String,
-    modified: String,
-    opened_at: String,
-}
-
 #[derive(Deserialize)]
 struct RecentsQuery {
     #[serde(default = "default_recents_limit")]
@@ -511,42 +579,12 @@ fn default_recents_limit() -> i64 {
     20
 }
 
-/// Recently opened notes across every vault.
-///
-/// One call regardless of vault count. Sorting by the server's `modified`
-/// instead would mean fetching every vault's whole tree on every load of the
-/// home screen.
 async fn recents(
     State(state): State<Shared>,
     Query(q): Query<RecentsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let limit = q.limit.clamp(1, 200);
-    let vaults = state.vaults.read().await;
-    let mut all: Vec<RecentEntry> = Vec::new();
-
-    for entry in &vaults.registry.vaults {
-        let Some(handle) = vaults.get(&entry.id) else {
-            continue;
-        };
-        let ix = handle.indexer.lock().await;
-        // Each vault only has to give up its own top `limit`; the merge below
-        // takes the overall newest.
-        for row in ix.db.recent_notes(limit)? {
-            all.push(RecentEntry {
-                vault_id: entry.id.clone(),
-                vault_name: entry.name.clone(),
-                note_id: row.note_id,
-                path: row.path,
-                title: row.title,
-                modified: row.modified,
-                opened_at: row.opened_at,
-            });
-        }
-    }
-
-    all.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
-    all.truncate(limit as usize);
-    Ok(Json(serde_json::json!({ "recents": all })))
+    let recents = crate::ops::recents(&state, q.limit).await?;
+    Ok(Json(serde_json::json!({ "recents": recents })))
 }
 
 #[derive(Serialize)]
@@ -604,25 +642,33 @@ async fn sync(
     Ok(Json(SyncResponse { changes, seq }))
 }
 
-#[derive(Serialize)]
-struct NoteResponse {
-    #[serde(flatten)]
-    note: crate::db::NoteRow,
-    content: String,
-}
-
 async fn get_note(
     State(state): State<Shared>,
     Path((vault, id)): Path<(String, String)>,
-) -> ApiResult<Json<NoteResponse>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let note = ix
-        .db
-        .get_note(&id)?
-        .ok_or_else(|| not_found("no such note"))?;
-    let content = ix.vault.read(&note.path)?;
-    Ok(Json(NoteResponse { note, content }))
+) -> ApiResult<Json<crate::ops::NoteDetail>> {
+    Ok(Json(crate::ops::get_note(&state, &vault, &id).await?))
+}
+
+/// Every stored revision of a note, newest first, without their content.
+///
+/// Added with MCP but not only for it: no client could see a note's history
+/// before this, even though `note_versions` has been populated since M1.
+async fn note_versions(
+    State(state): State<Shared>,
+    Path((vault, id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let versions = crate::ops::note_history(&state, &vault, &id).await?;
+    Ok(Json(serde_json::json!({ "versions": versions })))
+}
+
+async fn note_version(
+    State(state): State<Shared>,
+    Path((vault, id, version)): Path<(String, String, i64)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let content = crate::ops::note_version(&state, &vault, &id, version).await?;
+    Ok(Json(
+        serde_json::json!({ "version": version, "content": content }),
+    ))
 }
 
 /// Records that a note was opened, feeding the cross-vault recents list.
@@ -655,13 +701,9 @@ async fn create_note(
     Path(vault): Path<String>,
     Json(body): Json<CreateBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .create_note(&body.path, &body.content)
-        .map_err(|e| bad_request(e.to_string()))?;
-    broadcast_latest(&state, &ix, result.seq);
-    Ok(Json(result))
+    Ok(Json(
+        crate::ops::create_note(&state, &vault, &body.path, &body.content).await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -677,18 +719,17 @@ async fn put_note(
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<PutBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .put_note(
+    Ok(Json(
+        crate::ops::update_note(
+            &state,
+            &vault,
             &id,
             body.base_version,
             &body.content,
             body.device_id.as_deref(),
         )
-        .map_err(|e| not_found(e.to_string()))?;
-    broadcast_latest(&state, &ix, result.seq);
-    Ok(Json(result))
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -706,7 +747,7 @@ async fn move_note(
     let result = ix
         .move_note(&id, &body.new_path)
         .map_err(|e| bad_request(e.to_string()))?;
-    broadcast_latest(&state, &ix, result.seq);
+    crate::ops::broadcast_latest(&state, &ix, result.seq);
     Ok(Json(result))
 }
 
@@ -714,10 +755,7 @@ async fn delete_note(
     State(state): State<Shared>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let seq = ix.delete_note(&id).map_err(|e| not_found(e.to_string()))?;
-    broadcast_latest(&state, &ix, seq);
+    let seq = crate::ops::delete_note(&state, &vault, &id).await?;
     Ok(Json(serde_json::json!({ "seq": seq })))
 }
 
@@ -772,7 +810,7 @@ async fn rename_folder(
     // One `moved` per contained note, so every client follows the rename
     // rather than discovering it at the next full tree fetch.
     for seq in &seqs {
-        broadcast_latest(&state, &ix, *seq);
+        crate::ops::broadcast_latest(&state, &ix, *seq);
     }
     Ok(Json(serde_json::json!({
         "from": body.from,
@@ -797,44 +835,17 @@ async fn search(
     Path(vault): Path<String>,
     Query(q): Query<SearchQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    // FTS5 treats bare punctuation as syntax; a user typing `foo-bar` should
-    // get a search, not a parse error.
-    let sanitized = sanitize_fts_query(&q.q);
-    if sanitized.is_empty() {
-        return Ok(Json(serde_json::json!({ "hits": [] })));
-    }
-    let hits = ix
-        .db
-        .search(&sanitized, q.limit.clamp(1, 500))
-        .map_err(|e| bad_request(e.to_string()))?;
+    let hits = crate::ops::search(&state, &vault, &q.q, q.limit).await?;
     Ok(Json(serde_json::json!({ "hits": hits })))
-}
-
-/// Quotes each term so FTS5 special characters can't produce a syntax error.
-fn sanitize_fts_query(raw: &str) -> String {
-    raw.split_whitespace()
-        .map(|term| term.replace('"', ""))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 async fn backlinks(
     State(state): State<Shared>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let note = ix
-        .db
-        .get_note(&id)?
-        .ok_or_else(|| not_found("no such note"))?;
-    let links = ix.db.backlinks(&note.title)?;
+    let links = crate::ops::backlinks(&state, &vault, &id).await?;
     Ok(Json(
-        serde_json::json!({ "title": note.title, "backlinks": links }),
+        serde_json::json!({ "title": links.title, "backlinks": links.notes }),
     ))
 }
 
@@ -842,14 +853,7 @@ async fn tags(
     State(state): State<Shared>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let tags: Vec<_> = ix
-        .db
-        .all_tags()?
-        .into_iter()
-        .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
-        .collect();
+    let tags = crate::ops::list_tags(&state, &vault).await?;
     Ok(Json(serde_json::json!({ "tags": tags })))
 }
 
@@ -972,17 +976,6 @@ async fn push_changes(mut socket: WebSocket, state: Shared) {
     }
 }
 
-/// Publishes the change identified by `seq` to every connected client.
-fn broadcast_latest(state: &Shared, ix: &Indexer, seq: i64) {
-    if let Ok(Some(change)) = ix
-        .db
-        .changes_since(seq - 1, 1)
-        .map(|c| c.into_iter().next())
-    {
-        let _ = state.events.send(change);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,15 +1033,5 @@ mod tests {
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
         assert!(validate_root(&root, &state).is_ok());
-    }
-
-    #[test]
-    fn fts_queries_are_sanitized() {
-        assert_eq!(sanitize_fts_query("hello world"), "\"hello\" \"world\"");
-        // Characters that would otherwise be FTS5 syntax errors.
-        assert_eq!(sanitize_fts_query("foo-bar"), "\"foo-bar\"");
-        assert_eq!(sanitize_fts_query("NEAR(a b)"), "\"NEAR(a\" \"b)\"");
-        assert_eq!(sanitize_fts_query("  "), "");
-        assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"hi\"");
     }
 }

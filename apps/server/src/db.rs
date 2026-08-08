@@ -86,6 +86,24 @@ pub struct SearchHit {
     pub snippet: String,
 }
 
+/// SQL for "this row is one of the user's notes", to be applied to `notes`.
+///
+/// `_storm/` holds Storm's own per-vault configuration, kept as ordinary
+/// markdown so it syncs and stays greppable — which means every query that
+/// answers "what notes are there" has to exclude it, or Storm's internals show
+/// up as the user's content.
+///
+/// One constant rather than the predicate written out five times, because it
+/// carries a rule that is easy to get wrong: **`_` is a LIKE wildcard**, so it
+/// must be escaped. An unescaped `_storm/%` would also swallow `astorm/`,
+/// `1storm/` and every other single character in that position.
+///
+/// Deliberately *not* applied to the tree, `list_notes` or `get_note`: the
+/// client reads `_storm/vault.md` through them to load a vault's colour and
+/// property types. The exclusion belongs on the surfaces that answer "show me
+/// notes" — search, tags and recents — not on the ones that fetch a known path.
+const NOT_CONFIG: &str = r"path NOT LIKE '\_storm/%' ESCAPE '\'";
+
 pub const KIND_CREATED: &str = "created";
 pub const KIND_UPDATED: &str = "updated";
 pub const KIND_DELETED: &str = "deleted";
@@ -482,6 +500,30 @@ impl Db {
             .optional()?)
     }
 
+    /// Every stored revision of a note, newest first, without the content.
+    ///
+    /// `note_versions` holds a full snapshot per version rather than a diff
+    /// (see the schema), so a long-lived note's history is megabytes of text.
+    /// Selecting `length(content)` instead of `content` keeps a history listing
+    /// proportional to the number of revisions rather than to their size —
+    /// which matters most for the caller most likely to ask for one, an agent
+    /// deciding which revision is worth fetching.
+    pub fn list_versions(&self, note_id: &str) -> Result<Vec<crate::ops::VersionInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT version, created_at, device_id, length(content)
+             FROM note_versions WHERE note_id = ?1 ORDER BY version DESC",
+        )?;
+        let rows = stmt.query_map(params![note_id], |r| {
+            Ok(crate::ops::VersionInfo {
+                version: r.get(0)?,
+                created_at: r.get(1)?,
+                device_id: r.get(2)?,
+                size: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     // ---- change log ----------------------------------------------------
 
     pub fn changes_since(&self, since: i64, limit: i64) -> Result<Vec<Change>> {
@@ -583,11 +625,12 @@ impl Db {
     /// Most recently opened notes in this vault. The caller merges across
     /// vaults; each one only has to return its own top `limit`.
     pub fn recent_notes(&self, limit: i64) -> Result<Vec<RecentRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.note_id, n.path, n.title, n.modified, a.opened_at
              FROM note_access a JOIN notes n ON n.id = a.note_id
-             ORDER BY a.opened_at DESC LIMIT ?1",
-        )?;
+             WHERE n.{NOT_CONFIG}
+             ORDER BY a.opened_at DESC LIMIT ?1"
+        ))?;
         let rows = stmt.query_map(params![limit], |r| {
             Ok(RecentRow {
                 note_id: r.get(0)?,
@@ -606,10 +649,8 @@ impl Db {
     /// markdown so it syncs and stays greppable. Counting it would make every
     /// vault card on the dashboard read one too high.
     pub fn count_notes(&self) -> Result<i64> {
-        // `_` is a LIKE wildcard, so it has to be escaped — an unescaped
-        // `_storm/%` would also exclude `astorm/`, `1storm/` and so on.
         Ok(self.conn.query_row(
-            r"SELECT COUNT(*) FROM notes WHERE path NOT LIKE '\_storm/%' ESCAPE '\'",
+            &format!("SELECT COUNT(*) FROM notes WHERE {NOT_CONFIG}"),
             [],
             |r| r.get(0),
         )?)
@@ -618,13 +659,13 @@ impl Db {
     // ---- search, tags, backlinks ---------------------------------------
 
     pub fn search(&self, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT n.id, n.path, n.title,
                     snippet(notes_fts, 2, '<<', '>>', ' … ', 16)
              FROM notes_fts f JOIN notes n ON n.id = f.note_id
-             WHERE notes_fts MATCH ?1
-             ORDER BY rank LIMIT ?2",
-        )?;
+             WHERE notes_fts MATCH ?1 AND n.{NOT_CONFIG}
+             ORDER BY rank LIMIT ?2"
+        ))?;
         let rows = stmt.query_map(params![query, limit], |row| {
             Ok(SearchHit {
                 id: row.get(0)?,
@@ -648,19 +689,20 @@ impl Db {
     }
 
     pub fn all_tags(&self) -> Result<Vec<(String, i64)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT tag, COUNT(*) FROM tags GROUP BY tag ORDER BY tag")?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT t.tag, COUNT(*) FROM tags t JOIN notes n ON n.id = t.note_id
+             WHERE n.{NOT_CONFIG} GROUP BY t.tag ORDER BY t.tag"
+        ))?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn notes_with_tag(&self, tag: &str) -> Result<Vec<NoteRow>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT n.id, n.path, n.title, n.version, n.content_hash, n.created, n.modified, n.size
-             FROM tags t JOIN notes n ON n.id = t.note_id
-             WHERE t.tag = ?1 ORDER BY n.path",
-        )?;
+                 FROM tags t JOIN notes n ON n.id = t.note_id
+                 WHERE t.tag = ?1 AND n.{NOT_CONFIG} ORDER BY n.path"
+        ))?;
         let rows = stmt.query_map(params![tag], Self::note_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -687,6 +729,138 @@ mod tests {
     fn record(db: &mut Db, n: &NoteRow, content: &str, kind: &str) -> i64 {
         let e = parse::extract(content);
         db.record_note(n, content, &e, kind, None).unwrap()
+    }
+
+    #[test]
+    fn the_config_note_is_not_discoverable_as_a_note() {
+        // It leaked through search until MCP made it visible: the client
+        // filtered `_storm/` at five separate call sites, so a new caller —
+        // an agent — got Storm's own configuration back as if it were one of
+        // the user's notes. The rule belongs in the query, once.
+        let dir = tempdir::TempDir::new("storm-config-note").unwrap();
+        let mut db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+
+        record(
+            &mut db,
+            &note("cfg", "_storm/vault.md", 1),
+            "---\ntags:\n  - internal\n---\n\nstorm colour and property types\n",
+            KIND_CREATED,
+        );
+        record(
+            &mut db,
+            &note("real", "Notes.md", 1),
+            "---\ntags:\n  - internal\n---\n\nstorm notes the user wrote\n",
+            KIND_CREATED,
+        );
+        db.touch_note_access("cfg", "2026-08-08T10:00:00Z").unwrap();
+        db.touch_note_access("real", "2026-08-08T09:00:00Z")
+            .unwrap();
+
+        let found = |rows: Vec<String>| rows.iter().any(|p| p.starts_with("_storm/"));
+        assert!(
+            !found(
+                db.search("storm", 10)
+                    .unwrap()
+                    .into_iter()
+                    .map(|h| h.path)
+                    .collect()
+            ),
+            "search must not surface the config note"
+        );
+        assert!(
+            !found(
+                db.recent_notes(10)
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.path)
+                    .collect()
+            ),
+            "recents must not surface it, even though it was opened most recently"
+        );
+        assert!(
+            !found(
+                db.notes_with_tag("internal")
+                    .unwrap()
+                    .into_iter()
+                    .map(|n| n.path)
+                    .collect()
+            ),
+            "a tag listing must not surface it"
+        );
+        assert_eq!(
+            db.all_tags().unwrap(),
+            vec![("internal".to_string(), 1)],
+            "its tags must not inflate the counts either"
+        );
+
+        // The user's note is still there — the filter is not just "return
+        // nothing", which every assertion above would also pass.
+        assert_eq!(db.search("storm", 10).unwrap().len(), 1);
+        assert_eq!(db.count_notes().unwrap(), 1);
+
+        // And it is still readable by path, because the client loads vault
+        // colour and property types from it.
+        assert!(db.get_note_by_path("_storm/vault.md").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_underscore_in_the_exclusion_is_escaped_not_a_wildcard() {
+        // `_` is a LIKE wildcard. Unescaped, `_storm/%` would also exclude
+        // `astorm/`, `1storm/` and so on — a user folder silently vanishing
+        // from search.
+        let dir = tempdir::TempDir::new("storm-escape").unwrap();
+        let mut db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+        record(
+            &mut db,
+            &note("a", "astorm/Note.md", 1),
+            "findable\n",
+            KIND_CREATED,
+        );
+        record(
+            &mut db,
+            &note("b", "_storm/vault.md", 1),
+            "findable\n",
+            KIND_CREATED,
+        );
+
+        let hits: Vec<String> = db
+            .search("findable", 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.path)
+            .collect();
+        assert_eq!(hits, vec!["astorm/Note.md".to_string()]);
+    }
+
+    #[test]
+    fn a_history_lists_every_version_newest_first_without_content() {
+        let dir = tempdir::TempDir::new("storm-history").unwrap();
+        let mut db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+
+        record(&mut db, &note("a", "A.md", 1), "one\n", KIND_CREATED);
+        record(&mut db, &note("a", "A.md", 2), "two two\n", KIND_UPDATED);
+        record(&mut db, &note("a", "A.md", 3), "three\n", KIND_UPDATED);
+        // A second note, so the query is proved to filter by note rather than
+        // returning whatever is in the table.
+        record(&mut db, &note("b", "B.md", 1), "elsewhere\n", KIND_CREATED);
+
+        let history = db.list_versions("a").unwrap();
+        assert_eq!(
+            history.iter().map(|v| v.version).collect::<Vec<_>>(),
+            vec![3, 2, 1],
+            "newest first, and only this note's"
+        );
+        // `size` is the stored snapshot's length, which is what makes a
+        // listing useful without shipping the bodies.
+        assert_eq!(history[1].size, "two two\n".len() as i64);
+        assert!(!history[0].created_at.is_empty());
+    }
+
+    #[test]
+    fn a_history_is_empty_rather_than_an_error_for_an_unknown_note() {
+        let dir = tempdir::TempDir::new("storm-history2").unwrap();
+        let db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+        assert!(db.list_versions("nope").unwrap().is_empty());
     }
 
     #[test]
