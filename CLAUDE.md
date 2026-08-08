@@ -78,6 +78,15 @@ the generated registrant still references them, so the build fails on a symbol
 that looks like it should exist. Prefer first-party `flutter/packages` plugins
 (`file_selector` over `file_picker`, for instance).
 
+**The macOS app is sandboxed, so its entitlements are part of the build.**
+`macos/Runner/{DebugProfile,Release}.entitlements` must grant
+`network.client` — without it the app builds, launches and then reports the
+server unreachable whatever address it is given — and
+`files.user-selected.read-only`, which is what lets it read a file chosen in
+the attachment picker. `test/macos_entitlements_test.dart` guards both, because
+neither failure says anything about entitlements. `make install-mac` builds the
+release app and puts it in `/Applications`.
+
 ## Invariants worth knowing before editing
 
 These are load-bearing and each has a regression test. Breaking one loses user

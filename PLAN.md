@@ -456,6 +456,18 @@ Every adaptive test comes in a pair — the wide assertion, and its compact
 counterpart. "It works on desktop" is half a result; the other half is that
 nothing moved at 411px, which is the width this project exists for.
 
+**35. The macOS app stays sandboxed, so its entitlements are load-bearing.**
+Turning the sandbox off would make every entitlement question disappear in one
+line, and it is the wrong trade for an app that talks to the network and reads
+files the user picks. Keeping it means `network.client` and
+`files.user-selected.read-only` are as much a part of the build as any Dart
+file — and the failure without them is silent, which is why
+`test/macos_entitlements_test.dart` exists.
+*Revisit if:* something the app needs turns out to be impossible inside the
+sandbox. Nothing so far is: the LAN server is reachable with `network.client`,
+and ATS does not apply because `package:http` uses `dart:io` sockets rather
+than `NSURLSession`.
+
 ---
 
 ## Data model
@@ -1143,7 +1155,11 @@ Both former build blockers are discharged as of 2026-08-05:
 - *macOS builds* — `flutter doctor` reports Xcode 26.6 healthy, and
   `flutter build macos --debug` produces a running app. The
   `DVTDownloads.framework` version skew that needed
-  `sudo xcodebuild -runFirstLaunch` is gone.
+  `sudo xcodebuild -runFirstLaunch` is gone. **A running app was not a working
+  one**, though: the target carried the stock Flutter entitlements, which
+  sandbox the app and grant it no outgoing network access at all, so it could
+  never have reached the server — in debug either. See decision 35;
+  `make install-mac` is now the installed copy.
 - *Android toolchain* — SDK 36.0.0 is installed; debug APKs build and install
   on the Pixel over `adb`.
 

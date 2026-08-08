@@ -19,6 +19,27 @@ On first launch you're asked for the server address and token. The connection is
 verified before it's saved, so a typo surfaces immediately rather than as an
 empty vault later.
 
+### Installing it on macOS
+
+```sh
+make install-mac            # from the repo root; → /Applications/Storm.app
+```
+
+A release build, ad-hoc signed, which is all a locally built app needs.
+`MAC_APPS=$HOME/Applications` if `/Applications` isn't writable.
+
+Two things specific to macOS, both consequences of the app being sandboxed:
+
+- The **entitlements are load-bearing.** `network.client` is what makes the app
+  able to reach the server at all, and `files.user-selected.read-only` is what
+  lets it read a file chosen in the attachment picker. Neither failure mentions
+  entitlements — the first looks like a wrong address — so
+  `test/macos_entitlements_test.dart` asserts both.
+- macOS 15 asks for **local network** permission the first time the app talks
+  to a LAN address. Refuse it and syncing fails the same way a wrong token
+  does; it can be re-enabled under System Settings ▸ Privacy & Security ▸ Local
+  Network.
+
 ## What works
 
 - A dashboard of the server's vaults, over the notes you opened most recently

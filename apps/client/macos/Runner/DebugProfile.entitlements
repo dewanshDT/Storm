@@ -8,5 +8,14 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!-- Both of these are in Release.entitlements too, and for the same
+	     reasons — see there. They belong here as well because `network.server`
+	     above is only the Dart VM service: a debug run has exactly the same
+	     hole, so `make client` would report the server unreachable no matter
+	     what address it was given. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
 </dict>
 </plist>
