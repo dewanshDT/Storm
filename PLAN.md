@@ -1139,6 +1139,35 @@ assert; it made every tap in the tree actually ripple.
 
 ### M13 — MCP, read-only ✅
 
+**Deployed 2026-08-08.** Server only — `git diff` over `apps/client` between the
+APK on the phone and this commit is empty, so the mobile app needed no rebuild;
+the phone is already running this code. Binary verified by comparing the local
+build's sha256 against `/proc/<pid>/exe` on the VM
+(`54c158cf…3801be1`), and the client-facing routes (`/v1/vaults`, `/v1/recents`,
+`/tree`, the web bundle) all answer 200 over the LAN afterwards.
+
+Two things the deploy itself taught:
+
+- ***`make build-server` failed and left the previous binary in place.***
+  `~/.cargo/bin` is not on a non-interactive shell's PATH, so the target's
+  `command -v cargo-zigbuild` guard fired — and the stale 6 MB binary from
+  2026-08-07 was still sitting at the output path, which a deploy that only
+  checked "does the file exist" would have shipped. Worse, `rustc` on PATH is
+  **Homebrew's**, which has no `x86_64-unknown-linux-musl` target even though
+  `rustup` has it installed; the build has to run with
+  `~/.rustup/toolchains/stable-aarch64-apple-darwin/bin` first. Always compare
+  the artefact's timestamp and hash, never its existence.
+- *The VM binds `--host 0.0.0.0`*, so `mcp::allowed_hosts` correctly returns an
+  empty list and logs `allowed_hosts=[]` at startup. The LAN check that matters
+  was then done for real: `initialize` from this Mac against
+  `http://192.168.91.51:8484/mcp`, which carries `Host: 192.168.91.51:8484` and
+  would have been refused by rmcp's default.
+
+Rollback is one command: `storm-server.prev` and `run.sh.prev` sit beside the
+live ones, and the pre-swap index snapshot is at the path in
+`/home/dewansh/.storm-last-backup`.
+
+
 `docs/storm-mcp.md`, Phase 1. Nine read tools at `/mcp`, behind `--mcp` and the
 same bearer token. Write tools are designed and deliberately not built yet.
 
