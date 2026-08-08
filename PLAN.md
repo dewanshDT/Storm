@@ -49,6 +49,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
 | M11 | Typed note properties | **done** | properties, colours, fonts |
 | M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
+| M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 
 Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
@@ -479,6 +480,34 @@ that handler emits only snap packaging, which Storm does not use.
 through `qlmanage`, the only renderer macOS ships, and works around its
 flattening of transparency; `_render` is the single function that would change,
 and regenerating icons would stop needing a Mac.
+
+**37. MCP is a caller of the domain layer, so the domain layer had to exist.**
+`ops.rs` holds one plain async fn per operation; `api.rs` handlers and `mcp.rs`
+tools both call it and neither owns logic. The brief's "MCP is never a second
+implementation" could not be honoured by discipline alone — the logic lived
+inside axum handlers a second caller cannot reach. **A new operation goes in
+`ops.rs`.** One added to a handler is invisible to MCP; one added to a tool is
+the drift this prevents.
+*Revisit if:* an operation is genuinely HTTP-shaped — streaming, or a WebSocket
+— in which case it stays in `api.rs` and MCP simply doesn't offer it.
+
+**38. Read tools now; writes wait for the vault's runway.**
+Not an architectural limit — the write path is the same `put_note` with
+`base_version` and diff3 that Flutter uses, and could be wrapped tomorrow. It is
+that every milestone reaching production has found bugs no suite caught first,
+the real vault was cut over on 2026-08-07, and an agent is a new class of
+writer. `--mcp` is off by default for the same reason.
+*Revisit when:* the vault has had ordinary use since the cutover, per the
+brief's runway. Then Phase 2, on its own branch.
+
+**39. MCP speaks HTTP only; `rmcp` is pinned exactly.**
+No stdio shim: Claude Code connects to HTTP MCP servers directly with a bearer
+header, so a shim would be a second thing to maintain for no capability. The pin
+is `=3.1.2` because rmcp shipped five releases in the eleven days around the
+2026-07-28 spec revision, and it is still Tier 2 — `ProtocolVersion::LATEST` is
+2025-11-25, which Storm follows rather than announcing a revision the SDK's own
+transport treats as provisional.
+*Revisit if:* rmcp reaches Tier 1, or a client Storm wants only speaks stdio.
 
 ---
 
@@ -1105,6 +1134,54 @@ Flutter's *"ListTile background color or ink splashes may be invisible"* — the
 sidebar used a coloured `Container`, and `ListTile` paints its ripple onto the
 nearest `Material` ancestor. Fixing it with a `Material` was not silencing an
 assert; it made every tap in the tree actually ripple.
+
+---
+
+### M13 — MCP, read-only ✅
+
+`docs/storm-mcp.md`, Phase 1. Nine read tools at `/mcp`, behind `--mcp` and the
+same bearer token. Write tools are designed and deliberately not built yet.
+
+**The brief's Principle needed a refactor to be true, not just discipline.**
+"MCP is never a second way to touch markdown" is unachievable while every
+operation lives inside an axum handler: a handler takes extractors and returns
+HTTP types, so a second caller physically cannot reach it and would have to
+re-derive vault resolution, the 404-vs-409 rule and FTS sanitising. `ops.rs` is
+that refactor — one plain async fn per operation, called by the handler and by
+the tool. The 81-check `e2e.py` suite, unchanged, is what proves the extraction
+did not alter REST.
+
+**Two claims in the brief did not survive contact.** `get_note_history` was
+described as backed by existing plumbing: `note_versions` is populated and
+`version_content` reads one revision, but nothing *listed* them and neither was
+on a route, so this milestone added `Db::list_versions` and two REST routes —
+the Flutter client could not see history either. And `get_vault`'s description
+was said to come from `_storm/vault.md`; the server had never parsed that note,
+only excluded it from counts.
+
+**Three defaults that would have shipped as bugs**, each found by reading the
+SDK and the spec rather than by testing:
+
+1. *rmcp restricts `Host` to loopback by default*, as DNS-rebinding protection.
+   Storm is reached at a LAN address, so every request from the phone or
+   another laptop would have been refused with nothing naming the `Host` header
+   as the cause.
+2. *`structuredContent` must be a JSON object.* rmcp types it as any `Value`
+   and will happily send a bare array, which is what the first nine tools did.
+   List results are now wrapped under the REST envelopes' own keys.
+3. *A missing vault was a protocol error.* The spec reserves those for
+   malformed requests and says clients need not show them to the model, while
+   tool execution errors are the ones carrying "actionable feedback that
+   language models can use to self-correct". An agent holding a stale note id
+   is exactly that case, so 4xx now returns `isError: true` with the message
+   REST would give; only a server fault is a protocol error.
+
+Each of the three has a test, and each test was verified by breaking the code:
+mounting `/mcp` below the auth layer (unauthenticated calls returned 200),
+reverting the error mapping, and unwrapping the lists. The last one initially
+*crashed* the suite rather than reporting — a list where a dict was expected —
+which is a worse signal than a failure, so the payload accessor now normalises
+and the run reports all eight failures.
 
 ---
 

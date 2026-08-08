@@ -12,7 +12,9 @@ mod api;
 mod db;
 mod frontmatter;
 mod index;
+mod mcp;
 mod merge;
+mod ops;
 mod parse;
 mod registry;
 mod vault;
@@ -69,6 +71,14 @@ struct Args {
     /// Directory holding the built Flutter web client, served at `/`.
     #[arg(long)]
     web: Option<PathBuf>,
+
+    /// Serve the Model Context Protocol endpoint at `/mcp`.
+    ///
+    /// Read-only tools over the same vaults and the same bearer token. Off by
+    /// default: it is a new surface on the notes, and turning one on should be
+    /// a decision rather than a side effect of upgrading.
+    #[arg(long)]
+    mcp: bool,
 
     /// Write consistent snapshots of every vault index into this directory,
     /// then exit.
@@ -327,7 +337,21 @@ async fn main() -> Result<()> {
     watcher::spawn(root.clone(), state.clone()).context("starting file watcher")?;
     tracing::info!(path = %root.display(), "watching the storage root for external edits");
 
-    let mut app = api::router(state);
+    // Opt-in, so deploying a build that can speak MCP changes nothing until it
+    // is asked for. The tools are read-only, but a new protocol surface on a
+    // vault that has just been cut over is worth turning on deliberately.
+    let mcp = args.mcp.then(|| {
+        let hosts = mcp::allowed_hosts(&args.host, args.port);
+        tracing::info!(
+            allowed_hosts = ?hosts,
+            "MCP enabled at /mcp (read-only tools, same bearer token)"
+        );
+        mcp::McpOptions {
+            allowed_hosts: hosts,
+        }
+    });
+
+    let mut app = api::router(state, mcp);
 
     // The Flutter web client is served by this same binary, so there is one
     // thing to run in the homelab rather than two.
@@ -380,6 +404,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 8484,
             token: None,
+            mcp: false,
             dry_run: false,
             web: None,
             backup_db: None,
