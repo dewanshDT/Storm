@@ -40,6 +40,24 @@ Two things specific to macOS, both consequences of the app being sandboxed:
   does; it can be re-enabled under System Settings ▸ Privacy & Security ▸ Local
   Network.
 
+### Installing it on Android
+
+`flutter build apk --release`, then `adb install -r`. Two platform permissions
+make the difference between an app that runs and an app that works, and neither
+failure says anything useful:
+
+- **`INTERNET` must be in the *main* manifest.** Flutter's template puts it in
+  the debug and profile manifests only, so hot reload can reach your machine —
+  a release build without it opens no sockets at all and reports "Couldn't
+  reach the server". `test/android_manifest_test.dart` asserts it.
+- **Android 16+ also gates the local network** behind the runtime
+  `ACCESS_LOCAL_NETWORK` permission, which the toolchain adds for `targetSdk`
+  36. Storm's server is a LAN address, so if it is refused, syncing fails the
+  same way a wrong token does.
+
+**Verify by opening the app, not by comparing hashes.** A matching sha256
+proves the bytes arrived; it does not prove the app can reach anything.
+
 ## App icons
 
 `assets/logo.svg` is the source. Everything else is generated:

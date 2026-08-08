@@ -39,6 +39,25 @@ pub struct Registry {
     pub root: PathBuf,
     #[serde(default)]
     pub vaults: Vec<VaultEntry>,
+    /// Whether the MCP endpoint serves requests.
+    ///
+    /// Here rather than in a file of its own because this is already where the
+    /// server's own persisted settings live — `root` is one — and a second
+    /// settings file would be a second thing to back up and keep in step.
+    ///
+    /// `#[serde(default)]` so a registry written before this existed loads with
+    /// MCP off, which is the safe direction: an upgrade never switches on a way
+    /// to read the vault.
+    #[serde(default)]
+    pub mcp_enabled: bool,
+    /// Whether MCP may *change* the vault, not just read it.
+    ///
+    /// A second flag rather than a three-state mode so an older registry loads
+    /// as read-only rather than failing to parse — and because "off" and
+    /// "read-only" are the two safe states, and both should be reachable by a
+    /// field simply being absent.
+    #[serde(default)]
+    pub mcp_writable: bool,
 }
 
 /// What a scan of a candidate root would do, without doing it.
@@ -57,17 +76,27 @@ pub struct RootPreview {
 }
 
 impl Registry {
-    /// Loads the registry, or returns an empty one rooted at `root`.
+    /// Loads the registry, or returns an empty one rooted at `first_run_root`.
     ///
     /// A missing file is the first-run case, not an error. A corrupt one *is*
     /// an error: silently starting with zero vaults is the failure mode this
     /// whole module is written to avoid.
-    pub fn load(state_dir: &Path, root: &Path) -> Result<Self> {
+    ///
+    /// **The stored root wins.** `first_run_root` seeds a registry that does
+    /// not exist yet and is otherwise ignored, because the root is a setting
+    /// the app can change and a setting that does not survive a restart is not
+    /// a setting. This used to overwrite the parsed value with the argument,
+    /// which meant a root chosen in the app was recorded, ignored on the next
+    /// boot, and then *erased* by the next save — with any vault adopted under
+    /// it left behind as a permanently `missing` entry.
+    pub fn load(state_dir: &Path, first_run_root: &Path) -> Result<Self> {
         let path = state_dir.join(REGISTRY_FILE);
         if !path.exists() {
             return Ok(Self {
-                root: root.to_path_buf(),
+                root: first_run_root.to_path_buf(),
                 vaults: Vec::new(),
+                mcp_enabled: false,
+                mcp_writable: false,
             });
         }
         let raw = fs::read_to_string(&path)
@@ -79,7 +108,11 @@ impl Registry {
                 path.display()
             )
         })?;
-        registry.root = root.to_path_buf();
+        // Only when the file carries no root at all — a hand-edited or
+        // truncated registry — does the argument stand in for it.
+        if registry.root.as_os_str().is_empty() {
+            registry.root = first_run_root.to_path_buf();
+        }
         Ok(registry)
     }
 
@@ -295,6 +328,48 @@ mod tests {
 
     fn now() -> String {
         "2026-08-07T10:00:00Z".to_string()
+    }
+
+    #[test]
+    fn the_stored_root_survives_a_different_argument() {
+        // The bug this replaces: `load` overwrote the parsed root with its
+        // argument, so a root chosen in the app was written to vaults.json,
+        // ignored on the next boot, and then erased by the next save — leaving
+        // any vault adopted under it registered but permanently `missing`.
+        let dir = tempdir::TempDir::new("storm-root").unwrap();
+        let state = dir.path().join("state");
+        let chosen = dir.path().join("chosen");
+        let on_the_command_line = dir.path().join("flag");
+
+        let mut registry = Registry::default();
+        registry.root = chosen.clone();
+        registry.save(&state).unwrap();
+
+        let loaded = Registry::load(&state, &on_the_command_line).unwrap();
+        assert_eq!(loaded.root, chosen, "the stored root is the setting");
+    }
+
+    #[test]
+    fn the_argument_seeds_a_registry_that_does_not_exist_yet() {
+        let dir = tempdir::TempDir::new("storm-root2").unwrap();
+        let state = dir.path().join("state");
+        let first_run = dir.path().join("vaults");
+
+        let loaded = Registry::load(&state, &first_run).unwrap();
+        assert_eq!(loaded.root, first_run);
+        assert!(loaded.vaults.is_empty());
+    }
+
+    #[test]
+    fn a_registry_with_no_root_at_all_falls_back_to_the_argument() {
+        // A hand-repaired file, which the module docstring invites.
+        let dir = tempdir::TempDir::new("storm-root3").unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join(REGISTRY_FILE), r#"{"root":"","vaults":[]}"#).unwrap();
+
+        let fallback = dir.path().join("vaults");
+        assert_eq!(Registry::load(&state, &fallback).unwrap().root, fallback);
     }
 
     struct Fixture {

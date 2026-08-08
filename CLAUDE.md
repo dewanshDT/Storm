@@ -78,6 +78,15 @@ the generated registrant still references them, so the build fails on a symbol
 that looks like it should exist. Prefer first-party `flutter/packages` plugins
 (`file_selector` over `file_picker`, for instance).
 
+**A release APK has no network unless the *main* manifest grants it.** Flutter's
+template declares `android.permission.INTERNET` in
+`android/app/src/{debug,profile}/AndroidManifest.xml` only, so hot reload can
+reach the host — every debug build works, and the first release build on a
+phone cannot open a socket at all. The kernel refuses it with `EPERM`, which
+the app reports as "Couldn't reach the server", indistinguishable from a wrong
+address. `test/android_manifest_test.dart` guards it. **A hash-verified install
+proves the bytes arrived, not that the app works** — open it.
+
 **The macOS app is sandboxed, so its entitlements are part of the build.**
 `macos/Runner/{DebugProfile,Release}.entitlements` must grant
 `network.client` — without it the app builds, launches and then reports the
@@ -86,6 +95,13 @@ server unreachable whatever address it is given — and
 the attachment picker. `test/macos_entitlements_test.dart` guards both, because
 neither failure says anything about entitlements. `make install-mac` builds the
 release app and puts it in `/Applications`.
+
+**A new server operation goes in `apps/server/src/ops.rs`.** REST handlers and
+MCP tools are both thin callers of it — a handler holds extractors and `Json`,
+a tool holds params and structured content, and neither holds logic. Adding an
+operation to `api.rs` alone makes it invisible to MCP; adding one to `mcp.rs`
+alone starts the divergence `ops.rs` exists to prevent. `tests/e2e.py` is what
+proves an extraction left REST unchanged.
 
 ## Invariants worth knowing before editing
 
@@ -143,6 +159,13 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose
   directory is gone stays in the registry marked `missing`.
+- **The stored storage root wins over `--vault-root`.** `state/vaults.json` is
+  the source of truth; the flag seeds a registry that does not exist yet, and a
+  disagreement is logged rather than silently resolved. `Registry::load` used to
+  overwrite the parsed root with its argument, so a root chosen in the app was
+  recorded, ignored on the next boot, then erased by the next save — with every
+  vault adopted under it left registered as `missing`. **A setting that does not
+  survive a restart is not a setting.**
 
 ## Style
 
