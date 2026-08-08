@@ -1184,6 +1184,27 @@ live ones, and the pre-swap index snapshot is at the path in
   has a switch under **Server ▸ AI access**. `--mcp` is an override at boot, not
   the source of truth.
 
+**A release APK could never reach the server, and three deploys hid it.**
+Reported from the phone as *"Couldn't reach the server … OS Error: Operation
+not permitted, errno = 1"*. `EPERM` on `connect` is Android refusing the socket
+outright: Flutter's template declares `INTERNET` in the **debug** and
+**profile** manifests only, so hot reload can talk to the host machine, and
+`android/app/src/main/AndroidManifest.xml` had never carried it. Every debug
+APT this project has installed worked; the switch to
+`flutter build apk --release` for the icon deploy is what exposed it.
+
+The deeper mistake is the verification, not the manifest. Each of those deploys
+was "verified" by comparing the local APK's sha256 against the installed
+package — which proves the bytes arrived and nothing else. **The app was never
+opened.** A hash match is not a working app, and it took the user reporting a
+red error screen to find out. `test/android_manifest_test.dart` guards the
+permission now, and the fix was confirmed by launching the app on the device
+and seeing the vault list, not by another hash.
+
+Same class as the macOS entitlements finding two milestones earlier: a platform
+permission that fails silently, at the socket, long after everything that could
+have caught it has passed.
+
 The switch also repeated a mistake this project has already made once: a
 `SwitchListTile` inside a colour-carrying `Container` trips Flutter's
 "ink splashes may be invisible" assertion, exactly as the M12 sidebar did.

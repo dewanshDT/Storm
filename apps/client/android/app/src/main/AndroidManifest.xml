@@ -1,4 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Load-bearing, and easy to lose: Flutter's template declares INTERNET
+         only in the debug and profile manifests, so hot reload can talk to the
+         host. A release build without this line installs and runs perfectly and
+         then cannot open a socket at all — the kernel refuses it with EPERM,
+         which surfaces as "Couldn't reach the server", indistinguishable from a
+         wrong address or a server that is down.
+
+         Storm is a sync client; there is no version of it that works offline
+         forever. `test/android_manifest_test.dart` is the guard. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="Storm"
         android:name="${applicationName}"
