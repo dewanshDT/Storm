@@ -1167,6 +1167,29 @@ Rollback is one command: `storm-server.prev` and `run.sh.prev` sit beside the
 live ones, and the pre-swap index snapshot is at the path in
 `/home/dewansh/.storm-last-backup`.
 
+**Two things the first live use turned up**, both fixed the same day:
+
+- ***Storm's own config note was discoverable as one of the user's notes.***
+  Searching the real vault through MCP returned `_storm/vault.md`. Pre-existing
+  REST behaviour, not new — but the Flutter client had been filtering `_storm/`
+  at **five separate call sites**, so the rule lived in the callers rather than
+  in the query, and MCP was a caller that did not know it. Now one `NOT_CONFIG`
+  predicate in `db.rs` covers search, recents, tags and tag listings.
+  Deliberately *not* the tree or `get_note_by_path`: the client reads that note
+  to load a vault's colour and property types.
+- ***The endpoint could only be switched at boot.*** `--mcp` decided whether the
+  route was mounted, so turning MCP off meant an SSH session — for the one
+  setting most likely to be wanted in a hurry. `/mcp` is now always mounted
+  behind a gate, the setting is persisted in `state/vaults.json`, and the app
+  has a switch under **Server ▸ AI access**. `--mcp` is an override at boot, not
+  the source of truth.
+
+The switch also repeated a mistake this project has already made once: a
+`SwitchListTile` inside a colour-carrying `Container` trips Flutter's
+"ink splashes may be invisible" assertion, exactly as the M12 sidebar did.
+Decision 34's `Material` fix was in `PLAN.md` and still got re-made — worth
+knowing that a recorded lesson is not the same as a remembered one.
+
 
 `docs/storm-mcp.md`, Phase 1. Nine read tools at `/mcp`, behind `--mcp` and the
 same bearer token. Write tools are designed and deliberately not built yet.

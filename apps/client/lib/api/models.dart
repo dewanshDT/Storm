@@ -228,16 +228,25 @@ class ServerConfig {
     required this.vaultRoot,
     required this.stateDir,
     required this.vaultCount,
+    required this.mcpEnabled,
   });
 
   final String vaultRoot;
   final String stateDir;
   final int vaultCount;
 
+  /// Whether the server answers on `/mcp`.
+  ///
+  /// Defaults to false when the key is absent, which is what an older server
+  /// sends — the safe direction, since the switch would otherwise read as on
+  /// against a server that cannot serve it.
+  final bool mcpEnabled;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
     vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
+    mcpEnabled: j['mcp_enabled'] as bool? ?? false,
   );
 }
 

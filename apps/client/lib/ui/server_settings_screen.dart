@@ -44,6 +44,17 @@ class ServerSettingsScreen extends ConsumerWidget {
                 : _RootCard(config: c),
           ),
           const SizedBox(height: 24),
+          _Section(label: 'AI access (MCP)'),
+          config.when(
+            loading: () => const Padding(
+              padding: EdgeInsets.all(12),
+              child: LinearProgressIndicator(),
+            ),
+            error: (e, _) => _Muted('$e'),
+            data: (c) =>
+                c == null ? const _Muted('Not connected') : _McpCard(config: c),
+          ),
+          const SizedBox(height: 24),
           _Section(label: 'Vaults'),
           vaults.when(
             loading: () => const Padding(
@@ -95,6 +106,92 @@ Future<void> createVault(BuildContext context, WidgetRef ref) async {
 void _toast(BuildContext context, String message) => ScaffoldMessenger.of(
   context,
 ).showSnackBar(SnackBar(content: Text(message)));
+
+/// Whether the server lets an AI assistant read these vaults, and a switch.
+///
+/// This is a *server* setting, not this device's: turning it off here turns it
+/// off for every client and every agent, and it survives a restart. The
+/// subtitle says so, because a switch on a settings screen otherwise reads as
+/// local to the app.
+class _McpCard extends ConsumerStatefulWidget {
+  const _McpCard({required this.config});
+
+  final ServerConfig config;
+
+  @override
+  ConsumerState<_McpCard> createState() => _McpCardState();
+}
+
+class _McpCardState extends ConsumerState<_McpCard> {
+  /// Set while the request is in flight so the switch shows where it is going,
+  /// not where it was. Without it the switch snaps back until the provider
+  /// refreshes, which reads as the toggle having failed.
+  bool? _pending;
+
+  Future<void> _set(bool enabled) async {
+    final api = ref.read(apiProvider);
+    if (api == null) return;
+    setState(() => _pending = enabled);
+    try {
+      await api.setMcpEnabled(enabled);
+      ref.invalidate(serverConfigProvider);
+    } catch (e) {
+      if (mounted) _toast(context, describeFailure(e));
+    } finally {
+      if (mounted) setState(() => _pending = null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final on = _pending ?? widget.config.mcpEnabled;
+
+    // `Material`, not a coloured `Container`: SwitchListTile is a ListTile, and
+    // a ListTile paints its background and ink splash onto the nearest Material
+    // ancestor — a DecoratedBox in between swallows them, and Flutter asserts
+    // about it. The same mistake was made in the M12 sidebar; see decision 34.
+    return Material(
+      color: scheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 4, 6, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: on,
+              onChanged: _pending == null ? _set : null,
+              title: const Text('Let AI assistants read your notes'),
+              subtitle: Text(
+                on ? 'Serving at /mcp' : 'Off — /mcp refuses every request',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(0, 2, 8, 0),
+              child: Text(
+                on
+                    ? 'Read-only: search, read and history. Nothing can create, '
+                          'edit or delete a note. Anyone holding this server’s '
+                          'token can read every vault this way.'
+                    : 'A server setting, not just this device — it applies to '
+                          'every client and survives a restart.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _RootCard extends ConsumerWidget {
   const _RootCard({required this.config});

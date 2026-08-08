@@ -311,7 +311,7 @@ async fn main() -> Result<()> {
     }
 
     registry.save(&state_dir).context("saving the registry")?;
-    let vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
+    let mut vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
 
     let token = args.token.unwrap_or_else(|| {
         let generated = uuid::Uuid::new_v4().to_string();
@@ -323,12 +323,29 @@ async fn main() -> Result<()> {
 
     let (events, _) = broadcast::channel(1024);
     let (root_changed, _) = broadcast::channel(4);
+
+    // `--mcp` turns it on at boot; otherwise the persisted setting decides, so
+    // a toggle made from the app survives a restart. The flag is an override
+    // rather than the source of truth, which is why it also persists — a server
+    // started with it and then switched off in the app stays off.
+    let mcp_enabled = args.mcp || vault_set.registry.mcp_enabled;
+    if mcp_enabled != vault_set.registry.mcp_enabled {
+        vault_set.registry.mcp_enabled = mcp_enabled;
+        vault_set.registry.save(&state_dir)?;
+    }
+    tracing::info!(
+        enabled = mcp_enabled,
+        allowed_hosts = ?mcp::allowed_hosts(&args.host, args.port),
+        "MCP endpoint at /mcp (read-only tools, same bearer token)"
+    );
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
         token,
         state_dir: state_dir.clone(),
         root_changed,
+        mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -337,21 +354,12 @@ async fn main() -> Result<()> {
     watcher::spawn(root.clone(), state.clone()).context("starting file watcher")?;
     tracing::info!(path = %root.display(), "watching the storage root for external edits");
 
-    // Opt-in, so deploying a build that can speak MCP changes nothing until it
-    // is asked for. The tools are read-only, but a new protocol surface on a
-    // vault that has just been cut over is worth turning on deliberately.
-    let mcp = args.mcp.then(|| {
-        let hosts = mcp::allowed_hosts(&args.host, args.port);
-        tracing::info!(
-            allowed_hosts = ?hosts,
-            "MCP enabled at /mcp (read-only tools, same bearer token)"
-        );
+    let mut app = api::router(
+        state,
         mcp::McpOptions {
-            allowed_hosts: hosts,
-        }
-    });
-
-    let mut app = api::router(state, mcp);
+            allowed_hosts: mcp::allowed_hosts(&args.host, args.port),
+        },
+    );
 
     // The Flutter web client is served by this same binary, so there is one
     // thing to run in the homelab rather than two.
