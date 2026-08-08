@@ -1,4 +1,4 @@
-//! Model Context Protocol — read-only tools over the same operations REST uses.
+//! Model Context Protocol — tools over the same operations REST uses.
 //!
 //! Every tool here is params → [`crate::ops`] → structured content. Nothing in
 //! this file reaches for `Db` or the filesystem directly, and nothing
@@ -7,10 +7,10 @@
 //! apart. That is the whole point of `docs/storm-mcp.md`'s Principle, and the
 //! reason `ops` exists at all.
 //!
-//! **Read-only, deliberately.** Write tools are designed but wait until the
-//! freshly cut-over vault has had ordinary runtime, because every milestone
-//! that reached production found bugs no suite caught first, and a second
-//! writer is exactly that kind of new path.
+//! **Read-only unless switched on.** The write tools are filtered out of the
+//! router entirely when the server is in read-only mode, so an agent is never
+//! shown a tool it cannot use — better than letting it choose one and refusing,
+//! and impossible to forget in a single tool's body. See [`WRITE_TOOLS`].
 //!
 //! Notes are addressed by `vault + note_id`, never by a path — the same
 //! contract the REST API already has. Responses do carry the vault-relative
@@ -454,11 +454,25 @@ impl ServerHandler for Storm {
         info.protocol_version = ProtocolVersion::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("storm", env!("CARGO_PKG_VERSION"));
+        // The instructions follow the mode, because they are the first thing
+        // the model reads: telling it the tools are read-only when they are not
+        // would be worse than saying nothing.
         info.instructions = Some(
-            "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
-             addressed by vault id and note id — never by file path. Start with list_vaults, \
-             then search to find notes and get_note to read one. These tools are read-only."
-                .into(),
+            if self.writable {
+                "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+                 addressed by vault id and note id — never by file path. Start with \
+                 list_vaults, then search to find notes and get_note to read one. You may \
+                 also create, update and delete notes: always read a note before updating it \
+                 and send back its base_version, so a change made on another device is \
+                 merged rather than overwritten. There is no trash — a deleted note is gone \
+                 from the vault immediately."
+            } else {
+                "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+                 addressed by vault id and note id — never by file path. Start with \
+                 list_vaults, then search to find notes and get_note to read one. These \
+                 tools are read-only: this server does not allow changes."
+            }
+            .into(),
         );
         info
     }
