@@ -491,14 +491,30 @@ the drift this prevents.
 *Revisit if:* an operation is genuinely HTTP-shaped — streaming, or a WebSocket
 — in which case it stays in `api.rs` and MCP simply doesn't offer it.
 
-**38. Read tools now; writes wait for the vault's runway.**
-Not an architectural limit — the write path is the same `put_note` with
-`base_version` and diff3 that Flutter uses, and could be wrapped tomorrow. It is
-that every milestone reaching production has found bugs no suite caught first,
-the real vault was cut over on 2026-08-07, and an agent is a new class of
-writer. `--mcp` is off by default for the same reason.
-*Revisit when:* the vault has had ordinary use since the cutover, per the
-brief's runway. Then Phase 2, on its own branch.
+**38. Writes exist, and are off unless switched on.** *(supersedes the runway)*
+Originally: read tools now, writes after the freshly cut-over vault had had
+ordinary use. The user overrode that on 2026-08-08, which is their call — so
+`create_note`, `update_note` and `delete_note` ship, and the caution moved from
+the calendar into the design instead.
+
+Read-only is the default and a first-class mode, not a disabled state:
+`mcp_writable` is a second flag that defaults false, cannot be on while the
+endpoint is off, and **filters the tool router** — a read-only server does not
+advertise the write tools at all, so an agent cannot pick one it was never
+shown. Writes go through the same `put_note` with `base_version` and diff3 the
+Flutter client uses, so an agent racing a phone resolves exactly as two phones
+would, and `ops::broadcast_latest` means an agent's edit reaches every connected
+device rather than waiting for a pull.
+*Revisit if:* an agent turns out to need `move_note`, `tag_note` or
+`append_to_note` — all Phase 2 designs, all the same shape.
+
+**38a. Still no trash, and MCP does not get one of its own.**
+`delete_note` removes the file immediately, exactly as the Flutter client's
+delete does. `note_versions` still holds the text, so it is recoverable from the
+index, but nothing in the vault is. Adding a trash only for MCP would make
+agent-deleted and user-deleted notes behave differently, which is its own bug
+class — if trash is worth having it is a Storm feature decided once, for every
+client. The settings screen says this before write access is granted.
 
 **39. MCP speaks HTTP only; `rmcp` is pinned exactly.**
 No stdio shim: Claude Code connects to HTTP MCP servers directly with a bearer

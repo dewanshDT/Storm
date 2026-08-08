@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
@@ -36,6 +37,14 @@ pub struct McpOptions {
     /// `Host` headers to accept, empty meaning any.
     pub allowed_hosts: Vec<String>,
 }
+
+/// Tools that change the vault.
+///
+/// Named here rather than inferred, so adding a write tool without deciding it
+/// is a write is not possible: `every_write_tool_is_listed` fails if the router
+/// grows one that is missing from this list, and it would otherwise be served
+/// to a read-only client.
+pub const WRITE_TOOLS: &[&str] = &["create_note", "update_note", "delete_note"];
 
 /// Which `Host` headers the MCP endpoint should accept.
 ///
@@ -83,7 +92,14 @@ pub fn service(
         .with_allowed_hosts(options.allowed_hosts);
 
     StreamableHttpService::new(
-        move || Ok(Storm::new(state.clone())),
+        // A fresh handler per request, which is what lets the write switch take
+        // effect immediately: the mode is read here, not captured at startup.
+        move || {
+            let writable = state
+                .mcp_writable
+                .load(std::sync::atomic::Ordering::Relaxed);
+            Ok(Storm::new(state.clone(), writable))
+        },
         Arc::new(LocalSessionManager::default()),
         config,
     )
@@ -137,6 +153,30 @@ pub struct RecentParams {
     pub limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateParams {
+    pub vault: String,
+    /// Where the note goes, relative to the vault, ending in `.md` — for
+    /// example `Projects/Ideas.md`. Folders are created as needed.
+    pub path: String,
+    /// The note's full markdown. Frontmatter is optional; Storm adds `id` and
+    /// `created` itself.
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateParams {
+    pub vault: String,
+    pub note_id: String,
+    /// The note's complete new markdown. This replaces the body — read the note
+    /// first and send back the whole thing, not a fragment.
+    pub content: String,
+    /// The `version` from the `get_note` you edited. The server merges against
+    /// it, so a note changed on a phone in the meantime is reconciled rather
+    /// than overwritten.
+    pub base_version: i64,
+}
+
 // ---- the handler -------------------------------------------------------
 
 /// Holds only the shared state.
@@ -149,6 +189,14 @@ pub struct RecentParams {
 #[derive(Clone)]
 pub struct Storm {
     state: Shared,
+    /// Whether this request may change the vault.
+    ///
+    /// Filters the tool router rather than gating each tool's body, so a
+    /// read-only server does not *advertise* `delete_note` at all. An agent
+    /// cannot pick a tool it was never shown, which is a better answer than
+    /// letting it try and refusing — and it makes the refusal impossible to
+    /// forget in one tool's body.
+    writable: bool,
 }
 
 /// Renders an operation's result as a tool result.
@@ -204,8 +252,19 @@ fn respond_object<T: serde::Serialize>(
 
 #[tool_router]
 impl Storm {
-    pub fn new(state: Shared) -> Self {
-        Self { state }
+    pub fn new(state: Shared, writable: bool) -> Self {
+        Self { state, writable }
+    }
+
+    /// The tools this request is allowed to see and call.
+    fn tools(&self) -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        if !self.writable {
+            for name in WRITE_TOOLS {
+                router.remove_route(name);
+            }
+        }
+        router
     }
 
     #[tool(
@@ -317,9 +376,70 @@ impl Storm {
             Some("content"),
         )
     }
+
+    // ---- writes --------------------------------------------------------
+    //
+    // Present only when the server is in read-write mode; see `tools()`.
+
+    #[tool(
+        description = "Create a new note. Fails if the path is already taken. The note is stamped `source: ai` in its frontmatter so it is obvious later who wrote it."
+    )]
+    async fn create_note(
+        &self,
+        Parameters(CreateParams {
+            vault,
+            path,
+            content,
+        }): Parameters<CreateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Stamped here rather than in `ops`, because "an agent wrote this" is
+        // something only this caller knows — a note created from the phone must
+        // not carry it. `set_scalars` splices a single line and passes every
+        // other byte through, so a user's YAML keeps its order and comments.
+        let stamped = crate::frontmatter::set_scalars(&content, &[("source", "ai")]);
+        respond_object(crate::ops::create_note(&self.state, &vault, &path, &stamped).await)
+    }
+
+    #[tool(
+        description = "Replace a note's content. Requires the base_version you read, so a note edited elsewhere is merged rather than overwritten. If the result says merged or conflict, the returned content is the server's — re-read before editing again."
+    )]
+    async fn update_note(
+        &self,
+        Parameters(UpdateParams {
+            vault,
+            note_id,
+            content,
+            base_version,
+        }): Parameters<UpdateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(
+            crate::ops::update_note(
+                &self.state,
+                &vault,
+                &note_id,
+                base_version,
+                &content,
+                Some("mcp"),
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Delete a note. Storm has no trash: the file is removed from the vault immediately. Only the server's version history still holds the text."
+    )]
+    async fn delete_note(
+        &self,
+        Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::delete_note(&self.state, &vault, &note_id).await,
+            Some("seq"),
+        )
+    }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tools())]
 impl ServerHandler for Storm {
     fn get_info(&self) -> ServerInfo {
         // Field-by-field on a default, because these models are
@@ -347,6 +467,60 @@ impl ServerHandler for Storm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_mode_does_not_even_advertise_the_write_tools() {
+        // Filtering the router rather than gating each tool's body means an
+        // agent is never shown a tool it cannot use — and that the refusal
+        // cannot be forgotten in one tool.
+        let read_only = Storm::tool_router();
+        let listed: Vec<String> = read_only
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.into())
+            .collect();
+        for name in WRITE_TOOLS {
+            assert!(
+                listed.contains(&name.to_string()),
+                "{name} should exist in the full router"
+            );
+        }
+
+        let mut filtered = Storm::tool_router();
+        for name in WRITE_TOOLS {
+            filtered.remove_route(name);
+        }
+        for name in WRITE_TOOLS {
+            assert!(
+                !filtered.has_route(name),
+                "{name} must be gone when read-only"
+            );
+        }
+        assert_eq!(
+            filtered.list_all().len(),
+            listed.len() - WRITE_TOOLS.len(),
+            "only the write tools should have been removed"
+        );
+    }
+
+    #[test]
+    fn every_tool_that_changes_the_vault_is_named_in_write_tools() {
+        // The list is hand-maintained, so this is what stops a new write tool
+        // from being served to a read-only client because someone forgot to add
+        // it. Heuristic but deliberate: any tool whose name begins with a verb
+        // that changes something must be declared.
+        const MUTATING_PREFIXES: [&str; 5] = ["create", "update", "delete", "move", "append"];
+        for tool in Storm::tool_router().list_all() {
+            let name: String = tool.name.into();
+            if MUTATING_PREFIXES.iter().any(|p| name.starts_with(p)) {
+                assert!(
+                    WRITE_TOOLS.contains(&name.as_str()),
+                    "{name} looks like a write tool but is not in WRITE_TOOLS, \
+                     so a read-only server would serve it"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_concrete_bind_address_is_allowed_with_and_without_its_port() {

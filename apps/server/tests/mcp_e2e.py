@@ -46,6 +46,9 @@ EXPECTED_TOOLS = {
     "search",
 }
 
+# Only served when the server is in read-write mode.
+WRITE_TOOLS = {"create_note", "update_note", "delete_note"}
+
 ok = 0
 fail = 0
 _id = 0
@@ -320,6 +323,94 @@ status, body = rpc("tools/list")
 check("mcp answers again once on", status == 200 and "result" in body, status)
 _, cfg = rest("GET", "/v1/config")
 check("config reports it on", cfg.get("mcp_enabled") is True, cfg)
+
+print("== read-only mode hides the write tools ==")
+rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": False})
+_, body = rpc("tools/list")
+names = {t["name"] for t in body["result"]["tools"]}
+check("no write tools are advertised", names == EXPECTED_TOOLS, sorted(names - EXPECTED_TOOLS))
+result, raw = call("delete_note", {"vault": vault, "note_id": note_id})
+check(
+    "and calling one is refused",
+    raw.get("error") is not None or (result or {}).get("isError") is True,
+    raw,
+)
+_, cfg = rest("GET", "/v1/config")
+check("config reports read-only", cfg.get("mcp_writable") is False, cfg)
+
+print("== read-write mode ==")
+rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": True})
+_, body = rpc("tools/list")
+names = {t["name"] for t in body["result"]["tools"]}
+check("write tools appear", names == EXPECTED_TOOLS | WRITE_TOOLS, sorted(names ^ (EXPECTED_TOOLS | WRITE_TOOLS)))
+
+result, raw = call(
+    "create_note",
+    {"vault": vault, "path": "MCP/Written.md", "content": "# Written\n\nBy an agent.\n"},
+)
+# `WriteResult` wraps the row: {"note": {...}, "content", "seq", "merged"}.
+sc = structured(result)
+row = sc.get("note", {})
+check("create_note creates it", row.get("path") == "MCP/Written.md", sc)
+written_id = row.get("id")
+check("and stamps source: ai in the frontmatter", "source: ai" in sc.get("content", ""), sc.get("content"))
+
+# The stamp must be a spliced line, not a re-serialised document: the body has
+# to survive byte for byte.
+check("the body is untouched", "By an agent." in sc.get("content", ""), sc.get("content"))
+
+result, _ = call(
+    "update_note",
+    {
+        "vault": vault,
+        "note_id": written_id,
+        "content": "# Written\n\nEdited by an agent.\n",
+        "base_version": row.get("version"),
+    },
+)
+sc2 = structured(result)
+check(
+    "update_note bumps the version",
+    sc2.get("note", {}).get("version", 0) > row.get("version", 0),
+    sc2,
+)
+result, _ = call("get_note", {"vault": vault, "note_id": written_id})
+check("and the edit is readable", "Edited by an agent." in structured(result).get("content", ""), structured(result))
+
+# A stale base_version must merge rather than clobber — the same contract the
+# Flutter client obeys.
+result, _ = call(
+    "update_note",
+    {
+        "vault": vault,
+        "note_id": written_id,
+        "content": "# Written\n\nA third edit from a stale read.\n",
+        "base_version": 1,
+    },
+)
+sc3 = structured(result)
+check(
+    "a stale base_version is merged, not silently accepted",
+    sc3.get("merged") is True or sc3.get("conflict") is True or "error" in sc3,
+    sc3,
+)
+
+result, _ = call("delete_note", {"vault": vault, "note_id": written_id})
+check("delete_note removes it", "seq" in structured(result), structured(result))
+# Guarded, because an id of None would make this pass for the wrong reason.
+check("the note existed to delete", bool(written_id), "create_note returned no id")
+result, _ = call("get_note", {"vault": vault, "note_id": written_id})
+check("and it is gone", (result or {}).get("isError") is True, result)
+
+print("== writes cannot outlive the endpoint ==")
+rest("PUT", "/v1/config/mcp", {"enabled": False, "writable": True})
+_, cfg = rest("GET", "/v1/config")
+check(
+    "switching MCP off also disarms writes",
+    cfg.get("mcp_writable") is False,
+    'otherwise turning MCP back on would silently restore write access',
+)
+rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": True})
 
 print("== nothing leaks a filesystem path ==")
 blob = json.dumps(seen_payloads)

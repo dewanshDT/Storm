@@ -50,6 +50,14 @@ pub struct Registry {
     /// to read the vault.
     #[serde(default)]
     pub mcp_enabled: bool,
+    /// Whether MCP may *change* the vault, not just read it.
+    ///
+    /// A second flag rather than a three-state mode so an older registry loads
+    /// as read-only rather than failing to parse — and because "off" and
+    /// "read-only" are the two safe states, and both should be reachable by a
+    /// field simply being absent.
+    #[serde(default)]
+    pub mcp_writable: bool,
 }
 
 /// What a scan of a candidate root would do, without doing it.
@@ -80,6 +88,7 @@ impl Registry {
                 root: root.to_path_buf(),
                 vaults: Vec::new(),
                 mcp_enabled: false,
+                mcp_writable: false,
             });
         }
         let raw = fs::read_to_string(&path)

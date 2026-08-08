@@ -149,12 +149,12 @@ class StormApi {
   ///
   /// Persisted server-side, so it survives a restart — the setting is the
   /// server's, not this device's.
-  Future<void> setMcpEnabled(bool enabled) async {
+  Future<void> setMcpEnabled(bool enabled, {bool writable = false}) async {
     _decode(
       await _client.put(
         _uri('/v1/config/mcp'),
         headers: _headers,
-        body: jsonEncode({'enabled': enabled}),
+        body: jsonEncode({'enabled': enabled, 'writable': writable}),
       ),
     );
   }

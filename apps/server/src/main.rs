@@ -333,8 +333,10 @@ async fn main() -> Result<()> {
         vault_set.registry.mcp_enabled = mcp_enabled;
         vault_set.registry.save(&state_dir)?;
     }
+    let mcp_writable = mcp_enabled && vault_set.registry.mcp_writable;
     tracing::info!(
         enabled = mcp_enabled,
+        writable = mcp_writable,
         allowed_hosts = ?mcp::allowed_hosts(&args.host, args.port),
         "MCP endpoint at /mcp (read-only tools, same bearer token)"
     );
@@ -346,6 +348,7 @@ async fn main() -> Result<()> {
         state_dir: state_dir.clone(),
         root_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
+        mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
     });
 
     // One watcher over the whole root, attributing each event to a vault by

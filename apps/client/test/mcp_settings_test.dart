@@ -18,6 +18,10 @@ void main() {
   }
 
   final switchFinder = find.byType(SwitchListTile);
+  // The first switch is the endpoint, the second is write access.
+  Finder readSwitch() => switchFinder.at(0);
+  Finder writeSwitch() => switchFinder.at(1);
+  bool valueOf(WidgetTester t, Finder f) => t.widget<SwitchListTile>(f).value;
 
   testWidgets('shows the server as off, and says what off means', (
     tester,
@@ -27,7 +31,7 @@ void main() {
     await openSettings(tester, c);
 
     expect(serverOf(c).mcpEnabled, isFalse, reason: 'precondition');
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
+    expect(valueOf(tester, readSwitch()), isFalse);
     expect(find.textContaining('refuses every request'), findsOneWidget);
     await disposeShell(tester, c);
   });
@@ -38,7 +42,7 @@ void main() {
     await pumpShell(tester, c);
     await openSettings(tester, c);
 
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isTrue);
+    expect(valueOf(tester, readSwitch()), isTrue);
     expect(find.textContaining('Serving at /mcp'), findsOneWidget);
     await disposeShell(tester, c);
   });
@@ -53,11 +57,11 @@ void main() {
     await pumpShell(tester, c);
     await openSettings(tester, c);
 
-    await tester.tap(switchFinder);
+    await tester.tap(readSwitch());
     await tester.pumpAndSettle();
 
     expect(serverOf(c).mcpEnabled, isTrue, reason: 'the server was told');
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isTrue);
+    expect(valueOf(tester, readSwitch()), isTrue);
     await disposeShell(tester, c);
   });
 
@@ -67,11 +71,11 @@ void main() {
     await pumpShell(tester, c);
     await openSettings(tester, c);
 
-    await tester.tap(switchFinder);
+    await tester.tap(readSwitch());
     await tester.pumpAndSettle();
 
     expect(serverOf(c).mcpEnabled, isFalse);
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
+    expect(valueOf(tester, readSwitch()), isFalse);
     await disposeShell(tester, c);
   });
 
@@ -88,12 +92,12 @@ void main() {
     // the settings screen has to be able to read the config first.
     server.failWith = 500;
 
-    await tester.tap(switchFinder);
+    await tester.tap(readSwitch());
     await tester.pumpAndSettle();
 
     expect(server.mcpEnabled, isFalse, reason: 'the write failed');
     expect(
-      tester.widget<SwitchListTile>(switchFinder).value,
+      valueOf(tester, readSwitch()),
       isFalse,
       reason: 'so the switch must not claim otherwise',
     );
@@ -108,7 +112,73 @@ void main() {
     await pumpShell(tester, c);
     await openSettings(tester, c);
 
-    expect(tester.widget<SwitchListTile>(switchFinder).value, isFalse);
+    expect(valueOf(tester, readSwitch()), isFalse);
     await disposeShell(tester, c);
+  });
+
+  group('write access', () {
+    testWidgets('is off, and disabled, while the endpoint is off', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      await openSettings(tester, c);
+
+      expect(valueOf(tester, writeSwitch()), isFalse);
+      expect(
+        tester.widget<SwitchListTile>(writeSwitch()).onChanged,
+        isNull,
+        reason: 'write access without the endpoint means nothing',
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('turning it on reaches the server', (tester) async {
+      final c = shellContainer();
+      serverOf(c).mcpEnabled = true;
+      await pumpShell(tester, c);
+      await openSettings(tester, c);
+
+      await tester.tap(writeSwitch());
+      await tester.pumpAndSettle();
+
+      expect(serverOf(c).mcpWritable, isTrue);
+      expect(valueOf(tester, writeSwitch()), isTrue);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('switching the endpoint off disarms writes', (tester) async {
+      // Otherwise turning MCP back on later would silently restore write
+      // access the user believed they had revoked.
+      final c = shellContainer();
+      final server = serverOf(c);
+      server.mcpEnabled = true;
+      server.mcpWritable = true;
+      await pumpShell(tester, c);
+      await openSettings(tester, c);
+      expect(valueOf(tester, writeSwitch()), isTrue, reason: 'precondition');
+
+      await tester.tap(readSwitch());
+      await tester.pumpAndSettle();
+
+      expect(server.mcpEnabled, isFalse);
+      expect(server.mcpWritable, isFalse, reason: 'disarmed with the endpoint');
+      expect(valueOf(tester, writeSwitch()), isFalse);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('says a deleted note is not recoverable', (tester) async {
+      // Storm has no trash. The screen is the only place that says so before
+      // an agent is given permission to delete.
+      final c = shellContainer();
+      final server = serverOf(c);
+      server.mcpEnabled = true;
+      server.mcpWritable = true;
+      await pumpShell(tester, c);
+      await openSettings(tester, c);
+
+      expect(find.textContaining('no trash'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
   });
 }
