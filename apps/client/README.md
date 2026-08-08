@@ -19,6 +19,52 @@ On first launch you're asked for the server address and token. The connection is
 verified before it's saved, so a typo surfaces immediately rather than as an
 empty vault later.
 
+### Installing it on macOS
+
+```sh
+make install-mac            # from the repo root; → /Applications/Storm.app
+```
+
+A release build, ad-hoc signed, which is all a locally built app needs.
+`MAC_APPS=$HOME/Applications` if `/Applications` isn't writable.
+
+Two things specific to macOS, both consequences of the app being sandboxed:
+
+- The **entitlements are load-bearing.** `network.client` is what makes the app
+  able to reach the server at all, and `files.user-selected.read-only` is what
+  lets it read a file chosen in the attachment picker. Neither failure mentions
+  entitlements — the first looks like a wrong address — so
+  `test/macos_entitlements_test.dart` asserts both.
+- macOS 15 asks for **local network** permission the first time the app talks
+  to a LAN address. Refuse it and syncing fails the same way a wrong token
+  does; it can be re-enabled under System Settings ▸ Privacy & Security ▸ Local
+  Network.
+
+## App icons
+
+`assets/logo.svg` is the source. Everything else is generated:
+
+```sh
+python3 tool/make_icons.py       # SVG   -> three PNGs in assets/icon/
+dart run icons_launcher:create   # PNGs  -> every platform's icon files
+```
+
+Three PNGs rather than one because the platforms want different pictures, not
+different sizes of the same one: macOS wants the margin Apple reserves around
+an icon, Android's launcher applies its own mask and needs full bleed, and an
+adaptive icon needs its foreground transparent so the system can shift it
+against the background. The generated files are checked in, so neither command
+is part of a build.
+
+`tool/make_icons.py` explains its own oddities — the short version is that
+`icons_launcher` cannot read SVG, this Mac has no SVG rasteriser, and macOS's
+own renderer (`qlmanage`) flattens transparency, so the two images that need an
+alpha channel have it reconstructed afterwards in stdlib Python. Regenerating
+icons therefore needs a Mac. Rendering them is the only step that does.
+
+Linux is deliberately switched off in the config: the only thing that handler
+produces is snap packaging, and Storm isn't shipped as a snap.
+
 ## What works
 
 - A dashboard of the server's vaults, over the notes you opened most recently

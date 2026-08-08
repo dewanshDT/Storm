@@ -47,7 +47,8 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M8 | UI refactor stage 2 — editor | **done** | 309 tests · toolbar, links, formatting, autocomplete |
 | M9 | Multi-vault server + configurable root | **done** | 138 Rust tests · 81 e2e checks |
 | M10 | Folders, vault dashboard, recents | **done** | 326 Dart tests · folders, grid, recents |
-| M11 | Typed note properties | **done** | 438 Dart tests · properties, colours, fonts |
+| M11 | Typed note properties | **done** | properties, colours, fonts |
+| M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
 
 Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
@@ -71,7 +72,7 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 140 Rust and 438 Dart unit tests
+make check       # clippy + analyze + 140 Rust and 453 Dart unit tests
 make test-live   # 81 server e2e checks + 19 client integration checks
 ```
 
@@ -133,7 +134,8 @@ storm/
     ├── editor-findings.md    M0 editor measurements, incl. on-device
     ├── storm-ui-refactor.md  M7/M8 design brief
     ├── storm-multi-vault.md  M9/M10 design brief
-    └── storm-properties.md   M11 design brief
+    ├── storm-properties.md   M11 design brief
+    └── storm-adaptive.md     M12 design brief
 ```
 
 A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
@@ -422,6 +424,61 @@ edit. No disclosure, no divider under the list.
 *The cost, accepted:* a malformed frontmatter block can no longer be repaired
 from inside the app. The vault is plain markdown; that is what it is for.
 *Revisit if:* users hit unrepairable blocks in practice.
+
+**31. One breakpoint, not a matrix.**
+900px, and nothing else. The only structural question this app has is "is
+there room for a sidebar and a note side by side"; every additional threshold
+would multiply the states needing tests for a distinction nothing makes.
+Tablet portrait stays on the phone layout, which is the honest answer at that
+width. `MediaQuery.sizeOf`, not a `LayoutBuilder`, because it is a property of
+the window — every widget must agree on it regardless of the box it happens to
+sit in, and it has to rebuild while a browser edge is being dragged.
+
+**32. The tree and the drill-down share data and rows, not a widget.**
+They are different navigation models: one replaces the screen, the other opens
+a branch while everything else stays visible. A single widget doing both would
+carry two sets of rules and two sets of bugs. What they do share is real and
+one level down — `childrenOfFolder` derives every level in both, and
+`EntryTile` draws every row, so a folder looks and behaves identically either
+way. *Reuse the thing that is actually the same, not the thing that merely
+looks similar.*
+
+**33. The vault routes live under a `ShellRoute` so the tree can hold its
+state.**
+Wrapping each route's child individually rebuilt the whole subtree on every
+navigation. A drill-down list does not care; a tree collapses the moment you
+open a note. `ShellRoute` builds the frame once and swaps only the pane, which
+also let `VaultGate` move from five wrappers to one. The paths are unchanged,
+so decision 17 still holds, and `back_navigation_test.dart` is what proves it.
+
+**34. The phone layout is the default; the wide branch is additive.**
+Every adaptive test comes in a pair — the wide assertion, and its compact
+counterpart. "It works on desktop" is half a result; the other half is that
+nothing moved at 411px, which is the width this project exists for.
+
+**35. The macOS app stays sandboxed, so its entitlements are load-bearing.**
+Turning the sandbox off would make every entitlement question disappear in one
+line, and it is the wrong trade for an app that talks to the network and reads
+files the user picks. Keeping it means `network.client` and
+`files.user-selected.read-only` are as much a part of the build as any Dart
+file — and the failure without them is silent, which is why
+`test/macos_entitlements_test.dart` exists.
+*Revisit if:* something the app needs turns out to be impossible inside the
+sandbox. Nothing so far is: the LAN server is reachable with `network.client`,
+and ATS does not apply because `package:http` uses `dart:io` sockets rather
+than `NSURLSession`.
+
+**36. One logo, generated icons — and three source images, not one.**
+`apps/client/assets/logo.svg` is the only drawing; every icon in the repo comes
+from `tool/make_icons.py` plus `icons_launcher`. Three PNGs rather than one
+because the platforms want different *pictures*: macOS the margin Apple
+reserves around an icon, Android full bleed because its launcher masks, and an
+adaptive foreground on transparency so the system can shift it. Linux is off —
+that handler emits only snap packaging, which Storm does not use.
+*Revisit if:* an SVG rasteriser is ever installed. `make_icons.py` renders
+through `qlmanage`, the only renderer macOS ships, and works around its
+flattening of transparency; `_render` is the single function that would change,
+and regenerating icons would stop needing a Mac.
 
 ---
 
@@ -1018,6 +1075,39 @@ could hide.
 
 ---
 
+### M12 — Adaptive layout ✅
+
+`docs/storm-adaptive.md`. The client had **no responsive handling at all**:
+`GridView.count(crossAxisCount: 2)` gave 980×725 vault cards on a 2000px
+window, a floating pill sat in the middle of the screen, and one pane showed at
+a time when there was room for two. Now a wide window gets a folder-tree
+sidebar beside the note, a flowing card grid, and recents in a rail.
+
+**Two tests that passed for the wrong reason**, both caught by breaking the
+code on purpose rather than by reading them:
+
+1. *"the tree keeps its expansion when a note is opened"* — the guard that
+   justifies the `ShellRoute` — passed with the tree's state deliberately
+   discarded, because `find.text('Ideas')` also matches the note's own AppBar
+   title once it opens.
+2. Scoping it to the sidebar **still** was not enough: `_revealOpenNote`
+   re-expands the ancestors of whatever note is in the URL, so opening a note
+   from the folder under test reopens that folder even from a freshly built
+   tree. It only became a real guard once it expands `Daily` and opens a note
+   at the *root*.
+
+*A test that exercises the feature is not the same as a test that would notice
+its absence.* Both versions ran green against broken code.
+
+**An assertion that was hiding a defect.** Three existing wide-screen tests
+started failing with "Multiple exceptions detected", which turned out to be
+Flutter's *"ListTile background color or ink splashes may be invisible"* — the
+sidebar used a coloured `Container`, and `ListTile` paints its ripple onto the
+nearest `Material` ancestor. Fixing it with a `Material` was not silencing an
+assert; it made every tap in the tree actually ripple.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1077,7 +1167,11 @@ Both former build blockers are discharged as of 2026-08-05:
 - *macOS builds* — `flutter doctor` reports Xcode 26.6 healthy, and
   `flutter build macos --debug` produces a running app. The
   `DVTDownloads.framework` version skew that needed
-  `sudo xcodebuild -runFirstLaunch` is gone.
+  `sudo xcodebuild -runFirstLaunch` is gone. **A running app was not a working
+  one**, though: the target carried the stock Flutter entitlements, which
+  sandbox the app and grant it no outgoing network access at all, so it could
+  never have reached the server — in debug either. See decision 35;
+  `make install-mac` is now the installed copy.
 - *Android toolchain* — SDK 36.0.0 is installed; debug APKs build and install
   on the Pixel over `adb`.
 

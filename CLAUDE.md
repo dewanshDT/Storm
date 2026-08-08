@@ -32,6 +32,7 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
 | `docs/storm-properties.md` | M11 design brief — typed frontmatter properties. |
+| `docs/storm-adaptive.md` | M12 design brief — the wide-screen layout. |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
@@ -76,6 +77,15 @@ applies its own Kotlin Gradle Plugin won't have its classes compiled, while
 the generated registrant still references them, so the build fails on a symbol
 that looks like it should exist. Prefer first-party `flutter/packages` plugins
 (`file_selector` over `file_picker`, for instance).
+
+**The macOS app is sandboxed, so its entitlements are part of the build.**
+`macos/Runner/{DebugProfile,Release}.entitlements` must grant
+`network.client` — without it the app builds, launches and then reports the
+server unreachable whatever address it is given — and
+`files.user-selected.read-only`, which is what lets it read a file chosen in
+the attachment picker. `test/macos_entitlements_test.dart` guards both, because
+neither failure says anything about entitlements. `make install-mac` builds the
+release app and puts it in `/Applications`.
 
 ## Invariants worth knowing before editing
 
@@ -125,6 +135,10 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   note, `storm.color:` in a vault's config. The vault has to stay readable
   outside Storm, and a stored hex would pin it to one theme and mean nothing
   in Obsidian.
+- **The phone layout is the default; wide-screen behaviour is additive.**
+  There is one breakpoint (900px, `lib/ui/breakpoints.dart`). A change that
+  alters what renders below it is a defect, not a design choice — every
+  adaptive test asserts both sides for that reason.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose

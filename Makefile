@@ -109,6 +109,34 @@ server:
 client:
 	cd $(CLIENT) && flutter run -d macos
 
+# Overridable for a per-user install: make install-mac MAC_APPS=$HOME/Applications
+MAC_APPS ?= /Applications
+
+## install-mac: build the release app and install it into /Applications
+#
+# `flutter run -d macos` above is the dev loop and dies with the terminal; this
+# is the copy you keep. Ad-hoc signed (the project sets CODE_SIGN_IDENTITY = -),
+# which is all a locally built, locally run app needs — nothing downloads it, so
+# Gatekeeper never sees a quarantine flag.
+#
+# The build's output is not filtered down to a success pattern: `flutter build`
+# prints nothing matching on failure, and silence reads exactly like success.
+# Make stops on its exit status, and `test -d` catches the rest.
+install-mac:
+	cd $(CLIENT) && flutter build macos --release
+	@set -e; \
+	APP="$(CLIENT)/build/macos/Build/Products/Release/Storm.app"; \
+	test -d "$$APP" || { echo "no bundle at $$APP" >&2; exit 1; }; \
+	mkdir -p "$(MAC_APPS)" 2>/dev/null || true; \
+	test -w "$(MAC_APPS)" || { \
+		echo "$(MAC_APPS) is not writable." >&2; \
+		echo "Retry with: make install-mac MAC_APPS=\$$HOME/Applications" >&2; \
+		exit 1; \
+	}; \
+	rm -rf "$(MAC_APPS)/Storm.app"; \
+	cp -R "$$APP" "$(MAC_APPS)/Storm.app"; \
+	echo "installed $(MAC_APPS)/Storm.app"
+
 ## web: build the web bundle
 web:
 	cd $(CLIENT) && flutter build web --release

@@ -8,6 +8,7 @@ import '../../state/app_state.dart';
 import '../../state/vault_config.dart';
 import '../server_settings_screen.dart' show createVault;
 import '../accents.dart';
+import '../breakpoints.dart';
 import 'corner_bubbles.dart' show relativeTime;
 import 'nav_bubble.dart';
 import '../theme.dart';
@@ -40,10 +41,18 @@ class DashboardScreen extends ConsumerWidget {
                   ref.invalidate(vaultsProvider);
                   ref.invalidate(recentsProvider);
                 },
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
-                  children: const [_Vaults(), SizedBox(height: 24), _Recents()],
-                ),
+                child: context.isExpanded
+                    // Wide: the grid flows and recents take a rail, rather
+                    // than the list becoming 1900px-wide rows.
+                    ? const _WideBody()
+                    : ListView(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
+                        children: const [
+                          _Vaults(),
+                          SizedBox(height: 24),
+                          _Recents(),
+                        ],
+                      ),
               ),
             ),
             if (!keyboard)
@@ -56,6 +65,33 @@ class DashboardScreen extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The dashboard at desk width.
+class _WideBody extends StatelessWidget {
+  const _WideBody();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(24, 12, 12, 40),
+            children: const [_Vaults()],
+          ),
+        ),
+        SizedBox(
+          width: 340,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(12, 12, 24, 40),
+            children: const [_Recents()],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -87,13 +123,16 @@ class _Vaults extends ConsumerWidget {
             onAction: () => createVault(context, ref),
           );
         }
-        return GridView.count(
-          crossAxisCount: 2,
+        // A maximum card size rather than a fixed column count. At 411px it
+        // still works out to two columns, so the phone is unchanged; at 1900
+        // it flows to eight card-sized cards instead of two enormous ones.
+        return GridView.extent(
+          maxCrossAxisExtent: 220,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
           crossAxisSpacing: 12,
           mainAxisSpacing: 12,
-          childAspectRatio: 1.35,
+          childAspectRatio: 1.15,
           children: [for (final v in list) _VaultCard(vault: v)],
         );
       },
