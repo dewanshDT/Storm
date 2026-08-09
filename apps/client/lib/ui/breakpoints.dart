@@ -29,6 +29,10 @@ const kEditorInset = 40.0;
 /// The measure. Long-form text stops growing here however wide the window is.
 const kEditorMeasure = 640.0;
 
+/// The note pane's top padding, which is what puts the version line on the
+/// same baseline as the sidebar's vault name.
+const kEditorTopInset = 28.0;
+
 extension Layout on BuildContext {
   /// Wide enough for two panes.
   ///
