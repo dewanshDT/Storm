@@ -50,6 +50,7 @@ class BrowseScreen extends ConsumerWidget {
           child: const SkeletonRows(),
         ),
         error: (e, _) => EmptyState(
+          fill: true,
           icon: LucideIcons.cloud_off,
           title: 'Could not list this folder',
           detail: describeFailure(e),
@@ -60,6 +61,7 @@ class BrowseScreen extends ConsumerWidget {
           final entries = _childrenOf(list, folder, known);
           if (entries.isEmpty) {
             return EmptyState(
+              fill: true,
               icon: LucideIcons.folder_open,
               title: 'Nothing in this folder',
               detail: folder.isEmpty

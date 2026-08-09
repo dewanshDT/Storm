@@ -31,6 +31,7 @@ class EmptyState extends StatelessWidget {
     this.detail,
     this.action,
     this.onAction,
+    this.fill = false,
   });
 
   final IconData icon;
@@ -39,10 +40,16 @@ class EmptyState extends StatelessWidget {
   final String? action;
   final VoidCallback? onAction;
 
+  /// Centre in the space given, rather than sitting at the top of it.
+  ///
+  /// Off by default because half the callers put this inside a scrolling
+  /// Column, where the height is unbounded and centring cannot be measured.
+  final bool fill;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Padding(
+    final content = Padding(
       padding: EdgeInsets.symmetric(
         horizontal: t.cardPad,
         vertical: t.sectionRhythm * 0.7,
@@ -81,6 +88,13 @@ class EmptyState extends StatelessWidget {
         ],
       ),
     );
+
+    // Full width either way: a Column shrink-wraps its cross axis, so without
+    // this the whole thing huddles against the left edge of whatever it is
+    // given rather than centring in it.
+    return fill
+        ? Center(child: content)
+        : SizedBox(width: double.infinity, child: content);
   }
 }
 

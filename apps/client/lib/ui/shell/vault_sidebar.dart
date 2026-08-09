@@ -551,6 +551,10 @@ class NoNoteSelected extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const Scaffold(
-    body: EmptyState(icon: LucideIcons.file_text, title: 'Select a note'),
+    body: EmptyState(
+      icon: LucideIcons.file_text,
+      title: 'Select a note',
+      fill: true,
+    ),
   );
 }

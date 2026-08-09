@@ -267,6 +267,26 @@ void main() {
     // At desk width a settings screen that replaced the whole window would be
     // the one place the tree disappears, and the only way back would be the
     // app bar's arrow.
+    testWidgets('a setting can be changed without the page closing', (
+      tester,
+    ) async {
+      // Reported from the running app: changing a setting closed the page.
+      // Not reproduced here — this pins the behaviour so that if it is a
+      // regression it cannot come back silently, and so the next attempt
+      // starts from a test that already exercises the path.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+      await tester.tap(find.byTooltip('Client settings'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(StormPreset.slowflowEarth.label));
+      await tester.pumpAndSettle();
+
+      expect(locationOf(c), Routes.clientSettingsIn(FakeServer.primaryVault));
+      await disposeShell(tester, c);
+    });
+
     testWidgets('client settings open in the pane, not over it', (
       tester,
     ) async {
@@ -491,6 +511,29 @@ void main() {
         tester.getTopLeft(find.byType(VaultSidebar)).dy,
         reason: 'the columns are the same height, so their rules line up',
       );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('stay open when the next note is opened', (tester) async {
+      // The drawer is a pane at this width, not a thing belonging to one
+      // note's screen — opening a second note built a second state and shut
+      // it.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
+
+      // Out to the browser and into another note, so the note screen's own
+      // State is destroyed rather than merely re-keyed.
+      await openVault(tester, c);
+      await tester.pumpAndSettle();
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n1'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
       await disposeShell(tester, c);
     });
 

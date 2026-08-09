@@ -232,10 +232,12 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     if (!session.isOpen) {
       return session.error == null
           ? const EmptyState(
+              fill: true,
               icon: LucideIcons.file_text,
               title: 'Select a note to start editing',
             )
           : EmptyState(
+              fill: true,
               icon: LucideIcons.circle_alert,
               title: 'This note would not open',
               detail: session.error,
