@@ -7,27 +7,34 @@ import '../../state/app_state.dart';
 import '../../state/vault_config.dart' show kColorKey;
 import '../browse_screen.dart' show createFolder;
 import '../new_note_dialog.dart';
+import '../breakpoints.dart';
+import '../tokens.dart';
 import 'corner_bubbles.dart';
 import 'vault_gate.dart';
 import 'nav_bubble.dart';
 
-/// Every screen inside the vault: content, the floating nav bubble, and the
-/// new-note action wired in one place rather than per screen.
+/// Every screen inside the vault: content, the persistent corner bubbles, the
+/// floating nav bubble, and the new-note action wired in one place.
+///
+/// There is no app bar. The design puts the vault and settings bubbles at the
+/// top corners of *every* vault screen and gives each screen its own [header]
+/// underneath them, so a title bar would be a third band of chrome nothing
+/// asked for.
 class StormScaffold extends ConsumerStatefulWidget {
   const StormScaffold({
     super.key,
     required this.child,
-    this.title,
-    this.leading,
-    this.actions = const [],
+    this.header,
     this.showNav = true,
+    this.showBubbles = true,
   });
 
   final Widget child;
-  final Widget? title;
-  final Widget? leading;
-  final List<Widget> actions;
+
+  /// The screen's own chrome, laid out below the corner bubbles.
+  final Widget? header;
   final bool showNav;
+  final bool showBubbles;
 
   @override
   ConsumerState<StormScaffold> createState() => _StormScaffoldState();
@@ -83,22 +90,11 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
       child: NewFolderRequest(
         onRequest: _createFolder,
         child: Scaffold(
-          appBar: AppBar(
-            leading: widget.leading,
-            title: widget.title,
-            actions: widget.actions,
-          ),
-          body: Stack(
-            children: [
-              Positioned.fill(child: widget.child),
-              if (widget.showNav && !keyboard)
-                const Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: NavBubble(),
-                ),
-            ],
+          body: StormChrome(
+            header: widget.header,
+            showNav: widget.showNav && !keyboard,
+            showBubbles: widget.showBubbles,
+            child: widget.child,
           ),
         ),
       ),
@@ -106,27 +102,84 @@ class _StormScaffoldState extends ConsumerState<StormScaffold> {
   }
 }
 
-/// The dashboard's own header, which uses the corner bubbles instead of a
-/// conventional app bar.
-class DashboardHeader extends StatelessWidget implements PreferredSizeWidget {
-  const DashboardHeader({super.key});
+/// The chrome itself: corner bubbles, the screen's header, the content, and
+/// the nav pill over the lot.
+///
+/// Separate from [StormScaffold] because the note screen tints its own
+/// background and so builds its `Scaffold` itself, but must not therefore
+/// grow a second, slightly different set of bubbles.
+class StormChrome extends StatelessWidget {
+  const StormChrome({
+    super.key,
+    required this.child,
+    this.header,
+    this.showNav = true,
+    this.showBubbles = true,
+  });
 
-  @override
-  Size get preferredSize => const Size.fromHeight(64);
+  final Widget child;
+  final Widget? header;
+  final bool showNav;
+  final bool showBubbles;
+
+  /// How far the content has to start below the top edge to clear the bubbles.
+  static double contentTop(BuildContext context) {
+    final t = context.tokens;
+    // bubble inset + bubble side + a gap.
+    return t.sp * 2.5 + t.sp * 5.5 + t.sp;
+  }
+
+  /// What every scrolling child leaves at the bottom for the nav pill.
+  static double navClearance(BuildContext context) => context.tokens.sp * 13.5;
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
+    // Wide screens carry the sidebar and its own switcher, so the corners are
+    // free of both bubbles there.
+    final bubbles = showBubbles && !context.isExpanded;
+
     return SafeArea(
       bottom: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
-        child: Row(
-          children: [
-            const VaultBubble(),
-            const Expanded(child: SizedBox.shrink()),
-            const ProfileBubble(),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (bubbles)
+                  SizedBox(height: t.sp * 5.5 + t.sp * 2.5)
+                else
+                  SizedBox(height: t.sp),
+                if (header != null)
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      t.sp * 2.5,
+                      0,
+                      t.sp * 2.5,
+                      t.sp * 0.75,
+                    ),
+                    child: header!,
+                  ),
+                Expanded(child: child),
+              ],
+            ),
+          ),
+          if (bubbles) ...[
+            Positioned(
+              top: t.sp * 2.5,
+              left: t.sp * 2.5,
+              child: const VaultBubble(),
+            ),
+            Positioned(
+              top: t.sp * 2.5,
+              right: t.sp * 2.5,
+              child: const SettingsBubble(),
+            ),
           ],
-        ),
+          if (showNav)
+            const Positioned(left: 0, right: 0, bottom: 0, child: NavBubble()),
+        ],
       ),
     );
   }

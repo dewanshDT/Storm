@@ -6,8 +6,20 @@ library;
 
 import 'package:flutter/material.dart';
 
-import 'atoms.dart';
+import '../api/models.dart';
+
+import 'widgets.dart';
 import 'tokens.dart';
+
+/// Turns any failure into something the user can read.
+///
+/// A `StormApiException` is the server saying no, and its wording is the best
+/// available. Anything else is the server not answering at all — which used to
+/// escape as an unhandled exception and put a red screen in front of a folder
+/// that had, in some cases, actually been created.
+String describeFailure(Object e) => e is StormApiException
+    ? e.message
+    : 'Could not reach the server. Try again when it is back.';
 
 /// Nothing here yet, and what to do about it.
 class EmptyState extends StatelessWidget {

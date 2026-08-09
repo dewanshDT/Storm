@@ -9,7 +9,7 @@ import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'editor_toolbar.dart';
-import 'atoms.dart';
+import 'widgets.dart';
 import 'states.dart';
 import 'tokens.dart';
 import 'wikilink_suggestions.dart';

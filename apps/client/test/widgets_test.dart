@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:storm/ui/atoms.dart';
+import 'package:storm/ui/widgets.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
 
