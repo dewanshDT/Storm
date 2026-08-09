@@ -28,8 +28,9 @@ class PropertiesPanel extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback? onClose;
 
-  /// How wide the drawer is beside a note.
-  static const drawerWidth = 280.0;
+  /// The drawer's floor. Its actual width is `context.drawerWidth`, which
+  /// scales with the window on the same rule as the sidebar.
+  static const minDrawerWidth = 280.0;
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +65,12 @@ class PropertiesPanel extends StatelessWidget {
         ),
         Flexible(
           child: SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(t.cardPad, 0, t.cardPad, t.cardPad),
+            padding: EdgeInsets.fromLTRB(
+              t.cardPad,
+              t.sp * 0.5,
+              t.cardPad,
+              t.cardPad,
+            ),
             child: NoteProperties(content: content, onChanged: onChanged),
           ),
         ),
@@ -130,7 +136,7 @@ class PropertiesDrawer extends StatelessWidget {
       children: [
         Container(width: t.bw, color: t.border),
         SizedBox(
-          width: PropertiesPanel.drawerWidth,
+          width: context.drawerWidth,
           child: Material(
             color: t.bg,
             // No close of its own: the rail's toggle is what opens and shuts

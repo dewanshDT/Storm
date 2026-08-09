@@ -54,7 +54,7 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
     if (context.isExpanded) return const SizedBox.shrink();
 
     return SafeArea(
-      minimum: EdgeInsets.only(bottom: t.sp * 2),
+      minimum: EdgeInsets.only(bottom: t.sp * 2.5),
       child: Align(
         alignment: Alignment.bottomCenter,
         child: AnimatedSize(
@@ -62,7 +62,7 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
           curve: Curves.easeOutCubic,
           child: Container(
             decoration: BoxDecoration(
-              color: t.surface2,
+              color: t.surface.withValues(alpha: 0.96),
               // A pill, where the corner bubbles are rounded squares. The
               // shape difference is deliberate grammar: corners are places,
               // the pill is an action bar.
@@ -70,10 +70,9 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
               border: Border.all(color: t.border, width: t.bw),
               boxShadow: t.shadow,
             ),
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 0.75,
-              vertical: t.sp * 0.5,
-            ),
+            // 5px all round, as the prototype has it: the slots are the
+            // padding. A wider inset made the pill read as a bar.
+            padding: EdgeInsets.all(t.sp * 0.625),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -107,12 +106,15 @@ class _Slot extends StatelessWidget {
           onTap: action.onTap,
           customBorder: const CircleBorder(),
           child: Container(
-            width: t.sp * 5.75,
-            height: t.sp * 5.75,
+            width: t.sp * 5.5,
+            height: t.sp * 5.5,
             alignment: Alignment.center,
-            margin: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
             decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
-            child: StormIcon(action.glyph, size: t.sp * 2.5, color: t.onAccent),
+            child: StormIcon(
+              action.glyph,
+              size: t.sp * 2.75,
+              color: t.onAccent,
+            ),
           ),
         ),
       );
@@ -123,22 +125,26 @@ class _Slot extends StatelessWidget {
       child: InkWell(
         onTap: action.onTap,
         customBorder: const CircleBorder(),
-        child: Padding(
-          padding: EdgeInsets.all(t.sp * 1.25),
+        child: SizedBox(
+          // Every slot is the same 44px square, filled or not, so the pill's
+          // rhythm does not change when the primary one moves.
+          width: t.sp * 5.5,
+          height: t.sp * 5.5,
           child: Stack(
+            alignment: Alignment.center,
             clipBehavior: Clip.none,
             children: [
               StormIcon(
                 action.glyph,
                 size: t.sp * 2.5,
-                color: action.selected ? t.accent : t.text2,
+                color: action.selected ? t.accent : t.text,
               ),
               // Amber, and carrying the count. Mentions are the one slot whose
               // value is a number, and a bare dot threw that away.
               if ((action.badge ?? 0) > 0)
                 Positioned(
-                  right: -6,
-                  top: -6,
+                  right: t.sp * 0.25,
+                  top: t.sp * 0.5,
                   child: Container(
                     padding: EdgeInsets.symmetric(
                       horizontal: t.sp * 0.5,

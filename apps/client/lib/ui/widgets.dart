@@ -573,7 +573,7 @@ class NoteRow extends StatelessWidget {
       child: Container(
         padding:
             padding ??
-            EdgeInsets.symmetric(horizontal: t.sp * 1.5, vertical: t.sp * 1.5),
+            EdgeInsets.symmetric(horizontal: t.sp * 1.75, vertical: t.sp * 2),
         decoration: BoxDecoration(
           color: selected ? t.accentSoft : null,
           borderRadius: BorderRadius.circular(t.rControl),
@@ -597,21 +597,23 @@ class NoteRow extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      fontWeight: FontWeight.w500,
+                      fontSize: t.bodySize * 0.95,
+                      fontWeight: FontWeight.w600,
                       color: t.text,
+                      height: 1.3,
                     ),
                   ),
                   if (meta != null) ...[
-                    SizedBox(height: t.sp * 0.25),
+                    SizedBox(height: t.sp * 0.375),
                     Text(
                       meta!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontFamily: StormTokens.sansFamily,
-                        fontSize: t.labelSize,
+                        fontSize: t.codeSize,
                         color: t.text3,
+                        height: 1.2,
                       ),
                     ),
                   ],
@@ -661,7 +663,7 @@ class FolderRow extends StatelessWidget {
       child: Container(
         padding:
             padding ??
-            EdgeInsets.symmetric(horizontal: t.sp * 1.5, vertical: t.sp * 1.75),
+            EdgeInsets.symmetric(horizontal: t.sp * 1.75, vertical: t.sp * 2),
         decoration: divider
             ? BoxDecoration(
                 border: Border(
@@ -674,7 +676,7 @@ class FolderRow extends StatelessWidget {
             // Grey, not accent: the folder glyph is furniture, and accent is
             // reserved for what is interactive.
             leading ??
-                Icon(Icons.folder_rounded, size: t.bodySize, color: t.text3),
+                Icon(Icons.folder_rounded, size: t.bodySize, color: t.text2),
             SizedBox(width: t.sp * 1.5),
             Expanded(
               child: Text(
@@ -683,7 +685,7 @@ class FolderRow extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
+                  fontSize: t.bodySize * 0.95,
                   fontWeight: FontWeight.w500,
                   color: t.text,
                 ),
@@ -694,13 +696,13 @@ class FolderRow extends StatelessWidget {
                 '$count',
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
+                  fontSize: t.codeSize,
+                  color: t.text2,
                 ),
               ),
             if (chevron) ...[
               SizedBox(width: t.sp * 0.75),
-              Icon(Icons.chevron_right, size: t.bodySize, color: t.text3),
+              Icon(Icons.chevron_right, size: t.bodySize, color: t.text2),
             ],
           ],
         ),
@@ -727,10 +729,13 @@ class Breadcrumb extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    // Code-sized, not label-sized: the breadcrumb is read, not glanced at,
+    // and at the label step it disappeared under the bubbles above it.
     final mono = TextStyle(
       fontFamily: StormTokens.monoFamily,
-      fontSize: t.labelSize,
-      color: t.text3,
+      fontSize: t.bodySize * 0.95,
+      color: t.text2,
+      height: 1.2,
     );
 
     final children = <Widget>[];

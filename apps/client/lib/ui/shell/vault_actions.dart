@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../icons.dart';
+import '../states.dart';
+import '../surfaces.dart';
 import 'nav_bubble.dart'
     show NewFolderRequest, NewNoteRequest, NoteContextRequest;
 
@@ -22,6 +24,7 @@ class VaultAction {
     this.selected = false,
     this.badge,
     this.primary = false,
+    this.inSidebar = true,
   });
 
   /// One of the design's own shapes, not a Material name — the two sets are
@@ -41,6 +44,13 @@ class VaultAction {
   /// among six. Only the toolbar treats it differently; the action itself is
   /// the same data.
   final bool primary;
+
+  /// Whether the wide screen's sidebar footer repeats this action.
+  ///
+  /// False for Directory and Search: the tree *is* the directory and the field
+  /// above it *is* search, so a button for either would be a control that does
+  /// what is already on screen. The design's sidebar footer omits both.
+  final bool inSidebar;
 }
 
 /// The actions for the current location.
@@ -80,12 +90,14 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
     VaultAction(
       glyph: StormGlyph.folder,
       tooltip: 'Directory',
+      inSidebar: false,
       selected: uri.path.startsWith(Routes.browse(vaultId)),
       onTap: () => context.go(Routes.browse(vaultId)),
     ),
     VaultAction(
       glyph: StormGlyph.search,
       tooltip: 'Search',
+      inSidebar: false,
       selected: uri.path == Routes.search(vaultId),
       onTap: () => context.go(Routes.search(vaultId)),
     ),
@@ -103,24 +115,37 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
         tooltip: 'New folder',
         onTap: () => NewFolderRequest.of(context)?.call(),
       ),
-    // The dynamic slot: tags outside a note, that note's linked mentions
-    // inside one. Its meaning follows the router rather than a separate flag,
-    // so there is exactly one answer to "where am I".
-    if (inNote)
-      VaultAction(
-        glyph: StormGlyph.mentions,
-        tooltip: mentions == 1
-            ? '1 linked mention'
-            : '$mentions linked mentions',
-        badge: mentions,
-        onTap: () => NoteContextRequest.of(context)?.call(),
-      )
-    else
-      VaultAction(
-        glyph: StormGlyph.hash,
-        tooltip: 'Tags',
-        selected: uri.path == Routes.tags(vaultId),
-        onTap: () => context.go(Routes.tags(vaultId)),
-      ),
+    // Six slots, always — the design's pill does not change shape as you
+    // move around it. Mentions is about *a* note, so outside one it says so
+    // rather than disappearing and shifting everything else along.
+    VaultAction(
+      glyph: StormGlyph.mentions,
+      tooltip: inNote
+          ? (mentions == 1 ? '1 linked mention' : '$mentions linked mentions')
+          : 'Mentions',
+      badge: inNote ? mentions : null,
+      onTap: () {
+        final toggle = NoteContextRequest.of(context);
+        if (toggle != null) {
+          toggle();
+        } else {
+          showStormSheet<void>(
+            context: context,
+            title: 'Mentions',
+            heightFactor: 0.4,
+            builder: (_) => const EmptyState(
+              icon: Icons.hub_outlined,
+              title: 'Open a note to see what links to it',
+            ),
+          );
+        }
+      },
+    ),
+    VaultAction(
+      glyph: StormGlyph.hash,
+      tooltip: 'Tags',
+      selected: uri.path == Routes.tags(vaultId),
+      onTap: () => context.go(Routes.tags(vaultId)),
+    ),
   ];
 }

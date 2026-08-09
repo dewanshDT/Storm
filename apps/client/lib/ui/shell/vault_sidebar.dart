@@ -6,6 +6,7 @@ import '../../api/models.dart';
 import '../../state/app_state.dart';
 import '../../router.dart';
 import '../accents.dart';
+import '../breakpoints.dart';
 import '../icons.dart';
 import '../states.dart';
 import '../tokens.dart';
@@ -13,8 +14,9 @@ import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
 import 'vault_actions.dart';
 
-/// How wide the sidebar is. Narrow enough to leave the note its column, wide
-/// enough for two levels of indent and a filename.
+/// The sidebar's floor. Its actual width is `context.sidebarWidth`, which
+/// scales with the window — see `breakpoints.dart` for why a fixed 260 made a
+/// wide display look unbalanced.
 const kSidebarWidth = 260.0;
 
 /// The wide-screen navigation rail.
@@ -48,7 +50,7 @@ class VaultSidebar extends ConsumerWidget {
     return Material(
       color: t.bg,
       child: SizedBox(
-        width: kSidebarWidth,
+        width: context.sidebarWidth,
         child: SafeArea(
           right: false,
           child: Column(
@@ -56,7 +58,7 @@ class VaultSidebar extends ConsumerWidget {
             children: [
               _VaultSwitcher(vault: vault, accent: accent),
               Padding(
-                padding: EdgeInsets.fromLTRB(t.sp * 1.5, 0, t.sp * 1.5, t.sp),
+                padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
                 child: _SearchField(vaultId: vaultId),
               ),
               Expanded(
@@ -70,20 +72,34 @@ class VaultSidebar extends ConsumerWidget {
                     title: 'Could not list this vault',
                     detail: describeFailure(e),
                   ),
-                  data: (list) => FolderTree(notes: list, knownFolders: known),
+                  data: (list) => Padding(
+                    padding: EdgeInsets.symmetric(horizontal: t.sp),
+                    child: FolderTree(notes: list, knownFolders: known),
+                  ),
                 ),
               ),
               Divider(height: t.bw, color: t.border),
               // The same actions the floating pill carries on a phone, drawn
-              // from the same list so the two can never offer different things.
+              // from the same list so the two can never offer different
+              // things — minus the two the rail already *is*. The tree is the
+              // directory and the field above is search, so repeating them
+              // here would be two buttons that do what is already on screen.
               Padding(
                 padding: EdgeInsets.symmetric(
-                  horizontal: t.sp,
-                  vertical: t.sp * 0.75,
+                  horizontal: t.sp * 1.5,
+                  vertical: t.sp * 1.25,
                 ),
                 child: Row(
+                  spacing: t.sp,
                   children: [
-                    for (final action in vaultActions(context, ref, uri))
+                    for (final action
+                        in vaultActions(context, ref, uri)
+                            .where(
+                              (a) =>
+                                  a.glyph != StormGlyph.folder ||
+                                  a.tooltip == 'New folder',
+                            )
+                            .where((a) => a.glyph != StormGlyph.search))
                       IconButton(
                         icon: StormIcon(
                           action.glyph,
@@ -97,6 +113,23 @@ class VaultSidebar extends ConsumerWidget {
                         constraints: const BoxConstraints(),
                         onPressed: action.onTap,
                       ),
+                    const Spacer(),
+                    // Server settings live on the corner bubble, and the
+                    // corners are empty at this width — without this the
+                    // screen has no way to reach them at all.
+                    IconButton(
+                      icon: Icon(
+                        Icons.settings_outlined,
+                        size: t.bodySize,
+                        color: t.text3,
+                      ),
+                      iconSize: t.bodySize,
+                      tooltip: 'Server settings',
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.all(t.sp * 0.75),
+                      constraints: const BoxConstraints(),
+                      onPressed: () => context.push(Routes.serverSettings),
+                    ),
                   ],
                 ),
               ),
@@ -121,12 +154,12 @@ class _VaultSwitcher extends StatelessWidget {
     return InkWell(
       onTap: () => context.go(Routes.dashboard),
       child: Padding(
-        padding: EdgeInsets.all(t.sp * 1.5),
+        padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 2, t.sp * 2, t.sp * 1.5),
         child: Row(
           children: [
             Container(
-              width: t.sp * 3.75,
-              height: t.sp * 3.75,
+              width: t.sp * 4.5,
+              height: t.sp * 4.5,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: accent.tile(t),
@@ -183,8 +216,8 @@ class _SearchField extends StatelessWidget {
       onTap: vaultId.isEmpty ? null : () => context.go(Routes.search(vaultId)),
       child: Container(
         padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 1.25,
-          vertical: t.sp * 1.1,
+          horizontal: t.sp * 1.5,
+          vertical: t.sp * 1.5,
         ),
         decoration: BoxDecoration(
           color: t.surface2,

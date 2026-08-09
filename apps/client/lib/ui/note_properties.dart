@@ -224,7 +224,9 @@ class _PropertyRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     return Padding(
-      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+      // 12px between rows, as the drawer has it. At 8 the labels and their
+      // values read as one block of chips rather than as pairs.
+      padding: EdgeInsets.symmetric(vertical: t.sp * 0.75),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
