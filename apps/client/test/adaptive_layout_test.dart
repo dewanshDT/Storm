@@ -42,10 +42,13 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('absent on the dashboard even when wide', (tester) async {
-      // There is no vault to show folders for.
+    testWidgets('absent on the dashboard, which only a phone reaches', (
+      tester,
+    ) async {
+      // There is no vault to show folders for — and no dashboard at all at
+      // desk width once a vault exists, so this is the phone's case.
       final c = shellContainer();
-      await pumpShell(tester, c, size: desk);
+      await pumpShell(tester, c, size: phone);
 
       expect(find.byType(VaultSidebar), findsNothing);
       await disposeShell(tester, c);
@@ -191,25 +194,27 @@ void main() {
 
       expect(locationOf(c), before, reason: 'opening a menu is not navigation');
       expect(find.text('Second'), findsOneWidget, reason: 'the other vault');
-      expect(
-        find.text('All vaults'),
-        findsOneWidget,
-        reason: 'home lives here',
-      );
       await disposeShell(tester, c);
     });
 
-    testWidgets('and home is an entry inside it', (tester) async {
+    testWidgets('and server settings are the entry beneath the vaults', (
+      tester,
+    ) async {
+      // Not "All vaults": there is no dashboard at this width, and an entry
+      // that navigates to a screen the layout does not have is worse than no
+      // entry at all.
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);
       await openVault(tester, c);
 
       await tester.tap(find.text('Primary'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('All vaults'));
+      expect(find.text('All vaults'), findsNothing);
+
+      await tester.tap(find.text('Server settings ›'));
       await tester.pumpAndSettle();
 
-      expect(locationOf(c), Routes.dashboard);
+      expect(locationOf(c), Routes.serverSettings);
       await disposeShell(tester, c);
     });
   });
@@ -450,16 +455,18 @@ void main() {
       return tester.getSize(card).width;
     }
 
-    testWidgets('cards stay card-sized on a wide screen', (tester) async {
+    testWidgets('hands off to a vault at desk width instead of showing', (
+      tester,
+    ) async {
+      // Everything the dashboard offers is already in the sidebar at this
+      // width — the switcher lists the vaults, the tree is the browser — so a
+      // whole screen for it is a page you pass through on the way to the only
+      // thing you came for.
       final c = shellContainer();
-      final server = serverOf(c);
-      for (var i = 0; i < 6; i++) {
-        server.addVault('v-extra-$i', 'Extra $i');
-      }
-      await pumpShell(tester, c, size: const Size(1600, 900));
+      await pumpShell(tester, c, size: desk);
 
-      expect(await cardWidth(tester), lessThanOrEqualTo(220));
-      expect(tester.takeException(), isNull);
+      expect(locationOf(c), Routes.browse(FakeServer.primaryVault));
+      expect(find.byType(VaultSidebar), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -475,21 +482,16 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('recents move to a rail instead of stretching', (tester) async {
+    testWidgets('but stays when there is no vault to hand off to', (
+      tester,
+    ) async {
+      // It is the only screen that can make one.
       final c = shellContainer();
-      final server = serverOf(c);
-      server.markOpened(FakeServer.primaryVault, 'n0', '2026-08-07T09:00:00Z');
+      serverOf(c).vaults.clear();
       await pumpShell(tester, c, size: desk);
 
-      final rail = tester.getSize(
-        find
-            .ancestor(
-              of: find.text('RECENTLY OPENED'),
-              matching: find.byType(SizedBox),
-            )
-            .last,
-      );
-      expect(rail.width, lessThanOrEqualTo(340));
+      expect(locationOf(c), Routes.dashboard);
+      expect(find.text('No vaults yet'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });

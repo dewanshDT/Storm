@@ -13,6 +13,7 @@ import '../surfaces.dart';
 import '../tokens.dart';
 import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
+import 'corner_bubbles.dart' show AppearanceMenu;
 import 'vault_actions.dart';
 
 /// The sidebar's floor. Its actual width is `context.sidebarWidth`, which
@@ -93,14 +94,11 @@ class VaultSidebar extends ConsumerWidget {
                 child: Row(
                   spacing: t.sp * 0.25,
                   children: [
-                    for (final action
-                        in vaultActions(context, ref, uri)
-                            .where(
-                              (a) =>
-                                  a.glyph != StormGlyph.folder ||
-                                  a.tooltip == 'New folder',
-                            )
-                            .where((a) => a.glyph != StormGlyph.search))
+                    for (final action in vaultActions(
+                      context,
+                      ref,
+                      uri,
+                    ).where((a) => a.inSidebar))
                       IconButton(
                         icon: StormIcon(
                           action.glyph,
@@ -120,24 +118,12 @@ class VaultSidebar extends ConsumerWidget {
                         onPressed: action.onTap,
                       ),
                     // Last in the row, not pushed to the far edge: the design
-                    // groups all four at the left. Server settings live on the
-                    // corner bubble, and the corners are empty at this width —
-                    // without this the screen cannot reach them at all.
-                    IconButton(
-                      icon: Icon(
-                        Icons.settings_outlined,
-                        size: t.bodySize,
-                        color: t.text3,
-                      ),
-                      iconSize: t.bodySize,
-                      tooltip: 'Server settings',
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: BoxConstraints.tight(
-                        Size.square(t.sp * 4.75),
-                      ),
-                      onPressed: () => context.push(Routes.serverSettings),
-                    ),
+                    // groups all four at the left. This is the *appearance*
+                    // menu — theme, text size, note font — which lives on the
+                    // top-right corner bubble on a phone, and the corners are
+                    // empty at this width. Server settings are in the vault
+                    // switcher, next to the vault they configure.
+                    const _SettingsButton(),
                   ],
                 ),
               ),
@@ -221,12 +207,15 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
                         },
                 ),
               const PopoverDivider(),
+              // Not "All vaults": there is no dashboard at this width, and an
+              // entry that navigates to a screen the layout does not have is
+              // worse than no entry.
               PopoverItem(
-                label: 'All vaults',
+                label: 'Server settings ›',
                 tone: PopoverTone.accent,
                 onTap: () {
                   Navigator.pop(popContext);
-                  context.go(Routes.dashboard);
+                  context.push(Routes.serverSettings);
                 },
               ),
             ],
@@ -307,6 +296,43 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The footer's gear: theme, text size, note font.
+///
+/// Not server settings — those are in the vault switcher, next to the vault
+/// they configure. This is the menu the phone's top-right corner bubble
+/// drops, and the corners are empty at this width.
+class _SettingsButton extends StatefulWidget {
+  const _SettingsButton();
+
+  @override
+  State<_SettingsButton> createState() => _SettingsButtonState();
+}
+
+class _SettingsButtonState extends State<_SettingsButton> {
+  final _anchor = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return IconButton(
+      key: _anchor,
+      icon: Icon(Icons.settings_outlined, size: t.bodySize, color: t.text3),
+      iconSize: t.bodySize,
+      tooltip: 'Appearance',
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
+      onPressed: () => showStormPopover<void>(
+        context: context,
+        anchorKey: _anchor,
+        width: t.sp * 33,
+        builder: (popContext) =>
+            AppearanceMenu(onClose: () => Navigator.pop(popContext)),
       ),
     );
   }
