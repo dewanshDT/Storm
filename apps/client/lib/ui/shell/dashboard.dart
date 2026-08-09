@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -134,7 +135,7 @@ class _Vaults extends ConsumerWidget {
     return vaults.when(
       loading: () => const SkeletonRows(rows: 2),
       error: (e, _) => EmptyState(
-        icon: Icons.cloud_off,
+        icon: LucideIcons.cloud_off,
         title: 'Could not reach the server',
         detail: describeFailure(e),
         action: 'Try again',
@@ -143,7 +144,7 @@ class _Vaults extends ConsumerWidget {
       data: (list) {
         if (list.isEmpty) {
           return EmptyState(
-            icon: Icons.folder_special_outlined,
+            icon: LucideIcons.folder_cog,
             title: 'No vaults yet',
             detail: 'A vault is a directory under the storage root.',
             action: 'New vault',
@@ -285,13 +286,13 @@ class _Recents extends ConsumerWidget {
         recents.when(
           loading: () => const SkeletonRows(rows: 3),
           error: (e, _) => EmptyState(
-            icon: Icons.cloud_off,
+            icon: LucideIcons.cloud_off,
             title: 'Could not load recents',
             detail: describeFailure(e),
           ),
           data: (list) => list.isEmpty
               ? const EmptyState(
-                  icon: Icons.history,
+                  icon: LucideIcons.history,
                   title: 'Nothing opened yet',
                   detail: 'Notes you open will show up here.',
                 )

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
@@ -63,7 +64,9 @@ class _MentionsSectionState extends ConsumerState<MentionsSection> {
               child: Row(
                 children: [
                   Icon(
-                    _expanded ? Icons.expand_more : Icons.chevron_right,
+                    _expanded
+                        ? LucideIcons.chevron_down
+                        : LucideIcons.chevron_right,
                     size: t.bodySize,
                     color: t.text3,
                   ),

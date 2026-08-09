@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -49,7 +50,7 @@ class BrowseScreen extends ConsumerWidget {
           child: const SkeletonRows(),
         ),
         error: (e, _) => EmptyState(
-          icon: Icons.cloud_off,
+          icon: LucideIcons.cloud_off,
           title: 'Could not list this folder',
           detail: describeFailure(e),
           action: 'Try again',
@@ -59,7 +60,7 @@ class BrowseScreen extends ConsumerWidget {
           final entries = _childrenOf(list, folder, known);
           if (entries.isEmpty) {
             return EmptyState(
-              icon: Icons.folder_open,
+              icon: LucideIcons.folder_open,
               title: 'Nothing in this folder',
               detail: folder.isEmpty
                   ? 'New notes will land at the top of this vault.'
@@ -272,7 +273,7 @@ class EntryTile extends ConsumerWidget {
       divider: divider,
       padding: contentPadding as EdgeInsets?,
       trailing: pinned.contains(entry.note!.id)
-          ? Icon(Icons.push_pin, size: t.labelSize, color: t.accent)
+          ? Icon(LucideIcons.pin, size: t.labelSize, color: t.accent)
           : null,
       onTap: () => replaceRoute
           ? context.go(Routes.note(vaultId, entry.note!.id))
@@ -299,13 +300,13 @@ Future<void> _folderActions(
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
-            leading: const Icon(Icons.drive_file_rename_outline),
+            leading: const Icon(LucideIcons.pencil_line),
             title: Text('Rename “${entry.name}”'),
             onTap: () => Navigator.pop(c, 'rename'),
           ),
           ListTile(
             leading: Icon(
-              Icons.delete_outline,
+              LucideIcons.trash_2,
               color: Theme.of(c).colorScheme.error,
             ),
             title: const Text('Delete folder'),

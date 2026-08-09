@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/editor/markdown_theme.dart';
@@ -40,7 +41,7 @@ void main() {
         reason: 'precondition',
       );
 
-      await tester.tap(find.byIcon(Icons.title));
+      await tester.tap(find.byIcon(LucideIcons.heading));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Heading 1'));
       await tester.pumpAndSettle();
@@ -116,7 +117,7 @@ void main() {
       await tester.pump();
       expect(focus.hasFocus, isTrue, reason: 'precondition');
 
-      await tester.tap(find.byIcon(Icons.format_bold));
+      await tester.tap(find.byIcon(LucideIcons.bold));
       await tester.pumpAndSettle();
 
       expect(controller.text, 'hello **world**');

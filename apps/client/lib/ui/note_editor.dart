@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -230,11 +231,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     if (!session.isOpen) {
       return session.error == null
           ? const EmptyState(
-              icon: Icons.article_outlined,
+              icon: LucideIcons.file_text,
               title: 'Select a note to start editing',
             )
           : EmptyState(
-              icon: Icons.error_outline,
+              icon: LucideIcons.circle_alert,
               title: 'This note would not open',
               detail: session.error,
             );
@@ -365,7 +366,7 @@ class _DegradedNotice extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: t.sp * 2.5, vertical: t.sp),
       child: Row(
         children: [
-          Icon(Icons.speed, size: t.bodySize, color: t.text3),
+          Icon(LucideIcons.gauge, size: t.bodySize, color: t.text3),
           SizedBox(width: t.sp * 1.25),
           Expanded(
             child: Text(
@@ -429,7 +430,7 @@ class _Notice extends StatelessWidget {
       child: Row(
         children: [
           Icon(
-            isConflict ? Icons.merge_type : Icons.info_outline,
+            isConflict ? LucideIcons.git_merge : LucideIcons.info,
             size: t.bodySize,
             color: fg,
           ),
@@ -445,7 +446,7 @@ class _Notice extends StatelessWidget {
             ),
           ),
           IconButton(
-            icon: Icon(Icons.close, size: t.bodySize, color: fg),
+            icon: Icon(LucideIcons.x, size: t.bodySize, color: fg),
             onPressed: onDismiss,
             visualDensity: VisualDensity.compact,
           ),

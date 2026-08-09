@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../api/models.dart';
 
@@ -249,7 +250,7 @@ class ConflictCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.merge_type, size: t.bodySize, color: t.danger),
+              Icon(LucideIcons.git_merge, size: t.bodySize, color: t.danger),
               SizedBox(width: t.sp * 0.75),
               Expanded(
                 child: Text(
@@ -265,7 +266,7 @@ class ConflictCard extends StatelessWidget {
               if (onDismiss != null)
                 InkWell(
                   onTap: onDismiss,
-                  child: Icon(Icons.close, size: t.bodySize, color: t.text3),
+                  child: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
                 ),
             ],
           ),

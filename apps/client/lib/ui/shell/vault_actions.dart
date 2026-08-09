@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -134,7 +135,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
             title: 'Mentions',
             heightFactor: 0.4,
             builder: (_) => const EmptyState(
-              icon: Icons.hub_outlined,
+              icon: LucideIcons.link_2,
               title: 'Open a note to see what links to it',
             ),
           );

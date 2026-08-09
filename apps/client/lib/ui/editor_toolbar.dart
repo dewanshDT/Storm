@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../editor/storm_markdown_controller.dart';
 import 'tokens.dart';
@@ -63,7 +64,7 @@ class EditorToolbar extends StatelessWidget {
                           ),
                           children: [
                             _Button(
-                              icon: Icons.title,
+                              icon: LucideIcons.heading,
                               tooltip: 'Heading',
                               active: block.startsWith('#'),
                               // A picker, not a blind cycle: cycling means
@@ -71,61 +72,61 @@ class EditorToolbar extends StatelessWidget {
                               onTap: () => _pickHeading(context),
                             ),
                             _Button(
-                              icon: Icons.format_bold,
+                              icon: LucideIcons.bold,
                               tooltip: 'Bold',
                               active: controller.inlineActive('**'),
                               onTap: () => controller.toggleInline('**'),
                             ),
                             _Button(
-                              icon: Icons.format_italic,
+                              icon: LucideIcons.italic,
                               tooltip: 'Italic',
                               active: controller.inlineActive('*'),
                               onTap: () => controller.toggleInline('*'),
                             ),
                             _Button(
-                              icon: Icons.code,
+                              icon: LucideIcons.code,
                               tooltip: 'Code',
                               active: controller.inlineActive('`'),
                               onTap: () => controller.toggleInline('`'),
                             ),
                             _Button(
-                              icon: Icons.format_strikethrough,
+                              icon: LucideIcons.strikethrough,
                               tooltip: 'Strikethrough',
                               active: controller.inlineActive('~~'),
                               onTap: () => controller.toggleInline('~~'),
                             ),
                             _Button(
-                              icon: Icons.border_color_outlined,
+                              icon: LucideIcons.highlighter,
                               tooltip: 'Highlight',
                               active: controller.inlineActive('=='),
                               onTap: () => controller.toggleInline('=='),
                             ),
                             _Button(
-                              icon: Icons.format_list_bulleted,
+                              icon: LucideIcons.list,
                               tooltip: 'Bullet list',
                               active: block == '- ',
                               onTap: () => controller.setBlockPrefix('- '),
                             ),
                             _Button(
-                              icon: Icons.format_list_numbered,
+                              icon: LucideIcons.list_ordered,
                               tooltip: 'Numbered list',
                               active: orderedMarker.hasMatch(block),
                               onTap: () => controller.setBlockPrefix('1. '),
                             ),
                             _Button(
-                              icon: Icons.check_box_outlined,
+                              icon: LucideIcons.square_check,
                               tooltip: 'Task',
                               active: block.startsWith('- ['),
                               onTap: () => controller.setBlockPrefix('- [ ] '),
                             ),
                             _Button(
-                              icon: Icons.format_quote,
+                              icon: LucideIcons.text_quote,
                               tooltip: 'Quote',
                               active: block.startsWith('>'),
                               onTap: () => controller.setBlockPrefix('> '),
                             ),
                             _Button(
-                              icon: Icons.link,
+                              icon: LucideIcons.link,
                               tooltip: 'Link to a note',
                               onTap: controller.insertWikilink,
                             ),

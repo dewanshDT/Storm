@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -70,7 +71,7 @@ class VaultSidebar extends ConsumerWidget {
                     child: const SkeletonRows(),
                   ),
                   error: (e, _) => EmptyState(
-                    icon: Icons.cloud_off,
+                    icon: LucideIcons.cloud_off,
                     title: 'Could not list this vault',
                     detail: describeFailure(e),
                   ),
@@ -288,7 +289,7 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
                 turns: _open ? 0.5 : 0,
                 duration: t.duration,
                 child: Icon(
-                  Icons.expand_more,
+                  LucideIcons.chevron_down,
                   size: t.bodySize,
                   color: t.text3,
                 ),
@@ -318,7 +319,7 @@ class _SettingsButtonState extends State<_SettingsButton> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     return IconButton(
-      icon: Icon(Icons.settings_outlined, size: t.bodySize, color: t.text3),
+      icon: Icon(LucideIcons.settings, size: t.bodySize, color: t.text3),
       iconSize: t.bodySize,
       tooltip: 'Client settings',
       visualDensity: VisualDensity.compact,
@@ -360,7 +361,7 @@ class _SearchField extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(Icons.search, size: t.codeSize, color: t.text3),
+            Icon(LucideIcons.search, size: t.codeSize, color: t.text3),
             SizedBox(width: t.sp),
             Text(
               'Search…',
@@ -423,7 +424,7 @@ class _FolderTreeState extends State<FolderTree> {
     final t = context.tokens;
     if (rows.isEmpty) {
       return const EmptyState(
-        icon: Icons.folder_open,
+        icon: LucideIcons.folder_open,
         title: 'This vault is empty',
       );
     }
@@ -488,7 +489,7 @@ class _FolderTreeState extends State<FolderTree> {
             inTree: true,
             contentPadding: _rowPadding(context),
             leading: Icon(
-              isOpen ? Icons.expand_more : Icons.chevron_right,
+              isOpen ? LucideIcons.chevron_down : LucideIcons.chevron_right,
               size: t.codeSize,
               color: t.text3,
             ),
@@ -550,6 +551,6 @@ class NoNoteSelected extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => const Scaffold(
-    body: EmptyState(icon: Icons.article_outlined, title: 'Select a note'),
+    body: EmptyState(icon: LucideIcons.file_text, title: 'Select a note'),
   );
 }
