@@ -196,15 +196,17 @@ deploy: build-server web
 # The full `deploy` cross-compiles the server, which needs cargo-zigbuild and
 # several minutes, and a presentation-layer change touches neither the binary
 # nor the wire format. ServeDir reads from disk, so nothing is restarted.
+#
+# WEB_DIR is what the running server was actually given as `--web`, which on
+# the VM is under the service account's home rather than the /srv/storm that
+# deploy/README.md describes. Check it against `pgrep -af storm-server` before
+# assuming, and no sudo: the directory belongs to the user we ssh in as.
+WEB_DIR ?= /home/dewansh/storm/web
+
 deploy-web: web
 	@set -e; \
-	echo "--- staging web to $(HOST) ---"; \
-	rsync -az --delete "$(CLIENT)/build/web/" "$(HOST):/tmp/storm-web/"; \
-	ssh "$(HOST)" "set -e; \
-		sudo mkdir -p $(REMOTE_DIR)/web; \
-		sudo rsync -a --delete /tmp/storm-web/ $(REMOTE_DIR)/web/; \
-		sudo chown -R storm:storm $(REMOTE_DIR)/web; \
-		rm -rf /tmp/storm-web"
+	echo "--- staging web to $(HOST):$(WEB_DIR) ---"; \
+	rsync -az --delete "$(CLIENT)/build/web/" "$(HOST):$(WEB_DIR)/"
 	@echo "--- deployed, now verify ---"
 	@$(MAKE) --no-print-directory deploy-web-check
 
