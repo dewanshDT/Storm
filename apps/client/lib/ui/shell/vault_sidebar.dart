@@ -6,6 +6,7 @@ import '../../api/models.dart';
 import '../../state/app_state.dart';
 import '../../router.dart';
 import '../accents.dart';
+import '../icons.dart';
 import '../states.dart';
 import '../tokens.dart';
 import '../widgets.dart';
@@ -84,10 +85,16 @@ class VaultSidebar extends ConsumerWidget {
                   children: [
                     for (final action in vaultActions(context, ref, uri))
                       IconButton(
-                        icon: Icon(action.icon, size: t.bodySize),
+                        icon: StormIcon(
+                          action.glyph,
+                          size: t.bodySize,
+                          color: action.selected ? t.accent : t.text3,
+                        ),
+                        iconSize: t.bodySize,
                         tooltip: action.tooltip,
-                        color: action.selected ? t.accent : t.text3,
                         visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.all(t.sp * 0.75),
+                        constraints: const BoxConstraints(),
                         onPressed: action.onTap,
                       ),
                   ],

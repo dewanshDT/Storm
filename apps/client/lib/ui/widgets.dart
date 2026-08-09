@@ -871,6 +871,7 @@ class VaultCard extends StatelessWidget {
     required this.subtitle,
     this.status,
     this.muted = false,
+    this.tinted = true,
     this.onTap,
     this.onLongPress,
   });
@@ -879,6 +880,10 @@ class VaultCard extends StatelessWidget {
 
   /// The accent ground behind the initial, already resolved for this theme.
   final Color tile;
+
+  /// False when [tile] is the neutral surface rather than an accent, which is
+  /// what an uncoloured vault gets. [kTileInk] on it is black on near-black.
+  final bool tinted;
   final String subtitle;
   final DotStatus? status;
   final bool muted;
@@ -911,6 +916,7 @@ class VaultCard extends StatelessWidget {
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Container(
               width: side,
@@ -926,11 +932,15 @@ class VaultCard extends StatelessWidget {
                   fontFamily: StormTokens.sansFamily,
                   fontSize: t.codeSize,
                   fontWeight: FontWeight.w600,
-                  color: muted ? t.danger : kTileInk,
+                  color: muted
+                      ? t.danger
+                      : tinted
+                      ? kTileInk
+                      : t.text2,
                 ),
               ),
             ),
-            const Spacer(),
+            SizedBox(height: t.sp * 1.25),
             Text(
               name,
               maxLines: 1,

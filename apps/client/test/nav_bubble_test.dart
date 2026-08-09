@@ -90,7 +90,7 @@ void main() {
 
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
-      expect(find.byIcon(Icons.hub_outlined), findsOneWidget);
+      expect(find.byTooltip('0 linked mentions'), findsOneWidget);
       expect(find.byTooltip('Tags'), findsNothing);
       await disposeShell(tester, c);
     });

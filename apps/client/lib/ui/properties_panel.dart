@@ -122,6 +122,9 @@ class PropertiesDrawer extends StatelessWidget {
     if (!context.isExpanded) return const SizedBox.shrink();
 
     return Row(
+      // Stretch, or the inner Column's MainAxisSize.min lets the whole panel
+      // float in the vertical middle of the pane.
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(width: t.bw, color: t.border),
         SizedBox(

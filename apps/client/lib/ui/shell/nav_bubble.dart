@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../breakpoints.dart';
+import '../icons.dart';
 import '../tokens.dart';
 import 'vault_actions.dart';
 
@@ -106,11 +107,12 @@ class _Slot extends StatelessWidget {
           onTap: action.onTap,
           customBorder: const CircleBorder(),
           child: Container(
-            width: 46,
-            height: 46,
+            width: t.sp * 5.75,
+            height: t.sp * 5.75,
+            alignment: Alignment.center,
             margin: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
             decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
-            child: Icon(action.icon, size: 24, color: t.onAccent),
+            child: StormIcon(action.glyph, size: t.sp * 2.5, color: t.onAccent),
           ),
         ),
       );
@@ -126,9 +128,9 @@ class _Slot extends StatelessWidget {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              Icon(
-                action.icon,
-                size: 21,
+              StormIcon(
+                action.glyph,
+                size: t.sp * 2.5,
                 color: action.selected ? t.accent : t.text2,
               ),
               // Amber, and carrying the count. Mentions are the one slot whose
