@@ -237,6 +237,7 @@ class EntryTile extends ConsumerWidget {
     if (entry.isFolder) {
       return FolderRow(
         name: entry.name,
+        dense: inTree,
         leading: leading,
         // The tree shows counts too — the design's sidebar has them, and a
         // folder's weight is the reason to open it or not.
@@ -256,11 +257,9 @@ class EntryTile extends ConsumerWidget {
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     return NoteRow(
       title: entry.name,
-      meta: _noteMeta(entry.note!),
-      // An empty box the width of a folder glyph, so titles line up in a list
-      // that mixes both. The design never draws one, because its directory
-      // screens are all folders or all notes; a real vault has both.
-      leading: leading ?? (inTree ? null : SizedBox(width: t.bodySize)),
+      dense: inTree,
+      meta: inTree ? null : _noteMeta(entry.note!),
+      leading: leading,
       selected: selected,
       divider: divider,
       padding: contentPadding as EdgeInsets?,

@@ -551,6 +551,7 @@ class NoteRow extends StatelessWidget {
     this.divider = false,
     this.selected = false,
     this.padding,
+    this.dense = false,
   });
 
   final String title;
@@ -562,6 +563,10 @@ class NoteRow extends StatelessWidget {
   final bool divider;
   final bool selected;
   final EdgeInsetsGeometry? padding;
+
+  /// The sidebar's step down: the design's tree is set at 13px where a
+  /// full-width list row is 15.
+  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -597,9 +602,9 @@ class NoteRow extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontFamily: StormTokens.sansFamily,
-                      fontSize: t.bodySize * 0.95,
-                      fontWeight: FontWeight.w600,
-                      color: t.text,
+                      fontSize: dense ? t.codeSize : t.bodySize * 0.95,
+                      fontWeight: dense ? FontWeight.w400 : FontWeight.w600,
+                      color: dense ? t.text2 : t.text,
                       height: 1.3,
                     ),
                   ),
@@ -640,6 +645,7 @@ class FolderRow extends StatelessWidget {
     this.leading,
     this.chevron = true,
     this.padding,
+    this.dense = false,
   });
 
   final String name;
@@ -652,6 +658,9 @@ class FolderRow extends StatelessWidget {
   final Widget? leading;
   final bool chevron;
   final EdgeInsetsGeometry? padding;
+
+  /// See [NoteRow.dense].
+  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -677,7 +686,7 @@ class FolderRow extends StatelessWidget {
             // reserved for what is interactive.
             leading ??
                 Icon(Icons.folder_rounded, size: t.bodySize, color: t.text2),
-            SizedBox(width: t.sp * 1.5),
+            SizedBox(width: dense ? t.sp : t.sp * 1.5),
             Expanded(
               child: Text(
                 name,
@@ -685,9 +694,9 @@ class FolderRow extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
-                  fontSize: t.bodySize * 0.95,
+                  fontSize: dense ? t.codeSize : t.bodySize * 0.95,
                   fontWeight: FontWeight.w500,
-                  color: t.text,
+                  color: dense ? t.text2 : t.text,
                 ),
               ),
             ),
@@ -696,8 +705,8 @@ class FolderRow extends StatelessWidget {
                 '$count',
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  color: t.text2,
+                  fontSize: dense ? t.labelSize : t.codeSize,
+                  color: t.text3,
                 ),
               ),
             if (chevron) ...[

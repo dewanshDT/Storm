@@ -113,10 +113,10 @@ class VaultSidebar extends ConsumerWidget {
                         constraints: const BoxConstraints(),
                         onPressed: action.onTap,
                       ),
-                    const Spacer(),
-                    // Server settings live on the corner bubble, and the
-                    // corners are empty at this width — without this the
-                    // screen has no way to reach them at all.
+                    // Last in the row, not pushed to the far edge: the design
+                    // groups all four at the left. Server settings live on the
+                    // corner bubble, and the corners are empty at this width —
+                    // without this the screen cannot reach them at all.
                     IconButton(
                       icon: Icon(
                         Icons.settings_outlined,
@@ -341,7 +341,7 @@ class _FolderTreeState extends State<FolderTree> {
             contentPadding: _indent(depth),
             leading: Icon(
               isOpen ? Icons.expand_more : Icons.chevron_right,
-              size: context.tokens.bodySize,
+              size: context.tokens.codeSize,
               color: context.tokens.text3,
             ),
             onFolderTap: () => setState(() {
