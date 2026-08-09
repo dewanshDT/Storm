@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../theme.dart';
+import '../tokens.dart';
 
 /// Top-left: the vault, whether it is reaching the server, and the switcher.
 ///
@@ -179,12 +180,22 @@ class ProfileBubble extends ConsumerWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                SwitchListTile(
-                  secondary: const Icon(Icons.dark_mode_outlined),
-                  title: const Text('Dark theme'),
-                  value: settings.darkMode,
-                  onChanged: (v) =>
-                      notifier.save(settings.copyWith(darkMode: v)),
+                // A switch could only ever say two things, and there are
+                // three identities to choose between.
+                ListTile(
+                  leading: const Icon(Icons.palette_outlined),
+                  title: const Text('Theme'),
+                  subtitle: Text(settings.theme.label),
+                  trailing: PopupMenuButton<StormPreset>(
+                    initialValue: settings.theme,
+                    onSelected: (p) =>
+                        notifier.save(settings.copyWith(theme: p)),
+                    itemBuilder: (_) => [
+                      for (final preset in StormPreset.values)
+                        PopupMenuItem(value: preset, child: Text(preset.label)),
+                    ],
+                    icon: const Icon(Icons.expand_more),
+                  ),
                 ),
                 ListTile(
                   leading: const Icon(Icons.format_size),
