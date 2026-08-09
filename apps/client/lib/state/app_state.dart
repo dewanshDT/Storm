@@ -8,6 +8,7 @@ import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import '../ui/theme.dart';
+import '../ui/tokens.dart';
 import '../sync/sync_engine.dart';
 import 'note_session.dart';
 import '../ui/accents.dart';
@@ -25,7 +26,7 @@ class Settings {
     this.token = '',
     // Dark-first, matching the design. Someone who turns it off has `false`
     // stored, so this default never overrides a deliberate choice.
-    this.darkMode = true,
+    this.theme = StormPreset.stormDark,
     this.fontSize = 16,
     this.activeVault = '',
     this.bodyFont = BodyFont.serif,
@@ -34,7 +35,16 @@ class Settings {
 
   final String baseUrl;
   final String token;
-  final bool darkMode;
+
+  /// Which visual identity the app wears.
+  ///
+  /// Replaces the old `darkMode` bool, which could only express two of the
+  /// three shipped presets. The stored bool is migrated on load rather than
+  /// dropped — see [SettingsNotifier.build].
+  final StormPreset theme;
+
+  /// Kept so the rest of the app can still ask the simple question.
+  bool get darkMode => theme.inputs.dark;
   final double fontSize;
 
   /// The face note bodies are set in.
@@ -69,7 +79,7 @@ class Settings {
   Settings copyWith({
     String? baseUrl,
     String? token,
-    bool? darkMode,
+    StormPreset? theme,
     double? fontSize,
     String? activeVault,
     BodyFont? bodyFont,
@@ -77,7 +87,7 @@ class Settings {
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     token: token ?? this.token,
-    darkMode: darkMode ?? this.darkMode,
+    theme: theme ?? this.theme,
     fontSize: fontSize ?? this.fontSize,
     activeVault: activeVault ?? this.activeVault,
     bodyFont: bodyFont ?? this.bodyFont,
@@ -89,6 +99,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kUrl = 'storm.baseUrl';
   static const _kToken = 'storm.token';
   static const _kDark = 'storm.darkMode';
+  static const _kTheme = 'storm.theme';
   static const _kFont = 'storm.fontSize';
   static const _kVault = 'storm.activeVault';
   static const _kBodyFont = 'storm.bodyFont';
@@ -100,12 +111,27 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     return Settings(
       baseUrl: prefs.getString(_kUrl) ?? '',
       token: prefs.getString(_kToken) ?? '',
-      darkMode: prefs.getBool(_kDark) ?? true,
+      theme: _themeFrom(prefs),
       fontSize: prefs.getDouble(_kFont) ?? 16,
       activeVault: prefs.getString(_kVault) ?? '',
       bodyFont: BodyFont.fromName(prefs.getString(_kBodyFont)),
       showNoteId: prefs.getBool(_kShowId) ?? false,
     );
+  }
+
+  /// The stored theme, migrating an installation that only knew dark/light.
+  ///
+  /// Someone upgrading has `storm.darkMode` and no `storm.theme`, and losing
+  /// their choice would silently flip the app to dark on the first launch after
+  /// an update. The old key is read but never written again, so the migration
+  /// happens once and then stops mattering.
+  static StormPreset _themeFrom(SharedPreferences prefs) {
+    final stored = prefs.getString(_kTheme);
+    if (stored != null) return StormPreset.parse(stored);
+
+    final wasDark = prefs.getBool(_kDark);
+    if (wasDark == null) return StormPreset.stormDark;
+    return wasDark ? StormPreset.stormDark : StormPreset.stormLight;
   }
 
   Future<void> save(Settings next) async {
@@ -117,7 +143,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kUrl, cleaned.baseUrl);
     await prefs.setString(_kToken, cleaned.token);
-    await prefs.setBool(_kDark, cleaned.darkMode);
+    await prefs.setString(_kTheme, cleaned.theme.wire);
     await prefs.setDouble(_kFont, cleaned.fontSize);
     await prefs.setString(_kVault, cleaned.activeVault);
     await prefs.setString(_kBodyFont, cleaned.bodyFont.name);
@@ -372,6 +398,18 @@ final vaultFoldersProvider = Provider<List<String>>((ref) {
 
 /// The currently open note, if any.
 final openNoteIdProvider = StateProvider<String?>((ref) => null);
+
+/// Whether the properties drawer is open beside the note, at desk width.
+///
+/// A provider rather than the note screen's own state, which is where it
+/// started: opening a second note built a second `_NoteScreenState` and the
+/// drawer shut. Properties are a *pane* at that width — you open the column
+/// once and it stays while you read around it, the way the sidebar does.
+///
+/// Not read on a phone. There properties are a modal sheet, which has to be
+/// dismissed before anything else can be touched, so "is it open" is the
+/// navigator's question rather than ours.
+final propertiesOpenProvider = StateProvider<bool>((ref) => false);
 
 final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
   // Deliberately `watch(apiProvider)` + `read(syncEngineProvider)`: the

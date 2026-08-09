@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../editor/storm_markdown_controller.dart';
+import 'tokens.dart';
 
 /// The formatting bar that takes the nav bubble's place while the keyboard is
 /// up.
@@ -11,13 +13,17 @@ import '../editor/storm_markdown_controller.dart';
 /// controller's methods exist precisely so there is one place that gets that
 /// right.
 class EditorToolbar extends StatelessWidget {
-  const EditorToolbar({super.key, required this.controller});
+  const EditorToolbar({super.key, required this.controller, this.onDone});
 
   final StormMarkdownController controller;
 
+  /// Puts the keyboard away. Without it the only way out of editing is the
+  /// system gesture, which on Android is also the way out of the note.
+  final VoidCallback? onDone;
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
 
     // The toolbar counts as *inside* the text field for tap purposes.
     // `TextField`'s default `onTapOutside` unfocuses on desktop and web, and an
@@ -27,79 +33,123 @@ class EditorToolbar extends StatelessWidget {
     return TapRegion(
       groupId: EditableText,
       child: Material(
-        color: scheme.surfaceContainerHigh,
-        elevation: 8,
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: 48,
-            // Scrolls rather than wraps: an overflowing bar drops buttons
-            // silently, which is how the attach action once appeared to vanish.
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 6),
-              children: [
-                _Button(
-                  icon: Icons.title,
-                  tooltip: 'Heading',
-                  // A picker, not a blind cycle: cycling means tapping four
-                  // times to find out what you got.
-                  onTap: () => _pickHeading(context),
-                ),
-                const _Divider(),
-                _Button(
-                  icon: Icons.format_bold,
-                  tooltip: 'Bold',
-                  onTap: () => controller.toggleInline('**'),
-                ),
-                _Button(
-                  icon: Icons.format_italic,
-                  tooltip: 'Italic',
-                  onTap: () => controller.toggleInline('*'),
-                ),
-                _Button(
-                  icon: Icons.code,
-                  tooltip: 'Code',
-                  onTap: () => controller.toggleInline('`'),
-                ),
-                _Button(
-                  icon: Icons.format_strikethrough,
-                  tooltip: 'Strikethrough',
-                  onTap: () => controller.toggleInline('~~'),
-                ),
-                _Button(
-                  icon: Icons.border_color_outlined,
-                  tooltip: 'Highlight',
-                  onTap: () => controller.toggleInline('=='),
-                ),
-                const _Divider(),
-                _Button(
-                  icon: Icons.format_list_bulleted,
-                  tooltip: 'Bullet list',
-                  onTap: () => controller.setBlockPrefix('- '),
-                ),
-                _Button(
-                  icon: Icons.format_list_numbered,
-                  tooltip: 'Numbered list',
-                  onTap: () => controller.setBlockPrefix('1. '),
-                ),
-                _Button(
-                  icon: Icons.check_box_outlined,
-                  tooltip: 'Task',
-                  onTap: () => controller.setBlockPrefix('- [ ] '),
-                ),
-                _Button(
-                  icon: Icons.format_quote,
-                  tooltip: 'Quote',
-                  onTap: () => controller.setBlockPrefix('> '),
-                ),
-                const _Divider(),
-                _Button(
-                  icon: Icons.link,
-                  tooltip: 'Link to a note',
-                  onTap: controller.insertWikilink,
-                ),
-              ],
+        color: t.surface,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(color: t.border, width: t.bw),
+            ),
+          ),
+          child: SafeArea(
+            top: false,
+            child: SizedBox(
+              height: t.sp * 6.5,
+              // Rebuilt on every selection change, which is what makes the
+              // active state honest: bold lights up when the caret is inside
+              // `**…**`, not when it was last tapped.
+              child: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: controller,
+                builder: (context, _, _) {
+                  final block = controller.blockPrefixHere();
+                  return Row(
+                    children: [
+                      Expanded(
+                        // Scrolls rather than wraps: an overflowing bar drops
+                        // buttons silently, which is how the attach action
+                        // once appeared to vanish.
+                        child: ListView(
+                          scrollDirection: Axis.horizontal,
+                          padding: EdgeInsets.symmetric(
+                            horizontal: t.sp * 0.75,
+                          ),
+                          children: [
+                            _Button(
+                              icon: LucideIcons.heading,
+                              tooltip: 'Heading',
+                              active: block.startsWith('#'),
+                              // A picker, not a blind cycle: cycling means
+                              // tapping four times to find out what you got.
+                              onTap: () => _pickHeading(context),
+                            ),
+                            _Button(
+                              icon: LucideIcons.bold,
+                              tooltip: 'Bold',
+                              active: controller.inlineActive('**'),
+                              onTap: () => controller.toggleInline('**'),
+                            ),
+                            _Button(
+                              icon: LucideIcons.italic,
+                              tooltip: 'Italic',
+                              active: controller.inlineActive('*'),
+                              onTap: () => controller.toggleInline('*'),
+                            ),
+                            _Button(
+                              icon: LucideIcons.code,
+                              tooltip: 'Code',
+                              active: controller.inlineActive('`'),
+                              onTap: () => controller.toggleInline('`'),
+                            ),
+                            _Button(
+                              icon: LucideIcons.strikethrough,
+                              tooltip: 'Strikethrough',
+                              active: controller.inlineActive('~~'),
+                              onTap: () => controller.toggleInline('~~'),
+                            ),
+                            _Button(
+                              icon: LucideIcons.highlighter,
+                              tooltip: 'Highlight',
+                              active: controller.inlineActive('=='),
+                              onTap: () => controller.toggleInline('=='),
+                            ),
+                            _Button(
+                              icon: LucideIcons.list,
+                              tooltip: 'Bullet list',
+                              active: block == '- ',
+                              onTap: () => controller.setBlockPrefix('- '),
+                            ),
+                            _Button(
+                              icon: LucideIcons.list_ordered,
+                              tooltip: 'Numbered list',
+                              active: orderedMarker.hasMatch(block),
+                              onTap: () => controller.setBlockPrefix('1. '),
+                            ),
+                            _Button(
+                              icon: LucideIcons.square_check,
+                              tooltip: 'Task',
+                              active: block.startsWith('- ['),
+                              onTap: () => controller.setBlockPrefix('- [ ] '),
+                            ),
+                            _Button(
+                              icon: LucideIcons.text_quote,
+                              tooltip: 'Quote',
+                              active: block.startsWith('>'),
+                              onTap: () => controller.setBlockPrefix('> '),
+                            ),
+                            _Button(
+                              icon: LucideIcons.link,
+                              tooltip: 'Link to a note',
+                              onTap: controller.insertWikilink,
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (onDone != null)
+                        TextButton(
+                          onPressed: onDone,
+                          child: Text(
+                            'Done',
+                            style: TextStyle(
+                              fontFamily: StormTokens.sansFamily,
+                              fontSize: t.codeSize,
+                              fontWeight: FontWeight.w600,
+                              color: t.accent,
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
             ),
           ),
         ),
@@ -154,45 +204,38 @@ class _Button extends StatelessWidget {
     required this.icon,
     required this.tooltip,
     required this.onTap,
+    this.active = false,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback onTap;
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Tooltip(
       message: tooltip,
       child: InkWell(
         // The field keeps focus, so the keyboard does not close and reopen
         // between two formatting taps.
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 11),
+        borderRadius: BorderRadius.circular(t.rControl * 0.8),
+        child: Container(
+          margin: EdgeInsets.symmetric(vertical: t.sp * 0.75),
+          padding: EdgeInsets.symmetric(horizontal: t.sp * 1.25),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: active ? t.accentSoft : null,
+            borderRadius: BorderRadius.circular(t.rControl * 0.8),
+          ),
           child: Icon(
             icon,
-            size: 21,
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            size: t.headingSize,
+            color: active ? t.accent : t.text2,
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _Divider extends StatelessWidget {
-  const _Divider();
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Container(
-        width: 1,
-        height: 20,
-        margin: const EdgeInsets.symmetric(horizontal: 5),
-        color: Theme.of(context).dividerColor,
       ),
     );
   }

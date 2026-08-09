@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/editor/list_continuation.dart';
@@ -162,7 +163,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(Icons.title));
+      await tester.tap(find.byIcon(LucideIcons.heading));
       await tester.pumpAndSettle();
 
       // The keyboard would close here, taking the toolbar with it.

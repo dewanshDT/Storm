@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&family=Space+Mono:wght@400;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  body { margin: 0; }
+  * { box-sizing: border-box; }
+  input[type=range] { -webkit-appearance: none; appearance: none; height: 3px; border-radius: 2px; outline: none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%; background: #fff; cursor: pointer; border: 2px solid rgba(0,0,0,.35); }
+</style>
+</helmet>
+<div style="{{ rootVars }}">
+  <div style="min-height:100vh;background:var(--bg,#221f1d);color:var(--text,#f2f0ee);font-family:'IBM Plex Sans',sans-serif;padding:calc(var(--sp,8px) * 6) calc(var(--sp,8px) * 5) 140px">
+
+    <div style="max-width:1180px;margin:0 auto">
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.12em;text-transform:uppercase;color:var(--text3,#8a8580)">Storm · design system</div>
+      <div style="font-size:var(--fs-2xl,40px);font-weight:600;margin-top:calc(var(--sp,8px) * 1.5);line-height:1.08">Atoms, molecules, organisms</div>
+      <div style="font-size:var(--fs-md,16px);color:var(--text2,#b0aaa4);margin-top:calc(var(--sp,8px) * 1.5);max-width:620px;line-height:1.6">Every specimen below is drawn from the same token layer. Change a token in the panel at bottom-left and it moves everywhere at once — that is the contract.</div>
+
+      <div style="height:calc(var(--sp,8px) * 6)"></div>
+
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.1em;text-transform:uppercase;color:var(--text3,#8a8580);border-bottom:var(--bw,1px) solid var(--border,#4a4642);padding-bottom:calc(var(--sp,8px) * 1.5)">01 · Tokens</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:var(--gap,16px);margin-top:calc(var(--sp,8px) * 3)">
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);text-transform:uppercase;letter-spacing:0.08em">Colour roles</div>
+          <div style="display:flex;flex-direction:column;gap:calc(var(--sp,8px) * 1);margin-top:calc(var(--sp,8px) * 2)">
+            <sc-for list="{{ colorTokens }}" as="c" hint-placeholder-count="6">
+              <div style="display:flex;align-items:center;gap:calc(var(--sp,8px) * 1.5)">
+                <div style="{{ c.swatchStyle }}"></div>
+                <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text2,#b0aaa4);flex:1">{{ c.name }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);text-transform:uppercase;letter-spacing:0.08em">Type scale</div>
+          <div style="margin-top:calc(var(--sp,8px) * 2);display:flex;flex-direction:column;gap:calc(var(--sp,8px) * 1)">
+            <div style="font-size:var(--fs-2xl,40px);line-height:1.1;font-weight:600">Display</div>
+            <div style="font-size:var(--fs-lg,20px);line-height:1.25;font-weight:600">Heading</div>
+            <div style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-md,16px);line-height:1.6;color:var(--text2,#b0aaa4)">Note body — Newsreader</div>
+            <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580)">label · metadata</div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);text-transform:uppercase;letter-spacing:0.08em">Spacing · radius</div>
+          <div style="display:flex;align-items:flex-end;gap:calc(var(--sp,8px) * 1);margin-top:calc(var(--sp,8px) * 2);height:56px">
+            <div style="width:calc(var(--sp,8px) * 1);height:calc(var(--sp,8px) * 1);background:var(--accent,#9b87e8)"></div>
+            <div style="width:calc(var(--sp,8px) * 2);height:calc(var(--sp,8px) * 2);background:var(--accent,#9b87e8)"></div>
+            <div style="width:calc(var(--sp,8px) * 3);height:calc(var(--sp,8px) * 3);background:var(--accent,#9b87e8)"></div>
+            <div style="width:calc(var(--sp,8px) * 5);height:calc(var(--sp,8px) * 5);background:var(--accent,#9b87e8)"></div>
+          </div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 1.5);margin-top:calc(var(--sp,8px) * 2)">
+            <div style="width:44px;height:44px;background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px)"></div>
+            <div style="width:44px;height:44px;background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-control,10px)"></div>
+            <div style="width:44px;height:44px;background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:999px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="height:calc(var(--sp,8px) * 7)"></div>
+
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.1em;text-transform:uppercase;color:var(--text3,#8a8580);border-bottom:var(--bw,1px) solid var(--border,#4a4642);padding-bottom:calc(var(--sp,8px) * 1.5)">02 · Atoms</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:var(--gap,16px);margin-top:calc(var(--sp,8px) * 3)">
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">brand mark — the ground stays #96F2D7</div>
+          <div style="display:flex;align-items:center;gap:calc(var(--sp,8px) * 2)">
+            <img src="apps/client/assets/icon/storm_icon_full.png" alt="Storm mark" style="width:56px;height:56px;border-radius:var(--r-card,16px);display:block" />
+            <img src="apps/client/assets/icon/storm_icon_full.png" alt="Storm mark" style="width:32px;height:32px;border-radius:var(--r-control,10px);display:block" />
+            <div style="display:flex;flex-direction:column;gap:2px">
+              <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-sm,13px);letter-spacing:0.14em;color:var(--text,#f2f0ee)">STORM</span>
+              <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;color:var(--text3,#8a8580)">mark + wordmark lockup</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">status dot</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 2);align-items:center">
+            <div style="width:10px;height:10px;border-radius:999px;background:var(--green,#5cc28f)"></div>
+            <div style="width:10px;height:10px;border-radius:999px;background:var(--amber,#e0a94b)"></div>
+            <div style="width:10px;height:10px;border-radius:999px;background:var(--text3,#8a8580)"></div>
+            <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580)">synced · syncing · offline</span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">tag chip</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 1);flex-wrap:wrap">
+            <span style="background:var(--amber-soft,#4a3a20);color:var(--amber,#e0a94b);padding:3px 10px;border-radius:999px;font-size:var(--fs-sm,13px)">#proj/storm</span>
+            <span style="background:var(--amber-soft,#4a3a20);color:var(--amber,#e0a94b);padding:3px 10px;border-radius:999px;font-size:var(--fs-sm,13px)">#cooking</span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">key chip</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 1);flex-wrap:wrap">
+            <span style="background:var(--surface2,#35302c);color:var(--text2,#b0aaa4);font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);padding:3px 9px;border-radius:calc(var(--r-control,10px) * 0.6)">status</span>
+            <span style="background:var(--surface2,#35302c);color:var(--text2,#b0aaa4);font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);padding:3px 9px;border-radius:calc(var(--r-control,10px) * 0.6)">created</span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">accent swatches</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 1);flex-wrap:wrap">
+            <sc-for list="{{ accentSwatches }}" as="a" hint-placeholder-count="9">
+              <div style="{{ a.style }}"></div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">buttons</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 1.5);align-items:center;flex-wrap:wrap">
+            <div style="background:var(--accent,#9b87e8);color:var(--on-accent,#15121f);padding:9px 16px;border-radius:var(--r-control,10px);font-size:var(--fs-sm,13px);font-weight:600;cursor:pointer">Connect</div>
+            <div style="background:transparent;color:var(--text,#f2f0ee);border:var(--bw,1px) solid var(--border,#4a4642);padding:9px 16px;border-radius:var(--r-control,10px);font-size:var(--fs-sm,13px);cursor:pointer">Cancel</div>
+            <div style="color:var(--accent,#9b87e8);font-size:var(--fs-sm,13px);font-weight:600;cursor:pointer">Sync now</div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">input · switch · checkbox</div>
+          <div style="display:flex;flex-direction:column;gap:calc(var(--sp,8px) * 1.5)">
+            <div style="background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-control,10px);padding:9px 12px;font-size:var(--fs-sm,13px);color:var(--text3,#8a8580)">Search notes</div>
+            <div style="display:flex;gap:calc(var(--sp,8px) * 2);align-items:center">
+              <div style="width:34px;height:20px;border-radius:999px;background:var(--accent,#9b87e8);position:relative"><div style="width:16px;height:16px;border-radius:999px;background:#fff;position:absolute;top:2px;left:16px"></div></div>
+              <div style="width:34px;height:20px;border-radius:999px;background:var(--border,#4a4642);position:relative"><div style="width:16px;height:16px;border-radius:999px;background:#fff;position:absolute;top:2px;left:2px"></div></div>
+              <div style="width:18px;height:18px;border-radius:calc(var(--r-control,10px) * 0.5);background:var(--accent,#9b87e8);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--on-accent,#15121f)">✓</div>
+              <div style="width:18px;height:18px;border-radius:calc(var(--r-control,10px) * 0.5);border:1.5px solid var(--text3,#8a8580)"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">icons</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 2.5);align-items:center;color:var(--text,#f2f0ee)">
+            <div style="width:16px;height:13px;position:relative"><div style="position:absolute;top:0;left:0;width:7px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:16px;height:11px;background:currentColor;border-radius:2px"></div></div>
+            <div style="width:15px;height:15px;position:relative"><div style="position:absolute;top:0;left:0;width:10px;height:10px;border:1.6px solid currentColor;border-radius:999px"></div><div style="position:absolute;bottom:0;right:0;width:5px;height:1.6px;background:currentColor;transform:rotate(45deg)"></div></div>
+            <div style="width:15px;height:9px;position:relative"><div style="position:absolute;left:0;top:0;width:8px;height:8px;border:1.4px solid currentColor;border-radius:4px"></div><div style="position:absolute;right:0;top:0;width:8px;height:8px;border:1.4px solid currentColor;border-radius:4px"></div></div>
+            <span style="font-weight:600;font-size:16px">#</span>
+            <span style="font-size:18px">+</span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">save states</div>
+          <div style="display:flex;flex-direction:column;gap:6px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px)">
+            <span style="color:var(--green,#5cc28f)">Saved</span>
+            <span style="color:var(--accent,#9b87e8)">Saving…</span>
+            <span style="color:var(--amber,#e0a94b)">Queued — offline</span>
+            <span style="color:var(--danger,#e06c5a)">Failed</span>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="height:calc(var(--sp,8px) * 7)"></div>
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.1em;text-transform:uppercase;color:var(--text3,#8a8580);border-bottom:var(--bw,1px) solid var(--border,#4a4642);padding-bottom:calc(var(--sp,8px) * 1.5)">03 · Molecules</div>
+      <div style="font-size:var(--fs-sm,13px);color:var(--text3,#8a8580);margin-top:calc(var(--sp,8px) * 1.5);max-width:560px">Atoms in fixed arrangements. Each one is a row-level unit the app repeats — change the atom and every molecule follows.</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--gap,16px);margin-top:calc(var(--sp,8px) * 3)">
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">property row — key chip + typed value</div>
+          <div style="display:flex;flex-direction:column;gap:calc(var(--sp,8px) * 1.25)">
+            <div style="display:flex;align-items:center;gap:calc(var(--sp,8px) * 1.25)">
+              <span style="background:var(--surface2,#35302c);color:var(--text2,#b0aaa4);font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);padding:3px 9px;border-radius:calc(var(--r-control,10px) * 0.6)">status</span>
+              <span style="font-size:var(--fs-sm,13px);color:var(--text,#f2f0ee)">in-progress</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:calc(var(--sp,8px) * 1.25)">
+              <span style="background:var(--surface2,#35302c);color:var(--text2,#b0aaa4);font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);padding:3px 9px;border-radius:calc(var(--r-control,10px) * 0.6)">done</span>
+              <div style="width:18px;height:18px;border-radius:calc(var(--r-control,10px) * 0.5);border:1.5px solid var(--text3,#8a8580)"></div>
+            </div>
+            <div style="display:flex;align-items:center;gap:calc(var(--sp,8px) * 1.25)">
+              <span style="background:var(--surface2,#35302c);color:var(--text2,#b0aaa4);font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);padding:3px 9px;border-radius:calc(var(--r-control,10px) * 0.6)">created</span>
+              <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-sm,13px);color:var(--text3,#8a8580)">2026-07-30 · read-only</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">note row · folder row</div>
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <div style="padding:calc(var(--sp,8px) * 1.5) calc(var(--sp,8px) * 1);border-bottom:var(--bw,1px) solid var(--border,#4a4642)">
+              <div style="font-size:var(--fs-sm,14px);color:var(--text,#f2f0ee);font-weight:500">Sprint Retro</div>
+              <div style="font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-top:2px">Projects · 2h ago</div>
+            </div>
+            <div style="padding:calc(var(--sp,8px) * 1.5) calc(var(--sp,8px) * 1);display:flex;align-items:center;gap:calc(var(--sp,8px) * 1.5)">
+              <div style="width:16px;height:13px;position:relative;color:var(--text3,#8a8580);flex-shrink:0"><div style="position:absolute;top:0;left:0;width:7px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:16px;height:11px;background:currentColor;border-radius:2px"></div></div>
+              <span style="font-size:var(--fs-sm,14px);color:var(--text,#f2f0ee);flex:1">Projects</span>
+              <span style="font-size:var(--fs-xs,12px);color:var(--text3,#8a8580)">2 notes</span>
+              <span style="color:var(--text3,#8a8580)">›</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">status bar · breadcrumb</div>
+          <div style="display:flex;align-items:center;gap:8px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 1.5)">
+            <span>v12</span><span>·</span><span style="color:var(--green,#5cc28f)">Saved</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580)">
+            <span style="color:var(--accent,#9b87e8)">Vaults</span><span>›</span><span style="color:var(--accent,#9b87e8)">Work</span><span>›</span><span style="color:var(--text,#f2f0ee)">Projects</span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">tag group · popover item</div>
+          <div style="font-size:var(--fs-sm,13px);color:var(--text,#f2f0ee);font-weight:600;margin-bottom:6px">proj</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:calc(var(--sp,8px) * 2)">
+            <span style="background:var(--amber-soft,#4a3a20);color:var(--amber,#e0a94b);padding:3px 10px;border-radius:999px;font-size:var(--fs-xs,12px)">proj/storm</span>
+            <span style="background:var(--amber-soft,#4a3a20);color:var(--amber,#e0a94b);padding:3px 10px;border-radius:999px;font-size:var(--fs-xs,12px)">proj/api</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:calc(var(--sp,8px) * 1);padding:calc(var(--sp,8px) * 1);border-radius:var(--r-control,10px);background:var(--surface2,#35302c)">
+            <div style="width:8px;height:8px;border-radius:999px;background:var(--green,#5cc28f)"></div>
+            <span style="font-size:var(--fs-sm,13px);color:var(--text,#f2f0ee)">Work</span>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="height:calc(var(--sp,8px) * 7)"></div>
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.1em;text-transform:uppercase;color:var(--text3,#8a8580);border-bottom:var(--bw,1px) solid var(--border,#4a4642);padding-bottom:calc(var(--sp,8px) * 1.5)">04 · Organisms</div>
+      <div style="font-size:var(--fs-sm,13px);color:var(--text3,#8a8580);margin-top:calc(var(--sp,8px) * 1.5);max-width:560px">Molecules composed into the app's actual working parts.</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:var(--gap,16px);margin-top:calc(var(--sp,8px) * 3)">
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">vault card</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:calc(var(--sp,8px) * 1.5)">
+            <sc-for list="{{ vaultCards }}" as="v" hint-placeholder-count="2">
+              <div style="background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:calc(var(--sp,8px) * 2)">
+                <div style="{{ v.iconStyle }}">{{ v.icon }}</div>
+                <div style="font-size:var(--fs-sm,14px);font-weight:600;color:var(--text,#f2f0ee);margin-top:calc(var(--sp,8px) * 1.25)">{{ v.name }}</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:4px"><div style="{{ v.dotStyle }}"></div><span style="font-size:var(--fs-xs,12px);color:var(--text3,#8a8580)">{{ v.notes }} notes</span></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">corner bubbles</div>
+          <div style="display:flex;gap:calc(var(--sp,8px) * 2);align-items:center">
+            <div style="width:44px;height:44px;border-radius:var(--r-control,10px);background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;position:relative">
+              <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-sm,14px);color:var(--text,#f2f0ee)">W</span>
+              <div style="position:absolute;bottom:5px;right:5px;width:9px;height:9px;border-radius:999px;background:var(--green,#5cc28f);border:2px solid var(--surface2,#35302c)"></div>
+            </div>
+            <div style="width:44px;height:44px;border-radius:var(--r-control,10px);background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-size:var(--fs-sm,14px);font-weight:600;color:var(--text,#f2f0ee)">A</div>
+            <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);line-height:1.5">vault · settings<br />rounded square</span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">nav bubble — always expanded</div>
+          <div style="display:flex;align-items:center;background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:999px;padding:4px;width:fit-content;box-shadow:var(--shadow)">
+            <div style="width:38px;height:38px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee)"><div style="width:14px;height:11px;position:relative"><div style="position:absolute;top:0;left:0;width:6px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:14px;height:9px;background:currentColor;border-radius:2px"></div></div></div>
+            <div style="width:38px;height:38px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee)"><div style="width:13px;height:13px;position:relative"><div style="position:absolute;top:0;left:0;width:9px;height:9px;border:1.6px solid currentColor;border-radius:999px"></div><div style="position:absolute;bottom:0;right:0;width:5px;height:1.6px;background:currentColor;transform:rotate(45deg)"></div></div></div>
+            <div style="width:38px;height:38px;border-radius:999px;background:var(--accent,#9b87e8);color:var(--on-accent,#15121f);display:flex;align-items:center;justify-content:center;font-size:18px">+</div>
+            <div style="width:38px;height:38px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee);position:relative">
+              <div style="width:14px;height:9px;position:relative"><div style="position:absolute;left:0;top:0;width:8px;height:8px;border:1.4px solid currentColor;border-radius:4px"></div><div style="position:absolute;right:0;top:0;width:8px;height:8px;border:1.4px solid currentColor;border-radius:4px"></div></div>
+              <span style="position:absolute;top:2px;right:2px;min-width:13px;height:13px;border-radius:999px;background:var(--amber,#e0a94b);color:#241a06;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center">2</span>
+            </div>
+            <div style="width:38px;height:38px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee);font-weight:600">#</div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px)">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">formatting toolbar</div>
+          <div style="display:flex;align-items:center;background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-control,10px);padding:0 4px;height:46px;overflow-x:auto;color:var(--text,#f2f0ee)">
+            <div style="min-width:34px;text-align:center;font-weight:700;font-size:var(--fs-sm,14px)">H</div>
+            <div style="min-width:34px;text-align:center;font-weight:700;font-size:var(--fs-sm,14px)">B</div>
+            <div style="min-width:34px;text-align:center;font-style:italic;font-size:var(--fs-sm,14px)">i</div>
+            <div style="min-width:34px;text-align:center;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px)">&lt;/&gt;</div>
+            <div style="min-width:34px;text-align:center;font-size:var(--fs-sm,14px);text-decoration:line-through">S</div>
+            <div style="min-width:34px;text-align:center"><span style="background:var(--amber,#e0a94b);color:#241a06;font-size:11px;font-weight:700;padding:1px 5px;border-radius:3px">A</span></div>
+            <div style="min-width:34px;text-align:center;font-size:var(--fs-md,16px)">•</div>
+            <div style="min-width:34px;text-align:center;font-size:var(--fs-xs,12px)">1.</div>
+            <div style="min-width:34px;text-align:center;font-size:var(--fs-sm,14px)">☑</div>
+            <div style="min-width:34px;text-align:center;font-size:var(--fs-lg,18px)">"</div>
+            <div style="min-width:40px;text-align:center;color:var(--accent,#9b87e8);font-size:var(--fs-xs,12px)">[[ ]]</div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px);grid-column:span 2;min-width:0">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">note body — live preview</div>
+          <div style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-lg,20px);font-weight:600;color:var(--text,#f2f0ee);margin-bottom:calc(var(--sp,8px) * 1.5)">Sprint Retro</div>
+          <div style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-md,16px);line-height:1.65;color:var(--text2,#b0aaa4);margin-bottom:calc(var(--sp,8px) * 1.5)">Discussed blockers from <span style="color:var(--accent,#9b87e8);font-weight:500">[[Sprint Planning]]</span> and progress on <span style="background:var(--amber-soft,#4a3a20);color:var(--amber,#e0a94b);padding:2px 8px;border-radius:999px;font-size:var(--fs-sm,14px);font-family:'IBM Plex Sans',sans-serif">#proj/storm</span>.</div>
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-sm,13px);background:var(--surface2,#35302c);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-control,10px);padding:calc(var(--sp,8px) * 1.5);color:var(--green,#5cc28f);margin-bottom:calc(var(--sp,8px) * 1.5)">npm run build</div>
+          <div style="border-left:3px solid var(--accent,#9b87e8);padding-left:calc(var(--sp,8px) * 1.75);font-family:var(--font-body,'Newsreader'),serif;font-style:italic;font-size:var(--fs-md,16px);color:var(--text3,#8a8580)">Ship small, ship often.</div>
+        </div>
+
+      </div>
+
+      <div style="height:calc(var(--sp,8px) * 7)"></div>
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.1em;text-transform:uppercase;color:var(--text3,#8a8580);border-bottom:var(--bw,1px) solid var(--border,#4a4642);padding-bottom:calc(var(--sp,8px) * 1.5)">05 · Templates</div>
+      <div style="font-size:var(--fs-sm,13px);color:var(--text3,#8a8580);margin-top:calc(var(--sp,8px) * 1.5);max-width:560px">Organisms assembled into screens, at real phone width.</div>
+
+      <div style="display:flex;gap:var(--gap,16px);flex-wrap:wrap;margin-top:calc(var(--sp,8px) * 3)">
+
+        <div>
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text3,#8a8580);margin-bottom:8px">dashboard</div>
+          <div style="width:300px;height:560px;border-radius:calc(var(--r-card,16px) * 1.6);border:var(--bw,1px) solid var(--border,#4a4642);background:var(--bg,#221f1d);overflow:hidden;position:relative;box-shadow:var(--shadow)">
+            <div style="position:absolute;top:14px;left:14px;width:36px;height:36px;border-radius:var(--r-control,10px);background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:12px;color:var(--text,#f2f0ee)">W</div>
+            <div style="position:absolute;top:14px;right:14px;width:36px;height:36px;border-radius:var(--r-control,10px);background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--text,#f2f0ee)">A</div>
+            <div style="padding:58px 16px 0;display:flex;align-items:center;justify-content:center;gap:7px">
+              <img src="apps/client/assets/icon/storm_icon_full.png" alt="" style="width:18px;height:18px;border-radius:5px;display:block" />
+              <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:11px;letter-spacing:0.12em;color:var(--text3,#8a8580)">STORM</span>
+            </div>
+            <div style="padding:16px 16px 0;display:flex;gap:20px">
+              <div><div style="font-size:var(--fs-lg,20px);font-weight:600">27</div><div style="font-size:var(--fs-xs,11px);color:var(--text3,#8a8580)">notes</div></div>
+              <div><div style="font-size:var(--fs-lg,20px);font-weight:600">2m</div><div style="font-size:var(--fs-xs,11px);color:var(--text3,#8a8580)">last synced</div></div>
+            </div>
+            <div style="padding:18px 16px 6px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text3,#8a8580)">Recently opened</div>
+            <div style="padding:0 16px">
+              <div style="padding:8px 0"><div style="font-size:var(--fs-sm,13px);color:var(--text,#f2f0ee)">Sprint Retro</div><div style="font-size:var(--fs-xs,11px);color:var(--text3,#8a8580)">Work · Projects · 2h ago</div></div>
+              <div style="padding:8px 0"><div style="font-size:var(--fs-sm,13px);color:var(--text,#f2f0ee)">Recipe: Sourdough</div><div style="font-size:var(--fs-xs,11px);color:var(--text3,#8a8580)">Personal · Recipes · 5d ago</div></div>
+            </div>
+            <div style="padding:14px 16px 6px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text3,#8a8580)">Vaults</div>
+            <div style="padding:0 16px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+              <sc-for list="{{ vaultCards }}" as="v" hint-placeholder-count="2">
+                <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:12px">
+                  <div style="{{ v.iconStyle }}">{{ v.icon }}</div>
+                  <div style="font-size:var(--fs-xs,12px);font-weight:600;margin-top:8px">{{ v.name }}</div>
+                  <div style="display:flex;align-items:center;gap:5px;margin-top:3px"><div style="{{ v.dotStyle }}"></div><span style="font-size:10px;color:var(--text3,#8a8580)">{{ v.notes }} notes</span></div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="position:absolute;left:0;right:0;bottom:16px;display:flex;justify-content:center">
+              <div style="display:flex;align-items:center;background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:999px;padding:4px;box-shadow:var(--shadow)">
+                <div style="width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee)"><div style="width:13px;height:10px;position:relative"><div style="position:absolute;top:0;left:0;width:5px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:13px;height:8px;background:currentColor;border-radius:2px"></div></div></div>
+                <div style="width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee)"><div style="width:12px;height:12px;position:relative"><div style="position:absolute;top:0;left:0;width:8px;height:8px;border:1.5px solid currentColor;border-radius:999px"></div><div style="position:absolute;bottom:0;right:0;width:5px;height:1.5px;background:currentColor;transform:rotate(45deg)"></div></div></div>
+                <div style="width:34px;height:34px;border-radius:999px;background:var(--accent,#9b87e8);color:var(--on-accent,#15121f);display:flex;align-items:center;justify-content:center;font-size:16px">+</div>
+                <div style="width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee);font-weight:600;font-size:14px">#</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text3,#8a8580);margin-bottom:8px">directory</div>
+          <div style="width:300px;height:560px;border-radius:calc(var(--r-card,16px) * 1.6);border:var(--bw,1px) solid var(--border,#4a4642);background:var(--bg,#221f1d);overflow:hidden;position:relative;box-shadow:var(--shadow)">
+            <div style="position:absolute;top:14px;left:14px;width:36px;height:36px;border-radius:var(--r-control,10px);background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:12px;color:var(--text,#f2f0ee)">W</div>
+            <div style="position:absolute;top:14px;right:14px;width:36px;height:36px;border-radius:var(--r-control,10px);background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--text,#f2f0ee)">A</div>
+            <div style="padding:62px 16px 6px;display:flex;gap:6px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:11px;color:var(--text3,#8a8580)">
+              <span style="color:var(--accent,#9b87e8)">Vaults</span><span>›</span><span style="color:var(--text,#f2f0ee)">Work</span>
+            </div>
+            <div style="padding:6px 12px">
+              <div style="padding:12px 6px;display:flex;align-items:center;gap:10px;border-bottom:var(--bw,1px) solid var(--border,#4a4642)">
+                <div style="width:15px;height:12px;position:relative;color:var(--text3,#8a8580)"><div style="position:absolute;top:0;left:0;width:6px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:15px;height:10px;background:currentColor;border-radius:2px"></div></div>
+                <span style="font-size:var(--fs-sm,13px);flex:1">Projects</span><span style="font-size:11px;color:var(--text3,#8a8580)">2</span><span style="color:var(--text3,#8a8580)">›</span>
+              </div>
+              <div style="padding:12px 6px;display:flex;align-items:center;gap:10px;border-bottom:var(--bw,1px) solid var(--border,#4a4642)">
+                <div style="width:15px;height:12px;position:relative;color:var(--text3,#8a8580)"><div style="position:absolute;top:0;left:0;width:6px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:15px;height:10px;background:currentColor;border-radius:2px"></div></div>
+                <span style="font-size:var(--fs-sm,13px);flex:1">Meetings</span><span style="font-size:11px;color:var(--text3,#8a8580)">1</span><span style="color:var(--text3,#8a8580)">›</span>
+              </div>
+            </div>
+            <div style="position:absolute;left:0;right:0;bottom:16px;display:flex;justify-content:center">
+              <div style="display:flex;align-items:center;background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:999px;padding:4px;box-shadow:var(--shadow)">
+                <div style="width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee)"><div style="width:13px;height:10px;position:relative"><div style="position:absolute;top:0;left:0;width:5px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:13px;height:8px;background:currentColor;border-radius:2px"></div></div></div>
+                <div style="width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee)"><div style="width:12px;height:12px;position:relative"><div style="position:absolute;top:0;left:0;width:8px;height:8px;border:1.5px solid currentColor;border-radius:999px"></div><div style="position:absolute;bottom:0;right:0;width:5px;height:1.5px;background:currentColor;transform:rotate(45deg)"></div></div></div>
+                <div style="width:34px;height:34px;border-radius:999px;background:var(--accent,#9b87e8);color:var(--on-accent,#15121f);display:flex;align-items:center;justify-content:center;font-size:16px">+</div>
+                <div style="width:34px;height:34px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text,#f2f0ee);font-weight:600;font-size:14px">#</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text3,#8a8580);margin-bottom:8px">note</div>
+          <div style="width:300px;height:560px;border-radius:calc(var(--r-card,16px) * 1.6);border:var(--bw,1px) solid var(--border,#4a4642);background:var(--bg,#221f1d);overflow:hidden;position:relative;box-shadow:var(--shadow)">
+            <div style="position:absolute;top:14px;left:14px;width:36px;height:36px;border-radius:var(--r-control,10px);background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:12px;color:var(--text,#f2f0ee)">W</div>
+            <div style="position:absolute;top:14px;right:14px;width:36px;height:36px;border-radius:var(--r-control,10px);background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--text,#f2f0ee)">A</div>
+            <div style="padding:58px 14px 0;display:flex;align-items:center;gap:8px">
+              <span style="color:var(--text3,#8a8580);font-size:16px">‹</span>
+              <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:11px;color:var(--text3,#8a8580);flex:1">Projects</span>
+              <span style="color:var(--accent,#9b87e8);font-size:13px">⚙</span>
+            </div>
+            <div style="padding:4px 14px 8px;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;color:var(--text3,#8a8580);display:flex;gap:6px"><span>v12</span><span>·</span><span style="color:var(--green,#5cc28f)">Saved</span></div>
+            <div style="padding:0 18px">
+              <div style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-lg,20px);font-weight:600;margin-bottom:10px">Sprint Retro</div>
+              <div style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-sm,14px);line-height:1.6;color:var(--text2,#b0aaa4);margin-bottom:10px">Discussed blockers from <span style="color:var(--accent,#9b87e8)">[[Sprint Planning]]</span> and progress on <span style="background:var(--amber-soft,#4a3a20);color:var(--amber,#e0a94b);padding:1px 7px;border-radius:999px;font-size:12px;font-family:'IBM Plex Sans',sans-serif">#proj/storm</span>.</div>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:16px;height:16px;border-radius:calc(var(--r-control,10px) * 0.5);background:var(--accent,#9b87e8);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--on-accent,#15121f)">✓</div><span style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-sm,14px);color:var(--text2,#b0aaa4);text-decoration:line-through;opacity:.6">Write release notes</span></div>
+              <div style="display:flex;align-items:center;gap:8px"><div style="width:16px;height:16px;border-radius:calc(var(--r-control,10px) * 0.5);border:1.5px solid var(--text3,#8a8580)"></div><span style="font-family:var(--font-body,'Newsreader'),serif;font-size:var(--fs-sm,14px);color:var(--text2,#b0aaa4)">Update changelog</span></div>
+            </div>
+            <div style="position:absolute;left:0;right:0;bottom:0;height:44px;background:var(--surface,#2b2724);border-top:var(--bw,1px) solid var(--border,#4a4642);display:flex;align-items:center;padding:0 6px;color:var(--text,#f2f0ee);overflow:hidden">
+              <div style="min-width:30px;text-align:center;font-weight:700;font-size:13px">H</div>
+              <div style="min-width:30px;text-align:center;font-weight:700;font-size:13px">B</div>
+              <div style="min-width:30px;text-align:center;font-style:italic;font-size:13px">i</div>
+              <div style="min-width:30px;text-align:center;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:11px">&lt;/&gt;</div>
+              <div style="min-width:30px;text-align:center;font-size:13px;text-decoration:line-through">S</div>
+              <div style="min-width:30px;text-align:center"><span style="background:var(--amber,#e0a94b);color:#241a06;font-size:10px;font-weight:700;padding:1px 4px;border-radius:3px">A</span></div>
+              <div style="min-width:30px;text-align:center;font-size:15px">•</div>
+              <div style="min-width:30px;text-align:center;color:var(--accent,#9b87e8);font-size:11px">[[ ]]</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="height:calc(var(--sp,8px) * 7)"></div>
+      <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);letter-spacing:0.1em;text-transform:uppercase;color:var(--text3,#8a8580);border-bottom:var(--bw,1px) solid var(--border,#4a4642);padding-bottom:calc(var(--sp,8px) * 1.5)">06 · Empty, loading, error</div>
+      <div style="font-size:var(--fs-sm,13px);color:var(--text3,#8a8580);margin-top:calc(var(--sp,8px) * 1.5);max-width:560px">The states the brief listed as unwritten. Offline reads as a condition, never as a failure.</div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:var(--gap,16px);margin-top:calc(var(--sp,8px) * 3)">
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px);min-height:180px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:calc(var(--sp,8px) * 1)">
+          <div style="width:34px;height:26px;position:relative;color:var(--text3,#8a8580);opacity:.5"><div style="position:absolute;top:0;left:0;width:14px;height:6px;background:currentColor;border-radius:3px 3px 0 0"></div><div style="position:absolute;top:5px;left:0;width:34px;height:21px;background:currentColor;border-radius:3px"></div></div>
+          <div style="font-size:var(--fs-sm,14px);color:var(--text,#f2f0ee)">Nothing in this folder</div>
+          <div style="font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);max-width:180px;line-height:1.5">New notes made here will land in Projects.</div>
+          <div style="margin-top:6px;background:var(--accent,#9b87e8);color:var(--on-accent,#15121f);padding:7px 14px;border-radius:var(--r-control,10px);font-size:var(--fs-xs,12px);font-weight:600;cursor:pointer">New note</div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px);min-height:180px">
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);margin-bottom:calc(var(--sp,8px) * 2)">loading — skeleton</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="{{ skelStyleA }}"></div>
+            <div style="{{ skelStyleB }}"></div>
+            <div style="{{ skelStyleA }}"></div>
+            <div style="{{ skelStyleC }}"></div>
+          </div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:var(--card-pad,24px);min-height:180px;display:flex;flex-direction:column;justify-content:center;gap:calc(var(--sp,8px) * 1)">
+          <div style="display:flex;align-items:center;gap:8px"><div style="width:8px;height:8px;border-radius:999px;background:var(--text3,#8a8580)"></div><span style="font-size:var(--fs-sm,14px);color:var(--text,#f2f0ee)">Offline</span></div>
+          <div style="font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);line-height:1.55">Showing your cached copy. 2 edits are queued and will send when the server is reachable.</div>
+          <div style="margin-top:4px;align-self:flex-start;border:var(--bw,1px) solid var(--border,#4a4642);color:var(--text,#f2f0ee);padding:6px 12px;border-radius:var(--r-control,10px);font-size:var(--fs-xs,12px);cursor:pointer">Retry now</div>
+        </div>
+
+        <div style="background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--danger,#e06c5a);border-radius:var(--r-card,16px);padding:var(--card-pad,24px);min-height:180px;display:flex;flex-direction:column;justify-content:center;gap:calc(var(--sp,8px) * 1)">
+          <div style="font-size:var(--fs-sm,14px);color:var(--danger,#e06c5a);font-weight:600">Conflict in this note</div>
+          <div style="font-size:var(--fs-xs,12px);color:var(--text3,#8a8580);line-height:1.55">Another device saved a different version. Both are kept in the text below — delete the lines you don't want.</div>
+          <div style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:11px;background:var(--surface2,#35302c);border-radius:calc(var(--r-control,10px) * 0.7);padding:8px;color:var(--text2,#b0aaa4);margin-top:4px">&lt;&lt;&lt;&lt;&lt;&lt;&lt; yours</div>
+        </div>
+
+      </div>
+    </div>
+
+    <div style="{{ panelStyle }}">
+      <div onClick="{{ togglePanel }}" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding-bottom:calc(var(--sp,8px) * 1)">
+        <span style="font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text2,#b0aaa4)">Tokens</span>
+        <span style="font-size:12px;color:var(--text3,#8a8580)">{{ panelChevron }}</span>
+      </div>
+      <sc-if value="{{ panelOpen }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;gap:10px;max-height:62vh;overflow:auto;padding-top:4px">
+          <div style="display:flex;gap:6px">
+            <div onClick="{{ presetStorm }}" style="{{ presetStormStyle }}">Storm dark</div>
+            <div onClick="{{ presetSlow }}" style="{{ presetSlowStyle }}">SlowFlow earth</div>
+          </div>
+          <sc-for list="{{ controls }}" as="c" hint-placeholder-count="10">
+            <div>
+              <div style="display:flex;justify-content:space-between;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;color:var(--text3,#8a8580);margin-bottom:3px">
+                <span>{{ c.label }}</span><span>{{ c.display }}</span>
+              </div>
+              <input type="range" min="{{ c.min }}" max="{{ c.max }}" step="{{ c.step }}" value="{{ c.value }}" onInput="{{ c.onInput }}" style="width:100%;background:var(--border,#4a4642)" />
+            </div>
+          </sc-for>
+          <div onClick="{{ resetTokens }}" style="text-align:center;font-family:var(--font-label,'IBM Plex Mono'),monospace;font-size:10px;color:var(--text3,#8a8580);cursor:pointer;padding-top:2px">reset</div>
+        </div>
+      </sc-if>
+    </div>
+
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const PRESETS = {
+  storm: { mode: 'dark', bgL: 22, hue: 55, chroma: 8, accentH: 293, accentC: 15, accentL: 68, fs: 16, scale: 125, sp: 8, rCard: 16, rControl: 10, bw: 10, shadow: 35, dur: 180 },
+  slow: { mode: 'light', bgL: 84, hue: 62, chroma: 22, accentH: 55, accentC: 6, accentL: 45, fs: 16, scale: 130, sp: 8, rCard: 2, rControl: 10, bw: 10, shadow: 16, dur: 320 }
+};
+const ACCENT_NAMES = ['coral', 'peach', 'sand', 'sage', 'mint', 'sky', 'lavender', 'blossom', 'clay'];
+const ACCENT_DARK = { coral: '#5C2B29', peach: '#614A19', sand: '#635D19', sage: '#345920', mint: '#16504B', sky: '#2D555E', lavender: '#42275E', blossom: '#6C394F', clay: '#4B443A' };
+const ACCENT_LIGHT = { coral: '#FAD2CF', peach: '#FDE2CE', sand: '#FFF8B8', sage: '#E6F4D7', mint: '#D4E4ED', sky: '#D3E3FD', lavender: '#E9D9FB', blossom: '#FDCFE8', clay: '#E9E3D4' };
+const STORE_KEY = 'storm-ds-tokens-v1';
+
+class Component extends DCLogic {
+  state = { ...PRESETS.storm, preset: 'storm', panelOpen: true };
+
+  componentDidMount() {
+    try {
+      const saved = localStorage.getItem(STORE_KEY);
+      if (saved) this.setState(JSON.parse(saved));
+    } catch (e) {}
+  }
+  persist(next) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ ...this.state, ...next })); } catch (e) {}
+    this.setState(next);
+  }
+  set(key) { return (e) => this.persist({ [key]: Number(e.target.value) }); }
+
+  tokens() {
+    const s = this.state, dark = s.mode === 'dark', dir = dark ? 1 : -1;
+    const L = (v) => Math.max(0.02, Math.min(0.99, v)).toFixed(3);
+    const n = (l) => `oklch(${L(l)} ${(s.chroma / 1000).toFixed(3)} ${s.hue})`;
+    const bg = s.bgL / 100;
+    return {
+      bg: n(bg),
+      surface: n(bg + dir * 0.05),
+      surface2: n(bg + dir * 0.09),
+      border: n(bg + dir * 0.14),
+      text: dark ? n(0.95) : n(0.18),
+      text2: dark ? n(0.74) : n(0.34),
+      text3: dark ? n(0.66) : n(0.40),
+      // Semantic colours are measured against --surface, not --bg: in light mode
+      // surface is the darker of the two and is what cards paint behind text.
+      accent: `oklch(${(dark ? s.accentL / 100 : Math.min(0.40, s.accentL / 100)).toFixed(2)} ${(s.accentC / 100).toFixed(2)} ${s.accentH})`,
+      accentSoft: `oklch(${(bg + dir * 0.08).toFixed(2)} ${(s.accentC / 300).toFixed(3)} ${s.accentH})`,
+      onAccent: (dark ? s.accentL / 100 : Math.min(0.40, s.accentL / 100)) > 0.6 ? `oklch(0.16 0.03 ${s.accentH})` : '#ffffff',
+      amber: `oklch(${dark ? 0.74 : 0.38} 0.14 68)`,
+      amberSoft: `oklch(${(bg + dir * 0.08).toFixed(2)} 0.05 68)`,
+      green: `oklch(${dark ? 0.74 : 0.38} 0.13 148)`,
+      danger: `oklch(${dark ? 0.70 : 0.38} 0.17 25)`
+    };
+  }
+
+  renderVals() {
+    const s = this.state, t = this.tokens();
+    const r = s.scale / 100;
+    const fs = s.fs;
+    const vars = [
+      `--bg:${t.bg}`, `--surface:${t.surface}`, `--surface2:${t.surface2}`, `--border:${t.border}`,
+      `--text:${t.text}`, `--text2:${t.text2}`, `--text3:${t.text3}`,
+      `--accent:${t.accent}`, `--accent-soft:${t.accentSoft}`, `--on-accent:${t.onAccent}`,
+      `--amber:${t.amber}`, `--amber-soft:${t.amberSoft}`, `--green:${t.green}`, `--danger:${t.danger}`,
+      `--font-body:'Newsreader'`, `--font-label:${s.preset === 'slow' ? "'Space Mono'" : "'IBM Plex Mono'"}`,
+      `--fs-xs:${Math.max(11, fs / r / r).toFixed(1)}px`, `--fs-sm:${Math.max(12, fs / r).toFixed(1)}px`, `--fs-md:${fs}px`,
+      `--fs-lg:${(fs * r).toFixed(1)}px`, `--fs-xl:${(fs * r * r).toFixed(1)}px`, `--fs-2xl:${(fs * r * r * r).toFixed(1)}px`,
+      `--sp:${s.sp}px`, `--gap:${s.sp * 2}px`, `--card-pad:${s.sp * 3}px`,
+      `--r-card:${s.rCard}px`, `--r-control:${s.rControl}px`,
+      `--bw:${(s.bw / 10).toFixed(1)}px`, `--dur:${s.dur}ms`,
+      `--shadow:0 ${Math.round(s.shadow / 3)}px ${Math.round(s.shadow * 1.2)}px -8px rgba(0,0,0,${(s.shadow / 100).toFixed(2)})`
+    ].join(';');
+
+    const accentMap = s.mode === 'dark' ? ACCENT_DARK : ACCENT_LIGHT;
+    const chipBase = 'font-family:var(--font-label),monospace;font-size:11px;padding:6px 8px;border-radius:var(--r-control,10px);cursor:pointer;flex:1;text-align:center;border:var(--bw,1px) solid var(--border)';
+
+    const ctl = (label, key, min, max, step, fmt) => ({
+      label, min, max, step, value: s[key], display: fmt ? fmt(s[key]) : String(s[key]), onInput: this.set(key)
+    });
+
+    return {
+      rootVars: vars,
+      colorTokens: [
+        { name: 'bg', v: t.bg }, { name: 'surface', v: t.surface }, { name: 'border', v: t.border },
+        { name: 'text', v: t.text }, { name: 'accent', v: t.accent }, { name: 'amber', v: t.amber },
+        { name: 'green', v: t.green }, { name: 'danger', v: t.danger }
+      ].map(c => ({ name: c.name, swatchStyle: `width:22px;height:22px;border-radius:var(--r-control,10px);background:${c.v};border:var(--bw,1px) solid var(--border)` })),
+      accentSwatches: ACCENT_NAMES.map(nm => ({ style: `width:26px;height:26px;border-radius:999px;background:${accentMap[nm]};border:var(--bw,1px) solid var(--border)` })),
+      vaultCards: [
+        { name: 'Work', icon: 'W', notes: 14, accent: 'lavender', status: t.green },
+        { name: 'Personal', icon: 'P', notes: 8, accent: 'sage', status: t.text3 }
+      ].map(v => ({
+        name: v.name, icon: v.icon, notes: v.notes,
+        iconStyle: `width:34px;height:34px;border-radius:var(--r-control,10px);background:${accentMap[v.accent]};color:${s.mode === 'dark' ? '#fff' : 'oklch(0.28 0.01 60)'};display:flex;align-items:center;justify-content:center;font-family:var(--font-label),monospace;font-weight:600;font-size:var(--fs-sm,14px)`,
+        dotStyle: `width:7px;height:7px;border-radius:999px;background:${v.status}`
+      })),
+
+      skelStyleA: `height:12px;width:100%;border-radius:calc(var(--r-control,10px) * 0.5);background:${t.surface2};animation:none;opacity:0.9`,
+      skelStyleB: `height:12px;width:72%;border-radius:calc(var(--r-control,10px) * 0.5);background:${t.surface2};opacity:0.65`,
+      skelStyleC: `height:12px;width:48%;border-radius:calc(var(--r-control,10px) * 0.5);background:${t.surface2};opacity:0.45`,
+      panelOpen: s.panelOpen,
+      panelChevron: s.panelOpen ? '▾' : '▸',
+      togglePanel: () => this.persist({ panelOpen: !s.panelOpen }),
+      panelStyle: `position:fixed;left:20px;bottom:20px;width:236px;background:var(--surface,#2b2724);border:var(--bw,1px) solid var(--border,#4a4642);border-radius:var(--r-card,16px);padding:12px;z-index:100;box-shadow:var(--shadow);backdrop-filter:blur(6px)`,
+      presetStorm: () => this.persist({ ...PRESETS.storm, preset: 'storm' }),
+      presetSlow: () => this.persist({ ...PRESETS.slow, preset: 'slow' }),
+      presetStormStyle: chipBase + (s.preset === 'storm' ? ';background:var(--accent);color:var(--on-accent)' : ';color:var(--text2)'),
+      presetSlowStyle: chipBase + (s.preset === 'slow' ? ';background:var(--accent);color:var(--on-accent)' : ';color:var(--text2)'),
+      resetTokens: () => this.persist({ ...PRESETS.storm, preset: 'storm' }),
+
+      controls: [
+        ctl('accent hue', 'accentH', 0, 360, 1, v => v + '°'),
+        ctl('accent chroma', 'accentC', 0, 30, 1, v => (v / 100).toFixed(2)),
+        ctl('accent lightness', 'accentL', 20, 90, 1, v => v + '%'),
+        ctl('surface lightness', 'bgL', 6, 96, 1, v => v + '%'),
+        ctl('neutral hue', 'hue', 0, 360, 1, v => v + '°'),
+        ctl('neutral warmth', 'chroma', 0, 40, 1, v => (v / 1000).toFixed(3)),
+        ctl('base type size', 'fs', 12, 22, 1, v => v + 'px'),
+        ctl('type scale', 'scale', 105, 145, 1, v => (v / 100).toFixed(2)),
+        ctl('spacing base', 'sp', 4, 14, 1, v => v + 'px'),
+        ctl('card radius', 'rCard', 0, 28, 1, v => v + 'px'),
+        ctl('control radius', 'rControl', 0, 24, 1, v => v + 'px'),
+        ctl('border width', 'bw', 0, 30, 1, v => (v / 10).toFixed(1) + 'px'),
+        ctl('shadow depth', 'shadow', 0, 60, 1, v => (v / 100).toFixed(2)),
+        ctl('motion', 'dur', 0, 600, 10, v => v + 'ms')
+      ]
+    };
+  }
+}
+
+</script>
+</body>
+</html>

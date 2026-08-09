@@ -6,6 +6,7 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/state/vault_config.dart';
 import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/note_properties.dart';
+import 'package:storm/ui/widgets.dart';
 import 'package:storm/ui/theme.dart';
 
 /// Settings without SharedPreferences, so the panel's own options can be
@@ -115,8 +116,11 @@ void main() {
 
     testWidgets('a boolean renders a checkbox', (tester) async {
       await pump(tester, '---\ndone: true\n---\nbody\n');
-      expect(find.byType(Checkbox), findsOneWidget);
-      expect(tester.widget<Checkbox>(find.byType(Checkbox)).value, isTrue);
+      expect(find.byType(StormCheckbox), findsOneWidget);
+      expect(
+        tester.widget<StormCheckbox>(find.byType(StormCheckbox)).value,
+        isTrue,
+      );
     });
 
     testWidgets('an ISO date renders formatted, not raw', (tester) async {
@@ -303,7 +307,7 @@ void main() {
 
     testWidgets('a checkbox writes true and false', (tester) async {
       await pump(tester, '---\ndone: false\n---\nbody\n');
-      await tester.tap(find.byType(Checkbox));
+      await tester.tap(find.byType(StormCheckbox));
       await tester.pumpAndSettle();
       expect(contentOf(tester), contains('done: true'));
     });

@@ -45,6 +45,7 @@ dependencies:
   web_socket_channel: ^3.0.3
   file_selector: ^1.1.0
   go_router: ^17.4.0
+  flutter_lucide: ^1.11.0
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.
@@ -123,6 +124,31 @@ flutter:
         - asset: assets/fonts/Newsreader.ttf
         - asset: assets/fonts/Newsreader-Italic.ttf
           style: italic
+
+    # Chrome and display. Bundled rather than relying on the platform face, so
+    # the design is identical on macOS, Android, Linux and the web — and so it
+    # works with no network, the same rule that keeps Newsreader bundled.
+    - family: IBMPlexSans
+      fonts:
+        - asset: assets/fonts/IBMPlexSans-Regular.ttf
+        - asset: assets/fonts/IBMPlexSans-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/IBMPlexSans-SemiBold.ttf
+          weight: 600
+
+    # Labels, metadata, key chips and code.
+    - family: IBMPlexMono
+      fonts:
+        - asset: assets/fonts/IBMPlexMono-Regular.ttf
+        - asset: assets/fonts/IBMPlexMono-Medium.ttf
+          weight: 500
+
+  # The brand mark, shown in the app rather than only on the launcher icon.
+  # It was referenced by the icons_launcher config below long before it was
+  # declared here, which is enough to generate the launcher icons and *not*
+  # enough for Image.asset to find it at runtime.
+  assets:
+    - assets/icon/storm_icon_full.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

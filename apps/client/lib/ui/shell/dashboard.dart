@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -8,10 +9,13 @@ import '../../state/app_state.dart';
 import '../../state/vault_config.dart';
 import '../server_settings_screen.dart' show createVault;
 import '../accents.dart';
+import '../widgets.dart';
 import '../breakpoints.dart';
-import 'corner_bubbles.dart' show relativeTime;
+import '../states.dart';
+
+import 'corner_bubbles.dart' show compactAge, relativeTime;
 import 'nav_bubble.dart';
-import '../theme.dart';
+import '../tokens.dart';
 import 'storm_scaffold.dart';
 
 /// Home: a grid of vaults over the notes you opened most recently.
@@ -25,72 +29,103 @@ class DashboardScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final keyboard = keyboardIsOpen(context);
+    final t = context.tokens;
+    final vaults = ref.watch(vaultsProvider).value ?? const [];
+
+    // There is no dashboard at desk width. Everything it offers is already in
+    // the sidebar — the switcher lists the vaults, the tree is the browser —
+    // so a whole screen for it is a page you pass through on the way to the
+    // only thing you came for. It stays reachable with no vaults, because
+    // then it is the only screen that can make one.
+    //
+    // Guarded on actually being the current route. A `go` fired from a
+    // post-frame callback is not conditional on anything the framework
+    // checks, so any rebuild of this widget while it is not on top would
+    // navigate out from under whatever is. It does not happen today — the
+    // router does not keep the parent mounted beneath its children — but the
+    // cost of the guard is a string comparison and the cost of being wrong is
+    // being thrown out of the screen you are using.
+    final onDashboard = GoRouter.of(context).state.uri.path == Routes.dashboard;
+    if (onDashboard && context.isExpanded && vaults.isNotEmpty) {
+      final active = ref.watch(activeVaultProvider);
+      final target = vaults.any((v) => v.id == active && !v.missing)
+          ? active
+          : (vaults.firstWhere(
+              (v) => !v.missing,
+              orElse: () => vaults.first,
+            )).id;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted &&
+            GoRouter.of(context).state.uri.path == Routes.dashboard) {
+          context.go(Routes.browse(target));
+        }
+      });
+      // Blank rather than the dashboard: rendering it for one frame is a
+      // flash of a screen the user is never meant to see at this width.
+      return Scaffold(backgroundColor: t.bg, body: const SizedBox.shrink());
+    }
 
     return NewNoteRequest(
       // On the dashboard the `+` makes a vault: there is no note context here
       // to create a note into.
       onRequest: () => createVault(context, ref),
       child: Scaffold(
-        appBar: const DashboardHeader(),
-        body: Stack(
-          children: [
-            Positioned.fill(
-              child: RefreshIndicator(
-                onRefresh: () async {
-                  ref.invalidate(vaultsProvider);
-                  ref.invalidate(recentsProvider);
-                },
-                child: context.isExpanded
-                    // Wide: the grid flows and recents take a rail, rather
-                    // than the list becoming 1900px-wide rows.
-                    ? const _WideBody()
-                    : ListView(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
-                        children: const [
-                          _Vaults(),
-                          SizedBox(height: 24),
-                          _Recents(),
-                        ],
-                      ),
+        body: StormChrome(
+          showNav: !keyboardIsOpen(context),
+          child: RefreshIndicator(
+            onRefresh: () async {
+              ref.invalidate(vaultsProvider);
+              ref.invalidate(recentsProvider);
+            },
+            child: ListView(
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 2.5,
+                0,
+                t.sp * 2.5,
+                StormChrome.navClearance(context),
               ),
+              children: [
+                // Mark, then the shape of the vault, then what you were
+                // last doing, then where things live. Recents sit above
+                // vaults because the note you want is usually one of the
+                // last few you touched.
+                const _Masthead(),
+                SizedBox(height: t.sectionRhythm * 0.5),
+                const _Recents(),
+                SizedBox(height: t.sectionRhythm * 0.5),
+                const _Vaults(),
+              ],
             ),
-            if (!keyboard)
-              const Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: NavBubble(),
-              ),
-          ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// The dashboard at desk width.
-class _WideBody extends StatelessWidget {
-  const _WideBody();
+/// The mark, and the shape of the whole vault set in two numbers.
+///
+/// No mark here. The app's own name is the least useful thing on the screen
+/// you already opened the app to see, and it cost a whole row above the two
+/// numbers that are the point.
+class _Masthead extends ConsumerWidget {
+  const _Masthead();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final vaults = ref.watch(vaultsProvider).value ?? const [];
+    final notes = vaults.fold<int>(0, (sum, v) => sum + v.noteCount);
+    // Not persisted, so it reads "—" until this run syncs once. That is
+    // honest; a stored timestamp would claim a sync that may not have
+    // survived the restart.
+    final synced = ref.watch(syncEngineProvider).lastSyncedAt;
+
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(24, 12, 12, 40),
-            children: const [_Vaults()],
-          ),
-        ),
-        SizedBox(
-          width: 340,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(12, 12, 24, 40),
-            children: const [_Recents()],
-          ),
-        ),
+        StatBlock(value: '$notes', label: notes == 1 ? 'note' : 'notes'),
+        SizedBox(width: t.sp * 4),
+        StatBlock(value: compactAge(synced), label: 'last synced'),
       ],
     );
   }
@@ -104,21 +139,20 @@ class _Vaults extends ConsumerWidget {
     final vaults = ref.watch(vaultsProvider);
 
     return vaults.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.symmetric(vertical: 40),
-        child: Center(child: CircularProgressIndicator()),
-      ),
-      error: (e, _) => _Message(
-        icon: Icons.cloud_off,
-        text: '$e',
-        action: 'Retry',
+      loading: () => const SkeletonRows(rows: 2),
+      error: (e, _) => EmptyState(
+        icon: LucideIcons.cloud_off,
+        title: 'Could not reach the server',
+        detail: describeFailure(e),
+        action: 'Try again',
         onAction: () => ref.invalidate(vaultsProvider),
       ),
       data: (list) {
         if (list.isEmpty) {
-          return _Message(
-            icon: Icons.folder_special_outlined,
-            text: 'No vaults yet.',
+          return EmptyState(
+            icon: LucideIcons.folder_cog,
+            title: 'No vaults yet',
+            detail: 'A vault is a directory under the storage root.',
             action: 'New vault',
             onAction: () => createVault(context, ref),
           );
@@ -126,14 +160,24 @@ class _Vaults extends ConsumerWidget {
         // A maximum card size rather than a fixed column count. At 411px it
         // still works out to two columns, so the phone is unchanged; at 1900
         // it flows to eight card-sized cards instead of two enormous ones.
-        return GridView.extent(
-          maxCrossAxisExtent: 220,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 1.15,
-          children: [for (final v in list) _VaultCard(vault: v)],
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: SectionLabel('Vaults'),
+            ),
+            const SizedBox(height: 10),
+            GridView.extent(
+              maxCrossAxisExtent: 220,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.15,
+              children: [for (final v in list) _VaultCard(vault: v)],
+            ),
+          ],
         );
       },
     );
@@ -147,7 +191,7 @@ class _VaultCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     final engine = ref.watch(syncEngineProvider);
     final active = ref.watch(activeVaultProvider) == vault.id;
     final accent =
@@ -157,14 +201,31 @@ class _VaultCard extends ConsumerWidget {
     // from the list would look exactly like one that never existed.
     final muted = vault.missing;
 
-    return InkWell(
-      borderRadius: BorderRadius.circular(16),
+    return VaultCard(
+      name: vault.name,
+      tile: accent.tile(t),
+      tinted: !accent.isNone,
+      muted: muted,
+      subtitle: muted
+          ? 'Directory not found'
+          : '${vault.noteCount} note${vault.noteCount == 1 ? '' : 's'}',
+      // Only the vault currently open has an engine behind it, so only it can
+      // honestly report sync state.
+      status: muted
+          ? null
+          : active
+          ? dotStatusFor(
+              online: engine.isOnline,
+              syncing: engine.isSyncing,
+              pending: engine.pendingCount,
+            )
+          : DotStatus.offline,
       onTap: muted
           ? () => ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'The directory for “${vault.name}” is missing from the '
-                  'storage root. Nothing was deleted.',
+                  'The directory for \u201C${vault.name}\u201D is missing from '
+                  'the storage root. Nothing was deleted.',
                 ),
               ),
             )
@@ -172,77 +233,6 @@ class _VaultCard extends ConsumerWidget {
       onLongPress: muted
           ? null
           : () => _pickVaultColour(context, ref, vault.id, accent),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: muted
-              ? scheme.surfaceContainerHigh
-              : context.accentSurface(accent),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: muted
-                ? scheme.error.withValues(alpha: 0.5)
-                : context.accentBorder(accent),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: muted
-                        ? scheme.error.withValues(alpha: 0.15)
-                        : scheme.onSurface.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    _initial(vault.name),
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: muted ? scheme.error : scheme.onSurface,
-                    ),
-                  ),
-                ),
-                const Spacer(),
-                // Only the vault currently open has an engine behind it, so
-                // only it can honestly report sync state.
-                if (active && !muted)
-                  StormStatusDot(
-                    status: !engine.isOnline
-                        ? StormStatus.offline
-                        : (engine.isSyncing || engine.pendingCount > 0)
-                        ? StormStatus.syncing
-                        : StormStatus.synced,
-                  ),
-              ],
-            ),
-            const Spacer(),
-            Text(
-              vault.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              muted
-                  ? 'Directory not found'
-                  : '${vault.noteCount} note${vault.noteCount == 1 ? '' : 's'}',
-              style: TextStyle(
-                fontSize: 12,
-                color: muted ? scheme.error : scheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -280,48 +270,53 @@ Future<void> _pickVaultColour(
   }
 }
 
-String _initial(String name) =>
-    name.trim().isEmpty ? 'S' : name.trim().characters.first.toUpperCase();
-
 class _Recents extends ConsumerWidget {
   const _Recents();
+
+  /// How many to show before the vaults below them. Twenty rows pushed the
+  /// vault grid off the bottom of the phone entirely.
+  static const limit = 5;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final recents = ref.watch(recentsProvider);
-    final scheme = Theme.of(context).colorScheme;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 6),
-          child: Text(
-            'Recently opened',
-            style: Theme.of(
-              context,
-            ).textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant),
-          ),
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: SectionLabel('Recently opened'),
         ),
+        const SizedBox(height: 10),
         recents.when(
-          loading: () => const Padding(
-            padding: EdgeInsets.all(12),
-            child: LinearProgressIndicator(),
+          loading: () => const SkeletonRows(rows: 3),
+          error: (e, _) => EmptyState(
+            icon: LucideIcons.cloud_off,
+            title: 'Could not load recents',
+            detail: describeFailure(e),
           ),
-          error: (e, _) => _Message(icon: Icons.cloud_off, text: '$e'),
           data: (list) => list.isEmpty
-              ? const _Message(
-                  icon: Icons.history,
-                  text: 'Notes you open will show up here.',
+              ? const EmptyState(
+                  icon: LucideIcons.history,
+                  title: 'Nothing opened yet',
+                  detail: 'Notes you open will show up here.',
                 )
-              : Column(children: [for (final r in list) _RecentCard(note: r)]),
+              : Column(
+                  children: [
+                    for (final r in list.take(limit)) _RecentCard(note: r),
+                  ],
+                ),
         ),
       ],
     );
   }
 }
 
-/// A full-width card: the note's name, and the vault it came from.
+/// A text row: the note's name, and where it came from.
+///
+/// Deliberately not a card. Eight cards stacked is eight competing rectangles,
+/// and what is actually being scanned here is the titles.
 class _RecentCard extends ConsumerWidget {
   const _RecentCard({required this.note});
 
@@ -329,24 +324,17 @@ class _RecentCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    // The vault's colour, not the note's: this card is about *where* the note
-    // came from, and reading every note's frontmatter to render a list would
-    // cost a fetch per row.
-    final accent =
-        ref.watch(vaultAccentsProvider).value?[note.vaultId] ?? Accent.none;
+    final t = context.tokens;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.only(bottom: t.sp * 0.5),
       child: InkWell(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(t.rControl),
         onTap: () => context.push(Routes.note(note.vaultId, note.noteId)),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: context.accentSurface(accent),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: context.accentBorder(accent)),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: t.sp * 0.5,
+            vertical: t.sp * 1.25,
           ),
           child: Row(
             children: [
@@ -358,9 +346,14 @@ class _RecentCard extends ConsumerWidget {
                       note.displayTitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w500),
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.bodySize,
+                        fontWeight: FontWeight.w600,
+                        color: t.text,
+                      ),
                     ),
-                    const SizedBox(height: 3),
+                    SizedBox(height: t.sp * 0.25),
                     Text(
                       // The vault first: with several in play, "which vault"
                       // is what tells two same-named daily notes apart.
@@ -370,58 +363,26 @@ class _RecentCard extends ConsumerWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 12,
-                        color: scheme.onSurfaceVariant,
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        color: t.text3,
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: t.sp),
               Text(
                 relativeTime(DateTime.tryParse(note.openedAt)?.toLocal()),
-                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.codeSize,
+                  color: t.text3,
+                ),
               ),
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _Message extends StatelessWidget {
-  const _Message({
-    required this.icon,
-    required this.text,
-    this.action,
-    this.onAction,
-  });
-
-  final IconData icon;
-  final String text;
-  final String? action;
-  final VoidCallback? onAction;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 32),
-      child: Column(
-        children: [
-          Icon(icon, size: 30, color: scheme.onSurfaceVariant),
-          const SizedBox(height: 10),
-          Text(
-            text,
-            textAlign: TextAlign.center,
-            style: TextStyle(color: scheme.onSurfaceVariant),
-          ),
-          if (action != null) ...[
-            const SizedBox(height: 12),
-            OutlinedButton(onPressed: onAction, child: Text(action!)),
-          ],
-        ],
       ),
     );
   }

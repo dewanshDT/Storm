@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
@@ -26,7 +26,7 @@ void main() {
       expect(find.byTooltip('Search'), findsOneWidget);
       expect(find.byTooltip('New note'), findsOneWidget);
       // No `…` to tap: nothing collapses any more.
-      expect(find.byIcon(Icons.more_horiz), findsNothing);
+      expect(find.byIcon(LucideIcons.ellipsis), findsNothing);
       await disposeShell(tester, c);
     });
 
@@ -38,7 +38,7 @@ void main() {
       await tester.tap(find.byTooltip('Directory'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vault'), findsOneWidget);
+      expect(find.text('Vaults'), findsOneWidget);
       expect(find.byTooltip('Directory'), findsOneWidget);
       await disposeShell(tester, c);
     });
@@ -74,24 +74,28 @@ void main() {
   });
 
   group('the context slot', () {
-    testWidgets('offers tags outside a note', (tester) async {
+    testWidgets('keeps mentions and tags visible outside a note', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c);
       await openVault(tester, c);
 
+      expect(find.byTooltip('Mentions'), findsOneWidget);
       expect(find.byTooltip('Tags'), findsOneWidget);
-      expect(find.byIcon(Icons.hub_outlined), findsNothing);
       await disposeShell(tester, c);
     });
 
-    testWidgets('offers linked mentions inside a note', (tester) async {
+    testWidgets('shows the linked-mentions count inside a note', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c);
 
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
-      expect(find.byIcon(Icons.hub_outlined), findsOneWidget);
-      expect(find.byTooltip('Tags'), findsNothing);
+      expect(find.byTooltip('0 linked mentions'), findsOneWidget);
+      expect(find.byTooltip('Tags'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });

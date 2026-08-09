@@ -341,8 +341,10 @@ mod tests {
         let chosen = dir.path().join("chosen");
         let on_the_command_line = dir.path().join("flag");
 
-        let mut registry = Registry::default();
-        registry.root = chosen.clone();
+        let registry = Registry {
+            root: chosen.clone(),
+            ..Default::default()
+        };
         registry.save(&state).unwrap();
 
         let loaded = Registry::load(&state, &on_the_command_line).unwrap();

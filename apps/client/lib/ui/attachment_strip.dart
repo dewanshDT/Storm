@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/app_state.dart';
+import 'breakpoints.dart';
+import 'tokens.dart';
 
 /// Images referenced by the open note, shown as thumbnails under the editor.
 ///
@@ -12,7 +15,8 @@ import '../state/app_state.dart';
 /// editor (see the M0 findings).
 ///
 /// A strip is the honest version: the markdown stays visible and editable, and
-/// the pictures are actually visible.
+/// the pictures are actually visible. It sits inside the note's scroll, after
+/// the prose, rather than pinned under it.
 class AttachmentStrip extends ConsumerWidget {
   const AttachmentStrip({super.key, required this.body});
 
@@ -44,46 +48,50 @@ class AttachmentStrip extends ConsumerWidget {
     final paths = imagePaths(body);
     if (paths.isEmpty) return const SizedBox.shrink();
 
-    final theme = Theme.of(context);
-    return Container(
-      height: 96,
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: theme.dividerColor)),
-      ),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        itemCount: paths.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
-        itemBuilder: (c, i) {
-          final url = api.attachmentUrl(vaultId, paths[i]);
-          return InkWell(
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => _Viewer(url: url, title: paths[i]),
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: Image.network(
-                url.toString(),
-                width: 76,
-                height: 76,
-                fit: BoxFit.cover,
-                errorBuilder: (c, _, _) => Container(
-                  width: 76,
-                  height: 76,
-                  color: theme.colorScheme.surfaceContainerHighest,
-                  child: Icon(
-                    Icons.broken_image_outlined,
-                    size: 20,
-                    color: theme.colorScheme.onSurfaceVariant,
+    final t = context.tokens;
+    final side = t.sp * (context.isExpanded ? 11 : 9.5);
+
+    return Padding(
+      padding: EdgeInsets.only(top: t.sp * 2.5),
+      child: Wrap(
+        spacing: t.sp * 1.25,
+        runSpacing: t.sp * 1.25,
+        children: [
+          for (final path in paths)
+            Builder(
+              builder: (c) {
+                final url = api.attachmentUrl(vaultId, path);
+                return InkWell(
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => _Viewer(url: url, title: path),
+                    ),
                   ),
-                ),
-              ),
+                  borderRadius: BorderRadius.circular(t.rControl),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(t.rControl),
+                    child: Image.network(
+                      url.toString(),
+                      width: side,
+                      height: side,
+                      fit: BoxFit.cover,
+                      errorBuilder: (c, _, _) => Container(
+                        width: side,
+                        height: side,
+                        alignment: Alignment.center,
+                        color: t.surface2,
+                        child: Icon(
+                          LucideIcons.image_off,
+                          size: t.bodySize,
+                          color: t.text3,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
-          );
-        },
+        ],
       ),
     );
   }
@@ -97,19 +105,26 @@ class _Viewer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Scaffold(
       appBar: AppBar(title: Text(title, overflow: TextOverflow.ellipsis)),
-      backgroundColor: Colors.black,
+      // A viewer is the one surface that should not be themed: a picture is
+      // judged against a neutral ground, not against the app's.
+      backgroundColor: const Color(0xFF000000),
       body: Center(
         child: InteractiveViewer(
           maxScale: 6,
           child: Image.network(
             url.toString(),
-            errorBuilder: (c, _, _) => const Padding(
-              padding: EdgeInsets.all(24),
+            errorBuilder: (c, _, _) => Padding(
+              padding: EdgeInsets.all(t.cardPad),
               child: Text(
                 'Could not load this attachment.',
-                style: TextStyle(color: Colors.white70),
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.codeSize,
+                  color: const Color(0xB3FFFFFF),
+                ),
               ),
             ),
           ),

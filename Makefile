@@ -191,6 +191,48 @@ deploy: build-server web
 			|| { echo '  FAILED — journalctl -u storm-server' >&2; exit 1; }"
 	@echo "--- deployed ---"
 
+## deploy-web: push only the web client to HOST
+#
+# The full `deploy` cross-compiles the server, which needs cargo-zigbuild and
+# several minutes, and a presentation-layer change touches neither the binary
+# nor the wire format. ServeDir reads from disk, so nothing is restarted.
+#
+# WEB_DIR is what the running server was actually given as `--web`, which on
+# the VM is under the service account's home rather than the /srv/storm that
+# deploy/README.md describes. Check it against `pgrep -af storm-server` before
+# assuming, and no sudo: the directory belongs to the user we ssh in as.
+WEB_DIR ?= /home/dewansh/storm/web
+
+deploy-web: web
+	@set -e; \
+	echo "--- staging web to $(HOST):$(WEB_DIR) ---"; \
+	rsync -az --delete "$(CLIENT)/build/web/" "$(HOST):$(WEB_DIR)/"
+	@echo "--- deployed, now verify ---"
+	@$(MAKE) --no-print-directory deploy-web-check
+
+## deploy-web-check: do the served bytes match the local build?
+#
+# Flutter registers a service worker, so a browser can keep serving the client
+# it cached before the push — and a stale page is indistinguishable from a
+# failed deploy. Comparing hashes is the only answer that is evidence. This is
+# what M11 learned: a hash-verified install proves the bytes arrived.
+deploy-web-check:
+	@set -e; \
+	LOCAL="$(CLIENT)/build/web/main.dart.js"; \
+	test -f "$$LOCAL" || { echo "no local build — run: make web" >&2; exit 1; }; \
+	WANT=$$(shasum -a 256 "$$LOCAL" | cut -d' ' -f1); \
+	GOT=$$(ssh "$(HOST)" "curl -sf http://127.0.0.1:$(PORT)/main.dart.js | \
+		sha256sum | cut -d' ' -f1"); \
+	echo "  local:  $$WANT"; \
+	echo "  served: $$GOT"; \
+	if [ "$$WANT" = "$$GOT" ]; then \
+		echo "  the server is serving this build"; \
+	else \
+		echo "  MISMATCH — the server is serving something else" >&2; \
+		exit 1; \
+	fi
+	@echo "  hard-reload the browser: the service worker caches the old client"
+
 ## deploy-check: is the deployed server healthy?
 deploy-check:
 	@ssh "$(HOST)" "curl -sf -o /dev/null -w '  health: HTTP %{http_code}\n' \
@@ -213,4 +255,5 @@ clean:
 
 .PHONY: help check lint test test-server test-client test-live fmt \
         dry-run server client web serve-web codegen clean \
+        deploy-web deploy-web-check \
         build-server deploy deploy-check

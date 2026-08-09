@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/models.dart';
@@ -97,16 +98,16 @@ void main() {
       );
 
       for (final (icon, expected) in [
-        (Icons.format_bold, 'toggleInline(**)'),
-        (Icons.format_italic, 'toggleInline(*)'),
-        (Icons.code, 'toggleInline(`)'),
-        (Icons.format_strikethrough, 'toggleInline(~~)'),
-        (Icons.border_color_outlined, 'toggleInline(==)'),
-        (Icons.format_list_bulleted, 'setBlockPrefix(- )'),
-        (Icons.format_list_numbered, 'setBlockPrefix(1. )'),
-        (Icons.check_box_outlined, 'setBlockPrefix(- [ ] )'),
-        (Icons.format_quote, 'setBlockPrefix(> )'),
-        (Icons.link, 'insertWikilink()'),
+        (LucideIcons.bold, 'toggleInline(**)'),
+        (LucideIcons.italic, 'toggleInline(*)'),
+        (LucideIcons.code, 'toggleInline(`)'),
+        (LucideIcons.strikethrough, 'toggleInline(~~)'),
+        (LucideIcons.highlighter, 'toggleInline(==)'),
+        (LucideIcons.list, 'setBlockPrefix(- )'),
+        (LucideIcons.list_ordered, 'setBlockPrefix(1. )'),
+        (LucideIcons.square_check, 'setBlockPrefix(- [ ] )'),
+        (LucideIcons.text_quote, 'setBlockPrefix(> )'),
+        (LucideIcons.link, 'insertWikilink()'),
       ]) {
         controller.calls.clear();
         await tester.tap(find.byIcon(icon), warnIfMissed: false);
@@ -137,7 +138,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(Icons.title));
+      await tester.tap(find.byIcon(LucideIcons.heading));
       await tester.pumpAndSettle();
       expect(find.text('Heading 2'), findsOneWidget);
 
@@ -162,7 +163,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(Icons.title));
+      await tester.tap(find.byIcon(LucideIcons.heading));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Heading 3'));
       await tester.pumpAndSettle();
@@ -184,7 +185,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(Icons.title));
+      await tester.tap(find.byIcon(LucideIcons.heading));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Paragraph'));
       await tester.pumpAndSettle();
