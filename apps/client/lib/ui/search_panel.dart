@@ -1,16 +1,25 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'states.dart';
+import 'shell/storm_scaffold.dart';
+import 'tokens.dart';
+import 'widgets.dart';
 
 import '../api/models.dart';
 import '../state/app_state.dart';
 
 /// Full-text search over the vault, served by the server's FTS5 index.
 class SearchPanel extends ConsumerStatefulWidget {
-  const SearchPanel({super.key, required this.onOpen});
+  const SearchPanel({super.key, required this.onOpen, this.onClose});
 
   final void Function(NoteMeta) onOpen;
+
+  /// Shown as the trailing `×` when search owns the whole screen.
+  final VoidCallback? onClose;
 
   @override
   ConsumerState<SearchPanel> createState() => _SearchPanelState();
@@ -43,53 +52,93 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final results = ref.watch(searchResultsProvider);
     final query = ref.watch(searchQueryProvider);
+    final online = ref.watch(syncEngineProvider).isOnline;
 
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.all(10),
-          child: TextField(
-            controller: _controller,
-            autofocus: true,
-            onChanged: _onChanged,
-            decoration: InputDecoration(
-              hintText: 'Search notes',
-              prefixIcon: const Icon(Icons.search, size: 18),
-              isDense: true,
-              border: const OutlineInputBorder(),
-              suffixIcon: _controller.text.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear, size: 16),
-                      onPressed: () {
-                        _controller.clear();
-                        ref.read(searchQueryProvider.notifier).state = '';
-                      },
-                    ),
-            ),
+          padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 0.5, t.sp, t.sp),
+          child: Row(
+            children: [
+              Expanded(
+                child: StormInput(
+                  controller: _controller,
+                  autofocus: true,
+                  onChanged: _onChanged,
+                  hintText: 'Search notes',
+                  prefixIcon: LucideIcons.search,
+                  suffix: _controller.text.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: Icon(LucideIcons.x, size: t.codeSize),
+                          onPressed: () {
+                            _controller.clear();
+                            ref.read(searchQueryProvider.notifier).state = '';
+                          },
+                        ),
+                ),
+              ),
+              if (widget.onClose != null)
+                IconButton(
+                  icon: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
+                  onPressed: widget.onClose,
+                  tooltip: 'Close',
+                ),
+            ],
           ),
         ),
         Expanded(
           child: results.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text('$e', style: Theme.of(context).textTheme.bodySmall),
-              ),
+            loading: () => Padding(
+              padding: EdgeInsets.symmetric(horizontal: t.sp * 2.5),
+              child: const SkeletonRows(rows: 3),
+            ),
+            error: (e, _) => EmptyState(
+              fill: true,
+              icon: LucideIcons.cloud_off,
+              title: 'Search needs the server',
+              detail: describeFailure(e),
             ),
             data: (hits) {
+              // Search is served by the index, so offline it can only ever
+              // answer "nothing" — which is not the same as "no matches".
+              if (!online) {
+                return const EmptyState(
+                  fill: true,
+                  icon: LucideIcons.cloud_off,
+                  title: 'Search needs the server',
+                  detail:
+                      'Reconnect to search this vault. '
+                      'Your notes are still here to read.',
+                );
+              }
               if (query.trim().isEmpty) {
-                return const _Hint(text: 'Type to search the vault');
+                return const EmptyState(
+                  fill: true,
+                  icon: LucideIcons.search,
+                  title: 'Search this vault',
+                  detail: 'Every note, by its words.',
+                );
               }
               if (hits.isEmpty) {
-                return _Hint(text: 'No notes match “$query”');
+                return EmptyState(
+                  fill: true,
+                  icon: LucideIcons.search_x,
+                  title: 'No notes match “$query”',
+                  detail: 'Try fewer words, or a word from the body.',
+                );
               }
-              return ListView.separated(
+              return ListView.builder(
+                padding: EdgeInsets.fromLTRB(
+                  t.sp,
+                  0,
+                  t.sp,
+                  StormChrome.navClearance(context),
+                ),
                 itemCount: hits.length,
-                separatorBuilder: (_, _) => const Divider(height: 1),
                 itemBuilder: (c, i) =>
                     _HitRow(hit: hits[i], onOpen: widget.onOpen),
               );
@@ -109,7 +158,9 @@ class _HitRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final t = context.tokens;
+    final tags = tagsIn(hit.snippet);
+
     return InkWell(
       onTap: () => onOpen(
         NoteMeta(
@@ -123,25 +174,52 @@ class _HitRow extends StatelessWidget {
           size: 0,
         ),
       ),
+      borderRadius: BorderRadius.circular(t.rControl),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: EdgeInsets.symmetric(
+          horizontal: t.sp * 1.5,
+          vertical: t.sp * 1.5,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               hit.title.isEmpty ? hit.path : hit.title,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.codeSize,
+                fontWeight: FontWeight.w500,
+                color: t.text,
+              ),
             ),
-            const SizedBox(height: 2),
+            SizedBox(height: t.sp * 0.25),
             _Snippet(raw: hit.snippet),
+            if (tags.isNotEmpty) ...[
+              SizedBox(height: t.sp * 0.75),
+              Wrap(
+                spacing: t.sp * 0.75,
+                runSpacing: t.sp * 0.5,
+                children: [for (final tag in tags) TagChip(label: tag)],
+              ),
+            ],
           ],
         ),
       ),
     );
   }
+}
+
+/// The `#tags` a snippet happens to contain, de-duplicated and in order.
+List<String> tagsIn(String snippet) {
+  final found = <String>{};
+  for (final m in RegExp(
+    r'#[\w/-]+',
+  ).allMatches(snippet.replaceAll('<<', '').replaceAll('>>', ''))) {
+    found.add(m.group(0)!);
+  }
+  return found.toList(growable: false);
 }
 
 /// Renders the server's `<<match>>` markers as highlighted spans.
@@ -152,9 +230,12 @@ class _Snippet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final base = theme.textTheme.bodySmall!.copyWith(
-      color: theme.colorScheme.onSurfaceVariant,
+    final t = context.tokens;
+    final base = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.labelSize,
+      color: t.text3,
+      height: 1.4,
     );
     final spans = <TextSpan>[];
 
@@ -171,10 +252,7 @@ class _Snippet extends StatelessWidget {
       spans.add(
         TextSpan(
           text: text.substring(open + 2, close),
-          style: base.copyWith(
-            color: theme.colorScheme.primary,
-            fontWeight: FontWeight.w700,
-          ),
+          style: base.copyWith(color: t.accent, fontWeight: FontWeight.w600),
         ),
       );
       text = text.substring(close + 2);
@@ -186,24 +264,4 @@ class _Snippet extends StatelessWidget {
       overflow: TextOverflow.ellipsis,
     );
   }
-}
-
-class _Hint extends StatelessWidget {
-  const _Hint({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(24),
-      child: Text(
-        text,
-        textAlign: TextAlign.center,
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
-      ),
-    ),
-  );
 }

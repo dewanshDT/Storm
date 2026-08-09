@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
+
+import 'oklch.dart';
+import 'tokens.dart';
 
 /// The colours a note or a vault can be tinted with.
 ///
@@ -10,27 +14,42 @@ import 'package:flutter/material.dart';
 /// theme forever.
 ///
 /// Each accent carries a light *and* a dark variant, because a tint that
-/// works on white is a glare on black and vice versa. The pairs are picked so
-/// body text keeps its contrast in both.
+/// works on white is a glare on black and vice versa.
+///
+/// Both are derived in OKLCH from the same system as everything else (see
+/// `tokens.dart`): one hue per name, one small chroma, one lightness per
+/// theme. They were sampled from Google Keep before, which made them slabs of
+/// unrelated colour sitting on a palette they had never met.
+///
+/// **They are sized for a tile, not for a card wash.** The design uses an
+/// accent as a small rounded square behind a vault's initial, and as a dot
+/// beside a note's colour property — never as the fill of a whole card, which
+/// is why the earlier values read as heavy blocks of green and teal. Every
+/// tile clears 5:1 against the dark ink that sits on it.
 enum Accent {
-  none('none', Color(0x00000000), Color(0x00000000)),
-  coral('coral', Color(0xFFFAD2CF), Color(0xFF5C2B29)),
-  peach('peach', Color(0xFFFDE2CE), Color(0xFF614A19)),
-  sand('sand', Color(0xFFFFF8B8), Color(0xFF635D19)),
-  sage('sage', Color(0xFFE6F4D7), Color(0xFF345920)),
-  mint('mint', Color(0xFFD4E4ED), Color(0xFF16504B)),
-  sky('sky', Color(0xFFD3E3FD), Color(0xFF2D555E)),
-  lavender('lavender', Color(0xFFE9D9FB), Color(0xFF42275E)),
-  blossom('blossom', Color(0xFFFDCFE8), Color(0xFF6C394F)),
-  clay('clay', Color(0xFFE9E3D4), Color(0xFF4B443A));
+  none('none', 0, 0),
+  coral('coral', 25, 1),
+  peach('peach', 50, 1),
+  sand('sand', 85, 1),
+  sage('sage', 135, 1),
+  mint('mint', 165, 1),
+  sky('sky', 230, 1),
+  lavender('lavender', 290, 1),
+  blossom('blossom', 340, 1),
+  // Deliberately the near-neutral one, so it carries less chroma and leans on
+  // lightness alone to stay visible.
+  clay('clay', 70, 0.4);
 
-  const Accent(this.name, this._light, this._dark);
+  const Accent(this.name, this.hue, this._chromaScale);
 
   /// What goes in the file. Lower case, one word, stable.
   final String name;
 
-  final Color _light;
-  final Color _dark;
+  /// The only thing an accent really is. Everything else is derived from the
+  /// theme it is being drawn in.
+  final double hue;
+
+  final double _chromaScale;
 
   /// Reads an accent from frontmatter, forgivingly.
   ///
@@ -48,23 +67,44 @@ enum Accent {
 
   bool get isNone => this == Accent.none;
 
-  /// The card or surface fill for [brightness].
-  Color surface(Brightness brightness) =>
-      brightness == Brightness.dark ? _dark : _light;
+  /// The tile behind a vault's initial, and the dot beside a note's colour.
+  ///
+  /// Derived from the theme rather than stored, so an accent sits a step off
+  /// *this* surface whatever the preset is. Storm light's surface is 0.87 and
+  /// SlowFlow's is 0.79; a single stored value vanished into the first while
+  /// working on the second, which is what deriving fixes.
+  ///
+  /// A tile always steps *towards light*, never away from the page in the
+  /// theme's own direction. On a dark ground there is a lot of room above the
+  /// surface, so the step is large; on a light ground there is very little, so
+  /// the step is small and the colour does the work. `clay`, the near-neutral
+  /// one, gets a bigger step because it has almost no chroma to be seen by.
+  Color tile(StormTokens t) {
+    if (isNone) return t.surface2;
+    final step = t.dir > 0 ? 0.35 : 0.09 + (1 - _chromaScale) * 0.05;
+    return oklch(
+      (t.surfaceL + step).clamp(0.0, 0.99),
+      0.085 * _chromaScale,
+      hue,
+    );
+  }
 
   /// A quieter version, for tinting a whole page behind body text.
   ///
-  /// The full surface colour is right for a card an inch tall and far too
-  /// loud behind a screen of prose.
-  Color wash(Brightness brightness) => surface(
-    brightness,
-  ).withValues(alpha: brightness == Brightness.dark ? 0.38 : 0.45);
+  /// A tile colour at tile strength behind a screen of prose is a glare.
+  ///
+  /// Blended onto the page rather than left translucent. This is used as a
+  /// `Scaffold.backgroundColor`, which is the bottom layer of a route — on a
+  /// phone there is nothing painted behind it, so 14% alpha meant 86% of the
+  /// window's black showing through and the whole note going dark. At desk
+  /// width it composited over the shell's own Scaffold and looked right,
+  /// which is why the same note was fine there.
+  Color wash(StormTokens t) =>
+      isNone ? t.bg : Color.alphaBlend(tile(t).withValues(alpha: 0.14), t.bg);
 
-  /// The outline that keeps a card readable when its fill is close to the
-  /// page.
-  Color border(Brightness brightness) => surface(
-    brightness,
-  ).withValues(alpha: brightness == Brightness.dark ? 1 : 0.9);
+  /// The outline that keeps a tinted card readable against the page.
+  Color border(StormTokens t) =>
+      isNone ? t.border : tile(t).withValues(alpha: 0.55);
 
   /// A human label for the picker.
   String get label => switch (this) {
@@ -84,15 +124,8 @@ enum Accent {
 /// Resolves the accent for the current theme without every caller reaching
 /// for `Theme.of(context).brightness`.
 extension AccentContext on BuildContext {
-  Brightness get _brightness => Theme.of(this).brightness;
-
-  Color accentSurface(Accent accent) => accent.isNone
-      ? Theme.of(this).colorScheme.surfaceContainerHigh
-      : accent.surface(_brightness);
-
-  Color accentBorder(Accent accent) => accent.isNone
-      ? Theme.of(this).colorScheme.outlineVariant.withValues(alpha: 0.4)
-      : accent.border(_brightness);
+  Color accentSurface(Accent accent) => accent.tile(tokens);
+  Color accentBorder(Accent accent) => accent.border(tokens);
 }
 
 /// A row of swatches, used wherever a colour is chosen.
@@ -119,7 +152,7 @@ class AccentPicker extends StatelessWidget {
       runSpacing: 8,
       children: [
         for (final accent in Accent.values)
-          _Swatch(
+          AccentSwatch(
             accent: accent,
             selected: accent == selected,
             size: size,
@@ -130,8 +163,10 @@ class AccentPicker extends StatelessWidget {
   }
 }
 
-class _Swatch extends StatelessWidget {
-  const _Swatch({
+/// One swatch. Public because the gallery renders the set on its own.
+class AccentSwatch extends StatelessWidget {
+  const AccentSwatch({
+    super.key,
     required this.accent,
     required this.selected,
     required this.size,
@@ -146,7 +181,6 @@ class _Swatch extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final brightness = Theme.of(context).brightness;
 
     return Tooltip(
       message: accent.label,
@@ -158,9 +192,7 @@ class _Swatch extends StatelessWidget {
           height: size,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: accent.isNone
-                ? scheme.surfaceContainerHighest
-                : accent.surface(brightness),
+            color: accent.tile(context.tokens),
             border: Border.all(
               color: selected ? scheme.primary : scheme.outlineVariant,
               width: selected ? 2 : 1,
@@ -170,12 +202,16 @@ class _Swatch extends StatelessWidget {
               // A slash, so "no colour" reads as a choice rather than an
               // unfilled swatch.
               ? Icon(
-                  Icons.format_color_reset_outlined,
+                  LucideIcons.droplet_off,
                   size: size * 0.5,
                   color: scheme.onSurfaceVariant,
                 )
               : selected
-              ? Icon(Icons.check, size: size * 0.55, color: scheme.onSurface)
+              ? Icon(
+                  LucideIcons.check,
+                  size: size * 0.55,
+                  color: scheme.onSurface,
+                )
               : null,
         ),
       ),

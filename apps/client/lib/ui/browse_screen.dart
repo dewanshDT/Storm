@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -7,6 +8,11 @@ import '../router.dart';
 import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'breakpoints.dart';
+import 'tokens.dart';
+import 'widgets.dart';
+import 'shell/corner_bubbles.dart' show relativeTime;
+import 'shell/nav_bubble.dart' show NewNoteRequest;
+import 'states.dart';
 import 'shell/storm_scaffold.dart';
 import 'shell/vault_sidebar.dart' show NoNoteSelected;
 import 'shell/vault_gate.dart';
@@ -34,38 +40,47 @@ class BrowseScreen extends ConsumerWidget {
     // the empty state rather than the same list twice.
     if (context.isExpanded) return const NoNoteSelected();
 
+    final t = context.tokens;
+
     return StormScaffold(
-      leading: folder.isEmpty
-          ? null
-          : IconButton(
-              icon: const Icon(Icons.arrow_back),
-              // Pop the stack we drilled down through, so this matches what
-              // the system back gesture does. A deep link has no stack to pop,
-              // so it falls back to walking up a level.
-              onPressed: () => context.canPop()
-                  ? context.pop()
-                  : context.go(Routes.folder(vaultId, _parentOf(folder))),
-            ),
-      title: const Text('Directory'),
+      header: _Breadcrumbs(folder: folder, vaultId: vaultId),
       child: notes.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(child: Text('$e')),
+        loading: () => Padding(
+          padding: EdgeInsets.symmetric(horizontal: t.sp * 2.5),
+          child: const SkeletonRows(),
+        ),
+        error: (e, _) => EmptyState(
+          fill: true,
+          icon: LucideIcons.cloud_off,
+          title: 'Could not list this folder',
+          detail: describeFailure(e),
+          action: 'Try again',
+          onAction: () => ref.invalidate(treeProvider),
+        ),
         data: (list) {
           final entries = _childrenOf(list, folder, known);
-          return Column(
-            children: [
-              _Breadcrumbs(folder: folder, vaultId: vaultId),
-              const Divider(height: 1),
-              Expanded(
-                child: entries.isEmpty
-                    ? const Center(child: Text('This folder is empty'))
-                    : ListView.builder(
-                        padding: const EdgeInsets.only(bottom: 110),
-                        itemCount: entries.length,
-                        itemBuilder: (c, i) => EntryTile(entry: entries[i]),
-                      ),
-              ),
-            ],
+          if (entries.isEmpty) {
+            return EmptyState(
+              fill: true,
+              icon: LucideIcons.folder_open,
+              title: 'Nothing in this folder',
+              detail: folder.isEmpty
+                  ? 'New notes will land at the top of this vault.'
+                  : 'New notes made here will land in '
+                        '${folder.split('/').last}.',
+              action: 'New note',
+              onAction: () => NewNoteRequest.of(context)?.call(),
+            );
+          }
+          return ListView.builder(
+            padding: EdgeInsets.fromLTRB(
+              t.cardPad,
+              t.sp * 1.25,
+              t.cardPad,
+              StormChrome.navClearance(context),
+            ),
+            itemCount: entries.length,
+            itemBuilder: (c, i) => EntryTile(entry: entries[i], divider: true),
           );
         },
       ),
@@ -86,11 +101,6 @@ class BrowseEntry {
   final int childCount;
 
   bool get isFolder => note == null;
-}
-
-String _parentOf(String folder) {
-  final i = folder.lastIndexOf('/');
-  return i < 0 ? '' : folder.substring(0, i);
 }
 
 /// Everything directly inside [folder] — one level, not the whole subtree.
@@ -153,71 +163,35 @@ String _stripExtension(String fileName) => fileName.endsWith('.md')
     ? fileName.substring(0, fileName.length - 3)
     : fileName;
 
-class _Breadcrumbs extends StatelessWidget {
+class _Breadcrumbs extends ConsumerWidget {
   const _Breadcrumbs({required this.folder, required this.vaultId});
 
   final String folder;
   final String vaultId;
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final vaults = ref.watch(vaultsProvider).value ?? const [];
+    final name =
+        vaults.where((v) => v.id == vaultId).firstOrNull?.name ?? 'Vault';
     final parts = folder.isEmpty ? <String>[] : folder.split('/');
 
-    final crumbs = <Widget>[
-      _Crumb(
-        label: 'Vault',
-        onTap: () => context.go(Routes.browse(vaultId)),
-        muted: parts.isNotEmpty,
+    return Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: StormChrome.contentInset(context),
       ),
-    ];
-    for (var i = 0; i < parts.length; i++) {
-      final path = parts.take(i + 1).join('/');
-      crumbs
-        ..add(Icon(Icons.chevron_right, size: 16, color: scheme.outline))
-        ..add(
-          _Crumb(
-            label: parts[i],
-            onTap: () => context.go(Routes.folder(vaultId, path)),
-            muted: i != parts.length - 1,
-          ),
-        );
-    }
-
-    return SizedBox(
-      height: 44,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        children: [for (final c in crumbs) Center(child: c)],
-      ),
-    );
-  }
-}
-
-class _Crumb extends StatelessWidget {
-  const _Crumb({required this.label, required this.onTap, required this.muted});
-
-  final String label;
-  final VoidCallback onTap;
-  final bool muted;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 13,
-            color: muted ? scheme.onSurfaceVariant : scheme.onSurface,
-            fontWeight: muted ? FontWeight.w400 : FontWeight.w600,
-          ),
-        ),
+      child: Breadcrumb(
+        crumbs: [
+          Crumb('Vaults', onTap: () => context.go(Routes.dashboard)),
+          Crumb(name, onTap: () => context.go(Routes.browse(vaultId))),
+          for (var i = 0; i < parts.length; i++)
+            Crumb(
+              parts[i],
+              onTap: () => context.go(
+                Routes.folder(vaultId, parts.take(i + 1).join('/')),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -238,6 +212,8 @@ class EntryTile extends ConsumerWidget {
     this.selected = false,
     this.replaceRoute = false,
     this.contentPadding,
+    this.divider = false,
+    this.inTree = false,
   });
 
   final BrowseEntry entry;
@@ -260,25 +236,32 @@ class EntryTile extends ConsumerWidget {
   final bool replaceRoute;
 
   final EdgeInsetsGeometry? contentPadding;
+  final bool divider;
+
+  /// Drawn as a row of the sidebar's tree rather than of the phone's list.
+  ///
+  /// Explicit, not inferred. It used to be read off `leading != null`, which
+  /// silently stopped being true for notes the day the leading spacer was
+  /// removed — so every note in the tree started rendering at the full-width
+  /// list's size, with a timestamp, and the hierarchy flattened.
+  final bool inTree;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     final vaultId = VaultGate.of(context);
 
     if (entry.isFolder) {
-      return ListTile(
-        contentPadding: contentPadding,
-        leading: leading ?? Icon(Icons.folder_outlined, color: scheme.primary),
-        title: Text(entry.name),
-        subtitle: onFolderTap != null
-            ? null
-            : Text(
-                entry.childCount == 1 ? '1 note' : '${entry.childCount} notes',
-              ),
-        trailing: onFolderTap != null
-            ? null
-            : const Icon(Icons.chevron_right, size: 18),
+      return FolderRow(
+        name: entry.name,
+        dense: inTree,
+        leading: leading,
+        // The tree shows counts too — the design's sidebar has them, and a
+        // folder's weight is the reason to open it or not.
+        count: entry.childCount,
+        chevron: !inTree,
+        divider: divider,
+        padding: contentPadding as EdgeInsets?,
         onTap:
             onFolderTap ??
             () => context.push(Routes.folder(vaultId, entry.path)),
@@ -289,21 +272,27 @@ class EntryTile extends ConsumerWidget {
     }
 
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
-    return ListTile(
-      contentPadding: contentPadding,
+    return NoteRow(
+      title: entry.name,
+      dense: inTree,
+      meta: inTree ? null : _noteMeta(entry.note!),
+      leading: leading,
       selected: selected,
-      leading:
-          leading ??
-          Icon(Icons.description_outlined, color: scheme.onSurfaceVariant),
-      title: Text(entry.name),
+      divider: divider,
+      padding: contentPadding as EdgeInsets?,
       trailing: pinned.contains(entry.note!.id)
-          ? Icon(Icons.push_pin, size: 13, color: scheme.primary)
+          ? Icon(LucideIcons.pin, size: t.labelSize, color: t.accent)
           : null,
       onTap: () => replaceRoute
           ? context.go(Routes.note(vaultId, entry.note!.id))
           : context.push(Routes.note(vaultId, entry.note!.id)),
     );
   }
+}
+
+String? _noteMeta(NoteMeta note) {
+  final modified = DateTime.tryParse(note.modified)?.toLocal();
+  return modified == null ? null : relativeTime(modified);
 }
 
 Future<void> _folderActions(
@@ -319,13 +308,13 @@ Future<void> _folderActions(
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
-            leading: const Icon(Icons.drive_file_rename_outline),
+            leading: const Icon(LucideIcons.pencil_line),
             title: Text('Rename “${entry.name}”'),
             onTap: () => Navigator.pop(c, 'rename'),
           ),
           ListTile(
             leading: Icon(
-              Icons.delete_outline,
+              LucideIcons.trash_2,
               color: Theme.of(c).colorScheme.error,
             ),
             title: const Text('Delete folder'),
@@ -399,16 +388,6 @@ Future<void> createFolder(
     if (context.mounted) _toast(context, describeFailure(e));
   }
 }
-
-/// Turns any failure into something the user can read.
-///
-/// A `StormApiException` is the server saying no, and its wording is the best
-/// available. Anything else is the server not answering at all — which used to
-/// escape as an unhandled exception and put a red screen in front of a folder
-/// that had, in some cases, actually been created.
-String describeFailure(Object e) => e is StormApiException
-    ? e.message
-    : 'Could not reach the server. Try again when it is back.';
 
 void _toast(BuildContext context, String message) => ScaffoldMessenger.of(
   context,

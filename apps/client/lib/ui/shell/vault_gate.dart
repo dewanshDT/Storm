@@ -65,7 +65,9 @@ class _VaultGateState extends ConsumerState<VaultGate> {
   Widget build(BuildContext context) {
     final active = ref.watch(activeVaultProvider);
     if (active != widget.vaultId) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      // One frame, while the route's vault is adopted. A spinner here is a
+      // flash of "something is wrong" for a wait nobody perceives.
+      return const Scaffold(body: SizedBox.shrink());
     }
     return _VaultScope(vaultId: widget.vaultId, child: widget.child);
   }

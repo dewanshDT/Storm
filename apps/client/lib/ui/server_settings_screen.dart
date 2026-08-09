@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
 import '../router.dart';
+import 'tokens.dart';
+import 'widgets.dart';
 import '../state/app_state.dart';
-import 'browse_screen.dart' show describeFailure;
+import 'states.dart';
 
 /// Where vaults live on the server, and which ones exist.
 ///
@@ -23,22 +26,28 @@ class ServerSettingsScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () =>
-              context.canPop() ? context.pop() : context.go(Routes.dashboard),
+          icon: const Icon(LucideIcons.arrow_left),
+          onPressed: () => context.canPop()
+              ? context.pop()
+              // Mounted at two paths: the vault-scoped one goes back into the
+              // vault, the dashboard's one goes home.
+              : context.go(
+                  Routes.vaultOf(GoRouterState.of(context).uri).isEmpty
+                      ? Routes.dashboard
+                      : Routes.browse(
+                          Routes.vaultOf(GoRouterState.of(context).uri),
+                        ),
+                ),
         ),
-        title: const Text('Server'),
+        title: const Text('Server settings'),
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
         children: [
           _Section(label: 'Vault storage root'),
           config.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(12),
-              child: LinearProgressIndicator(),
-            ),
-            error: (e, _) => _Muted('$e'),
+            loading: () => const SkeletonRows(rows: 2),
+            error: (e, _) => _Muted(describeFailure(e)),
             data: (c) => c == null
                 ? const _Muted('Not connected')
                 : _RootCard(config: c),
@@ -46,22 +55,16 @@ class ServerSettingsScreen extends ConsumerWidget {
           const SizedBox(height: 24),
           _Section(label: 'AI access (MCP)'),
           config.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(12),
-              child: LinearProgressIndicator(),
-            ),
-            error: (e, _) => _Muted('$e'),
+            loading: () => const SkeletonRows(rows: 2),
+            error: (e, _) => _Muted(describeFailure(e)),
             data: (c) =>
                 c == null ? const _Muted('Not connected') : _McpCard(config: c),
           ),
           const SizedBox(height: 24),
           _Section(label: 'Vaults'),
           vaults.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(12),
-              child: LinearProgressIndicator(),
-            ),
-            error: (e, _) => _Muted('$e'),
+            loading: () => const SkeletonRows(rows: 2),
+            error: (e, _) => _Muted(describeFailure(e)),
             data: (list) => Column(
               children: [
                 for (final v in list) _VaultRow(vault: v),
@@ -70,7 +73,7 @@ class ServerSettingsScreen extends ConsumerWidget {
                   alignment: Alignment.centerLeft,
                   child: OutlinedButton.icon(
                     onPressed: () => createVault(context, ref),
-                    icon: const Icon(Icons.add, size: 18),
+                    icon: const Icon(LucideIcons.plus, size: 18),
                     label: const Text('New vault'),
                   ),
                 ),
@@ -153,78 +156,68 @@ class _McpCardState extends ConsumerState<_McpCard> {
     final on = _pending?.enabled ?? widget.config.mcpEnabled;
     final writable = _pending?.writable ?? widget.config.mcpWritable;
 
-    // `Material`, not a coloured `Container`: SwitchListTile is a ListTile, and
-    // a ListTile paints its background and ink splash onto the nearest Material
-    // ancestor — a DecoratedBox in between swallows them, and Flutter asserts
-    // about it. The same mistake was made in the M12 sidebar; see decision 34.
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(14),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 4, 6, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              value: on,
-              onChanged: _pending == null
-                  ? (v) => _set(enabled: v, writable: writable)
-                  : null,
-              title: const Text('Let AI assistants read your notes'),
-              subtitle: Text(
-                on ? 'Serving at /mcp' : 'Off — /mcp refuses every request',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
+    // No card. A settings screen is a list of facts, and wrapping each group in
+    // a bordered box made every one of them look like a separate object; the
+    // label above and the hairlines below do the grouping instead.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          value: on,
+          onChanged: _pending == null
+              ? (v) => _set(enabled: v, writable: writable)
+              : null,
+          title: const Text('Let AI assistants read your notes'),
+          subtitle: Text(
+            on ? 'Serving at /mcp' : 'Off — /mcp refuses every request',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
             ),
-            // Nested under the first, and dead while it is off, because writes
-            // without the endpoint mean nothing.
-            SwitchListTile(
-              contentPadding: const EdgeInsets.only(left: 16),
-              value: writable,
-              onChanged: on && _pending == null
-                  ? (v) => _set(enabled: on, writable: v)
-                  : null,
-              title: Text(
-                'Allow it to create, edit and delete',
-                style: TextStyle(
-                  color: on
-                      ? null
-                      : scheme.onSurfaceVariant.withValues(alpha: 0.5),
-                ),
-              ),
-              subtitle: Text(
-                writable
-                    ? 'Edits merge like any other device’s'
-                    : 'Read-only — it can look, not change',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(0, 2, 8, 0),
-              child: Text(
-                !on
-                    ? 'A server setting, not just this device — it applies to '
-                          'every client and survives a restart.'
-                    : writable
-                    ? 'An assistant can change your notes. Edits carry the '
-                          'version they were made from, so nothing overwrites a '
-                          'change from another device — but Storm has no trash, '
-                          'and a deleted note is gone from the vault at once.'
-                    : 'Search, read and history only. Anyone holding this '
-                          'server’s token can read every vault this way.',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                ),
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
+        // Nested under the first, and dead while it is off, because writes
+        // without the endpoint mean nothing.
+        SwitchListTile(
+          contentPadding: const EdgeInsets.only(left: 16),
+          value: writable,
+          onChanged: on && _pending == null
+              ? (v) => _set(enabled: on, writable: v)
+              : null,
+          title: Text(
+            'Allow it to create, edit and delete',
+            style: TextStyle(
+              color: on ? null : scheme.onSurfaceVariant.withValues(alpha: 0.5),
+            ),
+          ),
+          subtitle: Text(
+            writable
+                ? 'Edits merge like any other device’s'
+                : 'Read-only — it can look, not change',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(0, 2, 8, 0),
+          child: Text(
+            !on
+                ? 'A server setting, not just this device — it applies to '
+                      'every client and survives a restart.'
+                : writable
+                ? 'An assistant can change your notes. Edits carry the '
+                      'version they were made from, so nothing overwrites a '
+                      'change from another device — but Storm has no trash, '
+                      'and a deleted note is gone from the vault at once.'
+                : 'Search, read and history only. Anyone holding this '
+                      'server’s token can read every vault this way.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -236,41 +229,31 @@ class _RootCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SelectableText(
-            config.vaultRoot,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+    final t = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SettingRow(label: 'Vault root', value: config.vaultRoot),
+        SettingRow(label: 'Vaults', value: '${config.vaultCount}'),
+        SizedBox(height: t.sp * 1.5),
+        // Said before the action, not after: Storm points at directories
+        // someone has already moved, and a mistyped path that silently
+        // orphaned every vault would read as "my notes are gone".
+        Text(
+          'Changing this does not move your notes. Move the vault '
+          'directories first, then change the root.',
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: t.codeSize,
+            color: t.text3,
           ),
-          const SizedBox(height: 6),
-          Text(
-            '${config.vaultCount} vault${config.vaultCount == 1 ? '' : 's'}',
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 12),
-          // Said before the action, not after: Storm points at directories
-          // someone has already moved, and a mistyped path that silently
-          // orphaned every vault would read as "my notes are gone".
-          Text(
-            'Changing this does not move your notes. Move the vault '
-            'directories first, then change the root.',
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 10),
-          OutlinedButton(
-            onPressed: () => _change(context, ref),
-            child: const Text('Change'),
-          ),
-        ],
-      ),
+        ),
+        SizedBox(height: t.sp * 1.25),
+        OutlinedButton(
+          onPressed: () => _change(context, ref),
+          child: const Text('Change'),
+        ),
+      ],
     );
   }
 
@@ -344,7 +327,7 @@ class _VaultRow extends ConsumerWidget {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Icon(
-        vault.missing ? Icons.error_outline : Icons.folder_special_outlined,
+        vault.missing ? LucideIcons.circle_alert : LucideIcons.folder_cog,
         color: vault.missing ? scheme.error : scheme.primary,
       ),
       title: Text(vault.name),
@@ -354,7 +337,7 @@ class _VaultRow extends ConsumerWidget {
             : '${vault.dir} · ${vault.noteCount} '
                   'note${vault.noteCount == 1 ? '' : 's'}',
         style: TextStyle(
-          fontSize: 12,
+          fontSize: context.tokens.labelSize,
           color: vault.missing ? scheme.error : scheme.onSurfaceVariant,
         ),
       ),
@@ -431,15 +414,85 @@ class _Section extends StatelessWidget {
   final String label;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(left: 4, bottom: 8, top: 4),
-    child: Text(
-      label,
-      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-        color: Theme.of(context).colorScheme.onSurfaceVariant,
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp, top: t.sp * 0.5),
+      child: SectionLabel(label),
+    );
+  }
+}
+
+/// One setting: what it is, and what it currently says.
+///
+/// A row with a hairline under it rather than a card. The design is flat here
+/// because a settings screen is a list of facts — wrapping each in its own
+/// bordered box made every one of them look like a separate object.
+class SettingRow extends StatelessWidget {
+  const SettingRow({
+    super.key,
+    required this.label,
+    this.value,
+    this.trailing,
+    this.onTap,
+    this.mono = true,
+    this.muted = false,
+  });
+
+  final String label;
+  final String? value;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+
+  /// Values that are paths, addresses or identifiers are mono; prose is not.
+  final bool mono;
+  final bool muted;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final row = Container(
+      padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: t.border, width: t.bw),
+        ),
       ),
-    ),
-  );
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.bodySize,
+                color: muted ? t.text3 : t.text,
+              ),
+            ),
+          ),
+          if (value != null)
+            Flexible(
+              child: Text(
+                value!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  fontFamily: mono
+                      ? StormTokens.monoFamily
+                      : StormTokens.sansFamily,
+                  fontSize: t.codeSize,
+                  color: t.text2,
+                ),
+              ),
+            ),
+          if (trailing != null) ...[SizedBox(width: t.sp), trailing!],
+        ],
+      ),
+    );
+    if (onTap == null) return row;
+    return InkWell(onTap: onTap, child: row);
+  }
 }
 
 class _Muted extends StatelessWidget {

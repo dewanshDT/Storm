@@ -101,7 +101,10 @@ void main() {
     Future<void> openMenu(WidgetTester tester, ProviderContainer c) async {
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Note actions'));
+      // Long-press, not a visible menu: the design's note chrome is back, path
+      // and properties, and long-press is how this app offers secondary
+      // actions everywhere else.
+      await tester.longPress(find.byKey(const Key('note-actions')));
       await tester.pumpAndSettle();
     }
 
@@ -138,7 +141,7 @@ void main() {
 
       expect(await c.read(syncEngineProvider).pinnedIds(), contains('n0'));
       // And the label flips, so the menu says what tapping it again will do.
-      await tester.tap(find.byTooltip('Note actions'));
+      await tester.longPress(find.byKey(const Key('note-actions')));
       await tester.pumpAndSettle();
       expect(find.text('Stop keeping offline'), findsOneWidget);
 
@@ -149,7 +152,7 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      expect(find.byTooltip('Note actions'), findsNothing);
+      expect(find.byKey(const Key('note-actions')), findsNothing);
       await disposeShell(tester, c);
     });
   });

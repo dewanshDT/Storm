@@ -262,7 +262,7 @@ void main() {
 
       expect(find.text('Primary'), findsOneWidget);
       expect(find.text('Work'), findsOneWidget);
-      expect(find.text('Recently opened'), findsOneWidget);
+      expect(find.text('RECENTLY OPENED'), findsOneWidget);
       // The check that caught the AppBar quietly dropping the attach button.
       expect(tester.takeException(), isNull);
 

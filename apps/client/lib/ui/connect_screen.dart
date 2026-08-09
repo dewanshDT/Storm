@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../state/app_state.dart';
+import 'tokens.dart';
+import 'widgets.dart';
 
 /// First-run screen: point the app at a homelab server.
 ///
@@ -65,68 +67,67 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
+          constraints: BoxConstraints(maxWidth: t.sp * 52),
           child: Padding(
-            padding: const EdgeInsets.all(24),
+            padding: EdgeInsets.all(t.cardPad),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  'Storm',
-                  style: Theme.of(context).textTheme.headlineMedium,
-                ),
-                const SizedBox(height: 4),
+                // The mark, not the word: the design is explicit that a text
+                // wordmark is never substituted for it.
+                const Center(child: BrandMark(size: 44, withWordmark: true)),
+                SizedBox(height: t.sp * 2),
                 Text(
                   'Connect to your homelab vault',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.codeSize,
+                    color: t.text3,
                   ),
                 ),
-                const SizedBox(height: 28),
-                TextField(
+                SizedBox(height: t.sp * 3.5),
+                StormInput(
                   controller: _url,
                   autofocus: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Server address',
-                    hintText: '192.168.1.20:8484',
-                    border: OutlineInputBorder(),
-                  ),
+                  labelText: 'Server address',
+                  hintText: '192.168.1.20:8484',
                   keyboardType: TextInputType.url,
                   autocorrect: false,
                 ),
-                const SizedBox(height: 14),
-                TextField(
+                SizedBox(height: t.sp * 1.75),
+                StormInput(
                   controller: _token,
-                  decoration: const InputDecoration(
-                    labelText: 'Access token',
-                    border: OutlineInputBorder(),
-                  ),
+                  labelText: 'Access token',
                   obscureText: true,
                   autocorrect: false,
                   onSubmitted: (_) => _connect(),
                 ),
                 if (_error != null) ...[
-                  const SizedBox(height: 16),
+                  SizedBox(height: t.sp * 2),
                   Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: EdgeInsets.all(t.sp * 1.5),
                     decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.errorContainer,
-                      borderRadius: BorderRadius.circular(8),
+                      color: t.surface,
+                      borderRadius: BorderRadius.circular(t.rControl),
+                      border: Border.all(color: t.danger, width: t.bw),
                     ),
                     child: Text(
                       _error!,
                       style: TextStyle(
-                        color: Theme.of(context).colorScheme.onErrorContainer,
-                        fontSize: 13,
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        color: t.danger,
                       ),
                     ),
                   ),
                 ],
-                const SizedBox(height: 20),
+                SizedBox(height: t.sp * 2.5),
                 FilledButton(
                   onPressed: _testing ? null : _connect,
                   child: _testing

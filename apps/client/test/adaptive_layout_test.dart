@@ -1,8 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
+import 'package:storm/ui/note_editor.dart';
+import 'package:storm/ui/note_properties.dart';
+import 'package:storm/ui/properties_panel.dart';
 import 'package:storm/ui/shell/nav_bubble.dart';
+import 'package:storm/ui/shell/corner_bubbles.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/shell/vault_sidebar.dart';
 
 import 'fake_server.dart';
@@ -38,10 +45,13 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('absent on the dashboard even when wide', (tester) async {
-      // There is no vault to show folders for.
+    testWidgets('absent on the dashboard, which only a phone reaches', (
+      tester,
+    ) async {
+      // There is no vault to show folders for — and no dashboard at all at
+      // desk width once a vault exists, so this is the phone's case.
       final c = shellContainer();
-      await pumpShell(tester, c, size: desk);
+      await pumpShell(tester, c, size: phone);
 
       expect(find.byType(VaultSidebar), findsNothing);
       await disposeShell(tester, c);
@@ -55,7 +65,7 @@ void main() {
       await openVault(tester, c);
 
       expect(find.byTooltip('Directory'), findsOneWidget);
-      expect(find.byIcon(Icons.more_horiz), findsNothing);
+      expect(find.byIcon(LucideIcons.ellipsis), findsNothing);
       await disposeShell(tester, c);
     });
 
@@ -66,28 +76,264 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await openVault(tester, c);
 
-      // The bubble renders nothing, but the actions are still reachable —
+      // The bubble renders nothing, and the actions are still reachable —
       // both draw the same list, so they cannot offer different things.
       expect(
         find.descendant(
           of: find.byType(NavBubble),
-          matching: find.byTooltip('Directory'),
+          matching: find.byTooltip('Tags'),
         ),
         findsNothing,
       );
       expect(
         find.descendant(
           of: find.byType(VaultSidebar),
-          matching: find.byTooltip('Directory'),
+          matching: find.byTooltip('Tags'),
         ),
         findsOneWidget,
+      );
+      // Except the two the rail already *is*: a Directory button beside the
+      // folder tree, or a Search button beside the search field, would be a
+      // control that does what is already on screen.
+      expect(
+        find.descendant(
+          of: find.byType(VaultSidebar),
+          matching: find.byTooltip('Directory'),
+        ),
+        findsNothing,
       );
       expect(find.byTooltip('New note'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });
 
+  group('the rail is ordered the way the design orders it', () {
+    testWidgets('vault, then search, then folders, then actions', (
+      tester,
+    ) async {
+      // The order is the design decision, not the contents. Actions used to be
+      // on top, where they were the first thing the eye hit and the last thing
+      // anyone wanted; the vault you are in and the way to a note come first.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      double topOf(Finder f) => tester.getTopLeft(f).dy;
+      final sidebar = find.byType(VaultSidebar);
+      Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
+
+      final search = inRail(find.text('Search…'));
+      final actions = inRail(find.byTooltip('Tags'));
+      expect(search, findsOneWidget, reason: 'the rail offers search');
+      expect(actions, findsOneWidget);
+      expect(
+        topOf(search),
+        lessThan(topOf(actions)),
+        reason: 'actions belong at the bottom of the rail',
+      );
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('the columns keep the design\'s proportions', () {
+    // The mockup is a 1200px frame with a 260 sidebar and a 280 drawer. Those
+    // were pinned, so at 1200 the layout matched exactly and at 1700 the side
+    // columns stayed put while the note pane swallowed every extra pixel.
+    testWidgets('the sidebar is the design width at the design frame', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(1200, 900));
+      await openVault(tester, c);
+
+      expect(tester.getSize(find.byType(VaultSidebar)).width, 260);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('and grows with the window rather than staying put', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(1800, 900));
+      await openVault(tester, c);
+
+      final width = tester.getSize(find.byType(VaultSidebar)).width;
+      expect(width, greaterThan(260));
+      // Capped: a 4K display must not hand a third of the screen to a list of
+      // folder names.
+      expect(width, lessThanOrEqualTo(400));
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('never below the design width, however narrow the pane', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(901, 900));
+      await openVault(tester, c);
+
+      expect(tester.getSize(find.byType(VaultSidebar)).width, 260);
+      await disposeShell(tester, c);
+    });
+  });
+
+  String locationOf(ProviderContainer c) =>
+      c.read(routerProvider).state.uri.path;
+
+  group('one left edge', () {
+    // The bubble, the header and the prose used to start at 24, 24 and 20 —
+    // close enough to read as a mistake rather than a decision, which is what
+    // a three-pixel stagger down the left margin looks like.
+    testWidgets('bubble, header glyph and prose share it on a phone', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      final bubble = tester.getTopLeft(find.byType(VaultBubble)).dx;
+      final back = tester.getTopLeft(find.byIcon(LucideIcons.chevron_left)).dx;
+      final prose = tester.getTopLeft(find.byKey(const Key('note-body'))).dx;
+
+      expect(back, moreOrLessEquals(bubble, epsilon: 0.5));
+      expect(prose, moreOrLessEquals(bubble, epsilon: 0.5));
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('and the header buttons are evenly spaced', (tester) async {
+      // One was left-aligned in its box, one centred and one right-aligned,
+      // so the gaps between the three glyphs were all different.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      final actions = tester.getTopLeft(find.byIcon(LucideIcons.ellipsis)).dx;
+      final props = tester
+          .getTopLeft(find.byIcon(LucideIcons.sliders_horizontal))
+          .dx;
+      final t = StormTokens.from(StormPreset.stormDark);
+      expect(props - actions, moreOrLessEquals(t.sp * 5.5, epsilon: 0.5));
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('the vault switcher', () {
+    testWidgets('opens the switcher rather than navigating home', (
+      tester,
+    ) async {
+      // It used to `go(dashboard)` on tap, so the one control labelled with
+      // the current vault navigated away from every vault.
+      final c = shellContainer();
+      serverOf(c).addVault('v-second', 'Second');
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+      final before = locationOf(c);
+
+      await tester.tap(find.text('Primary'));
+      await tester.pumpAndSettle();
+
+      expect(locationOf(c), before, reason: 'opening a menu is not navigation');
+      expect(find.text('Second'), findsOneWidget, reason: 'the other vault');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('and server settings are the entry beneath the vaults', (
+      tester,
+    ) async {
+      // Not "All vaults": there is no dashboard at this width, and an entry
+      // that navigates to a screen the layout does not have is worse than no
+      // entry at all.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      await tester.tap(find.text('Primary'));
+      await tester.pumpAndSettle();
+      expect(find.text('All vaults'), findsNothing);
+
+      await tester.tap(find.text('Server settings ›'));
+      await tester.pumpAndSettle();
+
+      // The vault-scoped mount, so the sidebar stays beside it.
+      expect(locationOf(c), Routes.serverSettingsIn(FakeServer.primaryVault));
+      expect(find.byType(VaultSidebar), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('settings keep the sidebar', () {
+    // At desk width a settings screen that replaced the whole window would be
+    // the one place the tree disappears, and the only way back would be the
+    // app bar's arrow.
+    testWidgets('a setting can be changed without the page closing', (
+      tester,
+    ) async {
+      // Reported from the running app: changing a setting closed the page.
+      // Not reproduced here — this pins the behaviour so that if it is a
+      // regression it cannot come back silently, and so the next attempt
+      // starts from a test that already exercises the path.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+      await tester.tap(find.byTooltip('Client settings'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text(StormPreset.slowflowEarth.label));
+      await tester.pumpAndSettle();
+
+      expect(locationOf(c), Routes.clientSettingsIn(FakeServer.primaryVault));
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('client settings open in the pane, not over it', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      // A page, not a popover: anchored to a button at the foot of the
+      // sidebar, a menu opens below the bottom of the window.
+      await tester.tap(find.byTooltip('Client settings'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Client settings'), findsWidgets);
+      expect(find.byType(VaultSidebar), findsOneWidget);
+      expect(locationOf(c), Routes.clientSettingsIn(FakeServer.primaryVault));
+      await disposeShell(tester, c);
+    });
+  });
+
   group('the folder tree', () {
+    testWidgets('indents a note under the folder that holds it', (
+      tester,
+    ) async {
+      // `inTree` used to be inferred from `leading != null`, which silently
+      // stopped being true for notes the day the leading spacer was removed —
+      // so every note in the tree rendered at the full-width list's size and
+      // the hierarchy flattened.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      final sidebar = find.byType(VaultSidebar);
+      Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
+
+      await tester.tap(inRail(find.text('Daily')));
+      await tester.pumpAndSettle();
+
+      final folder = tester.getTopLeft(inRail(find.text('Daily'))).dx;
+      final note = tester.getTopLeft(inRail(find.text('2026-08-05'))).dx;
+      expect(
+        note,
+        greaterThan(folder),
+        reason: 'a child sits in from the folder that holds it',
+      );
+      await disposeShell(tester, c);
+    });
+
     testWidgets('expands a folder in place rather than navigating', (
       tester,
     ) async {
@@ -205,6 +451,108 @@ void main() {
     });
   });
 
+  group('properties are a surface of their own', () {
+    // They used to sit inline above the prose, which cost a phone's first
+    // screen permanently: a note with a dozen keys pushed the writing off the
+    // bottom before a word of it was visible.
+    testWidgets('never inside the prose column', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byType(NoteEditor),
+          matching: find.byType(NoteProperties),
+        ),
+        findsNothing,
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('open as a drawer beside the note on a wide screen', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PropertiesDrawer), findsNothing, reason: 'closed');
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
+
+      // And close again, because a drawer that cannot be dismissed is a
+      // column. The rail's toggle is what does it: the design draws the
+      // drawer's header as the word alone, with no close of its own.
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('its rule runs the full height, level with the sidebar\'s', (
+      tester,
+    ) async {
+      // The shell used to put an 8px spacer above the pane's Row, so the
+      // vertical rules on the rail and the drawer started below the top of
+      // the pane with the page showing above them.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getTopLeft(find.byType(PropertiesDrawer)).dy,
+        tester.getTopLeft(find.byType(VaultSidebar)).dy,
+        reason: 'the columns are the same height, so their rules line up',
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('stay open when the next note is opened', (tester) async {
+      // The drawer is a pane at this width, not a thing belonging to one
+      // note's screen — opening a second note built a second state and shut
+      // it.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
+
+      // Out to the browser and into another note, so the note screen's own
+      // State is destroyed rather than merely re-keyed.
+      await openVault(tester, c);
+      await tester.pumpAndSettle();
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n1'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('open as a sheet on a phone, never a drawer', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PropertiesDrawer), findsNothing);
+      expect(find.byType(PropertiesPanel), findsOneWidget);
+      expect(find.text('PROPERTIES'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+  });
+
   group('the dashboard', () {
     /// The widest a vault card is allowed to get.
     ///
@@ -217,16 +565,18 @@ void main() {
       return tester.getSize(card).width;
     }
 
-    testWidgets('cards stay card-sized on a wide screen', (tester) async {
+    testWidgets('hands off to a vault at desk width instead of showing', (
+      tester,
+    ) async {
+      // Everything the dashboard offers is already in the sidebar at this
+      // width — the switcher lists the vaults, the tree is the browser — so a
+      // whole screen for it is a page you pass through on the way to the only
+      // thing you came for.
       final c = shellContainer();
-      final server = serverOf(c);
-      for (var i = 0; i < 6; i++) {
-        server.addVault('v-extra-$i', 'Extra $i');
-      }
-      await pumpShell(tester, c, size: const Size(1600, 900));
+      await pumpShell(tester, c, size: desk);
 
-      expect(await cardWidth(tester), lessThanOrEqualTo(220));
-      expect(tester.takeException(), isNull);
+      expect(locationOf(c), Routes.browse(FakeServer.primaryVault));
+      expect(find.byType(VaultSidebar), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -242,21 +592,16 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('recents move to a rail instead of stretching', (tester) async {
+    testWidgets('but stays when there is no vault to hand off to', (
+      tester,
+    ) async {
+      // It is the only screen that can make one.
       final c = shellContainer();
-      final server = serverOf(c);
-      server.markOpened(FakeServer.primaryVault, 'n0', '2026-08-07T09:00:00Z');
+      serverOf(c).vaults.clear();
       await pumpShell(tester, c, size: desk);
 
-      final rail = tester.getSize(
-        find
-            .ancestor(
-              of: find.text('Recently opened'),
-              matching: find.byType(SizedBox),
-            )
-            .last,
-      );
-      expect(rail.width, lessThanOrEqualTo(340));
+      expect(locationOf(c), Routes.dashboard);
+      expect(find.text('No vaults yet'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });

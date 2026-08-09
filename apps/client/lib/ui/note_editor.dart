@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,8 +9,12 @@ import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
+import 'breakpoints.dart';
+import 'shell/storm_scaffold.dart';
 import 'editor_toolbar.dart';
-import 'note_properties.dart';
+import 'widgets.dart';
+import 'states.dart';
+import 'tokens.dart';
 import 'wikilink_suggestions.dart';
 
 /// The editing pane.
@@ -20,7 +25,23 @@ import 'wikilink_suggestions.dart';
 /// reconciled our text against a version we never saw, and the buffer must be
 /// replaced rather than kept.
 class NoteEditor extends ConsumerStatefulWidget {
-  const NoteEditor({super.key, this.onFollowLink, this.showToolbar = false});
+  const NoteEditor({
+    super.key,
+    this.onFollowLink,
+    this.showToolbar = false,
+    this.footer,
+    this.onActions,
+  });
+
+  /// Pin, attach, rename, delete — reached by long-pressing the status line.
+  ///
+  /// The status line is the note's own chrome at *both* widths; the phone's
+  /// header row does not exist at desk width, and the actions have to.
+  final VoidCallback? onActions;
+
+  /// Attachments and mentions, which the design puts *inside* the scroll
+  /// after the prose rather than pinned under it.
+  final Widget? footer;
 
   /// Whether to show the formatting toolbar.
   ///
@@ -69,7 +90,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   void initState() {
     super.initState();
     _controller = StormMarkdownController(
-      theme: MarkdownTheme.light(const TextStyle(fontSize: 16)),
+      // Replaced on the first build with the themed one. A size here would
+      // be a number the token layer cannot reach, and it is never painted.
+      theme: MarkdownTheme.light(const TextStyle()),
     );
     _controller.addListener(_onLocalEdit);
   }
@@ -187,9 +210,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     // user's choice; the default is the bundled serif.
     final base = TextStyle(
       fontFamily: settings.bodyFont.family,
-      fontSize: settings.fontSize + 1,
-      height: 1.6,
-      color: Theme.of(context).colorScheme.onSurface,
+      fontSize: settings.fontSize,
+      height: 1.65,
+      color: context.tokens.text,
     );
     _controller.theme = dark
         ? MarkdownTheme.dark(base)
@@ -207,37 +230,80 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     }
 
     if (!session.isOpen) {
-      return _Placeholder(error: session.error);
+      return session.error == null
+          ? const EmptyState(
+              fill: true,
+              icon: LucideIcons.file_text,
+              title: 'Select a note to start editing',
+            )
+          : EmptyState(
+              fill: true,
+              icon: LucideIcons.circle_alert,
+              title: 'This note would not open',
+              detail: session.error,
+            );
     }
+
+    final t = context.tokens;
+    // 40 at desk width, as the prototype has it; on a phone the column is the
+    // screen and 40 a side would leave nothing for the words.
+    // The shell's inset on a phone, so the prose starts under the bubble and
+    // the header rather than three pixels inside them.
+    final inset = context.isExpanded
+        ? kEditorInset
+        : StormChrome.contentInset(context);
+    // The pane's own top padding, all of it — the shell contributes nothing
+    // at this width. Getting it wrong is visible from across the room: the
+    // version line and the sidebar's vault name are meant to share a
+    // baseline, which is what 28 here and 18-around-a-34px-badge there both
+    // land on.
+    final topInset = context.isExpanded ? kEditorTopInset : 0.0;
 
     return Column(
       children: [
-        _StatusBar(session: session),
+        GestureDetector(
+          key: const Key('note-actions'),
+          onLongPress: widget.onActions,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            // The same inset as the prose below it: the design lines the
+            // version up with the note's first character.
+            padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 0.5),
+            child: _statusBar(session),
+          ),
+        ),
         if (_isDegraded(session)) const _DegradedNotice(),
-        if (session.notice != null)
+        if (session.hasConflict)
+          ConflictCard(onDismiss: session.dismissNotice)
+        else if (session.notice != null)
           _Notice(
             message: session.notice!,
-            isConflict: session.hasConflict,
+            isConflict: false,
             onDismiss: session.dismissNotice,
           ),
+        if (session.saveState == SaveState.queued)
+          OfflineNotice(queued: ref.watch(syncEngineProvider).pendingCount),
         Expanded(
           child: Scrollbar(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(28, 18, 28, 120),
-              child: Center(
+              padding: EdgeInsets.fromLTRB(inset, t.sp, inset, t.sp * 15),
+              // Left, not centred. The prototype's note pane is 604px wide, so
+              // its `margin: 0 auto` inside a 640 measure never actually
+              // centres anything — the prose sits 40px from the column's left
+              // edge. Centring reproduces that at 1200 and nowhere else: at
+              // 1700 it strands the text in the middle of an empty field.
+              child: Align(
+                alignment: Alignment.topLeft,
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 820),
+                  constraints: const BoxConstraints(maxWidth: kEditorMeasure),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Inside the scroll view and inside the same 820px
-                      // column as the prose. Pinned above it, the panel was
-                      // full-width while the text was centred and capped —
-                      // and it cost a phone's first screen permanently.
-                      NoteProperties(
-                        content: session.buffer,
-                        onChanged: session.editProperties,
-                      ),
+                      // Properties are no longer in this column. They are a
+                      // surface of their own now — a sheet on a phone, a drawer
+                      // on a wide screen — because a note with a dozen keys
+                      // pushed the writing off the first screen, and the design
+                      // gives them their own place with a header and a close.
                       TextField(
                         // Named so tests can tell the prose apart from the
                         // property inputs above it.
@@ -252,11 +318,25 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                         // Enter inside a list carries the list on.
                         inputFormatters: const [ListContinuationFormatter()],
                         contextMenuBuilder: _contextMenu,
+                        // Every border, not just `border`. The theme sets
+                        // enabledBorder and focusedBorder separately, and
+                        // clearing only `border` left a rounded outline drawn
+                        // around the whole note. `filled: false` for the same
+                        // reason: the theme fills every field with surface2,
+                        // which put the prose on a card of its own.
                         decoration: const InputDecoration(
                           border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          errorBorder: InputBorder.none,
+                          focusedErrorBorder: InputBorder.none,
+                          filled: false,
+                          contentPadding: EdgeInsets.zero,
                           isDense: true,
                         ),
                       ),
+                      if (widget.footer != null) widget.footer!,
                     ],
                   ),
                 ),
@@ -268,7 +348,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
         // formatting row, in the space the nav bubble gives up.
         if (widget.showToolbar) ...[
           WikilinkSuggestions(controller: _controller),
-          EditorToolbar(controller: _controller),
+          EditorToolbar(controller: _controller, onDone: _focus.unfocus),
         ],
       ],
     );
@@ -284,23 +364,26 @@ class _DegradedNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
+    // Not amber: amber means tags and highlight. This is a note about how the
+    // editor is behaving, which is neither.
     return Container(
       width: double.infinity,
-      color: scheme.tertiaryContainer,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
+      color: t.surface2,
+      padding: EdgeInsets.symmetric(horizontal: t.sp * 2.5, vertical: t.sp),
       child: Row(
         children: [
-          Icon(Icons.speed, size: 16, color: scheme.onTertiaryContainer),
-          const SizedBox(width: 10),
+          Icon(LucideIcons.gauge, size: t.bodySize, color: t.text3),
+          SizedBox(width: t.sp * 1.25),
           Expanded(
             child: Text(
               'Formatting is off above '
               '${StormMarkdownController.maxStyledLines} lines, to keep typing '
               'responsive. The note itself is unchanged.',
               style: TextStyle(
-                color: scheme.onTertiaryContainer,
-                fontSize: 12.5,
+                fontFamily: StormTokens.sansFamily,
+                color: t.text2,
+                fontSize: t.labelSize,
               ),
             ),
           ),
@@ -310,61 +393,23 @@ class _DegradedNotice extends StatelessWidget {
   }
 }
 
-/// Shown while the frontmatter is being edited as text.
-class _StatusBar extends StatelessWidget {
-  const _StatusBar({required this.session});
-
-  final NoteSession session;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (label, color) = switch (session.saveState) {
-      SaveState.idle => ('', theme.colorScheme.onSurfaceVariant),
-      SaveState.dirty => ('Unsaved', theme.colorScheme.onSurfaceVariant),
-      SaveState.saving => ('Saving…', theme.colorScheme.onSurfaceVariant),
-      SaveState.saved => ('Saved', theme.colorScheme.primary),
-      SaveState.queued => ('Queued — offline', theme.colorScheme.tertiary),
-      SaveState.failed => ('Failed', theme.colorScheme.error),
+extension on _NoteEditorState {
+  /// The tone is the meaning, and the meanings are fixed: green is the server
+  /// has it, amber is waiting, danger is it did not go, grey is in flight.
+  Widget _statusBar(NoteSession session) {
+    final (label, tone) = switch (session.saveState) {
+      SaveState.idle => ('', SaveTone.working),
+      SaveState.dirty => ('Unsaved', SaveTone.working),
+      SaveState.saving => ('Saving…', SaveTone.working),
+      SaveState.saved => ('Saved', SaveTone.good),
+      SaveState.queued => ('Queued — offline', SaveTone.waiting),
+      SaveState.failed => ('Failed', SaveTone.bad),
     };
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: theme.dividerColor)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              session.meta?.path ?? '',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (session.error != null) ...[
-            Icon(Icons.error_outline, size: 14, color: theme.colorScheme.error),
-            const SizedBox(width: 5),
-            Text(
-              session.error!,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.error,
-              ),
-            ),
-            const SizedBox(width: 12),
-          ],
-          Text(
-            'v${session.baseVersion}',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Text(label, style: theme.textTheme.bodySmall?.copyWith(color: color)),
-        ],
-      ),
+    return StatusBar(
+      version: session.baseVersion,
+      label: label,
+      tone: tone,
+      error: session.error,
     );
   }
 }
@@ -382,71 +427,37 @@ class _Notice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final bg = isConflict ? scheme.errorContainer : scheme.secondaryContainer;
-    final fg = isConflict
-        ? scheme.onErrorContainer
-        : scheme.onSecondaryContainer;
+    final t = context.tokens;
+    final fg = isConflict ? t.danger : t.text2;
 
     return Container(
       width: double.infinity,
-      color: bg,
-      padding: const EdgeInsets.fromLTRB(20, 10, 8, 10),
+      color: t.surface2,
+      padding: EdgeInsets.fromLTRB(t.sp * 2.5, t.sp * 1.25, t.sp, t.sp * 1.25),
       child: Row(
         children: [
           Icon(
-            isConflict ? Icons.merge_type : Icons.info_outline,
-            size: 16,
+            isConflict ? LucideIcons.git_merge : LucideIcons.info,
+            size: t.bodySize,
             color: fg,
           ),
-          const SizedBox(width: 10),
+          SizedBox(width: t.sp * 1.25),
           Expanded(
-            child: Text(message, style: TextStyle(color: fg, fontSize: 13)),
+            child: Text(
+              message,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                color: fg,
+                fontSize: t.codeSize,
+              ),
+            ),
           ),
           IconButton(
-            icon: Icon(Icons.close, size: 16, color: fg),
+            icon: Icon(LucideIcons.x, size: t.bodySize, color: fg),
             onPressed: onDismiss,
             visualDensity: VisualDensity.compact,
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _Placeholder extends StatelessWidget {
-  const _Placeholder({this.error});
-
-  final String? error;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              error != null ? Icons.error_outline : Icons.description_outlined,
-              size: 36,
-              color: error != null
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.onSurfaceVariant,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              error ?? 'Select a note to start editing',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: error != null
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

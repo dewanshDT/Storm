@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import 'accents.dart';
+import 'tokens.dart';
+import 'widgets.dart';
 
 /// What a new note needs from the user: a name, and optionally a colour.
 class NewNote {
@@ -70,7 +72,7 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
 
     return AlertDialog(
       title: const Text('New note'),
@@ -78,32 +80,31 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(
+          StormInput(
             controller: _controller,
             autofocus: true,
             textCapitalization: TextCapitalization.sentences,
-            decoration: const InputDecoration(
-              labelText: 'Name',
-              hintText: 'Weekly review',
-            ),
+            labelText: 'Name',
+            hintText: 'Weekly review',
             onSubmitted: (_) => _submit(),
           ),
           if (widget.folder.isNotEmpty) ...[
-            const SizedBox(height: 8),
+            SizedBox(height: t.sp),
             // Said, not asked: the folder follows where they are.
             Text(
               'in ${widget.folder}',
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.labelSize,
+                color: t.text3,
+              ),
             ),
           ],
-          const SizedBox(height: 18),
-          Text(
-            'Colour',
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-          ),
-          const SizedBox(height: 8),
+          SizedBox(height: t.sp * 2.25),
+          const SectionLabel('Colour'),
+          SizedBox(height: t.sp),
           AccentPicker(
-            size: 26,
+            size: t.sp * 3.25,
             selected: _accent,
             onSelected: (accent) => setState(() => _accent = accent),
           ),

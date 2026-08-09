@@ -23,6 +23,27 @@ void main() {
     return c;
   }
 
+  group('what the toolbar lights up', () {
+    // The active state has to be read from the buffer rather than remembered
+    // from the last tap: a caret moved with the arrow keys changes what is
+    // bold without any button being pressed.
+    test('bold is active with the caret inside the markers', () {
+      expect(make('a **b** c', base: 5).inlineActive('**'), isTrue);
+      expect(make('a **b** c', base: 1).inlineActive('**'), isFalse);
+    });
+
+    test('bold is active for a selection wrapped either way', () {
+      expect(make('a **b** c', base: 4, extent: 5).inlineActive('**'), isTrue);
+      expect(make('a **b** c', base: 2, extent: 7).inlineActive('**'), isTrue);
+    });
+
+    test('the block prefix comes from the caret line', () {
+      expect(make('# One\n- two\n', base: 2).blockPrefixHere(), '# ');
+      expect(make('# One\n- two\n', base: 8).blockPrefixHere(), '- ');
+      expect(make('plain\n', base: 2).blockPrefixHere(), '');
+    });
+  });
+
   group('toggleInline', () {
     test('wraps a selection and keeps it selected', () {
       final c = make('hello world', base: 6, extent: 11);

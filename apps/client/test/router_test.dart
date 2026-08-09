@@ -27,8 +27,11 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      expect(find.text('Storm'), findsOneWidget);
-      expect(find.text('Recently opened'), findsOneWidget);
+      // The wordmark is gone — the app's own name is the least useful thing
+      // on the screen you opened the app to see.
+      expect(find.text('STORM'), findsNothing);
+      expect(find.text('RECENTLY OPENED'), findsOneWidget);
+      expect(find.text('VAULTS'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -40,7 +43,7 @@ void main() {
       // the old one, so this redirect never fired.
       final c = shellContainer();
       await pumpShell(tester, c);
-      expect(find.text('Recently opened'), findsOneWidget);
+      expect(find.text('RECENTLY OPENED'), findsOneWidget);
 
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
@@ -93,7 +96,7 @@ void main() {
           .go(Routes.folder(FakeServer.primaryVault, 'Projects/Storm'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vault'), findsOneWidget);
+      expect(find.text('Vaults'), findsOneWidget);
       expect(find.text('Projects'), findsWidgets);
       expect(find.text('Storm'), findsWidgets);
       expect(find.text('Design'), findsOneWidget);
@@ -112,7 +115,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('2026-08-05'), findsOneWidget);
 
-      await tester.tap(find.byIcon(Icons.arrow_back));
+      // Up is the breadcrumb now: there is no back button in the chrome.
+      await tester.tap(find.text('Primary'));
       await tester.pumpAndSettle();
       expect(find.text('Projects'), findsOneWidget);
       await disposeShell(tester, c);

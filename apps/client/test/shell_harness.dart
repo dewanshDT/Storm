@@ -10,6 +10,7 @@ import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/theme.dart';
+import 'package:storm/ui/tokens.dart';
 
 import 'fake_server.dart';
 
@@ -130,7 +131,7 @@ class FakeSettings extends SettingsNotifier {
       ? Settings(
           baseUrl: 'http://test',
           token: 't',
-          darkMode: true,
+          theme: StormPreset.stormDark,
           activeVault: activeVault,
         )
       : const Settings();
