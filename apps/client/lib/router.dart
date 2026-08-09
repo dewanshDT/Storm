@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'state/app_state.dart';
 import 'ui/browse_screen.dart';
 import 'ui/connect_screen.dart';
+import 'ui/gallery_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/search_screen.dart';
 import 'ui/server_settings_screen.dart';
@@ -22,6 +23,10 @@ abstract final class Routes {
   static const dashboard = '/';
   static const connect = '/connect';
   static const serverSettings = '/settings/server';
+
+  /// Every shared widget in all three themes. Not linked from the app — it is
+  /// a surface for judging the token layer, reached by typing the path.
+  static const gallery = '/gallery';
 
   /// Everything note-shaped hangs off the vault, so a deep link carries which
   /// vault it means and back always retraces the real path.
@@ -77,11 +82,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       // connect screen at someone who is already set up.
       if (settings.isLoading) return null;
 
+      // The gallery needs no server, and bouncing it to Connect would make it
+      // unreachable on exactly the install where the theme is being judged.
+      if (state.matchedLocation == Routes.gallery) return null;
+
       if (!configured) return atConnect ? null : Routes.connect;
       return atConnect ? Routes.dashboard : null;
     },
     routes: [
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
+      GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
       // builds a stack with the dashboard underneath rather than replacing it.
       // Flat routes meant `go` left exactly one route on the stack, and the

@@ -258,7 +258,6 @@ class _PathDialogState extends State<_PathDialog> {
           labelText: widget.isFolder ? 'Folder name' : 'Path in vault',
           hintText: widget.isFolder ? 'Projects' : 'Folder/Note.md',
           errorText: _error,
-          border: const OutlineInputBorder(),
         ),
         onSubmitted: (_) => _submit(),
       ),

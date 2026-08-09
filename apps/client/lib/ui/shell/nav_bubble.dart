@@ -138,11 +138,11 @@ class _Slot extends StatelessWidget {
                   right: -6,
                   top: -6,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 4,
-                      vertical: 1,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: t.sp * 0.5,
+                      vertical: t.sp * 0.125,
                     ),
-                    constraints: const BoxConstraints(minWidth: 15),
+                    constraints: BoxConstraints(minWidth: t.labelSize * 1.6),
                     decoration: BoxDecoration(
                       color: t.amber,
                       borderRadius: BorderRadius.circular(999),
@@ -152,8 +152,10 @@ class _Slot extends StatelessWidget {
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontFamily: StormTokens.monoFamily,
-                        fontSize: 9,
-                        height: 1.3,
+                        // The 11px floor applies here too: a count nobody can
+                        // read is not a count.
+                        fontSize: t.labelSize,
+                        height: 1.2,
                         fontWeight: FontWeight.w600,
                         color: t.bg,
                       ),
