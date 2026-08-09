@@ -228,11 +228,19 @@ class _PropertyRow extends StatelessWidget {
       // values read as one block of chips rather than as pairs.
       padding: EdgeInsets.symmetric(vertical: t.sp * 0.75),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+        // Top, not centre: a `tags` value that wraps to three chip rows used
+        // to drag its key down beside the middle row. The key belongs against
+        // the value's first line.
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // The chip hugs its key. A fixed column reserved 132px for `id` and
-          // left the value stranded a third of the way across the sheet.
-          _PropertyKey(label: span.key, enabled: !readOnly, onMenu: onMenu),
+          Padding(
+            padding: EdgeInsets.only(top: t.sp * 0.25),
+            child: _PropertyKey(
+              label: span.key,
+              enabled: !readOnly,
+              onMenu: onMenu,
+            ),
+          ),
           SizedBox(width: t.sp * 1.25),
           Expanded(
             child: readOnly

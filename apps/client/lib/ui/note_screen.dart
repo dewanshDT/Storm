@@ -421,40 +421,107 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    // Hand-rolled hit targets rather than IconButton: its 8px padding plus a
+    // 48px minimum pushed the chevron well inboard of the header's own inset
+    // and made the row twice the height the design draws. The tap area is
+    // still 44 — it is the *box* that shrinks, not the target.
     return GestureDetector(
       onLongPress: onActions,
       behavior: HitTestBehavior.opaque,
-      child: Row(
-        key: const Key('note-header-row'),
-        children: [
-          IconButton(
-            icon: Icon(Icons.chevron_left, size: t.headingSize, color: t.text2),
-            onPressed: onBack,
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Back',
-          ),
-          Expanded(
-            child: GestureDetector(
-              onTap: folder.isEmpty ? null : onUp,
-              child: Text(
-                folder.isEmpty ? 'Vault root' : folder,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
+      child: SizedBox(
+        height: t.sp * 5.5,
+        child: Row(
+          key: const Key('note-header-row'),
+          children: [
+            _HeaderButton(
+              icon: Icons.chevron_left,
+              tooltip: 'Back',
+              color: t.text2,
+              size: t.headingSize,
+              onTap: onBack,
+              // Flush left, so the chevron lines up with the breadcrumb on
+              // every other screen.
+              alignLeft: true,
+            ),
+            SizedBox(width: t.sp * 0.75),
+            Expanded(
+              child: GestureDetector(
+                onTap: folder.isEmpty ? null : onUp,
+                child: Text(
+                  folder.isEmpty ? 'Vault root' : folder,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.codeSize,
+                    color: t.text3,
+                  ),
                 ),
               ),
             ),
+            // Attach, pin, rename and delete were long-press only, which is
+            // no way to find "keep offline". The long-press still works.
+            _HeaderButton(
+              icon: Icons.more_horiz,
+              tooltip: 'Note actions',
+              color: t.text3,
+              size: t.bodySize,
+              onTap: onActions,
+            ),
+            _HeaderButton(
+              icon: Icons.tune,
+              tooltip: 'Properties',
+              color: t.accent,
+              size: t.bodySize,
+              onTap: onProperties,
+              alignRight: true,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HeaderButton extends StatelessWidget {
+  const _HeaderButton({
+    required this.icon,
+    required this.tooltip,
+    required this.color,
+    required this.size,
+    required this.onTap,
+    this.alignLeft = false,
+    this.alignRight = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final Color color;
+  final double size;
+  final VoidCallback onTap;
+  final bool alignLeft;
+  final bool alignRight;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: SizedBox(
+          width: t.sp * 5.5,
+          height: t.sp * 5.5,
+          child: Align(
+            alignment: alignLeft
+                ? Alignment.centerLeft
+                : alignRight
+                ? Alignment.centerRight
+                : Alignment.center,
+            child: Icon(icon, size: size, color: color),
           ),
-          IconButton(
-            icon: Icon(Icons.tune, size: t.bodySize, color: t.accent),
-            onPressed: onProperties,
-            visualDensity: VisualDensity.compact,
-            tooltip: 'Properties',
-          ),
-        ],
+        ),
       ),
     );
   }
