@@ -27,8 +27,11 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      expect(find.text('STORM'), findsOneWidget);
+      // The wordmark is gone — the app's own name is the least useful thing
+      // on the screen you opened the app to see.
+      expect(find.text('STORM'), findsNothing);
       expect(find.text('RECENTLY OPENED'), findsOneWidget);
+      expect(find.text('VAULTS'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
