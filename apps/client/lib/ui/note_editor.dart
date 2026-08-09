@@ -244,11 +244,12 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     // 40 at desk width, as the prototype has it; on a phone the column is the
     // screen and 40 a side would leave nothing for the words.
     final inset = context.isExpanded ? kEditorInset : t.sp * 2.5;
-    // The pane's own top padding is 28 in the design, and the shell has
-    // already contributed 8. Getting this wrong is visible from across the
-    // room: at 8 the version line sits above the sidebar's vault name, and
-    // the two are meant to share a baseline.
-    final topInset = context.isExpanded ? kEditorTopInset - t.sp : 0.0;
+    // The pane's own top padding, all of it — the shell contributes nothing
+    // at this width. Getting it wrong is visible from across the room: the
+    // version line and the sidebar's vault name are meant to share a
+    // baseline, which is what 28 here and 18-around-a-34px-badge there both
+    // land on.
+    final topInset = context.isExpanded ? kEditorTopInset : 0.0;
 
     return Column(
       children: [

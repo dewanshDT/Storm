@@ -162,7 +162,14 @@ class StormChrome extends StatelessWidget {
               children: [
                 if (bubbles)
                   SizedBox(height: contentTop(context))
-                else
+                // Nothing at desk width. The columns beside the note carry the
+                // vertical rules that separate them, and a spacer here pushes
+                // the whole Row down — so those rules started eight pixels
+                // below the top of the pane with the page showing above them.
+                // Each column owns its own top padding instead, which is what
+                // the design specifies: 28 for the note, 16 for the rail, 20
+                // for the drawer.
+                else if (!context.isExpanded)
                   SizedBox(height: t.sp),
                 if (header != null)
                   Padding(
