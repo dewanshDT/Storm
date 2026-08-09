@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
@@ -170,7 +171,77 @@ void main() {
     });
   });
 
+  String locationOf(ProviderContainer c) =>
+      c.read(routerProvider).state.uri.path;
+
+  group('the vault switcher', () {
+    testWidgets('opens the switcher rather than navigating home', (
+      tester,
+    ) async {
+      // It used to `go(dashboard)` on tap, so the one control labelled with
+      // the current vault navigated away from every vault.
+      final c = shellContainer();
+      serverOf(c).addVault('v-second', 'Second');
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+      final before = locationOf(c);
+
+      await tester.tap(find.text('Primary'));
+      await tester.pumpAndSettle();
+
+      expect(locationOf(c), before, reason: 'opening a menu is not navigation');
+      expect(find.text('Second'), findsOneWidget, reason: 'the other vault');
+      expect(
+        find.text('All vaults'),
+        findsOneWidget,
+        reason: 'home lives here',
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('and home is an entry inside it', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      await tester.tap(find.text('Primary'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('All vaults'));
+      await tester.pumpAndSettle();
+
+      expect(locationOf(c), Routes.dashboard);
+      await disposeShell(tester, c);
+    });
+  });
+
   group('the folder tree', () {
+    testWidgets('indents a note under the folder that holds it', (
+      tester,
+    ) async {
+      // `inTree` used to be inferred from `leading != null`, which silently
+      // stopped being true for notes the day the leading spacer was removed —
+      // so every note in the tree rendered at the full-width list's size and
+      // the hierarchy flattened.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      final sidebar = find.byType(VaultSidebar);
+      Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
+
+      await tester.tap(inRail(find.text('Daily')));
+      await tester.pumpAndSettle();
+
+      final folder = tester.getTopLeft(inRail(find.text('Daily'))).dx;
+      final note = tester.getTopLeft(inRail(find.text('2026-08-05'))).dx;
+      expect(
+        note,
+        greaterThan(folder),
+        reason: 'a child sits in from the folder that holds it',
+      );
+      await disposeShell(tester, c);
+    });
+
     testWidgets('expands a folder in place rather than navigating', (
       tester,
     ) async {

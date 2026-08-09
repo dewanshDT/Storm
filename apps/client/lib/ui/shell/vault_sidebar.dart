@@ -9,6 +9,7 @@ import '../accents.dart';
 import '../breakpoints.dart';
 import '../icons.dart';
 import '../states.dart';
+import '../surfaces.dart';
 import '../tokens.dart';
 import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
@@ -90,7 +91,7 @@ class VaultSidebar extends ConsumerWidget {
                   vertical: t.sp * 1.25,
                 ),
                 child: Row(
-                  spacing: t.sp,
+                  spacing: t.sp * 0.25,
                   children: [
                     for (final action
                         in vaultActions(context, ref, uri)
@@ -109,8 +110,13 @@ class VaultSidebar extends ConsumerWidget {
                         iconSize: t.bodySize,
                         tooltip: action.tooltip,
                         visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.all(t.sp * 0.75),
-                        constraints: const BoxConstraints(),
+                        // A 38px square, as the design draws it. At icon-plus-
+                        // six the row read as four glyphs dropped on a border
+                        // rather than as a toolbar.
+                        padding: EdgeInsets.zero,
+                        constraints: BoxConstraints.tight(
+                          Size.square(t.sp * 4.75),
+                        ),
                         onPressed: action.onTap,
                       ),
                     // Last in the row, not pushed to the far edge: the design
@@ -126,8 +132,10 @@ class VaultSidebar extends ConsumerWidget {
                       iconSize: t.bodySize,
                       tooltip: 'Server settings',
                       visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.all(t.sp * 0.75),
-                      constraints: const BoxConstraints(),
+                      padding: EdgeInsets.zero,
+                      constraints: BoxConstraints.tight(
+                        Size.square(t.sp * 4.75),
+                      ),
                       onPressed: () => context.push(Routes.serverSettings),
                     ),
                   ],
@@ -142,57 +150,162 @@ class VaultSidebar extends ConsumerWidget {
 }
 
 /// Which vault you are in, and the way out of it.
-class _VaultSwitcher extends StatelessWidget {
+/// Which vault you are in, and the way to another one.
+///
+/// It used to `go(dashboard)` on tap, so the one control labelled with the
+/// current vault navigated away from every vault. It opens the switcher now;
+/// "All vaults" inside it is what goes home.
+class _VaultSwitcher extends ConsumerStatefulWidget {
   const _VaultSwitcher({required this.vault, required this.accent});
 
   final VaultInfo? vault;
   final Accent accent;
 
   @override
+  ConsumerState<_VaultSwitcher> createState() => _VaultSwitcherState();
+}
+
+class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
+  final _anchor = GlobalKey();
+  bool _open = false;
+
+  Future<void> _toggle() async {
+    final t = context.tokens;
+    setState(() => _open = true);
+    await showStormPopover<void>(
+      context: context,
+      anchorKey: _anchor,
+      width: context.sidebarWidth - t.sp * 4,
+      builder: (popContext) => Consumer(
+        builder: (popContext, ref, _) {
+          final engine = ref.watch(syncEngineProvider);
+          final activeId = ref.watch(activeVaultProvider);
+          final vaults = ref.watch(vaultsProvider).value ?? const [];
+          final status = dotStatusFor(
+            online: engine.isOnline,
+            syncing: engine.isSyncing,
+            pending: engine.pendingCount,
+          );
+
+          return StormPopover(
+            children: [
+              Padding(
+                padding: EdgeInsets.only(
+                  left: t.sp * 0.75,
+                  bottom: t.sp * 0.75,
+                ),
+                child: const SectionLabel('Vaults'),
+              ),
+              for (final v in vaults)
+                PopoverItem(
+                  label: v.name,
+                  subtitle: v.missing
+                      ? 'Directory not found'
+                      : '${v.noteCount} note${v.noteCount == 1 ? '' : 's'}',
+                  selected: v.id == activeId,
+                  leading: StatusDot(
+                    status: v.missing
+                        ? DotStatus.offline
+                        : v.id == activeId
+                        ? status
+                        : DotStatus.offline,
+                  ),
+                  onTap: v.missing
+                      ? null
+                      : () {
+                          Navigator.pop(popContext);
+                          // Selecting the vault you are already in should do
+                          // nothing, not navigate.
+                          if (v.id == activeId) return;
+                          context.go(Routes.browse(v.id));
+                        },
+                ),
+              const PopoverDivider(),
+              PopoverItem(
+                label: 'All vaults',
+                tone: PopoverTone.accent,
+                onTap: () {
+                  Navigator.pop(popContext);
+                  context.go(Routes.dashboard);
+                },
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (mounted) setState(() => _open = false);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return InkWell(
-      onTap: () => context.go(Routes.dashboard),
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 2, t.sp * 2, t.sp * 1.5),
-        child: Row(
-          children: [
-            Container(
-              width: t.sp * 4.5,
-              height: t.sp * 4.5,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: accent.tile(t),
-                borderRadius: BorderRadius.circular(t.rControl),
-              ),
-              child: Text(
-                (vault?.name.trim().isNotEmpty ?? false)
-                    ? vault!.name.trim()[0].toUpperCase()
-                    : 'S',
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  fontWeight: FontWeight.w600,
-                  color: kTileInk,
+    final vault = widget.vault;
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        t.sp * 1.5,
+        t.sp * 2,
+        t.sp * 1.5,
+        t.sp * 1.5,
+      ),
+      child: InkWell(
+        key: _anchor,
+        onTap: _toggle,
+        borderRadius: BorderRadius.circular(t.rControl),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: t.sp * 0.5,
+            vertical: t.sp * 0.5,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: t.sp * 4.25,
+                height: t.sp * 4.25,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: widget.accent.tile(t),
+                  borderRadius: BorderRadius.circular(t.rControl),
+                ),
+                child: Text(
+                  (vault?.name.trim().isNotEmpty ?? false)
+                      ? vault!.name.trim()[0].toUpperCase()
+                      : 'S',
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.codeSize,
+                    fontWeight: FontWeight.w600,
+                    color: widget.accent.isNone ? t.text2 : kTileInk,
+                  ),
                 ),
               ),
-            ),
-            SizedBox(width: t.sp * 1.25),
-            Expanded(
-              child: Text(
-                vault?.name ?? 'Storm',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.bodySize,
-                  fontWeight: FontWeight.w600,
-                  color: t.text,
+              SizedBox(width: t.sp * 1.25),
+              Expanded(
+                child: Text(
+                  vault?.name ?? 'Storm',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.bodySize * 0.95,
+                    fontWeight: FontWeight.w600,
+                    color: t.text,
+                  ),
                 ),
               ),
-            ),
-            Icon(Icons.expand_more, size: t.bodySize, color: t.text3),
-          ],
+              // Rotates, so the control says whether the menu is down.
+              AnimatedRotation(
+                turns: _open ? 0.5 : 0,
+                duration: t.duration,
+                child: Icon(
+                  Icons.expand_more,
+                  size: t.bodySize,
+                  color: t.text3,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -328,34 +441,58 @@ class _FolderTreeState extends State<FolderTree> {
     required String folder,
     required int depth,
   }) {
+    final t = context.tokens;
     final entries = childrenOfFolder(widget.notes, folder, widget.knownFolders);
     final openNoteId = _openNoteId(context);
+
+    void addRow(Widget row, {required bool leading}) {
+      rows.add(
+        Padding(
+          padding: EdgeInsets.only(
+            left: _indent(context, depth, leading: leading),
+          ),
+          child: row,
+        ),
+      );
+    }
 
     for (final entry in entries) {
       if (entry.isFolder) {
         final isOpen = _expanded.contains(entry.path);
-        rows.add(
+        addRow(
+          leading: false,
           EntryTile(
             key: ValueKey('folder:${entry.path}'),
             entry: entry,
-            contentPadding: _indent(depth),
+            inTree: true,
+            contentPadding: _rowPadding(context),
             leading: Icon(
               isOpen ? Icons.expand_more : Icons.chevron_right,
-              size: context.tokens.codeSize,
-              color: context.tokens.text3,
+              size: t.codeSize,
+              color: t.text3,
             ),
             onFolderTap: () => setState(() {
               if (!_expanded.remove(entry.path)) _expanded.add(entry.path);
             }),
           ),
         );
-        if (isOpen) _appendLevel(rows, folder: entry.path, depth: depth + 1);
+        if (isOpen) {
+          _appendLevel(rows, folder: entry.path, depth: depth + 1);
+          // A group and the group after it need daylight between them, or the
+          // last child of one reads as a sibling of the next folder.
+          rows.add(SizedBox(height: t.sp * 0.75));
+        }
       } else {
-        rows.add(
+        addRow(
+          // A note has no chevron, so without this its title would start where
+          // the parent folder's chevron does rather than under the folder's
+          // own text — and one level of nesting would be invisible.
+          leading: true,
           EntryTile(
             key: ValueKey('note:${entry.note!.id}'),
             entry: entry,
-            contentPadding: _indent(depth),
+            inTree: true,
+            contentPadding: _rowPadding(context),
             selected: entry.note!.id == openNoteId,
             replaceRoute: true,
           ),
@@ -369,14 +506,20 @@ class _FolderTreeState extends State<FolderTree> {
     return segments.length > 3 && segments[2] == 'note' ? segments[3] : null;
   }
 
-  EdgeInsets _indent(int depth) {
+  /// Every tree row's own padding. The indent is applied *outside* it, so a
+  /// selected note's background sits inside the indented column rather than
+  /// spanning the sidebar as if it were top-level.
+  EdgeInsets _rowPadding(BuildContext context) {
     final sp = context.tokens.sp;
-    return EdgeInsets.fromLTRB(
-      sp + depth * sp * 1.75,
-      sp * 0.75,
-      sp,
-      sp * 0.75,
-    );
+    return EdgeInsets.symmetric(horizontal: sp * 1.25, vertical: sp * 0.75);
+  }
+
+  /// One step of hierarchy per level, plus the width of the chevron a folder
+  /// carries and a note does not — that second term is what puts a note's
+  /// title under its folder's title rather than under its folder's chevron.
+  double _indent(BuildContext context, int depth, {required bool leading}) {
+    final t = context.tokens;
+    return depth * t.sp * 2 + (leading ? t.codeSize + t.sp : 0);
   }
 }
 
