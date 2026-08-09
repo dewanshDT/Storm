@@ -244,6 +244,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     // 40 at desk width, as the prototype has it; on a phone the column is the
     // screen and 40 a side would leave nothing for the words.
     final inset = context.isExpanded ? kEditorInset : t.sp * 2.5;
+    // The pane's own top padding is 28 in the design, and the shell has
+    // already contributed 8. Getting this wrong is visible from across the
+    // room: at 8 the version line sits above the sidebar's vault name, and
+    // the two are meant to share a baseline.
+    final topInset = context.isExpanded ? kEditorTopInset - t.sp : 0.0;
 
     return Column(
       children: [
@@ -254,7 +259,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
           child: Padding(
             // The same inset as the prose below it: the design lines the
             // version up with the note's first character.
-            padding: EdgeInsets.fromLTRB(inset, 0, inset, t.sp * 0.5),
+            padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 0.5),
             child: _statusBar(session),
           ),
         ),

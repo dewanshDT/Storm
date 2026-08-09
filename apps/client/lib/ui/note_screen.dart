@@ -479,7 +479,9 @@ class _PropertiesRail extends StatelessWidget {
       ),
       child: Column(
         children: [
-          SizedBox(height: t.sp * 2),
+          // 16 from the pane top, as the prototype's rail has it — the shell
+          // already contributed 8 of that.
+          SizedBox(height: t.sp),
           Tooltip(
             message: 'Properties',
             child: InkWell(
