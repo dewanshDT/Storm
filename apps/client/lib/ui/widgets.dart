@@ -45,6 +45,12 @@ class StatusDot extends StatelessWidget {
   }
 }
 
+/// Dark ink for anything sitting on an accent tile.
+///
+/// The tile is always a light colour whatever the theme, so this does not
+/// re-derive per preset — and the accent test measures this exact pairing.
+const kTileInk = Color(0xFF1A1626);
+
 enum DotStatus { synced, syncing, offline }
 
 /// The one place the engine's three flags become a dot, so the vault bubble,
@@ -919,9 +925,7 @@ class VaultCard extends StatelessWidget {
                   fontFamily: StormTokens.sansFamily,
                   fontSize: t.codeSize,
                   fontWeight: FontWeight.w600,
-                  // The tile is always a light colour whatever the theme, and
-                  // the accent test measures this exact pairing.
-                  color: muted ? t.danger : const Color(0xFF1A1626),
+                  color: muted ? t.danger : kTileInk,
                 ),
               ),
             ),

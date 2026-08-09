@@ -6,7 +6,9 @@ import '../../api/models.dart';
 import '../../state/app_state.dart';
 import '../../router.dart';
 import '../accents.dart';
+import '../states.dart';
 import '../tokens.dart';
+import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
 import 'vault_actions.dart';
 
@@ -27,7 +29,6 @@ class VaultSidebar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    final theme = Theme.of(context);
     final uri = GoRouterState.of(context).uri;
     final notes = ref.watch(treeProvider);
     final known = ref.watch(vaultFoldersProvider);
@@ -59,11 +60,14 @@ class VaultSidebar extends ConsumerWidget {
               ),
               Expanded(
                 child: notes.when(
-                  loading: () =>
-                      const Center(child: CircularProgressIndicator()),
-                  error: (e, _) => Padding(
-                    padding: EdgeInsets.all(t.cardPad),
-                    child: Text('$e', style: theme.textTheme.bodySmall),
+                  loading: () => Padding(
+                    padding: EdgeInsets.symmetric(horizontal: t.sp * 1.5),
+                    child: const SkeletonRows(),
+                  ),
+                  error: (e, _) => EmptyState(
+                    icon: Icons.cloud_off,
+                    title: 'Could not list this vault',
+                    detail: describeFailure(e),
                   ),
                   data: (list) => FolderTree(notes: list, knownFolders: known),
                 ),
@@ -80,7 +84,7 @@ class VaultSidebar extends ConsumerWidget {
                   children: [
                     for (final action in vaultActions(context, ref, uri))
                       IconButton(
-                        icon: Icon(action.icon, size: 18),
+                        icon: Icon(action.icon, size: t.bodySize),
                         tooltip: action.tooltip,
                         color: action.selected ? t.accent : t.text3,
                         visualDensity: VisualDensity.compact,
@@ -114,8 +118,8 @@ class _VaultSwitcher extends StatelessWidget {
         child: Row(
           children: [
             Container(
-              width: 30,
-              height: 30,
+              width: t.sp * 3.75,
+              height: t.sp * 3.75,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: accent.tile(t),
@@ -129,7 +133,7 @@ class _VaultSwitcher extends StatelessWidget {
                   fontFamily: StormTokens.sansFamily,
                   fontSize: t.codeSize,
                   fontWeight: FontWeight.w600,
-                  color: const Color(0xFF1A1626),
+                  color: kTileInk,
                 ),
               ),
             ),
@@ -147,7 +151,7 @@ class _VaultSwitcher extends StatelessWidget {
                 ),
               ),
             ),
-            Icon(Icons.expand_more, size: 16, color: t.text3),
+            Icon(Icons.expand_more, size: t.bodySize, color: t.text3),
           ],
         ),
       ),
@@ -182,7 +186,7 @@ class _SearchField extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(Icons.search, size: 15, color: t.text3),
+            Icon(Icons.search, size: t.codeSize, color: t.text3),
             SizedBox(width: t.sp),
             Text(
               'Search…',
@@ -242,18 +246,17 @@ class _FolderTreeState extends State<FolderTree> {
     final rows = <Widget>[];
     _appendLevel(rows, folder: '', depth: 0);
 
+    final t = context.tokens;
     if (rows.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Text(
-            'This vault is empty',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ),
+      return const EmptyState(
+        icon: Icons.folder_open,
+        title: 'This vault is empty',
       );
     }
-    return ListView(padding: const EdgeInsets.only(bottom: 24), children: rows);
+    return ListView(
+      padding: EdgeInsets.only(bottom: t.cardPad),
+      children: rows,
+    );
   }
 
   /// Opens the folders leading to the note in the URL.
@@ -298,8 +301,8 @@ class _FolderTreeState extends State<FolderTree> {
             contentPadding: _indent(depth),
             leading: Icon(
               isOpen ? Icons.expand_more : Icons.chevron_right,
-              size: 18,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              size: context.tokens.bodySize,
+              color: context.tokens.text3,
             ),
             onFolderTap: () => setState(() {
               if (!_expanded.remove(entry.path)) _expanded.add(entry.path);
@@ -326,8 +329,15 @@ class _FolderTreeState extends State<FolderTree> {
     return segments.length > 3 && segments[2] == 'note' ? segments[3] : null;
   }
 
-  EdgeInsets _indent(int depth) =>
-      EdgeInsets.only(left: 8 + depth * 14.0, right: 8);
+  EdgeInsets _indent(int depth) {
+    final sp = context.tokens.sp;
+    return EdgeInsets.fromLTRB(
+      sp + depth * sp * 1.75,
+      sp * 0.75,
+      sp,
+      sp * 0.75,
+    );
+  }
 }
 
 /// What the pane beside the sidebar shows when no note is open.
@@ -335,26 +345,7 @@ class NoNoteSelected extends StatelessWidget {
   const NoNoteSelected({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.article_outlined,
-              size: 32,
-              color: scheme.onSurfaceVariant,
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Select a note',
-              style: TextStyle(color: scheme.onSurfaceVariant),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const Scaffold(
+    body: EmptyState(icon: Icons.article_outlined, title: 'Select a note'),
+  );
 }
