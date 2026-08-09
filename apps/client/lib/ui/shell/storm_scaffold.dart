@@ -127,10 +127,21 @@ class StormChrome extends StatelessWidget {
     return bubbleTopInset(context) + bubbleSide(context) + bubbleGap(context);
   }
 
-  /// The corner bubbles sit inboard of the phone edges rather than hugging
-  /// them, matching the prototype and giving the chrome room to breathe.
-  static double bubbleHorizontalInset(BuildContext context) =>
-      context.tokens.cardPad;
+  /// The one left edge on the screen.
+  ///
+  /// The bubbles, every screen's header and the note's prose all start here.
+  /// They used to be `cardPad`, `cardPad` and `sp * 2.5` — close enough to
+  /// look like a mistake rather than a decision, which is exactly what a
+  /// three-pixel stagger down the left margin reads as.
+  static double contentInset(BuildContext context) => context.tokens.cardPad;
+
+  /// How far a 44px icon button's *box* extends past the glyph inside it.
+  ///
+  /// A header ending in icon buttons has to hang out by this much for its
+  /// first and last glyphs to sit on [contentInset] rather than the boxes
+  /// around them.
+  static double buttonOverhang(BuildContext context) =>
+      (context.tokens.sp * 5.5 - context.tokens.headingSize) / 2;
 
   /// The safe area has already taken care of the system status bar, so this is
   /// the spacing inside the app's own surface.
@@ -171,14 +182,12 @@ class StormChrome extends StatelessWidget {
                 // for the drawer.
                 else if (!context.isExpanded)
                   SizedBox(height: t.sp),
+                // No horizontal padding: a header made of icon buttons needs
+                // to hang past the inset so its glyphs land on it, and only
+                // the header knows what it is made of.
                 if (header != null)
                   Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      bubbleHorizontalInset(context),
-                      0,
-                      bubbleHorizontalInset(context),
-                      t.sp * 1.25,
-                    ),
+                    padding: EdgeInsets.only(bottom: t.sp * 1.25),
                     child: header!,
                   ),
                 Expanded(child: child),
@@ -188,12 +197,12 @@ class StormChrome extends StatelessWidget {
           if (bubbles) ...[
             Positioned(
               top: bubbleTopInset(context),
-              left: bubbleHorizontalInset(context),
+              left: contentInset(context),
               child: const VaultBubble(),
             ),
             Positioned(
               top: bubbleTopInset(context),
-              right: bubbleHorizontalInset(context),
+              right: contentInset(context),
               child: const SettingsBubble(),
             ),
           ],

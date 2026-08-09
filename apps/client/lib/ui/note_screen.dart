@@ -426,58 +426,68 @@ class _Header extends StatelessWidget {
     // 48px minimum pushed the chevron well inboard of the header's own inset
     // and made the row twice the height the design draws. The tap area is
     // still 44 — it is the *box* that shrinks, not the target.
+    //
+    // Every button is the same 44 square with its glyph centred, and the row
+    // hangs past the content inset by exactly half the difference. Aligning
+    // the *boxes* instead left the first glyph twelve pixels right of the
+    // prose below it, and the gaps between the three uneven, because one was
+    // left-aligned in its box, one centred and one right-aligned.
+    final overhang = StormChrome.buttonOverhang(context);
+
     return GestureDetector(
       onLongPress: onActions,
       behavior: HitTestBehavior.opaque,
-      child: SizedBox(
-        height: t.sp * 5.5,
-        child: Row(
-          key: const Key('note-header-row'),
-          children: [
-            _HeaderButton(
-              icon: LucideIcons.chevron_left,
-              tooltip: 'Back',
-              color: t.text2,
-              size: t.headingSize,
-              onTap: onBack,
-              // Flush left, so the chevron lines up with the breadcrumb on
-              // every other screen.
-              alignLeft: true,
-            ),
-            SizedBox(width: t.sp * 0.75),
-            Expanded(
-              child: GestureDetector(
-                onTap: folder.isEmpty ? null : onUp,
-                child: Text(
-                  folder.isEmpty ? 'Vault root' : folder,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.codeSize,
-                    color: t.text3,
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: StormChrome.contentInset(context) - overhang,
+        ),
+        child: SizedBox(
+          height: t.sp * 5.5,
+          child: Row(
+            key: const Key('note-header-row'),
+            children: [
+              _HeaderButton(
+                icon: LucideIcons.chevron_left,
+                tooltip: 'Back',
+                color: t.text2,
+                onTap: onBack,
+              ),
+              Expanded(
+                child: GestureDetector(
+                  onTap: folder.isEmpty ? null : onUp,
+                  child: Padding(
+                    // Back onto the inset, since the button beside it is
+                    // hanging off the edge.
+                    padding: EdgeInsets.only(left: overhang),
+                    child: Text(
+                      folder.isEmpty ? 'Vault root' : folder,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: StormTokens.monoFamily,
+                        fontSize: t.codeSize,
+                        color: t.text3,
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
-            // Attach, pin, rename and delete were long-press only, which is
-            // no way to find "keep offline". The long-press still works.
-            _HeaderButton(
-              icon: LucideIcons.ellipsis,
-              tooltip: 'Note actions',
-              color: t.text3,
-              size: t.bodySize,
-              onTap: onActions,
-            ),
-            _HeaderButton(
-              icon: LucideIcons.sliders_horizontal,
-              tooltip: 'Properties',
-              color: t.accent,
-              size: t.bodySize,
-              onTap: onProperties,
-              alignRight: true,
-            ),
-          ],
+              // Attach, pin, rename and delete were long-press only, which is
+              // no way to find "keep offline". The long-press still works.
+              _HeaderButton(
+                icon: LucideIcons.ellipsis,
+                tooltip: 'Note actions',
+                color: t.text3,
+                onTap: onActions,
+              ),
+              _HeaderButton(
+                icon: LucideIcons.sliders_horizontal,
+                tooltip: 'Properties',
+                color: t.accent,
+                onTap: onProperties,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -489,19 +499,13 @@ class _HeaderButton extends StatelessWidget {
     required this.icon,
     required this.tooltip,
     required this.color,
-    required this.size,
     required this.onTap,
-    this.alignLeft = false,
-    this.alignRight = false,
   });
 
   final IconData icon;
   final String tooltip;
   final Color color;
-  final double size;
   final VoidCallback onTap;
-  final bool alignLeft;
-  final bool alignRight;
 
   @override
   Widget build(BuildContext context) {
@@ -514,13 +518,14 @@ class _HeaderButton extends StatelessWidget {
         child: SizedBox(
           width: t.sp * 5.5,
           height: t.sp * 5.5,
-          child: Align(
-            alignment: alignLeft
-                ? Alignment.centerLeft
-                : alignRight
-                ? Alignment.centerRight
-                : Alignment.center,
-            child: Icon(icon, size: size, color: color),
+          // Centre rather than letting the SizedBox stretch the Icon to fill
+          // it: an Icon given tight 44px constraints reports a 44px box and
+          // draws the glyph in the middle of it, which makes every alignment
+          // measurement — including a test's — off by the difference.
+          child: Center(
+            // One size for all three, so the space between glyphs is the
+            // space between boxes and not a function of which icon is in them.
+            child: Icon(icon, size: t.headingSize, color: color),
           ),
         ),
       ),
