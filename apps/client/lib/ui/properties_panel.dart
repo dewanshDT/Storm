@@ -42,7 +42,9 @@ class PropertiesPanel extends StatelessWidget {
         Padding(
           padding: EdgeInsets.fromLTRB(
             t.cardPad,
-            t.sp * 2,
+            // Flush at desk width, where the label lines up with the note's
+            // `v12 · Saved` across the rail.
+            onClose == null ? 0 : t.sp * 2,
             t.sp * 1.5,
             t.sp * 1.5,
           ),
@@ -131,11 +133,9 @@ class PropertiesDrawer extends StatelessWidget {
           width: PropertiesPanel.drawerWidth,
           child: Material(
             color: t.bg,
-            child: PropertiesPanel(
-              content: content,
-              onChanged: onChanged,
-              onClose: onClose,
-            ),
+            // No close of its own: the rail's toggle is what opens and shuts
+            // it, and the design draws the header as the word alone.
+            child: PropertiesPanel(content: content, onChanged: onChanged),
           ),
         ),
       ],

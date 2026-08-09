@@ -276,25 +276,27 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           backgroundColor: tint,
           body: StormChrome(
             showNav: !keyboard,
-            header: _Header(
-              key: const Key('note-header'),
-              folder: session.meta?.folder ?? '',
-              propertiesOpen: context.isExpanded && _showProperties,
-              onBack: () => context.canPop()
-                  ? context.pop()
-                  : context.go(Routes.dashboard),
-              onUp: () => context.go(
-                Routes.folder(vaultId, session.meta?.folder ?? ''),
-              ),
-              onProperties: context.isExpanded
-                  ? null
-                  : () => PropertiesPanel.showSheet(
+            // No header at desk width: the sidebar already says where the
+            // note lives and offers the way back, and the design's note pane
+            // starts at `v12 · Saved`.
+            header: context.isExpanded
+                ? null
+                : _Header(
+                    key: const Key('note-header'),
+                    folder: session.meta?.folder ?? '',
+                    onBack: () => context.canPop()
+                        ? context.pop()
+                        : context.go(Routes.dashboard),
+                    onUp: () => context.go(
+                      Routes.folder(vaultId, session.meta?.folder ?? ''),
+                    ),
+                    onProperties: () => PropertiesPanel.showSheet(
                       context,
                       content: session.buffer,
                       onChanged: session.editProperties,
                     ),
-              onActions: () => _noteActions(isPinned),
-            ),
+                    onActions: () => _noteActions(isPinned),
+                  ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -302,6 +304,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                   child: NoteEditor(
                     onFollowLink: _followLink,
                     showToolbar: keyboard,
+                    onActions: () => _noteActions(isPinned),
                     footer: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
@@ -403,7 +406,6 @@ class _Header extends StatelessWidget {
   const _Header({
     super.key,
     required this.folder,
-    required this.propertiesOpen,
     required this.onBack,
     required this.onUp,
     required this.onProperties,
@@ -411,12 +413,9 @@ class _Header extends StatelessWidget {
   });
 
   final String folder;
-  final bool propertiesOpen;
   final VoidCallback onBack;
   final VoidCallback onUp;
-
-  /// Null at desk width, where the rail owns the toggle instead.
-  final VoidCallback? onProperties;
+  final VoidCallback onProperties;
   final VoidCallback onActions;
 
   @override
@@ -449,13 +448,12 @@ class _Header extends StatelessWidget {
               ),
             ),
           ),
-          if (onProperties != null)
-            IconButton(
-              icon: Icon(Icons.tune, size: t.bodySize, color: t.accent),
-              onPressed: onProperties,
-              visualDensity: VisualDensity.compact,
-              tooltip: 'Properties',
-            ),
+          IconButton(
+            icon: Icon(Icons.tune, size: t.bodySize, color: t.accent),
+            onPressed: onProperties,
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Properties',
+          ),
         ],
       ),
     );
