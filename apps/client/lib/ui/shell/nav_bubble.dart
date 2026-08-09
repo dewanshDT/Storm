@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../breakpoints.dart';
+import '../tokens.dart';
 import 'vault_actions.dart';
 import '../theme.dart';
 
@@ -46,33 +47,39 @@ class NavBubble extends ConsumerStatefulWidget {
 class _NavBubbleState extends ConsumerState<NavBubble> {
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     final uri = GoRouterState.of(context).uri;
 
     // The sidebar carries these on a wide screen.
     if (context.isExpanded) return const SizedBox.shrink();
 
     return SafeArea(
-      minimum: const EdgeInsets.only(bottom: 16),
+      minimum: EdgeInsets.only(bottom: t.sp * 2),
       child: Align(
         alignment: Alignment.bottomCenter,
         child: AnimatedSize(
-          duration: const Duration(milliseconds: 180),
+          duration: t.duration,
           curve: Curves.easeOutCubic,
-          child: Material(
-            color: scheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(26),
-            elevation: 6,
-            shadowColor: Colors.black.withValues(alpha: 0.4),
-            child: Padding(
-              padding: const EdgeInsets.all(5),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final action in vaultActions(context, ref, uri))
-                    _Slot(action: action),
-                ],
-              ),
+          child: Container(
+            decoration: BoxDecoration(
+              color: t.surface2,
+              // A pill, where the corner bubbles are rounded squares. The
+              // shape difference is deliberate grammar: corners are places,
+              // the pill is an action bar.
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: t.border, width: t.bw),
+              boxShadow: t.shadow,
+            ),
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 0.75,
+              vertical: t.sp * 0.5,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final action in vaultActions(context, ref, uri))
+                  _Slot(action: action),
+              ],
             ),
           ),
         ),
@@ -88,29 +95,71 @@ class _Slot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
+
+    // The primary action is a filled circle standing proud of the pill, not a
+    // sixth equal icon: on a notes app "write something" is not one option
+    // among six.
+    if (action.primary) {
+      return Tooltip(
+        message: action.tooltip,
+        child: InkWell(
+          onTap: action.onTap,
+          customBorder: const CircleBorder(),
+          child: Container(
+            width: 46,
+            height: 46,
+            margin: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
+            decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
+            child: Icon(action.icon, size: 24, color: t.onAccent),
+          ),
+        ),
+      );
+    }
+
     return Tooltip(
       message: action.tooltip,
       child: InkWell(
         onTap: action.onTap,
-        borderRadius: BorderRadius.circular(21),
+        customBorder: const CircleBorder(),
         child: Padding(
-          padding: const EdgeInsets.all(11),
+          padding: EdgeInsets.all(t.sp * 1.25),
           child: Stack(
             clipBehavior: Clip.none,
             children: [
               Icon(
                 action.icon,
-                size: 22,
-                color: action.selected
-                    ? scheme.primary
-                    : scheme.onSurfaceVariant,
+                size: 21,
+                color: action.selected ? t.accent : t.text2,
               ),
+              // Amber, and carrying the count. Mentions are the one slot whose
+              // value is a number, and a bare dot threw that away.
               if ((action.badge ?? 0) > 0)
-                const Positioned(
-                  right: -2,
-                  top: -2,
-                  child: StormStatusDot(status: StormStatus.syncing, size: 7),
+                Positioned(
+                  right: -6,
+                  top: -6,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 1,
+                    ),
+                    constraints: const BoxConstraints(minWidth: 15),
+                    decoration: BoxDecoration(
+                      color: t.amber,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '${action.badge}',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontFamily: StormTokens.monoFamily,
+                        fontSize: 9,
+                        height: 1.3,
+                        fontWeight: FontWeight.w600,
+                        color: t.bg,
+                      ),
+                    ),
+                  ),
                 ),
             ],
           ),
