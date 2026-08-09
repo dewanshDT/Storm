@@ -595,6 +595,58 @@ void main() {
       session.dispose();
     });
 
+    test('our own save coming back is not "another device"', () async {
+      // The server owns `modified:` and rewrites it on every save, so the
+      // copy that lands in the cache differs from the buffer by exactly that
+      // one line. Comparing raw text called that a remote edit and put a
+      // banner over the note every time the user paused typing.
+      const before =
+          '---\nid: n1\nmodified: 2026-08-09T10:00:00Z\n---\n\nbody\n';
+      const after =
+          '---\nid: n1\nmodified: 2026-08-09T10:00:05Z\n---\n\nbody\n';
+
+      await seed('n1', before);
+      final session = NoteSession(engine);
+      await session.open('n1');
+
+      server.notes['n1'] = server.notes['n1']!.copyWith(
+        content: after,
+        version: 2,
+      );
+      server.pushChange('n1', 'updated', 2);
+      await engine.sync();
+      await session.onRemoteChange();
+
+      expect(session.notice, isNull, reason: 'only the stamp moved');
+      // Still adopted: the version moved, and saving against a stale base
+      // would make the next write a conflict the user never caused.
+      expect(session.baseVersion, 2);
+      session.dispose();
+    });
+
+    test('a real remote edit still says so', () async {
+      const before =
+          '---\nid: n1\nmodified: 2026-08-09T10:00:00Z\n---\n\nbody\n';
+      const after =
+          '---\nid: n1\nmodified: 2026-08-09T10:00:05Z\n---\n\nelsewhere\n';
+
+      await seed('n1', before);
+      final session = NoteSession(engine);
+      await session.open('n1');
+
+      server.notes['n1'] = server.notes['n1']!.copyWith(
+        content: after,
+        version: 2,
+      );
+      server.pushChange('n1', 'updated', 2);
+      await engine.sync();
+      await session.onRemoteChange();
+
+      expect(session.notice, contains('another device'));
+      expect(session.buffer, contains('elsewhere'));
+      session.dispose();
+    });
+
     test('a note deleted elsewhere closes cleanly', () async {
       await seed('n1', 'original\n');
       final session = NoteSession(engine);

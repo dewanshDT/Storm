@@ -1387,6 +1387,17 @@ rows, note timestamps where they exist, and the always-present mentions slot —
 so the phone screen moves toward the handoff without creating one-off layout
 rules the next pass would have to undo.
 
+**"Updated from another device" fired on your own typing.** The server owns
+`modified:` and rewrites it on every save, so the copy that lands in the cache
+differs from the open buffer by exactly that one line. `onRemoteChange`
+compared raw text, called the difference a remote edit, and put a banner over
+the note every time a save landed. The server already blanks the same field
+before it merges — `VOLATILE` in `index.rs`, guarded by
+`the_modified_timestamp_never_causes_a_conflict` — and the client now does the
+same before it compares. It still adopts the incoming version silently, because
+saving against a stale base would turn the *next* write into a conflict the
+user never caused.
+
 **`/gallery`** renders every shared widget in all three presets side by side.
 The header of `widgets.dart` had claimed it existed since the widgets landed.
 

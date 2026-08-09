@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../api/models.dart';
 import '../editor/frontmatter.dart' as fm;
+import '../editor/frontmatter_edit.dart' as fme;
 import '../sync/sync_engine.dart';
 
 /// How long typing must pause before a save fires.
@@ -266,10 +267,29 @@ class NoteSession extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    if (cached.content == _buffer) return;
+    // The server owns `modified:` and rewrites it on every save, so our own
+    // write comes back differing from the buffer by exactly that one line.
+    // Comparing raw text called that "another device" and put a banner over
+    // the note on every keystroke's save. The server blanks the same field
+    // before it merges, for the same reason — see `VOLATILE` in `index.rs`.
+    if (_sameIgnoringStamp(cached.content, _buffer)) {
+      // Still adopt it: the version moved, and saving against a stale base
+      // would make the next write a conflict the user never caused.
+      _adopt(cached.content, cached.version);
+      return;
+    }
 
     _notice = 'Updated from another device.';
     _adopt(cached.content, cached.version);
+  }
+
+  /// Whether two versions differ only by the server's own timestamp.
+  static bool _sameIgnoringStamp(String a, String b) {
+    if (a == b) return true;
+    const blank = '@@storm-modified@@';
+    // Raw, so neither side is quoted differently from the other.
+    return fme.setScalar(a, 'modified', blank, raw: true) ==
+        fme.setScalar(b, 'modified', blank, raw: true);
   }
 
   /// Replaces the buffer with authoritative text.
