@@ -401,6 +401,27 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('its rule runs the full height, level with the sidebar\'s', (
+      tester,
+    ) async {
+      // The shell used to put an 8px spacer above the pane's Row, so the
+      // vertical rules on the rail and the drawer started below the top of
+      // the pane with the page showing above them.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getTopLeft(find.byType(PropertiesDrawer)).dy,
+        tester.getTopLeft(find.byType(VaultSidebar)).dy,
+        reason: 'the columns are the same height, so their rules line up',
+      );
+      await disposeShell(tester, c);
+    });
+
     testWidgets('open as a sheet on a phone, never a drawer', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: phone);

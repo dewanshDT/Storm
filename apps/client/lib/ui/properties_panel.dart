@@ -43,9 +43,9 @@ class PropertiesPanel extends StatelessWidget {
         Padding(
           padding: EdgeInsets.fromLTRB(
             t.cardPad,
-            // Flush at desk width, where the label lines up with the note's
-            // `v12 · Saved` across the rail.
-            onClose == null ? 0 : t.sp * 2,
+            // The drawer's own 20 at desk width, against the note pane's 28
+            // — the design sets the label a step above the version line.
+            onClose == null ? t.sp * 2.5 : t.sp * 2,
             t.sp * 1.5,
             t.sp * 1.5,
           ),
