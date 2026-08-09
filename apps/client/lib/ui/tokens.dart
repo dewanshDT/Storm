@@ -44,6 +44,8 @@ class StormTokens extends ThemeExtension<StormTokens> {
     required this.bw,
     required this.shadowDepth,
     required this.duration,
+    required this.surfaceL,
+    required this.dir,
   });
 
   /// Which identity this is, so a preset can be named in settings and in tests.
@@ -105,6 +107,16 @@ class StormTokens extends ThemeExtension<StormTokens> {
   final double bw;
   final double shadowDepth;
   final Duration duration;
+
+  /// The surface's own OKLCH lightness, and which way "away from the page"
+  /// points (+1 dark, -1 light).
+  ///
+  /// Exposed because a note's accent tile has to sit a step off *this theme's*
+  /// surface rather than at a fixed lightness. A fixed value cannot work: Storm
+  /// light's surface is 0.87 and SlowFlow's is 0.79, so one constant either
+  /// vanishes into the first or floats off the second.
+  final double surfaceL;
+  final double dir;
 
   // ---- type scale ------------------------------------------------------
 
@@ -215,6 +227,8 @@ class StormTokens extends ThemeExtension<StormTokens> {
       bw: i.bw,
       shadowDepth: i.shadow,
       duration: Duration(milliseconds: i.dur),
+      surfaceL: bgL + dir * 0.05,
+      dir: dir,
     );
   }
 }

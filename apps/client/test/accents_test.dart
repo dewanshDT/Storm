@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/state/vault_config.dart';
 import 'package:storm/ui/accents.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/new_note_dialog.dart';
 import 'package:storm/ui/shell/storm_scaffold.dart' show validateVaultPath;
 
@@ -12,6 +13,11 @@ import 'package:storm/ui/shell/storm_scaffold.dart' show validateVaultPath;
 /// The colour is written into the note as a *word* — `color: sage` — so the
 /// tests that matter are about that word surviving a round trip and meaning
 /// something in both themes, not about the exact hex.
+final darkTokens = StormTokens.from(StormPreset.stormDark);
+final lightTokens = StormTokens.from(StormPreset.stormLight);
+StormTokens tokensFor(Brightness b) =>
+    b == Brightness.dark ? darkTokens : lightTokens;
+
 void main() {
   group('the palette', () {
     test('reads a colour back from the word in the file', () {
@@ -34,8 +40,8 @@ void main() {
       // would make half the palette unreadable in one of the two modes.
       for (final accent in Accent.values.where((a) => !a.isNone)) {
         expect(
-          accent.surface(Brightness.light),
-          isNot(accent.surface(Brightness.dark)),
+          accent.tile(lightTokens),
+          isNot(accent.tile(darkTokens)),
           reason: '${accent.name} uses one colour for both modes',
         );
       }
@@ -44,12 +50,12 @@ void main() {
     test('dark variants are dark and light variants are light', () {
       for (final accent in Accent.values.where((a) => !a.isNone)) {
         expect(
-          accent.surface(Brightness.light).computeLuminance(),
+          accent.tile(lightTokens).computeLuminance(),
           greaterThan(0.5),
           reason: '${accent.name} is too dark for a light card',
         );
         expect(
-          accent.surface(Brightness.dark).computeLuminance(),
+          accent.tile(darkTokens).computeLuminance(),
           lessThan(0.35),
           reason: '${accent.name} is too bright for a dark card',
         );
@@ -59,7 +65,10 @@ void main() {
     test('the page wash is quieter than the card fill', () {
       // The full tint behind a screen of prose fights the text.
       for (final mode in Brightness.values) {
-        expect(Accent.sage.wash(mode).a, lessThan(Accent.sage.surface(mode).a));
+        expect(
+          Accent.sage.wash(tokensFor(mode)).a,
+          lessThan(Accent.sage.tile(tokensFor(mode)).a),
+        );
       }
     });
 
