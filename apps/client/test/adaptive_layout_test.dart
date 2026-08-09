@@ -269,8 +269,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(PropertiesDrawer), findsOneWidget);
 
-      // And close again, because a drawer that cannot be dismissed is a column.
-      await tester.tap(find.byTooltip('Close'));
+      // And close again, because a drawer that cannot be dismissed is a
+      // column. The rail's toggle is what does it: the design draws the
+      // drawer's header as the word alone, with no close of its own.
+      await tester.tap(find.byTooltip('Properties'));
       await tester.pumpAndSettle();
       expect(find.byType(PropertiesDrawer), findsNothing);
       await disposeShell(tester, c);

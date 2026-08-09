@@ -27,7 +27,14 @@ class NoteEditor extends ConsumerStatefulWidget {
     this.onFollowLink,
     this.showToolbar = false,
     this.footer,
+    this.onActions,
   });
+
+  /// Pin, attach, rename, delete — reached by long-pressing the status line.
+  ///
+  /// The status line is the note's own chrome at *both* widths; the phone's
+  /// header row does not exist at desk width, and the actions have to.
+  final VoidCallback? onActions;
 
   /// Attachments and mentions, which the design puts *inside* the scroll
   /// after the prose rather than pinned under it.
@@ -236,9 +243,14 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
 
     return Column(
       children: [
-        Padding(
-          padding: EdgeInsets.fromLTRB(t.sp * 2.5, 0, t.sp * 2.5, t.sp * 0.5),
-          child: _statusBar(session),
+        GestureDetector(
+          key: const Key('note-actions'),
+          onLongPress: widget.onActions,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(t.sp * 2.5, 0, t.sp * 2.5, t.sp * 0.5),
+            child: _statusBar(session),
+          ),
         ),
         if (_isDegraded(session)) const _DegradedNotice(),
         if (session.hasConflict)
@@ -287,11 +299,19 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                         // Enter inside a list carries the list on.
                         inputFormatters: const [ListContinuationFormatter()],
                         contextMenuBuilder: _contextMenu,
+                        // Every border, not just `border`. The theme sets
+                        // enabledBorder and focusedBorder separately, and
+                        // clearing only `border` left a rounded outline drawn
+                        // around the whole note. `filled: false` for the same
+                        // reason: the theme fills every field with surface2,
+                        // which put the prose on a card of its own.
                         decoration: const InputDecoration(
                           border: InputBorder.none,
-                          // Explicitly unfilled: `inputDecorationTheme` fills
-                          // every field with surface2, which put the note's
-                          // prose on a card of its own.
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          disabledBorder: InputBorder.none,
+                          errorBorder: InputBorder.none,
+                          focusedErrorBorder: InputBorder.none,
                           filled: false,
                           contentPadding: EdgeInsets.zero,
                           isDense: true,

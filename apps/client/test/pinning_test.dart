@@ -104,7 +104,7 @@ void main() {
       // Long-press, not a visible menu: the design's note chrome is back, path
       // and properties, and long-press is how this app offers secondary
       // actions everywhere else.
-      await tester.longPress(find.byKey(const Key('note-header')));
+      await tester.longPress(find.byKey(const Key('note-actions')));
       await tester.pumpAndSettle();
     }
 
@@ -141,7 +141,7 @@ void main() {
 
       expect(await c.read(syncEngineProvider).pinnedIds(), contains('n0'));
       // And the label flips, so the menu says what tapping it again will do.
-      await tester.longPress(find.byKey(const Key('note-header')));
+      await tester.longPress(find.byKey(const Key('note-actions')));
       await tester.pumpAndSettle();
       expect(find.text('Stop keeping offline'), findsOneWidget);
 
@@ -152,7 +152,7 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      expect(find.byKey(const Key('note-header')), findsNothing);
+      expect(find.byKey(const Key('note-actions')), findsNothing);
       await disposeShell(tester, c);
     });
   });
