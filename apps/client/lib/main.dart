@@ -5,6 +5,7 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 import 'router.dart';
 import 'state/app_state.dart';
 import 'ui/theme.dart';
+import 'ui/tokens.dart';
 
 void main() {
   // Clean URLs on the web, so a link to a note looks like a path rather than
@@ -18,16 +19,19 @@ class StormApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final dark = ref.watch(settingsProvider).value?.darkMode ?? true;
+    final settings = ref.watch(settingsProvider).value;
 
     return MaterialApp.router(
       title: 'Storm',
       debugShowCheckedModeBanner: false,
-      theme: StormTheme.light(),
-      darkTheme: StormTheme.dark(),
-      // Dark by default: the design is dark-first, and a notes app is mostly
-      // read at night.
-      themeMode: dark ? ThemeMode.dark : ThemeMode.light,
+      // One resolved theme rather than a light/dark pair: there are three
+      // identities now, and which one is worn is the user's explicit choice —
+      // the OS setting must not override it. Storm dark is the default because
+      // the design is dark-first and a notes app is mostly read at night.
+      theme: StormTheme.from(
+        settings?.theme ?? StormPreset.stormDark,
+        fontSize: settings?.fontSize,
+      ),
       routerConfig: ref.watch(routerProvider),
     );
   }
