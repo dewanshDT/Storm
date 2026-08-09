@@ -760,9 +760,10 @@ class Breadcrumb extends StatelessWidget {
       );
     }
 
+    // Left-aligned, not reversed. `reverse: true` parks a short trail against
+    // the right edge, where on a phone it sits underneath the settings bubble.
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      reverse: true,
       child: Row(mainAxisSize: MainAxisSize.min, children: children),
     );
   }
