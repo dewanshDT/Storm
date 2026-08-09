@@ -151,7 +151,11 @@ class StormChrome extends StatelessWidget {
   static double bubbleSide(BuildContext context) => context.tokens.sp * 5.5;
 
   /// Space between the corner affordances and the screen's own header.
-  static double bubbleGap(BuildContext context) => context.tokens.sp * 2;
+  ///
+  /// Wider than the prototype's 12, deliberately. The mock has no status bar
+  /// above the bubbles; a real phone does, and at 12 the breadcrumb reads as
+  /// part of the same crowded band as the row above it.
+  static double bubbleGap(BuildContext context) => context.tokens.sp * 3.5;
 
   /// What every scrolling child leaves at the bottom for the nav pill.
   static double navClearance(BuildContext context) => context.tokens.sp * 14;
