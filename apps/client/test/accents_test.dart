@@ -63,11 +63,15 @@ void main() {
     });
 
     test('the page wash is quieter than the card fill', () {
-      // The full tint behind a screen of prose fights the text.
+      // The full tint behind a screen of prose fights the text. Measured as
+      // distance from the page rather than as alpha: the wash is opaque now,
+      // because it is a Scaffold background and a translucent one lets the
+      // window's black through on a phone.
       for (final mode in Brightness.values) {
+        final t = tokensFor(mode);
         expect(
-          Accent.sage.wash(tokensFor(mode)).a,
-          lessThan(Accent.sage.tile(tokensFor(mode)).a),
+          _distance(Accent.sage.wash(t), t.bg),
+          lessThan(_distance(Accent.sage.tile(t), t.bg)),
         );
       }
     });
@@ -175,3 +179,7 @@ void main() {
     });
   });
 }
+
+/// How far apart two colours are, as a rough sum of channel differences.
+double _distance(Color a, Color b) =>
+    (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();

@@ -37,7 +37,16 @@ class DashboardScreen extends ConsumerWidget {
     // so a whole screen for it is a page you pass through on the way to the
     // only thing you came for. It stays reachable with no vaults, because
     // then it is the only screen that can make one.
-    if (context.isExpanded && vaults.isNotEmpty) {
+    //
+    // Guarded on actually being the current route. A `go` fired from a
+    // post-frame callback is not conditional on anything the framework
+    // checks, so any rebuild of this widget while it is not on top would
+    // navigate out from under whatever is. It does not happen today — the
+    // router does not keep the parent mounted beneath its children — but the
+    // cost of the guard is a string comparison and the cost of being wrong is
+    // being thrown out of the screen you are using.
+    final onDashboard = GoRouter.of(context).state.uri.path == Routes.dashboard;
+    if (onDashboard && context.isExpanded && vaults.isNotEmpty) {
       final active = ref.watch(activeVaultProvider);
       final target = vaults.any((v) => v.id == active && !v.missing)
           ? active
@@ -46,7 +55,10 @@ class DashboardScreen extends ConsumerWidget {
               orElse: () => vaults.first,
             )).id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) context.go(Routes.browse(target));
+        if (context.mounted &&
+            GoRouter.of(context).state.uri.path == Routes.dashboard) {
+          context.go(Routes.browse(target));
+        }
       });
       // Blank rather than the dashboard: rendering it for one frame is a
       // flash of a screen the user is never meant to see at this width.

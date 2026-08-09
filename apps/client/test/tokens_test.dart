@@ -158,11 +158,19 @@ void main() {
 
     test('the page wash stays quiet enough to read prose on', () {
       // A tile colour at tile strength behind a whole screen of text is a
-      // glare; the wash is the same hue at a fraction of the alpha.
+      // glare; the wash is the same hue a short step off the page. It is
+      // opaque — a Scaffold background is the bottom layer of a route, and a
+      // translucent one shows the window through on a phone — so this is a
+      // distance from `bg` rather than an alpha.
       for (final brightness in Brightness.values) {
+        final t = tokensFor(brightness);
         for (final accent in Accent.values) {
           if (accent.isNone) continue;
-          expect(accent.wash(tokensFor(brightness)).a, lessThan(0.25));
+          expect(accent.wash(t).a, 1.0, reason: 'opaque, or the page shows');
+          expect(
+            _distance(accent.wash(t), t.bg),
+            lessThan(_distance(accent.tile(t), t.bg) * 0.25),
+          );
         }
       }
     });
@@ -289,3 +297,7 @@ double _perceptualDistance(Color a, Color b) {
         math.pow(x[2] - y[2], 2),
   );
 }
+
+/// How far apart two colours are, as a rough sum of channel differences.
+double _distance(Color a, Color b) =>
+    (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();

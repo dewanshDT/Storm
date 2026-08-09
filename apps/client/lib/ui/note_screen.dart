@@ -43,14 +43,6 @@ class NoteScreen extends ConsumerStatefulWidget {
 class _NoteScreenState extends ConsumerState<NoteScreen> {
   bool _showContext = false;
 
-  /// Whether the properties drawer is open beside the note.
-  ///
-  /// Wide screens only — on a phone properties are a sheet, which is its own
-  /// route and needs no state here. Local rather than in a provider: the
-  /// providers drive sync and cache, and this is where the panel is, which is
-  /// nobody else's business.
-  bool _showProperties = false;
-
   @override
   void initState() {
     super.initState();
@@ -261,6 +253,9 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     // depending on it still rebuilds. See keyboardIsOpen.
     final keyboard = keyboardIsOpen(context);
     final vaultId = VaultGate.of(context);
+    // Survives opening another note: the drawer is a pane at this width, not
+    // a thing belonging to one note's screen.
+    final showProperties = ref.watch(propertiesOpenProvider);
     // The note's own colour, from its `color:` property. A wash rather than
     // the full card tint: this sits behind a screen of prose, and the card
     // colour at full strength fights the text.
@@ -325,15 +320,17 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                 // the sheet would cover a note that has room beside it.
                 if (context.isExpanded)
                   _PropertiesRail(
-                    open: _showProperties,
-                    onToggle: () =>
-                        setState(() => _showProperties = !_showProperties),
+                    open: showProperties,
+                    onToggle: () => ref
+                        .read(propertiesOpenProvider.notifier)
+                        .update((open) => !open),
                   ),
-                if (context.isExpanded && _showProperties)
+                if (context.isExpanded && showProperties)
                   PropertiesDrawer(
                     content: session.buffer,
                     onChanged: session.editProperties,
-                    onClose: () => setState(() => _showProperties = false),
+                    onClose: () =>
+                        ref.read(propertiesOpenProvider.notifier).state = false,
                   ),
               ],
             ),

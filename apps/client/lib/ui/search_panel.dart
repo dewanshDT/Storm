@@ -97,6 +97,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               child: const SkeletonRows(rows: 3),
             ),
             error: (e, _) => EmptyState(
+              fill: true,
               icon: LucideIcons.cloud_off,
               title: 'Search needs the server',
               detail: describeFailure(e),
@@ -106,6 +107,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               // answer "nothing" — which is not the same as "no matches".
               if (!online) {
                 return const EmptyState(
+                  fill: true,
                   icon: LucideIcons.cloud_off,
                   title: 'Search needs the server',
                   detail:
@@ -115,6 +117,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               }
               if (query.trim().isEmpty) {
                 return const EmptyState(
+                  fill: true,
                   icon: LucideIcons.search,
                   title: 'Search this vault',
                   detail: 'Every note, by its words.',
@@ -122,6 +125,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               }
               if (hits.isEmpty) {
                 return EmptyState(
+                  fill: true,
                   icon: LucideIcons.search_x,
                   title: 'No notes match “$query”',
                   detail: 'Try fewer words, or a word from the body.',

@@ -399,6 +399,18 @@ final vaultFoldersProvider = Provider<List<String>>((ref) {
 /// The currently open note, if any.
 final openNoteIdProvider = StateProvider<String?>((ref) => null);
 
+/// Whether the properties drawer is open beside the note, at desk width.
+///
+/// A provider rather than the note screen's own state, which is where it
+/// started: opening a second note built a second `_NoteScreenState` and the
+/// drawer shut. Properties are a *pane* at that width — you open the column
+/// once and it stays while you read around it, the way the sidebar does.
+///
+/// Not read on a phone. There properties are a modal sheet, which has to be
+/// dismissed before anything else can be touched, so "is it open" is the
+/// navigator's question rather than ours.
+final propertiesOpenProvider = StateProvider<bool>((ref) => false);
+
 final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
   // Deliberately `watch(apiProvider)` + `read(syncEngineProvider)`: the
   // session must be rebuilt when the server connection changes, but must

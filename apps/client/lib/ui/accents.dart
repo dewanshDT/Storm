@@ -92,8 +92,15 @@ enum Accent {
   /// A quieter version, for tinting a whole page behind body text.
   ///
   /// A tile colour at tile strength behind a screen of prose is a glare.
+  ///
+  /// Blended onto the page rather than left translucent. This is used as a
+  /// `Scaffold.backgroundColor`, which is the bottom layer of a route — on a
+  /// phone there is nothing painted behind it, so 14% alpha meant 86% of the
+  /// window's black showing through and the whole note going dark. At desk
+  /// width it composited over the shell's own Scaffold and looked right,
+  /// which is why the same note was fine there.
   Color wash(StormTokens t) =>
-      isNone ? const Color(0x00000000) : tile(t).withValues(alpha: 0.14);
+      isNone ? t.bg : Color.alphaBlend(tile(t).withValues(alpha: 0.14), t.bg);
 
   /// The outline that keeps a tinted card readable against the page.
   Color border(StormTokens t) =>
