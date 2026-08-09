@@ -29,7 +29,7 @@ class ServerSettingsScreen extends ConsumerWidget {
           onPressed: () =>
               context.canPop() ? context.pop() : context.go(Routes.dashboard),
         ),
-        title: const Text('Server'),
+        title: const Text('Server settings'),
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),

@@ -229,86 +229,93 @@ class _SettingsBubbleState extends ConsumerState<SettingsBubble> {
       anchorKey: _anchor,
       width: t.sp * 33,
       alignRight: true,
-      builder: (popContext) => Consumer(
-        builder: (popContext, ref, _) {
-          final settings =
-              ref.watch(settingsProvider).value ?? const Settings();
-          final notifier = ref.read(settingsProvider.notifier);
+      builder: (popContext) =>
+          AppearanceMenu(onClose: () => Navigator.pop(popContext)),
+    );
+  }
+}
 
-          return StormPopover(
-            children: [
-              Padding(
-                padding: EdgeInsets.only(
-                  left: t.sp * 0.75,
-                  bottom: t.sp * 0.75,
-                ),
-                child: const SectionLabel('Appearance'),
+/// Theme, text size, note font, and the way out.
+///
+/// Public because it has two homes: the phone's top-right corner bubble, and
+/// the wide sidebar's footer gear — the corners are empty above 900px, and
+/// without a second entry these settings would be unreachable there.
+class AppearanceMenu extends ConsumerWidget {
+  const AppearanceMenu({super.key, required this.onClose});
+
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final settings = ref.watch(settingsProvider).value ?? const Settings();
+    final notifier = ref.read(settingsProvider.notifier);
+
+    return StormPopover(
+      children: [
+        Padding(
+          padding: EdgeInsets.only(left: t.sp * 0.75, bottom: t.sp * 0.75),
+          child: const SectionLabel('Appearance'),
+        ),
+        // A switch could only ever say two things, and there are three
+        // identities to choose between.
+        Wrap(
+          spacing: t.sp * 0.5,
+          runSpacing: t.sp * 0.5,
+          children: [
+            for (final preset in StormPreset.values)
+              _Choice(
+                label: preset.label,
+                selected: settings.theme == preset,
+                onTap: () => notifier.save(settings.copyWith(theme: preset)),
               ),
-              // A switch could only ever say two things, and there are three
-              // identities to choose between.
-              Wrap(
-                spacing: t.sp * 0.5,
-                runSpacing: t.sp * 0.5,
-                children: [
-                  for (final preset in StormPreset.values)
-                    _Choice(
-                      label: preset.label,
-                      selected: settings.theme == preset,
-                      onTap: () =>
-                          notifier.save(settings.copyWith(theme: preset)),
-                    ),
-                ],
+          ],
+        ),
+        SizedBox(height: t.sp),
+        _SliderRow(
+          label: 'Text size',
+          value: settings.fontSize,
+          display: '${settings.fontSize.round()}px',
+          onChanged: (v) => notifier.save(settings.copyWith(fontSize: v)),
+        ),
+        SizedBox(height: t.sp * 0.5),
+        Padding(
+          padding: EdgeInsets.only(left: t.sp * 0.75, bottom: t.sp * 0.5),
+          child: const SectionLabel('Note font'),
+        ),
+        Wrap(
+          spacing: t.sp * 0.5,
+          runSpacing: t.sp * 0.5,
+          children: [
+            for (final font in BodyFont.values)
+              _Choice(
+                label: font.label,
+                // Each option is set in the face it names, so the choice
+                // shows what it will do.
+                family: font.family,
+                selected: settings.bodyFont == font,
+                onTap: () => notifier.save(settings.copyWith(bodyFont: font)),
               ),
-              SizedBox(height: t.sp),
-              _SliderRow(
-                label: 'Text size',
-                value: settings.fontSize,
-                display: '${settings.fontSize.round()}px',
-                onChanged: (v) => notifier.save(settings.copyWith(fontSize: v)),
-              ),
-              SizedBox(height: t.sp * 0.5),
-              Padding(
-                padding: EdgeInsets.only(left: t.sp * 0.75, bottom: t.sp * 0.5),
-                child: const SectionLabel('Note font'),
-              ),
-              Wrap(
-                spacing: t.sp * 0.5,
-                runSpacing: t.sp * 0.5,
-                children: [
-                  for (final font in BodyFont.values)
-                    _Choice(
-                      label: font.label,
-                      // Each option is set in the face it names, so the choice
-                      // shows what it will do.
-                      family: font.family,
-                      selected: settings.bodyFont == font,
-                      onTap: () =>
-                          notifier.save(settings.copyWith(bodyFont: font)),
-                    ),
-                ],
-              ),
-              const PopoverDivider(),
-              PopoverItem(
-                label: 'Show note id',
-                trailing: StormSwitch(
-                  value: settings.showNoteId,
-                  onChanged: (v) =>
-                      notifier.save(settings.copyWith(showNoteId: v)),
-                ),
-              ),
-              PopoverItem(
-                label: 'Disconnect',
-                subtitle: 'Forget this server and its token',
-                tone: PopoverTone.muted,
-                onTap: () {
-                  Navigator.pop(popContext);
-                  notifier.save(const Settings());
-                },
-              ),
-            ],
-          );
-        },
-      ),
+          ],
+        ),
+        const PopoverDivider(),
+        PopoverItem(
+          label: 'Show note id',
+          trailing: StormSwitch(
+            value: settings.showNoteId,
+            onChanged: (v) => notifier.save(settings.copyWith(showNoteId: v)),
+          ),
+        ),
+        PopoverItem(
+          label: 'Disconnect',
+          subtitle: 'Forget this server and its token',
+          tone: PopoverTone.muted,
+          onTap: () {
+            onClose();
+            notifier.save(const Settings());
+          },
+        ),
+      ],
     );
   }
 }

@@ -29,6 +29,28 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
+    final vaults = ref.watch(vaultsProvider).value ?? const [];
+
+    // There is no dashboard at desk width. Everything it offers is already in
+    // the sidebar — the switcher lists the vaults, the tree is the browser —
+    // so a whole screen for it is a page you pass through on the way to the
+    // only thing you came for. It stays reachable with no vaults, because
+    // then it is the only screen that can make one.
+    if (context.isExpanded && vaults.isNotEmpty) {
+      final active = ref.watch(activeVaultProvider);
+      final target = vaults.any((v) => v.id == active && !v.missing)
+          ? active
+          : (vaults.firstWhere(
+              (v) => !v.missing,
+              orElse: () => vaults.first,
+            )).id;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) context.go(Routes.browse(target));
+      });
+      // Blank rather than the dashboard: rendering it for one frame is a
+      // flash of a screen the user is never meant to see at this width.
+      return Scaffold(backgroundColor: t.bg, body: const SizedBox.shrink());
+    }
 
     return NewNoteRequest(
       // On the dashboard the `+` makes a vault: there is no note context here
@@ -42,29 +64,25 @@ class DashboardScreen extends ConsumerWidget {
               ref.invalidate(vaultsProvider);
               ref.invalidate(recentsProvider);
             },
-            child: context.isExpanded
-                // Wide: the grid flows and recents take a rail, rather than
-                // the list becoming 1900px-wide rows.
-                ? const _WideBody()
-                : ListView(
-                    padding: EdgeInsets.fromLTRB(
-                      t.sp * 2.5,
-                      0,
-                      t.sp * 2.5,
-                      StormChrome.navClearance(context),
-                    ),
-                    children: [
-                      // Mark, then the shape of the vault, then what you were
-                      // last doing, then where things live. Recents sit above
-                      // vaults because the note you want is usually one of the
-                      // last few you touched.
-                      const _Masthead(),
-                      SizedBox(height: t.sectionRhythm * 0.5),
-                      const _Recents(),
-                      SizedBox(height: t.sectionRhythm * 0.5),
-                      const _Vaults(),
-                    ],
-                  ),
+            child: ListView(
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 2.5,
+                0,
+                t.sp * 2.5,
+                StormChrome.navClearance(context),
+              ),
+              children: [
+                // Mark, then the shape of the vault, then what you were
+                // last doing, then where things live. Recents sit above
+                // vaults because the note you want is usually one of the
+                // last few you touched.
+                const _Masthead(),
+                SizedBox(height: t.sectionRhythm * 0.5),
+                const _Recents(),
+                SizedBox(height: t.sectionRhythm * 0.5),
+                const _Vaults(),
+              ],
+            ),
           ),
         ),
       ),
@@ -77,11 +95,7 @@ class DashboardScreen extends ConsumerWidget {
 /// The wordmark is set beside the real mark rather than as a text title: the
 /// design is explicit that the mark is never substituted for type.
 class _Masthead extends ConsumerWidget {
-  const _Masthead({this.compact = false});
-
-  /// The wide screen's rail form: the mark, then one line of summary. Two
-  /// stat blocks side by side need more than the 280px the rail has.
-  final bool compact;
+  const _Masthead();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -92,25 +106,6 @@ class _Masthead extends ConsumerWidget {
     // honest; a stored timestamp would claim a sync that may not have
     // survived the restart.
     final synced = ref.watch(syncEngineProvider).lastSyncedAt;
-
-    if (compact) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const BrandMark(size: 30, withWordmark: true),
-          SizedBox(height: t.sp * 1.5),
-          Text(
-            '$notes note${notes == 1 ? '' : 's'} · '
-            'synced ${relativeTime(synced)}',
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: t.labelSize,
-              color: t.text3,
-            ),
-          ),
-        ],
-      );
-    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -123,51 +118,6 @@ class _Masthead extends ConsumerWidget {
             SizedBox(width: t.sp * 4),
             StatBlock(value: compactAge(synced), label: 'last synced'),
           ],
-        ),
-      ],
-    );
-  }
-}
-
-/// The dashboard at desk width.
-class _WideBody extends StatelessWidget {
-  const _WideBody();
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    // Recents on the left, vaults filling the rest — the order the design
-    // has, and the one that reads: what you were doing, then where things
-    // live. The reverse left a 340px rail of text beside a field of cards.
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: t.sp * 35,
-          child: ListView(
-            padding: EdgeInsets.fromLTRB(
-              t.cardPad,
-              t.sp * 2,
-              t.sp * 2,
-              t.sp * 5,
-            ),
-            children: [
-              const _Masthead(compact: true),
-              SizedBox(height: t.sectionRhythm * 0.5),
-              const _Recents(limit: 12),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView(
-            padding: EdgeInsets.fromLTRB(
-              t.sp * 2,
-              t.sp * 2,
-              t.cardPad,
-              t.sp * 5,
-            ),
-            children: const [_Vaults()],
-          ),
         ),
       ],
     );
@@ -314,12 +264,11 @@ Future<void> _pickVaultColour(
 }
 
 class _Recents extends ConsumerWidget {
-  const _Recents({this.limit = 5});
+  const _Recents();
 
-  /// How many to show before the vaults below them.
-  ///
-  /// Twenty rows pushed the vault grid off the bottom of the phone entirely.
-  final int limit;
+  /// How many to show before the vaults below them. Twenty rows pushed the
+  /// vault grid off the bottom of the phone entirely.
+  static const limit = 5;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {

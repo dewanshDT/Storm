@@ -45,7 +45,11 @@ abstract final class StormTheme {
         backgroundColor: t.bg,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
-        centerTitle: true,
+        // Left, after the back button. The design's settings header is
+        // `‹ Server settings` on both widths, and a centred title on a
+        // 1700px window puts it a very long way from the control that
+        // dismisses it.
+        centerTitle: false,
         titleTextStyle: TextStyle(
           fontFamily: StormTokens.sansFamily,
           color: t.text,
