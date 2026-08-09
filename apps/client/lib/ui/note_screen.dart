@@ -16,7 +16,9 @@ import 'accents.dart';
 import 'tokens.dart';
 import '../sync/sync_engine.dart';
 import 'attachment_strip.dart';
-import 'backlinks_panel.dart';
+import 'surfaces.dart';
+import 'widgets.dart';
+import 'mentions_section.dart';
 import 'properties_panel.dart';
 import 'breakpoints.dart';
 import 'note_editor.dart';
@@ -272,143 +274,236 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
         onRequest: () {},
         child: Scaffold(
           backgroundColor: tint,
-          appBar: AppBar(
-            backgroundColor: tint,
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back),
-              onPressed: () => context.canPop()
+          body: StormChrome(
+            showNav: !keyboard,
+            header: _Header(
+              key: const Key('note-header'),
+              folder: session.meta?.folder ?? '',
+              propertiesOpen: context.isExpanded && _showProperties,
+              onBack: () => context.canPop()
                   ? context.pop()
                   : context.go(Routes.dashboard),
-            ),
-            title: Text(
-              session.meta?.fileName ?? '',
-              overflow: TextOverflow.ellipsis,
-            ),
-            actions: [
-              // Properties get their own control rather than a menu item: the
-              // design puts a gear next to the breadcrumb, and this is the one
-              // note action reached often enough to be worth a button.
-              IconButton(
-                icon: const Icon(Icons.tune, size: 20),
-                tooltip: 'Properties',
-                onPressed: () {
-                  if (context.isExpanded) {
-                    setState(() => _showProperties = !_showProperties);
-                  } else {
-                    PropertiesPanel.showSheet(
+              onUp: () => context.go(
+                Routes.folder(vaultId, session.meta?.folder ?? ''),
+              ),
+              onProperties: context.isExpanded
+                  ? null
+                  : () => PropertiesPanel.showSheet(
                       context,
                       content: session.buffer,
                       onChanged: session.editProperties,
-                    );
-                  }
-                },
-              ),
-              // One menu, not five icons: an overflowing AppBar silently drops
-              // what doesn't fit, which is how the attach button once appeared
-              // to be missing.
-              PopupMenuButton<VoidCallback>(
-                tooltip: 'Note actions',
-                onSelected: (action) => action(),
-                itemBuilder: (c) => [
-                  PopupMenuItem(
-                    value: _togglePin,
-                    child: ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                        size: 20,
-                      ),
-                      title: Text(
-                        isPinned ? 'Stop keeping offline' : 'Keep offline',
-                      ),
+                    ),
+              onActions: () => _noteActions(isPinned),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: NoteEditor(
+                    onFollowLink: _followLink,
+                    showToolbar: keyboard,
+                    footer: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AttachmentStrip(body: session.body),
+                        MentionsSection(
+                          noteId: widget.noteId,
+                          initiallyExpanded: _showContext,
+                          onOpen: (note) =>
+                              context.push(Routes.note(vaultId, note.id)),
+                        ),
+                      ],
                     ),
                   ),
-                  PopupMenuItem(
-                    value: _attach,
-                    child: const ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.attach_file, size: 20),
-                      title: Text('Attach a file'),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: _rename,
-                    child: const ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.drive_file_rename_outline, size: 20),
-                      title: Text('Rename or move'),
-                    ),
-                  ),
-                  const PopupMenuDivider(),
-                  PopupMenuItem(
-                    value: _delete,
-                    child: ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        Icons.delete_outline,
-                        size: 20,
-                        color: Theme.of(c).colorScheme.error,
-                      ),
-                      title: Text(
-                        'Delete',
-                        style: TextStyle(color: Theme.of(c).colorScheme.error),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          body: Stack(
-            children: [
-              Positioned.fill(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        children: [
-                          Expanded(
-                            child: NoteEditor(
-                              onFollowLink: _followLink,
-                              showToolbar: keyboard,
-                            ),
-                          ),
-                          AttachmentStrip(body: session.body),
-                          if (_showContext)
-                            BacklinksPanel(
-                              noteId: widget.noteId,
-                              onOpen: (note) =>
-                                  context.push(Routes.note(vaultId, note.id)),
-                            ),
-                        ],
-                      ),
-                    ),
-                    // The same panel, placed by width: a drawer here, a sheet
-                    // from the toolbar button on a phone.
-                    if (context.isExpanded && _showProperties)
-                      PropertiesDrawer(
-                        content: session.buffer,
-                        onChanged: session.editProperties,
-                        onClose: () => setState(() => _showProperties = false),
-                      ),
-                  ],
                 ),
-              ),
-              if (!keyboard)
-                const Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: NavBubble(),
-                ),
-            ],
+                // The rail carries the properties toggle at desk width, where
+                // the sheet would cover a note that has room beside it.
+                if (context.isExpanded)
+                  _PropertiesRail(
+                    open: _showProperties,
+                    onToggle: () =>
+                        setState(() => _showProperties = !_showProperties),
+                  ),
+                if (context.isExpanded && _showProperties)
+                  PropertiesDrawer(
+                    content: session.buffer,
+                    onChanged: session.editProperties,
+                    onClose: () => setState(() => _showProperties = false),
+                  ),
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Pin, attach, rename and delete.
+  ///
+  /// Reached by long-pressing the header rather than from a visible menu: the
+  /// design's note chrome is back, path and properties, and long-press is
+  /// already how this app offers a row's secondary actions.
+  Future<void> _noteActions(bool isPinned) async {
+    final action = await showStormSheet<VoidCallback>(
+      context: context,
+      title: 'Note',
+      heightFactor: 0.5,
+      builder: (sheetContext) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          PopoverItem(
+            label: isPinned ? 'Stop keeping offline' : 'Keep offline',
+            leading: Icon(
+              isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+              size: context.tokens.bodySize,
+              color: context.tokens.text3,
+            ),
+            onTap: () => Navigator.pop(sheetContext, _togglePin),
+          ),
+          PopoverItem(
+            label: 'Attach a file',
+            leading: Icon(
+              Icons.attach_file,
+              size: context.tokens.bodySize,
+              color: context.tokens.text3,
+            ),
+            onTap: () => Navigator.pop(sheetContext, _attach),
+          ),
+          PopoverItem(
+            label: 'Rename or move',
+            leading: Icon(
+              Icons.drive_file_rename_outline,
+              size: context.tokens.bodySize,
+              color: context.tokens.text3,
+            ),
+            onTap: () => Navigator.pop(sheetContext, _rename),
+          ),
+          const PopoverDivider(),
+          PopoverItem(
+            label: 'Delete',
+            tone: PopoverTone.danger,
+            leading: Icon(
+              Icons.delete_outline,
+              size: context.tokens.bodySize,
+              color: context.tokens.danger,
+            ),
+            onTap: () => Navigator.pop(sheetContext, _delete),
+          ),
+        ],
+      ),
+    );
+    action?.call();
+  }
+}
+
+/// Back, where the note lives, and the way into its properties.
+class _Header extends StatelessWidget {
+  const _Header({
+    super.key,
+    required this.folder,
+    required this.propertiesOpen,
+    required this.onBack,
+    required this.onUp,
+    required this.onProperties,
+    required this.onActions,
+  });
+
+  final String folder;
+  final bool propertiesOpen;
+  final VoidCallback onBack;
+  final VoidCallback onUp;
+
+  /// Null at desk width, where the rail owns the toggle instead.
+  final VoidCallback? onProperties;
+  final VoidCallback onActions;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return GestureDetector(
+      onLongPress: onActions,
+      behavior: HitTestBehavior.opaque,
+      child: Row(
+        key: const Key('note-header-row'),
+        children: [
+          IconButton(
+            icon: Icon(Icons.chevron_left, size: t.headingSize, color: t.text2),
+            onPressed: onBack,
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Back',
+          ),
+          Expanded(
+            child: GestureDetector(
+              onTap: folder.isEmpty ? null : onUp,
+              child: Text(
+                folder.isEmpty ? 'Vault root' : folder,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  color: t.text3,
+                ),
+              ),
+            ),
+          ),
+          if (onProperties != null)
+            IconButton(
+              icon: Icon(Icons.tune, size: t.bodySize, color: t.accent),
+              onPressed: onProperties,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Properties',
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The narrow strip between the note and its properties at desk width.
+class _PropertiesRail extends StatelessWidget {
+  const _PropertiesRail({required this.open, required this.onToggle});
+
+  final bool open;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(
+      width: t.sp * 7,
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(color: t.border, width: t.bw),
+        ),
+      ),
+      child: Column(
+        children: [
+          SizedBox(height: t.sp * 2),
+          Tooltip(
+            message: 'Properties',
+            child: InkWell(
+              onTap: onToggle,
+              borderRadius: BorderRadius.circular(t.rControl * 0.8),
+              child: Container(
+                width: t.sp * 4,
+                height: t.sp * 4,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: open ? t.accentSoft : null,
+                  borderRadius: BorderRadius.circular(t.rControl * 0.8),
+                ),
+                child: Icon(
+                  Icons.tune,
+                  size: t.bodySize,
+                  color: open ? t.accent : t.text2,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

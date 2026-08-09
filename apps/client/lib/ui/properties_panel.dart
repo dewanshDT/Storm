@@ -29,7 +29,7 @@ class PropertiesPanel extends StatelessWidget {
   final VoidCallback? onClose;
 
   /// How wide the drawer is beside a note.
-  static const drawerWidth = 320.0;
+  static const drawerWidth = 280.0;
 
   @override
   Widget build(BuildContext context) {
