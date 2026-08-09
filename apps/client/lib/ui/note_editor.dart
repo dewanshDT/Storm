@@ -22,7 +22,16 @@ import 'wikilink_suggestions.dart';
 /// reconciled our text against a version we never saw, and the buffer must be
 /// replaced rather than kept.
 class NoteEditor extends ConsumerStatefulWidget {
-  const NoteEditor({super.key, this.onFollowLink, this.showToolbar = false});
+  const NoteEditor({
+    super.key,
+    this.onFollowLink,
+    this.showToolbar = false,
+    this.footer,
+  });
+
+  /// Attachments and mentions, which the design puts *inside* the scroll
+  /// after the prose rather than pinned under it.
+  final Widget? footer;
 
   /// Whether to show the formatting toolbar.
   ///
@@ -189,9 +198,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     // user's choice; the default is the bundled serif.
     final base = TextStyle(
       fontFamily: settings.bodyFont.family,
-      fontSize: settings.fontSize + 1,
-      height: 1.6,
-      color: Theme.of(context).colorScheme.onSurface,
+      fontSize: settings.fontSize,
+      height: 1.65,
+      color: context.tokens.text,
     );
     _controller.theme = dark
         ? MarkdownTheme.dark(base)
@@ -209,12 +218,26 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     }
 
     if (!session.isOpen) {
-      return _Placeholder(error: session.error);
+      return session.error == null
+          ? const EmptyState(
+              icon: Icons.article_outlined,
+              title: 'Select a note to start editing',
+            )
+          : EmptyState(
+              icon: Icons.error_outline,
+              title: 'This note would not open',
+              detail: session.error,
+            );
     }
+
+    final t = context.tokens;
 
     return Column(
       children: [
-        _StatusBar(session: session),
+        Padding(
+          padding: EdgeInsets.fromLTRB(t.sp * 2.5, 0, t.sp * 2.5, t.sp * 0.5),
+          child: _statusBar(session),
+        ),
         if (_isDegraded(session)) const _DegradedNotice(),
         if (session.hasConflict)
           ConflictCard(onDismiss: session.dismissNotice)
@@ -225,11 +248,16 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
             onDismiss: session.dismissNotice,
           ),
         if (session.saveState == SaveState.queued)
-          const OfflineNotice(queued: 1),
+          OfflineNotice(queued: ref.watch(syncEngineProvider).pendingCount),
         Expanded(
           child: Scrollbar(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(28, 18, 28, 120),
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 2.75,
+                t.sp,
+                t.sp * 2.75,
+                t.sp * 15,
+              ),
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 820),
@@ -260,6 +288,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                           isDense: true,
                         ),
                       ),
+                      if (widget.footer != null) widget.footer!,
                     ],
                   ),
                 ),
@@ -313,18 +342,10 @@ class _DegradedNotice extends StatelessWidget {
   }
 }
 
-/// Shown while the frontmatter is being edited as text.
-class _StatusBar extends StatelessWidget {
-  const _StatusBar({required this.session});
-
-  final NoteSession session;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-
-    // The tone is the meaning, and the meanings are fixed: green is the server
-    // has it, amber is waiting, danger is it did not go, grey is in flight.
+extension on _NoteEditorState {
+  /// The tone is the meaning, and the meanings are fixed: green is the server
+  /// has it, amber is waiting, danger is it did not go, grey is in flight.
+  Widget _statusBar(NoteSession session) {
     final (label, tone) = switch (session.saveState) {
       SaveState.idle => ('', SaveTone.working),
       SaveState.dirty => ('Unsaved', SaveTone.working),
@@ -333,38 +354,11 @@ class _StatusBar extends StatelessWidget {
       SaveState.queued => ('Queued — offline', SaveTone.waiting),
       SaveState.failed => ('Failed', SaveTone.bad),
     };
-
-    final mono = TextStyle(
-      fontFamily: StormTokens.monoFamily,
-      fontSize: t.labelSize,
-      color: t.text3,
-    );
-
-    return Padding(
-      padding: EdgeInsets.fromLTRB(t.sp * 2.5, t.sp, t.sp * 2.5, t.sp * 0.5),
-      child: Row(
-        children: [
-          // Version first, then state, as the design has it — `v12 · Saved`
-          // reads as one fact about the note rather than two chips at opposite
-          // ends of a bar. The path moved out; it is in the breadcrumb above.
-          Text('v${session.baseVersion}', style: mono),
-          Text('  ·  ', style: mono),
-          SaveStateLabel(label: label, tone: tone),
-          const Spacer(),
-          if (session.error != null) ...[
-            Icon(Icons.error_outline, size: 13, color: t.danger),
-            SizedBox(width: t.sp * 0.5),
-            Flexible(
-              child: Text(
-                session.error!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: mono.copyWith(color: t.danger),
-              ),
-            ),
-          ],
-        ],
-      ),
+    return StatusBar(
+      version: session.baseVersion,
+      label: label,
+      tone: tone,
+      error: session.error,
     );
   }
 }
@@ -409,44 +403,6 @@ class _Notice extends StatelessWidget {
             visualDensity: VisualDensity.compact,
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _Placeholder extends StatelessWidget {
-  const _Placeholder({this.error});
-
-  final String? error;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              error != null ? Icons.error_outline : Icons.description_outlined,
-              size: 36,
-              color: error != null
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.onSurfaceVariant,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              error ?? 'Select a note to start editing',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: error != null
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
