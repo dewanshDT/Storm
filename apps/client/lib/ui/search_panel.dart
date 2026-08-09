@@ -200,23 +200,3 @@ class _Snippet extends StatelessWidget {
     );
   }
 }
-
-class _Hint extends StatelessWidget {
-  const _Hint({required this.text});
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(24),
-      child: Text(
-        text,
-        textAlign: TextAlign.center,
-        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
-      ),
-    ),
-  );
-}
