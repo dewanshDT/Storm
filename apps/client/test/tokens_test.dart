@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/oklch.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
@@ -10,6 +13,10 @@ import 'package:storm/ui/tokens.dart';
 /// Both come from the handoff's accessibility review, and both are the kind of
 /// thing that passes by eye and fails in use, so they are asserted rather than
 /// trusted.
+StormTokens tokensFor(Brightness b) => StormTokens.from(
+  b == Brightness.dark ? StormPreset.stormDark : StormPreset.stormLight,
+);
+
 void main() {
   group('OKLCH conversion', () {
     // Every colour in the app flows through this, so it is checked against
@@ -94,6 +101,69 @@ void main() {
           greaterThanOrEqualTo(4.5),
           reason: '${preset.label}: label on a primary button',
         );
+      }
+    });
+  });
+
+  group('a note accent works as a tile', () {
+    // The design paints an accent as a small rounded square carrying a vault's
+    // initial, and as a dot beside a note's colour. Both are small, so the
+    // colour can be more saturated than a card wash — but the letter on it has
+    // to stay readable, which a wash never had to worry about.
+    const ink = Color(0xFF1A1626);
+
+    test('the initial is readable on every accent, in both brightnesses', () {
+      for (final brightness in Brightness.values) {
+        for (final accent in Accent.values) {
+          if (accent.isNone) continue;
+          final ratio = contrastRatio(
+            ink,
+            accent.tile(
+              StormTokens.from(
+                brightness == Brightness.dark
+                    ? StormPreset.stormDark
+                    : StormPreset.stormLight,
+              ),
+            ),
+          );
+          expect(
+            ratio,
+            greaterThanOrEqualTo(4.5),
+            reason:
+                '${accent.name} on $brightness is '
+                '${ratio.toStringAsFixed(2)}:1',
+          );
+        }
+      }
+    });
+
+    test('a tile is distinguishable from the surface behind it', () {
+      // Measured as perceptual distance, not contrast ratio. Contrast is
+      // luminance alone, and a pale lavender tile on a warm grey card can match
+      // it while being obviously a different colour — the first version of this
+      // test failed on exactly that, which was the test being wrong rather than
+      // the palette.
+      for (final preset in StormPreset.values) {
+        final t = StormTokens.from(preset);
+        for (final accent in Accent.values) {
+          if (accent.isNone) continue;
+          expect(
+            _perceptualDistance(accent.tile(t), t.surface),
+            greaterThan(0.05),
+            reason: '${accent.name} vanishes into ${preset.label}',
+          );
+        }
+      }
+    });
+
+    test('the page wash stays quiet enough to read prose on', () {
+      // A tile colour at tile strength behind a whole screen of text is a
+      // glare; the wash is the same hue at a fraction of the alpha.
+      for (final brightness in Brightness.values) {
+        for (final accent in Accent.values) {
+          if (accent.isNone) continue;
+          expect(accent.wash(tokensFor(brightness)).a, lessThan(0.25));
+        }
       }
     });
   });
@@ -185,3 +255,37 @@ void main() {
 
 String _hex(Color c) =>
     '#${((c.r * 255).round() << 16 | (c.g * 255).round() << 8 | (c.b * 255).round()).toRadixString(16).padLeft(6, '0')}';
+
+/// Rough OKLab distance between two colours, via linear sRGB.
+///
+/// Enough to answer "would anyone see these as different", which is the
+/// question a swatch has to pass and contrast ratio cannot answer.
+double _perceptualDistance(Color a, Color b) {
+  List<double> lab(Color c) {
+    double lin(double v) => v <= 0.04045
+        ? v / 12.92
+        : math.pow((v + 0.055) / 1.055, 2.4).toDouble();
+    final r = lin(c.r), g = lin(c.g), bl = lin(c.b);
+    final l = math
+        .pow(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl, 1 / 3)
+        .toDouble();
+    final m = math
+        .pow(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl, 1 / 3)
+        .toDouble();
+    final s = math
+        .pow(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl, 1 / 3)
+        .toDouble();
+    return [
+      0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+      1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+      0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    ];
+  }
+
+  final x = lab(a), y = lab(b);
+  return math.sqrt(
+    math.pow(x[0] - y[0], 2) +
+        math.pow(x[1] - y[1], 2) +
+        math.pow(x[2] - y[2], 2),
+  );
+}

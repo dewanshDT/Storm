@@ -13,6 +13,7 @@ import '../editor/frontmatter_edit.dart' as fme;
 import '../state/vault_config.dart';
 import '../state/wikilinks.dart';
 import 'accents.dart';
+import 'tokens.dart';
 import '../sync/sync_engine.dart';
 import 'attachment_strip.dart';
 import 'backlinks_panel.dart';
@@ -253,9 +254,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final accent = Accent.parse(
       fme.findSpan(session.buffer, kColorKey)?.displayValue,
     );
-    final tint = accent.isNone
-        ? null
-        : accent.wash(Theme.of(context).brightness);
+    final tint = accent.isNone ? null : accent.wash(context.tokens);
 
     return NoteContextRequest(
       onRequest: () => setState(() => _showContext = !_showContext),
