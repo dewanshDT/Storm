@@ -34,6 +34,7 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | `docs/storm-properties.md` | M11 design brief — typed frontmatter properties. |
 | `docs/storm-adaptive.md` | M12 design brief — the wide-screen layout. |
 | `docs/storm-ui.md` | What every screen does today, for designing against. |
+| `docs/design_handoff_storm_design_system/` | M14 design system + prototype. `README.md` is the brief; the two `.dc.html` files open in a browser. |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
