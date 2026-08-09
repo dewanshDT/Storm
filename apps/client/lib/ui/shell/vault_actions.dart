@@ -20,6 +20,7 @@ class VaultAction {
     required this.onTap,
     this.selected = false,
     this.badge,
+    this.primary = false,
   });
 
   final IconData icon;
@@ -29,6 +30,14 @@ class VaultAction {
 
   /// A count shown on the icon, for linked mentions.
   final int? badge;
+
+  /// The one action the bar exists for.
+  ///
+  /// Drawn as a filled accent circle standing proud of the pill rather than as
+  /// an equal slot, because on a notes app "write something" is not one option
+  /// among six. Only the toolbar treats it differently; the action itself is
+  /// the same data.
+  final bool primary;
 }
 
 /// The actions for the current location.
@@ -77,6 +86,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
     VaultAction(
       icon: Icons.add,
       tooltip: 'New note',
+      primary: true,
       onTap: () => NewNoteRequest.of(context)?.call(),
     ),
     // Only where a folder can actually be made — inside a note there is no
