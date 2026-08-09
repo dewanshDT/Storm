@@ -50,8 +50,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M11 | Typed note properties | **done** | properties, colours, fonts |
 | M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
+| M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 
-Last updated: 2026-08-07. M0–M11 are built and deployed to the VM.
+Last updated: 2026-08-09. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
 decisions 20–30 record the choices.
 
@@ -538,6 +539,52 @@ is `=3.1.2` because rmcp shipped five releases in the eleven days around the
 2025-11-25, which Storm follows rather than announcing a revision the SDK's own
 transport treats as provisional.
 *Revisit if:* rmcp reaches Tier 1, or a client Storm wants only speaks stdio.
+
+**40. There is no app bar anywhere inside a vault.**
+The design puts the vault and settings bubbles at the top corners of every
+vault screen and gives each screen its own header underneath them. A title bar
+would be a third band of chrome above content that already says where it is —
+the note's folder path, the directory's breadcrumb. `StormChrome` places the
+bubbles, the header, the content and the nav pill; `StormScaffold` wraps it for
+every screen but the note, which tints its own background and so builds its
+`Scaffold` itself.
+*Revisit if:* a screen appears whose header cannot be expressed as one row.
+
+**41. Search and Tags are sheets, and still routes.**
+The design draws both as overlays over the screen they came from, but
+`/v/<vault>/search` and `/v/<vault>/tags` have to keep resolving — the web
+client's deep links are the reason the router exists at all, and a test covers
+them. `SheetHost` renders the screen the sheet belongs over and raises the
+sheet on the first frame; dismissing it backs out the way the route came in, so
+one system back from Tags still reaches the dashboard.
+*Revisit if:* a third overlay needs its own route, at which point the pattern
+is worth a route-level abstraction rather than a widget.
+
+**42. Note actions are a long-press, not a menu button.**
+Pin, attach, rename and delete left the app bar with the app bar. The design's
+note chrome is back, path and a gear, and long-press is already how this app
+offers a row's secondary actions — it is what a folder row does. The trade is
+discoverability, accepted because the grammar is consistent and because three
+of the four actions are rare.
+*Revisit if:* someone cannot find delete.
+
+**43. A literal in `lib/ui/` is a test failure.**
+`test/token_conformance_test.dart` scans the source for `Colors.*`, a bare
+`fontSize:`, a numeric `circular()` other than the 999 pill, and any
+`OutlineInputBorder` outside `theme.dart`. A source scan rather than a widget
+test because this class of mistake is invisible at runtime in the default
+theme: `circular(8)` looks right under Storm dark, where `rControl` is 10, and
+only goes wrong under SlowFlow, where `rCard` is 2 and every hardcoded corner
+stays round while the cards go square.
+*Revisit if:* a genuine exception appears; add it to the exemption beside
+`theme.dart` rather than deleting the test.
+
+**44. The skeleton does not shimmer.**
+A repeating animation never lets `pumpAndSettle` return, so every widget test
+that renders a loading state hangs. These lists come from cache and are gone in
+a frame or two; the animation would cost more than it buys.
+*Revisit if:* a loading state appears that is genuinely slow, in which case it
+wants its own widget with a `TickerMode` guard.
 
 ---
 
@@ -1285,6 +1332,57 @@ reverting the error mapping, and unwrapping the lists. The last one initially
 *crashed* the suite rather than reporting — a list where a dict was expected —
 which is a worse signal than a failure, so the payload accessor now normalises
 and the run reports all eight failures.
+
+---
+
+### M14 — The design system, applied ✅
+
+`docs/design_handoff_storm_design_system/` is a high-fidelity system plus a
+clickable prototype of every phone and wide screen. Three commits landed the
+foundation — the OKLCH token layer, the derived `ThemeData`, the shared widgets
+and the four state widgets — and then stopped at the dashboard. Directory,
+Note, Search, Tags, Properties, the toolbar, attachments, mentions, Connect and
+Server settings still carried the pre-design structure and about forty
+hardcoded sizes, radii and paddings the token layer could not reach. The app
+read as two products: the dashboard was the design, and everything a tap away
+from it was not.
+
+**What was structural rather than cosmetic.** Three things, and they are
+decisions 40–42: there is no app bar; Search and Tags are overlays; the
+properties chip hugs its key rather than reserving a fixed 132px column.
+
+**What the sweep found that the diff would not have.** Several of these were
+wrong in ways that never show up in the default theme or in a test:
+
+- The note body rendered at `settings.fontSize + 1`, so every note was a point
+  larger than the size the slider claimed.
+- `OfflineNotice(queued: 1)` was a literal, so the notice said "1 edit queued"
+  whatever the real depth of the outbox.
+- Tags rendered in accent purple, which is the colour of *interactive*. The
+  token doc is explicit that amber means tags and highlight and nothing else.
+- The degraded-editor notice sat on amber-soft, borrowing the tag colour for a
+  message about performance.
+- The nav badge was 9px, below the 11px floor the handoff is explicit about.
+- `note_properties.dart` used `fontFamily: 'monospace'` — a platform alias that
+  resolves to whatever the OS ships, not the bundled IBM Plex Mono the rest of
+  the app is set in.
+- Four widgets drew "nothing here", three drew "loading", and raw `'$e'`
+  reached the UI in nine places while `describeFailure()` already existed.
+
+**The toolbar now says what is already on.** `inlineActive` and
+`blockPrefixHere` are read-only queries on `StormMarkdownController`, and the
+bar rebuilds on selection changes rather than on taps — which is the part that
+makes the state honest, because moving the caret changes what is bold without
+any button being pressed. A collapsed caret needs the marker count on the line:
+`_wrappedAt` only sees the two characters either side of it, which is true only
+of a `****` you have just typed.
+
+**`/gallery`** renders every shared widget in all three presets side by side.
+The header of `widgets.dart` had claimed it existed since the widgets landed.
+
+The handoff's own vocabulary — atoms, molecules, organisms — is a documentation
+device and does not appear in the code. Shared widgets are `lib/ui/widgets.dart`
+and overlay containers `lib/ui/surfaces.dart`.
 
 ---
 
