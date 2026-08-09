@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart' show TextInputFormatter;
 
+import 'icons.dart';
 import 'tokens.dart';
 
 /// Synced, syncing, or offline.
@@ -694,8 +695,11 @@ class FolderRow extends StatelessWidget {
           children: [
             // Grey, not accent: the folder glyph is furniture, and accent is
             // reserved for what is interactive.
+            // The same solid folder the nav pill carries. Lucide's outline
+            // folder is a different weight from the glyph two inches below it
+            // on the same screen.
             leading ??
-                Icon(LucideIcons.folder, size: t.bodySize, color: t.text2),
+                StormIcon(StormGlyph.folder, size: t.bodySize, color: t.text2),
             SizedBox(width: dense ? t.sp : t.sp * 1.5),
             Expanded(
               child: Text(
