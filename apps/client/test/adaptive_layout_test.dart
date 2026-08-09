@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
+import 'package:storm/ui/note_editor.dart';
+import 'package:storm/ui/note_properties.dart';
+import 'package:storm/ui/properties_panel.dart';
 import 'package:storm/ui/shell/nav_bubble.dart';
 import 'package:storm/ui/shell/vault_sidebar.dart';
 
@@ -229,6 +232,62 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(c.read(routerProvider).state.uri.path, Routes.dashboard);
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('properties are a surface of their own', () {
+    // They used to sit inline above the prose, which cost a phone's first
+    // screen permanently: a note with a dozen keys pushed the writing off the
+    // bottom before a word of it was visible.
+    testWidgets('never inside the prose column', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.descendant(
+          of: find.byType(NoteEditor),
+          matching: find.byType(NoteProperties),
+        ),
+        findsNothing,
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('open as a drawer beside the note on a wide screen', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PropertiesDrawer), findsNothing, reason: 'closed');
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
+
+      // And close again, because a drawer that cannot be dismissed is a column.
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('open as a sheet on a phone, never a drawer', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PropertiesDrawer), findsNothing);
+      expect(find.byType(PropertiesPanel), findsOneWidget);
+      expect(find.text('PROPERTIES'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });

@@ -9,7 +9,8 @@ import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'editor_toolbar.dart';
-import 'note_properties.dart';
+import 'atoms.dart';
+import 'tokens.dart';
 import 'wikilink_suggestions.dart';
 
 /// The editing pane.
@@ -230,14 +231,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Inside the scroll view and inside the same 820px
-                      // column as the prose. Pinned above it, the panel was
-                      // full-width while the text was centred and capped —
-                      // and it cost a phone's first screen permanently.
-                      NoteProperties(
-                        content: session.buffer,
-                        onChanged: session.editProperties,
-                      ),
+                      // Properties are no longer in this column. They are a
+                      // surface of their own now — a sheet on a phone, a drawer
+                      // on a wide screen — because a note with a dozen keys
+                      // pushed the writing off the first screen, and the design
+                      // gives them their own place with a header and a close.
                       TextField(
                         // Named so tests can tell the prose apart from the
                         // property inputs above it.
@@ -318,51 +316,48 @@ class _StatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (label, color) = switch (session.saveState) {
-      SaveState.idle => ('', theme.colorScheme.onSurfaceVariant),
-      SaveState.dirty => ('Unsaved', theme.colorScheme.onSurfaceVariant),
-      SaveState.saving => ('Saving…', theme.colorScheme.onSurfaceVariant),
-      SaveState.saved => ('Saved', theme.colorScheme.primary),
-      SaveState.queued => ('Queued — offline', theme.colorScheme.tertiary),
-      SaveState.failed => ('Failed', theme.colorScheme.error),
+    final t = context.tokens;
+
+    // The tone is the meaning, and the meanings are fixed: green is the server
+    // has it, amber is waiting, danger is it did not go, grey is in flight.
+    final (label, tone) = switch (session.saveState) {
+      SaveState.idle => ('', SaveTone.working),
+      SaveState.dirty => ('Unsaved', SaveTone.working),
+      SaveState.saving => ('Saving…', SaveTone.working),
+      SaveState.saved => ('Saved', SaveTone.good),
+      SaveState.queued => ('Queued — offline', SaveTone.waiting),
+      SaveState.failed => ('Failed', SaveTone.bad),
     };
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: theme.dividerColor)),
-      ),
+    final mono = TextStyle(
+      fontFamily: StormTokens.monoFamily,
+      fontSize: t.labelSize,
+      color: t.text3,
+    );
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(t.sp * 2.5, t.sp, t.sp * 2.5, t.sp * 0.5),
       child: Row(
         children: [
-          Expanded(
-            child: Text(
-              session.meta?.path ?? '',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
+          // Version first, then state, as the design has it — `v12 · Saved`
+          // reads as one fact about the note rather than two chips at opposite
+          // ends of a bar. The path moved out; it is in the breadcrumb above.
+          Text('v${session.baseVersion}', style: mono),
+          Text('  ·  ', style: mono),
+          SaveStateLabel(label: label, tone: tone),
+          const Spacer(),
           if (session.error != null) ...[
-            Icon(Icons.error_outline, size: 14, color: theme.colorScheme.error),
-            const SizedBox(width: 5),
-            Text(
-              session.error!,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.error,
+            Icon(Icons.error_outline, size: 13, color: t.danger),
+            SizedBox(width: t.sp * 0.5),
+            Flexible(
+              child: Text(
+                session.error!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: mono.copyWith(color: t.danger),
               ),
             ),
-            const SizedBox(width: 12),
           ],
-          Text(
-            'v${session.baseVersion}',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Text(label, style: theme.textTheme.bodySmall?.copyWith(color: color)),
         ],
       ),
     );

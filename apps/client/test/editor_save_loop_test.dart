@@ -10,6 +10,8 @@ import 'package:storm/editor/storm_markdown_controller.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/note_editor.dart';
+import 'package:storm/ui/theme.dart';
+import 'package:storm/ui/note_properties.dart';
 
 import 'fake_server.dart';
 
@@ -64,11 +66,34 @@ void main() {
     );
   }
 
+  /// The editor with the properties panel beside it, as the note screen now
+  /// composes them.
+  ///
+  /// Properties used to live *inside* NoteEditor, above the prose. They are
+  /// their own surface now — a sheet on a phone, a drawer on a wide screen —
+  /// but the seam these tests exercise is unchanged: a property edit must not
+  /// bump `revision`, or every keystroke in the panel resets the caret in the
+  /// body.
   Future<void> pumpEditor(WidgetTester tester, ProviderContainer c) async {
+    final session = c.read(noteSessionProvider);
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: c,
-        child: const MaterialApp(home: Scaffold(body: NoteEditor())),
+        child: MaterialApp(
+          theme: StormTheme.dark(),
+          home: Scaffold(
+            body: Column(
+              children: [
+                if (session.isOpen)
+                  NoteProperties(
+                    content: session.buffer,
+                    onChanged: session.editProperties,
+                  ),
+                const Expanded(child: NoteEditor()),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

@@ -17,6 +17,8 @@ import 'tokens.dart';
 import '../sync/sync_engine.dart';
 import 'attachment_strip.dart';
 import 'backlinks_panel.dart';
+import 'properties_panel.dart';
+import 'breakpoints.dart';
 import 'note_editor.dart';
 import 'shell/nav_bubble.dart';
 import 'shell/storm_scaffold.dart';
@@ -37,6 +39,14 @@ class NoteScreen extends ConsumerStatefulWidget {
 
 class _NoteScreenState extends ConsumerState<NoteScreen> {
   bool _showContext = false;
+
+  /// Whether the properties drawer is open beside the note.
+  ///
+  /// Wide screens only — on a phone properties are a sheet, which is its own
+  /// route and needs no state here. Local rather than in a provider: the
+  /// providers drive sync and cache, and this is where the panel is, which is
+  /// nobody else's business.
+  bool _showProperties = false;
 
   @override
   void initState() {
@@ -275,6 +285,24 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
               overflow: TextOverflow.ellipsis,
             ),
             actions: [
+              // Properties get their own control rather than a menu item: the
+              // design puts a gear next to the breadcrumb, and this is the one
+              // note action reached often enough to be worth a button.
+              IconButton(
+                icon: const Icon(Icons.tune, size: 20),
+                tooltip: 'Properties',
+                onPressed: () {
+                  if (context.isExpanded) {
+                    setState(() => _showProperties = !_showProperties);
+                  } else {
+                    PropertiesPanel.showSheet(
+                      context,
+                      content: session.buffer,
+                      onChanged: session.editProperties,
+                    );
+                  }
+                },
+              ),
               // One menu, not five icons: an overflowing AppBar silently drops
               // what doesn't fit, which is how the attach button once appeared
               // to be missing.
@@ -338,20 +366,35 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           body: Stack(
             children: [
               Positioned.fill(
-                child: Column(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Expanded(
-                      child: NoteEditor(
-                        onFollowLink: _followLink,
-                        showToolbar: keyboard,
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: NoteEditor(
+                              onFollowLink: _followLink,
+                              showToolbar: keyboard,
+                            ),
+                          ),
+                          AttachmentStrip(body: session.body),
+                          if (_showContext)
+                            BacklinksPanel(
+                              noteId: widget.noteId,
+                              onOpen: (note) =>
+                                  context.push(Routes.note(vaultId, note.id)),
+                            ),
+                        ],
                       ),
                     ),
-                    AttachmentStrip(body: session.body),
-                    if (_showContext)
-                      BacklinksPanel(
-                        noteId: widget.noteId,
-                        onOpen: (note) =>
-                            context.push(Routes.note(vaultId, note.id)),
+                    // The same panel, placed by width: a drawer here, a sheet
+                    // from the toolbar button on a phone.
+                    if (context.isExpanded && _showProperties)
+                      PropertiesDrawer(
+                        content: session.buffer,
+                        onChanged: session.editProperties,
+                        onClose: () => setState(() => _showProperties = false),
                       ),
                   ],
                 ),
