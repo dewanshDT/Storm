@@ -7,7 +7,7 @@ import '../router.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 import '../state/app_state.dart';
-import 'states.dart' show describeFailure;
+import 'states.dart';
 
 /// Where vaults live on the server, and which ones exist.
 ///
@@ -36,11 +36,8 @@ class ServerSettingsScreen extends ConsumerWidget {
         children: [
           _Section(label: 'Vault storage root'),
           config.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(12),
-              child: LinearProgressIndicator(),
-            ),
-            error: (e, _) => _Muted('$e'),
+            loading: () => const SkeletonRows(rows: 2),
+            error: (e, _) => _Muted(describeFailure(e)),
             data: (c) => c == null
                 ? const _Muted('Not connected')
                 : _RootCard(config: c),
@@ -48,22 +45,16 @@ class ServerSettingsScreen extends ConsumerWidget {
           const SizedBox(height: 24),
           _Section(label: 'AI access (MCP)'),
           config.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(12),
-              child: LinearProgressIndicator(),
-            ),
-            error: (e, _) => _Muted('$e'),
+            loading: () => const SkeletonRows(rows: 2),
+            error: (e, _) => _Muted(describeFailure(e)),
             data: (c) =>
                 c == null ? const _Muted('Not connected') : _McpCard(config: c),
           ),
           const SizedBox(height: 24),
           _Section(label: 'Vaults'),
           vaults.when(
-            loading: () => const Padding(
-              padding: EdgeInsets.all(12),
-              child: LinearProgressIndicator(),
-            ),
-            error: (e, _) => _Muted('$e'),
+            loading: () => const SkeletonRows(rows: 2),
+            error: (e, _) => _Muted(describeFailure(e)),
             data: (list) => Column(
               children: [
                 for (final v in list) _VaultRow(vault: v),

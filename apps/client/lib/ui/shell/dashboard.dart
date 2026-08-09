@@ -10,6 +10,7 @@ import '../server_settings_screen.dart' show createVault;
 import '../accents.dart';
 import '../widgets.dart';
 import '../breakpoints.dart';
+import '../states.dart';
 
 import 'corner_bubbles.dart' show compactAge, relativeTime;
 import 'nav_bubble.dart';
@@ -145,21 +146,20 @@ class _Vaults extends ConsumerWidget {
     final vaults = ref.watch(vaultsProvider);
 
     return vaults.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.symmetric(vertical: 40),
-        child: Center(child: CircularProgressIndicator()),
-      ),
-      error: (e, _) => _Message(
+      loading: () => const SkeletonRows(rows: 2),
+      error: (e, _) => EmptyState(
         icon: Icons.cloud_off,
-        text: '$e',
-        action: 'Retry',
+        title: 'Could not reach the server',
+        detail: describeFailure(e),
+        action: 'Try again',
         onAction: () => ref.invalidate(vaultsProvider),
       ),
       data: (list) {
         if (list.isEmpty) {
-          return _Message(
+          return EmptyState(
             icon: Icons.folder_special_outlined,
-            text: 'No vaults yet.',
+            title: 'No vaults yet',
+            detail: 'A vault is a directory under the storage root.',
             action: 'New vault',
             onAction: () => createVault(context, ref),
           );
@@ -297,15 +297,17 @@ class _Recents extends ConsumerWidget {
         ),
         const SizedBox(height: 10),
         recents.when(
-          loading: () => const Padding(
-            padding: EdgeInsets.all(12),
-            child: LinearProgressIndicator(),
+          loading: () => const SkeletonRows(rows: 3),
+          error: (e, _) => EmptyState(
+            icon: Icons.cloud_off,
+            title: 'Could not load recents',
+            detail: describeFailure(e),
           ),
-          error: (e, _) => _Message(icon: Icons.cloud_off, text: '$e'),
           data: (list) => list.isEmpty
-              ? const _Message(
+              ? const EmptyState(
                   icon: Icons.history,
-                  text: 'Notes you open will show up here.',
+                  title: 'Nothing opened yet',
+                  detail: 'Notes you open will show up here.',
                 )
               : Column(
                   children: [
@@ -388,43 +390,6 @@ class _RecentCard extends ConsumerWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _Message extends StatelessWidget {
-  const _Message({
-    required this.icon,
-    required this.text,
-    this.action,
-    this.onAction,
-  });
-
-  final IconData icon;
-  final String text;
-  final String? action;
-  final VoidCallback? onAction;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 32),
-      child: Column(
-        children: [
-          Icon(icon, size: 30, color: scheme.onSurfaceVariant),
-          const SizedBox(height: 10),
-          Text(
-            text,
-            textAlign: TextAlign.center,
-            style: TextStyle(color: scheme.onSurfaceVariant),
-          ),
-          if (action != null) ...[
-            const SizedBox(height: 12),
-            OutlinedButton(onPressed: onAction, child: Text(action!)),
-          ],
-        ],
       ),
     );
   }
