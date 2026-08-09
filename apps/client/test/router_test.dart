@@ -27,7 +27,7 @@ void main() {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      expect(find.text('Storm'), findsOneWidget);
+      expect(find.text('STORM'), findsOneWidget);
       expect(find.text('RECENTLY OPENED'), findsOneWidget);
       await disposeShell(tester, c);
     });

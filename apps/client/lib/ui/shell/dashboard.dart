@@ -133,7 +133,7 @@ class _WideBody extends StatelessWidget {
           width: 340,
           child: ListView(
             padding: const EdgeInsets.fromLTRB(12, 12, 24, 40),
-            children: const [_Recents()],
+            children: const [_Recents(limit: 12)],
           ),
         ),
       ],
@@ -366,7 +366,12 @@ String _initial(String name) =>
     name.trim().isEmpty ? 'S' : name.trim().characters.first.toUpperCase();
 
 class _Recents extends ConsumerWidget {
-  const _Recents();
+  const _Recents({this.limit = 5});
+
+  /// How many to show before the vaults below them.
+  ///
+  /// Twenty rows pushed the vault grid off the bottom of the phone entirely.
+  final int limit;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -391,7 +396,11 @@ class _Recents extends ConsumerWidget {
                   icon: Icons.history,
                   text: 'Notes you open will show up here.',
                 )
-              : Column(children: [for (final r in list) _RecentCard(note: r)]),
+              : Column(
+                  children: [
+                    for (final r in list.take(limit)) _RecentCard(note: r),
+                  ],
+                ),
         ),
       ],
     );
