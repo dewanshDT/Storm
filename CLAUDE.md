@@ -33,6 +33,7 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
 | `docs/storm-properties.md` | M11 design brief — typed frontmatter properties. |
 | `docs/storm-adaptive.md` | M12 design brief — the wide-screen layout. |
+| `docs/storm-ui.md` | What every screen does today, for designing against. |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on

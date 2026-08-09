@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  body { margin: 0; }
+  * { box-sizing: border-box; }
+  ::selection { background: oklch(0.40 0.09 293); }
+</style>
+</helmet>
+<div style="{{ rootVars }}">
+<div style="min-height:100vh;background:var(--canvas,oklch(0.93 0.006 55));font-family:'IBM Plex Sans',sans-serif;padding:40px 24px 120px;display:flex;flex-direction:column;align-items:center;gap:28px">
+  <div style="width:100%;max-width:1600px;display:flex;align-items:baseline;justify-content:space-between">
+    <div style="color:var(--canvas-text,oklch(0.30 0.01 55));font-size:14px;font-weight:600;letter-spacing:0.02em">Storm — clickable prototype</div>
+    <div style="color:var(--canvas-text2,oklch(0.5 0.01 55));font-size:12px">Themed live from the design-system tokens · panel bottom-left</div>
+  </div>
+  <div style="display:flex;gap:56px;flex-wrap:wrap;justify-content:center;align-items:flex-start">
+
+    <div style="display:flex;flex-direction:column;gap:14px;align-items:center">
+      <div style="color:var(--border,oklch(0.45 0.01 55));font-size:12px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Phone · 390 × 844</div>
+      <div style="width:390px;height:844px;border-radius:36px;overflow:hidden;position:relative;background:var(--bg,oklch(0.22 0.008 55));box-shadow:0 24px 60px -12px oklch(0.2 0.01 55 / 0.35);border:1px solid var(--border,oklch(0.35 0.01 55))">
+
+        <sc-if value="{{ showCornerBubbles }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute;top:20px;left:20px;z-index:15">
+            <div onClick="{{ toggleVaultPopover }}" style="width:44px;height:44px;border-radius:var(--r-control,12px);background:var(--surface,oklch(0.27 0.008 55));display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;border:1px solid var(--border,oklch(0.34 0.01 55))">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--text,oklch(0.95 0.006 55));font-weight:500">{{ bubbleVaultInitial }}</span>
+              <div style="{{ dashStatusDotStyle }}"></div>
+            </div>
+          </div>
+          <div style="position:absolute;top:20px;right:20px;z-index:15">
+            <div onClick="{{ toggleProfilePopover }}" style="width:44px;height:44px;border-radius:var(--r-control,12px);background:var(--surface,oklch(0.27 0.008 55));display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--border,oklch(0.34 0.01 55))">
+              <span style="font-family:'IBM Plex Sans',sans-serif;font-size:14px;color:var(--text,oklch(0.95 0.006 55));font-weight:600">A</span>
+            </div>
+          </div>
+          <sc-if value="{{ vaultPopoverOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;top:68px;left:20px;width:220px;background:var(--surface2,oklch(0.29 0.009 55));border:1px solid var(--border,oklch(0.36 0.01 55));border-radius:var(--r-card,14px);padding:12px;z-index:20;box-shadow:0 12px 30px -8px oklch(0.15 0.01 55 / 0.5)">
+              <div style="font-size:11px;font-weight:600;color:var(--text3,oklch(0.5 0.008 55));letter-spacing:0.04em;text-transform:uppercase;padding:4px 6px 6px">Vaults</div>
+              <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="3">
+                <div onClick="{{ v.switchTo }}" style="padding:8px 6px;border-radius:8px;display:flex;align-items:center;gap:8px;cursor:pointer">
+                  <div style="{{ v.dotStyle }}"></div>
+                  <span style="font-size:13px;color:var(--text,oklch(0.9 0.006 55))">{{ v.name }}</span>
+                </div>
+              </sc-for>
+              <div style="height:1px;background:var(--border,oklch(0.34 0.01 55));margin:6px 0"></div>
+              <div style="padding:4px 6px;font-size:12px;color:var(--text3,oklch(0.65 0.008 55))">{{ syncStatusLine }}</div>
+              <div onClick="{{ openSettings }}" style="padding:8px 6px 2px;font-size:13px;color:var(--accent,oklch(0.68 0.15 293));cursor:pointer">Server settings ›</div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ profilePopoverOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;top:68px;right:20px;width:200px;background:var(--surface2,oklch(0.29 0.009 55));border:1px solid var(--border,oklch(0.36 0.01 55));border-radius:14px;padding:8px;z-index:20;box-shadow:0 12px 30px -8px oklch(0.15 0.01 55 / 0.5)">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 8px">
+                <span style="font-size:13px;color:var(--text,oklch(0.9 0.006 55))">Dark theme</span>
+                <span style="font-size:11px;color:var(--text3,oklch(0.5 0.008 55))">on</span>
+              </div>
+              <div style="padding:8px 8px">
+                <span style="font-size:13px;color:var(--text,oklch(0.9 0.006 55))">Text size</span>
+                <div style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));margin-top:2px">16px · default</div>
+              </div>
+              <div style="height:1px;background:var(--border,oklch(0.34 0.01 55));margin:6px 0"></div>
+              <div style="padding:8px 8px;font-size:13px;color:var(--text3,oklch(0.6 0.008 55));cursor:pointer">Disconnect</div>
+            </div>
+          </sc-if>
+        </sc-if>
+
+        <sc-if value="{{ isPhoneDashboard }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+            <div style="padding:76px 20px 0 20px;display:flex;align-items:center;justify-content:center">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:0.12em;color:var(--text2,oklch(0.7 0.01 55));font-weight:500">STORM</div>
+            </div>
+
+            <div style="padding:22px 20px 0 20px;display:flex;gap:24px">
+              <div><div style="font-size:22px;font-weight:600;color:var(--text,oklch(0.95 0.006 55))">27</div><div style="font-size:12px;color:var(--text3,oklch(0.6 0.008 55));margin-top:2px">notes</div></div>
+              <div><div style="font-size:22px;font-weight:600;color:var(--text,oklch(0.95 0.006 55))">2m</div><div style="font-size:12px;color:var(--text3,oklch(0.6 0.008 55));margin-top:2px">last synced</div></div>
+            </div>
+
+            <div style="padding:26px 20px 10px 20px;font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Recently opened</div>
+            <div style="padding:0 12px;display:flex;flex-direction:column;overflow:auto">
+              <sc-for list="{{ recents }}" as="n" hint-placeholder-count="4">
+                <div onClick="{{ n.open }}" style="padding:12px 8px;display:flex;flex-direction:column;gap:2px;border-radius:10px;cursor:pointer">
+                  <div style="font-size:15px;color:var(--text,oklch(0.94 0.006 55));font-weight:500">{{ n.title }}</div>
+                  <div style="font-size:12px;color:var(--text3,oklch(0.58 0.008 55))">{{ n.vaultName }} · {{ n.folder }} · {{ n.time }}</div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="padding:18px 20px 10px 20px;font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Vaults</div>
+            <div style="padding:0 20px 100px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px;overflow:auto">
+              <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="4">
+                <div onClick="{{ v.open }}" style="{{ v.cardStyle }}">
+                  <div style="{{ v.iconStyle }}">{{ v.icon }}</div>
+                  <div style="font-size:14px;font-weight:600;color:var(--text,oklch(0.94 0.006 55));margin-top:10px">{{ v.name }}</div>
+                  <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+                    <div style="{{ v.dotStyle }}"></div>
+                    <div style="font-size:12px;color:var(--text3,oklch(0.6 0.008 55))">{{ v.notes }} notes</div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isPhoneDirectory }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+            <div style="padding:76px 20px 6px 20px;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text3,oklch(0.6 0.008 55));font-family:'IBM Plex Mono',monospace">
+              <span onClick="{{ backToDashboard }}" style="cursor:pointer;color:var(--accent,oklch(0.68 0.15 293))">Vaults</span>
+              <span>›</span>
+              <span onClick="{{ backToVaultRoot }}" style="cursor:pointer;{{ folderCrumbColor }}">{{ activeVaultName }}</span>
+              <sc-if value="{{ inFolder }}" hint-placeholder-val="{{ false }}">
+                <span>›</span><span style="color:var(--text,oklch(0.9 0.006 55))">{{ activeFolderName }}</span>
+              </sc-if>
+            </div>
+            <div style="padding:10px 12px;flex:1;overflow:auto">
+              <sc-if value="{{ inFolder }}" hint-placeholder-val="{{ false }}">
+                <sc-for list="{{ folderNotes }}" as="n" hint-placeholder-count="3">
+                  <div onClick="{{ n.open }}" style="padding:14px 12px;display:flex;flex-direction:column;gap:3px;border-bottom:1px solid var(--border,oklch(0.30 0.009 55));cursor:pointer">
+                    <div style="font-size:15px;color:var(--text,oklch(0.94 0.006 55));font-weight:500">{{ n.title }}</div>
+                    <div style="font-size:12px;color:var(--text3,oklch(0.58 0.008 55))">{{ n.time }}</div>
+                  </div>
+                </sc-for>
+                <sc-if value="{{ folderIsEmpty }}" hint-placeholder-val="{{ false }}"><div style="padding:24px 12px;font-size:13px;color:var(--text3,oklch(0.5 0.008 55))">Nothing here yet.</div></sc-if>
+              </sc-if>
+              <sc-if value="{{ notInFolder }}" hint-placeholder-val="{{ false }}">
+                <sc-for list="{{ vaultFolders }}" as="f" hint-placeholder-count="3">
+                  <div onClick="{{ f.open }}" style="padding:14px 12px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--border,oklch(0.30 0.009 55));cursor:pointer">
+                    <div style="width:18px;height:14px;position:relative;flex-shrink:0">
+                      <div style="position:absolute;top:0;left:0;width:8px;height:3px;background:var(--text3,oklch(0.65 0.008 55));border-radius:2px 2px 0 0"></div>
+                      <div style="position:absolute;top:2px;left:0;width:18px;height:12px;background:var(--text3,oklch(0.65 0.008 55));border-radius:2px"></div>
+                    </div>
+                    <div style="font-size:15px;color:var(--text,oklch(0.94 0.006 55));font-weight:500;flex:1">{{ f.name }}</div>
+                    <div style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55))">{{ f.count }}</div>
+                    <span style="color:var(--text3,oklch(0.5 0.008 55))">›</span>
+                  </div>
+                </sc-for>
+              </sc-if>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isPhoneNote }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+            <div style="padding:76px 16px 0 16px;display:flex;align-items:center;gap:10px">
+              <span onClick="{{ closeNote }}" style="font-size:20px;color:var(--text2,oklch(0.7 0.01 55));cursor:pointer;padding:4px">‹</span>
+              <div style="font-size:13px;color:var(--text3,oklch(0.55 0.008 55));flex:1;font-family:'IBM Plex Mono',monospace">{{ activeNoteFolder }}</div>
+              <span onClick="{{ toggleProperties }}" style="font-size:16px;color:var(--accent,oklch(0.68 0.15 293));cursor:pointer;padding:4px">⚙</span>
+            </div>
+            <div style="padding:2px 16px 8px 16px;display:flex;align-items:center;gap:8px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--text3,oklch(0.5 0.008 55))">
+              <span>{{ activeNoteVersion }}</span><span>·</span>
+              <span onClick="{{ cycleSaveState }}" style="cursor:pointer;{{ saveStateColor }}">{{ saveStateLabel }}</span>
+            </div>
+            <div style="flex:1;overflow:auto;padding:6px 22px 20px 22px" onClick="{{ startEditing }}">
+              <div style="font-family:'Newsreader',serif;font-size:24px;font-weight:600;color:var(--text,oklch(0.96 0.006 55));margin-bottom:14px">{{ activeNoteTitle }}</div>
+              <sc-for list="{{ activeNoteBlocks }}" as="b" hint-placeholder-count="3">
+                <sc-if value="{{ b.isH2 }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Newsreader',serif;font-size:19px;font-weight:600;color:var(--text,oklch(0.93 0.006 55));margin:18px 0 8px">{{ b.text }}</div></sc-if>
+                <sc-if value="{{ b.isP }}" hint-placeholder-val="{{ false }}">
+                  <div style="font-family:'Newsreader',serif;font-size:16px;line-height:1.65;color:var(--text2,oklch(0.86 0.006 55));margin-bottom:12px">
+                    <sc-for list="{{ b.segments }}" as="s" hint-placeholder-count="2">
+                      <sc-if value="{{ s.isText }}" hint-placeholder-val="{{ true }}"><span>{{ s.text }}</span></sc-if>
+                      <sc-if value="{{ s.isLink }}" hint-placeholder-val="{{ false }}"><span style="color:var(--accent,oklch(0.68 0.15 293));font-weight:500">{{ s.text }}</span></sc-if>
+                      <sc-if value="{{ s.isTag }}" hint-placeholder-val="{{ false }}"><span style="background:var(--amber-soft,oklch(0.30 0.05 68));color:var(--amber,oklch(0.82 0.1 68));padding:2px 8px;border-radius:999px;font-size:13px;font-family:'IBM Plex Sans',sans-serif">{{ s.text }}</span></sc-if>
+                    </sc-for>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ b.isUl }}" hint-placeholder-val="{{ false }}">
+                  <ul style="font-family:'Newsreader',serif;font-size:16px;line-height:1.6;color:var(--text2,oklch(0.86 0.006 55));margin:0 0 12px;padding-left:22px">
+                    <sc-for list="{{ b.items }}" as="it" hint-placeholder-count="2"><li>{{ it }}</li></sc-for>
+                  </ul>
+                </sc-if>
+                <sc-if value="{{ b.isChecklist }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+                    <sc-for list="{{ b.items }}" as="it" hint-placeholder-count="2">
+                      <div style="display:flex;align-items:center;gap:10px">
+                        <div style="{{ it.boxStyle }}">{{ it.mark }}</div>
+                        <span style="font-family:'Newsreader',serif;font-size:16px;color:var(--text2,oklch(0.86 0.006 55));{{ it.textStyle }}">{{ it.text }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ b.isCode }}" hint-placeholder-val="{{ false }}">
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:13.5px;background:var(--surface,oklch(0.27 0.008 55));border:1px solid var(--border,oklch(0.34 0.01 55));border-radius:8px;padding:12px 14px;color:var(--green,oklch(0.82 0.02 148));margin-bottom:12px;white-space:pre-wrap">{{ b.text }}</div>
+                </sc-if>
+                <sc-if value="{{ b.isQuote }}" hint-placeholder-val="{{ false }}">
+                  <div style="border-left:3px solid var(--accent,oklch(0.68 0.15 293));padding-left:14px;font-family:'Newsreader',serif;font-style:italic;font-size:16px;color:var(--text2,oklch(0.72 0.008 55));margin-bottom:12px">{{ b.text }}</div>
+                </sc-if>
+              </sc-for>
+
+              <div style="margin-top:20px;display:flex;gap:10px">
+                <sc-for list="{{ activeNoteAttachments }}" as="a" hint-placeholder-count="2">
+                  <div style="width:76px;height:76px;border-radius:10px;flex-shrink:0;background:repeating-linear-gradient(45deg,var(--border,oklch(0.30 0.009 55)),var(--border,oklch(0.30 0.009 55)) 6px,var(--surface,oklch(0.27 0.008 55)) 6px,var(--surface,oklch(0.27 0.008 55)) 12px);border:1px solid var(--border,oklch(0.36 0.01 55));display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px">
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--text3,oklch(0.6 0.008 55))">{{ a.label }}</span>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div onClick="{{ toggleBacklinks }}" style="margin-top:22px;padding-top:14px;border-top:1px solid var(--border,oklch(0.32 0.009 55));display:flex;align-items:center;gap:6px;cursor:pointer">
+                <span style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));transform:{{ backlinksChevronRotate }};display:inline-block">›</span>
+                <span style="font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Mentions ({{ activeNoteBacklinks.length }})</span>
+              </div>
+              <sc-if value="{{ backlinksOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+                  <sc-for list="{{ activeNoteBacklinks }}" as="bl" hint-placeholder-count="2">
+                    <div style="padding:10px 12px;background:var(--surface,oklch(0.26 0.008 55));border-radius:8px">
+                      <div style="font-size:13px;font-weight:500;color:var(--text2,oklch(0.85 0.006 55))">{{ bl.title }}</div>
+                      <div style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));margin-top:2px">{{ bl.snippet }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isPhoneSearch }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:var(--bg,oklch(0.22 0.008 55));display:flex;flex-direction:column;padding:76px 16px 0">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="flex:1;background:var(--surface2,oklch(0.28 0.008 55));border:1px solid var(--border,oklch(0.36 0.01 55));border-radius:var(--r-control,10px);padding:10px 14px;font-size:15px;color:var(--text,oklch(0.9 0.006 55))">proj/storm</div>
+              <span onClick="{{ closeOverlay }}" style="color:var(--text3,oklch(0.6 0.008 55));font-size:18px;cursor:pointer">×</span>
+            </div>
+            <div style="margin-top:16px;display:flex;flex-direction:column;gap:4px;overflow:auto">
+              <sc-for list="{{ searchResults }}" as="r" hint-placeholder-count="3">
+                <div onClick="{{ r.open }}" style="padding:12px 10px;border-radius:10px;cursor:pointer">
+                  <div style="font-size:15px;font-weight:500;color:var(--text,oklch(0.93 0.006 55))">{{ r.title }}</div>
+                  <div style="font-size:13px;color:var(--text3,oklch(0.6 0.008 55));margin-top:2px">{{ r.snippet }}</div>
+                  <div style="display:flex;gap:6px;margin-top:6px">
+                    <sc-for list="{{ r.tags }}" as="t" hint-placeholder-count="1">
+                      <span style="background:var(--amber-soft,oklch(0.30 0.05 68));color:var(--amber,oklch(0.82 0.1 68));padding:2px 8px;border-radius:999px;font-size:11px">{{ t }}</span>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isPhoneSettings }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;inset:0;background:var(--bg,oklch(0.22 0.008 55));display:flex;flex-direction:column">
+            <div style="padding:18px 16px 10px;display:flex;align-items:center;gap:10px">
+              <span onClick="{{ closeOverlay }}" style="font-size:20px;color:var(--text2,oklch(0.7 0.01 55));cursor:pointer">‹</span>
+              <div style="font-size:17px;font-weight:600;color:var(--text,oklch(0.95 0.006 55))">Server settings</div>
+            </div>
+            <div style="padding:6px 18px;overflow:auto;display:flex;flex-direction:column;gap:18px">
+              <div>
+                <div style="{{ settingsLabelStyle }}">Storage</div>
+                <div style="{{ settingsRowStyle }}"><span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">Vault root</span><span style="font-size:13px;color:var(--text3,oklch(0.55 0.008 55));font-family:'IBM Plex Mono',monospace">/srv/storm/vaults</span></div>
+              </div>
+              <div>
+                <div style="{{ settingsLabelStyle }}">AI access</div>
+                <div style="{{ settingsRowStyle }}">
+                  <span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">Let an assistant read notes</span>
+                  <div onClick="{{ toggleAiRead }}" style="{{ aiReadTrackStyle }}"><div style="{{ aiReadKnobStyle }}"></div></div>
+                </div>
+                <div style="{{ settingsRowStyle }}">
+                  <span style="font-size:14px;color:{{ aiWriteLabelColor }}">Let it change notes</span>
+                  <div onClick="{{ toggleAiWrite }}" style="{{ aiWriteTrackStyle }}"><div style="{{ aiWriteKnobStyle }}"></div></div>
+                </div>
+              </div>
+              <div>
+                <div style="{{ settingsLabelStyle }}">Vaults</div>
+                <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="3">
+                  <div style="{{ settingsRowStyle }}"><span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">{{ v.name }}</span><span style="font-size:12px;color:var(--text3,oklch(0.5 0.008 55))">rename · remove</span></div>
+                </sc-for>
+              </div>
+              <div>
+                <div style="{{ settingsLabelStyle }}">Server</div>
+                <div style="{{ settingsRowStyle }}"><span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">Address</span><span style="font-size:13px;color:var(--text3,oklch(0.55 0.008 55));font-family:'IBM Plex Mono',monospace">storm.lan:8443</span></div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ showProperties }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:0;right:0;bottom:0;max-height:60%;background:var(--surface,oklch(0.26 0.008 55));border-top:1px solid var(--border,oklch(0.38 0.01 55));border-radius:var(--r-card,20px) var(--r-card,20px) 0 0;z-index:30;display:flex;flex-direction:column;box-shadow:0 -12px 30px -8px oklch(0.15 0.01 55 / 0.5)">
+            <div style="padding:14px 18px 10px;display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:13px;font-weight:600;color:var(--text3,oklch(0.6 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Properties</span>
+              <span onClick="{{ toggleProperties }}" style="color:var(--text3,oklch(0.6 0.008 55));font-size:16px;cursor:pointer">×</span>
+            </div>
+            <div style="padding:0 18px 18px;overflow:auto;display:flex;flex-direction:column;gap:10px">
+              <sc-for list="{{ activeNoteProperties }}" as="p" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="{{ p.chipStyle }}">{{ p.key }}</span>
+                  <sc-if value="{{ p.isText }}" hint-placeholder-val="{{ false }}"><span style="flex:1;font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">{{ p.value }}</span></sc-if>
+                  <sc-if value="{{ p.isCheckbox }}" hint-placeholder-val="{{ false }}"><div style="{{ p.boxStyle }}">{{ p.mark }}</div></sc-if>
+                  <sc-if value="{{ p.isColor }}" hint-placeholder-val="{{ false }}">
+                    <div onClick="{{ p.togglePicker }}" style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1">
+                      <div style="width:16px;height:16px;border-radius:50%;background:{{ p.colorHex }};border:1px solid var(--border,oklch(0.4 0.01 55))"></div>
+                      <span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">{{ p.value }}</span>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{ p.isReadonly }}" hint-placeholder-val="{{ false }}"><span style="flex:1;font-size:14px;color:var(--text3,oklch(0.5 0.008 55));font-family:'IBM Plex Mono',monospace">{{ p.value }}</span></sc-if>
+                </div>
+                <sc-if value="{{ p.pickerOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;gap:7px;flex-wrap:wrap;padding-left:52px;margin-top:-2px">
+                    <sc-for list="{{ p.swatchOptions }}" as="sw" hint-placeholder-count="5">
+                      <div onClick="{{ sw.select }}" style="width:22px;height:22px;border-radius:50%;background:{{ sw.hex }};cursor:pointer;border:2px solid {{ sw.borderColor }}"></div>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </sc-for>
+              <div style="display:flex;align-items:center;gap:8px;margin-top:4px;color:var(--text3,oklch(0.55 0.008 55));cursor:pointer">
+                <div style="width:22px;height:22px;border-radius:6px;border:1px dashed var(--border,oklch(0.45 0.01 55));display:flex;align-items:center;justify-content:center;font-size:14px">+</div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ showMentions }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:0;right:0;bottom:0;max-height:55%;background:var(--surface,oklch(0.26 0.008 55));border-top:1px solid var(--border,oklch(0.38 0.01 55));border-radius:var(--r-card,20px) var(--r-card,20px) 0 0;z-index:30;display:flex;flex-direction:column;box-shadow:0 -12px 30px -8px oklch(0.15 0.01 55 / 0.5)">
+            <div style="padding:14px 18px 10px;display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:13px;font-weight:600;color:var(--text3,oklch(0.6 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Mentions</span>
+              <span onClick="{{ toggleMentions }}" style="color:var(--text3,oklch(0.6 0.008 55));font-size:16px;cursor:pointer">×</span>
+            </div>
+            <div style="padding:0 18px 18px;overflow:auto">
+              <sc-if value="{{ isPhoneNote }}" hint-placeholder-val="{{ false }}">
+                <sc-for list="{{ activeNoteBacklinks }}" as="bl" hint-placeholder-count="2">
+                  <div style="padding:10px 12px;background:var(--surface2,oklch(0.29 0.009 55));border-radius:8px;margin-bottom:8px">
+                    <div style="font-size:13px;font-weight:500;color:var(--text2,oklch(0.85 0.006 55))">{{ bl.title }}</div>
+                    <div style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));margin-top:2px">{{ bl.snippet }}</div>
+                  </div>
+                </sc-for>
+                <sc-if value="{{ noMentions }}" hint-placeholder-val="{{ false }}"><div style="font-size:13px;color:var(--text3,oklch(0.5 0.008 55));padding:8px 0">No notes link here yet.</div></sc-if>
+              </sc-if>
+              <sc-if value="{{ notPhoneNote }}" hint-placeholder-val="{{ true }}"><div style="font-size:13px;color:var(--text3,oklch(0.5 0.008 55));padding:8px 0">Open a note to see what links to it.</div></sc-if>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ showTags }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:0;right:0;bottom:0;max-height:60%;background:var(--surface,oklch(0.26 0.008 55));border-top:1px solid var(--border,oklch(0.38 0.01 55));border-radius:var(--r-card,20px) var(--r-card,20px) 0 0;z-index:30;display:flex;flex-direction:column;box-shadow:0 -12px 30px -8px oklch(0.15 0.01 55 / 0.5)">
+            <div style="padding:14px 18px 10px;display:flex;align-items:center;justify-content:space-between">
+              <span style="font-size:13px;font-weight:600;color:var(--text3,oklch(0.6 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Tags</span>
+              <span onClick="{{ toggleTags }}" style="color:var(--text3,oklch(0.6 0.008 55));font-size:16px;cursor:pointer">×</span>
+            </div>
+            <div style="padding:0 18px 18px;overflow:auto">
+              <sc-for list="{{ tagGroups }}" as="g" hint-placeholder-count="3">
+                <div style="margin-bottom:14px">
+                  <div style="font-size:13px;font-weight:600;color:var(--text2,oklch(0.85 0.006 55));margin-bottom:6px">{{ g.name }}</div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <sc-for list="{{ g.tags }}" as="t" hint-placeholder-count="2"><span style="background:var(--amber-soft,oklch(0.30 0.05 68));color:var(--amber,oklch(0.82 0.1 68));padding:3px 10px;border-radius:999px;font-size:12px">{{ t }}</span></sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ showNavBar }}" hint-placeholder-val="{{ true }}">
+          <div style="position:absolute;left:0;right:0;bottom:20px;display:flex;justify-content:center;z-index:25">
+            <div style="display:flex;align-items:center;gap:0px;background:var(--surface2,oklch(0.29 0.009 55));border:1px solid var(--border,oklch(0.38 0.01 55));border-radius:999px;padding:5px;box-shadow:0 10px 26px -6px oklch(0.15 0.01 55 / 0.5)">
+              <div onClick="{{ navDirectory }}" style="width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text,oklch(0.9 0.006 55))">
+                <div style="width:15px;height:12px;position:relative"><div style="position:absolute;top:0;left:0;width:6px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:15px;height:10px;background:currentColor;border-radius:2px"></div></div>
+              </div>
+              <div onClick="{{ navSearch }}" style="width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text,oklch(0.9 0.006 55))">
+                <div style="width:14px;height:14px;position:relative"><div style="position:absolute;top:0;left:0;width:9px;height:9px;border:1.6px solid currentColor;border-radius:50%"></div><div style="position:absolute;bottom:0;right:0;width:5px;height:1.6px;background:currentColor;transform:rotate(45deg);border-radius:1px"></div></div>
+              </div>
+              <div onClick="{{ navNewNote }}" style="width:44px;height:44px;border-radius:50%;background:var(--accent,oklch(0.68 0.15 293));display:flex;align-items:center;justify-content:center;cursor:pointer">
+                <span style="font-size:19px;color:var(--on-accent,oklch(0.98 0.005 293));line-height:1">+</span>
+              </div>
+              <div onClick="{{ navNewFolder }}" style="width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text,oklch(0.9 0.006 55));position:relative">
+                <div style="width:14px;height:11px;position:relative"><div style="position:absolute;top:0;left:0;width:5px;height:3px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:14px;height:9px;background:currentColor;border-radius:2px"></div></div>
+                <span style="position:absolute;bottom:5px;right:5px;width:9px;height:9px;border-radius:50%;background:var(--bg,oklch(0.22 0.008 55));color:var(--text,oklch(0.9 0.006 55));font-size:8px;display:flex;align-items:center;justify-content:center;line-height:1">+</span>
+              </div>
+              <div onClick="{{ navMentions }}" style="width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text,oklch(0.9 0.006 55));position:relative">
+                <div style="width:15px;height:9px;position:relative"><div style="position:absolute;left:0;top:0.5px;width:8px;height:7px;border:1.4px solid currentColor;border-radius:4px"></div><div style="position:absolute;right:0;top:0.5px;width:8px;height:7px;border:1.4px solid currentColor;border-radius:4px"></div></div>
+                <sc-if value="{{ hasMentionsBadge }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;top:3px;right:3px;min-width:14px;height:14px;border-radius:7px;background:var(--amber,oklch(0.68 0.15 68));color:oklch(0.15 0.03 68);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 3px">{{ mentionsCount }}</span></sc-if>
+              </div>
+              <div onClick="{{ navTags }}" style="width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer">
+                <span style="font-size:16px;color:var(--text,oklch(0.9 0.006 55));font-weight:600">#</span>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ showToolbar }}" hint-placeholder-val="{{ false }}">
+          <div style="position:absolute;left:0;right:0;bottom:0;background:var(--surface,oklch(0.27 0.008 55));border-top:1px solid var(--border,oklch(0.36 0.01 55));display:flex;align-items:center;padding:0 6px;height:52px;overflow-x:auto;gap:0px;z-index:25">
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-weight:700;font-size:15px">H</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-weight:700;font-size:15px">B</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-style:italic;font-size:15px">i</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-family:'IBM Plex Mono',monospace;font-size:13px">&lt;/&gt;</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-size:14px;text-decoration:line-through">S</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center"><span style="background:var(--amber,oklch(0.68 0.15 68));color:oklch(0.15 0.03 68);font-size:12px;font-weight:700;padding:1px 5px;border-radius:3px">A</span></div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-size:16px">•</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-size:12px">1.</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-size:14px">☑</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--text2,oklch(0.85 0.006 55));font-size:19px">"</div>
+            <div style="min-width:38px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--accent,oklch(0.68 0.15 293));font-size:12px">[[ ]]</div>
+            <div onClick="{{ doneEditing }}" style="min-width:52px;height:44px;display:flex;align-items:center;justify-content:center;color:var(--accent,oklch(0.68 0.15 293));font-weight:600;font-size:14px;margin-left:auto">Done</div>
+          </div>
+        </sc-if>
+
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;align-items:center">
+      <div style="color:var(--border,oklch(0.45 0.01 55));font-size:12px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase">Wide · 1200 × 760</div>
+      <div style="width:1200px;height:760px;border-radius:16px;overflow:hidden;position:relative;background:var(--bg,oklch(0.22 0.008 55));box-shadow:0 24px 60px -12px oklch(0.2 0.01 55 / 0.35);border:1px solid var(--border,oklch(0.35 0.01 55));display:flex">
+
+        <div style="width:260px;flex-shrink:0;border-right:1px solid var(--border,oklch(0.32 0.009 55));display:flex;flex-direction:column">
+          <div style="padding:18px 16px 10px;display:flex;align-items:center;gap:10px">
+            <div style="width:34px;height:34px;border-radius:10px;background:var(--surface,oklch(0.27 0.008 55));display:flex;align-items:center;justify-content:center;border:1px solid var(--border,oklch(0.34 0.01 55))"><span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text,oklch(0.95 0.006 55))">{{ wideActiveVaultIcon }}</span></div>
+            <div onClick="{{ wideToggleVaultMenu }}" style="flex:1;font-size:14px;font-weight:600;color:var(--text,oklch(0.92 0.006 55));cursor:pointer;display:flex;align-items:center;gap:6px">{{ wideActiveVaultName }} <span style="color:var(--text3,oklch(0.5 0.008 55));font-size:11px">⌄</span></div>
+          </div>
+          <sc-if value="{{ wideVaultMenuOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="margin:0 16px 8px;background:var(--surface,oklch(0.27 0.008 55));border:1px solid var(--border,oklch(0.34 0.01 55));border-radius:10px;overflow:hidden">
+              <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="3">
+                <div onClick="{{ v.wideSelect }}" style="padding:10px 12px;font-size:13px;color:var(--text2,oklch(0.88 0.006 55));cursor:pointer">{{ v.name }}</div>
+              </sc-for>
+            </div>
+          </sc-if>
+          <div style="padding:0 16px 12px">
+            <div style="background:var(--surface,oklch(0.27 0.008 55));border:1px solid var(--border,oklch(0.34 0.01 55));border-radius:var(--r-control,8px);padding:8px 10px;font-size:13px;color:var(--text3,oklch(0.55 0.008 55))">Search…</div>
+          </div>
+          <div style="flex:1;overflow:auto;padding:0 8px 12px">
+            <sc-for list="{{ wideFolders }}" as="f" hint-placeholder-count="3">
+              <div>
+                <div onClick="{{ f.toggle }}" style="padding:8px 10px;display:flex;align-items:center;gap:8px;border-radius:8px;cursor:pointer">
+                  <span style="font-size:10px;color:var(--text3,oklch(0.55 0.008 55));display:inline-block;transform:{{ f.chevRotate }}">›</span>
+                  <span style="font-size:13px;color:var(--text2,oklch(0.85 0.006 55));font-weight:500;flex:1">{{ f.name }}</span>
+                  <span style="font-size:11px;color:var(--text3,oklch(0.5 0.008 55))">{{ f.count }}</span>
+                </div>
+                <sc-if value="{{ f.expanded }}" hint-placeholder-val="{{ true }}">
+                  <div style="padding-left:26px">
+                    <sc-for list="{{ f.notes }}" as="n" hint-placeholder-count="2">
+                      <div onClick="{{ n.wideOpen }}" style="{{ n.rowStyle }}">{{ n.title }}</div>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+          <div style="border-top:1px solid var(--border,oklch(0.32 0.009 55));padding:6px 8px;display:flex;align-items:center;gap:2px">
+            <div onClick="{{ navMentions }}" style="width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2,oklch(0.75 0.008 55));position:relative">
+              <div style="width:14px;height:9px;position:relative"><div style="position:absolute;left:0;top:0.5px;width:8px;height:7px;border:1.3px solid currentColor;border-radius:4px"></div><div style="position:absolute;right:0;top:0.5px;width:8px;height:7px;border:1.3px solid currentColor;border-radius:4px"></div></div>
+              <sc-if value="{{ hasMentionsBadge }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;top:2px;right:2px;min-width:12px;height:12px;border-radius:6px;background:var(--amber,oklch(0.68 0.15 68));color:oklch(0.15 0.03 68);font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center">{{ mentionsCount }}</span></sc-if>
+            </div>
+            <div onClick="{{ navTags }}" style="width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2,oklch(0.75 0.008 55));font-size:14px;font-weight:600">#</div>
+            <div onClick="{{ navNewFolder }}" style="width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2,oklch(0.75 0.008 55))">
+              <div style="width:13px;height:10px;position:relative"><div style="position:absolute;top:0;left:0;width:5px;height:2.5px;background:currentColor;border-radius:2px 2px 0 0"></div><div style="position:absolute;top:2px;left:0;width:13px;height:8px;background:currentColor;border-radius:2px"></div></div>
+            </div>
+            <div onClick="{{ wideOpenSettings }}" style="width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2,oklch(0.75 0.008 55))">⚙</div>
+          </div>
+        </div>
+
+        <div style="flex:1;display:flex;overflow:hidden">
+
+          <sc-if value="{{ isWideDashboard }}" hint-placeholder-val="{{ false }}">
+            <div style="flex:1;overflow:auto;padding:28px 32px;display:flex;gap:32px">
+              <div style="width:280px;flex-shrink:0">
+                <div style="font-size:20px;font-weight:600;color:var(--text,oklch(0.95 0.006 55));margin-bottom:4px">Storm</div>
+                <div style="font-size:13px;color:var(--text3,oklch(0.58 0.008 55));margin-bottom:20px">27 notes · synced 2m ago</div>
+                <div style="font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase;margin-bottom:8px">Recently opened</div>
+                <sc-for list="{{ recents }}" as="n" hint-placeholder-count="4">
+                  <div onClick="{{ n.wideOpen }}" style="padding:10px 8px;cursor:pointer;border-radius:8px">
+                    <div style="font-size:14px;color:var(--text,oklch(0.9 0.006 55));font-weight:500">{{ n.title }}</div>
+                    <div style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));margin-top:2px">{{ n.vaultName }} · {{ n.folder }} · {{ n.time }}</div>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase;margin-bottom:12px">Vaults</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px">
+                  <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="3">
+                    <div onClick="{{ v.wideSelect }}" style="{{ v.cardStyle }}">
+                      <div style="{{ v.iconStyle }}">{{ v.icon }}</div>
+                      <div style="font-size:14px;font-weight:600;color:var(--text,oklch(0.94 0.006 55));margin-top:10px">{{ v.name }}</div>
+                      <div style="display:flex;align-items:center;gap:6px;margin-top:4px"><div style="{{ v.dotStyle }}"></div><div style="font-size:12px;color:var(--text3,oklch(0.6 0.008 55))">{{ v.notes }} notes</div></div>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isWideNote }}" hint-placeholder-val="{{ true }}">
+            <div style="flex:1;overflow:auto;padding:28px 40px 36px">
+              <div style="max-width:640px;margin:0 auto">
+                <div style="display:flex;align-items:center;gap:8px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--text3,oklch(0.5 0.008 55));margin-bottom:14px">
+                  <span>{{ wideNoteVersion }}</span><span>·</span><span style="{{ saveStateColor }}">{{ saveStateLabel }}</span>
+                </div>
+                <div style="font-family:'Newsreader',serif;font-size:28px;font-weight:600;color:var(--text,oklch(0.96 0.006 55));margin-bottom:18px">{{ wideNoteTitle }}</div>
+                <sc-for list="{{ wideNoteBlocks }}" as="b" hint-placeholder-count="3">
+                  <sc-if value="{{ b.isH2 }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Newsreader',serif;font-size:20px;font-weight:600;color:var(--text,oklch(0.93 0.006 55));margin:22px 0 10px">{{ b.text }}</div></sc-if>
+                  <sc-if value="{{ b.isP }}" hint-placeholder-val="{{ false }}">
+                    <div style="font-family:'Newsreader',serif;font-size:17px;line-height:1.7;color:var(--text2,oklch(0.86 0.006 55));margin-bottom:14px">
+                      <sc-for list="{{ b.segments }}" as="s" hint-placeholder-count="2">
+                        <sc-if value="{{ s.isText }}" hint-placeholder-val="{{ true }}"><span>{{ s.text }}</span></sc-if>
+                        <sc-if value="{{ s.isLink }}" hint-placeholder-val="{{ false }}"><span style="color:var(--accent,oklch(0.68 0.15 293));font-weight:500">{{ s.text }}</span></sc-if>
+                        <sc-if value="{{ s.isTag }}" hint-placeholder-val="{{ false }}"><span style="background:var(--amber-soft,oklch(0.30 0.05 68));color:var(--amber,oklch(0.82 0.1 68));padding:2px 8px;border-radius:999px;font-size:14px">{{ s.text }}</span></sc-if>
+                      </sc-for>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{ b.isUl }}" hint-placeholder-val="{{ false }}">
+                    <ul style="font-family:'Newsreader',serif;font-size:17px;line-height:1.65;color:var(--text2,oklch(0.86 0.006 55));margin:0 0 14px;padding-left:24px">
+                      <sc-for list="{{ b.items }}" as="it" hint-placeholder-count="2"><li>{{ it }}</li></sc-for>
+                    </ul>
+                  </sc-if>
+                  <sc-if value="{{ b.isChecklist }}" hint-placeholder-val="{{ false }}">
+                    <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
+                      <sc-for list="{{ b.items }}" as="it" hint-placeholder-count="2">
+                        <div style="display:flex;align-items:center;gap:10px">
+                          <div style="{{ it.boxStyle }}">{{ it.mark }}</div>
+                          <span style="font-family:'Newsreader',serif;font-size:17px;color:var(--text2,oklch(0.86 0.006 55));{{ it.textStyle }}">{{ it.text }}</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{ b.isCode }}" hint-placeholder-val="{{ false }}">
+                    <div style="font-family:'IBM Plex Mono',monospace;font-size:14px;background:var(--surface,oklch(0.27 0.008 55));border:1px solid var(--border,oklch(0.34 0.01 55));border-radius:8px;padding:14px 16px;color:var(--green,oklch(0.82 0.02 148));margin-bottom:14px;white-space:pre-wrap">{{ b.text }}</div>
+                  </sc-if>
+                  <sc-if value="{{ b.isQuote }}" hint-placeholder-val="{{ false }}">
+                    <div style="border-left:3px solid var(--accent,oklch(0.68 0.15 293));padding-left:16px;font-family:'Newsreader',serif;font-style:italic;font-size:17px;color:var(--text2,oklch(0.72 0.008 55));margin-bottom:14px">{{ b.text }}</div>
+                  </sc-if>
+                </sc-for>
+                <div style="margin-top:24px;display:flex;gap:10px">
+                  <sc-for list="{{ wideNoteAttachments }}" as="a" hint-placeholder-count="2">
+                    <div style="width:88px;height:88px;border-radius:10px;flex-shrink:0;background:repeating-linear-gradient(45deg,var(--border,oklch(0.30 0.009 55)),var(--border,oklch(0.30 0.009 55)) 6px,var(--surface,oklch(0.27 0.008 55)) 6px,var(--surface,oklch(0.27 0.008 55)) 12px);border:1px solid var(--border,oklch(0.36 0.01 55));display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3,oklch(0.6 0.008 55))">{{ a.label }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+                <div onClick="{{ wideToggleBacklinks }}" style="margin-top:26px;padding-top:16px;border-top:1px solid var(--border,oklch(0.32 0.009 55));display:flex;align-items:center;gap:6px;cursor:pointer">
+                  <span style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));transform:{{ wideBacklinksChevronRotate }};display:inline-block">›</span>
+                  <span style="font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase">Mentions ({{ wideNoteBacklinks.length }})</span>
+                </div>
+                <sc-if value="{{ wideBacklinksOpen }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+                    <sc-for list="{{ wideNoteBacklinks }}" as="bl" hint-placeholder-count="2">
+                      <div style="padding:10px 12px;background:var(--surface,oklch(0.26 0.008 55));border-radius:8px">
+                        <div style="font-size:13px;font-weight:500;color:var(--text2,oklch(0.85 0.006 55))">{{ bl.title }}</div>
+                        <div style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55));margin-top:2px">{{ bl.snippet }}</div>
+                      </div>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </div>
+            </div>
+            <div style="width:56px;flex-shrink:0;border-left:1px solid var(--border,oklch(0.32 0.009 55));display:flex;flex-direction:column;align-items:center;padding-top:16px">
+              <div onClick="{{ wideToggleProperties }}" style="width:32px;height:32px;border-radius:8px;background:{{ widePropsButtonBg }};display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text2,oklch(0.85 0.006 55));font-size:15px">⚙</div>
+            </div>
+            <sc-if value="{{ wideShowProperties }}" hint-placeholder-val="{{ false }}">
+              <div style="width:280px;flex-shrink:0;border-left:1px solid var(--border,oklch(0.32 0.009 55));padding:20px;overflow:auto">
+                <div style="font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase;margin-bottom:14px">Properties</div>
+                <div style="display:flex;flex-direction:column;gap:12px">
+                  <sc-for list="{{ wideNoteProperties }}" as="p" hint-placeholder-count="4">
+                    <div style="display:flex;align-items:center;gap:10px">
+                      <span style="{{ p.chipStyle }}">{{ p.key }}</span>
+                      <sc-if value="{{ p.isText }}" hint-placeholder-val="{{ false }}"><span style="flex:1;font-size:13px;color:var(--text2,oklch(0.88 0.006 55))">{{ p.value }}</span></sc-if>
+                      <sc-if value="{{ p.isCheckbox }}" hint-placeholder-val="{{ false }}"><div style="{{ p.boxStyle }}">{{ p.mark }}</div></sc-if>
+                      <sc-if value="{{ p.isColor }}" hint-placeholder-val="{{ false }}">
+                        <div onClick="{{ p.togglePicker }}" style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1">
+                          <div style="width:14px;height:14px;border-radius:50%;background:{{ p.colorHex }};border:1px solid var(--border,oklch(0.4 0.01 55))"></div>
+                          <span style="font-size:13px;color:var(--text2,oklch(0.88 0.006 55))">{{ p.value }}</span>
+                        </div>
+                      </sc-if>
+                      <sc-if value="{{ p.isReadonly }}" hint-placeholder-val="{{ false }}"><span style="flex:1;font-size:13px;color:var(--text3,oklch(0.5 0.008 55));font-family:'IBM Plex Mono',monospace">{{ p.value }}</span></sc-if>
+                    </div>
+                    <sc-if value="{{ p.pickerOpen }}" hint-placeholder-val="{{ false }}">
+                      <div style="display:flex;gap:6px;flex-wrap:wrap;padding-left:44px;margin-top:-2px">
+                        <sc-for list="{{ p.swatchOptions }}" as="sw" hint-placeholder-count="5">
+                          <div onClick="{{ sw.select }}" style="width:20px;height:20px;border-radius:50%;background:{{ sw.hex }};cursor:pointer;border:2px solid {{ sw.borderColor }}"></div>
+                        </sc-for>
+                      </div>
+                    </sc-if>
+                  </sc-for>
+                  <div style="width:22px;height:22px;border-radius:6px;border:1px dashed var(--border,oklch(0.45 0.01 55));display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--text3,oklch(0.55 0.008 55));cursor:pointer;margin-top:2px">+</div>
+                </div>
+              </div>
+            </sc-if>
+          </sc-if>
+
+          <sc-if value="{{ isWideSettings }}" hint-placeholder-val="{{ false }}">
+            <div style="flex:1;overflow:auto;padding:32px 40px">
+              <div style="font-size:20px;font-weight:600;color:var(--text,oklch(0.95 0.006 55));margin-bottom:20px">Server settings</div>
+              <div style="max-width:480px;display:flex;flex-direction:column;gap:20px">
+                <div>
+                  <div style="{{ settingsLabelStyle }}">Storage</div>
+                  <div style="{{ settingsRowStyle }}"><span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">Vault root</span><span style="font-size:13px;color:var(--text3,oklch(0.55 0.008 55));font-family:'IBM Plex Mono',monospace">/srv/storm/vaults</span></div>
+                </div>
+                <div>
+                  <div style="{{ settingsLabelStyle }}">AI access</div>
+                  <div style="{{ settingsRowStyle }}">
+                    <span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">Let an assistant read notes</span>
+                    <div onClick="{{ toggleAiRead }}" style="{{ aiReadTrackStyle }}"><div style="{{ aiReadKnobStyle }}"></div></div>
+                  </div>
+                  <div style="{{ settingsRowStyle }}">
+                    <span style="font-size:14px;color:{{ aiWriteLabelColor }}">Let it change notes</span>
+                    <div onClick="{{ toggleAiWrite }}" style="{{ aiWriteTrackStyle }}"><div style="{{ aiWriteKnobStyle }}"></div></div>
+                  </div>
+                </div>
+                <div>
+                  <div style="{{ settingsLabelStyle }}">Vaults</div>
+                  <sc-for list="{{ vaults }}" as="v" hint-placeholder-count="3">
+                    <div style="{{ settingsRowStyle }}"><span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">{{ v.name }}</span><span style="font-size:12px;color:var(--text3,oklch(0.5 0.008 55))">rename · remove</span></div>
+                  </sc-for>
+                </div>
+                <div>
+                  <div style="{{ settingsLabelStyle }}">Server</div>
+                  <div style="{{ settingsRowStyle }}"><span style="font-size:14px;color:var(--text2,oklch(0.88 0.006 55))">Address</span><span style="font-size:13px;color:var(--text3,oklch(0.55 0.008 55));font-family:'IBM Plex Mono',monospace">storm.lan:8443</span></div>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="{{ panelStyle }}">
+    <div onClick="{{ togglePanel }}" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding-bottom:6px">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text2,oklch(0.7 0.01 55))">Tokens</span>
+      <span style="font-size:12px;color:var(--text3,oklch(0.55 0.008 55))">{{ panelChevron }}</span>
+    </div>
+    <sc-if value="{{ panelOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-direction:column;gap:10px;max-height:58vh;overflow:auto">
+        <div style="display:flex;gap:6px">
+          <div onClick="{{ presetStorm }}" style="{{ presetStormStyle }}">Storm dark</div>
+          <div onClick="{{ presetSlow }}" style="{{ presetSlowStyle }}">SlowFlow earth</div>
+        </div>
+        <sc-for list="{{ controls }}" as="c" hint-placeholder-count="6">
+          <div>
+            <div style="display:flex;justify-content:space-between;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3,oklch(0.55 0.008 55));margin-bottom:3px">
+              <span>{{ c.label }}</span><span>{{ c.display }}</span>
+            </div>
+            <input type="range" min="{{ c.min }}" max="{{ c.max }}" step="{{ c.step }}" value="{{ c.value }}" onInput="{{ c.onInput }}" style="width:100%" />
+          </div>
+        </sc-for>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:9px;color:var(--text3,oklch(0.55 0.008 55));line-height:1.5">shared with the design-system page</div>
+      </div>
+    </sc-if>
+  </div>
+
+</div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const ACCENTS = {
+  none: '#3a3632', coral: '#5C2B29', peach: '#614A19', sand: '#635D19', sage: '#345920',
+  mint: '#16504B', sky: '#2D555E', lavender: '#42275E', blossom: '#6C394F', clay: '#4B443A'
+};
+const ACCENTS_LIGHT = {
+  none: '#E5E0DA', coral: '#FAD2CF', peach: '#FDE2CE', sand: '#FFF8B8', sage: '#E6F4D7',
+  mint: '#D4E4ED', sky: '#D3E3FD', lavender: '#E9D9FB', blossom: '#FDCFE8', clay: '#E9E3D4'
+};
+const ACCENT_NAMES = Object.keys(ACCENTS).filter(n => n !== 'none');
+const STATUS_COLOR = { green: 'var(--green,oklch(0.68 0.13 148))', amber: 'var(--amber,oklch(0.68 0.15 68))', gray: 'var(--text3,oklch(0.55 0.006 55))' };
+const SAVE_STATES = ['Saved', 'Unsaved', 'Saving…', 'Queued — offline', 'Failed'];
+const SAVE_COLORS = { Saved: 'color:var(--green,oklch(0.65 0.1 148))', Unsaved: 'color:var(--text3,oklch(0.6 0.008 55))', 'Saving…': 'color:var(--accent,oklch(0.68 0.15 293))', 'Queued — offline': 'color:var(--amber,oklch(0.68 0.15 68))', Failed: 'color:var(--danger,oklch(0.62 0.18 25))' };
+
+const NOTE_DETAIL = {
+  'sprint-retro': {
+    title: 'Sprint Retro', folder: 'Projects', tags: ['#proj/storm'], version: 'v12',
+    blocks: [
+      { isH2: true, text: 'Attendees' },
+      { isP: true, segments: [{ isText: true, text: 'Discussed blockers from ' }, { isLink: true, text: '[[Sprint Planning]]' }, { isText: true, text: ' and progress on ' }, { isTag: true, text: '#proj/storm' }, { isText: true, text: '.' }] },
+      { isUl: true, items: ['Ship properties panel', 'Fix sync retry logic', 'Revisit nav bubble badge states'] },
+      { isChecklist: true, items: [{ text: 'Write release notes', done: true }, { text: 'Update changelog', done: false }] },
+      { isCode: true, text: 'npm run build && npm run deploy' },
+      { isQuote: true, text: 'Ship small, ship often.' }
+    ],
+    attachments: [{ label: 'board.png' }, { label: 'notes.jpg' }],
+    properties: [
+      { key: 'status', kind: 'text', value: 'in-progress' },
+      { key: 'priority', kind: 'text', value: 'high' },
+      { key: 'done', kind: 'checkbox', value: false },
+      { key: 'color', kind: 'color', value: 'lavender' },
+      { key: 'id', kind: 'readonly', value: 'ntx-3391' },
+      { key: 'created', kind: 'readonly', value: '2026-07-30' }
+    ],
+    backlinks: [{ title: 'Sprint Planning', snippet: 'See retro notes for follow-ups.' }, { title: 'Roadmap', snippet: 'Storm properties panel tracked here.' }]
+  },
+  sourdough: {
+    title: 'Recipe: Sourdough', folder: 'Recipes', tags: ['#cooking'], version: 'v4',
+    blocks: [
+      { isP: true, segments: [{ isText: true, text: 'Basic weekday loaf, adapted from ' }, { isLink: true, text: '[[Bread Notes]]' }, { isText: true, text: '. Tag: ' }, { isTag: true, text: '#cooking' }] },
+      { isUl: true, items: ['500g flour', '350g water', '100g starter', '10g salt'] },
+      { isQuote: true, text: 'Patience over speed — cold ferment overnight.' }
+    ],
+    attachments: [{ label: 'loaf.jpg' }],
+    properties: [
+      { key: 'rating', kind: 'text', value: '★★★★' },
+      { key: 'made', kind: 'checkbox', value: true },
+      { key: 'color', kind: 'color', value: 'sage' },
+      { key: 'id', kind: 'readonly', value: 'ntx-1187' },
+      { key: 'created', kind: 'readonly', value: '2026-07-04' }
+    ],
+    backlinks: [{ title: 'Bread Notes', snippet: 'Parent technique reference.' }]
+  },
+  __new__: { title: 'Untitled', folder: 'New note', tags: [], version: 'v1', blocks: [{ isP: true, segments: [{ isText: true, text: '' }] }], attachments: [], properties: [{ key: 'created', kind: 'readonly', value: 'today' }], backlinks: [] }
+};
+
+function genericDetail(n) {
+  return { title: n.title, folder: n.folder, tags: n.tags.map(t => '#' + t), version: 'v2',
+    blocks: [{ isP: true, segments: [{ isText: true, text: 'Notes on ' + n.title.toLowerCase() + '. Tagged ' }, { isTag: true, text: '#' + n.tags[0] }, { isText: true, text: '.' }] }],
+    attachments: [], properties: [{ key: 'id', kind: 'readonly', value: 'ntx-0000' }, { key: 'created', kind: 'readonly', value: n.time }], backlinks: [] };
+}
+
+const TOKEN_KEY = 'storm-ds-tokens-v1';
+const TOKEN_PRESETS = {
+  storm: { mode: 'dark', bgL: 22, hue: 55, chroma: 8, accentH: 293, accentC: 15, accentL: 68, fs: 16, scale: 125, sp: 8, rCard: 16, rControl: 10, bw: 10, shadow: 35, dur: 180 },
+  slow: { mode: 'light', bgL: 84, hue: 62, chroma: 22, accentH: 55, accentC: 6, accentL: 45, fs: 16, scale: 130, sp: 8, rCard: 2, rControl: 10, bw: 10, shadow: 16, dur: 320 }
+};
+
+class Component extends DCLogic {
+  state = {
+    tk: { ...TOKEN_PRESETS.storm, preset: 'storm' }, panelOpen: false,
+    phoneScreen: 'dashboard', phoneVaultId: null, phoneFolder: null, phoneNoteId: null,
+    phoneEditing: false, showProperties: false, showMentions: false, showTags: false,
+    vaultPopoverOpen: false, profilePopoverOpen: false, backlinksOpen: false, saveStateIdx: 0,
+    aiRead: false, aiWrite: false, colorOverrides: {}, colorPickerKey: null,
+    wideVaultId: 'work', wideVaultMenuOpen: false, wideExpanded: { Projects: true, Meetings: true, Recipes: true, Journal: false, Plants: true },
+    wideNoteId: 'sprint-retro', wideView: 'note', wideShowProperties: true, wideBacklinksOpen: false
+  };
+
+  vaultData = [
+    { id: 'work', name: 'Work', icon: 'W', accent: 'lavender', notes: 14, status: 'green', folders: [
+      { name: 'Projects', notes: [{ id: 'sprint-retro', title: 'Sprint Retro', folder: 'Projects', tags: ['proj/storm'], time: '2h ago' }, { id: 'roadmap', title: 'Roadmap', folder: 'Projects', tags: ['proj/storm'], time: '1d ago' }] },
+      { name: 'Meetings', notes: [{ id: 'standup', title: 'Standup Notes', folder: 'Meetings', tags: ['meetings'], time: '3d ago' }] }
+    ]},
+    { id: 'personal', name: 'Personal', icon: 'P', accent: 'sage', notes: 8, status: 'gray', folders: [
+      { name: 'Recipes', notes: [{ id: 'sourdough', title: 'Recipe: Sourdough', folder: 'Recipes', tags: ['cooking'], time: '5d ago' }] },
+      { name: 'Journal', notes: [{ id: 'reading-list', title: 'Reading List', folder: 'Journal', tags: ['books'], time: '1w ago' }] }
+    ]},
+    { id: 'garden', name: 'Garden Notes', icon: 'G', accent: 'peach', notes: 5, status: 'amber', folders: [
+      { name: 'Plants', notes: [{ id: 'tomatoes', title: 'Tomato Bed', folder: 'Plants', tags: ['garden'], time: '2w ago' }] }
+    ]}
+  ];
+
+  componentDidMount() {
+    this.loadTokens();
+    this._onStorage = (e) => { if (e.key === TOKEN_KEY) this.loadTokens(); };
+    window.addEventListener('storage', this._onStorage);
+  }
+  componentWillUnmount() { window.removeEventListener('storage', this._onStorage); }
+  loadTokens() {
+    try {
+      const saved = localStorage.getItem(TOKEN_KEY);
+      if (saved) this.setState({ tk: { ...TOKEN_PRESETS.storm, ...JSON.parse(saved) } });
+    } catch (e) {}
+  }
+  saveTokens(next) {
+    const tk = { ...this.state.tk, ...next };
+    try { localStorage.setItem(TOKEN_KEY, JSON.stringify(tk)); } catch (e) {}
+    this.setState({ tk });
+  }
+  tokenVars() {
+    const s = this.state.tk, dark = s.mode === 'dark', dir = dark ? 1 : -1;
+    const L = (v) => Math.max(0.02, Math.min(0.99, v)).toFixed(3);
+    const n = (l) => `oklch(${L(l)} ${(s.chroma / 1000).toFixed(3)} ${s.hue})`;
+    const bg = s.bgL / 100, r = s.scale / 100, fs = s.fs;
+    return [
+      `--bg:${n(bg)}`, `--surface:${n(bg + dir * 0.05)}`, `--surface2:${n(bg + dir * 0.09)}`, `--border:${n(bg + dir * 0.14)}`,
+      `--text:${dark ? n(0.95) : n(0.18)}`, `--text2:${dark ? n(0.74) : n(0.34)}`, `--text3:${dark ? n(0.66) : n(0.40)}`,
+      `--accent:oklch(${(dark ? s.accentL / 100 : Math.min(0.40, s.accentL / 100)).toFixed(2)} ${(s.accentC / 100).toFixed(2)} ${s.accentH})`,
+      `--accent-soft:oklch(${(bg + dir * 0.08).toFixed(2)} ${(s.accentC / 300).toFixed(3)} ${s.accentH})`,
+      `--on-accent:${(dark ? s.accentL / 100 : Math.min(0.40, s.accentL / 100)) > 0.6 ? `oklch(0.16 0.03 ${s.accentH})` : '#ffffff'}`,
+      `--amber:oklch(${dark ? 0.74 : 0.38} 0.14 68)`, `--amber-soft:oklch(${(bg + dir * 0.08).toFixed(2)} 0.05 68)`,
+      `--green:oklch(${dark ? 0.74 : 0.38} 0.13 148)`, `--danger:oklch(${dark ? 0.70 : 0.38} 0.17 25)`,
+      `--canvas:${dark ? 'oklch(0.93 0.006 55)' : n(bg + 0.09)}`,
+      `--canvas-text:${dark ? 'oklch(0.30 0.01 55)' : n(0.20)}`, `--canvas-text2:${dark ? 'oklch(0.50 0.01 55)' : n(0.38)}`,
+      `--fs-md:${fs}px`, `--fs-sm:${Math.max(12, fs / r).toFixed(1)}px`, `--fs-xs:${Math.max(11, fs / r / r).toFixed(1)}px`,
+      `--r-card:${s.rCard}px`, `--r-control:${s.rControl}px`, `--bw:${(s.bw / 10).toFixed(1)}px`, `--dur:${s.dur}ms`
+    ].join(';');
+  }
+
+  accentHex(name) {
+    const map = this.state.tk.mode === 'dark' ? ACCENTS : ACCENTS_LIGHT;
+    return map[name] || map.none;
+  }
+  getVault(id) { return this.vaultData.find(v => v.id === id); }
+  getNote(id) {
+    for (const v of this.vaultData) for (const f of v.folders) { const n = f.notes.find(x => x.id === id); if (n) return n; }
+    return null;
+  }
+  getVaultOfNote(id) {
+    for (const v of this.vaultData) for (const f of v.folders) if (f.notes.some(n => n.id === id)) return v;
+    return null;
+  }
+  getDetail(id) {
+    if (NOTE_DETAIL[id]) return NOTE_DETAIL[id];
+    const n = this.getNote(id);
+    return n ? genericDetail(n) : NOTE_DETAIL.__new__;
+  }
+  chipStyle() { return 'background:var(--surface2,oklch(0.31 0.009 55));color:var(--text2,oklch(0.75 0.008 55));font-size:12px;font-weight:500;padding:3px 9px;border-radius:6px;font-family:\'IBM Plex Mono\',monospace'; }
+  boxStyle(done) { return done ? 'width:18px;height:18px;border-radius:5px;background:var(--accent,oklch(0.68 0.15 293));display:flex;align-items:center;justify-content:center;font-size:11px;color:white;flex-shrink:0' : 'width:18px;height:18px;border-radius:5px;border:1.5px solid var(--text3,oklch(0.5 0.008 55));flex-shrink:0'; }
+  switchStyle(on) { return `width:34px;height:20px;border-radius:10px;position:relative;cursor:pointer;transition:background .15s;background:${on ? 'var(--accent,oklch(0.68 0.15 293))' : 'var(--border,oklch(0.36 0.01 55))'}`; }
+  knobStyle(on) { return `width:16px;height:16px;border-radius:50%;background:white;position:absolute;top:2px;left:${on ? '16px' : '2px'};transition:left .15s`; }
+
+  vaultCard(v) {
+    return {
+      name: v.name, icon: v.icon, notes: v.notes,
+      cardStyle: `background:var(--surface,oklch(0.26 0.008 55));border:1px solid var(--border,oklch(0.34 0.01 55));border-radius:var(--r-card,16px);padding:16px;cursor:pointer`,
+      iconStyle: `width:38px;height:38px;border-radius:var(--r-control,10px);background:${this.accentHex(v.accent)};color:${this.state.tk.mode === 'dark' ? 'white' : 'oklch(0.28 0.01 60)'};display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:15px`,
+      dotStyle: `width:7px;height:7px;border-radius:50%;background:${STATUS_COLOR[v.status]}`,
+      open: () => this.setState({ phoneScreen: 'directory', phoneVaultId: v.id, phoneFolder: null }),
+      switchTo: () => this.setState({ phoneScreen: 'directory', phoneVaultId: v.id, phoneFolder: null, vaultPopoverOpen: false }),
+      wideSelect: () => this.setState({ wideVaultId: v.id, wideVaultMenuOpen: false, wideView: 'note', wideNoteId: v.folders[0].notes[0].id })
+    };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const activeVault = s.phoneVaultId ? this.getVault(s.phoneVaultId) : null;
+    const activeFolder = activeVault && s.phoneFolder ? activeVault.folders.find(f => f.name === s.phoneFolder) : null;
+    const detail = s.phoneNoteId ? this.getDetail(s.phoneNoteId) : null;
+    const wideVault = this.getVault(s.wideVaultId);
+    const wideDetail = s.wideNoteId ? this.getDetail(s.wideNoteId) : null;
+    const bubbleVault = activeVault || this.vaultData[0];
+    const saveState = SAVE_STATES[s.saveStateIdx];
+
+    const mkBlocks = (blocks) => blocks.map(b => ({
+      ...b,
+      items: b.isChecklist ? b.items.map(it => ({ text: it.text, mark: it.done ? '✓' : '', boxStyle: this.boxStyle(it.done), textStyle: it.done ? 'text-decoration:line-through;opacity:0.6' : '' })) : b.items
+    }));
+    const mkProps = (props, noteId) => props.map(p => {
+      const pickerKey = noteId + ':' + p.key;
+      const value = p.kind === 'color' && s.colorOverrides[pickerKey] ? s.colorOverrides[pickerKey] : p.value;
+      return {
+        key: p.key, value, chipStyle: this.chipStyle(),
+        isText: p.kind === 'text', isCheckbox: p.kind === 'checkbox', isColor: p.kind === 'color', isReadonly: p.kind === 'readonly',
+        mark: p.kind === 'checkbox' && p.value ? '✓' : '', boxStyle: p.kind === 'checkbox' ? this.boxStyle(p.value) : '',
+        colorHex: p.kind === 'color' ? this.accentHex(value) : '',
+        pickerOpen: p.kind === 'color' && s.colorPickerKey === pickerKey,
+        togglePicker: () => this.setState({ colorPickerKey: s.colorPickerKey === pickerKey ? null : pickerKey }),
+        swatchOptions: p.kind === 'color' ? ACCENT_NAMES.map(name => ({
+          name, hex: this.accentHex(name),
+          borderColor: name === value ? 'var(--text,oklch(0.9 0.006 55))' : 'transparent',
+          select: () => this.setState({ colorOverrides: { ...s.colorOverrides, [pickerKey]: name }, colorPickerKey: null })
+        })) : []
+      };
+    });
+
+    const recents = [
+      { title: 'Sprint Retro', vaultName: 'Work', folder: 'Projects', time: '2h ago', open: () => this.setState({ phoneScreen: 'note', phoneNoteId: 'sprint-retro' }), wideOpen: () => this.setState({ wideVaultId: 'work', wideNoteId: 'sprint-retro', wideView: 'note' }) },
+      { title: 'Recipe: Sourdough', vaultName: 'Personal', folder: 'Recipes', time: '5d ago', open: () => this.setState({ phoneScreen: 'note', phoneNoteId: 'sourdough' }), wideOpen: () => this.setState({ wideVaultId: 'personal', wideNoteId: 'sourdough', wideView: 'note' }) },
+      { title: 'Roadmap', vaultName: 'Work', folder: 'Projects', time: '1d ago', open: () => this.setState({ phoneScreen: 'note', phoneNoteId: 'roadmap' }), wideOpen: () => this.setState({ wideVaultId: 'work', wideNoteId: 'roadmap', wideView: 'note' }) },
+      { title: 'Reading List', vaultName: 'Personal', folder: 'Journal', time: '1w ago', open: () => this.setState({ phoneScreen: 'note', phoneNoteId: 'reading-list' }), wideOpen: () => this.setState({ wideVaultId: 'personal', wideNoteId: 'reading-list', wideView: 'note' }) }
+    ];
+
+    const searchResults = [
+      { title: 'Sprint Retro', snippet: 'Discussed blockers from Sprint Planning…', tags: ['#proj/storm'], open: () => this.setState({ phoneScreen: 'note', phoneNoteId: 'sprint-retro' }) },
+      { title: 'Roadmap', snippet: 'Q3 milestones for proj/storm sync engine…', tags: ['#proj/storm'], open: () => this.setState({ phoneScreen: 'note', phoneNoteId: 'roadmap' }) }
+    ];
+
+    const tagGroups = [
+      { name: 'proj', tags: ['proj/storm', 'proj/api'] },
+      { name: 'meetings', tags: ['meetings'] },
+      { name: 'cooking', tags: ['cooking'] },
+      { name: 'garden', tags: ['garden'] }
+    ];
+
+    const tk = s.tk;
+    const chipBase = 'font-family:\'IBM Plex Mono\',monospace;font-size:11px;padding:6px 8px;border-radius:8px;cursor:pointer;flex:1;text-align:center;border:1px solid var(--border)';
+    const tctl = (label, key, min, max, step, fmt) => ({
+      label, min, max, step, value: tk[key], display: fmt ? fmt(tk[key]) : String(tk[key]),
+      onInput: (e) => this.saveTokens({ [key]: Number(e.target.value) })
+    });
+
+    return {
+      rootVars: this.tokenVars(),
+      panelOpen: s.panelOpen,
+      panelChevron: s.panelOpen ? '▾' : '▸',
+      togglePanel: () => this.setState({ panelOpen: !s.panelOpen }),
+      panelStyle: 'position:fixed;left:20px;bottom:20px;width:224px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card,14px);padding:12px;z-index:200;box-shadow:0 12px 30px -8px rgba(0,0,0,.45);color:var(--text)',
+      presetStorm: () => this.saveTokens({ ...TOKEN_PRESETS.storm, preset: 'storm' }),
+      presetSlow: () => this.saveTokens({ ...TOKEN_PRESETS.slow, preset: 'slow' }),
+      presetStormStyle: chipBase + (tk.preset === 'storm' ? ';background:var(--accent);color:var(--on-accent)' : ';color:var(--text2)'),
+      presetSlowStyle: chipBase + (tk.preset === 'slow' ? ';background:var(--accent);color:var(--on-accent)' : ';color:var(--text2)'),
+      controls: [
+        tctl('accent hue', 'accentH', 0, 360, 1, v => v + '°'),
+        tctl('accent chroma', 'accentC', 0, 30, 1, v => (v / 100).toFixed(2)),
+        tctl('accent lightness', 'accentL', 20, 90, 1, v => v + '%'),
+        tctl('surface lightness', 'bgL', 6, 96, 1, v => v + '%'),
+        tctl('neutral hue', 'hue', 0, 360, 1, v => v + '°'),
+        tctl('neutral warmth', 'chroma', 0, 40, 1, v => (v / 1000).toFixed(3)),
+        tctl('card radius', 'rCard', 0, 28, 1, v => v + 'px'),
+        tctl('control radius', 'rControl', 0, 24, 1, v => v + 'px'),
+        tctl('border width', 'bw', 0, 30, 1, v => (v / 10).toFixed(1) + 'px')
+      ],
+
+      showCornerBubbles: s.phoneScreen !== 'settings',
+      isPhoneDashboard: s.phoneScreen === 'dashboard',
+      isPhoneDirectory: s.phoneScreen === 'directory',
+      isPhoneNote: s.phoneScreen === 'note',
+      notPhoneNote: s.phoneScreen !== 'note',
+      isPhoneSearch: s.phoneScreen === 'search',
+      isPhoneSettings: s.phoneScreen === 'settings',
+      vaultPopoverOpen: s.vaultPopoverOpen,
+      profilePopoverOpen: s.profilePopoverOpen,
+      bubbleVaultInitial: bubbleVault.icon,
+      dashStatusDotStyle: `position:absolute;bottom:6px;right:6px;width:9px;height:9px;border-radius:50%;background:${STATUS_COLOR[bubbleVault.status]};border:2px solid var(--surface,oklch(0.27 0.008 55))`,
+      syncStatusLine: bubbleVault.status === 'green' ? 'Synced · 2m ago' : bubbleVault.status === 'amber' ? 'Syncing…' : 'Offline',
+      recents,
+      vaults: this.vaultData.map(v => this.vaultCard(v)),
+      toggleVaultPopover: () => this.setState({ vaultPopoverOpen: !s.vaultPopoverOpen, profilePopoverOpen: false }),
+      toggleProfilePopover: () => this.setState({ profilePopoverOpen: !s.profilePopoverOpen, vaultPopoverOpen: false }),
+      openSettings: () => this.setState({ phoneScreen: 'settings', profilePopoverOpen: false, vaultPopoverOpen: false }),
+
+      activeVaultName: activeVault ? activeVault.name : '',
+      activeFolderName: activeFolder ? activeFolder.name : '',
+      inFolder: !!activeFolder,
+      notInFolder: !activeFolder,
+      folderIsEmpty: !!(activeFolder && activeFolder.notes.length === 0),
+      folderCrumbColor: activeFolder ? 'color:var(--accent,oklch(0.68 0.15 293))' : 'color:var(--text,oklch(0.9 0.006 55))',
+      vaultFolders: activeVault ? activeVault.folders.map(f => ({ name: f.name, count: f.notes.length + ' notes', open: () => this.setState({ phoneFolder: f.name }) })) : [],
+      folderNotes: activeFolder ? activeFolder.notes.map(n => ({ title: n.title, time: n.time, open: () => this.setState({ phoneScreen: 'note', phoneNoteId: n.id }) })) : [],
+      backToDashboard: () => this.setState({ phoneScreen: 'dashboard', phoneVaultId: null, phoneFolder: null }),
+      backToVaultRoot: () => this.setState({ phoneFolder: null }),
+
+      activeNoteTitle: detail ? detail.title : '',
+      activeNoteFolder: detail ? detail.folder : '',
+      activeNoteVersion: detail ? detail.version : '',
+      saveStateLabel: saveState, saveStateColor: SAVE_COLORS[saveState],
+      cycleSaveState: () => this.setState({ saveStateIdx: (s.saveStateIdx + 1) % SAVE_STATES.length }),
+      activeNoteBlocks: detail ? mkBlocks(detail.blocks) : [],
+      activeNoteAttachments: detail ? detail.attachments : [],
+      activeNoteProperties: detail ? mkProps(detail.properties, s.phoneNoteId) : [],
+      activeNoteTags: detail ? detail.tags : [],
+      activeNoteBacklinks: detail ? detail.backlinks : [],
+      noMentions: !!(detail && detail.backlinks.length === 0),
+      closeNote: () => this.setState({ phoneScreen: 'directory', showProperties: false, showMentions: false }),
+      startEditing: () => this.setState({ phoneEditing: true }),
+      toggleBacklinks: () => this.setState({ backlinksOpen: !s.backlinksOpen }),
+      backlinksOpen: s.backlinksOpen,
+      backlinksChevronRotate: s.backlinksOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+
+      searchResults,
+      closeOverlay: () => this.setState({ phoneScreen: activeVault ? 'directory' : 'dashboard' }),
+
+      settingsLabelStyle: 'font-size:12px;font-weight:600;color:var(--text3,oklch(0.55 0.008 55));letter-spacing:0.04em;text-transform:uppercase;margin-bottom:8px',
+      settingsRowStyle: 'display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--border,oklch(0.30 0.009 55))',
+      aiReadTrackStyle: this.switchStyle(s.aiRead), aiReadKnobStyle: this.knobStyle(s.aiRead),
+      aiWriteTrackStyle: this.switchStyle(s.aiWrite) + (s.aiRead ? '' : ';opacity:0.4;cursor:default'), aiWriteKnobStyle: this.knobStyle(s.aiWrite),
+      aiWriteLabelColor: s.aiRead ? 'var(--text2,oklch(0.88 0.006 55))' : 'oklch(0.45 0.008 55)',
+      toggleAiRead: () => this.setState({ aiRead: !s.aiRead, aiWrite: s.aiRead ? false : s.aiWrite }),
+      toggleAiWrite: () => { if (s.aiRead) this.setState({ aiWrite: !s.aiWrite }); },
+
+      showProperties: s.showProperties, toggleProperties: () => this.setState({ showProperties: !s.showProperties, showMentions: false, showTags: false }),
+      showMentions: s.showMentions, toggleMentions: () => this.setState({ showMentions: !s.showMentions, showProperties: false, showTags: false }),
+      showTags: s.showTags, toggleTags: () => this.setState({ showTags: !s.showTags, showProperties: false, showMentions: false }),
+      tagGroups,
+
+      showNavBar: !s.phoneEditing,
+      hasMentionsBadge: !!(detail && detail.backlinks.length > 0),
+      mentionsCount: detail ? detail.backlinks.length : 0,
+      navDirectory: () => this.setState({ phoneScreen: activeVault ? 'directory' : 'dashboard' }),
+      navSearch: () => this.setState({ phoneScreen: 'search' }),
+      navNewNote: () => this.setState({ phoneScreen: 'note', phoneNoteId: '__new__', phoneEditing: true }),
+      navNewFolder: () => {
+        if (activeVault && !activeFolder) {
+          const name = 'New folder ' + (activeVault.folders.length + 1);
+          activeVault.folders.push({ name, notes: [] });
+          this.forceUpdate();
+        }
+      },
+      navMentions: () => this.setState({ showMentions: !s.showMentions, showProperties: false, showTags: false }),
+      navTags: () => this.setState({ showTags: !s.showTags, showProperties: false, showMentions: false }),
+
+      showToolbar: s.phoneEditing,
+      doneEditing: () => this.setState({ phoneEditing: false }),
+
+      wideActiveVaultIcon: wideVault.icon, wideActiveVaultName: wideVault.name,
+      wideVaultMenuOpen: s.wideVaultMenuOpen,
+      wideToggleVaultMenu: () => this.setState({ wideVaultMenuOpen: !s.wideVaultMenuOpen }),
+      wideFolders: wideVault.folders.map(f => ({
+        name: f.name, count: f.notes.length,
+        expanded: !!s.wideExpanded[f.name],
+        chevRotate: s.wideExpanded[f.name] ? 'rotate(90deg)' : 'rotate(0deg)',
+        toggle: () => this.setState({ wideExpanded: { ...s.wideExpanded, [f.name]: !s.wideExpanded[f.name] } }),
+        notes: f.notes.map(n => ({
+          title: n.title,
+          rowStyle: `padding:7px 10px;font-size:13px;border-radius:6px;cursor:pointer;color:${n.id === s.wideNoteId ? 'var(--accent,oklch(0.68 0.15 293))' : 'var(--text2,oklch(0.75 0.008 55))'};background:${n.id === s.wideNoteId ? 'var(--accent-soft,oklch(0.28 0.03 293))' : 'transparent'}`,
+          wideOpen: () => this.setState({ wideNoteId: n.id, wideView: 'note' })
+        }))
+      })),
+      wideOpenSettings: () => this.setState({ wideView: 'settings' }),
+
+      isWideDashboard: s.wideView === 'dashboard', isWideNote: s.wideView === 'note', isWideSettings: s.wideView === 'settings',
+      wideShowProperties: s.wideShowProperties,
+      widePropsButtonBg: s.wideShowProperties ? 'var(--accent-soft,oklch(0.30 0.05 293))' : 'transparent',
+      wideToggleProperties: () => this.setState({ wideShowProperties: !s.wideShowProperties }),
+      wideBacklinksOpen: s.wideBacklinksOpen,
+      wideBacklinksChevronRotate: s.wideBacklinksOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+      wideToggleBacklinks: () => this.setState({ wideBacklinksOpen: !s.wideBacklinksOpen }),
+
+      wideNoteTitle: wideDetail ? wideDetail.title : '',
+      wideNoteVersion: wideDetail ? wideDetail.version : '',
+      wideNoteBlocks: wideDetail ? mkBlocks(wideDetail.blocks) : [],
+      wideNoteAttachments: wideDetail ? wideDetail.attachments : [],
+      wideNoteProperties: wideDetail ? mkProps(wideDetail.properties, s.wideNoteId) : [],
+      wideNoteBacklinks: wideDetail ? wideDetail.backlinks : []
+    };
+  }
+}
+
+</script>
+</body>
+</html>
