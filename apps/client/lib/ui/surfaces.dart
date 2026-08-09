@@ -155,7 +155,14 @@ Future<T?> showStormPopover<T>({
   if (box == null) return Future<T?>.value();
 
   final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
-  final top = origin.dy + box.size.height + t.sp;
+  // Below the anchor, unless there is no room below it — an anchor near the
+  // foot of the window would otherwise drop its menu off the bottom edge,
+  // where it is indistinguishable from a button that does nothing.
+  final below = origin.dy + box.size.height + t.sp;
+  final roomBelow = overlay.size.height - below;
+  final flip = roomBelow < overlay.size.height * 0.3;
+  final top = flip ? null : below;
+  final bottom = flip ? overlay.size.height - origin.dy + t.sp : null;
   final left = alignRight ? null : origin.dx;
   final right = alignRight
       ? overlay.size.width - (origin.dx + box.size.width)
@@ -172,6 +179,7 @@ Future<T?> showStormPopover<T>({
         children: [
           Positioned(
             top: top,
+            bottom: bottom,
             left: left,
             right: right,
             width: width,

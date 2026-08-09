@@ -240,10 +240,27 @@ class _SettingsBubbleState extends ConsumerState<SettingsBubble> {
 /// Public because it has two homes: the phone's top-right corner bubble, and
 /// the wide sidebar's footer gear — the corners are empty above 900px, and
 /// without a second entry these settings would be unreachable there.
-class AppearanceMenu extends ConsumerWidget {
+class AppearanceMenu extends StatelessWidget {
   const AppearanceMenu({super.key, required this.onClose});
 
   final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) =>
+      StormPopover(children: [ClientSettingsBody(onDone: onClose)]);
+}
+
+/// The controls themselves, without a container.
+///
+/// Two presentations: the phone's corner popover and, at desk width, a page in
+/// the pane beside the sidebar. A popover anchored to the sidebar's footer
+/// gear would open below the bottom of the window, which is how that button
+/// came to look like it did nothing.
+class ClientSettingsBody extends ConsumerWidget {
+  const ClientSettingsBody({super.key, this.onDone});
+
+  /// Dismisses the surface this is sitting in, where there is one.
+  final VoidCallback? onDone;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -251,7 +268,9 @@ class AppearanceMenu extends ConsumerWidget {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final notifier = ref.read(settingsProvider.notifier);
 
-    return StormPopover(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
           padding: EdgeInsets.only(left: t.sp * 0.75, bottom: t.sp * 0.75),
@@ -311,7 +330,7 @@ class AppearanceMenu extends ConsumerWidget {
           subtitle: 'Forget this server and its token',
           tone: PopoverTone.muted,
           onTap: () {
-            onClose();
+            onDone?.call();
             notifier.save(const Settings());
           },
         ),

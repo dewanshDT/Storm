@@ -214,7 +214,32 @@ void main() {
       await tester.tap(find.text('Server settings ›'));
       await tester.pumpAndSettle();
 
-      expect(locationOf(c), Routes.serverSettings);
+      // The vault-scoped mount, so the sidebar stays beside it.
+      expect(locationOf(c), Routes.serverSettingsIn(FakeServer.primaryVault));
+      expect(find.byType(VaultSidebar), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('settings keep the sidebar', () {
+    // At desk width a settings screen that replaced the whole window would be
+    // the one place the tree disappears, and the only way back would be the
+    // app bar's arrow.
+    testWidgets('client settings open in the pane, not over it', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      // A page, not a popover: anchored to a button at the foot of the
+      // sidebar, a menu opens below the bottom of the window.
+      await tester.tap(find.byTooltip('Client settings'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Client settings'), findsWidgets);
+      expect(find.byType(VaultSidebar), findsOneWidget);
+      expect(locationOf(c), Routes.clientSettingsIn(FakeServer.primaryVault));
       await disposeShell(tester, c);
     });
   });
