@@ -49,7 +49,7 @@ class EmptyState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 30, color: t.text3),
+          Icon(icon, size: t.headingSize * 1.5, color: t.text3),
           SizedBox(height: t.sp * 1.5),
           Text(
             title,
@@ -95,6 +95,9 @@ class SkeletonRows extends StatelessWidget {
 
   static const _widths = [0.62, 0.44, 0.71, 0.38, 0.55, 0.48];
 
+  // Deliberately still. A repeating shimmer never lets `pumpAndSettle`
+  // return, so every widget test that renders a loading state hangs — and
+  // these lists come from cache and are gone in a frame or two anyway.
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
@@ -109,11 +112,14 @@ class SkeletonRows extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _Bar(widthFactor: _widths[i % _widths.length], height: 13),
+                  _Bar(
+                    widthFactor: _widths[i % _widths.length],
+                    height: t.sp * 1.625,
+                  ),
                   SizedBox(height: t.sp * 0.75),
                   _Bar(
                     widthFactor: _widths[(i + 2) % _widths.length] * 0.6,
-                    height: 9,
+                    height: t.sp * 1.125,
                   ),
                 ],
               ),
@@ -243,7 +249,7 @@ class ConflictCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.merge_type, size: 16, color: t.danger),
+              Icon(Icons.merge_type, size: t.bodySize, color: t.danger),
               SizedBox(width: t.sp * 0.75),
               Expanded(
                 child: Text(
@@ -259,7 +265,7 @@ class ConflictCard extends StatelessWidget {
               if (onDismiss != null)
                 InkWell(
                   onTap: onDismiss,
-                  child: Icon(Icons.close, size: 16, color: t.text3),
+                  child: Icon(Icons.close, size: t.bodySize, color: t.text3),
                 ),
             ],
           ),
