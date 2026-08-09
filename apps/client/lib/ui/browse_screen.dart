@@ -253,7 +253,10 @@ class EntryTile extends ConsumerWidget {
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     return NoteRow(
       title: entry.name,
-      leading: leading,
+      // An empty box the width of a folder glyph, so titles line up in a list
+      // that mixes both. The design never draws one, because its directory
+      // screens are all folders or all notes; a real vault has both.
+      leading: leading ?? (inTree ? null : SizedBox(width: t.bodySize)),
       selected: selected,
       divider: divider,
       padding: contentPadding as EdgeInsets?,
