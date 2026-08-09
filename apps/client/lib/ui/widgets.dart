@@ -575,14 +575,21 @@ class NoteRow extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
-      borderRadius: BorderRadius.circular(t.rControl),
+      // Rounded only in the sidebar's tree, where a row is a standalone thing
+      // you select. In a divided list it is a row, and a radius there draws a
+      // card around every entry — and worse, Flutter renders a bottom-only
+      // border on a rounded decoration as the bottom *arc* of that rect, so
+      // the rule under the last row curled up at both ends.
+      borderRadius: dense
+          ? BorderRadius.circular(t.rControl)
+          : BorderRadius.zero,
       child: Container(
         padding:
             padding ??
             EdgeInsets.symmetric(horizontal: t.sp * 1.75, vertical: t.sp * 2),
         decoration: BoxDecoration(
           color: selected ? t.accentSoft : null,
-          borderRadius: BorderRadius.circular(t.rControl),
+          borderRadius: dense ? BorderRadius.circular(t.rControl) : null,
           border: divider
               ? Border(
                   bottom: BorderSide(color: t.border, width: t.bw),

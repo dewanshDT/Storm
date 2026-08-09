@@ -13,6 +13,58 @@ import 'package:storm/ui/tokens.dart';
 /// atom takes its colour from the tokens, a tag is not a control-sized slab,
 /// and the brand mark keeps its own ground in every theme.
 void main() {
+  group('a list row is a row, not a card', () {
+    // Flutter draws a bottom-only `Border` inside a decoration that also has
+    // a `borderRadius` as the bottom *arc* of the rounded rect, so the rule
+    // under the last row of a folder curled up at both ends. This has come
+    // back twice; the assertion is on the decoration rather than on pixels so
+    // it cannot pass by accident.
+    Future<BoxDecoration> decorationOf(WidgetTester tester, Widget row) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: StormTheme.dark(),
+          home: Scaffold(body: row),
+        ),
+      );
+      final container = tester.widget<Container>(
+        find
+            .descendant(
+              of: find.byType(InkWell),
+              matching: find.byType(Container),
+            )
+            .first,
+      );
+      return container.decoration! as BoxDecoration;
+    }
+
+    testWidgets('has no radius when it carries a rule', (tester) async {
+      final d = await decorationOf(
+        tester,
+        const NoteRow(title: 'Home', meta: '1h ago', divider: true),
+      );
+      expect(d.borderRadius, isNull);
+      expect(d.border, isNotNull, reason: 'the rule is the separator');
+    });
+
+    testWidgets('and the same for a folder', (tester) async {
+      final d = await decorationOf(
+        tester,
+        const FolderRow(name: 'Projects', count: 2, divider: true),
+      );
+      expect(d.borderRadius, isNull);
+    });
+
+    testWidgets('but the tree keeps its pill', (tester) async {
+      // There a row *is* a standalone thing you select, and the selected
+      // background needs a shape.
+      final d = await decorationOf(
+        tester,
+        const NoteRow(title: 'Codebase Map', dense: true, selected: true),
+      );
+      expect(d.borderRadius, isNotNull);
+    });
+  });
+
   testWidgets('the gallery renders every preset without overflowing', (
     tester,
   ) async {
