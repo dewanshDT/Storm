@@ -204,6 +204,7 @@ class EntryTile extends ConsumerWidget {
     this.replaceRoute = false,
     this.contentPadding,
     this.divider = false,
+    this.inTree = false,
   });
 
   final BrowseEntry entry;
@@ -228,11 +229,18 @@ class EntryTile extends ConsumerWidget {
   final EdgeInsetsGeometry? contentPadding;
   final bool divider;
 
+  /// Drawn as a row of the sidebar's tree rather than of the phone's list.
+  ///
+  /// Explicit, not inferred. It used to be read off `leading != null`, which
+  /// silently stopped being true for notes the day the leading spacer was
+  /// removed — so every note in the tree started rendering at the full-width
+  /// list's size, with a timestamp, and the hierarchy flattened.
+  final bool inTree;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final vaultId = VaultGate.of(context);
-    final inTree = onFolderTap != null || leading != null;
 
     if (entry.isFolder) {
       return FolderRow(
