@@ -39,7 +39,7 @@ void main() {
 
     expect(await systemBack(tester), isTrue, reason: 'must not leave the app');
     expect(locationOf(c), Routes.dashboard);
-    expect(find.text('Recently opened'), findsOneWidget);
+    expect(find.text('RECENTLY OPENED'), findsOneWidget);
 
     await disposeShell(tester, c);
   });

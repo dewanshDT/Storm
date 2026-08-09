@@ -87,6 +87,34 @@ void main() {
     });
   });
 
+  group('the rail is ordered the way the design orders it', () {
+    testWidgets('vault, then search, then folders, then actions', (
+      tester,
+    ) async {
+      // The order is the design decision, not the contents. Actions used to be
+      // on top, where they were the first thing the eye hit and the last thing
+      // anyone wanted; the vault you are in and the way to a note come first.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await openVault(tester, c);
+
+      double topOf(Finder f) => tester.getTopLeft(f).dy;
+      final sidebar = find.byType(VaultSidebar);
+      Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
+
+      final search = inRail(find.text('Search…'));
+      final actions = inRail(find.byTooltip('Directory'));
+      expect(search, findsOneWidget, reason: 'the rail offers search');
+      expect(actions, findsOneWidget);
+      expect(
+        topOf(search),
+        lessThan(topOf(actions)),
+        reason: 'actions belong at the bottom of the rail',
+      );
+      await disposeShell(tester, c);
+    });
+  });
+
   group('the folder tree', () {
     testWidgets('expands a folder in place rather than navigating', (
       tester,
@@ -251,7 +279,7 @@ void main() {
       final rail = tester.getSize(
         find
             .ancestor(
-              of: find.text('Recently opened'),
+              of: find.text('RECENTLY OPENED'),
               matching: find.byType(SizedBox),
             )
             .last,

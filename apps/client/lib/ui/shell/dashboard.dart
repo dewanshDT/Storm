@@ -8,10 +8,12 @@ import '../../state/app_state.dart';
 import '../../state/vault_config.dart';
 import '../server_settings_screen.dart' show createVault;
 import '../accents.dart';
+import '../atoms.dart';
 import '../breakpoints.dart';
 import 'corner_bubbles.dart' show relativeTime;
 import 'nav_bubble.dart';
 import '../theme.dart';
+import '../tokens.dart';
 import 'storm_scaffold.dart';
 
 /// Home: a grid of vaults over the notes you opened most recently.
@@ -46,11 +48,17 @@ class DashboardScreen extends ConsumerWidget {
                     // than the list becoming 1900px-wide rows.
                     ? const _WideBody()
                     : ListView(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
+                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 120),
                         children: const [
-                          _Vaults(),
-                          SizedBox(height: 24),
+                          // Mark, then the shape of the vault, then what you
+                          // were last doing, then where things live. The design
+                          // puts recents above vaults because the note you want
+                          // is usually one of the last few you touched.
+                          _Masthead(),
+                          SizedBox(height: 28),
                           _Recents(),
+                          SizedBox(height: 28),
+                          _Vaults(),
                         ],
                       ),
               ),
@@ -65,6 +73,43 @@ class DashboardScreen extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The mark, and the shape of the whole vault set in two numbers.
+///
+/// The wordmark is set beside the real mark rather than as a text title: the
+/// design is explicit that the mark is never substituted for type.
+class _Masthead extends ConsumerWidget {
+  const _Masthead();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final vaults = ref.watch(vaultsProvider).value ?? const [];
+    final notes = vaults.fold<int>(0, (sum, v) => sum + v.noteCount);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Center(child: BrandMark(size: 30, withWordmark: true)),
+        SizedBox(height: t.sp * 3),
+        Row(
+          children: [
+            StatBlock(value: '$notes', label: notes == 1 ? 'note' : 'notes'),
+            SizedBox(width: t.sp * 4),
+            // The design's second figure is "last synced". Storm does not
+            // record a sync timestamp anywhere, and inventing one would be a
+            // number that lies; the vault count is the honest thing it does
+            // know.
+            StatBlock(
+              value: '${vaults.length}',
+              label: vaults.length == 1 ? 'vault' : 'vaults',
+            ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -126,14 +171,24 @@ class _Vaults extends ConsumerWidget {
         // A maximum card size rather than a fixed column count. At 411px it
         // still works out to two columns, so the phone is unchanged; at 1900
         // it flows to eight card-sized cards instead of two enormous ones.
-        return GridView.extent(
-          maxCrossAxisExtent: 220,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 1.15,
-          children: [for (final v in list) _VaultCard(vault: v)],
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: SectionLabel('Vaults'),
+            ),
+            const SizedBox(height: 10),
+            GridView.extent(
+              maxCrossAxisExtent: 220,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.15,
+              children: [for (final v in list) _VaultCard(vault: v)],
+            ),
+          ],
         );
       },
     );
@@ -147,7 +202,7 @@ class _VaultCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     final engine = ref.watch(syncEngineProvider);
     final active = ref.watch(activeVaultProvider) == vault.id;
     final accent =
@@ -158,7 +213,7 @@ class _VaultCard extends ConsumerWidget {
     final muted = vault.missing;
 
     return InkWell(
-      borderRadius: BorderRadius.circular(16),
+      borderRadius: BorderRadius.circular(t.rCard),
       onTap: muted
           ? () => ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -173,16 +228,16 @@ class _VaultCard extends ConsumerWidget {
           ? null
           : () => _pickVaultColour(context, ref, vault.id, accent),
       child: Container(
-        padding: const EdgeInsets.all(14),
+        padding: EdgeInsets.all(t.cardPad * 0.6),
         decoration: BoxDecoration(
-          color: muted
-              ? scheme.surfaceContainerHigh
-              : context.accentSurface(accent),
-          borderRadius: BorderRadius.circular(16),
+          // The card is a plain surface; the accent is the *tile* inside it.
+          // Tinting the whole card was the old behaviour and read as a slab of
+          // unrelated colour sitting on the page.
+          color: t.surface,
+          borderRadius: BorderRadius.circular(t.rCard),
           border: Border.all(
-            color: muted
-                ? scheme.error.withValues(alpha: 0.5)
-                : context.accentBorder(accent),
+            color: muted ? t.danger.withValues(alpha: 0.5) : t.border,
+            width: t.bw,
           ),
         ),
         child: Column(
@@ -191,20 +246,24 @@ class _VaultCard extends ConsumerWidget {
             Row(
               children: [
                 Container(
-                  width: 32,
-                  height: 32,
+                  width: 40,
+                  height: 40,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: muted
-                        ? scheme.error.withValues(alpha: 0.15)
-                        : scheme.onSurface.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(10),
+                        ? t.danger.withValues(alpha: 0.15)
+                        : accent.tile(t),
+                    borderRadius: BorderRadius.circular(t.rControl),
                   ),
                   child: Text(
                     _initial(vault.name),
                     style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: muted ? scheme.error : scheme.onSurface,
+                      fontFamily: StormTokens.sansFamily,
+                      fontWeight: FontWeight.w600,
+                      // Dark ink on the tile whatever the theme — the tile is
+                      // always a light colour, and the accent test measures
+                      // this exact pairing.
+                      color: muted ? t.danger : const Color(0xFF1A1626),
                     ),
                   ),
                 ),
@@ -230,15 +289,38 @@ class _VaultCard extends ConsumerWidget {
                 context,
               ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
             ),
-            const SizedBox(height: 2),
-            Text(
-              muted
-                  ? 'Directory not found'
-                  : '${vault.noteCount} note${vault.noteCount == 1 ? '' : 's'}',
-              style: TextStyle(
-                fontSize: 12,
-                color: muted ? scheme.error : scheme.onSurfaceVariant,
-              ),
+            SizedBox(height: t.sp * 0.5),
+            Row(
+              children: [
+                if (!muted) ...[
+                  StatusDot(
+                    status: active && !engine.isOnline
+                        ? DotStatus.offline
+                        : active
+                        ? DotStatus.synced
+                        : DotStatus.offline,
+                    size: 6,
+                  ),
+                  SizedBox(width: t.sp * 0.75),
+                ],
+                // Flexible, because "Directory not found" is far longer
+                // than "14 notes" and the card is a fixed 220px at most.
+                Flexible(
+                  child: Text(
+                    muted
+                        ? 'Directory not found'
+                        : '${vault.noteCount} note'
+                              '${vault.noteCount == 1 ? '' : 's'}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: muted ? t.danger : t.text3,
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -289,20 +371,15 @@ class _Recents extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final recents = ref.watch(recentsProvider);
-    final scheme = Theme.of(context).colorScheme;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(left: 4, bottom: 6),
-          child: Text(
-            'Recently opened',
-            style: Theme.of(
-              context,
-            ).textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant),
-          ),
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: SectionLabel('Recently opened'),
         ),
+        const SizedBox(height: 10),
         recents.when(
           loading: () => const Padding(
             padding: EdgeInsets.all(12),
@@ -321,7 +398,10 @@ class _Recents extends ConsumerWidget {
   }
 }
 
-/// A full-width card: the note's name, and the vault it came from.
+/// A text row: the note's name, and where it came from.
+///
+/// Deliberately not a card. Eight cards stacked is eight competing rectangles,
+/// and what is actually being scanned here is the titles.
 class _RecentCard extends ConsumerWidget {
   const _RecentCard({required this.note});
 
@@ -329,24 +409,17 @@ class _RecentCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
-    // The vault's colour, not the note's: this card is about *where* the note
-    // came from, and reading every note's frontmatter to render a list would
-    // cost a fetch per row.
-    final accent =
-        ref.watch(vaultAccentsProvider).value?[note.vaultId] ?? Accent.none;
+    final t = context.tokens;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.only(bottom: t.sp * 0.5),
       child: InkWell(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(t.rControl),
         onTap: () => context.push(Routes.note(note.vaultId, note.noteId)),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: context.accentSurface(accent),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: context.accentBorder(accent)),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: t.sp * 0.5,
+            vertical: t.sp * 1.25,
           ),
           child: Row(
             children: [
@@ -358,9 +431,14 @@ class _RecentCard extends ConsumerWidget {
                       note.displayTitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w500),
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.bodySize,
+                        fontWeight: FontWeight.w600,
+                        color: t.text,
+                      ),
                     ),
-                    const SizedBox(height: 3),
+                    SizedBox(height: t.sp * 0.25),
                     Text(
                       // The vault first: with several in play, "which vault"
                       // is what tells two same-named daily notes apart.
@@ -370,17 +448,22 @@ class _RecentCard extends ConsumerWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: 12,
-                        color: scheme.onSurfaceVariant,
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        color: t.text3,
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: t.sp),
               Text(
                 relativeTime(DateTime.tryParse(note.openedAt)?.toLocal()),
-                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.codeSize,
+                  color: t.text3,
+                ),
               ),
             ],
           ),

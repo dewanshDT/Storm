@@ -28,7 +28,7 @@ void main() {
       await pumpShell(tester, c);
 
       expect(find.text('Storm'), findsOneWidget);
-      expect(find.text('Recently opened'), findsOneWidget);
+      expect(find.text('RECENTLY OPENED'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -40,7 +40,7 @@ void main() {
       // the old one, so this redirect never fired.
       final c = shellContainer();
       await pumpShell(tester, c);
-      expect(find.text('Recently opened'), findsOneWidget);
+      expect(find.text('RECENTLY OPENED'), findsOneWidget);
 
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
