@@ -139,6 +139,48 @@ class StormMarkdownController extends TextEditingController {
     );
   }
 
+  /// Whether what the caret is in is already wrapped in [marker].
+  ///
+  /// Read-only — the toolbar lights a button from it and nothing writes from
+  /// it. For a collapsed caret the answer comes from counting markers earlier
+  /// on the line: an odd count means the caret is between an opening one and
+  /// its closing one. `_wrappedAt` alone cannot answer this, because it only
+  /// sees the two characters either side of the caret.
+  bool inlineActive(String marker) {
+    final sel = selection;
+    if (!sel.isValid) return false;
+    if (_wrappedAt(text, sel.start, sel.end, marker)) return true;
+
+    if (sel.start == sel.end) {
+      final lineStart = _lineStartAt(text, sel.start);
+      final before = text.substring(lineStart, sel.start);
+      var count = 0;
+      var at = 0;
+      while (true) {
+        final found = before.indexOf(marker, at);
+        if (found < 0) break;
+        count++;
+        at = found + marker.length;
+      }
+      return count.isOdd;
+    }
+
+    final selected = text.substring(sel.start, sel.end);
+    return selected.length >= marker.length * 2 &&
+        selected.startsWith(marker) &&
+        selected.endsWith(marker);
+  }
+
+  /// The block prefix on the line the caret sits on — `## `, `- `, `> ` — or
+  /// the empty string when the line is a plain paragraph.
+  String blockPrefixHere() {
+    final sel = selection;
+    if (!sel.isValid) return '';
+    final start = _lineStartAt(text, sel.start);
+    final end = _lineEndAt(text, sel.start);
+    return _splitPrefix(text.substring(start, end)).marker;
+  }
+
   bool _wrappedAt(String t, int start, int end, String marker) {
     final n = marker.length;
     if (start - n < 0 || end + n > t.length) return false;
