@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:drift/drift.dart' show Value;
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -359,7 +360,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           PopoverItem(
             label: isPinned ? 'Stop keeping offline' : 'Keep offline',
             leading: Icon(
-              isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+              isPinned ? LucideIcons.pin : LucideIcons.pin_off,
               size: context.tokens.bodySize,
               color: context.tokens.text3,
             ),
@@ -368,7 +369,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           PopoverItem(
             label: 'Attach a file',
             leading: Icon(
-              Icons.attach_file,
+              LucideIcons.paperclip,
               size: context.tokens.bodySize,
               color: context.tokens.text3,
             ),
@@ -377,7 +378,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
           PopoverItem(
             label: 'Rename or move',
             leading: Icon(
-              Icons.drive_file_rename_outline,
+              LucideIcons.pencil_line,
               size: context.tokens.bodySize,
               color: context.tokens.text3,
             ),
@@ -388,7 +389,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
             label: 'Delete',
             tone: PopoverTone.danger,
             leading: Icon(
-              Icons.delete_outline,
+              LucideIcons.trash_2,
               size: context.tokens.bodySize,
               color: context.tokens.danger,
             ),
@@ -434,7 +435,7 @@ class _Header extends StatelessWidget {
           key: const Key('note-header-row'),
           children: [
             _HeaderButton(
-              icon: Icons.chevron_left,
+              icon: LucideIcons.chevron_left,
               tooltip: 'Back',
               color: t.text2,
               size: t.headingSize,
@@ -462,14 +463,14 @@ class _Header extends StatelessWidget {
             // Attach, pin, rename and delete were long-press only, which is
             // no way to find "keep offline". The long-press still works.
             _HeaderButton(
-              icon: Icons.more_horiz,
+              icon: LucideIcons.ellipsis,
               tooltip: 'Note actions',
               color: t.text3,
               size: t.bodySize,
               onTap: onActions,
             ),
             _HeaderButton(
-              icon: Icons.tune,
+              icon: LucideIcons.sliders_horizontal,
               tooltip: 'Properties',
               color: t.accent,
               size: t.bodySize,
@@ -565,7 +566,7 @@ class _PropertiesRail extends StatelessWidget {
                   borderRadius: BorderRadius.circular(t.rControl * 0.8),
                 ),
                 child: Icon(
-                  Icons.tune,
+                  LucideIcons.sliders_horizontal,
                   size: t.bodySize,
                   color: open ? t.accent : t.text2,
                 ),

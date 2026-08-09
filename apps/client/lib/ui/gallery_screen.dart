@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'accents.dart';
 import 'states.dart';
@@ -223,7 +224,7 @@ class _Column extends StatelessWidget {
               child: Column(
                 children: [
                   const EmptyState(
-                    icon: Icons.folder_open,
+                    icon: LucideIcons.folder_open,
                     title: 'Nothing in this folder',
                     detail: 'New notes made here will land in Projects.',
                     action: 'New note',

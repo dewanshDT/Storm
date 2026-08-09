@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
@@ -30,7 +31,7 @@ class TagsPanel extends ConsumerWidget {
 
     if (!engine.isOnline) {
       return const EmptyState(
-        icon: Icons.cloud_off,
+        icon: LucideIcons.cloud_off,
         title: 'Tags need the server',
         detail: 'Reconnect to browse them. Your notes are still here to read.',
       );
@@ -43,14 +44,14 @@ class TagsPanel extends ConsumerWidget {
     return tags.when(
       loading: () => const SkeletonRows(rows: 3),
       error: (e, _) => EmptyState(
-        icon: Icons.cloud_off,
+        icon: LucideIcons.cloud_off,
         title: 'Could not load tags',
         detail: describeFailure(e),
       ),
       data: (all) {
         if (all.isEmpty) {
           return const EmptyState(
-            icon: Icons.label_outline,
+            icon: LucideIcons.tag,
             title: 'No tags in this vault yet',
             detail: 'Add #a-tag to a note, or tags: in its frontmatter.',
           );
@@ -111,7 +112,7 @@ class _TaggedNotes extends ConsumerWidget {
             padding: EdgeInsets.symmetric(vertical: t.sp * 0.75),
             child: Row(
               children: [
-                Icon(Icons.arrow_back, size: t.bodySize, color: t.text3),
+                Icon(LucideIcons.arrow_left, size: t.bodySize, color: t.text3),
                 SizedBox(width: t.sp * 0.75),
                 TagChip(label: tag),
               ],
@@ -122,13 +123,13 @@ class _TaggedNotes extends ConsumerWidget {
         notes.when(
           loading: () => const SkeletonRows(rows: 3),
           error: (e, _) => EmptyState(
-            icon: Icons.cloud_off,
+            icon: LucideIcons.cloud_off,
             title: 'Could not load these notes',
             detail: describeFailure(e),
           ),
           data: (list) => list.isEmpty
               ? const EmptyState(
-                  icon: Icons.label_off_outlined,
+                  icon: LucideIcons.tags,
                   title: 'No notes carry this tag',
                 )
               : Column(

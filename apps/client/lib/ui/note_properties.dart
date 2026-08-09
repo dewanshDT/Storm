@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -155,7 +156,9 @@ class _NotePropertiesState extends ConsumerState<NoteProperties> {
               ListTile(
                 leading: Icon(_iconFor(type)),
                 title: Text(type.label),
-                trailing: type == current ? const Icon(Icons.check) : null,
+                trailing: type == current
+                    ? const Icon(LucideIcons.check)
+                    : null,
                 onTap: () => Navigator.pop(c, type),
               ),
           ],
@@ -177,15 +180,15 @@ class _NotePropertiesState extends ConsumerState<NoteProperties> {
 }
 
 IconData _iconFor(PropertyType type) => switch (type) {
-  PropertyType.text => Icons.notes,
-  PropertyType.number => Icons.tag,
-  PropertyType.checkbox => Icons.check_box_outlined,
-  PropertyType.date => Icons.event,
-  PropertyType.datetime => Icons.schedule,
-  PropertyType.list => Icons.label_outline,
-  PropertyType.select => Icons.arrow_drop_down_circle_outlined,
-  PropertyType.url => Icons.link,
-  PropertyType.color => Icons.palette_outlined,
+  PropertyType.text => LucideIcons.notepad_text_dashed,
+  PropertyType.number => LucideIcons.hash,
+  PropertyType.checkbox => LucideIcons.square_check,
+  PropertyType.date => LucideIcons.calendar,
+  PropertyType.datetime => LucideIcons.clock,
+  PropertyType.list => LucideIcons.tag,
+  PropertyType.select => LucideIcons.circle_chevron_down,
+  PropertyType.url => LucideIcons.link,
+  PropertyType.color => LucideIcons.palette,
 };
 
 enum _RowAction { retype, rename, delete }
@@ -792,7 +795,11 @@ class _AddValueChip extends StatelessWidget {
             borderRadius: BorderRadius.circular(999),
             border: Border.all(color: t.border, width: t.bw),
           ),
-          child: Icon(Icons.add, size: t.labelSize * 1.2, color: t.text3),
+          child: Icon(
+            LucideIcons.plus,
+            size: t.labelSize * 1.2,
+            color: t.text3,
+          ),
         ),
       ),
     );
@@ -852,7 +859,7 @@ class ValueChip extends StatelessWidget {
                 message: 'Remove $label',
                 child: Padding(
                   padding: EdgeInsets.all(t.sp * 0.375),
-                  child: Icon(Icons.close, size: t.labelSize, color: t.amber),
+                  child: Icon(LucideIcons.x, size: t.labelSize, color: t.amber),
                 ),
               ),
             ),
@@ -940,7 +947,7 @@ class _AddProperty extends StatelessWidget {
                   strokeAlign: BorderSide.strokeAlignInside,
                 ),
               ),
-              child: Icon(Icons.add, size: t.codeSize, color: t.text3),
+              child: Icon(LucideIcons.plus, size: t.codeSize, color: t.text3),
             ),
           ),
         ),

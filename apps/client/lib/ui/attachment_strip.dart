@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/app_state.dart';
@@ -80,7 +81,7 @@ class AttachmentStrip extends ConsumerWidget {
                         alignment: Alignment.center,
                         color: t.surface2,
                         child: Icon(
-                          Icons.broken_image_outlined,
+                          LucideIcons.image_off,
                           size: t.bodySize,
                           color: t.text3,
                         ),

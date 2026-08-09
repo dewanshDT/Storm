@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'widgets.dart';
 import 'breakpoints.dart';
@@ -54,7 +55,7 @@ class PropertiesPanel extends StatelessWidget {
               const Expanded(child: SectionLabel('Properties')),
               if (onClose != null)
                 IconButton(
-                  icon: const Icon(Icons.close, size: 18),
+                  icon: const Icon(LucideIcons.x, size: 18),
                   color: t.text3,
                   visualDensity: VisualDensity.compact,
                   tooltip: 'Close',

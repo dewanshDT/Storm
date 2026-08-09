@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
@@ -27,7 +28,7 @@ class ClientSettingsScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+          icon: const Icon(LucideIcons.arrow_left),
           onPressed: () => context.canPop()
               ? context.pop()
               : context.go(Routes.browse(vaultId)),

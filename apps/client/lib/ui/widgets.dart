@@ -6,6 +6,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart' show TextInputFormatter;
 
 import 'tokens.dart';
@@ -408,7 +409,7 @@ class StormCheckbox extends StatelessWidget {
           border: value ? null : Border.all(color: t.text3, width: t.bw * 1.5),
         ),
         child: value
-            ? Icon(Icons.check, size: side * 0.72, color: t.onAccent)
+            ? Icon(LucideIcons.check, size: side * 0.72, color: t.onAccent)
             : null,
       ),
     );
@@ -668,7 +669,9 @@ class FolderRow extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       onLongPress: onLongPress,
-      borderRadius: BorderRadius.circular(t.rControl),
+      borderRadius: dense
+          ? BorderRadius.circular(t.rControl)
+          : BorderRadius.zero,
       child: Container(
         padding:
             padding ??
@@ -685,7 +688,7 @@ class FolderRow extends StatelessWidget {
             // Grey, not accent: the folder glyph is furniture, and accent is
             // reserved for what is interactive.
             leading ??
-                Icon(Icons.folder_rounded, size: t.bodySize, color: t.text2),
+                Icon(LucideIcons.folder, size: t.bodySize, color: t.text2),
             SizedBox(width: dense ? t.sp : t.sp * 1.5),
             Expanded(
               child: Text(
@@ -711,7 +714,7 @@ class FolderRow extends StatelessWidget {
               ),
             if (chevron) ...[
               SizedBox(width: t.sp * 0.75),
-              Icon(Icons.chevron_right, size: t.bodySize, color: t.text2),
+              Icon(LucideIcons.chevron_right, size: t.bodySize, color: t.text2),
             ],
           ],
         ),
@@ -860,7 +863,11 @@ class StatusBar extends StatelessWidget {
         SaveStateLabel(label: label, tone: tone),
         const Spacer(),
         if (error != null) ...[
-          Icon(Icons.error_outline, size: t.labelSize * 1.2, color: t.danger),
+          Icon(
+            LucideIcons.circle_alert,
+            size: t.labelSize * 1.2,
+            color: t.danger,
+          ),
           SizedBox(width: t.sp * 0.5),
           Flexible(
             child: Text(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
@@ -62,7 +63,7 @@ void main() {
       await openVault(tester, c);
 
       expect(find.byTooltip('Directory'), findsOneWidget);
-      expect(find.byIcon(Icons.more_horiz), findsNothing);
+      expect(find.byIcon(LucideIcons.ellipsis), findsNothing);
       await disposeShell(tester, c);
     });
 

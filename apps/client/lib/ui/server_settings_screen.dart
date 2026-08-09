@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -25,7 +26,7 @@ class ServerSettingsScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
+          icon: const Icon(LucideIcons.arrow_left),
           onPressed: () => context.canPop()
               ? context.pop()
               // Mounted at two paths: the vault-scoped one goes back into the
@@ -72,7 +73,7 @@ class ServerSettingsScreen extends ConsumerWidget {
                   alignment: Alignment.centerLeft,
                   child: OutlinedButton.icon(
                     onPressed: () => createVault(context, ref),
-                    icon: const Icon(Icons.add, size: 18),
+                    icon: const Icon(LucideIcons.plus, size: 18),
                     label: const Text('New vault'),
                   ),
                 ),
@@ -326,7 +327,7 @@ class _VaultRow extends ConsumerWidget {
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: Icon(
-        vault.missing ? Icons.error_outline : Icons.folder_special_outlined,
+        vault.missing ? LucideIcons.circle_alert : LucideIcons.folder_cog,
         color: vault.missing ? scheme.error : scheme.primary,
       ),
       title: Text(vault.name),

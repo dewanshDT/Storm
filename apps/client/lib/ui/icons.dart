@@ -2,7 +2,7 @@
 ///
 /// Material's set is close but not the same shape language: its folder is a
 /// tab on a rounded slab, its "link" is a chain, and there is no two-ovals
-/// mentions mark at all — `Icons.hub` is a node graph, which says "network"
+/// mentions mark at all — `LucideIcons.link_2` is a node graph, which says "network"
 /// where the design says "these two notes are joined". Five shapes is few
 /// enough to draw, and drawing them is the only way the nav pill matches the
 /// prototype.

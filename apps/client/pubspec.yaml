@@ -45,6 +45,7 @@ dependencies:
   web_socket_channel: ^3.0.3
   file_selector: ^1.1.0
   go_router: ^17.4.0
+  flutter_lucide: ^1.11.0
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.

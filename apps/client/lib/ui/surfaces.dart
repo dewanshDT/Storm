@@ -3,6 +3,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'widgets.dart';
 import 'tokens.dart';
@@ -47,7 +48,7 @@ class StormSheet extends StatelessWidget {
               Expanded(child: SectionLabel(title)),
               if (onClose != null)
                 IconButton(
-                  icon: Icon(Icons.close, size: t.bodySize, color: t.text3),
+                  icon: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
                   onPressed: onClose,
                   visualDensity: VisualDensity.compact,
                   tooltip: 'Close',

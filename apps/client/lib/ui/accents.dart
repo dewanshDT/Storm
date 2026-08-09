@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'oklch.dart';
 import 'tokens.dart';
@@ -194,12 +195,16 @@ class AccentSwatch extends StatelessWidget {
               // A slash, so "no colour" reads as a choice rather than an
               // unfilled swatch.
               ? Icon(
-                  Icons.format_color_reset_outlined,
+                  LucideIcons.droplet_off,
                   size: size * 0.5,
                   color: scheme.onSurfaceVariant,
                 )
               : selected
-              ? Icon(Icons.check, size: size * 0.55, color: scheme.onSurface)
+              ? Icon(
+                  LucideIcons.check,
+                  size: size * 0.55,
+                  color: scheme.onSurface,
+                )
               : null,
         ),
       ),

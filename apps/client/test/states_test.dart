@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/ui/states.dart';
@@ -78,7 +79,7 @@ void main() {
       await show(
         tester,
         EmptyState(
-          icon: Icons.folder_open,
+          icon: LucideIcons.folder_open,
           title: 'Nothing in this folder',
           detail: 'New notes made here will land in Projects.',
           action: 'New note',
@@ -94,7 +95,7 @@ void main() {
     testWidgets('works without an action', (tester) async {
       await show(
         tester,
-        const EmptyState(icon: Icons.search_off, title: 'No notes match'),
+        const EmptyState(icon: LucideIcons.search_x, title: 'No notes match'),
       );
       expect(tester.takeException(), isNull);
       expect(find.byType(FilledButton), findsNothing);

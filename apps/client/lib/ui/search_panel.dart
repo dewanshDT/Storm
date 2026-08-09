@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'states.dart';
@@ -68,11 +69,11 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
                   autofocus: true,
                   onChanged: _onChanged,
                   hintText: 'Search notes',
-                  prefixIcon: Icons.search,
+                  prefixIcon: LucideIcons.search,
                   suffix: _controller.text.isEmpty
                       ? null
                       : IconButton(
-                          icon: Icon(Icons.clear, size: t.codeSize),
+                          icon: Icon(LucideIcons.x, size: t.codeSize),
                           onPressed: () {
                             _controller.clear();
                             ref.read(searchQueryProvider.notifier).state = '';
@@ -82,7 +83,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               ),
               if (widget.onClose != null)
                 IconButton(
-                  icon: Icon(Icons.close, size: t.bodySize, color: t.text3),
+                  icon: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
                   onPressed: widget.onClose,
                   tooltip: 'Close',
                 ),
@@ -96,7 +97,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               child: const SkeletonRows(rows: 3),
             ),
             error: (e, _) => EmptyState(
-              icon: Icons.cloud_off,
+              icon: LucideIcons.cloud_off,
               title: 'Search needs the server',
               detail: describeFailure(e),
             ),
@@ -105,7 +106,7 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               // answer "nothing" — which is not the same as "no matches".
               if (!online) {
                 return const EmptyState(
-                  icon: Icons.cloud_off,
+                  icon: LucideIcons.cloud_off,
                   title: 'Search needs the server',
                   detail:
                       'Reconnect to search this vault. '
@@ -114,14 +115,14 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
               }
               if (query.trim().isEmpty) {
                 return const EmptyState(
-                  icon: Icons.search,
+                  icon: LucideIcons.search,
                   title: 'Search this vault',
                   detail: 'Every note, by its words.',
                 );
               }
               if (hits.isEmpty) {
                 return EmptyState(
-                  icon: Icons.search_off,
+                  icon: LucideIcons.search_x,
                   title: 'No notes match “$query”',
                   detail: 'Try fewer words, or a word from the body.',
                 );

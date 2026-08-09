@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
@@ -26,7 +26,7 @@ void main() {
       expect(find.byTooltip('Search'), findsOneWidget);
       expect(find.byTooltip('New note'), findsOneWidget);
       // No `…` to tap: nothing collapses any more.
-      expect(find.byIcon(Icons.more_horiz), findsNothing);
+      expect(find.byIcon(LucideIcons.ellipsis), findsNothing);
       await disposeShell(tester, c);
     });
 
