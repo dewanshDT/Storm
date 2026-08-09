@@ -300,7 +300,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
         // formatting row, in the space the nav bubble gives up.
         if (widget.showToolbar) ...[
           WikilinkSuggestions(controller: _controller),
-          EditorToolbar(controller: _controller),
+          EditorToolbar(controller: _controller, onDone: _focus.unfocus),
         ],
       ],
     );
