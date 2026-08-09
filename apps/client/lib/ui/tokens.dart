@@ -370,6 +370,20 @@ enum StormPreset {
 }
 
 /// Reaches the tokens from anywhere in the tree.
+///
+/// Falls back to the preset matching the ambient brightness when the extension
+/// is absent, rather than throwing. The app always installs the real one, but a
+/// widget can legitimately be rendered under a plain `MaterialApp` — a test
+/// harness, a dialog with its own theme — and an atom that crashes there is an
+/// atom that cannot be reused.
 extension StormTokensOf on BuildContext {
-  StormTokens get tokens => Theme.of(this).extension<StormTokens>()!;
+  StormTokens get tokens {
+    final theme = Theme.of(this);
+    return theme.extension<StormTokens>() ??
+        StormTokens.from(
+          theme.brightness == Brightness.dark
+              ? StormPreset.stormDark
+              : StormPreset.stormLight,
+        );
+  }
 }

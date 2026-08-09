@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import '../breakpoints.dart';
 import '../tokens.dart';
 import 'vault_actions.dart';
-import '../theme.dart';
 
 /// Whether a soft keyboard is currently covering the bottom of the screen.
 ///
