@@ -93,8 +93,9 @@ class DashboardScreen extends ConsumerWidget {
 
 /// The mark, and the shape of the whole vault set in two numbers.
 ///
-/// The wordmark is set beside the real mark rather than as a text title: the
-/// design is explicit that the mark is never substituted for type.
+/// No mark here. The app's own name is the least useful thing on the screen
+/// you already opened the app to see, and it cost a whole row above the two
+/// numbers that are the point.
 class _Masthead extends ConsumerWidget {
   const _Masthead();
 
@@ -108,18 +109,11 @@ class _Masthead extends ConsumerWidget {
     // survived the restart.
     final synced = ref.watch(syncEngineProvider).lastSyncedAt;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return Row(
       children: [
-        const Center(child: BrandMark(size: 30, withWordmark: true)),
-        SizedBox(height: t.sp * 3),
-        Row(
-          children: [
-            StatBlock(value: '$notes', label: notes == 1 ? 'note' : 'notes'),
-            SizedBox(width: t.sp * 4),
-            StatBlock(value: compactAge(synced), label: 'last synced'),
-          ],
-        ),
+        StatBlock(value: '$notes', label: notes == 1 ? 'note' : 'notes'),
+        SizedBox(width: t.sp * 4),
+        StatBlock(value: compactAge(synced), label: 'last synced'),
       ],
     );
   }
