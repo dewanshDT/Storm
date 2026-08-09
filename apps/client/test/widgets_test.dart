@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/ui/gallery_screen.dart';
+import 'package:storm/ui/icons.dart';
 import 'package:storm/ui/widgets.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
@@ -13,6 +14,23 @@ import 'package:storm/ui/tokens.dart';
 /// atom takes its colour from the tokens, a tag is not a control-sized slab,
 /// and the brand mark keeps its own ground in every theme.
 void main() {
+  testWidgets('every glyph paints without throwing', (tester) async {
+    // A CustomPainter that references a missing case or a bad rect fails at
+    // paint time, which no other test in this suite reaches.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: StormTheme.dark(),
+        home: Scaffold(
+          body: Wrap(
+            children: [for (final g in StormGlyph.values) StormIcon(g)],
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    expect(find.byType(StormIcon), findsNWidgets(StormGlyph.values.length));
+  });
+
   group('a list row is a row, not a card', () {
     // Flutter draws a bottom-only `Border` inside a decoration that also has
     // a `borderRadius` as the bottom *arc* of the rounded rect, so the rule

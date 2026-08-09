@@ -72,8 +72,8 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
         onTap: () => NewNoteRequest.of(context)?.call(),
       ),
       VaultAction(
-        glyph: StormGlyph.folder,
-        tooltip: 'Server',
+        glyph: StormGlyph.server,
+        tooltip: 'Server settings',
         onTap: () => context.push(Routes.serverSettings),
       ),
     ];

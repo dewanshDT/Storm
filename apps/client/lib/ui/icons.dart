@@ -10,7 +10,7 @@ library;
 
 import 'package:flutter/material.dart';
 
-enum StormGlyph { folder, newFolder, search, mentions, hash, plus }
+enum StormGlyph { folder, newFolder, search, mentions, hash, plus, server }
 
 class StormIcon extends StatelessWidget {
   const StormIcon(this.glyph, {super.key, this.size = 20, this.color});
@@ -133,6 +133,21 @@ class _GlyphPainter extends CustomPainter {
           Offset(16.3 * k, 12.8 * k),
           thin,
         );
+
+      case StormGlyph.server:
+        // Two stacked units with a status lamp each — a machine, not a
+        // directory. The dashboard's second slot opens server settings, and
+        // it was wearing the folder glyph.
+        for (final top in [3.0, 11.0]) {
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(
+              Rect.fromLTWH(2 * k, top * k, 16 * k, 6 * k),
+              Radius.circular(1.5 * k),
+            ),
+            stroke,
+          );
+          canvas.drawCircle(Offset(5.5 * k, (top + 3) * k), 0.9 * k, fill);
+        }
 
       case StormGlyph.plus:
         final thick = Paint()
