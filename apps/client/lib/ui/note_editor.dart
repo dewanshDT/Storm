@@ -10,6 +10,7 @@ import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'editor_toolbar.dart';
 import 'atoms.dart';
+import 'states.dart';
 import 'tokens.dart';
 import 'wikilink_suggestions.dart';
 
@@ -215,12 +216,16 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
       children: [
         _StatusBar(session: session),
         if (_isDegraded(session)) const _DegradedNotice(),
-        if (session.notice != null)
+        if (session.hasConflict)
+          ConflictCard(onDismiss: session.dismissNotice)
+        else if (session.notice != null)
           _Notice(
             message: session.notice!,
-            isConflict: session.hasConflict,
+            isConflict: false,
             onDismiss: session.dismissNotice,
           ),
+        if (session.saveState == SaveState.queued)
+          const OfflineNotice(queued: 1),
         Expanded(
           child: Scrollbar(
             child: SingleChildScrollView(

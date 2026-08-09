@@ -7,6 +7,8 @@ import '../router.dart';
 import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'breakpoints.dart';
+import 'shell/nav_bubble.dart' show NewNoteRequest;
+import 'states.dart';
 import 'shell/storm_scaffold.dart';
 import 'shell/vault_sidebar.dart' show NoNoteSelected;
 import 'shell/vault_gate.dart';
@@ -48,7 +50,10 @@ class BrowseScreen extends ConsumerWidget {
             ),
       title: const Text('Directory'),
       child: notes.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
+        loading: () => const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 20),
+          child: SkeletonRows(),
+        ),
         error: (e, _) => Center(child: Text('$e')),
         data: (list) {
           final entries = _childrenOf(list, folder, known);
@@ -58,7 +63,16 @@ class BrowseScreen extends ConsumerWidget {
               const Divider(height: 1),
               Expanded(
                 child: entries.isEmpty
-                    ? const Center(child: Text('This folder is empty'))
+                    ? EmptyState(
+                        icon: Icons.folder_open,
+                        title: 'Nothing in this folder',
+                        detail: folder.isEmpty
+                            ? 'New notes will land at the top of this vault.'
+                            : 'New notes made here will land in '
+                                  '${folder.split('/').last}.',
+                        action: 'New note',
+                        onAction: () => NewNoteRequest.of(context)?.call(),
+                      )
                     : ListView.builder(
                         padding: const EdgeInsets.only(bottom: 110),
                         itemCount: entries.length,

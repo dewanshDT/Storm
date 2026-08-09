@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'states.dart';
+
 import '../api/models.dart';
 import '../state/app_state.dart';
 
@@ -73,7 +75,10 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
         ),
         Expanded(
           child: results.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: SkeletonRows(rows: 3),
+            ),
             error: (e, _) => Center(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -82,10 +87,18 @@ class _SearchPanelState extends ConsumerState<SearchPanel> {
             ),
             data: (hits) {
               if (query.trim().isEmpty) {
-                return const _Hint(text: 'Type to search the vault');
+                return const EmptyState(
+                  icon: Icons.search,
+                  title: 'Search this vault',
+                  detail: 'Every note, by its words.',
+                );
               }
               if (hits.isEmpty) {
-                return _Hint(text: 'No notes match “$query”');
+                return EmptyState(
+                  icon: Icons.search_off,
+                  title: 'No notes match “$query”',
+                  detail: 'Try fewer words, or a word from the body.',
+                );
               }
               return ListView.separated(
                 itemCount: hits.length,
