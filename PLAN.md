@@ -1384,6 +1384,29 @@ The handoff's own vocabulary — atoms, molecules, organisms — is a documentat
 device and does not appear in the code. Shared widgets are `lib/ui/widgets.dart`
 and overlay containers `lib/ui/surfaces.dart`.
 
+### The VM does not run the layout deploy/README.md describes
+
+Found on 2026-08-09 while adding `deploy-web`, and worth recording because
+every deploy target in the Makefile is written against the wrong paths.
+
+`deploy/README.md` and `make deploy` assume `/srv/storm/{vaults,state,web}`, a
+`storm` service account and a `storm-server.service` unit. None of that exists
+on the VM. What is actually there:
+
+```
+/home/dewansh/storm/{run.sh,storm-server,state,vaults,web}
+```
+
+started by `run.sh` — no systemd, no `storm` user, and therefore no sudo
+needed to replace the web bundle. `systemctl is-active storm-server` reports
+`inactive`, which reads as "the server is down" and is simply the wrong
+question. `pgrep -af storm-server` is the one that answers.
+
+`deploy-web` takes `WEB_DIR` and defaults it to the real path. `deploy` and
+`deploy-check` are still written against `/srv/storm` and systemd, and would
+fail the same way — they are left alone rather than half-corrected, because
+which layout is *intended* is a decision, not a bug fix.
+
 ---
 
 ## A lesson worth keeping
