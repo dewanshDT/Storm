@@ -10,6 +10,7 @@ import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'breakpoints.dart';
+import 'shell/storm_scaffold.dart';
 import 'editor_toolbar.dart';
 import 'widgets.dart';
 import 'states.dart';
@@ -244,7 +245,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final t = context.tokens;
     // 40 at desk width, as the prototype has it; on a phone the column is the
     // screen and 40 a side would leave nothing for the words.
-    final inset = context.isExpanded ? kEditorInset : t.sp * 2.5;
+    // The shell's inset on a phone, so the prose starts under the bubble and
+    // the header rather than three pixels inside them.
+    final inset = context.isExpanded
+        ? kEditorInset
+        : StormChrome.contentInset(context);
     // The pane's own top padding, all of it — the shell contributes nothing
     // at this width. Getting it wrong is visible from across the room: the
     // version line and the sidebar's vault name are meant to share a

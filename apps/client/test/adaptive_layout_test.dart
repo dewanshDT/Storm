@@ -8,6 +8,8 @@ import 'package:storm/ui/note_editor.dart';
 import 'package:storm/ui/note_properties.dart';
 import 'package:storm/ui/properties_panel.dart';
 import 'package:storm/ui/shell/nav_bubble.dart';
+import 'package:storm/ui/shell/corner_bubbles.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/shell/vault_sidebar.dart';
 
 import 'fake_server.dart';
@@ -177,6 +179,45 @@ void main() {
 
   String locationOf(ProviderContainer c) =>
       c.read(routerProvider).state.uri.path;
+
+  group('one left edge', () {
+    // The bubble, the header and the prose used to start at 24, 24 and 20 —
+    // close enough to read as a mistake rather than a decision, which is what
+    // a three-pixel stagger down the left margin looks like.
+    testWidgets('bubble, header glyph and prose share it on a phone', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      final bubble = tester.getTopLeft(find.byType(VaultBubble)).dx;
+      final back = tester.getTopLeft(find.byIcon(LucideIcons.chevron_left)).dx;
+      final prose = tester.getTopLeft(find.byKey(const Key('note-body'))).dx;
+
+      expect(back, moreOrLessEquals(bubble, epsilon: 0.5));
+      expect(prose, moreOrLessEquals(bubble, epsilon: 0.5));
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('and the header buttons are evenly spaced', (tester) async {
+      // One was left-aligned in its box, one centred and one right-aligned,
+      // so the gaps between the three glyphs were all different.
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+
+      final actions = tester.getTopLeft(find.byIcon(LucideIcons.ellipsis)).dx;
+      final props = tester
+          .getTopLeft(find.byIcon(LucideIcons.sliders_horizontal))
+          .dx;
+      final t = StormTokens.from(StormPreset.stormDark);
+      expect(props - actions, moreOrLessEquals(t.sp * 5.5, epsilon: 0.5));
+      await disposeShell(tester, c);
+    });
+  });
 
   group('the vault switcher', () {
     testWidgets('opens the switcher rather than navigating home', (

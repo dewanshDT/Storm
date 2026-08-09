@@ -174,17 +174,23 @@ class _Breadcrumbs extends ConsumerWidget {
         vaults.where((v) => v.id == vaultId).firstOrNull?.name ?? 'Vault';
     final parts = folder.isEmpty ? <String>[] : folder.split('/');
 
-    return Breadcrumb(
-      crumbs: [
-        Crumb('Vaults', onTap: () => context.go(Routes.dashboard)),
-        Crumb(name, onTap: () => context.go(Routes.browse(vaultId))),
-        for (var i = 0; i < parts.length; i++)
-          Crumb(
-            parts[i],
-            onTap: () =>
-                context.go(Routes.folder(vaultId, parts.take(i + 1).join('/'))),
-          ),
-      ],
+    return Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: StormChrome.contentInset(context),
+      ),
+      child: Breadcrumb(
+        crumbs: [
+          Crumb('Vaults', onTap: () => context.go(Routes.dashboard)),
+          Crumb(name, onTap: () => context.go(Routes.browse(vaultId))),
+          for (var i = 0; i < parts.length; i++)
+            Crumb(
+              parts[i],
+              onTap: () => context.go(
+                Routes.folder(vaultId, parts.take(i + 1).join('/')),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
