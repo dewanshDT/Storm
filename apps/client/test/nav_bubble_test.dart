@@ -74,24 +74,28 @@ void main() {
   });
 
   group('the context slot', () {
-    testWidgets('offers tags outside a note', (tester) async {
+    testWidgets('keeps mentions and tags visible outside a note', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c);
       await openVault(tester, c);
 
+      expect(find.byTooltip('Mentions'), findsOneWidget);
       expect(find.byTooltip('Tags'), findsOneWidget);
-      expect(find.byIcon(Icons.hub_outlined), findsNothing);
       await disposeShell(tester, c);
     });
 
-    testWidgets('offers linked mentions inside a note', (tester) async {
+    testWidgets('shows the linked-mentions count inside a note', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c);
 
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
       expect(find.byTooltip('0 linked mentions'), findsOneWidget);
-      expect(find.byTooltip('Tags'), findsNothing);
+      expect(find.byTooltip('Tags'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });

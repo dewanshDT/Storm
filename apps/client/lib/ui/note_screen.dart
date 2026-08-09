@@ -490,7 +490,10 @@ class _PropertiesRail extends StatelessWidget {
                 height: t.sp * 4,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: open ? t.accentSoft : null,
+                  // Filled either way — the design draws it as a button, and
+                  // an outline-less transparent square reads as an icon that
+                  // happens to be there.
+                  color: open ? t.accentSoft : t.surface2,
                   borderRadius: BorderRadius.circular(t.rControl * 0.8),
                 ),
                 child: Icon(

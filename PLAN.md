@@ -1377,6 +1377,16 @@ any button being pressed. A collapsed caret needs the marker count on the line:
 `_wrappedAt` only sees the two characters either side of it, which is true only
 of a `****` you have just typed.
 
+**The phone directory chrome now rides on the shared shell, not per-screen
+offsets.** The mockup gap was in the wrong layer: the crowding came from
+`StormChrome` pinning the header directly under the corner bubbles, the browse
+screen using narrower gutters than the rest of the shell, and the nav pill's
+sixth slot being absent outside a note. The fix stayed in the shared chrome and
+row widgets — wider shell insets, a real bubble-to-breadcrumb gap, roomier list
+rows, note timestamps where they exist, and the always-present mentions slot —
+so the phone screen moves toward the handoff without creating one-off layout
+rules the next pass would have to undo.
+
 **`/gallery`** renders every shared widget in all three presets side by side.
 The header of `widgets.dart` had claimed it existed since the widgets landed.
 

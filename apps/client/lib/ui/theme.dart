@@ -253,9 +253,10 @@ class StormBubble extends StatelessWidget {
 
     final bubble = Container(
       decoration: BoxDecoration(
-        color: t.surface,
+        color: t.surface.withValues(alpha: 0.96),
         borderRadius: radius,
         border: Border.all(color: t.border, width: t.bw),
+        boxShadow: t.shadow,
       ),
       child: Material(
         color: const Color(0x00000000),

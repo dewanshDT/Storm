@@ -69,21 +69,31 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await openVault(tester, c);
 
-      // The bubble renders nothing, but the actions are still reachable —
+      // The bubble renders nothing, and the actions are still reachable —
       // both draw the same list, so they cannot offer different things.
       expect(
         find.descendant(
           of: find.byType(NavBubble),
-          matching: find.byTooltip('Directory'),
+          matching: find.byTooltip('Tags'),
         ),
         findsNothing,
       );
       expect(
         find.descendant(
           of: find.byType(VaultSidebar),
-          matching: find.byTooltip('Directory'),
+          matching: find.byTooltip('Tags'),
         ),
         findsOneWidget,
+      );
+      // Except the two the rail already *is*: a Directory button beside the
+      // folder tree, or a Search button beside the search field, would be a
+      // control that does what is already on screen.
+      expect(
+        find.descendant(
+          of: find.byType(VaultSidebar),
+          matching: find.byTooltip('Directory'),
+        ),
+        findsNothing,
       );
       expect(find.byTooltip('New note'), findsOneWidget);
       await disposeShell(tester, c);
@@ -106,7 +116,7 @@ void main() {
       Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
 
       final search = inRail(find.text('Search…'));
-      final actions = inRail(find.byTooltip('Directory'));
+      final actions = inRail(find.byTooltip('Tags'));
       expect(search, findsOneWidget, reason: 'the rail offers search');
       expect(actions, findsOneWidget);
       expect(
@@ -114,6 +124,48 @@ void main() {
         lessThan(topOf(actions)),
         reason: 'actions belong at the bottom of the rail',
       );
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('the columns keep the design\'s proportions', () {
+    // The mockup is a 1200px frame with a 260 sidebar and a 280 drawer. Those
+    // were pinned, so at 1200 the layout matched exactly and at 1700 the side
+    // columns stayed put while the note pane swallowed every extra pixel.
+    testWidgets('the sidebar is the design width at the design frame', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(1200, 900));
+      await openVault(tester, c);
+
+      expect(tester.getSize(find.byType(VaultSidebar)).width, 260);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('and grows with the window rather than staying put', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(1800, 900));
+      await openVault(tester, c);
+
+      final width = tester.getSize(find.byType(VaultSidebar)).width;
+      expect(width, greaterThan(260));
+      // Capped: a 4K display must not hand a third of the screen to a list of
+      // folder names.
+      expect(width, lessThanOrEqualTo(400));
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('never below the design width, however narrow the pane', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(901, 900));
+      await openVault(tester, c);
+
+      expect(tester.getSize(find.byType(VaultSidebar)).width, 260);
       await disposeShell(tester, c);
     });
   });

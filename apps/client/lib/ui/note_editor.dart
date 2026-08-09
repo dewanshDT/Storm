@@ -8,6 +8,7 @@ import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
+import 'breakpoints.dart';
 import 'editor_toolbar.dart';
 import 'widgets.dart';
 import 'states.dart';
@@ -240,6 +241,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     }
 
     final t = context.tokens;
+    // 40 at desk width, as the prototype has it; on a phone the column is the
+    // screen and 40 a side would leave nothing for the words.
+    final inset = context.isExpanded ? kEditorInset : t.sp * 2.5;
 
     return Column(
       children: [
@@ -248,7 +252,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
           onLongPress: widget.onActions,
           behavior: HitTestBehavior.opaque,
           child: Padding(
-            padding: EdgeInsets.fromLTRB(t.sp * 2.5, 0, t.sp * 2.5, t.sp * 0.5),
+            // The same inset as the prose below it: the design lines the
+            // version up with the note's first character.
+            padding: EdgeInsets.fromLTRB(inset, 0, inset, t.sp * 0.5),
             child: _statusBar(session),
           ),
         ),
@@ -266,17 +272,16 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
         Expanded(
           child: Scrollbar(
             child: SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(
-                t.sp * 2.75,
-                t.sp,
-                t.sp * 2.75,
-                t.sp * 15,
-              ),
-              child: Center(
+              padding: EdgeInsets.fromLTRB(inset, t.sp, inset, t.sp * 15),
+              // Left, not centred. The prototype's note pane is 604px wide, so
+              // its `margin: 0 auto` inside a 640 measure never actually
+              // centres anything — the prose sits 40px from the column's left
+              // edge. Centring reproduces that at 1200 and nowhere else: at
+              // 1700 it strands the text in the middle of an empty field.
+              child: Align(
+                alignment: Alignment.topLeft,
                 child: ConstrainedBox(
-                  // The design's measure. 820 was a column of prose wide
-                  // enough to lose your place in.
-                  constraints: BoxConstraints(maxWidth: t.sp * 80),
+                  constraints: const BoxConstraints(maxWidth: kEditorMeasure),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [

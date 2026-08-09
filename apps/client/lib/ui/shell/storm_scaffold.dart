@@ -124,13 +124,26 @@ class StormChrome extends StatelessWidget {
 
   /// How far the content has to start below the top edge to clear the bubbles.
   static double contentTop(BuildContext context) {
-    final t = context.tokens;
-    // bubble inset + bubble side + a gap.
-    return t.sp * 2.5 + t.sp * 5.5 + t.sp;
+    return bubbleTopInset(context) + bubbleSide(context) + bubbleGap(context);
   }
 
+  /// The corner bubbles sit inboard of the phone edges rather than hugging
+  /// them, matching the prototype and giving the chrome room to breathe.
+  static double bubbleHorizontalInset(BuildContext context) =>
+      context.tokens.cardPad;
+
+  /// The safe area has already taken care of the system status bar, so this is
+  /// the spacing inside the app's own surface.
+  static double bubbleTopInset(BuildContext context) => context.tokens.sp * 2.5;
+
+  /// Rounded square, not pill: same shape grammar as [StormBubble].
+  static double bubbleSide(BuildContext context) => context.tokens.sp * 5.5;
+
+  /// Space between the corner affordances and the screen's own header.
+  static double bubbleGap(BuildContext context) => context.tokens.sp * 2;
+
   /// What every scrolling child leaves at the bottom for the nav pill.
-  static double navClearance(BuildContext context) => context.tokens.sp * 13.5;
+  static double navClearance(BuildContext context) => context.tokens.sp * 14;
 
   @override
   Widget build(BuildContext context) {
@@ -148,16 +161,16 @@ class StormChrome extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (bubbles)
-                  SizedBox(height: t.sp * 5.5 + t.sp * 2.5)
+                  SizedBox(height: contentTop(context))
                 else
                   SizedBox(height: t.sp),
                 if (header != null)
                   Padding(
                     padding: EdgeInsets.fromLTRB(
-                      t.sp * 2.5,
+                      bubbleHorizontalInset(context),
                       0,
-                      t.sp * 2.5,
-                      t.sp * 0.75,
+                      bubbleHorizontalInset(context),
+                      t.sp * 1.25,
                     ),
                     child: header!,
                   ),
@@ -167,13 +180,13 @@ class StormChrome extends StatelessWidget {
           ),
           if (bubbles) ...[
             Positioned(
-              top: t.sp * 2.5,
-              left: t.sp * 2.5,
+              top: bubbleTopInset(context),
+              left: bubbleHorizontalInset(context),
               child: const VaultBubble(),
             ),
             Positioned(
-              top: t.sp * 2.5,
-              right: t.sp * 2.5,
+              top: bubbleTopInset(context),
+              right: bubbleHorizontalInset(context),
               child: const SettingsBubble(),
             ),
           ],

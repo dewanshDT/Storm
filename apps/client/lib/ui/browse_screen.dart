@@ -9,6 +9,7 @@ import '../state/vault_config.dart';
 import 'breakpoints.dart';
 import 'tokens.dart';
 import 'widgets.dart';
+import 'shell/corner_bubbles.dart' show relativeTime;
 import 'shell/nav_bubble.dart' show NewNoteRequest;
 import 'states.dart';
 import 'shell/storm_scaffold.dart';
@@ -70,9 +71,9 @@ class BrowseScreen extends ConsumerWidget {
           }
           return ListView.builder(
             padding: EdgeInsets.fromLTRB(
-              t.sp,
-              0,
-              t.sp,
+              t.cardPad,
+              t.sp * 1.25,
+              t.cardPad,
               StormChrome.navClearance(context),
             ),
             itemCount: entries.length,
@@ -255,6 +256,7 @@ class EntryTile extends ConsumerWidget {
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     return NoteRow(
       title: entry.name,
+      meta: _noteMeta(entry.note!),
       // An empty box the width of a folder glyph, so titles line up in a list
       // that mixes both. The design never draws one, because its directory
       // screens are all folders or all notes; a real vault has both.
@@ -270,6 +272,11 @@ class EntryTile extends ConsumerWidget {
           : context.push(Routes.note(vaultId, entry.note!.id)),
     );
   }
+}
+
+String? _noteMeta(NoteMeta note) {
+  final modified = DateTime.tryParse(note.modified)?.toLocal();
+  return modified == null ? null : relativeTime(modified);
 }
 
 Future<void> _folderActions(
