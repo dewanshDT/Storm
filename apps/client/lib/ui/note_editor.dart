@@ -80,7 +80,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   void initState() {
     super.initState();
     _controller = StormMarkdownController(
-      theme: MarkdownTheme.light(const TextStyle(fontSize: 16)),
+      // Replaced on the first build with the themed one. A size here would
+      // be a number the token layer cannot reach, and it is never painted.
+      theme: MarkdownTheme.light(const TextStyle()),
     );
     _controller.addListener(_onLocalEdit);
   }
@@ -316,23 +318,26 @@ class _DegradedNotice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
+    // Not amber: amber means tags and highlight. This is a note about how the
+    // editor is behaving, which is neither.
     return Container(
       width: double.infinity,
-      color: scheme.tertiaryContainer,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
+      color: t.surface2,
+      padding: EdgeInsets.symmetric(horizontal: t.sp * 2.5, vertical: t.sp),
       child: Row(
         children: [
-          Icon(Icons.speed, size: 16, color: scheme.onTertiaryContainer),
-          const SizedBox(width: 10),
+          Icon(Icons.speed, size: t.bodySize, color: t.text3),
+          SizedBox(width: t.sp * 1.25),
           Expanded(
             child: Text(
               'Formatting is off above '
               '${StormMarkdownController.maxStyledLines} lines, to keep typing '
               'responsive. The note itself is unchanged.',
               style: TextStyle(
-                color: scheme.onTertiaryContainer,
-                fontSize: 12.5,
+                fontFamily: StormTokens.sansFamily,
+                color: t.text2,
+                fontSize: t.labelSize,
               ),
             ),
           ),
@@ -376,29 +381,33 @@ class _Notice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final bg = isConflict ? scheme.errorContainer : scheme.secondaryContainer;
-    final fg = isConflict
-        ? scheme.onErrorContainer
-        : scheme.onSecondaryContainer;
+    final t = context.tokens;
+    final fg = isConflict ? t.danger : t.text2;
 
     return Container(
       width: double.infinity,
-      color: bg,
-      padding: const EdgeInsets.fromLTRB(20, 10, 8, 10),
+      color: t.surface2,
+      padding: EdgeInsets.fromLTRB(t.sp * 2.5, t.sp * 1.25, t.sp, t.sp * 1.25),
       child: Row(
         children: [
           Icon(
             isConflict ? Icons.merge_type : Icons.info_outline,
-            size: 16,
+            size: t.bodySize,
             color: fg,
           ),
-          const SizedBox(width: 10),
+          SizedBox(width: t.sp * 1.25),
           Expanded(
-            child: Text(message, style: TextStyle(color: fg, fontSize: 13)),
+            child: Text(
+              message,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                color: fg,
+                fontSize: t.codeSize,
+              ),
+            ),
           ),
           IconButton(
-            icon: Icon(Icons.close, size: 16, color: fg),
+            icon: Icon(Icons.close, size: t.bodySize, color: fg),
             onPressed: onDismiss,
             visualDensity: VisualDensity.compact,
           ),

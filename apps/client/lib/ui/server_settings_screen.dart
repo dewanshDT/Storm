@@ -327,7 +327,7 @@ class _VaultRow extends ConsumerWidget {
             : '${vault.dir} · ${vault.noteCount} '
                   'note${vault.noteCount == 1 ? '' : 's'}',
         style: TextStyle(
-          fontSize: 12,
+          fontSize: context.tokens.labelSize,
           color: vault.missing ? scheme.error : scheme.onSurfaceVariant,
         ),
       ),
