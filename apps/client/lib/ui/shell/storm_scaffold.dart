@@ -123,16 +123,7 @@ class DashboardHeader extends StatelessWidget implements PreferredSizeWidget {
         child: Row(
           children: [
             const VaultBubble(),
-            Expanded(
-              child: Center(
-                child: Text(
-                  'Storm',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
+            const Expanded(child: SizedBox.shrink()),
             const ProfileBubble(),
           ],
         ),
