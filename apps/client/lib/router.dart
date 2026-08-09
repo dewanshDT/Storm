@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'state/app_state.dart';
 import 'ui/browse_screen.dart';
+import 'ui/client_settings_screen.dart';
 import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/note_screen.dart';
@@ -22,7 +23,22 @@ import 'ui/tags_screen.dart';
 abstract final class Routes {
   static const dashboard = '/';
   static const connect = '/connect';
+
+  /// Reachable without a vault, from the phone's dashboard — which is the
+  /// screen you are on when there is no vault yet.
   static const serverSettings = '/settings/server';
+
+  /// The same two screens, mounted inside the vault shell.
+  ///
+  /// Two mount points for one screen, deliberately: settings have to be
+  /// reachable *without* a vault (there may be none) and *with* the sidebar
+  /// beside them (at desk width there is nowhere else to put them). The
+  /// screens themselves do not know the difference.
+  static String serverSettingsIn(String vaultId) =>
+      '${vault(vaultId)}/settings/server';
+
+  static String clientSettingsIn(String vaultId) =>
+      '${vault(vaultId)}/settings/client';
 
   /// Every shared widget in all three themes. Not linked from the app — it is
   /// a surface for judging the token layer, reached by typing the path.
@@ -139,6 +155,17 @@ final routerProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: 'v/:vault/tags',
                 builder: (_, _) => const TagsScreen(),
+              ),
+              // Inside the shell, so the sidebar stays beside them. At desk
+              // width a settings screen that replaced the whole window would
+              // be the one place the tree disappears.
+              GoRoute(
+                path: 'v/:vault/settings/server',
+                builder: (_, _) => const ServerSettingsScreen(),
+              ),
+              GoRoute(
+                path: 'v/:vault/settings/client',
+                builder: (_, _) => const ClientSettingsScreen(),
               ),
             ],
           ),

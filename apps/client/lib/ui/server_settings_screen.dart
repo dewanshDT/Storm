@@ -26,8 +26,17 @@ class ServerSettingsScreen extends ConsumerWidget {
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () =>
-              context.canPop() ? context.pop() : context.go(Routes.dashboard),
+          onPressed: () => context.canPop()
+              ? context.pop()
+              // Mounted at two paths: the vault-scoped one goes back into the
+              // vault, the dashboard's one goes home.
+              : context.go(
+                  Routes.vaultOf(GoRouterState.of(context).uri).isEmpty
+                      ? Routes.dashboard
+                      : Routes.browse(
+                          Routes.vaultOf(GoRouterState.of(context).uri),
+                        ),
+                ),
         ),
         title: const Text('Server settings'),
       ),

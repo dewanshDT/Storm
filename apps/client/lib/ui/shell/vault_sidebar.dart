@@ -13,8 +13,8 @@ import '../surfaces.dart';
 import '../tokens.dart';
 import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
-import 'corner_bubbles.dart' show AppearanceMenu;
 import 'vault_actions.dart';
+import 'vault_gate.dart';
 
 /// The sidebar's floor. Its actual width is `context.sidebarWidth`, which
 /// scales with the window — see `breakpoints.dart` for why a fixed 260 made a
@@ -215,7 +215,7 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
                 tone: PopoverTone.accent,
                 onTap: () {
                   Navigator.pop(popContext);
-                  context.push(Routes.serverSettings);
+                  context.push(Routes.serverSettingsIn(activeId));
                 },
               ),
             ],
@@ -314,26 +314,21 @@ class _SettingsButton extends StatefulWidget {
 }
 
 class _SettingsButtonState extends State<_SettingsButton> {
-  final _anchor = GlobalKey();
-
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return IconButton(
-      key: _anchor,
       icon: Icon(Icons.settings_outlined, size: t.bodySize, color: t.text3),
       iconSize: t.bodySize,
-      tooltip: 'Appearance',
+      tooltip: 'Client settings',
       visualDensity: VisualDensity.compact,
       padding: EdgeInsets.zero,
       constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
-      onPressed: () => showStormPopover<void>(
-        context: context,
-        anchorKey: _anchor,
-        width: t.sp * 33,
-        builder: (popContext) =>
-            AppearanceMenu(onClose: () => Navigator.pop(popContext)),
-      ),
+      // A page, not a popover. Anchored to a button at the foot of the
+      // sidebar, a menu opens below the bottom of the window — which is what
+      // made this button look like it did nothing at all.
+      onPressed: () =>
+          context.push(Routes.clientSettingsIn(VaultGate.of(context))),
     );
   }
 }
