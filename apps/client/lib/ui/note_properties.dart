@@ -6,6 +6,8 @@ import '../editor/frontmatter_edit.dart' as fme;
 import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'accents.dart';
+import 'tokens.dart';
+import 'widgets.dart';
 import 'shell/storm_scaffold.dart' show promptForPath;
 
 /// A note's frontmatter, as an editable key/value list.
@@ -220,31 +222,26 @@ class _PropertyRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _KeyChip(
-            label: span.key,
-            icon: readOnly ? Icons.lock_outline : _iconFor(type),
-            enabled: !readOnly,
-            onMenu: onMenu,
-          ),
-          const SizedBox(width: 10),
+          // The chip hugs its key. A fixed column reserved 132px for `id` and
+          // left the value stranded a third of the way across the sheet.
+          _PropertyKey(label: span.key, enabled: !readOnly, onMenu: onMenu),
+          SizedBox(width: t.sp * 1.25),
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: readOnly
-                  ? _ReadOnlyValue(span: span)
-                  : _ValueEditor(
-                      span: span,
-                      type: type,
-                      options: options,
-                      onValue: onValue,
-                      onItems: onItems,
-                    ),
-            ),
+            child: readOnly
+                ? _ReadOnlyValue(span: span)
+                : _ValueEditor(
+                    span: span,
+                    type: type,
+                    options: options,
+                    onValue: onValue,
+                    onItems: onItems,
+                  ),
           ),
         ],
       ),
@@ -252,49 +249,21 @@ class _PropertyRow extends StatelessWidget {
   }
 }
 
-/// The rounded key button from the sketch. Tapping it opens the row's menu.
-class _KeyChip extends StatelessWidget {
-  const _KeyChip({
+/// The key, as a chip. Tapping it opens the row's menu.
+class _PropertyKey extends StatelessWidget {
+  const _PropertyKey({
     required this.label,
-    required this.icon,
     required this.enabled,
     required this.onMenu,
   });
 
   final String label;
-  final IconData icon;
   final bool enabled;
   final ValueChanged<_RowAction> onMenu;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final chip = Container(
-      width: 132,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(9),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 14, color: scheme.onSurfaceVariant),
-          const SizedBox(width: 7),
-          Expanded(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 13,
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
+    final chip = KeyChip(label: label);
     if (!enabled) return Opacity(opacity: 0.6, child: chip);
 
     return PopupMenuButton<_RowAction>(
@@ -392,10 +361,11 @@ class _AccentEditor extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Padding(
-      padding: const EdgeInsets.only(top: 2, bottom: 4),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
       child: AccentPicker(
-        size: 26,
+        size: t.sp * 3.25,
         selected: Accent.parse(value),
         // "Default" clears the key rather than writing `color: none`, so a
         // note that never had a colour goes back to having no colour line.
@@ -465,10 +435,17 @@ class _TextEditorState extends State<_TextEditor> {
       focusNode: _focus,
       keyboardType: widget.keyboardType,
       inputFormatters: widget.formatters,
-      style: Theme.of(context).textTheme.bodyMedium,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: context.tokens.codeSize,
+        color: context.tokens.text2,
+      ),
       decoration: const InputDecoration(
         isDense: true,
         border: InputBorder.none,
+        enabledBorder: InputBorder.none,
+        focusedBorder: InputBorder.none,
+        filled: false,
         contentPadding: EdgeInsets.zero,
         hintText: 'Empty',
       ),
@@ -487,16 +464,11 @@ class _CheckboxEditor extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final checked = value.trim().toLowerCase() == 'true';
-    return SizedBox(
-      height: 24,
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: Checkbox(
-          value: checked,
-          visualDensity: VisualDensity.compact,
-          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          onChanged: (next) => onChanged((next ?? false).toString()),
-        ),
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: StormCheckbox(
+        value: checked,
+        onChanged: (next) => onChanged(next.toString()),
       ),
     );
   }
@@ -521,19 +493,20 @@ class _DateEditor extends StatelessWidget {
         ? (value.trim().isEmpty ? 'Empty' : value)
         : _format(parsed);
 
+    final t = context.tokens;
     return Align(
       alignment: Alignment.centerLeft,
       child: InkWell(
         onTap: () => _pick(context, parsed),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(t.rControl * 0.6),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+          padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
           child: Text(
             label,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: parsed == null && value.trim().isEmpty
-                  ? Theme.of(context).hintColor
-                  : null,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.codeSize,
+              color: parsed == null && value.trim().isEmpty ? t.text3 : t.text2,
             ),
           ),
         ),
@@ -684,9 +657,10 @@ class _ListEditorState extends State<_ListEditor> {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     return Wrap(
-      spacing: 6,
-      runSpacing: 6,
+      spacing: t.sp * 0.75,
+      runSpacing: t.sp * 0.75,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         for (final item in widget.items)
@@ -749,24 +723,31 @@ class _NewValueChipState extends State<_NewValueChip> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     return Container(
-      height: _chipHeight,
-      constraints: const BoxConstraints(minWidth: 64, maxWidth: 180),
-      padding: const EdgeInsets.symmetric(horizontal: 9),
+      height: t.sp * 3.25,
+      constraints: BoxConstraints(minWidth: t.sp * 8, maxWidth: t.sp * 22),
+      padding: EdgeInsets.symmetric(horizontal: t.sp),
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(_chipRadius),
-        border: Border.all(color: scheme.primary.withValues(alpha: 0.6)),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: t.amber.withValues(alpha: 0.6), width: t.bw),
       ),
       child: TextField(
         controller: _controller,
         focusNode: _focus,
-        style: TextStyle(fontSize: 12, color: scheme.primary),
-        cursorHeight: 14,
+        style: TextStyle(
+          fontFamily: StormTokens.monoFamily,
+          fontSize: t.labelSize,
+          color: t.amber,
+        ),
+        cursorHeight: t.labelSize * 1.2,
         decoration: const InputDecoration(
           isDense: true,
           border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          filled: false,
           contentPadding: EdgeInsets.zero,
         ),
         onSubmitted: (value) {
@@ -787,21 +768,21 @@ class _AddValueChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     return Tooltip(
       message: 'Add a value',
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(_chipRadius),
+        borderRadius: BorderRadius.circular(999),
         child: Container(
-          height: _chipHeight,
-          width: 34,
+          height: t.sp * 3.25,
+          width: t.sp * 4.25,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(_chipRadius),
-            border: Border.all(color: scheme.outlineVariant),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: t.border, width: t.bw),
           ),
-          child: Icon(Icons.add, size: 14, color: scheme.onSurfaceVariant),
+          child: Icon(Icons.add, size: t.labelSize * 1.2, color: t.text3),
         ),
       ),
     );
@@ -821,14 +802,19 @@ class ValueChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
     return Container(
-      height: _chipHeight,
-      constraints: const BoxConstraints(maxWidth: 220),
-      padding: EdgeInsets.only(left: 9, right: onRemove == null ? 9 : 4),
+      height: t.sp * 3.25,
+      constraints: BoxConstraints(maxWidth: t.sp * 27),
+      padding: EdgeInsets.only(
+        left: t.sp,
+        right: onRemove == null ? t.sp : t.sp * 0.5,
+      ),
       decoration: BoxDecoration(
-        color: scheme.primary.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(_chipRadius),
+        // A list value is a tag in all but name — `tags: [a, b]` is the
+        // commonest list property there is — so it wears the tag colour.
+        color: t.amberSoft,
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -838,25 +824,25 @@ class ValueChip extends StatelessWidget {
               label,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 12,
-                height: 1.1,
-                color: scheme.primary,
-                fontWeight: FontWeight.w500,
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.labelSize,
+                height: 1.2,
+                color: t.amber,
               ),
             ),
           ),
           if (onRemove != null) ...[
-            const SizedBox(width: 3),
+            SizedBox(width: t.sp * 0.375),
             // A plain InkWell, not an IconButton: the latter enforces a
             // minimum tap target that doubles the chip's height.
             InkWell(
               onTap: onRemove,
-              borderRadius: BorderRadius.circular(_chipRadius),
+              borderRadius: BorderRadius.circular(999),
               child: Tooltip(
                 message: 'Remove $label',
                 child: Padding(
-                  padding: const EdgeInsets.all(3),
-                  child: Icon(Icons.close, size: 12, color: scheme.primary),
+                  padding: EdgeInsets.all(t.sp * 0.375),
+                  child: Icon(Icons.close, size: t.labelSize, color: t.amber),
                 ),
               ),
             ),
@@ -866,10 +852,6 @@ class ValueChip extends StatelessWidget {
     );
   }
 }
-
-/// Chip geometry, shared so a value, a new-value field and the `+` all line up.
-const double _chipHeight = 26;
-const double _chipRadius = 8;
 
 /// A value the list will not write: Storm's own fields, and structures a
 /// key/value row cannot represent.
@@ -884,7 +866,6 @@ class _ReadOnlyValue extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final text = switch (span.form) {
       fme.PropertyForm.nested => 'Nested value',
       fme.PropertyForm.blockScalar => 'Multi-line text',
@@ -897,18 +878,21 @@ class _ReadOnlyValue extends StatelessWidget {
         span.form == fme.PropertyForm.nested ||
         span.form == fme.PropertyForm.blockScalar;
 
+    final t = context.tokens;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
       child: SelectableText(
         text.isEmpty ? '—' : text,
-        style: theme.textTheme.bodySmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
+        style: TextStyle(
+          fontSize: t.labelSize,
+          color: t.text3,
           fontStyle: structural ? FontStyle.italic : null,
-          // Monospace only for values that are still raw, so a formatted date
-          // reads as prose rather than as data.
+          // Mono only for values that are still raw, so a formatted date reads
+          // as prose rather than as data. The bundled face, not the platform's
+          // 'monospace' alias, which resolves to whatever the OS ships.
           fontFamily: structural || _looksLikeStamp(span.displayValue)
-              ? null
-              : 'monospace',
+              ? StormTokens.sansFamily
+              : StormTokens.monoFamily,
         ),
       ),
     );
@@ -923,28 +907,30 @@ class _AddProperty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final t = context.tokens;
+    final side = t.sp * 2.75;
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: EdgeInsets.only(top: t.sp),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Tooltip(
           message: 'Add property',
           child: InkWell(
             onTap: onAdd,
-            borderRadius: BorderRadius.circular(9),
-            // Just the `+`, at the same width as a key chip so the column
-            // lines up. A label here would have to fit inside a fixed width
-            // and cannot, at every font size.
+            borderRadius: BorderRadius.circular(t.rControl * 0.6),
             child: Container(
-              width: 132,
-              height: 30,
+              width: side,
+              height: side,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: scheme.surfaceContainerHigh.withValues(alpha: 0.55),
-                borderRadius: BorderRadius.circular(9),
+                borderRadius: BorderRadius.circular(t.rControl * 0.6),
+                border: Border.all(
+                  color: t.border,
+                  width: t.bw,
+                  strokeAlign: BorderSide.strokeAlignInside,
+                ),
               ),
-              child: Icon(Icons.add, size: 17, color: scheme.onSurfaceVariant),
+              child: Icon(Icons.add, size: t.codeSize, color: t.text3),
             ),
           ),
         ),
