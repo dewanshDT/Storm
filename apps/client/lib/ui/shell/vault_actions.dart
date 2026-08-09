@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../icons.dart';
 import 'nav_bubble.dart'
     show NewFolderRequest, NewNoteRequest, NoteContextRequest;
 
@@ -15,7 +16,7 @@ import 'nav_bubble.dart'
 /// cannot drift into offering different things.
 class VaultAction {
   const VaultAction({
-    required this.icon,
+    required this.glyph,
     required this.tooltip,
     required this.onTap,
     this.selected = false,
@@ -23,7 +24,9 @@ class VaultAction {
     this.primary = false,
   });
 
-  final IconData icon;
+  /// One of the design's own shapes, not a Material name — the two sets are
+  /// close enough to look like a mistake side by side.
+  final StormGlyph glyph;
   final String tooltip;
   final VoidCallback onTap;
   final bool selected;
@@ -50,12 +53,15 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
   if (vaultId.isEmpty) {
     return [
       VaultAction(
-        icon: Icons.add,
+        glyph: StormGlyph.plus,
         tooltip: 'New vault',
+        // Primary here too: the pill always has one filled slot, and on the
+        // dashboard making a vault is the thing it is for.
+        primary: true,
         onTap: () => NewNoteRequest.of(context)?.call(),
       ),
       VaultAction(
-        icon: Icons.dns_outlined,
+        glyph: StormGlyph.folder,
         tooltip: 'Server',
         onTap: () => context.push(Routes.serverSettings),
       ),
@@ -72,19 +78,19 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
 
   return [
     VaultAction(
-      icon: Icons.folder_outlined,
+      glyph: StormGlyph.folder,
       tooltip: 'Directory',
       selected: uri.path.startsWith(Routes.browse(vaultId)),
       onTap: () => context.go(Routes.browse(vaultId)),
     ),
     VaultAction(
-      icon: Icons.search,
+      glyph: StormGlyph.search,
       tooltip: 'Search',
       selected: uri.path == Routes.search(vaultId),
       onTap: () => context.go(Routes.search(vaultId)),
     ),
     VaultAction(
-      icon: Icons.add,
+      glyph: StormGlyph.plus,
       tooltip: 'New note',
       primary: true,
       onTap: () => NewNoteRequest.of(context)?.call(),
@@ -93,7 +99,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
     // "here" for it to land in.
     if (NewFolderRequest.of(context) != null)
       VaultAction(
-        icon: Icons.create_new_folder_outlined,
+        glyph: StormGlyph.newFolder,
         tooltip: 'New folder',
         onTap: () => NewFolderRequest.of(context)?.call(),
       ),
@@ -102,7 +108,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
     // so there is exactly one answer to "where am I".
     if (inNote)
       VaultAction(
-        icon: Icons.hub_outlined,
+        glyph: StormGlyph.mentions,
         tooltip: mentions == 1
             ? '1 linked mention'
             : '$mentions linked mentions',
@@ -111,7 +117,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
       )
     else
       VaultAction(
-        icon: Icons.label_outline,
+        glyph: StormGlyph.hash,
         tooltip: 'Tags',
         selected: uri.path == Routes.tags(vaultId),
         onTap: () => context.go(Routes.tags(vaultId)),

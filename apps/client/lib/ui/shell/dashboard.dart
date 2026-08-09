@@ -77,14 +77,40 @@ class DashboardScreen extends ConsumerWidget {
 /// The wordmark is set beside the real mark rather than as a text title: the
 /// design is explicit that the mark is never substituted for type.
 class _Masthead extends ConsumerWidget {
-  const _Masthead();
+  const _Masthead({this.compact = false});
+
+  /// The wide screen's rail form: the mark, then one line of summary. Two
+  /// stat blocks side by side need more than the 280px the rail has.
+  final bool compact;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final vaults = ref.watch(vaultsProvider).value ?? const [];
     final notes = vaults.fold<int>(0, (sum, v) => sum + v.noteCount);
+    // Not persisted, so it reads "—" until this run syncs once. That is
+    // honest; a stored timestamp would claim a sync that may not have
+    // survived the restart.
     final synced = ref.watch(syncEngineProvider).lastSyncedAt;
+
+    if (compact) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const BrandMark(size: 30, withWordmark: true),
+          SizedBox(height: t.sp * 1.5),
+          Text(
+            '$notes note${notes == 1 ? '' : 's'} · '
+            'synced ${relativeTime(synced)}',
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.labelSize,
+              color: t.text3,
+            ),
+          ),
+        ],
+      );
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -95,15 +121,7 @@ class _Masthead extends ConsumerWidget {
           children: [
             StatBlock(value: '$notes', label: notes == 1 ? 'note' : 'notes'),
             SizedBox(width: t.sp * 4),
-            // Not persisted, so it reads "—" until this run syncs once. That
-            // is honest; a stored timestamp would claim a sync that may not
-            // have survived the restart.
             StatBlock(value: compactAge(synced), label: 'last synced'),
-            SizedBox(width: t.sp * 4),
-            StatBlock(
-              value: '${vaults.length}',
-              label: vaults.length == 1 ? 'vault' : 'vaults',
-            ),
           ],
         ),
       ],
@@ -117,20 +135,38 @@ class _WideBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
+    // Recents on the left, vaults filling the rest — the order the design
+    // has, and the one that reads: what you were doing, then where things
+    // live. The reverse left a 340px rail of text beside a field of cards.
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
+        SizedBox(
+          width: t.sp * 35,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(24, 12, 12, 40),
-            children: const [_Vaults()],
+            padding: EdgeInsets.fromLTRB(
+              t.cardPad,
+              t.sp * 2,
+              t.sp * 2,
+              t.sp * 5,
+            ),
+            children: [
+              const _Masthead(compact: true),
+              SizedBox(height: t.sectionRhythm * 0.5),
+              const _Recents(limit: 12),
+            ],
           ),
         ),
-        SizedBox(
-          width: 340,
+        Expanded(
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(12, 12, 24, 40),
-            children: const [_Recents(limit: 12)],
+            padding: EdgeInsets.fromLTRB(
+              t.sp * 2,
+              t.sp * 2,
+              t.cardPad,
+              t.sp * 5,
+            ),
+            children: const [_Vaults()],
           ),
         ),
       ],
@@ -211,6 +247,7 @@ class _VaultCard extends ConsumerWidget {
     return VaultCard(
       name: vault.name,
       tile: accent.tile(t),
+      tinted: !accent.isNone,
       muted: muted,
       subtitle: muted
           ? 'Directory not found'

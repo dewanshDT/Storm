@@ -262,7 +262,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
               ),
               child: Center(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 820),
+                  // The design's measure. 820 was a column of prose wide
+                  // enough to lose your place in.
+                  constraints: BoxConstraints(maxWidth: t.sp * 80),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -287,6 +289,11 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                         contextMenuBuilder: _contextMenu,
                         decoration: const InputDecoration(
                           border: InputBorder.none,
+                          // Explicitly unfilled: `inputDecorationTheme` fills
+                          // every field with surface2, which put the note's
+                          // prose on a card of its own.
+                          filled: false,
+                          contentPadding: EdgeInsets.zero,
                           isDense: true,
                         ),
                       ),

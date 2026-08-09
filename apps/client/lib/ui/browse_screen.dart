@@ -237,7 +237,9 @@ class EntryTile extends ConsumerWidget {
       return FolderRow(
         name: entry.name,
         leading: leading,
-        count: inTree ? null : entry.childCount,
+        // The tree shows counts too — the design's sidebar has them, and a
+        // folder's weight is the reason to open it or not.
+        count: entry.childCount,
         chevron: !inTree,
         divider: divider,
         padding: contentPadding as EdgeInsets?,
