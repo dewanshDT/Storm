@@ -142,6 +142,13 @@ flutter:
         - asset: assets/fonts/IBMPlexMono-Medium.ttf
           weight: 500
 
+  # The brand mark, shown in the app rather than only on the launcher icon.
+  # It was referenced by the icons_launcher config below long before it was
+  # declared here, which is enough to generate the launcher icons and *not*
+  # enough for Image.asset to find it at runtime.
+  assets:
+    - assets/icon/storm_icon_full.png
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg
