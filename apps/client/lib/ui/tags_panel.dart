@@ -3,6 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
 import '../state/app_state.dart';
+import 'states.dart';
+import 'tokens.dart';
+import 'widgets.dart';
 
 /// Tag browser.
 ///
@@ -20,14 +23,16 @@ class TagsPanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
     final engine = ref.watch(syncEngineProvider);
     final tags = ref.watch(tagsProvider);
     final selected = ref.watch(selectedTagProvider);
 
     if (!engine.isOnline) {
-      return const _Hint(
+      return const EmptyState(
         icon: Icons.cloud_off,
-        text: 'Tags need the server.\nReconnect to browse them.',
+        title: 'Tags need the server',
+        detail: 'Reconnect to browse them. Your notes are still here to read.',
       );
     }
 
@@ -36,162 +41,49 @@ class TagsPanel extends ConsumerWidget {
     }
 
     return tags.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => _Hint(icon: Icons.error_outline, text: '$e'),
+      loading: () => const SkeletonRows(rows: 3),
+      error: (e, _) => EmptyState(
+        icon: Icons.cloud_off,
+        title: 'Could not load tags',
+        detail: describeFailure(e),
+      ),
       data: (all) {
         if (all.isEmpty) {
-          return const _Hint(
+          return const EmptyState(
             icon: Icons.label_outline,
-            text:
-                'No tags in this vault yet.\n'
-                'Add #a-tag to a note, or tags: in its frontmatter.',
+            title: 'No tags in this vault yet',
+            detail: 'Add #a-tag to a note, or tags: in its frontmatter.',
           );
         }
 
         final groups = <String, List<TagCount>>{};
-        for (final t in all) {
-          groups.putIfAbsent(t.topLevel, () => []).add(t);
+        for (final tag in all) {
+          groups.putIfAbsent(tag.topLevel, () => []).add(tag);
         }
         final roots = groups.keys.toList()..sort();
 
-        return ListView.builder(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          itemCount: roots.length,
-          itemBuilder: (c, i) => _TagGroup(
-            root: roots[i],
-            members: groups[roots[i]]!,
-            onSelect: (tag) =>
-                ref.read(selectedTagProvider.notifier).state = tag,
-          ),
+        void select(String tag) =>
+            ref.read(selectedTagProvider.notifier).state = tag;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final root in roots)
+              Padding(
+                padding: EdgeInsets.only(bottom: t.sp * 1.75),
+                child: TagGroup(
+                  name: root,
+                  // Amber, because amber means tags. They read accent-purple
+                  // here before, which is the colour of "interactive" — and a
+                  // colour used for a second purpose stops working as a signal.
+                  tags: [for (final m in groups[root]!) m.tag],
+                  onTagTap: select,
+                ),
+              ),
+          ],
         );
       },
-    );
-  }
-}
-
-class _TagGroup extends StatefulWidget {
-  const _TagGroup({
-    required this.root,
-    required this.members,
-    required this.onSelect,
-  });
-
-  final String root;
-  final List<TagCount> members;
-  final void Function(String) onSelect;
-
-  @override
-  State<_TagGroup> createState() => _TagGroupState();
-}
-
-class _TagGroupState extends State<_TagGroup> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    // A tag with no children is just a row — no disclosure triangle for
-    // something that can't expand.
-    final exact = widget.members.where((m) => m.tag == widget.root).firstOrNull;
-    final children = widget.members.where((m) => m.tag != widget.root).toList();
-    final total = widget.members.fold<int>(0, (sum, m) => sum + m.count);
-
-    if (children.isEmpty) {
-      return _TagRow(
-        label: widget.root,
-        count: exact?.count ?? total,
-        indent: 10,
-        onTap: () => widget.onSelect(widget.root),
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        InkWell(
-          onTap: () => setState(() => _expanded = !_expanded),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(6, 6, 12, 6),
-            child: Row(
-              children: [
-                Icon(
-                  _expanded
-                      ? Icons.keyboard_arrow_down
-                      : Icons.keyboard_arrow_right,
-                  size: 16,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-                Expanded(
-                  child: Text(
-                    '#${widget.root}',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                Text('$total', style: theme.textTheme.bodySmall),
-              ],
-            ),
-          ),
-        ),
-        if (_expanded) ...[
-          if (exact != null)
-            _TagRow(
-              label: exact.tag,
-              count: exact.count,
-              indent: 30,
-              onTap: () => widget.onSelect(exact.tag),
-            ),
-          for (final child in children)
-            _TagRow(
-              label: child.tag,
-              count: child.count,
-              indent: 30,
-              onTap: () => widget.onSelect(child.tag),
-            ),
-        ],
-      ],
-    );
-  }
-}
-
-class _TagRow extends StatelessWidget {
-  const _TagRow({
-    required this.label,
-    required this.count,
-    required this.indent,
-    required this.onTap,
-  });
-
-  final String label;
-  final int count;
-  final double indent;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(indent, 5, 12, 5),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                '#$label',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.primary,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Text('$count', style: theme.textTheme.bodySmall),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -205,94 +97,54 @@ class _TaggedNotes extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
     final notes = ref.watch(notesWithTagProvider(tag));
-    final theme = Theme.of(context);
 
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
         InkWell(
           onTap: () => ref.read(selectedTagProvider.notifier).state = null,
+          borderRadius: BorderRadius.circular(t.rControl),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 10, 12, 10),
+            padding: EdgeInsets.symmetric(vertical: t.sp * 0.75),
             child: Row(
               children: [
-                const Icon(Icons.arrow_back, size: 16),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    '#$tag',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: theme.colorScheme.primary,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
+                Icon(Icons.arrow_back, size: t.bodySize, color: t.text3),
+                SizedBox(width: t.sp * 0.75),
+                TagChip(label: tag),
               ],
             ),
           ),
         ),
-        const Divider(height: 1),
-        Expanded(
-          child: notes.when(
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => _Hint(icon: Icons.error_outline, text: '$e'),
-            data: (list) => list.isEmpty
-                ? const _Hint(
-                    icon: Icons.label_off_outlined,
-                    text: 'No notes carry this tag.',
-                  )
-                : ListView.separated(
-                    itemCount: list.length,
-                    separatorBuilder: (_, _) => const Divider(height: 1),
-                    itemBuilder: (c, i) => ListTile(
-                      dense: true,
-                      title: Text(
-                        list[i].title.isEmpty ? list[i].path : list[i].title,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        list[i].path,
-                        style: theme.textTheme.bodySmall,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      onTap: () => onOpen(list[i]),
-                    ),
-                  ),
+        SizedBox(height: t.sp * 0.5),
+        notes.when(
+          loading: () => const SkeletonRows(rows: 3),
+          error: (e, _) => EmptyState(
+            icon: Icons.cloud_off,
+            title: 'Could not load these notes',
+            detail: describeFailure(e),
           ),
+          data: (list) => list.isEmpty
+              ? const EmptyState(
+                  icon: Icons.label_off_outlined,
+                  title: 'No notes carry this tag',
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final note in list)
+                      NoteRow(
+                        title: note.title.isEmpty ? note.path : note.title,
+                        meta: note.folder.isEmpty ? null : note.folder,
+                        padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
+                        onTap: () => onOpen(note),
+                      ),
+                  ],
+                ),
         ),
       ],
-    );
-  }
-}
-
-class _Hint extends StatelessWidget {
-  const _Hint({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 28, color: muted),
-            const SizedBox(height: 10),
-            Text(
-              text,
-              textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: muted),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
