@@ -144,7 +144,7 @@ class AccentPicker extends StatelessWidget {
       runSpacing: 8,
       children: [
         for (final accent in Accent.values)
-          _Swatch(
+          AccentSwatch(
             accent: accent,
             selected: accent == selected,
             size: size,
@@ -155,8 +155,10 @@ class AccentPicker extends StatelessWidget {
   }
 }
 
-class _Swatch extends StatelessWidget {
-  const _Swatch({
+/// One swatch. Public because the gallery renders the set on its own.
+class AccentSwatch extends StatelessWidget {
+  const AccentSwatch({
+    super.key,
     required this.accent,
     required this.selected,
     required this.size,

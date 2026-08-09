@@ -38,7 +38,7 @@ void main() {
       await tester.tap(find.byTooltip('Directory'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vault'), findsOneWidget);
+      expect(find.text('Vaults'), findsOneWidget);
       expect(find.byTooltip('Directory'), findsOneWidget);
       await disposeShell(tester, c);
     });

@@ -93,7 +93,7 @@ void main() {
           .go(Routes.folder(FakeServer.primaryVault, 'Projects/Storm'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vault'), findsOneWidget);
+      expect(find.text('Vaults'), findsOneWidget);
       expect(find.text('Projects'), findsWidgets);
       expect(find.text('Storm'), findsWidgets);
       expect(find.text('Design'), findsOneWidget);
@@ -112,7 +112,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('2026-08-05'), findsOneWidget);
 
-      await tester.tap(find.byIcon(Icons.arrow_back));
+      // Up is the breadcrumb now: there is no back button in the chrome.
+      await tester.tap(find.text('Primary'));
       await tester.pumpAndSettle();
       expect(find.text('Projects'), findsOneWidget);
       await disposeShell(tester, c);

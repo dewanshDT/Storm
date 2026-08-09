@@ -8,11 +8,11 @@ import '../../state/app_state.dart';
 import '../../state/vault_config.dart';
 import '../server_settings_screen.dart' show createVault;
 import '../accents.dart';
-import '../atoms.dart';
+import '../widgets.dart';
 import '../breakpoints.dart';
-import 'corner_bubbles.dart' show relativeTime;
+
+import 'corner_bubbles.dart' show compactAge, relativeTime;
 import 'nav_bubble.dart';
-import '../theme.dart';
 import '../tokens.dart';
 import 'storm_scaffold.dart';
 
@@ -27,50 +27,44 @@ class DashboardScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final keyboard = keyboardIsOpen(context);
+    final t = context.tokens;
 
     return NewNoteRequest(
       // On the dashboard the `+` makes a vault: there is no note context here
       // to create a note into.
       onRequest: () => createVault(context, ref),
       child: Scaffold(
-        appBar: const DashboardHeader(),
-        body: Stack(
-          children: [
-            Positioned.fill(
-              child: RefreshIndicator(
-                onRefresh: () async {
-                  ref.invalidate(vaultsProvider);
-                  ref.invalidate(recentsProvider);
-                },
-                child: context.isExpanded
-                    // Wide: the grid flows and recents take a rail, rather
-                    // than the list becoming 1900px-wide rows.
-                    ? const _WideBody()
-                    : ListView(
-                        padding: const EdgeInsets.fromLTRB(20, 4, 20, 120),
-                        children: const [
-                          // Mark, then the shape of the vault, then what you
-                          // were last doing, then where things live. The design
-                          // puts recents above vaults because the note you want
-                          // is usually one of the last few you touched.
-                          _Masthead(),
-                          SizedBox(height: 28),
-                          _Recents(),
-                          SizedBox(height: 28),
-                          _Vaults(),
-                        ],
-                      ),
-              ),
-            ),
-            if (!keyboard)
-              const Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: NavBubble(),
-              ),
-          ],
+        body: StormChrome(
+          showNav: !keyboardIsOpen(context),
+          child: RefreshIndicator(
+            onRefresh: () async {
+              ref.invalidate(vaultsProvider);
+              ref.invalidate(recentsProvider);
+            },
+            child: context.isExpanded
+                // Wide: the grid flows and recents take a rail, rather than
+                // the list becoming 1900px-wide rows.
+                ? const _WideBody()
+                : ListView(
+                    padding: EdgeInsets.fromLTRB(
+                      t.sp * 2.5,
+                      0,
+                      t.sp * 2.5,
+                      StormChrome.navClearance(context),
+                    ),
+                    children: [
+                      // Mark, then the shape of the vault, then what you were
+                      // last doing, then where things live. Recents sit above
+                      // vaults because the note you want is usually one of the
+                      // last few you touched.
+                      const _Masthead(),
+                      SizedBox(height: t.sectionRhythm * 0.5),
+                      const _Recents(),
+                      SizedBox(height: t.sectionRhythm * 0.5),
+                      const _Vaults(),
+                    ],
+                  ),
+          ),
         ),
       ),
     );
@@ -89,6 +83,7 @@ class _Masthead extends ConsumerWidget {
     final t = context.tokens;
     final vaults = ref.watch(vaultsProvider).value ?? const [];
     final notes = vaults.fold<int>(0, (sum, v) => sum + v.noteCount);
+    final synced = ref.watch(syncEngineProvider).lastSyncedAt;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -99,10 +94,11 @@ class _Masthead extends ConsumerWidget {
           children: [
             StatBlock(value: '$notes', label: notes == 1 ? 'note' : 'notes'),
             SizedBox(width: t.sp * 4),
-            // The design's second figure is "last synced". Storm does not
-            // record a sync timestamp anywhere, and inventing one would be a
-            // number that lies; the vault count is the honest thing it does
-            // know.
+            // Not persisted, so it reads "—" until this run syncs once. That
+            // is honest; a stored timestamp would claim a sync that may not
+            // have survived the restart.
+            StatBlock(value: compactAge(synced), label: 'last synced'),
+            SizedBox(width: t.sp * 4),
             StatBlock(
               value: '${vaults.length}',
               label: vaults.length == 1 ? 'vault' : 'vaults',
@@ -212,14 +208,30 @@ class _VaultCard extends ConsumerWidget {
     // from the list would look exactly like one that never existed.
     final muted = vault.missing;
 
-    return InkWell(
-      borderRadius: BorderRadius.circular(t.rCard),
+    return VaultCard(
+      name: vault.name,
+      tile: accent.tile(t),
+      muted: muted,
+      subtitle: muted
+          ? 'Directory not found'
+          : '${vault.noteCount} note${vault.noteCount == 1 ? '' : 's'}',
+      // Only the vault currently open has an engine behind it, so only it can
+      // honestly report sync state.
+      status: muted
+          ? null
+          : active
+          ? dotStatusFor(
+              online: engine.isOnline,
+              syncing: engine.isSyncing,
+              pending: engine.pendingCount,
+            )
+          : DotStatus.offline,
       onTap: muted
           ? () => ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'The directory for “${vault.name}” is missing from the '
-                  'storage root. Nothing was deleted.',
+                  'The directory for \u201C${vault.name}\u201D is missing from '
+                  'the storage root. Nothing was deleted.',
                 ),
               ),
             )
@@ -227,104 +239,6 @@ class _VaultCard extends ConsumerWidget {
       onLongPress: muted
           ? null
           : () => _pickVaultColour(context, ref, vault.id, accent),
-      child: Container(
-        padding: EdgeInsets.all(t.cardPad * 0.6),
-        decoration: BoxDecoration(
-          // The card is a plain surface; the accent is the *tile* inside it.
-          // Tinting the whole card was the old behaviour and read as a slab of
-          // unrelated colour sitting on the page.
-          color: t.surface,
-          borderRadius: BorderRadius.circular(t.rCard),
-          border: Border.all(
-            color: muted ? t.danger.withValues(alpha: 0.5) : t.border,
-            width: t.bw,
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 40,
-                  height: 40,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: muted
-                        ? t.danger.withValues(alpha: 0.15)
-                        : accent.tile(t),
-                    borderRadius: BorderRadius.circular(t.rControl),
-                  ),
-                  child: Text(
-                    _initial(vault.name),
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontWeight: FontWeight.w600,
-                      // Dark ink on the tile whatever the theme — the tile is
-                      // always a light colour, and the accent test measures
-                      // this exact pairing.
-                      color: muted ? t.danger : const Color(0xFF1A1626),
-                    ),
-                  ),
-                ),
-                const Spacer(),
-                // Only the vault currently open has an engine behind it, so
-                // only it can honestly report sync state.
-                if (active && !muted)
-                  StormStatusDot(
-                    status: !engine.isOnline
-                        ? StormStatus.offline
-                        : (engine.isSyncing || engine.pendingCount > 0)
-                        ? StormStatus.syncing
-                        : StormStatus.synced,
-                  ),
-              ],
-            ),
-            const Spacer(),
-            Text(
-              vault.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
-            ),
-            SizedBox(height: t.sp * 0.5),
-            Row(
-              children: [
-                if (!muted) ...[
-                  StatusDot(
-                    status: active && !engine.isOnline
-                        ? DotStatus.offline
-                        : active
-                        ? DotStatus.synced
-                        : DotStatus.offline,
-                    size: 6,
-                  ),
-                  SizedBox(width: t.sp * 0.75),
-                ],
-                // Flexible, because "Directory not found" is far longer
-                // than "14 notes" and the card is a fixed 220px at most.
-                Flexible(
-                  child: Text(
-                    muted
-                        ? 'Directory not found'
-                        : '${vault.noteCount} note'
-                              '${vault.noteCount == 1 ? '' : 's'}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      color: muted ? t.danger : t.text3,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -361,9 +275,6 @@ Future<void> _pickVaultColour(
     );
   }
 }
-
-String _initial(String name) =>
-    name.trim().isEmpty ? 'S' : name.trim().characters.first.toUpperCase();
 
 class _Recents extends ConsumerWidget {
   const _Recents({this.limit = 5});

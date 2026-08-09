@@ -188,7 +188,7 @@ abstract final class StormTheme {
   ///    `colorScheme.tertiary` and amber's meaning (tags and highlight) must
   ///    not become a generated accent.
   ///  * `outline` is [StormTokens.text3], because that is also the offline
-  ///    signal, and `StormStatusDot` already reads `outline` for it.
+  ///    signal, and `StatusDot` already reads it for that.
   static ColorScheme schemeFrom(StormTokens t) => ColorScheme(
     brightness: t.brightness,
     primary: t.accent,
@@ -226,73 +226,52 @@ abstract final class StormTheme {
   );
 }
 
-/// A rounded-square bubble, the shape used for both corner affordances and
-/// the floating navigation.
+/// The rounded-square corner affordance. `rControl`, `surface`, hairline
+/// border — the nav pill is the only round thing, and that difference is the
+/// grammar the handoff asks to preserve.
 class StormBubble extends StatelessWidget {
   const StormBubble({
     super.key,
     required this.child,
     this.onTap,
-    this.size = 42,
+    this.onLongPress,
+    this.size,
     this.tooltip,
   });
 
   final Widget child;
   final VoidCallback? onTap;
-  final double size;
+  final VoidCallback? onLongPress;
+  final double? size;
   final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final bubble = Material(
-      color: scheme.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(size * 0.32),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: SizedBox(
-          width: size,
-          height: size,
-          child: Center(child: child),
+    final t = context.tokens;
+    final side = size ?? t.sp * 5.5;
+    final radius = BorderRadius.circular(t.rControl);
+
+    final bubble = Container(
+      decoration: BoxDecoration(
+        color: t.surface,
+        borderRadius: radius,
+        border: Border.all(color: t.border, width: t.bw),
+      ),
+      child: Material(
+        color: const Color(0x00000000),
+        borderRadius: radius,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onLongPress,
+          child: SizedBox(
+            width: side,
+            height: side,
+            child: Center(child: child),
+          ),
         ),
       ),
     );
     return tooltip == null ? bubble : Tooltip(message: tooltip!, child: bubble);
   }
 }
-
-/// The status dot shared by the vault bubble and any badged nav slot.
-///
-/// One visual language for state, so a dot always means the same thing
-/// wherever it appears.
-class StormStatusDot extends StatelessWidget {
-  const StormStatusDot({super.key, required this.status, this.size = 10});
-
-  final StormStatus status;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final color = switch (status) {
-      StormStatus.synced => const Color(0xFF5CC28F),
-      StormStatus.syncing => amberOf(context),
-      StormStatus.offline => scheme.outline,
-    };
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-        border: Border.all(color: scheme.surface, width: 1.5),
-      ),
-    );
-  }
-
-  static Color amberOf(BuildContext context) =>
-      Theme.of(context).colorScheme.tertiary;
-}
-
-enum StormStatus { synced, syncing, offline }

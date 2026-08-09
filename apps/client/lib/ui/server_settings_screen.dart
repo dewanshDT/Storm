@@ -5,9 +5,9 @@ import 'package:go_router/go_router.dart';
 import '../api/models.dart';
 import '../router.dart';
 import 'tokens.dart';
-import 'atoms.dart';
+import 'widgets.dart';
 import '../state/app_state.dart';
-import 'browse_screen.dart' show describeFailure;
+import 'states.dart' show describeFailure;
 
 /// Where vaults live on the server, and which ones exist.
 ///

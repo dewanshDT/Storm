@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'atoms.dart';
+import 'widgets.dart';
 import 'breakpoints.dart';
 import 'note_properties.dart';
 import 'tokens.dart';
