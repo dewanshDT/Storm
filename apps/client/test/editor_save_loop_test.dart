@@ -96,6 +96,10 @@ void main() {
         ),
       ),
     );
+    await tester.pumpAndSettle();
+    // Notes open in Read Mode; these tests exercise the source editor.
+    await tester.tap(find.byKey(const Key('mode-edit')));
+    await tester.pumpAndSettle();
   }
 
   testWidgets('rebuilding the editor never writes an empty note', (

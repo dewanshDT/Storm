@@ -80,6 +80,10 @@ echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/
 sudo apt update
 sudo apt install storm-server
 
+# Later — update (no storm-server upgrade command):
+# sudo apt update && sudo apt install --only-upgrade storm-server
+# sudo systemctl restart storm-server
+
 # 2. Stop any hand-started process / old unit that shadows the package
 sudo systemctl disable --now storm-server 2>/dev/null || true
 sudo rm -f /etc/systemd/system/storm-server.service
