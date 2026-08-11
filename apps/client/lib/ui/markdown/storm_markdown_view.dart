@@ -52,7 +52,6 @@ class StormMarkdownView extends ConsumerWidget {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final api = ref.watch(apiProvider);
     final vaultId = ref.watch(activeVaultProvider);
-    final t = context.tokens;
 
     final style = stormMarkdownStyleSheet(
       context: context,
@@ -63,10 +62,14 @@ class StormMarkdownView extends ConsumerWidget {
     try {
       return MarkdownBody(
         key: const Key('storm-markdown-body'),
-        data: markdown,
+        data: _withCompletedTaskStrike(markdown),
         selectable: true,
         styleSheet: style,
         styleSheetTheme: MarkdownStyleSheetBaseTheme.material,
+        // Baseline alignment fights a non-text checkbox widget; start + a hair
+        // of top pad optically centres the 18px box on the first text line,
+        // matching `align-items: center` in the prototype.
+        listItemCrossAxisAlignment: MarkdownListItemCrossAxisAlignment.start,
         extensionSet: md.ExtensionSet(
           md.ExtensionSet.gitHubFlavored.blockSyntaxes,
           <md.InlineSyntax>[
@@ -75,12 +78,13 @@ class StormMarkdownView extends ConsumerWidget {
           ],
         ),
         checkboxBuilder: (checked) => Padding(
-          padding: EdgeInsets.only(right: t.sp * 0.75),
+          // ~((16 * 1.65) - 18) / 2 ≈ 4 — keeps the box on the text band.
+          padding: const EdgeInsets.only(top: 4),
           child: StormCheckbox(
             value: checked,
             // Read-only for this phase — no second mutation path.
             onChanged: null,
-            size: t.sp * 2,
+            size: kStormMarkdownCheckboxSize,
           ),
         ),
         imageBuilder: (uri, title, alt) => _MarkdownImage(
@@ -126,6 +130,20 @@ class StormMarkdownView extends ConsumerWidget {
     }
   }
 }
+
+/// Prototype completed tasks are struck through at reduced opacity.
+///
+/// GFM gives us a checkbox node but leaves the label plain; wrap checked
+/// item text in `~~…~~` for display only so Read Mode matches the design
+/// without writing anything back to the note.
+final _checkedTask = RegExp(
+  r'^(\s*[-*+]\s+)\[x\]\s+(?!~~)(.+?)\s*$',
+  multiLine: true,
+  caseSensitive: false,
+);
+
+String _withCompletedTaskStrike(String markdown) =>
+    markdown.replaceAllMapped(_checkedTask, (m) => '${m[1]}[x] ~~${m[2]}~~');
 
 /// Turns `[[Target]]` into an ordinary Markdown link with a Storm scheme.
 ///

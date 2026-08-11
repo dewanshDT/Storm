@@ -115,6 +115,7 @@ void main() {
           .toList();
       expect(boxes[0].value, isFalse);
       expect(boxes[0].onChanged, isNull, reason: 'read-only');
+      expect(boxes[0].size, 18, reason: 'prototype box is 18×18');
       expect(boxes[1].value, isTrue);
       expect(boxes[1].onChanged, isNull);
     });
