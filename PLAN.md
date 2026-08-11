@@ -52,12 +52,14 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
+| M16 | Marketing / home site (Astro) | **in progress** | `apps/www` builds · CF Pages via dashboard TBD |
 
 Last updated: 2026-08-11. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
-`/usr/share/storm/web`). Android keystore still optional.
-`docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
-decisions 20–30 record the choices.
+`/usr/share/storm/web`). Android keystore still optional. **M16** Astro site is
+scaffolded under `apps/www` (`/`, `/install`, `/how-it-works`); CI builds it on
+PR/main. Deploy is Cloudflare Pages connected to the repo (build there — no
+GitHub deploy workflow). Decision 49 is the site hosting split.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -133,14 +135,17 @@ storm/
 ├── deploy/                   systemd units, env template, backup script
 ├── apps/
 │   ├── server/               Rust — see apps/server/README.md
-│   └── client/               Flutter — see apps/client/README.md
+│   ├── client/               Flutter — see apps/client/README.md
+│   └── www/                  Astro marketing site (M16) — see apps/www/README.md
 └── docs/
     ├── prd.md                original brief, not maintained
+    ├── www/                  M16 marketing page copy (mirrors Storm Website notes)
     ├── editor-findings.md    M0 editor measurements, incl. on-device
     ├── storm-ui-refactor.md  M7/M8 design brief
     ├── storm-multi-vault.md  M9/M10 design brief
     ├── storm-properties.md   M11 design brief
-    └── storm-adaptive.md     M12 design brief
+    ├── storm-adaptive.md     M12 design brief
+    └── design_handoff_storm_design_system/  M14 tokens + HTML prototypes
 ```
 
 A monorepo with `apps/` rather than `src/apps/`: `src/` conventionally holds
@@ -629,6 +634,20 @@ state on the current VM). The web client is package-owned at
 the UI without touching notes.
 *Revisit if:* a non-systemd host becomes a first-class target — then `up`
 would need a different supervisor backend.
+
+**49. Marketing site is Astro in `apps/www`, hosted apart from apt Pages.**
+Astro over Mintlify/Docusaurus: marketing-first, thin pages, not a docs portal.
+`https://dewanshdt.github.io/Storm/` is the **apt repository root**
+(`apt-repo.yml` publishes reprepro as the Pages site root) — a marketing
+deploy must never overwrite it. Host on **Cloudflare Pages** (recommended
+default) or another static host / second Pages project on a custom domain.
+CI builds on PR/main; deploy is Cloudflare Pages connected to the
+repo (dashboard owns build + publish on push). Never chained into
+`apt-repo.yml` or `release.yml`. Package manager: **npm** (no JS elsewhere in
+the monorepo; one lockfile under `apps/www`).
+*Revisit if:* Cloudflare is unavailable or a custom domain is already pinned
+elsewhere — then Netlify or a second GitHub Pages project is fine as long as
+it does not share the apt site root.
 
 ---
 
@@ -1535,6 +1554,46 @@ the manual step rather than discharging it.
 
 ---
 
+### M16 — Marketing / home site (Astro) · in progress
+
+Started 2026-08-11. Thin public front door — product story + install path —
+in `apps/www`. **Not** a documentation portal; depth stays on GitHub /
+`PLAN.md` / `deploy/`.
+
+**Done:**
+
+- Astro static app (TypeScript, npm lockfile) with Storm dark tokens, BrandMark,
+  IBM Plex Sans / Newsreader / IBM Plex Mono.
+- Routes: `/`, `/install` (apt + `up` from `deploy/release-secrets.md`),
+  `/how-it-works` (thin architecture sketch + repo links).
+- `make www` / `make www-dev`; CI job `www` in `ci.yml` (build check only).
+- Page copy in vault [[Storm Website]] notes and `docs/www/`.
+
+**Still open:**
+
+- Connect the GitHub repo to Cloudflare Pages in the dashboard (root
+  `apps/www`, build `npm ci && npm run build`, output `dist`). Cloudflare
+  owns build + deploy on push — there is no GitHub deploy workflow for www.
+- Public hostname / custom domain (placeholder `site` in `astro.config.mjs`
+  is `https://storm.pages.dev` until then).
+- Visual polish against a real screenshot of the running app (hero atmosphere
+  is token-driven, not a product photo yet).
+
+**Hosting (decision 49):** Cloudflare Pages. **Never** deploy to
+`https://dewanshdt.github.io/Storm/` — that URL is the apt repository root
+owned by `apt-repo.yml`. A marketing overwrite would break every
+`sources.list` line. Do **not** chain marketing deploys into `release.yml`.
+
+**Content sources of truth:**
+
+- Marketing page copy → vault notes [[Storm Website]] (+ Home / Install /
+  How it works) and the mirror under `docs/www/`
+- Install commands → `deploy/release-secrets.md` (apt) + `deploy/README.md`
+- Product claims → `docs/storm-ui.md` + live app; do not invent features
+- Architecture depth → link to repo / `PLAN.md`, do not duplicate
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1603,20 +1662,14 @@ and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
 
 ## Blockers
 
-**None for development.** Two things about the deployment are worth knowing:
+**None for development.** Deployment notes that still matter:
 
-- *The VM has no systemd unit.* `sudo` needs a password there, so the server
-  runs as a hand-started process via `/home/dewansh/storm/run.sh` and **will
-  not survive a reboot**. **M15 does not remove the sudo need**, and it is
-  worth being precise about why: `apt install` / `storm-server up` need the
-  same password, so packaging shortens the manual step rather than discharging
-  it. Cutover: install the `.deb`, then
-  `sudo storm-server up --data-root /home/dewansh/storm` (decision 48).
-- *The shared token is still `testtoken`.* It is at least off the command line
-  now (in `/home/dewansh/.storm-env`, mode 600), so `/proc` no longer exposes
-  it to every local user. Rotating it means updating the phone and the browser
-  at the same time, so it is the user's call. M15's `up` / `postinst` generate
-  a real token on install, which is the natural moment to do it.
+- *Sudo on the VM.* `apt install` / `storm-server up` need a password; packaging
+  shortens the manual step rather than discharging it. Clean apt install is
+  **done** (M15): packaged unit, state under `/srv/storm`, vaults on NAS.
+- *The shared token* may still be the long-lived LAN token on some clients —
+  rotating it means updating every device at once. Fresh `up` / `postinst`
+  installs generate a real token.
 
 Both former build blockers are discharged as of 2026-08-05:
 
@@ -1669,6 +1722,8 @@ Use a pattern that cannot match the invoking shell.
 
 ## Open items (not v1-blocking)
 
+- **M16 marketing site** — in progress on `main`. Connect Cloudflare Pages in
+  the dashboard when ready (root `apps/www`); no GitHub deploy workflow.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.

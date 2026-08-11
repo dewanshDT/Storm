@@ -1,0 +1,57 @@
+---
+interface Props {
+  size?: "sm" | "md" | "lg";
+  showWordmark?: boolean;
+}
+
+const { size = "md", showWordmark = true } = Astro.props;
+const px = size === "sm" ? 28 : size === "lg" ? 72 : 40;
+---
+
+<span class:list={["brand-mark", `brand-mark--${size}`]}>
+  <img
+    src="/brand/storm_icon_full.png"
+    width={px}
+    height={px}
+    alt=""
+    decoding="async"
+  />
+  {
+    showWordmark && (
+      <span class="wordmark" aria-hidden="true">
+        Storm
+      </span>
+    )
+  }
+</span>
+
+<style>
+  .brand-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(var(--sp) * 1.5);
+  }
+
+  .brand-mark img {
+    border-radius: calc(var(--r-control) * 0.7);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--mint) 35%, transparent);
+  }
+
+  .wordmark {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  .brand-mark--lg .wordmark {
+    font-size: var(--fs-lg);
+    letter-spacing: 0.16em;
+  }
+
+  .brand-mark--sm .wordmark {
+    font-size: var(--fs-xs);
+  }
+</style>

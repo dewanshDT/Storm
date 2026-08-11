@@ -1,0 +1,143 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+
+<BaseLayout
+  title="How it works"
+  description="A short sketch of Storm's self-hosted layout: clients, sync server, plain markdown vaults."
+>
+  <header class="page-hero wrap-narrow">
+    <p class="eyebrow">How it works</p>
+    <h1>One server. Many devices. Files you can still open.</h1>
+    <p class="lede">
+      Storm is intentionally small. This page is the sketch; depth lives in the
+      repo.
+    </p>
+  </header>
+
+  <section class="section wrap-narrow">
+    <h2>Shape</h2>
+    <p class="support">
+      Clients (macOS, Android, web — one Flutter codebase) talk REST and a
+      WebSocket to <strong>storm-server</strong>, a Rust binary in the homelab.
+      The server owns merge, search, tags, attachments, and version history.
+      Notes remain plain markdown under a storage root you control.
+    </p>
+    <pre class="diagram" aria-label="Architecture sketch"><code>{`clients  ──►  storm-server (axum)
+                    │
+          ┌─────────┴──────────┐
+          ▼                    ▼
+   vaults/*.md           state/ (indexes)
+   plain markdown        never inside vaults`}</code></pre>
+  </section>
+
+  <section class="section wrap-narrow">
+    <h2>Invariants that matter</h2>
+    <ul class="points">
+      <li>
+        <strong>The vault is plain markdown.</strong> Storm state lives in a
+        sibling <code>state/</code> directory, never mixed into notes.
+      </li>
+      <li>
+        <strong>Notes are tracked by UUID,</strong> so renames and moves are
+        metadata, not new files.
+      </li>
+      <li>
+        <strong>Offline is normal.</strong> Edits queue on the device and replay
+        when the server returns; conflicts that cannot merge are written into
+        the note as visible markers.
+      </li>
+      <li>
+        <strong>No accounts, no sharing product.</strong> One person, several
+        devices, one token on the home network.
+      </li>
+    </ul>
+  </section>
+
+  <section class="section wrap-narrow">
+    <h2>Go deeper</h2>
+    <p class="support">
+      Living plan and decisions:
+      <a
+        href="https://github.com/dewanshDT/Storm/blob/main/PLAN.md"
+        target="_blank"
+        rel="noopener noreferrer">PLAN.md</a
+      >. Deploy and apt:
+      <a
+        href="https://github.com/dewanshDT/Storm/tree/main/deploy"
+        target="_blank"
+        rel="noopener noreferrer">deploy/</a
+      >. Design system handoff in
+      <code>docs/design_handoff_storm_design_system/</code>.
+    </p>
+    <p class="cta-row">
+      <a class="btn btn-primary" href="/install">Install</a>
+      <a
+        class="btn btn-ghost"
+        href="https://github.com/dewanshDT/Storm"
+        target="_blank"
+        rel="noopener noreferrer">Repository</a
+      >
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  .diagram {
+    margin: 0;
+    padding: calc(var(--sp) * 2.5);
+    background: var(--surface);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    line-height: 1.55;
+    color: var(--text2);
+  }
+
+  .diagram code {
+    font: inherit;
+    color: inherit;
+  }
+
+  .points {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: calc(var(--sp) * 3);
+  }
+
+  .points li {
+    font-family: var(--font-body);
+    font-size: var(--fs-md);
+    line-height: 1.6;
+    color: var(--text2);
+  }
+
+  .points strong {
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-weight: 600;
+  }
+
+  .points code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    color: var(--text);
+  }
+
+  .support code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    color: var(--text);
+  }
+
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1.5);
+    margin: calc(var(--sp) * 4) 0 0;
+  }
+</style>

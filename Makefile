@@ -10,6 +10,7 @@
 
 SERVER := apps/server
 CLIENT := apps/client
+WWW    := apps/www
 
 # Overridable: make server VAULT_ROOT=~/my-vaults
 #
@@ -247,13 +248,22 @@ deploy-check:
 codegen:
 	cd $(CLIENT) && dart run build_runner build
 
+## www: build the marketing site (apps/www → dist)
+www:
+	cd $(WWW) && npm ci && npm run build
+
+## www-dev: Astro dev server for the marketing site
+www-dev:
+	cd $(WWW) && npm install && npm run dev
+
 ## clean: remove build output and local dev data
 clean:
 	cd $(SERVER) && cargo clean
 	cd $(CLIENT) && flutter clean
+	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-client test-live fmt \
-        dry-run server client web serve-web codegen clean \
+        dry-run server client web serve-web www www-dev codegen clean \
         deploy-web deploy-web-check \
         build-server deploy deploy-check

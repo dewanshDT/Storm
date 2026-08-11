@@ -1,0 +1,61 @@
+---
+const year = new Date().getFullYear();
+---
+
+<footer class="site-footer">
+  <div class="wrap row">
+    <p>
+      Storm · self-hosted markdown notes · © {year}
+    </p>
+    <div class="links">
+      <a href="/install">Install</a>
+      <a href="https://github.com/dewanshDT/Storm" target="_blank" rel="noopener noreferrer"
+        >GitHub</a
+      >
+      <a
+        href="https://dewanshdt.github.io/Storm/"
+        target="_blank"
+        rel="noopener noreferrer">Apt repo</a
+      >
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: auto;
+    border-top: var(--bw) solid var(--border);
+    padding: calc(var(--sp) * 4) 0;
+  }
+
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: calc(var(--sp) * 2);
+  }
+
+  p {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text3);
+    letter-spacing: 0.02em;
+  }
+
+  .links {
+    display: flex;
+    gap: calc(var(--sp) * 2);
+  }
+
+  .links a {
+    font-size: var(--fs-sm);
+    color: var(--text2);
+    text-decoration: none;
+  }
+
+  .links a:hover {
+    color: var(--text);
+  }
+</style>
