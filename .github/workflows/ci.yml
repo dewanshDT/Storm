@@ -68,3 +68,19 @@ jobs:
       - name: server log on failure
         if: failure()
         run: cat .dev/live-server.log || true
+
+  www:
+    name: www (astro)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/www
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/www/package-lock.json
+      - run: npm ci
+      - run: npm run build

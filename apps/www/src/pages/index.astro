@@ -1,0 +1,163 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import BrandMark from "../components/BrandMark.astro";
+---
+
+<BaseLayout
+  title="Storm"
+  description="Self-hosted markdown notes. Your server owns the vault; phone, Mac, and browser sync to it."
+>
+  <section class="hero" aria-label="Storm">
+    <div class="atmosphere" aria-hidden="true">
+      <div class="glow glow-a"></div>
+      <div class="glow glow-b"></div>
+      <div class="grain"></div>
+    </div>
+
+    <div class="wrap stage">
+      <div class="brand-lockup">
+        <BrandMark size="lg" />
+      </div>
+      <h1 class="sr-only">Storm</h1>
+      <p class="headline">
+        Your notes. Your server.<br />Plain markdown, always.
+      </p>
+      <p class="support">
+        A small Rust sync server in the homelab owns the canonical vault.
+        Flutter clients on phone, Mac, and web keep pace — offline is normal,
+        conflicts stay visible in the file.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="/install">Install the server</a>
+        <a
+          class="btn btn-ghost"
+          href="https://github.com/dewanshDT/Storm"
+          target="_blank"
+          rel="noopener noreferrer">View on GitHub</a
+        >
+      </div>
+    </div>
+  </section>
+
+  <section class="section wrap-narrow">
+    <p class="eyebrow">Why it exists</p>
+    <h2>Obsidian + Syncthing, replaced</h2>
+    <p class="support">
+      Syncthing moves files without knowing what a note is. Storm keeps notes
+      as ordinary markdown on disk — greppable, backupable, openable in
+      Obsidian if you ever leave — and puts note-aware sync, merge, and search
+      on a box you run.
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    position: relative;
+    isolation: isolate;
+    min-height: min(100vh, 52rem);
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    padding: calc(var(--sp) * 8) 0 calc(var(--sp) * 10);
+  }
+
+  .atmosphere {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background:
+      radial-gradient(120% 80% at 50% -10%, oklch(0.28 0.04 293), transparent 55%),
+      linear-gradient(180deg, var(--bg), oklch(0.18 0.01 55));
+  }
+
+  .glow {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(64px);
+    animation: pulse-soft 8s var(--ease) infinite;
+  }
+
+  .glow-a {
+    width: min(70vw, 36rem);
+    height: min(70vw, 36rem);
+    top: -12%;
+    left: 42%;
+    background: color-mix(in oklab, var(--mint) 28%, transparent);
+    animation: drift 18s var(--ease) infinite alternate;
+  }
+
+  .glow-b {
+    width: min(55vw, 28rem);
+    height: min(55vw, 28rem);
+    bottom: 8%;
+    left: -8%;
+    background: color-mix(in oklab, var(--accent) 22%, transparent);
+    animation: drift 22s var(--ease) infinite alternate-reverse;
+    animation-delay: -4s;
+  }
+
+  .grain {
+    position: absolute;
+    inset: 0;
+    opacity: 0.07;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    pointer-events: none;
+  }
+
+  .stage {
+    max-width: 40rem;
+  }
+
+  .brand-lockup {
+    animation: rise 700ms var(--ease) both;
+  }
+
+  .headline {
+    margin: calc(var(--sp) * 4) 0 calc(var(--sp) * 2.5);
+    font-family: var(--font-sans);
+    font-size: clamp(1.75rem, 4.2vw, 2.75rem);
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+    color: var(--text);
+    animation: rise 700ms var(--ease) 80ms both;
+  }
+
+  .support {
+    margin: 0 0 calc(var(--sp) * 4);
+    max-width: 34rem;
+    font-family: var(--font-body);
+    font-size: var(--fs-lg);
+    line-height: 1.65;
+    color: var(--text2);
+    animation: rise 700ms var(--ease) 140ms both;
+  }
+
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1.5);
+    animation: rise 700ms var(--ease) 200ms both;
+  }
+
+  .section h2 {
+    max-width: 22ch;
+  }
+
+  @media (max-width: 560px) {
+    .hero {
+      min-height: auto;
+      padding-top: calc(var(--sp) * 6);
+      align-items: flex-start;
+    }
+
+    .cta {
+      width: 100%;
+    }
+
+    .cta .btn {
+      flex: 1 1 auto;
+    }
+  }
+</style>

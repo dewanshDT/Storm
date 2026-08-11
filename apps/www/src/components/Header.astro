@@ -1,0 +1,105 @@
+---
+import BrandMark from "./BrandMark.astro";
+
+const path = Astro.url.pathname.replace(/\/$/, "") || "/";
+
+const links = [
+  { href: "/install", label: "Install" },
+  { href: "/how-it-works", label: "How it works" },
+  { href: "https://github.com/dewanshDT/Storm", label: "GitHub", external: true },
+];
+---
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="home" href="/" aria-label="Storm home">
+      <BrandMark size="sm" />
+    </a>
+    <nav aria-label="Primary">
+      {
+        links.map((link) => (
+          <a
+            href={link.href}
+            class:list={[
+              "nav-link",
+              !link.external && path === link.href && "is-active",
+            ]}
+            {...(link.external
+              ? { target: "_blank", rel: "noopener noreferrer" }
+              : {})}
+          >
+            {link.label}
+          </a>
+        ))
+      }
+    </nav>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    backdrop-filter: blur(12px);
+    background: color-mix(in oklab, var(--bg) 82%, transparent);
+    border-bottom: var(--bw) solid color-mix(in oklab, var(--border) 70%, transparent);
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: calc(var(--sp) * 2);
+    min-height: 64px;
+  }
+
+  .home {
+    text-decoration: none;
+    color: inherit;
+  }
+
+  .home:hover {
+    color: inherit;
+  }
+
+  nav {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--sp) * 0.5);
+  }
+
+  .nav-link {
+    padding: calc(var(--sp) * 0.75) calc(var(--sp) * 1.25);
+    border-radius: var(--r-control);
+    color: var(--text2);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    text-decoration: none;
+    transition:
+      color var(--dur) var(--ease),
+      background-color var(--dur) var(--ease);
+  }
+
+  .nav-link:hover,
+  .nav-link.is-active {
+    color: var(--text);
+    background: var(--surface);
+    text-decoration: none;
+  }
+
+  @media (max-width: 560px) {
+    .bar {
+      min-height: 56px;
+    }
+
+    nav {
+      gap: 0;
+    }
+
+    .nav-link {
+      padding-inline: calc(var(--sp) * 0.9);
+      font-size: var(--fs-xs);
+    }
+  }
+</style>

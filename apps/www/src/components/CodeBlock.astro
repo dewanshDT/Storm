@@ -1,0 +1,107 @@
+---
+interface Props {
+  code: string;
+  label?: string;
+}
+
+const { code, label = "Copy" } = Astro.props;
+const id = `code-${Math.random().toString(36).slice(2, 9)}`;
+---
+
+<div class="code-block">
+  <div class="toolbar">
+    <span class="label">{label === "Copy" ? "shell" : label}</span>
+    <button type="button" class="copy" data-copy={id} aria-label="Copy to clipboard">
+      Copy
+    </button>
+  </div>
+  <pre id={id}><code>{code.trim()}</code></pre>
+</div>
+
+<script>
+  function wire() {
+    document.querySelectorAll<HTMLButtonElement>("[data-copy]").forEach((btn) => {
+      if (btn.dataset.wired) return;
+      btn.dataset.wired = "1";
+      btn.addEventListener("click", async () => {
+        const el = document.getElementById(btn.dataset.copy!);
+        if (!el) return;
+        try {
+          await navigator.clipboard.writeText(el.textContent ?? "");
+          btn.textContent = "Copied";
+          setTimeout(() => {
+            btn.textContent = "Copy";
+          }, 1400);
+        } catch {
+          btn.textContent = "Failed";
+          setTimeout(() => {
+            btn.textContent = "Copy";
+          }, 1400);
+        }
+      });
+    });
+  }
+  wire();
+  document.addEventListener("astro:page-load", wire);
+</script>
+
+<style>
+  .code-block {
+    background: var(--surface);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    overflow: hidden;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp);
+    padding: calc(var(--sp) * 1.25) calc(var(--sp) * 2);
+    border-bottom: var(--bw) solid var(--border);
+    background: var(--surface2);
+  }
+
+  .label {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+
+  .copy {
+    appearance: none;
+    border: var(--bw) solid var(--border);
+    background: var(--bg);
+    color: var(--text2);
+    border-radius: calc(var(--r-control) * 0.7);
+    padding: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    cursor: pointer;
+    transition:
+      color var(--dur) var(--ease),
+      border-color var(--dur) var(--ease);
+  }
+
+  .copy:hover {
+    color: var(--text);
+    border-color: var(--text3);
+  }
+
+  pre {
+    margin: 0;
+    padding: calc(var(--sp) * 2.5);
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    line-height: 1.55;
+    color: var(--green);
+  }
+
+  code {
+    font: inherit;
+  }
+</style>

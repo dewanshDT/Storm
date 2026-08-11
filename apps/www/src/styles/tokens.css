@@ -1,0 +1,44 @@
+/* Storm dark — derived from docs/design_handoff_storm_design_system/
+   (OKLCH inputs: bgL 22, hue 55, chroma 8, accent 293/0.15/68%). */
+
+:root {
+  --bg: oklch(0.22 0.008 55);
+  --surface: oklch(0.27 0.008 55);
+  --surface2: oklch(0.31 0.008 55);
+  --border: oklch(0.36 0.008 55);
+  --text: oklch(0.95 0.008 55);
+  --text2: oklch(0.74 0.008 55);
+  --text3: oklch(0.66 0.008 55);
+  --accent: oklch(0.68 0.15 293);
+  --accent-soft: oklch(0.3 0.05 293);
+  --on-accent: oklch(0.16 0.03 293);
+  --amber: oklch(0.74 0.14 68);
+  --amber-soft: oklch(0.3 0.05 68);
+  --green: oklch(0.74 0.13 148);
+  --danger: oklch(0.7 0.17 25);
+  --mint: #96f2d7;
+  --mark-ink: #343a40;
+
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-body: "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --fs: 16px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: var(--fs);
+  --fs-lg: 20px;
+  --fs-xl: 25px;
+  --fs-display: 39px;
+
+  --sp: 8px;
+  --r-card: 16px;
+  --r-control: 10px;
+  --bw: 1px;
+  --shadow: 0 12px 42px -8px rgba(0, 0, 0, 0.35);
+  --dur: 180ms;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --content: 42rem;
+  --wide: 68rem;
+}

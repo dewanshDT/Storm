@@ -1,0 +1,98 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import CodeBlock from "../components/CodeBlock.astro";
+
+const aptSource = `curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \\
+  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \\
+  | sudo tee /etc/apt/sources.list.d/storm.list
+sudo apt update
+sudo apt install storm-server`;
+
+const up = `sudo storm-server up
+sudo storm-server status`;
+
+const upCustom = `sudo storm-server up \\
+  --data-root /srv/storm \\
+  --vault-root /path/to/vaults \\
+  --state /srv/storm/state`;
+---
+
+<BaseLayout
+  title="Install"
+  description="Install storm-server from the apt repository, then run storm-server up."
+>
+  <header class="page-hero wrap-narrow">
+    <p class="eyebrow">Install</p>
+    <h1>Get a server running</h1>
+    <p class="lede">
+      Preferred path: apt on Debian/Ubuntu, then one <code>up</code> command.
+      The package ships the binary, systemd unit, and web client.
+    </p>
+  </header>
+
+  <section class="section wrap-narrow">
+    <h2>1. Add the apt source</h2>
+    <p class="support">
+      The GitHub Pages site at
+      <a href="https://dewanshdt.github.io/Storm/" target="_blank" rel="noopener noreferrer"
+        >dewanshdt.github.io/Storm</a
+      >
+      <em>is</em> the apt repository root — do not put a marketing site there.
+    </p>
+    <CodeBlock code={aptSource} label="apt" />
+  </section>
+
+  <section class="section wrap-narrow">
+    <h2>2. Start Storm</h2>
+    <p class="support">
+      <code>up</code> creates the <code>storm</code> user when it can, writes
+      <code>/etc/storm/storm.env</code> (mode 600, with a generated token), and
+      enables the systemd unit. Default data root is <code>/srv/storm</code>.
+    </p>
+    <CodeBlock code={up} label="up" />
+  </section>
+
+  <section class="section wrap-narrow">
+    <h2>Custom paths</h2>
+    <p class="support">
+      Point <code>--vault-root</code> at a directory that <em>contains</em>
+      vaults (one folder per vault), not at a single vault. Vaults on NFS often
+      need the process to run as a user that can write the mount — <code>up</code>
+      follows the state-dir owner in that case.
+    </p>
+    <CodeBlock code={upCustom} label="up · custom" />
+  </section>
+
+  <section class="section wrap-narrow">
+    <h2>Clients</h2>
+    <p class="support">
+      Point the Flutter app (macOS, Android, or the packaged web UI) at your
+      server URL and the token from <code>/etc/storm/storm.env</code>. Releases
+      and checksums live on
+      <a
+        href="https://github.com/dewanshDT/Storm/releases"
+        target="_blank"
+        rel="noopener noreferrer">GitHub Releases</a
+      >. Operator detail stays in
+      <a
+        href="https://github.com/dewanshDT/Storm/blob/main/deploy/README.md"
+        target="_blank"
+        rel="noopener noreferrer">deploy/README.md</a
+      >.
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    color: var(--text);
+  }
+
+  .support em {
+    font-style: italic;
+    color: var(--text);
+  }
+</style>
