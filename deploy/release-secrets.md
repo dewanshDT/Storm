@@ -39,14 +39,19 @@ gpg --export <KEYID> > deploy/storm-archive-keyring.gpg
 gpg --armor --export <KEYID> > deploy/storm-archive-keyring.asc
 ```
 
-## After M15 lands on `main`
+## After a tag (v0.2.2+ is live)
 
-1. `git tag v0.2.0 && git push origin v0.2.0`
-2. Watch **Release**, then **Apt repository**.
+1. `git tag vX.Y.Z && git push origin vX.Y.Z`
+2. Watch **Release** — it publishes the GitHub Release and then calls
+   **Apt repository** (a `GITHUB_TOKEN` release does not fire other workflows
+   on its own; `workflow_call` covers that).
 3. Clean install on the VM (see below) — do **not** keep the hand-rolled
    `/home/dewansh/storm` layout as the long-term target.
 
-## Clean install on the VM (after apt works)
+First public artifacts: **`v0.2.2`** — https://github.com/dewanshDT/Storm/releases/tag/v0.2.2
+Apt: https://dewanshdt.github.io/Storm/ (`storm-server` `0.2.2-1`).
+
+## Clean install on the VM
 
 Goal: FHS `/srv/storm`, `storm` user, package-owned web, systemd. Migrate data
 onto that layout, then remove the old tree and `~/storm-m15-cutover`.
@@ -74,4 +79,4 @@ sudo storm-server up   # creates env, enables systemd as User=storm
 #    ~/storm-m15-cutover, old run.sh binary, stale /home/dewansh/storm/vaults copy
 ```
 
-Until the tag ships, leave the current `run.sh` server alone.
+Until you cut over, leave the current `run.sh` server alone.
