@@ -111,17 +111,21 @@ const links = [
   }
 
   .brand {
-    display: inline-flex;
+    display: flex;
     align-items: center;
     gap: calc(var(--sp) * 1.25);
     z-index: 1;
     min-width: 0;
+    line-height: 1;
   }
 
   .home {
+    display: flex;
+    align-items: center;
     text-decoration: none;
     color: inherit;
     flex-shrink: 0;
+    line-height: 1;
   }
 
   .home:hover {
@@ -131,7 +135,9 @@ const links = [
   .pre-release {
     display: inline-flex;
     align-items: center;
-    padding: 2px calc(var(--sp) * 1);
+    justify-content: center;
+    height: 22px;
+    padding: 0 calc(var(--sp) * 1);
     border: var(--bw) solid color-mix(in oklab, var(--amber) 35%, var(--border));
     border-radius: var(--r-card);
     background: var(--amber-soft);
@@ -142,7 +148,7 @@ const links = [
     text-transform: uppercase;
     color: var(--amber);
     white-space: nowrap;
-    line-height: 1.4;
+    line-height: 1;
   }
 
   .menu-toggle {
