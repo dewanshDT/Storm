@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+    rm -f /etc/storm/storm.env
+    rm -rf /etc/systemd/system/storm-server.service.d
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+fi
+
+exit 0

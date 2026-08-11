@@ -16,7 +16,7 @@ set -a; . "$ENV_FILE"; set +a
 
 : "${STORM_VAULT_ROOT:?}" "${STORM_STATE:?}" "${STORM_BACKUP_DEST:?}"
 KEEP_DAYS="${STORM_BACKUP_KEEP_DAYS:-30}"
-SERVER_BIN="${STORM_SERVER_BIN:-/usr/local/bin/storm-server}"
+SERVER_BIN="${STORM_SERVER_BIN:-/usr/bin/storm-server}"
 
 stamp="$(date -u +%Y-%m-%d)"
 dest="$STORM_BACKUP_DEST/$stamp"
@@ -38,7 +38,7 @@ $(find "$dest/vaults" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') vault
 #
 # One per vault, plus vaults.json — without the registry the snapshots are a
 # pile of UUID-named files nobody can match to a vault.
-"$SERVER_BIN" --state "$STORM_STATE" --backup-db "$dest/index" >/dev/null
+"$SERVER_BIN" backup-db --state "$STORM_STATE" "$dest/index" >/dev/null
 echo "  index:  $(du -sh "$dest/index" | cut -f1)"
 
 # Prove the snapshot opens before trusting it. A backup nobody has read is a
@@ -47,7 +47,7 @@ echo "  index:  $(du -sh "$dest/index" | cut -f1)"
 # Verify into a temp file, never /dev/null: the snapshot path is deleted first
 # if it exists, and pointing that at a device node would remove it.
 verify_tmp="$(mktemp -d "${TMPDIR:-/tmp}/storm-verify-XXXXXX")"
-if ! "$SERVER_BIN" --state "$dest/index" --backup-db "$verify_tmp" >/dev/null 2>&1; then
+if ! "$SERVER_BIN" backup-db --state "$dest/index" "$verify_tmp" >/dev/null 2>&1; then
     rm -rf "$verify_tmp"
     echo "  ERROR: the snapshots did not open — keeping them, but investigate" >&2
     exit 1

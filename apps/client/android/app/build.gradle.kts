@@ -15,7 +15,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/publish/application-id.html).
         applicationId = "dev.storm.storm"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
@@ -25,11 +25,27 @@ android {
         versionName = flutter.versionName
     }
 
+    val uploadStoreFile = System.getenv("STORM_UPLOAD_STORE_FILE")
+    signingConfigs {
+        if (uploadStoreFile != null) {
+            create("release") {
+                storeFile = file(uploadStoreFile)
+                storePassword = System.getenv("STORM_UPLOAD_STORE_PASSWORD")
+                keyAlias = System.getenv("STORM_UPLOAD_KEY_ALIAS")
+                keyPassword = System.getenv("STORM_UPLOAD_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // CI sets STORM_UPLOAD_* secrets for a real keystore. Local
+            // `flutter run --release` keeps using the debug key so it still works.
+            signingConfig = if (uploadStoreFile != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

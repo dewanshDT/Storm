@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+# Create the system user and default data directories. First start is owned by
+# `storm-server up` — installing the package alone must not bind the port or
+# assume a data root.
+
+if ! id storm >/dev/null 2>&1; then
+    useradd --system --home /srv/storm --shell /usr/sbin/nologin storm || true
+fi
+
+mkdir -p /srv/storm/vaults /srv/storm/state /srv/storm/backups /etc/storm
+chown -R storm:storm /srv/storm 2>/dev/null || true
+
+if [ -f /etc/storm/storm.env ]; then
+    # Fresh conf-file still says change-me — generate a real token so a later
+    # `up` (or a manual enable) is not guessable. conf-files keep a real token
+    # across upgrades.
+    if grep -q '^STORM_TOKEN=change-me$' /etc/storm/storm.env 2>/dev/null; then
+        token=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+        # Avoid sed -i portability issues on busybox; rewrite via temp.
+        tmp=$(mktemp)
+        sed "s/^STORM_TOKEN=change-me$/STORM_TOKEN=${token}/" /etc/storm/storm.env > "$tmp"
+        chmod 600 "$tmp"
+        mv "$tmp" /etc/storm/storm.env
+    fi
+    chmod 600 /etc/storm/storm.env || true
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+echo "storm-server installed. Start it with: sudo storm-server up"
+echo "  (or: sudo storm-server up --data-root /path/to/data)"
+
+exit 0

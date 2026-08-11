@@ -4,22 +4,42 @@ A single static binary, a systemd unit, and a nightly backup. No container, no
 runtime dependencies — the server is a ~5 MB musl binary that runs on a bare
 Ubuntu or Debian box with nothing installed.
 
-See decision 8 in `PLAN.md` for why this isn't a Docker image.
+See decision 8 in `PLAN.md` for why this isn't a Docker image. Prefer the
+packaged install (`apt install storm-server` then `sudo storm-server up`) once
+a release exists; the steps below are the manual equivalent. Secrets and the
+**clean-install** runbook are in [release-secrets.md](release-secrets.md).
+After apt works, install under `/srv/storm` and remove the hand-rolled tree /
+`~/storm-m15-cutover` — do not treat the NFS cutover kit as permanent.
 
-## First-time setup
+## First-time setup (packaged)
+
+```sh
+# From the apt repo on Pages (preferred once v0.2.0 ships):
+# see deploy/release-secrets.md for the sources.list lines.
+sudo apt install storm-server
+sudo storm-server up                    # data root = /srv/storm
+sudo storm-server status
+```
+
+`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600, with a
+generated token), and `systemctl enable --now storm-server`. The web client
+lives at `/usr/share/storm/web` and upgrades with the package.
+
+## First-time setup (manual)
 
 On the server, once:
 
 ```sh
 sudo useradd --system --home /srv/storm --shell /usr/sbin/nologin storm
-sudo mkdir -p /srv/storm/{vaults,state,web,backups} /etc/storm
+sudo mkdir -p /srv/storm/{vaults,state,backups} /etc/storm
 sudo chown -R storm:storm /srv/storm
 
-sudo cp deploy/storm-server.service /etc/systemd/system/
-sudo cp deploy/storm-backup.service deploy/storm-backup.timer /etc/systemd/system/
+sudo cp deploy/storm-server.service /lib/systemd/system/
+sudo cp deploy/storm-backup.service deploy/storm-backup.timer /lib/systemd/system/
 sudo cp deploy/storm.env.example /etc/storm/storm.env
 sudo chmod 600 /etc/storm/storm.env      # it holds the token
 sudoedit /etc/storm/storm.env            # set STORM_TOKEN and the backup path
+sudo systemctl enable --now storm-server storm-backup.timer
 ```
 
 Generate a token with `openssl rand -hex 32`. It lives in the env file rather
@@ -30,7 +50,6 @@ Then from your machine:
 
 ```sh
 make deploy HOST=you@your-server
-sudo systemctl enable --now storm-server storm-backup.timer
 ```
 
 ## Vaults and the storage root
@@ -66,7 +85,7 @@ The move is manual, and worth a backup first — `note_versions` is the merge
 base and cannot be rebuilt from the markdown.
 
 ```sh
-sudo /usr/local/bin/storm-backup.sh          # and check it wrote something
+sudo /usr/bin/storm-backup.sh          # and check it wrote something
 sudo systemctl stop storm-server
 sudo -u storm mkdir -p /srv/storm/vaults
 sudo -u storm mv /srv/storm/vault /srv/storm/vaults/personal
@@ -93,7 +112,7 @@ zero vaults.
 every note that lacks one, which is a write to every file:
 
 ```sh
-storm-server --vault-root /srv/storm/vaults --state /srv/storm/state --dry-run
+storm-server dry-run --vault-root /srv/storm/vaults --state /srv/storm/state
 ```
 
 It reports, per vault, how many files would gain frontmatter, and writes

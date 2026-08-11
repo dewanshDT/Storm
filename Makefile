@@ -66,7 +66,7 @@ test-live:
 	rm -rf "$$ROOT/.dev/live-vaults" "$$ROOT/.dev/live-state"; \
 	mkdir -p "$$ROOT/.dev/live-vaults/primary"; \
 	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/live-vaults/primary/Seed.md"; \
-	"$$ROOT/$(SERVER)/target/debug/storm-server" \
+	"$$ROOT/$(SERVER)/target/debug/storm-server" serve \
 		--vault-root "$$ROOT/.dev/live-vaults" --state "$$ROOT/.dev/live-state" \
 		--token $(TOKEN) --port $(PORT) --mcp > "$$ROOT/.dev/live-server.log" 2>&1 & \
 	SERVER_PID=$$!; \
@@ -97,13 +97,13 @@ fmt:
 ## dry-run: report what importing every vault under VAULT_ROOT would change
 dry-run:
 	@mkdir -p $(VAULT_ROOT)
-	cd $(SERVER) && cargo run -- \
-		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) --dry-run
+	cd $(SERVER) && cargo run -- dry-run \
+		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE))
 
 ## server: run the sync server against VAULT_ROOT
 server:
 	@mkdir -p $(VAULT_ROOT)
-	cd $(SERVER) && cargo run -- \
+	cd $(SERVER) && cargo run -- serve \
 		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) \
 		--token $(TOKEN) --port $(PORT)
 
@@ -146,7 +146,7 @@ web:
 ## serve-web: build the web client and serve it from the server binary
 serve-web: web
 	@mkdir -p $(VAULT_ROOT)
-	cd $(SERVER) && cargo run --release -- \
+	cd $(SERVER) && cargo run --release -- serve \
 		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) \
 		--token $(TOKEN) --port $(PORT) \
 		--web $(abspath $(CLIENT))/build/web
@@ -179,8 +179,8 @@ deploy: build-server web
 	rsync -az deploy/storm-backup.sh "$(HOST):/tmp/storm-backup.sh"; \
 	echo "--- installing ---"; \
 	ssh "$(HOST)" "set -e; \
-		sudo install -m755 /tmp/storm-server /usr/local/bin/storm-server; \
-		sudo install -m755 /tmp/storm-backup.sh /usr/local/bin/storm-backup.sh; \
+		sudo install -m755 /tmp/storm-server /usr/bin/storm-server; \
+		sudo install -m755 /tmp/storm-backup.sh /usr/bin/storm-backup.sh; \
 		sudo mkdir -p $(REMOTE_DIR)/web; \
 		sudo rsync -a --delete /tmp/storm-web/ $(REMOTE_DIR)/web/; \
 		sudo chown -R storm:storm $(REMOTE_DIR); \

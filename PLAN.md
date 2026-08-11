@@ -51,8 +51,11 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
+| M15 | Releases, versioning, apt repo | **built** | CLI up/serve · .deb metadata · release.yml · apt-repo.yml |
 
-Last updated: 2026-08-09. M0–M11 are built and deployed to the VM.
+Last updated: 2026-08-11. M0–M14 deployed; M15 packaging and CLI landed —
+apt GPG + Pages ready; land on `main`, tag `v0.2.0`, then clean-install the VM
+via apt (`deploy/release-secrets.md`). Android keystore still optional.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
 decisions 20–30 record the choices.
 
@@ -585,6 +588,47 @@ that renders a loading state hangs. These lists come from cache and are gone in
 a frame or two; the animation would cost more than it buys.
 *Revisit if:* a loading state appears that is genuinely slow, in which case it
 wants its own widget with a `TickerMode` guard.
+
+**45. One tag builds every artifact, and nothing is hand-uploaded.**
+The server binary, the `.deb`, the APK, the macOS app and the web bundle all
+come out of the same tagged run. If `release.yml` did not build it, it is not a
+release. Hand-uploading one artifact "just this once" is how a release ends up
+containing two different builds, and nothing in the release itself would show
+it.
+*Revisit if:* a target appears that genuinely cannot be built in CI — iOS
+signing would be the candidate — in which case it gets its own documented step
+rather than a quiet exception.
+
+**46. The git tag is the only version source.**
+`Cargo.toml` and `pubspec.yaml` are stamped from `GITHUB_REF_NAME` during the
+release build, never edited by hand. Both are static today, and the failure
+mode is silent on both sides: apt reads the `.deb`'s control version, so a pool
+of identically-versioned packages never upgrades, and Android compares
+`versionCode`, so the second APK is refused as a downgrade. Renaming the output
+files is not versioning.
+*Revisit if:* client and server ever need to version independently — which
+would mean the wire format is stable enough to mix versions, and it is not.
+
+**47. The `.deb` owns the systemd install.**
+`deploy/storm-server.service` and `storm.env.example` become package payload
+rather than files someone copies by hand, and the maintainer scripts do the
+`useradd`, the directories and the token generation that `deploy/README.md`
+currently asks a human to remember. The env file is a `conf-file` so `dpkg`
+prompts rather than overwriting a real token on upgrade.
+*Revisit if:* the target box is ever not Debian-family. Nothing else in the
+deployment assumes it, so this would be a packaging change, not a redesign.
+
+**48. `up` configures; `serve` runs — and the data root is chosen at `up`.**
+The long-running process is `storm-server serve` (what systemd starts). Operator
+commands `up` / `down` / `status` own the install: write `/etc/storm/storm.env`,
+widen `ReadWritePaths` via a drop-in when paths are not under `/srv/storm`, and
+`enable --now`. Defaults stay FHS (`/srv/storm`); `up --data-root` is the common
+case, and `--vault-root` / `--state` cover a split layout (NAS vaults + local
+state on the current VM). The web client is package-owned at
+`/usr/share/storm/web`, not under the data root, so an apt upgrade refreshes
+the UI without touching notes.
+*Revisit if:* a non-systemd host becomes a first-class target — then `up`
+would need a different supervisor backend.
 
 ---
 
@@ -1430,6 +1474,66 @@ which layout is *intended* is a decision, not a bug fix.
 
 ---
 
+### M15 — Releases, versioning and an apt repo ✅
+
+Designed 2026-08-11; built the same day. A tag push produces one GitHub Release
+carrying every platform's artifact, and the `.deb` is also served as an apt
+repository on Pages. Operator setup is Tailscale-shaped: `storm-server up`
+writes config and enables systemd; `serve` is what the unit runs.
+
+**Shipped.**
+
+- CLI subcommands: `serve`, `up`, `down`, `status`, `dry-run`, `backup-db`
+  (legacy flat flags still work for one release via argv rewrite).
+- `[package.metadata.deb]` + `apps/server/debian/` maintainer scripts;
+  `LICENSE`; unit at `/usr/bin/storm-server serve`; web at
+  `/usr/share/storm/web` (package-owned).
+- `up --data-root` defaults to `/srv/storm` and writes a systemd drop-in when
+  the root is elsewhere (decision 48) — the VM can keep
+  `/home/dewansh/storm` without a second empty server.
+- `.github/workflows/release.yml` (stamp versions, musl+deb, APK, macOS, web)
+  and `apt-repo.yml` (reprepro → Pages). `ci.yml` also runs on `v*.*.*` tags.
+- Android release signing reads `STORM_UPLOAD_*` env when set; otherwise debug.
+
+**Still one-time and manual before the first useful tag:**
+
+- Android keystore secrets (`STORM_UPLOAD_*`) — optional for the first server
+  tag; without them the APK is debug-signed.
+- Apt GPG + Pages — **done 2026-08-11** (`STORM_APT_GPG_*`, Pages =
+  GitHub Actions, public keyring in `deploy/`).
+- Land M15 on `main`, tag `v0.2.0`, then a **clean** VM install via apt under
+  `/srv/storm` (see `deploy/release-secrets.md`). Do not treat the NFS cutover
+  kit as the long-term path — remove `~/storm-m15-cutover` after apt works.
+
+#### Versioning — the tag is the only source
+
+`Cargo.toml` / `pubspec.yaml` stay at static placeholders on `main`. The
+release job stamps them from `GITHUB_REF_NAME` and passes Flutter
+`--build-name` / `--build-number` before anything builds. Renaming output
+files alone is not versioning — apt reads the `.deb` control version, Android
+compares `versionCode`. First public tag: **`v0.2.0`**.
+
+#### Review traps — status after the build
+
+| Trap | Status |
+|---|---|
+| No `LICENSE` / `description` | Fixed |
+| APK hardcoded debug signing | Fixed (env-gated release config) |
+| `/usr/bin` vs `/usr/local/bin` | Fixed — unit uses `/usr/bin` |
+| `postinst` missing useradd/dirs | Fixed; start is owned by `up`, not postinst |
+| Missing `contents: read/write` | Fixed in both workflows |
+| Artifact path LCA surprises | Flat `dist/` per job |
+| Pages apt root | Documented; publish tree is the site root |
+| `.deb` ships no web | Fixed — release copies Flutter web into packaging |
+| `change-me` token | `postinst` + `up` generate a real one |
+| Tags bypass CI | Fixed — `ci.yml` on tags; `release.yml` runs check first |
+| macOS ad-hoc / arm64-only | Still true — called out in release notes |
+
+`apt install` still needs the same sudo password as before — packaging shortens
+the manual step rather than discharging it.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1502,14 +1606,16 @@ and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
 
 - *The VM has no systemd unit.* `sudo` needs a password there, so the server
   runs as a hand-started process via `/home/dewansh/storm/run.sh` and **will
-  not survive a reboot**. Installing `deploy/storm-server.service` is a
-  one-time `sudo` step that only the user can take. `make deploy` also targets
-  `/srv/storm` and `systemctl`, neither of which exists on that box — the
-  deployment is manual until the unit is installed.
+  not survive a reboot**. **M15 does not remove the sudo need**, and it is
+  worth being precise about why: `apt install` / `storm-server up` need the
+  same password, so packaging shortens the manual step rather than discharging
+  it. Cutover: install the `.deb`, then
+  `sudo storm-server up --data-root /home/dewansh/storm` (decision 48).
 - *The shared token is still `testtoken`.* It is at least off the command line
   now (in `/home/dewansh/.storm-env`, mode 600), so `/proc` no longer exposes
   it to every local user. Rotating it means updating the phone and the browser
-  at the same time, so it is the user's call.
+  at the same time, so it is the user's call. M15's `up` / `postinst` generate
+  a real token on install, which is the natural moment to do it.
 
 Both former build blockers are discharged as of 2026-08-05:
 

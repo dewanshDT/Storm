@@ -1,0 +1,250 @@
+name: Release
+
+# One tag, one release, every artifact. Hand-uploading is how a release ends up
+# holding two different builds — if this workflow did not build it, it is not
+# a release (decision 45).
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Tags used to bypass CI. Gate the publish on a green check first.
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+        working-directory: apps/client
+      - name: make check
+        run: make check
+      - name: make test-live
+        run: make test-live
+      - name: server log on failure
+        if: failure()
+        run: cat .dev/live-server.log || true
+
+  server:
+    name: server (musl + deb)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install musl tools, zig, cargo-deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          curl -sL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+            | sudo tar -xJ -C /opt
+          echo /opt/zig-linux-x86_64-0.13.0 >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild cargo-deb --locked
+      - name: Stamp Cargo version from tag
+        working-directory: apps/server
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          grep '^version' Cargo.toml
+      - name: Build Flutter web into packaging/web
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build web --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          rm -rf ../server/packaging/web
+          mkdir -p ../server/packaging/web
+          cp -a build/web/. ../server/packaging/web/
+      - name: Build musl binary
+        working-directory: apps/server
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo zigbuild --release --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/storm-server \
+            "dist/storm-server-${GITHUB_REF_NAME#v}-x86_64-linux"
+      - name: Build .deb
+        working-directory: apps/server
+        run: |
+          # cargo-deb reads target/release/ by default — copy the musl binary there.
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-musl/release/storm-server target/release/
+          cargo deb --no-build
+          cp target/debian/*.deb dist/
+      - name: Upload server artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: server
+          # upload-artifact@v4 roots at the LCA of the paths — keep a flat dir
+          # so the publish job does not guess path depth.
+          path: apps/server/dist/*
+
+  android:
+    name: android (apk)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Decode keystore
+        env:
+          STORE_B64: ${{ secrets.STORM_UPLOAD_STORE_BASE64 }}
+        run: |
+          if [ -z "$STORE_B64" ]; then
+            echo "STORM_UPLOAD_STORE_BASE64 not set — APK will be debug-signed" >&2
+            exit 0
+          fi
+          echo "$STORE_B64" | base64 -d > /tmp/storm-upload.jks
+          echo "STORM_UPLOAD_STORE_FILE=/tmp/storm-upload.jks" >> "$GITHUB_ENV"
+          echo "STORM_UPLOAD_STORE_PASSWORD=${{ secrets.STORM_UPLOAD_STORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "STORM_UPLOAD_KEY_ALIAS=${{ secrets.STORM_UPLOAD_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "STORM_UPLOAD_KEY_PASSWORD=${{ secrets.STORM_UPLOAD_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+      - name: Build APK
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build apk --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "dist/storm-${GITHUB_REF_NAME#v}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: apps/client/dist/*
+
+  macos:
+    name: macos (app)
+    needs: check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build macOS app
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build macos --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          APP="build/macos/Build/Products/Release/Storm.app"
+          test -d "$APP"
+          # Ad-hoc signed and unnotarized — Gatekeeper will quarantine a
+          # downloaded zip. Documented in the release notes.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" \
+            "dist/Storm-${GITHUB_REF_NAME#v}-macos-arm64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: apps/client/dist/*
+
+  web:
+    name: web (zip)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Build web bundle
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build web --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          (cd build/web && zip -r "../../dist/storm-web-${GITHUB_REF_NAME#v}.zip" .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: apps/client/dist/*
+
+  publish:
+    name: publish GitHub Release
+    needs: [server, android, macos, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect and checksum
+        run: |
+          mkdir -p release
+          # Artifacts land as artifacts/<name>/<file> — flatten.
+          find artifacts -type f -exec cp {} release/ \;
+          cd release
+          sha256sum * > checksums.txt
+          ls -la
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES=$(cat <<EOF
+          Storm ${GITHUB_REF_NAME}
+
+          Install the server on Debian/Ubuntu:
+          \`\`\`
+          sudo apt install ./storm-server_${VERSION}_amd64.deb
+          sudo storm-server up
+          \`\`\`
+          Or keep an existing data directory:
+          \`\`\`
+          sudo storm-server up --data-root /path/to/data
+          \`\`\`
+
+          The \`.deb\` ships the web client at \`/usr/share/storm/web\`.
+
+          **macOS:** the zip is ad-hoc signed and not notarized. Gatekeeper will
+          quarantine a downloaded copy (arm64 only on \`macos-latest\`).
+
+          **Android:** requires the upload keystore secrets for upgradeable
+          installs; without them this APK is debug-signed.
+          EOF
+          )
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --title "Storm ${GITHUB_REF_NAME}" \
+            --notes "$NOTES"

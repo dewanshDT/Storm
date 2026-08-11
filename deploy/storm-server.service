@@ -1,7 +1,10 @@
 # Storm sync server.
 #
-# Install:
-#   sudo cp deploy/storm-server.service /etc/systemd/system/
+# Prefer `sudo storm-server up` after installing the package — it writes the
+# env file, widens ReadWritePaths for a custom data root, and enables the unit.
+#
+# Manual install:
+#   sudo cp deploy/storm-server.service /lib/systemd/system/
 #   sudo cp deploy/storm.env.example /etc/storm/storm.env   # then edit it
 #   sudo chmod 600 /etc/storm/storm.env                     # it holds the token
 #   sudo systemctl enable --now storm-server
@@ -24,7 +27,8 @@ EnvironmentFile=/etc/storm/storm.env
 
 # STORM_TOKEN comes from the environment file, never the command line —
 # arguments are visible to every user on the box via /proc.
-ExecStart=/usr/local/bin/storm-server \
+# `serve` is the long-running process; `up`/`down`/`status` are operator tools.
+ExecStart=/usr/bin/storm-server serve \
     --vault-root ${STORM_VAULT_ROOT} \
     --state ${STORM_STATE} \
     --host ${STORM_HOST} \
@@ -50,8 +54,9 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-# The storage root must stay inside this. Moving it elsewhere (through the
-# app's server settings, or the env file) needs this line widened first, or
+# The storage root must stay inside this. `storm-server up --data-root` writes
+# a drop-in that replaces this line when the data lives elsewhere (e.g. under
+# /home). Moving the root through the app still needs this widened first, or
 # the server will refuse the new root as unwritable.
 ReadWritePaths=/srv/storm
 
