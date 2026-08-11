@@ -1542,6 +1542,7 @@ compares `versionCode`. First public tag: **`v0.2.0`**.
 | Missing `contents: read/write` | Fixed in both workflows |
 | Artifact path LCA surprises | Flat `dist/` per job |
 | Pages apt root | Documented; publish tree is the site root |
+| Bootstrap `install.sh` | `deploy/install.sh` → Pages `/install.sh` (Tailscale-style) |
 | `.deb` ships no web | Fixed — release copies Flutter web into packaging |
 | cargo-deb web glob empty | Fixed — use `packaging/web/**/*` (not `/` or `/**`) |
 | Apt not rebuilt after tag | Fixed — `release.yml` `workflow_call`s apt-repo (token can't chain) |
@@ -1550,7 +1551,16 @@ compares `versionCode`. First public tag: **`v0.2.0`**.
 | macOS ad-hoc / arm64-only | Still true — called out in release notes |
 
 `apt install` still needs the same sudo password as before — packaging shortens
-the manual step rather than discharging it.
+the manual step rather than discharging it. Preferred first install is the
+Tailscale-style bootstrap:
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
+```
+
+(`deploy/install.sh`, published at the apt Pages root by `apt-repo.yml`.) The
+script only registers the apt source and installs the package; `storm-server up`
+stays a separate step because vault/state paths are an operator choice.
 
 ---
 
