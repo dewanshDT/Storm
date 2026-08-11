@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl stop storm-server 2>/dev/null || true
+    systemctl disable storm-server 2>/dev/null || true
+    systemctl stop storm-backup.timer 2>/dev/null || true
+    systemctl disable storm-backup.timer 2>/dev/null || true
+fi
+
+exit 0

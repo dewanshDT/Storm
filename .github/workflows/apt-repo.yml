@@ -1,0 +1,101 @@
+name: Apt repository
+
+# Rebuild the Pages-hosted apt repo from GitHub Release .deb assets whenever a
+# release is published (or manually). Pages serves the uploaded directory as
+# the site root, so the apt line is:
+#   deb [signed-by=/usr/share/keyrings/storm.gpg] https://<user>.github.io/Storm stable main
+# not .../Storm/apt.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+jobs:
+  apt:
+    name: build and publish apt repo
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install apt tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro gnupg
+      - name: Import signing key
+        env:
+          GPG_PRIVATE: ${{ secrets.STORM_APT_GPG_PRIVATE }}
+          GPG_PASSPHRASE: ${{ secrets.STORM_APT_GPG_PASSPHRASE }}
+        run: |
+          if [ -z "$GPG_PRIVATE" ]; then
+            echo "STORM_APT_GPG_PRIVATE secret is required" >&2
+            exit 1
+          fi
+          printf '%s\n' "$GPG_PRIVATE" | gpg --batch --import
+          # Loopback pinentry so reprepro can sign non-interactively.
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          printf 'allow-loopback-pinentry\n' >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent || true
+          if [ -n "$GPG_PASSPHRASE" ]; then
+            printf '%s\n' "$GPG_PASSPHRASE" > ~/.gnupg/passphrase
+            chmod 600 ~/.gnupg/passphrase
+            printf 'pinentry-mode loopback\npassphrase-file %s\n' \
+              "$HOME/.gnupg/passphrase" >> ~/.gnupg/gpg.conf
+          fi
+          KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+          echo "Imported key $KEYID"
+      - name: Download release debs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p incoming
+          # contents: read is required — an explicit permissions block without
+          # it makes gh release download 404.
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --limit 1 --json tagName -q '.[0].tagName')
+          fi
+          gh release download "$TAG" --pattern '*.deb' --dir incoming
+          ls -la incoming
+      - name: Build repo
+        run: |
+          mkdir -p apt-repo/conf
+          cat > apt-repo/conf/distributions <<EOF
+          Origin: Storm
+          Label: Storm
+          Codename: stable
+          Architectures: amd64
+          Components: main
+          Description: Storm server apt repository
+          SignWith: ${KEYID}
+          EOF
+          gpg --armor --export "$KEYID" > apt-repo/storm-archive-keyring.asc
+          gpg --export "$KEYID" > apt-repo/storm-archive-keyring.gpg
+          for deb in incoming/*.deb; do
+            reprepro -b apt-repo includedeb stable "$deb"
+          done
+          mkdir -p publish
+          cp -a apt-repo/. publish/
+          # Keep the keyring at the site root; drop reprepro internals.
+          rm -rf publish/conf publish/db
+          ls -laR publish
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: publish
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

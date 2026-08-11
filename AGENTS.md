@@ -17,6 +17,11 @@ this repo, and **update it as part of the change** — not afterwards:
 - Leaving `PLAN.md` stale is a defect. A finding that exists only in a chat
   transcript is lost.
 
+**Also keep `Storm/Active Work.md` current** (personal vault, via Storm MCP) —
+the short in-flight checklist. Read it when starting multi-step work; update it
+when an item moves. `.cursor/rules/storm-active-work.mdc` requires this.
+`PLAN.md` still wins for decisions; Active Work is the queue.
+
 `docs/prd.md` is the original brief and is **not** maintained.
 Where it and `PLAN.md` disagree, `PLAN.md` is current.
 

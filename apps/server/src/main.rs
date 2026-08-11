@@ -4,6 +4,9 @@
 //! plain directory of markdown files per vault, plus a sibling `state/`
 //! directory holding the registry and one derived SQLite index per vault.
 //!
+//! Operator commands (`up` / `down` / `status`) own the systemd install; the
+//! long-running process is `serve`.
+//!
 //! v1 binds to the LAN with a single shared bearer token. That is only
 //! defensible while it stays on the LAN — exposing this beyond it needs TLS
 //! and per-device tokens first.
@@ -12,6 +15,7 @@ mod api;
 mod db;
 mod frontmatter;
 mod index;
+mod install;
 mod mcp;
 mod merge;
 mod ops;
@@ -20,11 +24,12 @@ mod registry;
 mod vault;
 mod watcher;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::sync::{RwLock, broadcast};
 
 use crate::api::AppState;
@@ -34,7 +39,68 @@ use crate::registry::Registry;
 
 #[derive(Parser, Debug)]
 #[command(name = "storm-server", about = "Storm sync server")]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Run the sync server (what systemd starts).
+    Serve(ServeArgs),
+    /// Write config, enable the systemd unit, and start it.
+    Up(UpArgs),
+    /// Stop and disable the systemd unit.
+    Down,
+    /// Show unit state and a local health probe.
+    Status,
+    /// Report what an import would change, then exit without writing.
+    DryRun(VaultArgs),
+    /// Snapshot every vault index into DIR, then exit.
+    BackupDb {
+        /// State directory holding the registry and indexes.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
+        /// Destination directory for the snapshots.
+        #[arg(value_name = "DIR")]
+        dest: PathBuf,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct UpArgs {
+    /// Directory for vaults/, state/, and backups/ (default /srv/storm).
+    ///
+    /// Ignored for a path that `--vault-root` / `--state` override individually —
+    /// needed when vaults and state already live in different places.
+    #[arg(long, default_value = "/srv/storm")]
+    data_root: PathBuf,
+
+    /// Override the storage root (default: `<data-root>/vaults`).
+    #[arg(long)]
+    vault_root: Option<PathBuf>,
+
+    /// Override the state directory (default: `<data-root>/state`).
+    #[arg(long)]
+    state: Option<PathBuf>,
+
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+
+    #[arg(long, default_value_t = 8484)]
+    port: u16,
+
+    /// Bearer token. Generated and stored in /etc/storm/storm.env if omitted.
+    #[arg(long)]
+    token: Option<String>,
+
+    /// Built Flutter web client directory (package default).
+    #[arg(long, default_value = "/usr/share/storm/web")]
+    web: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct VaultArgs {
     /// Storage root — a directory holding one directory per vault.
     #[arg(long, env = "STORM_VAULT_ROOT")]
     vault_root: Option<PathBuf>,
@@ -51,6 +117,12 @@ struct Args {
     /// out of the vaults so they stay pure markdown.
     #[arg(long, default_value = "./state")]
     state: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+struct ServeArgs {
+    #[command(flatten)]
+    vault: VaultArgs,
 
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -61,12 +133,6 @@ struct Args {
     /// Shared bearer token. Generated and printed if omitted.
     #[arg(long, env = "STORM_TOKEN")]
     token: Option<String>,
-
-    /// Report what an import would change, then exit without writing anything.
-    ///
-    /// Run this first when pointing Storm at an existing Obsidian vault.
-    #[arg(long)]
-    dry_run: bool,
 
     /// Directory holding the built Flutter web client, served at `/`.
     #[arg(long)]
@@ -79,15 +145,80 @@ struct Args {
     /// a decision rather than a side effect of upgrading.
     #[arg(long)]
     mcp: bool,
+}
 
-    /// Write consistent snapshots of every vault index into this directory,
-    /// then exit.
-    ///
-    /// Safe to run against a live server: SQLite does the right thing, which
-    /// a plain file copy of a WAL-mode database does not. Writes one
-    /// `<vault-id>.db` per vault plus a copy of `vaults.json`.
-    #[arg(long, value_name = "DIR")]
-    backup_db: Option<PathBuf>,
+/// Rewrite a legacy flat-flag invocation into a subcommand.
+///
+/// For one release, `storm-server --vault-root …` still works by inserting
+/// `serve` (or mapping `--dry-run` / `--backup-db`). New scripts should use
+/// the subcommands.
+fn normalize_argv(args: Vec<OsString>) -> Vec<OsString> {
+    if args.len() <= 1 {
+        return args;
+    }
+    let first = args[1].to_string_lossy();
+    const KNOWN: &[&str] = &[
+        "serve",
+        "up",
+        "down",
+        "status",
+        "dry-run",
+        "backup-db",
+        "help",
+        "-h",
+        "--help",
+        "-V",
+        "--version",
+    ];
+    if KNOWN.iter().any(|k| first == *k) {
+        return args;
+    }
+    if !first.starts_with('-') {
+        return args;
+    }
+
+    let as_str: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    eprintln!(
+        "warning: invoking storm-server without a subcommand is deprecated; \
+         use `storm-server serve` (or dry-run / backup-db)"
+    );
+
+    if let Some(i) = as_str.iter().position(|a| a == "--backup-db") {
+        let dest = as_str.get(i + 1).cloned().unwrap_or_default();
+        let mut out: Vec<OsString> = vec![args[0].clone(), "backup-db".into()];
+        if !dest.is_empty() && !dest.starts_with('-') {
+            out.push(dest.into());
+        }
+        let mut idx = 1;
+        while idx < as_str.len() {
+            if as_str[idx] == "--backup-db" {
+                idx += 2;
+                continue;
+            }
+            out.push(args[idx].clone());
+            idx += 1;
+        }
+        return out;
+    }
+
+    if as_str.iter().any(|a| a == "--dry-run") {
+        let mut out: Vec<OsString> = vec![args[0].clone(), "dry-run".into()];
+        for (i, s) in as_str.iter().enumerate().skip(1) {
+            if s == "--dry-run" {
+                continue;
+            }
+            out.push(args[i].clone());
+        }
+        return out;
+    }
+
+    let mut out = args;
+    out.insert(1, "serve".into());
+    out
 }
 
 /// Works out the storage root from the two mutually exclusive flags.
@@ -101,7 +232,7 @@ struct Args {
 /// Every failure here exits non-zero with the actual paths. Starting with zero
 /// vaults instead would read as "my notes disappeared" rather than as a skipped
 /// step in the runbook.
-fn resolve_root(args: &Args) -> Result<PathBuf> {
+fn resolve_root(args: &VaultArgs) -> Result<PathBuf> {
     match (&args.vault_root, &args.vault) {
         (Some(_), Some(_)) => bail!(
             "--vault-root and --vault are mutually exclusive. \
@@ -243,25 +374,14 @@ fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "storm_server=info,tower_http=warn".into()),
-        )
-        .init();
+struct PreparedVaults {
+    root: PathBuf,
+    state_dir: PathBuf,
+    registry: Registry,
+}
 
-    let args = Args::parse();
-
-    // Backup mode exits before touching a vault or starting anything.
-    if let Some(dest) = &args.backup_db {
-        backup_all(&args.state, dest)?;
-        println!("index snapshots written to {}", dest.display());
-        return Ok(());
-    }
-
-    let root = resolve_root(&args)?;
+fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
+    let root = resolve_root(args)?;
     std::fs::create_dir_all(&root)
         .with_context(|| format!("creating storage root {}", root.display()))?;
     std::fs::create_dir_all(&args.state)
@@ -305,28 +425,42 @@ async fn main() -> Result<()> {
         "scanning vaults"
     );
 
-    if args.dry_run {
-        println!("Dry run — nothing was written.\n");
-        println!("  storage root : {}", root.display());
-        println!("  vaults       : {}\n", registry.vaults.len());
-        for entry in &registry.vaults {
-            let vault = vault::Vault::new(registry.path_of(entry))?;
-            let db = Db::open_in_memory()?;
-            let mut ix = Indexer::new(vault, db);
-            let report = ix.reconcile(true)?;
-            println!("  {}", entry.name);
-            println!("      markdown files found : {}", report.scanned);
-            println!("      would add `id` to    : {}", report.ids_assigned);
-            for path in report.would_assign.iter().take(10) {
-                println!("          {path}");
-            }
-            if report.ids_assigned > 10 {
-                println!("          … and {} more", report.ids_assigned - 10);
-            }
+    Ok(PreparedVaults {
+        root,
+        state_dir,
+        registry,
+    })
+}
+
+fn run_dry_run(args: VaultArgs) -> Result<()> {
+    let prepared = prepare_vaults(&args)?;
+    println!("Dry run — nothing was written.\n");
+    println!("  storage root : {}", prepared.root.display());
+    println!("  vaults       : {}\n", prepared.registry.vaults.len());
+    for entry in &prepared.registry.vaults {
+        let vault = vault::Vault::new(prepared.registry.path_of(entry))?;
+        let db = Db::open_in_memory()?;
+        let mut ix = Indexer::new(vault, db);
+        let report = ix.reconcile(true)?;
+        println!("  {}", entry.name);
+        println!("      markdown files found : {}", report.scanned);
+        println!("      would add `id` to    : {}", report.ids_assigned);
+        for path in report.would_assign.iter().take(10) {
+            println!("          {path}");
         }
-        println!("\nRun again without --dry-run to apply.");
-        return Ok(());
+        if report.ids_assigned > 10 {
+            println!("          … and {} more", report.ids_assigned - 10);
+        }
     }
+    println!("\nRun again without dry-run to apply.");
+    Ok(())
+}
+
+async fn run_serve(args: ServeArgs) -> Result<()> {
+    let prepared = prepare_vaults(&args.vault)?;
+    let registry = prepared.registry;
+    let state_dir = prepared.state_dir;
+    let root = prepared.root;
 
     registry.save(&state_dir).context("saving the registry")?;
     let mut vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
@@ -421,22 +555,61 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "storm_server=info,tower_http=warn".into()),
+        )
+        .init();
+
+    let cli = Cli::parse_from(normalize_argv(std::env::args_os().collect()));
+
+    match cli.command {
+        Commands::Serve(args) => run_serve(args).await,
+        Commands::Up(args) => {
+            let vault_root = args
+                .vault_root
+                .unwrap_or_else(|| args.data_root.join("vaults"));
+            let state = args.state.unwrap_or_else(|| args.data_root.join("state"));
+            let backups = args.data_root.join("backups");
+            // ReadWritePaths must cover every path the service writes. When
+            // vaults and state are split (NAS vaults + local state), widen to
+            // both parents via the data-root drop-in's primary path plus an
+            // extra line — `up` passes the data_root for the drop-in and the
+            // concrete vault/state paths for the env file.
+            install::up(install::UpOptions {
+                data_root: args.data_root,
+                vault_root,
+                state,
+                backups,
+                host: args.host,
+                port: args.port,
+                token: args.token,
+                web: args.web,
+            })
+        }
+        Commands::Down => install::down(),
+        Commands::Status => install::status(),
+        Commands::DryRun(args) => run_dry_run(args),
+        Commands::BackupDb { state, dest } => {
+            backup_all(&state, &dest)?;
+            println!("index snapshots written to {}", dest.display());
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn args_with(vault_root: Option<PathBuf>, vault: Option<PathBuf>) -> Args {
-        Args {
+    fn vault_args(vault_root: Option<PathBuf>, vault: Option<PathBuf>) -> VaultArgs {
+        VaultArgs {
             vault_root,
             vault,
             state: PathBuf::from("./state"),
-            host: "127.0.0.1".into(),
-            port: 8484,
-            token: None,
-            mcp: false,
-            dry_run: false,
-            web: None,
-            backup_db: None,
         }
     }
 
@@ -445,7 +618,7 @@ mod tests {
         let dir = tempdir::TempDir::new("storm-root").unwrap();
         let root = dir.path().join("vaults");
         std::fs::create_dir_all(&root).unwrap();
-        let resolved = resolve_root(&args_with(Some(root.clone()), None)).unwrap();
+        let resolved = resolve_root(&vault_args(Some(root.clone()), None)).unwrap();
         assert_eq!(resolved, root);
     }
 
@@ -458,7 +631,7 @@ mod tests {
         let vault = dir.path().join("vault");
         std::fs::create_dir_all(vault.join("Daily")).unwrap();
 
-        let resolved = resolve_root(&args_with(None, Some(vault.clone()))).unwrap();
+        let resolved = resolve_root(&vault_args(None, Some(vault.clone()))).unwrap();
         assert_eq!(resolved, dir.path().canonicalize().unwrap());
         assert_ne!(resolved, vault, "the vault itself is never the root");
     }
@@ -469,7 +642,7 @@ mod tests {
         // a healthy server with zero vaults.
         let dir = tempdir::TempDir::new("storm-missing").unwrap();
         let vault = dir.path().join("not-here");
-        let err = resolve_root(&args_with(None, Some(vault.clone())))
+        let err = resolve_root(&vault_args(None, Some(vault.clone())))
             .unwrap_err()
             .to_string();
         assert!(err.contains("not-here"), "message lost the path: {err}");
@@ -481,7 +654,7 @@ mod tests {
         let dir = tempdir::TempDir::new("storm-file").unwrap();
         let file = dir.path().join("notes.md");
         std::fs::write(&file, "x").unwrap();
-        assert!(resolve_root(&args_with(None, Some(file))).is_err());
+        assert!(resolve_root(&vault_args(None, Some(file))).is_err());
     }
 
     #[test]
@@ -489,7 +662,7 @@ mod tests {
         let dir = tempdir::TempDir::new("storm-both").unwrap();
         std::fs::create_dir_all(dir.path().join("vault")).unwrap();
         assert!(
-            resolve_root(&args_with(
+            resolve_root(&vault_args(
                 Some(dir.path().to_path_buf()),
                 Some(dir.path().join("vault")),
             ))
@@ -577,5 +750,42 @@ mod tests {
 
         let id = &registry.vaults[0].id;
         assert!(state.join(id).join("index.db").exists());
+    }
+
+    #[test]
+    fn normalize_argv_inserts_serve_for_legacy_flags() {
+        let out = normalize_argv(vec![
+            "storm-server".into(),
+            "--vault-root".into(),
+            "/tmp/v".into(),
+        ]);
+        assert_eq!(out[1], "serve");
+        assert_eq!(out[2], "--vault-root");
+    }
+
+    #[test]
+    fn normalize_argv_rewrites_dry_run() {
+        let out = normalize_argv(vec![
+            "storm-server".into(),
+            "--vault-root".into(),
+            "/tmp/v".into(),
+            "--dry-run".into(),
+        ]);
+        assert_eq!(out[1], "dry-run");
+        assert!(!out.iter().any(|a| a == "--dry-run"));
+    }
+
+    #[test]
+    fn normalize_argv_rewrites_backup_db() {
+        let out = normalize_argv(vec![
+            "storm-server".into(),
+            "--state".into(),
+            "/tmp/s".into(),
+            "--backup-db".into(),
+            "/tmp/out".into(),
+        ]);
+        assert_eq!(out[1], "backup-db");
+        assert_eq!(out[2], "/tmp/out");
+        assert!(!out.iter().any(|a| a == "--backup-db"));
     }
 }

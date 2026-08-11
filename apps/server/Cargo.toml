@@ -2,6 +2,10 @@
 name = "storm-server"
 version = "0.1.0"
 edition = "2024"
+description = "Self-hosted markdown notes sync server"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/dewanshDT/Storm"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -26,3 +30,29 @@ walkdir = "2.5.0"
 
 [dev-dependencies]
 tempdir = "0.3.7"
+
+# Packaged with `cargo deb`. The release job copies the Flutter web build into
+# packaging/web/ before invoking cargo-deb so the .deb ships a real client.
+[package.metadata.deb]
+name = "storm-server"
+maintainer = "Dewansh Singh Thakur <dewansh.dt@gmail.com>"
+copyright = "2026 Dewansh Singh Thakur"
+extended-description = """\
+Storm sync server: owns canonical markdown vaults, merges concurrent edits, \
+and serves the Flutter web client. Install the package, then run \
+`sudo storm-server up` to enable the systemd unit."""
+section = "utils"
+priority = "optional"
+depends = "$auto"
+maintainer-scripts = "debian/"
+conf-files = ["/etc/storm/storm.env"]
+assets = [
+    ["target/release/storm-server", "usr/bin/", "755"],
+    ["packaging/web/", "usr/share/storm/web/", "644"],
+    ["../../deploy/storm-server.service", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-backup.service", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-backup.timer", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-backup.sh", "usr/bin/", "755"],
+    ["../../deploy/storm.env.example", "etc/storm/storm.env", "600"],
+    ["../../LICENSE", "usr/share/doc/storm-server/", "644"],
+]

@@ -23,7 +23,7 @@ Point it at a **copy** of your vaults first. The `--dry-run` pass writes
 nothing and reports what an import would change, per vault:
 
 ```sh
-cargo run -- --vault-root /srv/storm/vaults --state /srv/storm/state --dry-run
+cargo run -- dry-run --vault-root /srv/storm/vaults --state /srv/storm/state
 ```
 
 ```
@@ -44,12 +44,12 @@ Run again without --dry-run to apply.
 Then for real:
 
 ```sh
-cargo run --release -- \
+cargo run --release -- serve \
   --vault-root /srv/storm/vaults \
   --state /srv/storm/state \
   --host 0.0.0.0 --port 8484 \
   --token "$(openssl rand -hex 32)" \
-  --web /srv/storm/web        # optional: serves the Flutter web client
+  --web /usr/share/storm/web   # or a local Flutter build/web
 ```
 
 Omit `--token` and one is generated and printed for that run. Set `STORM_TOKEN`
@@ -212,7 +212,7 @@ curl -X PUT http://host:8484/v1/config/mcp -H "Authorization: Bearer $TOKEN" \
 
 # --mcp turns it on at boot. It is an override, not the source of truth:
 # switching it off in the app later sticks, until the flag is passed again.
-storm-server --vault-root ~/vaults --state ~/state --token "$STORM_TOKEN" --mcp
+storm-server serve --vault-root ~/vaults --state ~/state --token "$STORM_TOKEN" --mcp
 ```
 
 `GET /v1/config` reports `mcp_enabled` and `mcp_writable`.
