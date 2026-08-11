@@ -53,9 +53,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **built** | CLI up/serve · .deb metadata · release.yml · apt-repo.yml |
 
-Last updated: 2026-08-11. M0–M14 deployed; M15 packaging and CLI landed —
-apt GPG + Pages ready; land on `main`, tag `v0.2.0`, then clean-install the VM
-via apt (`deploy/release-secrets.md`). Android keystore still optional.
+Last updated: 2026-08-11. M0–M14 deployed; M15 tagged **`v0.2.2`** (Release +
+apt on Pages). Next: clean VM install via apt under `/srv/storm`
+(`deploy/release-secrets.md`). Android keystore still optional.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
 decisions 20–30 record the choices.
 
@@ -1526,6 +1526,7 @@ compares `versionCode`. First public tag: **`v0.2.0`**.
 | Pages apt root | Documented; publish tree is the site root |
 | `.deb` ships no web | Fixed — release copies Flutter web into packaging |
 | cargo-deb web glob empty | Fixed — use `packaging/web/**/*` (not `/` or `/**`) |
+| Apt not rebuilt after tag | Fixed — `release.yml` `workflow_call`s apt-repo (token can't chain) |
 | `change-me` token | `postinst` + `up` generate a real one |
 | Tags bypass CI | Fixed — `ci.yml` on tags; `release.yml` runs check first |
 | macOS ad-hoc / arm64-only | Still true — called out in release notes |
