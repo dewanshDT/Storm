@@ -413,5 +413,36 @@ fn main() {}
       await tester.pumpAndSettle();
       expect(c.read(settingsProvider).value!.readMode, isTrue);
     });
+
+    testWidgets('shows the client version stamp', (tester) async {
+      final c = shellContainer();
+      addTearDown(c.dispose);
+      await c.read(settingsProvider.future);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: c,
+          child: MaterialApp(
+            theme: StormTheme.dark(),
+            home: const Scaffold(
+              body: SingleChildScrollView(child: ClientSettingsBody()),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('client-version')), findsOneWidget);
+      expect(find.text('Version 0.0.0-test'), findsOneWidget);
+
+      // Section labels uppercased by SectionLabel — grouping, not a heading.
+      expect(find.text('APPEARANCE'), findsOneWidget);
+      expect(find.text('NOTES'), findsOneWidget);
+      expect(find.text('CONNECTION'), findsOneWidget);
+      expect(find.text('ABOUT'), findsOneWidget);
+      // Note font is a field under Appearance, not a peer section.
+      expect(find.text('NOTE FONT'), findsNothing);
+      expect(find.text('Note font'), findsOneWidget);
+    });
   });
 }
