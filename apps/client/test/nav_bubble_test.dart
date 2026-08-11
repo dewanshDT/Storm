@@ -56,11 +56,13 @@ void main() {
     tester,
   ) async {
     // Both read the same signal, so they must never be on screen together and
-    // never both absent.
+    // never both absent. Toolbar exists only in Edit Mode — Read Mode has no
+    // keyboard chrome to trade with.
     final c = shellContainer();
     await pumpShell(tester, c);
     c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
     await tester.pumpAndSettle();
+    await enterEditMode(tester);
 
     expect(find.byType(EditorToolbar), findsNothing);
     expect(find.byType(NavBubble), findsOneWidget);

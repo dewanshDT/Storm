@@ -180,6 +180,7 @@ void main() {
       await pumpShell(tester, c, size: const Size(411, 900));
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
+      await enterEditMode(tester);
       await pumpShell(tester, c, size: const Size(411, 900), keyboard: 320);
       await tester.pumpAndSettle();
 

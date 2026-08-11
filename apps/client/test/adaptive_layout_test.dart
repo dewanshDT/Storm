@@ -191,6 +191,7 @@ void main() {
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
+      await enterEditMode(tester);
 
       final bubble = tester.getTopLeft(find.byType(VaultBubble)).dx;
       final back = tester.getTopLeft(find.byIcon(LucideIcons.chevron_left)).dx;
