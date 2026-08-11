@@ -242,6 +242,19 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     }
   }
 
+  /// Leave the open note: pop the stack, or fall back into the vault's
+  /// browse pane when there is nothing to pop (a deep link). The header's
+  /// back arrow and Esc share this one answer, so the two cannot drift into
+  /// leaving a note differently. Browse, not dashboard, is the fallback —
+  /// the same one search and tags use.
+  void _leaveNote() {
+    if (context.canPop()) {
+      context.pop();
+    } else {
+      context.go(Routes.browse(VaultGate.of(context)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.watch(syncListenerProvider);
@@ -263,72 +276,71 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     );
     final tint = accent.isNone ? null : accent.wash(context.tokens);
 
+    // Global chords and create callbacks come from VaultShell, which wraps
+    // every vault route — this screen only tints its own background, so it
+    // builds its Scaffold rather than using StormScaffold.
     return NoteContextRequest(
       onRequest: () => setState(() => _showContext = !_showContext),
-      child: NewNoteRequest(
-        onRequest: () {},
-        child: Scaffold(
-          backgroundColor: tint,
-          body: StormChrome(
-            showNav: !keyboard,
-            // No header at desk width: the sidebar already says where the
-            // note lives and offers the way back, and the design's note pane
-            // starts at `v12 · Saved`.
-            header: context.isExpanded
-                ? null
-                : _Header(
-                    key: const Key('note-header'),
-                    folder: session.meta?.folder ?? '',
-                    onBack: () => context.canPop()
-                        ? context.pop()
-                        : context.go(Routes.dashboard),
-                    onUp: () => context.go(
-                      Routes.folder(vaultId, session.meta?.folder ?? ''),
-                    ),
-                    onProperties: () => PropertiesPanel.showSheet(
-                      context,
-                      content: session.buffer,
-                      onChanged: session.editProperties,
-                    ),
-                    onActions: () => _noteActions(isPinned),
+      child: Scaffold(
+        backgroundColor: tint,
+        body: StormChrome(
+          showNav: !keyboard,
+          // No header at desk width: the sidebar already says where the
+          // note lives and offers the way back, and the design's note pane
+          // starts at `v12 · Saved`.
+          header: context.isExpanded
+              ? null
+              : _Header(
+                  key: const Key('note-header'),
+                  folder: session.meta?.folder ?? '',
+                  onBack: _leaveNote,
+                  onUp: () => context.go(
+                    Routes.folder(vaultId, session.meta?.folder ?? ''),
                   ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: NoteEditor(
-                    key: ValueKey(widget.noteId),
-                    onFollowLink: _followLink,
-                    showToolbar: keyboard,
-                    onActions: () => _noteActions(isPinned),
-                    // Image thumbnails live inside NoteEditor (Edit Mode only).
-                    // Read Mode renders images inline via StormMarkdownView.
-                    footer: MentionsSection(
-                      noteId: widget.noteId,
-                      initiallyExpanded: _showContext,
-                      onOpen: (note) =>
-                          context.push(Routes.note(vaultId, note.id)),
-                    ),
-                  ),
-                ),
-                // The rail carries the properties toggle at desk width, where
-                // the sheet would cover a note that has room beside it.
-                if (context.isExpanded)
-                  _PropertiesRail(
-                    open: showProperties,
-                    onToggle: () => ref
-                        .read(propertiesOpenProvider.notifier)
-                        .update((open) => !open),
-                  ),
-                if (context.isExpanded && showProperties)
-                  PropertiesDrawer(
+                  onProperties: () => PropertiesPanel.showSheet(
+                    context,
                     content: session.buffer,
                     onChanged: session.editProperties,
-                    onClose: () =>
-                        ref.read(propertiesOpenProvider.notifier).state = false,
                   ),
-              ],
-            ),
+                  onActions: () => _noteActions(isPinned),
+                ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: NoteEditor(
+                  key: ValueKey(widget.noteId),
+                  onFollowLink: _followLink,
+                  showToolbar: keyboard,
+                  onActions: () => _noteActions(isPinned),
+                  onEscape: _leaveNote,
+                  // Image thumbnails live inside NoteEditor (Edit Mode only).
+                  // Read Mode renders images inline via StormMarkdownView.
+                  footer: MentionsSection(
+                    noteId: widget.noteId,
+                    initiallyExpanded: _showContext,
+                    onOpen: (note) =>
+                        context.push(Routes.note(vaultId, note.id)),
+                  ),
+                ),
+              ),
+              // The rail carries the properties toggle at desk width, where
+              // the sheet would cover a note that has room beside it.
+              if (context.isExpanded)
+                _PropertiesRail(
+                  open: showProperties,
+                  onToggle: () => ref
+                      .read(propertiesOpenProvider.notifier)
+                      .update((open) => !open),
+                ),
+              if (context.isExpanded && showProperties)
+                PropertiesDrawer(
+                  content: session.buffer,
+                  onChanged: session.editProperties,
+                  onClose: () =>
+                      ref.read(propertiesOpenProvider.notifier).state = false,
+                ),
+            ],
           ),
         ),
       ),

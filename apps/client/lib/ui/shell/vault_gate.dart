@@ -33,6 +33,10 @@ class VaultGate extends ConsumerStatefulWidget {
     return scope!.vaultId;
   }
 
+  /// Null when there is no enclosing gate (e.g. the dashboard).
+  static String? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_VaultScope>()?.vaultId;
+
   @override
   ConsumerState<VaultGate> createState() => _VaultGateState();
 }
