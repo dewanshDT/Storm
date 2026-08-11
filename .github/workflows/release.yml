@@ -79,9 +79,13 @@ jobs:
           flutter build web --release \
             --build-name="${GITHUB_REF_NAME#v}" \
             --build-number="${GITHUB_RUN_NUMBER}"
-          rm -rf ../server/packaging/web
-          mkdir -p ../server/packaging/web
-          cp -a build/web/. ../server/packaging/web/
+          DEST="${GITHUB_WORKSPACE}/apps/server/packaging/web"
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          cp -a build/web/. "$DEST/"
+          test -f "$DEST/index.html"
+          echo "web assets ready:"
+          find "$DEST" -maxdepth 2 | head -40
       - name: Build musl binary
         working-directory: apps/server
         run: |
@@ -93,11 +97,13 @@ jobs:
       - name: Build .deb
         working-directory: apps/server
         run: |
+          test -f packaging/web/index.html
           # cargo-deb reads target/release/ by default — copy the musl binary there.
           mkdir -p target/release
           cp target/x86_64-unknown-linux-musl/release/storm-server target/release/
           cargo deb --no-build
           cp target/debian/*.deb dist/
+          ls -la dist/
       - name: Upload server artifacts
         uses: actions/upload-artifact@v4
         with:

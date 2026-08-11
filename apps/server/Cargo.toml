@@ -48,7 +48,9 @@ maintainer-scripts = "debian/"
 conf-files = ["/etc/storm/storm.env"]
 assets = [
     ["target/release/storm-server", "usr/bin/", "755"],
-    ["packaging/web/", "usr/share/storm/web/", "644"],
+    # Glob required — a trailing-slash directory path is treated as a glob that
+    # matches nothing ("Can't resolve asset"), which is what failed v0.2.0.
+    ["packaging/web/**", "usr/share/storm/web/", "644"],
     ["../../deploy/storm-server.service", "lib/systemd/system/", "644"],
     ["../../deploy/storm-backup.service", "lib/systemd/system/", "644"],
     ["../../deploy/storm-backup.timer", "lib/systemd/system/", "644"],
