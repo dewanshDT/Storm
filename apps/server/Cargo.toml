@@ -48,9 +48,10 @@ maintainer-scripts = "debian/"
 conf-files = ["/etc/storm/storm.env"]
 assets = [
     ["target/release/storm-server", "usr/bin/", "755"],
-    # Glob required — a trailing-slash directory path is treated as a glob that
-    # matches nothing ("Can't resolve asset"), which is what failed v0.2.0.
-    ["packaging/web/**", "usr/share/storm/web/", "644"],
+    # Recursive files only. `packaging/web/` and `packaging/web/**` match
+    # directories; cargo-deb then drops dirs from the glob result and fails with
+    # "Can't resolve asset" (v0.2.0 / v0.2.1). `**/*` is the pattern that works.
+    ["packaging/web/**/*", "usr/share/storm/web/", "644"],
     ["../../deploy/storm-server.service", "lib/systemd/system/", "644"],
     ["../../deploy/storm-backup.service", "lib/systemd/system/", "644"],
     ["../../deploy/storm-backup.timer", "lib/systemd/system/", "644"],
