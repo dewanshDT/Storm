@@ -9,21 +9,28 @@ import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
+import 'attachment_strip.dart';
 import 'breakpoints.dart';
 import 'shell/storm_scaffold.dart';
 import 'editor_toolbar.dart';
+import 'markdown/storm_markdown_view.dart';
+import 'note_mode_toggle.dart';
 import 'widgets.dart';
 import 'states.dart';
 import 'tokens.dart';
 import 'wikilink_suggestions.dart';
 
-/// The editing pane.
+/// The note pane: Read Mode by default, Edit Mode for the source editor.
 ///
 /// Bridges two things that both want to own the text: Flutter's
 /// [TextEditingController] and the [NoteSession] that talks to the server.
 /// The session wins — when it raises its revision counter, the server has
 /// reconciled our text against a version we never saw, and the buffer must be
 /// replaced rather than kept.
+///
+/// Read Mode consumes [NoteSession.body] through [StormMarkdownView]; it does
+/// not own a second buffer. Switching modes never drops unsaved edits because
+/// the session already holds them.
 class NoteEditor extends ConsumerStatefulWidget {
   const NoteEditor({
     super.key,
@@ -39,15 +46,16 @@ class NoteEditor extends ConsumerStatefulWidget {
   /// header row does not exist at desk width, and the actions have to.
   final VoidCallback? onActions;
 
-  /// Attachments and mentions, which the design puts *inside* the scroll
-  /// after the prose rather than pinned under it.
+  /// Mentions (and anything else) that belong *inside* the scroll after the
+  /// prose. Image thumbnails are owned by Edit Mode via [AttachmentStrip] —
+  /// Read Mode renders images inline instead.
   final Widget? footer;
 
   /// Whether to show the formatting toolbar.
   ///
   /// Decided by the screen rather than here, because the answer depends on the
   /// keyboard inset and this widget lives inside a Scaffold body where that is
-  /// no longer readable. See `keyboardIsOpen`.
+  /// no longer readable. See `keyboardIsOpen`. Only applies in Edit Mode.
   final bool showToolbar;
 
   /// Called with a `[[target]]` the user asked to follow.
@@ -64,6 +72,9 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   late StormMarkdownController _controller;
   final _focus = FocusNode();
   int _seenRevision = -1;
+
+  /// Default viewing experience: polished document, not the raw editor.
+  NoteViewMode _mode = NoteViewMode.read;
 
   // There is no raw-YAML mode. Frontmatter is edited only through the
   // properties list, which shows every key in the block — including the ones
@@ -245,6 +256,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     }
 
     final t = context.tokens;
+    final editing = _mode == NoteViewMode.edit;
     // 40 at desk width, as the prototype has it; on a phone the column is the
     // screen and 40 a side would leave nothing for the words.
     // The shell's inset on a phone, so the prose starts under the bubble and
@@ -272,7 +284,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
             child: _statusBar(session),
           ),
         ),
-        if (_isDegraded(session)) const _DegradedNotice(),
+        if (editing && _isDegraded(session)) const _DegradedNotice(),
         if (session.hasConflict)
           ConflictCard(onDismiss: session.dismissNotice)
         else if (session.notice != null)
@@ -299,43 +311,49 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Properties are no longer in this column. They are a
-                      // surface of their own now — a sheet on a phone, a drawer
-                      // on a wide screen — because a note with a dozen keys
-                      // pushed the writing off the first screen, and the design
-                      // gives them their own place with a header and a close.
-                      TextField(
-                        // Named so tests can tell the prose apart from the
-                        // property inputs above it.
-                        key: const Key('note-body'),
-                        controller: _controller,
-                        focusNode: _focus,
-                        maxLines: null,
-                        cursorWidth: 2,
-                        keyboardType: TextInputType.multiline,
-                        textCapitalization: TextCapitalization.sentences,
-                        onTap: _onEditorTap,
-                        // Enter inside a list carries the list on.
-                        inputFormatters: const [ListContinuationFormatter()],
-                        contextMenuBuilder: _contextMenu,
-                        // Every border, not just `border`. The theme sets
-                        // enabledBorder and focusedBorder separately, and
-                        // clearing only `border` left a rounded outline drawn
-                        // around the whole note. `filled: false` for the same
-                        // reason: the theme fills every field with surface2,
-                        // which put the prose on a card of its own.
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          disabledBorder: InputBorder.none,
-                          errorBorder: InputBorder.none,
-                          focusedErrorBorder: InputBorder.none,
-                          filled: false,
-                          contentPadding: EdgeInsets.zero,
-                          isDense: true,
+                      if (editing)
+                        TextField(
+                          // Named so tests can tell the prose apart from the
+                          // property inputs above it.
+                          key: const Key('note-body'),
+                          controller: _controller,
+                          focusNode: _focus,
+                          maxLines: null,
+                          cursorWidth: 2,
+                          keyboardType: TextInputType.multiline,
+                          textCapitalization: TextCapitalization.sentences,
+                          onTap: _onEditorTap,
+                          // Enter inside a list carries the list on.
+                          inputFormatters: const [ListContinuationFormatter()],
+                          contextMenuBuilder: _contextMenu,
+                          // Every border, not just `border`. The theme sets
+                          // enabledBorder and focusedBorder separately, and
+                          // clearing only `border` left a rounded outline drawn
+                          // around the whole note. `filled: false` for the same
+                          // reason: the theme fills every field with surface2,
+                          // which put the prose on a card of its own.
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            disabledBorder: InputBorder.none,
+                            errorBorder: InputBorder.none,
+                            focusedErrorBorder: InputBorder.none,
+                            filled: false,
+                            contentPadding: EdgeInsets.zero,
+                            isDense: true,
+                          ),
+                        )
+                      else
+                        StormMarkdownView(
+                          key: const Key('note-read'),
+                          markdown: session.body,
+                          onFollowLink: widget.onFollowLink,
+                          onOpenEdit: () => _setMode(NoteViewMode.edit),
                         ),
-                      ),
+                      // Thumbnails only in Edit Mode: Read Mode renders images
+                      // inline, and a second strip under the document is noise.
+                      if (editing) AttachmentStrip(body: session.body),
                       if (widget.footer != null) widget.footer!,
                     ],
                   ),
@@ -346,12 +364,24 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
         ),
         // Both belong to the keyboard: suggestions sit directly above the
         // formatting row, in the space the nav bubble gives up.
-        if (widget.showToolbar) ...[
+        if (editing && widget.showToolbar) ...[
           WikilinkSuggestions(controller: _controller),
           EditorToolbar(controller: _controller, onDone: _focus.unfocus),
         ],
       ],
     );
+  }
+
+  void _setMode(NoteViewMode mode) {
+    if (_mode == mode) return;
+    setState(() => _mode = mode);
+    if (mode == NoteViewMode.edit) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focus.requestFocus();
+      });
+    } else {
+      _focus.unfocus();
+    }
   }
 }
 
@@ -405,11 +435,19 @@ extension on _NoteEditorState {
       SaveState.queued => ('Queued — offline', SaveTone.waiting),
       SaveState.failed => ('Failed', SaveTone.bad),
     };
-    return StatusBar(
-      version: session.baseVersion,
-      label: label,
-      tone: tone,
-      error: session.error,
+    return Row(
+      children: [
+        Expanded(
+          child: StatusBar(
+            version: session.baseVersion,
+            label: label,
+            tone: tone,
+            error: session.error,
+          ),
+        ),
+        SizedBox(width: context.tokens.sp),
+        NoteModeToggle(mode: _mode, onChanged: _setMode),
+      ],
     );
   }
 }

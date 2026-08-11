@@ -53,6 +53,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
+| M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 
 Last updated: 2026-08-11. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -60,7 +61,10 @@ from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
 positioning (no competitor framing), MCP-forward homepage, and real apt
 install CTAs. CI builds on PR/main. Deploy remains Cloudflare static (no
-GitHub deploy workflow). Decision 49 is the site hosting split.
+GitHub deploy workflow). Decision 49 is the site hosting split. **M17** adds
+a Read Mode on the note screen (Storm-styled `flutter_markdown_plus`); the
+existing editor remains Edit Mode. Markdown stays canonical — no AST, no
+server/MCP/sync changes.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -649,6 +653,18 @@ the monorepo; one lockfile under `apps/www`).
 *Revisit if:* Cloudflare is unavailable or a custom domain is already pinned
 elsewhere — then Netlify or a second GitHub Pages project is fine as long as
 it does not share the apt site root.
+
+**50. Read Mode is a styled Markdown renderer beside the existing editor —
+not a replacement and not an AST.**
+Opening a note defaults to Read Mode (`StormMarkdownView` over
+`flutter_markdown_plus`, Storm tokens). Edit Mode keeps the source
+`TextEditingController` editor from M0/M8. Markdown remains the only
+document format; there is no Storm AST, no block editor, and no second
+persistence path. Read Mode always renders `NoteSession.body` (including
+unsaved edits). Task-list checkboxes are read-only in this phase.
+*Revisit if:* Read Mode is not enough document quality and a real
+block/AST renderer becomes worth the migration cost — decision 5's
+block-editor revisit is the larger cousin of that call.
 
 ---
 
@@ -1609,6 +1625,31 @@ deploys into `release.yml`.
 
 ---
 
+### M17 — Markdown Read Mode · in progress
+
+Started 2026-08-11. Polished read-only document view for notes, without
+replacing the source editor or introducing an AST (decision 50).
+
+**Done (client):**
+
+- `flutter_markdown_plus` + `markdown` + `url_launcher` dependencies.
+- `StormMarkdownView` + `stormMarkdownStyleSheet` under `lib/ui/markdown/`.
+- Read / Edit toggle (`NoteModeToggle`); notes open in Read Mode.
+- Edit Mode unchanged (existing controller, toolbar, attachment strip).
+- Wikilinks via custom `WikilinkSyntax` (`storm-wikilink:` scheme).
+- Images resolve through `StormApi.attachmentUrl`; tables/code/HR/lists/
+  task lists (read-only `StormCheckbox`) styled from tokens.
+- Tests in `test/markdown_read_mode_test.dart`; existing editor suites
+  enter Edit Mode via `enterEditMode`.
+
+**Still open:**
+
+- Visual pass on a real vault note (phone + desk + web).
+- Optional later: interactive task-list toggles (still Markdown splice,
+  not a second mutation API).
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1737,6 +1778,8 @@ Use a pattern that cannot match the invoking shell.
 
 ## Open items (not v1-blocking)
 
+- **M17 Markdown Read Mode** — client implementation on
+  `feat/markdown-read-mode`; visual pass + ship still open.
 - **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
   confirm Cloudflare hostname / dashboard connection; optional real app
   screenshot for Client section. No GitHub deploy workflow.
