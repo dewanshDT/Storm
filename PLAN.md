@@ -51,8 +51,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
+| M15 | Releases, versioning, apt repo | **designed** | brief reviewed 2026-08-11 · nothing built |
 
-Last updated: 2026-08-09. M0–M11 are built and deployed to the VM.
+Last updated: 2026-08-11. M0–M11 are built and deployed to the VM.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
 decisions 20–30 record the choices.
 
@@ -585,6 +586,35 @@ that renders a loading state hangs. These lists come from cache and are gone in
 a frame or two; the animation would cost more than it buys.
 *Revisit if:* a loading state appears that is genuinely slow, in which case it
 wants its own widget with a `TickerMode` guard.
+
+**45. One tag builds every artifact, and nothing is hand-uploaded.**
+The server binary, the `.deb`, the APK, the macOS app and the web bundle all
+come out of the same tagged run. If `release.yml` did not build it, it is not a
+release. Hand-uploading one artifact "just this once" is how a release ends up
+containing two different builds, and nothing in the release itself would show
+it.
+*Revisit if:* a target appears that genuinely cannot be built in CI — iOS
+signing would be the candidate — in which case it gets its own documented step
+rather than a quiet exception.
+
+**46. The git tag is the only version source.**
+`Cargo.toml` and `pubspec.yaml` are stamped from `GITHUB_REF_NAME` during the
+release build, never edited by hand. Both are static today, and the failure
+mode is silent on both sides: apt reads the `.deb`'s control version, so a pool
+of identically-versioned packages never upgrades, and Android compares
+`versionCode`, so the second APK is refused as a downgrade. Renaming the output
+files is not versioning.
+*Revisit if:* client and server ever need to version independently — which
+would mean the wire format is stable enough to mix versions, and it is not.
+
+**47. The `.deb` owns the systemd install.**
+`deploy/storm-server.service` and `storm.env.example` become package payload
+rather than files someone copies by hand, and the maintainer scripts do the
+`useradd`, the directories and the token generation that `deploy/README.md`
+currently asks a human to remember. The env file is a `conf-file` so `dpkg`
+prompts rather than overwriting a real token on upgrade.
+*Revisit if:* the target box is ever not Debian-family. Nothing else in the
+deployment assumes it, so this would be a packaging change, not a redesign.
 
 ---
 
@@ -1430,6 +1460,113 @@ which layout is *intended* is a decision, not a bug fix.
 
 ---
 
+### M15 — Releases, versioning and an apt repo 🔜
+
+Designed 2026-08-11. **Nothing is built**; the brief was reviewed against the
+repo and the findings below are the reason it is not simply typed in.
+
+The goal: a tag push produces one GitHub Release carrying every platform's
+artifact, and the `.deb` from that release is also served as a real apt
+repository, so `apt install storm-server` works on a fresh machine.
+
+**Shape.** `.github/workflows/release.yml` fires on `v*.*.*` tags: four build
+jobs — musl server plus `.deb` via `cargo-deb`, signed APK, macOS `.app`, web
+bundle — feed one publish job that renames by version, writes `checksums.txt`
+and cuts the release. `.github/workflows/apt-repo.yml` then rebuilds the pool,
+signs `Release`, and ships it to Pages. Packaging metadata goes in
+`[package.metadata.deb]` in `apps/server/Cargo.toml`, maintainer scripts under
+`apps/server/debian/`.
+
+The musl half is not speculative: M6 already proved the static cross-compile
+(68 s, 5.4 MB, zero runtime deps) and `ci.yml` already sets up every toolchain
+the build jobs need.
+
+**Prerequisites — one-time, manual, before the first tag:**
+
+- *An Android signing keystore*, as four repo secrets. Skip it and CI signs
+  each build with a throwaway key; Android refuses to upgrade an app across a
+  changed signing identity, so a user has to uninstall and lose local state
+  first.
+- *A GPG key for the apt repo* — private half as secrets, public half
+  fetchable from the repo as well as from Pages.
+- *Pages source set to "GitHub Actions"* in repo settings. `deploy-pages`
+  cannot publish against the default branch-based source.
+
+#### Versioning — the tag has to be the only source
+
+**Nothing today derives a version from anything.** `apps/server/Cargo.toml` is
+pinned at `0.1.0` and `apps/client/pubspec.yaml` at `1.0.0+1`, and a release
+pipeline that only renames *files* leaves both untouched. Two silent failures
+follow, and neither reports an error:
+
+- apt reads the `.deb`'s **control** version, not its filename. A pool of
+  releases all declaring `0.1.0` means `apt upgrade` never fires again.
+- Android compares `versionCode`, which stays `1` forever. The second APK is
+  refused as a downgrade.
+
+So the release job must stamp `Cargo.toml` and pass `--build-name` /
+`--build-number` from `GITHUB_REF_NAME` before building anything. A pipeline
+whose artifacts share a filename but not a version is worse than no pipeline:
+it looks like it shipped.
+
+#### What the review found in the brief
+
+Each of these fails on the *first* tag, and most fail quietly:
+
+- **`cargo deb` never gets as far as building.** `license-file` points at a
+  `LICENSE` that does not exist in this repo, and `[package]` has no
+  `description` — a mandatory deb control field.
+- **The APK ignores every keystore secret.** `android/app/build.gradle.kts`
+  hardcodes `signingConfig = signingConfigs.getByName("debug")`. Wiring the
+  secrets into Gradle is part of the work; without it the prerequisite above
+  is bought and then thrown away.
+- **`/usr/bin` vs `/usr/local/bin`.** The `.deb` installs the binary to
+  `usr/bin/`; `deploy/storm-server.service` runs `/usr/local/bin/storm-server`.
+- **`postinst` enables a unit that cannot start.** The unit wants `User=storm`
+  and `ReadWritePaths=/srv/storm`; `deploy/README.md` documents the `useradd`
+  and `mkdir`/`chown` that create them, and the drafted script does neither.
+  It should also guard `systemctl` on `[ -d /run/systemd/system ]`.
+- **An explicit `permissions:` block sets every unlisted scope to none.** The
+  apt job lists only `pages: write` and `id-token: write`, so its own
+  `gh release download` has no `contents: read` and 404s. `release.yml` needs
+  `contents: write` for the same reason.
+- **`upload-artifact@v4` roots the archive at the least common ancestor** of
+  the paths it is given, so the server files arrive at
+  `dist/server-artifacts/{release,debian}/…` — one segment shorter than the
+  publish job copies from.
+- **Pages serves the uploaded directory as the site root**, so the apt line is
+  `…github.io/Storm stable main`, not `…/Storm/apt`.
+- **The `.deb` ships no web bundle**, but the unit passes `--web`. A clean
+  `apt install` yields a server with no web client — today `make deploy`
+  pushes the two together, so the split is new.
+- **`STORM_TOKEN=change-me` ships as a conf-file.** `conf-files` correctly
+  stops `dpkg` overwriting a real token on upgrade, but a fresh install still
+  comes up guessable. `postinst` should generate one with `openssl rand -hex
+  32` when it still reads `change-me` — which is also what finally retires
+  `testtoken` without anyone having to remember to.
+- **Tags bypass CI.** `ci.yml` triggers on pushes to `main` and on PRs, not on
+  tags, so a tag can publish artifacts that never ran `make check` or
+  `make test-live`.
+- **The macOS artifact is ad-hoc signed** (`CODE_SIGN_IDENTITY = "-"`) and
+  unnotarized, so a downloaded zip is quarantined and Gatekeeper refuses it.
+  `macos-latest` is arm64, so the app is arm64-only too.
+
+#### The decision M15 has to make first
+
+**Which layout the VM is supposed to have.** The brief claims the `.deb`
+discharges the "no systemd unit" blocker. It does not, in two ways: `apt
+install` needs the same sudo password that has blocked the manual step all
+along, and the packaged unit points at `/srv/storm` while the VM's data is at
+`/home/dewansh/storm`. Installing it as drafted onto that box gives a second
+server bound to the same port and reading empty directories.
+
+So M15 either includes an explicit migration — stop `run.sh`, move
+`{vaults,state}` to `/srv/storm`, chown to `storm` — or the packaged unit is
+written against the layout actually in use. That is the same decision the
+section above leaves open, and packaging is what finally forces it.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1506,10 +1643,15 @@ and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
   one-time `sudo` step that only the user can take. `make deploy` also targets
   `/srv/storm` and `systemctl`, neither of which exists on that box — the
   deployment is manual until the unit is installed.
+  **M15 does not remove this**, and it is worth being precise about why:
+  `apt install` needs the same password, so packaging shortens the manual step
+  rather than discharging it. What packaging *does* force is the choice of
+  which layout the box should have — see M15.
 - *The shared token is still `testtoken`.* It is at least off the command line
   now (in `/home/dewansh/.storm-env`, mode 600), so `/proc` no longer exposes
   it to every local user. Rotating it means updating the phone and the browser
-  at the same time, so it is the user's call.
+  at the same time, so it is the user's call. M15's `postinst` generates a real
+  token on install, which is the natural moment to do it.
 
 Both former build blockers are discharged as of 2026-08-05:
 
