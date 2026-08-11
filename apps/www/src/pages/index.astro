@@ -2,8 +2,9 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import BrandMark from "../components/BrandMark.astro";
 import CodeBlock from "../components/CodeBlock.astro";
+import { release } from "../data/release";
 
-const bootstrap = `curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh`;
+const bootstrap = release.installCommand;
 
 const mcpTools = [
   "list_vaults",
@@ -24,7 +25,7 @@ const description =
   "Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients and MCP access for AI agents.";
 ---
 
-<BaseLayout title="Storm" description={description}>
+<BaseLayout title="Storm — Self-hosted knowledge" description={description}>
   <!-- HERO -->
   <section class="hero" aria-labelledby="hero-heading">
     <div class="wrap hero-inner">
@@ -41,19 +42,14 @@ const description =
       </p>
       <div class="cta">
         <a class="btn btn-primary" href="/install">Install Storm</a>
+        <a class="btn btn-ghost" href="/clients">Get a client</a>
         <a class="btn btn-ghost" href="#docs">Read the docs</a>
-        <a
-          class="btn btn-ghost"
-          href="https://github.com/dewanshDT/Storm"
-          target="_blank"
-          rel="noopener noreferrer">GitHub</a
-        >
       </div>
 
       <div class="hero-install">
         <CodeBlock code={bootstrap} label="install" />
         <p class="install-note">
-          Debian / Ubuntu apt bootstrap. Then
+          Debian / Ubuntu apt bootstrap (from the apt repo). Then
           <code>sudo storm-server up</code>.
           <a href="/install">Full installation →</a>
         </p>
@@ -214,31 +210,33 @@ Archive/</code></pre>
     </div>
   </section>
 
-  <!-- 05 CLIENT -->
+  <!-- 05 CLIENTS -->
   <section class="section" id="client" aria-labelledby="client-h">
     <div class="wrap">
-      <p class="section-label">05 · Client</p>
+      <p class="section-label">05 · Clients</p>
       <h2 id="client-h">One client across your devices.</h2>
       <p class="support">
-        Storm uses a Flutter client for a consistent experience on the platforms
-        that ship today: macOS, Android, and web. The phone layout is the
-        default; wide screens add a sidebar without changing the small-screen
-        experience.
+        A single Flutter client provides the same Storm experience across
+        desktop, mobile, and web. Download a native build, or open the web UI
+        served by your server.
       </p>
       <div class="platform-row">
         <div class="platform">
           <span class="chip">macOS</span>
-          <p>Desktop app with sandbox network and file entitlements.</p>
+          <p>Apple Silicon desktop client.</p>
         </div>
         <div class="platform">
           <span class="chip">Android</span>
-          <p>Release APK with full network access for your server.</p>
+          <p>Direct APK for your phone.</p>
         </div>
         <div class="platform">
           <span class="chip">Web</span>
-          <p>Packaged UI served by storm-server itself.</p>
+          <p>Bundled with storm-server.</p>
         </div>
       </div>
+      <p class="cta-inline">
+        <a class="btn btn-primary" href="/clients">Get a client →</a>
+      </p>
     </div>
   </section>
 
@@ -292,26 +290,35 @@ Archive/</code></pre>
       <p class="support">
         Install the server, then get a client for your device.
       </p>
-      <div class="install-paths">
-        <a class="path-card" href="/install#linux">
-          <span class="chip">Linux</span>
-          <strong>Apt bootstrap</strong>
-          <span>install.sh → storm-server up</span>
-        </a>
-        <a class="path-card" href="/install#clients">
-          <span class="chip">Clients</span>
-          <strong>Get Storm</strong>
-          <span>macOS · Android · Web</span>
-        </a>
-        <a class="path-card" href="/install#start">
-          <span class="chip">Connect</span>
-          <strong>Server + token</strong>
-          <span>Point clients at your server</span>
-        </a>
-      </div>
-      <p class="cta-inline">
-        <a class="btn btn-primary" href="/install">Installation guide</a>
-      </p>
+      <ol class="steps">
+        <li>
+          <span class="step-num mono">01</span>
+          <div>
+            <strong>Install the server</strong>
+            <p>Install storm-server on Debian or Ubuntu.</p>
+            <a href="/install">Install command →</a>
+          </div>
+        </li>
+        <li>
+          <span class="step-num mono">02</span>
+          <div>
+            <strong>Get a client</strong>
+            <p>Choose macOS, Android, or Web.</p>
+            <a href="/clients">Get a client →</a>
+          </div>
+        </li>
+        <li>
+          <span class="step-num mono">03</span>
+          <div>
+            <strong>Connect</strong>
+            <p>
+              Point the client at your Storm server and the token from
+              <code>/etc/storm/storm.env</code>.
+            </p>
+            <a href="/install#start">Connection guide →</a>
+          </div>
+        </li>
+      </ol>
     </div>
   </section>
 
@@ -319,10 +326,10 @@ Archive/</code></pre>
   <section class="section" id="docs" aria-labelledby="docs-h">
     <div class="wrap">
       <p class="section-label">08 · Documentation</p>
-      <h2 id="docs-h">Depth lives in the repository.</h2>
+      <h2 id="docs-h">Depth lives next to the code.</h2>
       <p class="support">
         Storm does not ship a separate docs portal. Operator and architecture
-        detail stays next to the code.
+        detail stays in the repository.
       </p>
       <ul class="doc-list">
         <li>
@@ -350,16 +357,16 @@ Archive/</code></pre>
           <span>apps/client/README.md</span>
         </li>
         <li>
+          <a href="/how-it-works">Architecture</a>
+          <span>How it works</span>
+        </li>
+        <li>
           <a
             href="https://github.com/dewanshDT/Storm/blob/main/PLAN.md"
             target="_blank"
             rel="noopener noreferrer">Plan &amp; decisions</a
           >
           <span>PLAN.md</span>
-        </li>
-        <li>
-          <a href="/how-it-works">How it works</a>
-          <span>Architecture sketch</span>
         </li>
         <li>
           <a
@@ -628,6 +635,7 @@ Archive/</code></pre>
   .platform-row {
     display: grid;
     gap: calc(var(--sp) * 2);
+    margin-bottom: calc(var(--sp) * 4);
   }
 
   @media (min-width: 720px) {
@@ -687,49 +695,60 @@ Archive/</code></pre>
     color: var(--text2);
   }
 
-  .install-paths {
+  .steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: grid;
-    gap: calc(var(--sp) * 1.5);
-    margin-bottom: calc(var(--sp) * 4);
+    gap: 0;
+    border-top: var(--bw) solid var(--border);
   }
 
-  @media (min-width: 720px) {
-    .install-paths {
-      grid-template-columns: repeat(3, 1fr);
-    }
+  .steps li {
+    display: grid;
+    grid-template-columns: 3rem 1fr;
+    gap: calc(var(--sp) * 2);
+    padding: calc(var(--sp) * 3) 0;
+    border-bottom: var(--bw) solid var(--border);
   }
 
-  .path-card {
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--sp) * 1);
-    padding: calc(var(--sp) * 2.5);
-    border: var(--bw) solid var(--border);
-    border-radius: var(--r-card);
-    background: var(--surface);
-    text-decoration: none;
-    color: inherit;
-    transition: border-color var(--dur) var(--ease);
+  .step-num {
+    padding-top: 2px;
   }
 
-  .path-card:hover {
-    border-color: var(--text3);
-    color: inherit;
-    text-decoration: none;
-  }
-
-  .path-card strong {
+  .steps strong {
+    display: block;
     font-family: var(--font-sans);
-    font-size: var(--fs-sm);
+    font-size: var(--fs-md);
     font-weight: 600;
+    color: var(--text);
+    margin-bottom: calc(var(--sp) * 0.75);
+  }
+
+  .steps p {
+    margin: 0 0 calc(var(--sp) * 1);
+    font-family: var(--font-body);
+    font-size: var(--fs-md);
+    line-height: 1.55;
+    color: var(--text2);
+  }
+
+  .steps code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
     color: var(--text);
   }
 
-  .path-card > span:last-child {
-    font-family: var(--font-body);
+  .steps a {
+    font-family: var(--font-sans);
     font-size: var(--fs-sm);
-    color: var(--text2);
-    line-height: 1.45;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  .steps a:hover {
+    color: var(--text);
   }
 
   .cta-inline {
@@ -783,6 +802,10 @@ Archive/</code></pre>
 
     .cta .btn {
       flex: 1 1 auto;
+    }
+
+    .steps li {
+      grid-template-columns: 2.5rem 1fr;
     }
   }
 </style>

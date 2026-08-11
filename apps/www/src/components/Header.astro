@@ -5,6 +5,7 @@ const path = Astro.url.pathname.replace(/\/$/, "") || "/";
 const onHome = path === "/";
 
 const links = [
+  { href: "/clients", label: "Clients" },
   { href: onHome ? "#docs" : "/#docs", label: "Docs" },
   {
     href: "https://github.com/dewanshDT/Storm",
@@ -38,17 +39,23 @@ const links = [
 
     <nav id="site-nav" class="site-nav" aria-label="Primary" data-site-nav>
       {
-        links.map((link) => (
-          <a
-            href={link.href}
-            class="nav-link"
-            {...(link.external
-              ? { target: "_blank", rel: "noopener noreferrer" }
-              : {})}
-          >
-            {link.label}
-          </a>
-        ))
+        links.map((link) => {
+          const active =
+            !link.external &&
+            (link.href === path ||
+              (link.href === "/clients" && path === "/clients"));
+          return (
+            <a
+              href={link.href}
+              class:list={["nav-link", active && "is-active"]}
+              {...(link.external
+                ? { target: "_blank", rel: "noopener noreferrer" }
+                : {})}
+            >
+              {link.label}
+            </a>
+          );
+        })
       }
       <a
         class:list={["btn", "btn-primary", "nav-install", path === "/install" && "is-active"]}
@@ -194,7 +201,8 @@ const links = [
       background-color var(--dur) var(--ease);
   }
 
-  .nav-link:hover {
+  .nav-link:hover,
+  .nav-link.is-active {
     color: var(--text);
     background: var(--surface);
     text-decoration: none;

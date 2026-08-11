@@ -1,0 +1,19 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import GetStorm from "../components/GetStorm.astro";
+---
+
+<BaseLayout
+  title="Clients"
+  description="Download Storm for macOS or Android, or open the web client served by your Storm server."
+>
+  <div class="page wrap">
+    <GetStorm label="Clients" id="clients" displayHeading={true} />
+  </div>
+</BaseLayout>
+
+<style>
+  .page {
+    padding: calc(var(--sp) * 7) 0 calc(var(--sp) * 10);
+  }
+</style>

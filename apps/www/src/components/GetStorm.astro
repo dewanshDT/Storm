@@ -6,124 +6,142 @@ interface Props {
   label?: string;
   /** Anchor id for deep links */
   id?: string;
+  /** Show the page-style display heading */
+  displayHeading?: boolean;
+  /** Where “Open →” for Web should go */
+  webOpenHref?: string;
+  /** Footer link to server install docs */
+  installHref?: string;
 }
 
-const { label = "07 · Clients", id = "clients" } = Astro.props;
+const {
+  label = "Clients",
+  id = "clients",
+  displayHeading = true,
+  webOpenHref = "/install#start",
+  installHref = "/install",
+} = Astro.props;
 
 const { macos, android, web } = release;
+const rows = [macos, android, web];
 ---
 
 <section class="get-storm" id={id} aria-labelledby={`${id}-heading`} data-get-storm>
-  <p class="section-label">{label}</p>
-  <h2 id={`${id}-heading`}>Get Storm</h2>
+  {
+    label && (
+      <p class="section-label">{label}</p>
+    )
+  }
+  {
+    displayHeading ? (
+      <h1 id={`${id}-heading`} class="display">
+        One client.
+        <br />
+        Your devices.
+      </h1>
+    ) : (
+      <h2 id={`${id}-heading`}>Get Storm</h2>
+    )
+  }
   <p class="support">
-    Choose a client for your device. All clients connect to your Storm server.
-  </p>
-
-  <p class="release-badge">
-    <span class="mono">Current release · {release.tag}</span>
+    Download Storm for your device, or open the web client directly from your
+    server.
   </p>
 
   <ul class="manifest" role="list">
-    <li class="row" id={macos.id} data-platform={macos.detect}>
-      <div class="row-main">
-        <div class="identity">
-          <span class="mark" aria-hidden="true"></span>
-          <div>
-            <div class="name-line">
-              <span class="name">{macos.platform}</span>
-              <span class="rec" hidden data-rec>Recommended</span>
+    {
+      rows.map((row) => (
+        <li class="row" id={row.id} data-platform={row.detect}>
+          <div class="row-main">
+            <div class="info">
+              <div class="name-line">
+                <span class="name">{row.platform}</span>
+                <span class="rec" hidden data-rec>
+                  Current
+                </span>
+              </div>
+              <p class="meta mono">
+                {row.meta}
+                {row.action === "download" && (
+                  <>
+                    {" · "}
+                    {release.tag}
+                  </>
+                )}
+              </p>
+              <p class="blurb">{row.blurb}</p>
+              {row.note && <p class="note mono">{row.note}</p>}
             </div>
-            <p class="meta mono">{macos.meta}</p>
-            <p class="ver mono">{release.tag}</p>
+            <div class="actions">
+              {row.action === "download" ? (
+                <>
+                  <a
+                    class="action"
+                    href={row.url}
+                    download
+                    aria-label={row.aria}
+                  >
+                    {row.cta}
+                  </a>
+                  <p class="file mono">{row.file}</p>
+                </>
+              ) : (
+                <>
+                  <a class="action" href={webOpenHref} aria-label={row.aria}>
+                    {row.cta}
+                  </a>
+                  <a
+                    class="secondary"
+                    href={row.url}
+                    download
+                    aria-label={`Download Storm web bundle ${row.file}`}
+                  >
+                    Self-host the web client separately →
+                  </a>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-        <div class="actions">
-          <a
-            class="btn btn-primary cta"
-            href={macos.url}
-            download
-            aria-label={`Download Storm for macOS (${release.tag})`}
-          >
-            Download for macOS
-          </a>
-          <p class="file mono">{macos.file}</p>
-        </div>
-      </div>
-    </li>
+        </li>
+      ))
+    }
 
-    <li class="row" id={android.id} data-platform={android.detect}>
+    <li class="row row--muted" id="linux">
       <div class="row-main">
-        <div class="identity">
-          <span class="mark" aria-hidden="true">▢</span>
-          <div>
-            <div class="name-line">
-              <span class="name">{android.platform}</span>
-              <span class="rec" hidden data-rec>Recommended</span>
-            </div>
-            <p class="meta mono">{android.meta}</p>
+        <div class="info">
+          <div class="name-line">
+            <span class="name">Linux</span>
           </div>
+          <p class="meta mono">Desktop client deferred</p>
+          <p class="blurb">
+            The web client works on Linux today. A native desktop build is not
+            shipping yet.
+          </p>
         </div>
         <div class="actions">
-          <a
-            class="btn btn-primary cta"
-            href={android.url}
-            download
-            aria-label={`Download Storm APK for Android (${release.tag})`}
-          >
-            Download APK
-          </a>
-          <p class="file mono">{android.file}</p>
-        </div>
-      </div>
-    </li>
-
-    <li class="row" id={web.id} data-platform={web.detect}>
-      <div class="row-main">
-        <div class="identity">
-          <span class="mark" aria-hidden="true">◈</span>
-          <div>
-            <div class="name-line">
-              <span class="name">{web.platform}</span>
-              <span class="rec" hidden data-rec>Recommended</span>
-            </div>
-            <p class="meta mono">{web.meta}</p>
-            <p class="ver mono">http://&lt;host&gt;:{release.webPort}</p>
-          </div>
-        </div>
-        <div class="actions">
-          <a
-            class="btn btn-primary cta"
-            href="#start"
-            aria-label="Open Storm Web Client on your server after install"
-          >
-            Open Web Client →
-          </a>
-          <a
-            class="secondary"
-            href={web.url}
-            download
-            aria-label={`Download Storm web bundle ${web.file}`}
-          >
-            Download web bundle
+          <a class="action action--ghost" href={`${id === "clients" ? "#web" : "/clients#web"}`}>
+            Use Web →
           </a>
         </div>
       </div>
     </li>
   </ul>
 
-  <nav class="footer-links" aria-label="Release resources">
-    <a href={release.checksumsUrl} target="_blank" rel="noopener noreferrer"
-      >Checksums</a
-    >
-    <a href={release.notesUrl} target="_blank" rel="noopener noreferrer"
-      >Release notes</a
-    >
-    <a href={release.allUrl} target="_blank" rel="noopener noreferrer"
-      >All releases</a
-    >
-    <a href="#linux">Installation instructions →</a>
-  </nav>
+  <div class="release-foot">
+    <p class="mono">Current release · {release.tag}</p>
+    <nav class="footer-links" aria-label="Release resources">
+      <a href={release.checksumsUrl} target="_blank" rel="noopener noreferrer"
+        >Checksums</a
+      >
+      <a href={release.notesUrl} target="_blank" rel="noopener noreferrer"
+        >Release notes</a
+      >
+      <a href={release.allUrl} target="_blank" rel="noopener noreferrer"
+        >All releases</a
+      >
+      <a href={installHref}>Installation →</a>
+    </nav>
+  </div>
 </section>
 
 <script>
@@ -133,7 +151,6 @@ const { macos, android, web } = release;
     if (/Mac OS X|Macintosh/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua)) {
       return "mac";
     }
-    // Other desktops / unknown — web is the portable path
     if (/Win|Linux|CrOS/i.test(ua) && !/Android/i.test(ua)) return "web";
     return null;
   }
@@ -148,7 +165,7 @@ const { macos, android, web } = release;
       if (!rec) return;
       const match = row.dataset.platform === platform;
       rec.hidden = !match;
-      row.classList.toggle("is-recommended", match);
+      row.classList.toggle("is-current", match);
     });
   }
 
@@ -158,15 +175,21 @@ const { macos, android, web } = release;
 
 <style>
   .get-storm {
-    max-width: 40rem;
+    max-width: 42rem;
+  }
+
+  .display {
+    margin: 0 0 calc(var(--sp) * 2.5);
+    font-family: var(--font-body);
+    font-size: clamp(2rem, 4.5vw, 2.75rem);
+    font-weight: 500;
+    letter-spacing: -0.025em;
+    line-height: 1.12;
+    color: var(--text);
   }
 
   .get-storm .support {
-    margin-bottom: calc(var(--sp) * 2);
-  }
-
-  .release-badge {
-    margin: 0 0 calc(var(--sp) * 3);
+    margin-bottom: calc(var(--sp) * 4);
   }
 
   .mono {
@@ -180,48 +203,33 @@ const { macos, android, web } = release;
     list-style: none;
     margin: 0;
     padding: 0;
-    border: var(--bw) solid var(--border);
-    border-radius: var(--r-card);
-    background: var(--surface);
-    overflow: hidden;
+    border-top: var(--bw) solid var(--border);
   }
 
   .row {
     border-bottom: var(--bw) solid var(--border);
   }
 
-  .row:last-child {
-    border-bottom: 0;
+  .row.is-current {
+    background: color-mix(in oklab, var(--accent-soft) 40%, transparent);
   }
 
-  .row.is-recommended {
-    background: color-mix(in oklab, var(--accent-soft) 55%, var(--surface));
+  .row--muted .name {
+    color: var(--text2);
   }
 
   .row-main {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: calc(var(--sp) * 2) calc(var(--sp) * 3);
-    padding: calc(var(--sp) * 2.75) calc(var(--sp) * 2.5);
+    padding: calc(var(--sp) * 3) 0;
   }
 
-  .identity {
-    display: flex;
-    gap: calc(var(--sp) * 1.75);
-    align-items: flex-start;
-    min-width: min(100%, 14rem);
-  }
-
-  .mark {
-    font-family: var(--font-mono);
-    font-size: var(--fs-sm);
-    color: var(--text3);
-    line-height: 1.6;
-    width: 1.25rem;
-    text-align: center;
-    flex-shrink: 0;
+  .info {
+    min-width: min(100%, 16rem);
+    flex: 1 1 14rem;
   }
 
   .name-line {
@@ -229,14 +237,15 @@ const { macos, android, web } = release;
     flex-wrap: wrap;
     align-items: baseline;
     gap: calc(var(--sp) * 1) calc(var(--sp) * 1.5);
-    margin-bottom: calc(var(--sp) * 0.5);
+    margin-bottom: calc(var(--sp) * 0.75);
   }
 
   .name {
     font-family: var(--font-sans);
-    font-size: var(--fs-md);
+    font-size: var(--fs-lg);
     font-weight: 600;
     color: var(--text);
+    letter-spacing: -0.01em;
   }
 
   .rec {
@@ -248,14 +257,23 @@ const { macos, android, web } = release;
   }
 
   .meta,
-  .ver,
+  .blurb,
+  .note,
   .file {
     margin: 0;
     line-height: 1.45;
   }
 
-  .ver {
-    margin-top: 2px;
+  .blurb {
+    margin-top: calc(var(--sp) * 1);
+    font-family: var(--font-body);
+    font-size: var(--fs-md);
+    color: var(--text2);
+    max-width: 28rem;
+  }
+
+  .note {
+    margin-top: calc(var(--sp) * 1);
   }
 
   .actions {
@@ -264,15 +282,29 @@ const { macos, android, web } = release;
     align-items: flex-end;
     gap: calc(var(--sp) * 0.75);
     margin-left: auto;
+    padding-top: 2px;
   }
 
-  .cta {
-    min-height: 40px;
-    white-space: nowrap;
+  .action {
+    font-family: var(--font-sans);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    letter-spacing: 0.01em;
+    transition: color var(--dur) var(--ease);
+  }
+
+  .action:hover {
+    color: var(--text);
+  }
+
+  .action--ghost {
+    color: var(--text2);
   }
 
   .file {
-    max-width: 18rem;
+    max-width: 16rem;
     text-align: right;
     overflow-wrap: anywhere;
   }
@@ -280,20 +312,30 @@ const { macos, android, web } = release;
   .secondary {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    color: var(--text2);
+    color: var(--text3);
     text-decoration: none;
     letter-spacing: 0.02em;
+    text-align: right;
+    max-width: 16rem;
   }
 
   .secondary:hover {
     color: var(--accent);
   }
 
+  .release-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: calc(var(--sp) * 2);
+    margin-top: calc(var(--sp) * 3);
+  }
+
   .footer-links {
     display: flex;
     flex-wrap: wrap;
     gap: calc(var(--sp) * 1) calc(var(--sp) * 2.5);
-    margin-top: calc(var(--sp) * 3);
   }
 
   .footer-links a {
@@ -315,19 +357,14 @@ const { macos, android, web } = release;
     }
 
     .actions {
-      align-items: stretch;
+      align-items: flex-start;
       margin-left: 0;
-      width: 100%;
-    }
-
-    .cta {
-      width: 100%;
-      justify-content: center;
     }
 
     .file,
     .secondary {
       text-align: left;
+      max-width: none;
     }
   }
 </style>

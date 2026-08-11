@@ -14,7 +14,10 @@ const {
   description,
   ogImage = "/brand/storm_icon_full.png",
 } = Astro.props;
-const pageTitle = title === "Storm" ? "Storm" : `${title} · Storm`;
+const pageTitle =
+  title === "Storm" || title.startsWith("Storm ") || title.startsWith("Storm—") || title.startsWith("Storm —")
+    ? title
+    : `${title} · Storm`;
 ---
 
 <!doctype html>

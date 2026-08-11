@@ -8,7 +8,8 @@ Marketing / home site for Storm. Astro, static. Milestone **M16** in
 | Path | Purpose | Copy |
 |---|---|---|
 | `/` | Product story — knowledge, MCP, architecture, install CTA | `docs/www/home.md` |
-| `/install` | Apt source + `storm-server up` + clients | `docs/www/install.md` |
+| `/clients` | Get Storm — macOS / Android / Web downloads | `docs/www/install.md` (clients) |
+| `/install` | Apt source + `storm-server up` + link to clients | `docs/www/install.md` |
 | `/how-it-works` | Architecture sketch; deep links to the repo | `docs/www/how-it-works.md` |
 
 Canonical prose also lives in the personal vault as **Storm Website** notes
