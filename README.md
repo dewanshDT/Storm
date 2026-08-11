@@ -43,7 +43,16 @@ That URL is the **apt repository** root (not the marketing site). Details:
 UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
 [Clients page](https://storm.dewansh.space/clients).
 
-Current release: **v0.2.2** (pre-release).
+### Update
+
+```sh
+sudo apt update
+sudo apt install --only-upgrade storm-server
+sudo systemctl restart storm-server
+sudo storm-server status
+```
+
+Current release: **v0.2.3** (pre-release).
 
 ## Layout
 

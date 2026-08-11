@@ -153,3 +153,9 @@ Future<void> openVault(
   c.read(routerProvider).go(Routes.browse(vaultId));
   await tester.pumpAndSettle();
 }
+
+/// Notes open in Read Mode; tests that drive the source editor need Edit first.
+Future<void> enterEditMode(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('mode-edit')));
+  await tester.pumpAndSettle();
+}

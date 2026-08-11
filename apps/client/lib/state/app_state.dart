@@ -31,6 +31,9 @@ class Settings {
     this.activeVault = '',
     this.bodyFont = BodyFont.serif,
     this.showNoteId = false,
+    // On by default: notes open as a document. Off restores the pre-M17
+    // editor-only note screen (no Read / Edit switch).
+    this.readMode = true,
   });
 
   final String baseUrl;
@@ -62,6 +65,12 @@ class Settings {
   /// the list is the only place frontmatter is visible at all.
   final bool showNoteId;
 
+  /// Whether notes open in Read Mode with a Read / Edit switch.
+  ///
+  /// On by default (decision 50). Off hides the switch and keeps the source
+  /// editor only — the note screen as it was before M17.
+  final bool readMode;
+
   /// Which vault the note-level providers are serving.
   ///
   /// The **route** is the source of truth for which vault is open; this is a
@@ -84,6 +93,7 @@ class Settings {
     String? activeVault,
     BodyFont? bodyFont,
     bool? showNoteId,
+    bool? readMode,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     token: token ?? this.token,
@@ -92,6 +102,7 @@ class Settings {
     activeVault: activeVault ?? this.activeVault,
     bodyFont: bodyFont ?? this.bodyFont,
     showNoteId: showNoteId ?? this.showNoteId,
+    readMode: readMode ?? this.readMode,
   );
 }
 
@@ -104,6 +115,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kVault = 'storm.activeVault';
   static const _kBodyFont = 'storm.bodyFont';
   static const _kShowId = 'storm.showNoteId';
+  static const _kReadMode = 'storm.readMode';
 
   @override
   Future<Settings> build() async {
@@ -116,6 +128,9 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       activeVault: prefs.getString(_kVault) ?? '',
       bodyFont: BodyFont.fromName(prefs.getString(_kBodyFont)),
       showNoteId: prefs.getBool(_kShowId) ?? false,
+      // Missing key → on: matches a fresh install and anyone who has never
+      // opted out. Only an explicit `false` turns Read Mode off.
+      readMode: prefs.getBool(_kReadMode) ?? true,
     );
   }
 
@@ -148,6 +163,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setString(_kVault, cleaned.activeVault);
     await prefs.setString(_kBodyFont, cleaned.bodyFont.name);
     await prefs.setBool(_kShowId, cleaned.showNoteId);
+    await prefs.setBool(_kReadMode, cleaned.readMode);
   }
 }
 

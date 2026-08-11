@@ -51,7 +51,7 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
 4. **04 · Storage** — Ordinary `.md` files.
 5. **05 · Client** — macOS · Android · Web only (no fake screenshots).
 6. **06 · Synchronization** — Synced / Offline / Conflict status language.
-7. **07 · Installation** — Links into `/install`.
+7. **07 · Installation** — Links into `/install` (install + update + connect).
 8. **08 · Documentation** — Repo deep links only (no docs portal).
 
 ## Design notes

@@ -16,7 +16,6 @@ import '../state/wikilinks.dart';
 import 'accents.dart';
 import 'tokens.dart';
 import '../sync/sync_engine.dart';
-import 'attachment_strip.dart';
 import 'surfaces.dart';
 import 'widgets.dart';
 import 'mentions_section.dart';
@@ -298,21 +297,17 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
               children: [
                 Expanded(
                   child: NoteEditor(
+                    key: ValueKey(widget.noteId),
                     onFollowLink: _followLink,
                     showToolbar: keyboard,
                     onActions: () => _noteActions(isPinned),
-                    footer: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        AttachmentStrip(body: session.body),
-                        MentionsSection(
-                          noteId: widget.noteId,
-                          initiallyExpanded: _showContext,
-                          onOpen: (note) =>
-                              context.push(Routes.note(vaultId, note.id)),
-                        ),
-                      ],
+                    // Image thumbnails live inside NoteEditor (Edit Mode only).
+                    // Read Mode renders images inline via StormMarkdownView.
+                    footer: MentionsSection(
+                      noteId: widget.noteId,
+                      initiallyExpanded: _showContext,
+                      onOpen: (note) =>
+                          context.push(Routes.note(vaultId, note.id)),
                     ),
                   ),
                 ),

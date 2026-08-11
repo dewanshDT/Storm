@@ -319,6 +319,15 @@ class ClientSettingsBody extends ConsumerWidget {
         ),
         const PopoverDivider(),
         PopoverItem(
+          label: 'Read mode',
+          subtitle: 'Document view with a Read / Edit switch',
+          trailing: StormSwitch(
+            key: const Key('setting-read-mode'),
+            value: settings.readMode,
+            onChanged: (v) => notifier.save(settings.copyWith(readMode: v)),
+          ),
+        ),
+        PopoverItem(
           label: 'Show note id',
           trailing: StormSwitch(
             value: settings.showNoteId,
