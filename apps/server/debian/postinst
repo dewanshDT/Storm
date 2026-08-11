@@ -10,7 +10,13 @@ if ! id storm >/dev/null 2>&1; then
 fi
 
 mkdir -p /srv/storm/vaults /srv/storm/state /srv/storm/backups /etc/storm
-chown -R storm:storm /srv/storm 2>/dev/null || true
+# Only claim ownership on a *fresh* tree. An upgrade must not yank /srv/storm
+# away from the operator `up` chose — NFS vault layouts run the unit as the
+# state-dir owner (often a real user), and `chown -R storm:storm` on every
+# apt upgrade makes serve fail with Permission denied on vaults.json.
+if [ ! -e /srv/storm/state/vaults.json ]; then
+    chown -R storm:storm /srv/storm 2>/dev/null || true
+fi
 
 if [ -f /etc/storm/storm.env ]; then
     # Fresh conf-file still says change-me — generate a real token so a later

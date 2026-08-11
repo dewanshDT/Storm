@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/client_version.dart';
 import '../widgets.dart';
 import '../surfaces.dart';
 import '../theme.dart';
@@ -256,6 +257,10 @@ class AppearanceMenu extends StatelessWidget {
 /// the pane beside the sidebar. A popover anchored to the sidebar's footer
 /// gear would open below the bottom of the window, which is how that button
 /// came to look like it did nothing.
+///
+/// Grouped like Server settings — section labels and spacing, not cards — so
+/// Appearance / Notes / Connection / About read as one list of facts rather
+/// than a flat pile of switches.
 class ClientSettingsBody extends ConsumerWidget {
   const ClientSettingsBody({super.key, this.onDone});
 
@@ -267,83 +272,177 @@ class ClientSettingsBody extends ConsumerWidget {
     final t = context.tokens;
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final notifier = ref.read(settingsProvider.notifier);
+    final version = ref.watch(clientVersionProvider).value;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: EdgeInsets.only(left: t.sp * 0.75, bottom: t.sp * 0.75),
-          child: const SectionLabel('Appearance'),
-        ),
-        // A switch could only ever say two things, and there are three
-        // identities to choose between.
-        Wrap(
-          spacing: t.sp * 0.5,
-          runSpacing: t.sp * 0.5,
+        _ClientSection(
+          label: 'Appearance',
+          first: true,
           children: [
-            for (final preset in StormPreset.values)
-              _Choice(
-                label: preset.label,
-                selected: settings.theme == preset,
-                onTap: () => notifier.save(settings.copyWith(theme: preset)),
-              ),
+            // A switch could only ever say two things, and there are three
+            // identities to choose between.
+            Wrap(
+              spacing: t.sp * 0.5,
+              runSpacing: t.sp * 0.5,
+              children: [
+                for (final preset in StormPreset.values)
+                  _Choice(
+                    label: preset.label,
+                    selected: settings.theme == preset,
+                    onTap: () =>
+                        notifier.save(settings.copyWith(theme: preset)),
+                  ),
+              ],
+            ),
+            SizedBox(height: t.sp),
+            _SliderRow(
+              label: 'Text size',
+              value: settings.fontSize,
+              display: '${settings.fontSize.round()}px',
+              onChanged: (v) => notifier.save(settings.copyWith(fontSize: v)),
+            ),
+            SizedBox(height: t.sp * 0.75),
+            // Field label, not a peer SectionLabel — "Note font" is one control
+            // under Appearance, not a second top-level group.
+            const _FieldLabel('Note font'),
+            SizedBox(height: t.sp * 0.5),
+            Wrap(
+              spacing: t.sp * 0.5,
+              runSpacing: t.sp * 0.5,
+              children: [
+                for (final font in BodyFont.values)
+                  _Choice(
+                    label: font.label,
+                    // Each option is set in the face it names, so the choice
+                    // shows what it will do.
+                    family: font.family,
+                    selected: settings.bodyFont == font,
+                    onTap: () =>
+                        notifier.save(settings.copyWith(bodyFont: font)),
+                  ),
+              ],
+            ),
           ],
         ),
-        SizedBox(height: t.sp),
-        _SliderRow(
-          label: 'Text size',
-          value: settings.fontSize,
-          display: '${settings.fontSize.round()}px',
-          onChanged: (v) => notifier.save(settings.copyWith(fontSize: v)),
-        ),
-        SizedBox(height: t.sp * 0.5),
-        Padding(
-          padding: EdgeInsets.only(left: t.sp * 0.75, bottom: t.sp * 0.5),
-          child: const SectionLabel('Note font'),
-        ),
-        Wrap(
-          spacing: t.sp * 0.5,
-          runSpacing: t.sp * 0.5,
+        _ClientSection(
+          label: 'Notes',
           children: [
-            for (final font in BodyFont.values)
-              _Choice(
-                label: font.label,
-                // Each option is set in the face it names, so the choice
-                // shows what it will do.
-                family: font.family,
-                selected: settings.bodyFont == font,
-                onTap: () => notifier.save(settings.copyWith(bodyFont: font)),
+            PopoverItem(
+              label: 'Read mode',
+              subtitle: 'Document view with a Read / Edit switch',
+              trailing: StormSwitch(
+                key: const Key('setting-read-mode'),
+                value: settings.readMode,
+                onChanged: (v) => notifier.save(settings.copyWith(readMode: v)),
               ),
+            ),
+            PopoverItem(
+              label: 'Show note id',
+              subtitle: 'UUID in the properties strip',
+              trailing: StormSwitch(
+                value: settings.showNoteId,
+                onChanged: (v) =>
+                    notifier.save(settings.copyWith(showNoteId: v)),
+              ),
+            ),
           ],
         ),
-        const PopoverDivider(),
-        PopoverItem(
-          label: 'Read mode',
-          subtitle: 'Document view with a Read / Edit switch',
-          trailing: StormSwitch(
-            key: const Key('setting-read-mode'),
-            value: settings.readMode,
-            onChanged: (v) => notifier.save(settings.copyWith(readMode: v)),
+        _ClientSection(
+          label: 'Connection',
+          children: [
+            PopoverItem(
+              label: 'Disconnect',
+              subtitle: 'Forget this server and its token',
+              tone: PopoverTone.muted,
+              onTap: () {
+                onDone?.call();
+                notifier.save(const Settings());
+              },
+            ),
+          ],
+        ),
+        // Release builds stamp --build-name from the tag; without this line a
+        // web hard-refresh is the only way to tell whether the service worker
+        // still has yesterday's bundle.
+        if (version != null)
+          _ClientSection(
+            label: 'About',
+            children: [
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: t.sp * 0.75),
+                child: Text(
+                  'Version $version',
+                  key: const Key('client-version'),
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize,
+                    color: t.text3,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ),
-        PopoverItem(
-          label: 'Show note id',
-          trailing: StormSwitch(
-            value: settings.showNoteId,
-            onChanged: (v) => notifier.save(settings.copyWith(showNoteId: v)),
-          ),
-        ),
-        PopoverItem(
-          label: 'Disconnect',
-          subtitle: 'Forget this server and its token',
-          tone: PopoverTone.muted,
-          onTap: () {
-            onDone?.call();
-            notifier.save(const Settings());
-          },
-        ),
       ],
+    );
+  }
+}
+
+/// A top-level group on Client settings — same job as Server settings'
+/// `_Section`, kept local so the popover and the desk page stay in lockstep.
+class _ClientSection extends StatelessWidget {
+  const _ClientSection({
+    required this.label,
+    required this.children,
+    this.first = false,
+  });
+
+  final String label;
+  final List<Widget> children;
+  final bool first;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.only(
+            left: t.sp * 0.75,
+            top: first ? 0 : t.sp * 1.75,
+            bottom: t.sp * 0.75,
+          ),
+          child: SectionLabel(label),
+        ),
+        ...children,
+      ],
+    );
+  }
+}
+
+/// Quiet label for a control inside a section (matches the Text size row).
+class _FieldLabel extends StatelessWidget {
+  const _FieldLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: t.sp * 0.75),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontFamily: StormTokens.sansFamily,
+          fontSize: t.codeSize,
+          color: t.text,
+        ),
+      ),
     );
   }
 }

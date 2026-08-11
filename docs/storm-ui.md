@@ -191,9 +191,13 @@ Everything about the **server**, rather than about this device.
 
 ### Appearance & connection (device settings)
 
-Dark mode · body font (Serif = bundled Newsreader, Sans, Monospace) · font size
-(default 16) · show the note `id` in properties (off) · server address and
-token.
+Client settings, grouped like Server settings (section labels, no cards):
+
+- **Appearance** — theme · text size · note font (Serif = Newsreader, Sans,
+  Monospace)
+- **Notes** — Read mode (default on) · show the note `id` in properties (off)
+- **Connection** — disconnect (forget server address and token)
+- **About** — client version stamp from the release build
 
 ---
 

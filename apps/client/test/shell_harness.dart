@@ -8,6 +8,7 @@ import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
+import 'package:storm/state/client_version.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
@@ -64,6 +65,9 @@ ProviderContainer shellContainer({bool configured = true}) {
         ),
       ),
       settingsProvider.overrideWith(() => FakeSettings(configured)),
+      // Widget tests have no platform package info; keep Client settings
+      // deterministic and free of MissingPluginException noise.
+      clientVersionProvider.overrideWith((ref) async => '0.0.0-test'),
     ],
   );
   _servers[container] = server;
