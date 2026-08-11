@@ -258,8 +258,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     }
 
     final t = context.tokens;
-    final readModeEnabled =
-        ref.watch(settingsProvider).value?.readMode ?? true;
+    final readModeEnabled = ref.watch(settingsProvider).value?.readMode ?? true;
     // Keep local mode honest while the setting is off, so turning it back on
     // does not snap the user into Read after they have been editing.
     if (!readModeEnabled) {
