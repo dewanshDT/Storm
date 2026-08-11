@@ -277,7 +277,9 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('Esc in Edit steps back to Read before leaving', (tester) async {
+    testWidgets('Esc in Edit steps back to Read before leaving', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
