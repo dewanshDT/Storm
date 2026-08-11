@@ -7,11 +7,12 @@ import 'shell/corner_bubbles.dart' show ClientSettingsBody;
 import 'shell/vault_gate.dart';
 import 'tokens.dart';
 
-/// Theme, text size, note font — the settings that belong to this device.
+/// Theme, text size, note preferences, connection — settings for this device.
 ///
-/// "Client", not "Appearance": it also holds `Show note id` and Disconnect,
-/// and the distinction that matters to the user is which side of the wire a
-/// setting lives on. Server settings are the storage root, the vaults and MCP.
+/// "Client", not "Appearance": Appearance is one section; Notes, Connection
+/// and About sit beside it. The distinction that matters to the user is which
+/// side of the wire a setting lives on. Server settings are the storage root,
+/// the vaults and MCP.
 ///
 /// A page rather than a popover, because at desk width the control that opens
 /// it is the sidebar's footer gear and a menu anchored there would open below

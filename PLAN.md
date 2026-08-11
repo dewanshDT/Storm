@@ -1584,6 +1584,12 @@ release job stamps them from `GITHUB_REF_NAME` and passes Flutter
 files alone is not versioning — apt reads the `.deb` control version, Android
 compares `versionCode`. First public tag: **`v0.2.0`**.
 
+Client settings shows that stamp (`package_info_plus` → `Version x.y.z+N`) under
+an About section so a stale web service-worker cache is obvious without a
+hard-refresh guessing game. Local `flutter run` still shows the pubspec
+placeholder. The same page groups Appearance / Notes / Connection / About —
+matching Server settings' section-label rhythm rather than a flat switch pile.
+
 #### Review traps — status after the build
 
 | Trap | Status |
