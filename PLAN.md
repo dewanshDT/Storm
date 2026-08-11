@@ -1525,6 +1525,7 @@ compares `versionCode`. First public tag: **`v0.2.0`**.
 | Artifact path LCA surprises | Flat `dist/` per job |
 | Pages apt root | Documented; publish tree is the site root |
 | `.deb` ships no web | Fixed — release copies Flutter web into packaging |
+| cargo-deb web glob empty | Fixed — use `packaging/web/**/*` (not `/` or `/**`) |
 | `change-me` token | `postinst` + `up` generate a real one |
 | Tags bypass CI | Fixed — `ci.yml` on tags; `release.yml` runs check first |
 | macOS ad-hoc / arm64-only | Still true — called out in release notes |
