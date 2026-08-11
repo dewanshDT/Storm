@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../editor/list_continuation.dart';
 import '../editor/markdown_theme.dart';
 import '../editor/storm_markdown_controller.dart';
+import '../keyboard/storm_editor_shortcuts.dart';
+import '../keyboard/storm_note_shortcuts.dart';
 import '../state/app_state.dart';
 import '../state/note_session.dart';
 import 'attachment_strip.dart';
@@ -14,6 +16,7 @@ import 'breakpoints.dart';
 import 'shell/storm_scaffold.dart';
 import 'editor_toolbar.dart';
 import 'markdown/storm_markdown_view.dart';
+import 'note_find_bar.dart';
 import 'note_mode_toggle.dart';
 import 'widgets.dart';
 import 'states.dart';
@@ -40,6 +43,7 @@ class NoteEditor extends ConsumerStatefulWidget {
     this.showToolbar = false,
     this.footer,
     this.onActions,
+    this.onEscape,
   });
 
   /// Pin, attach, rename, delete — reached by long-pressing the status line.
@@ -66,6 +70,9 @@ class NoteEditor extends ConsumerStatefulWidget {
   /// That belongs to the screen, which owns navigation.
   final void Function(String target)? onFollowLink;
 
+  /// Esc with no find bar open — leave the note / pop. The screen owns routing.
+  final VoidCallback? onEscape;
+
   @override
   ConsumerState<NoteEditor> createState() => _NoteEditorState();
 }
@@ -77,6 +84,12 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
 
   /// Default viewing experience: polished document, not the raw editor.
   NoteViewMode _mode = NoteViewMode.read;
+
+  final _findController = TextEditingController();
+  final _findFocus = FocusNode();
+  bool _findOpen = false;
+  List<int> _findMatches = const [];
+  int _findIndex = 0;
 
   // There is no raw-YAML mode. Frontmatter is edited only through the
   // properties list, which shows every key in the block — including the ones
@@ -115,6 +128,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     _controller.removeListener(_onLocalEdit);
     _controller.dispose();
     _focus.dispose();
+    _findController.dispose();
+    _findFocus.dispose();
     super.dispose();
   }
 
@@ -279,105 +294,211 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     // land on.
     final topInset = context.isExpanded ? kEditorTopInset : 0.0;
 
-    return Column(
-      children: [
-        GestureDetector(
-          key: const Key('note-actions'),
-          onLongPress: widget.onActions,
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
-            // The same inset as the prose below it: the design lines the
-            // version up with the note's first character.
-            padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 0.5),
-            child: _statusBar(session, readModeEnabled: readModeEnabled),
+    return StormNoteShortcuts(
+      onToggleReadEdit: _toggleReadEdit,
+      onSave: () => ref.read(noteSessionProvider).save(),
+      onFind: _openFind,
+      onDismiss: _dismiss,
+      child: Column(
+        children: [
+          if (_findOpen)
+            NoteFindBar(
+              controller: _findController,
+              focusNode: _findFocus,
+              matchLabel: _findMatchLabel(),
+              onChanged: _onFindQueryChanged,
+              onNext: () => _stepFind(1),
+              onPrevious: () => _stepFind(-1),
+              onClose: _closeFind,
+            ),
+          GestureDetector(
+            key: const Key('note-actions'),
+            onLongPress: widget.onActions,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              // The same inset as the prose below it: the design lines the
+              // version up with the note's first character.
+              padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 0.5),
+              child: _statusBar(session, readModeEnabled: readModeEnabled),
+            ),
           ),
-        ),
-        if (editing && _isDegraded(session)) const _DegradedNotice(),
-        if (session.hasConflict)
-          ConflictCard(onDismiss: session.dismissNotice)
-        else if (session.notice != null)
-          _Notice(
-            message: session.notice!,
-            isConflict: false,
-            onDismiss: session.dismissNotice,
-          ),
-        if (session.saveState == SaveState.queued)
-          OfflineNotice(queued: ref.watch(syncEngineProvider).pendingCount),
-        Expanded(
-          child: Scrollbar(
-            child: SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(inset, t.sp, inset, t.sp * 15),
-              // Left, not centred. The prototype's note pane is 604px wide, so
-              // its `margin: 0 auto` inside a 640 measure never actually
-              // centres anything — the prose sits 40px from the column's left
-              // edge. Centring reproduces that at 1200 and nowhere else: at
-              // 1700 it strands the text in the middle of an empty field.
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: kEditorMeasure),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (editing)
-                        TextField(
-                          // Named so tests can tell the prose apart from the
-                          // property inputs above it.
-                          key: const Key('note-body'),
-                          controller: _controller,
-                          focusNode: _focus,
-                          maxLines: null,
-                          cursorWidth: 2,
-                          keyboardType: TextInputType.multiline,
-                          textCapitalization: TextCapitalization.sentences,
-                          onTap: _onEditorTap,
-                          // Enter inside a list carries the list on.
-                          inputFormatters: const [ListContinuationFormatter()],
-                          contextMenuBuilder: _contextMenu,
-                          // Every border, not just `border`. The theme sets
-                          // enabledBorder and focusedBorder separately, and
-                          // clearing only `border` left a rounded outline drawn
-                          // around the whole note. `filled: false` for the same
-                          // reason: the theme fills every field with surface2,
-                          // which put the prose on a card of its own.
-                          decoration: const InputDecoration(
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            disabledBorder: InputBorder.none,
-                            errorBorder: InputBorder.none,
-                            focusedErrorBorder: InputBorder.none,
-                            filled: false,
-                            contentPadding: EdgeInsets.zero,
-                            isDense: true,
+          if (editing && _isDegraded(session)) const _DegradedNotice(),
+          if (session.hasConflict)
+            ConflictCard(onDismiss: session.dismissNotice)
+          else if (session.notice != null)
+            _Notice(
+              message: session.notice!,
+              isConflict: false,
+              onDismiss: session.dismissNotice,
+            ),
+          if (session.saveState == SaveState.queued)
+            OfflineNotice(queued: ref.watch(syncEngineProvider).pendingCount),
+          Expanded(
+            child: Scrollbar(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(inset, t.sp, inset, t.sp * 15),
+                // Left, not centred. The prototype's note pane is 604px wide, so
+                // its `margin: 0 auto` inside a 640 measure never actually
+                // centres anything — the prose sits 40px from the column's left
+                // edge. Centring reproduces that at 1200 and nowhere else: at
+                // 1700 it strands the text in the middle of an empty field.
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: kEditorMeasure),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (editing)
+                          StormEditorShortcuts(
+                            controller: _controller,
+                            child: TextField(
+                              // Named so tests can tell the prose apart from the
+                              // property inputs above it.
+                              key: const Key('note-body'),
+                              controller: _controller,
+                              focusNode: _focus,
+                              maxLines: null,
+                              cursorWidth: 2,
+                              keyboardType: TextInputType.multiline,
+                              textCapitalization: TextCapitalization.sentences,
+                              onTap: _onEditorTap,
+                              // Enter inside a list carries the list on.
+                              inputFormatters: const [
+                                ListContinuationFormatter(),
+                              ],
+                              contextMenuBuilder: _contextMenu,
+                              // Every border, not just `border`. The theme sets
+                              // enabledBorder and focusedBorder separately, and
+                              // clearing only `border` left a rounded outline drawn
+                              // around the whole note. `filled: false` for the same
+                              // reason: the theme fills every field with surface2,
+                              // which put the prose on a card of its own.
+                              decoration: const InputDecoration(
+                                border: InputBorder.none,
+                                enabledBorder: InputBorder.none,
+                                focusedBorder: InputBorder.none,
+                                disabledBorder: InputBorder.none,
+                                errorBorder: InputBorder.none,
+                                focusedErrorBorder: InputBorder.none,
+                                filled: false,
+                                contentPadding: EdgeInsets.zero,
+                                isDense: true,
+                              ),
+                            ),
+                          )
+                        else
+                          StormMarkdownView(
+                            key: const Key('note-read'),
+                            markdown: session.body,
+                            onFollowLink: widget.onFollowLink,
+                            onOpenEdit: () => _setMode(NoteViewMode.edit),
                           ),
-                        )
-                      else
-                        StormMarkdownView(
-                          key: const Key('note-read'),
-                          markdown: session.body,
-                          onFollowLink: widget.onFollowLink,
-                          onOpenEdit: () => _setMode(NoteViewMode.edit),
-                        ),
-                      // Thumbnails only in Edit Mode: Read Mode renders images
-                      // inline, and a second strip under the document is noise.
-                      if (editing) AttachmentStrip(body: session.body),
-                      if (widget.footer != null) widget.footer!,
-                    ],
+                        // Thumbnails only in Edit Mode: Read Mode renders images
+                        // inline, and a second strip under the document is noise.
+                        if (editing) AttachmentStrip(body: session.body),
+                        if (widget.footer != null) widget.footer!,
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-        // Both belong to the keyboard: suggestions sit directly above the
-        // formatting row, in the space the nav bubble gives up.
-        if (editing && widget.showToolbar) ...[
-          WikilinkSuggestions(controller: _controller),
-          EditorToolbar(controller: _controller, onDone: _focus.unfocus),
+          // Both belong to the keyboard: suggestions sit directly above the
+          // formatting row, in the space the nav bubble gives up.
+          if (editing && widget.showToolbar) ...[
+            WikilinkSuggestions(controller: _controller),
+            EditorToolbar(controller: _controller, onDone: _focus.unfocus),
+          ],
         ],
-      ],
+      ),
     );
+  }
+
+  void _toggleReadEdit() {
+    final readModeEnabled = ref.read(settingsProvider).value?.readMode ?? true;
+    if (!readModeEnabled) return;
+    _setMode(
+      _mode == NoteViewMode.read ? NoteViewMode.edit : NoteViewMode.read,
+    );
+  }
+
+  void _openFind() {
+    setState(() => _findOpen = true);
+    // The field autofocuses itself on mount; the query starts with the whole
+    // buffer selected by the first match.
+    _onFindQueryChanged(_findController.text);
+  }
+
+  void _closeFind() {
+    if (!_findOpen) return;
+    setState(() {
+      _findOpen = false;
+      _findMatches = const [];
+      _findIndex = 0;
+    });
+    _findFocus.unfocus();
+  }
+
+  void _dismiss() {
+    if (_findOpen) {
+      _closeFind();
+      return;
+    }
+    // A ladder, not a jump. An Esc that popped the note while the caret is in
+    // the body is how you lose your place mid-sentence: the first Esc steps
+    // out of writing (back to Read), the next one leaves the note. With Read
+    // Mode off there is no lower rung, so Esc leaves directly.
+    final readModeEnabled = ref.read(settingsProvider).value?.readMode ?? true;
+    if (_mode == NoteViewMode.edit && readModeEnabled) {
+      _setMode(NoteViewMode.read);
+      return;
+    }
+    widget.onEscape?.call();
+  }
+
+  String _findMatchLabel() {
+    if (_findController.text.isEmpty) return '';
+    if (_findMatches.isEmpty) return '0/0';
+    return '${_findIndex + 1}/${_findMatches.length}';
+  }
+
+  void _onFindQueryChanged(String query) {
+    final body = ref.read(noteSessionProvider).body;
+    final matches = _matchStarts(body, query);
+    setState(() {
+      _findMatches = matches;
+      _findIndex = 0;
+    });
+    if (matches.isNotEmpty) _selectFindMatch(0);
+  }
+
+  void _stepFind(int delta) {
+    if (_findMatches.isEmpty) return;
+    final next =
+        (_findIndex + delta + _findMatches.length) % _findMatches.length;
+    setState(() => _findIndex = next);
+    _selectFindMatch(next);
+  }
+
+  void _selectFindMatch(int index) {
+    if (index < 0 || index >= _findMatches.length) return;
+    final start = _findMatches[index];
+    final len = _findController.text.length;
+    // Find selects in the source editor — jump out of Read so the range is
+    // visible. Read Mode has no caret to move.
+    if (_mode != NoteViewMode.edit) {
+      _setMode(NoteViewMode.edit);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _controller.selection = TextSelection(
+        baseOffset: start,
+        extentOffset: start + len,
+      );
+      _focus.requestFocus();
+    });
   }
 
   void _setMode(NoteViewMode mode) {
@@ -391,6 +512,22 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
       _focus.unfocus();
     }
   }
+}
+
+/// Case-insensitive starts of [needle] in [haystack]. Empty needle → none.
+List<int> _matchStarts(String haystack, String needle) {
+  if (needle.isEmpty) return const [];
+  final lower = haystack.toLowerCase();
+  final n = needle.toLowerCase();
+  final out = <int>[];
+  var from = 0;
+  while (true) {
+    final i = lower.indexOf(n, from);
+    if (i < 0) break;
+    out.add(i);
+    from = i + n.length;
+  }
+  return out;
 }
 
 /// Shown when a note is too long to style.

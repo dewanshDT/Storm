@@ -27,6 +27,11 @@ build/
 .env
 *.local
 
+# Git worktrees nested inside the repo (e.g. .claude/worktrees/) — their
+# checkouts are full repos and must never be staged from here.
+.git/worktrees/
+.claude/
+
 # Editors / OS
 .idea/
 .vscode/

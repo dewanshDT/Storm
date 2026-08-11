@@ -214,6 +214,26 @@ At 900px and above the pill is hidden and those same actions become the toolbar
 at the top of the sidebar. Both are drawn from one list, so they can never offer
 different things.
 
+### Desktop keyboard shortcuts (M18)
+
+Platform-aware (⌘ on macOS / Mac web, Ctrl elsewhere). Phone touch layout
+unchanged. Nested: global · note open · editor focus only.
+
+| Action | macOS | Win / Linux |
+|---|---|---|
+| Search | ⌘ K | Ctrl K |
+| New note | ⌘ N | Ctrl N |
+| New folder | ⌘ ⇧ N | Ctrl ⇧ N |
+| Toggle sidebar | ⌘ \\ | Ctrl \\ |
+| Read ↔ Edit | ⌘ E | Ctrl E |
+| Save | ⌘ S | Ctrl S |
+| Find in note | ⌘ F | Ctrl F |
+| Bold / Italic | ⌘ B / I | Ctrl B / I |
+| Dismiss / leave | Esc | Esc |
+
+Undo/redo stay with the system text field. No ⌘/Ctrl R or W (browser-hostile).
+Deferred: shortcut overlay, command palette.
+
 ---
 
 ## 6. State vocabulary
