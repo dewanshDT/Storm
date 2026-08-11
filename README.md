@@ -1,64 +1,97 @@
 # Storm
 
-Self-hosted, markdown-first notes. Flutter clients talking to a small Rust
-server that owns the canonical vault — replacing Obsidian + Syncthing with
-something whose format and protocol you control.
+Self-hosted, Markdown-native knowledge system. A Rust sync server owns the
+canonical vaults on infrastructure you control; Flutter clients on macOS,
+Android, and web keep pace. The same knowledge is available to AI agents
+through MCP.
 
-The vault stays a plain directory of `.md` files: greppable, rsync-able, and
-readable by Obsidian if you ever want out.
+> **Your knowledge. On your infrastructure.**
+
+Site: [storm.dewansh.space](https://storm.dewansh.space) ·
+Clients: [storm.dewansh.space/clients](https://storm.dewansh.space/clients) ·
+Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 
 ```
 ┌──── clients (one Dart codebase) ────┐
-│  macOS · Linux · Android · Web      │
+│  macOS · Android · Web              │
 │  editor · cache · outbox · sync     │
 └──────────────┬──────────────────────┘
-        REST + WebSocket (LAN)
+        REST + WebSocket
 ┌──────────────┴──────────────────────┐
 │  storm-server (Rust, axum)          │
-│  3-way merge · FTS5 · file watcher  │
+│  3-way merge · FTS5 · MCP · watcher │
 └──────┬───────────────────┬──────────┘
-  vault/                state/
-  plain markdown        index + history
+  vaults/*.md           state/
+  plain markdown        registry + indexes
 ```
+
+Notes stay ordinary `.md` files under a storage root you control. Storm’s own
+state lives in a sibling `state/` directory — never inside the vaults.
+
+## Install (server)
+
+Debian / Ubuntu — apt bootstrap, then start:
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
+sudo storm-server up
+sudo storm-server status
+```
+
+That URL is the **apt repository** root (not the marketing site). Details:
+[`deploy/README.md`](deploy/README.md). Clients (macOS zip, Android APK, web
+UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
+[Clients page](https://storm.dewansh.space/clients).
+
+Current release: **v0.2.2** (pre-release).
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `apps/server` | Rust sync server — [README](apps/server/README.md) |
-| `apps/client` | Flutter app, all four targets — [README](apps/client/README.md) |
-| `docs/prd.md` | Original brief, not maintained |
-| `docs/editor-findings.md` | Editor design constraints and measurements |
-| `PLAN.md` | **Living plan, status and decision log** |
+| [`apps/server`](apps/server/README.md) | Rust sync server (REST, WebSocket, MCP) |
+| [`apps/client`](apps/client/README.md) | Flutter app — macOS, Android, web (Linux desktop deferred) |
+| [`apps/www`](apps/www/README.md) | Marketing site (Astro) → [storm.dewansh.space](https://storm.dewansh.space) |
+| [`deploy/`](deploy/README.md) | systemd units, apt bootstrap, backup |
+| [`PLAN.md`](PLAN.md) | Living plan, status, and decision log |
+| `docs/` | Design briefs and findings (see links in `PLAN.md`) |
 
-## Getting started
+## Development
 
-Requires Rust and Flutter. Point the server at a **copy** of your vault first —
-`--dry-run` writes nothing and reports what an import would change:
+Requires Rust and Flutter. Point the server at a directory that **contains**
+vaults (`VAULT_ROOT`), not at a single vault:
 
 ```sh
-make dry-run VAULT=~/vault-copy
-make server  VAULT=~/vault-copy      # http://127.0.0.1:8484, token: testtoken
-make client                          # or: make web
+make dry-run VAULT_ROOT=~/vaults-copy   # report only — writes nothing
+make server  VAULT_ROOT=~/vaults-copy   # http://127.0.0.1:8484, token: testtoken
+make client                             # or: make web / make serve-web
+make www-dev                            # marketing site locally
 ```
 
-`make help` lists everything.
+`make help` lists every target.
 
 ## Testing
 
 ```sh
-make check        # analyze + clippy + both unit suites
-make test-live    # starts a server, runs the integration suites, cleans up
+make check        # clippy + analyze + both unit suites
+make test-live    # starts a server, runs integration suites, tears down
 ```
 
-The unit suites need nothing running. The live suites drive the real client
-against a real server, which is where a protocol mismatch actually shows up.
+Unit suites need nothing running. Live suites drive the real client against a
+real server.
+
+## MCP
+
+When enabled, the server exposes twelve tools over Streamable HTTP at `/mcp`
+(nine read tools always; create / update / delete when writable). Off by
+default. See [`apps/server/README.md`](apps/server/README.md).
 
 ## Status
 
-v1 is LAN-only with a single shared bearer token — defensible only inside the
-LAN. TLS and per-device tokens must land **before** this is reachable from
-anywhere else.
+M0–M15 are done and deployed. M16 (marketing site) is live at
+[storm.dewansh.space](https://storm.dewansh.space). v1 is intended for a
+trusted network with a shared bearer token — TLS and per-device tokens before
+exposing it more widely.
 
-See [PLAN.md](PLAN.md) for milestone status, the decision log, and open
-blockers.
+See [`PLAN.md`](PLAN.md) for milestone status, the decision log, and open
+items. License: [MIT](LICENSE).
