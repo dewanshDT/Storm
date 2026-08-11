@@ -46,6 +46,19 @@ Native clients (macOS zip, Android APK) are separate downloads from
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases) — upgrade those
 on each device when a new release lands.
 
+**NFS / non-`storm` User:** the package `postinst` used to
+`chown -R storm:storm /srv/storm` on every upgrade, which breaks a unit that
+`up` configured as the state-dir owner (Permission denied on
+`vaults.json`). Fixed in postinst (skip chown when `vaults.json` already
+exists). If an older upgrade already flipped ownership, restore it to the
+`User=` in `/etc/systemd/system/storm-server.service.d/data-root.conf`:
+
+```sh
+sudo chown -R dewansh:dewansh /srv/storm   # match your drop-in’s User=
+sudo systemctl restart storm-server
+sudo storm-server status
+```
+
 ## First-time setup (manual)
 
 On the server, once:
