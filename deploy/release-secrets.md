@@ -53,8 +53,19 @@ Apt: https://dewanshdt.github.io/Storm/ (`storm-server` `0.2.2-1`).
 
 ## Clean install on the VM
 
-Goal: FHS `/srv/storm`, `storm` user, package-owned web, systemd. Migrate data
-onto that layout, then remove the old tree and `~/storm-m15-cutover`.
+**Done 2026-08-11** on `proxmox-mcp-vm`: `apt install storm-server` (0.2.2-1),
+`storm-server up` with vaults on NAS and state under `/srv/storm`. Hand-rolled
+`~/storm` and `~/storm-m15-cutover` removed.
+
+Live layout:
+
+| Path | Role |
+|---|---|
+| `/mnt/media/Docs/storm` | vault root (NFS) |
+| `/srv/storm/state` | indexes + `vaults.json` |
+| `/srv/storm/backups` | backup target |
+| `/usr/share/storm/web` | package web client |
+| `/etc/storm/storm.env` | token + paths (mode 600) |
 
 ```sh
 # 1. Add the apt source (Pages root IS the apt root)
@@ -65,18 +76,23 @@ echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/
 sudo apt update
 sudo apt install storm-server
 
-# 2. Stop the hand-started process
-pkill -f '/home/dewansh/storm/storm-server' || true
+# 2. Stop any hand-started process / old unit that shadows the package
+sudo systemctl disable --now storm-server 2>/dev/null || true
+sudo rm -f /etc/systemd/system/storm-server.service
+sudo systemctl daemon-reload
 
-# 3. Move data into the packaged layout (example — adjust if paths differ)
+# 3. Migrate state (vaults stay where the registry points — often NAS)
 sudo mkdir -p /srv/storm/{vaults,state,backups}
-# Prefer the NAS root the registry already uses, or copy vault dirs under vaults/
-# Storm never moves vault dirs itself — point or copy deliberately.
-sudo storm-server up   # creates env, enables systemd as User=storm
+# rsync old state into /srv/storm/state, chown to the operator that can
+# write the vault root (NFS cannot be chown'd to User=storm).
+sudo storm-server up \
+  --data-root /srv/storm \
+  --vault-root /mnt/media/Docs/storm \
+  --state /srv/storm/state \
+  --token "$EXISTING_TOKEN"
 
-# 4. Point clients at the new token in /etc/storm/storm.env
-# 5. Remove leftovers once healthy across a reboot:
-#    ~/storm-m15-cutover, old run.sh binary, stale /home/dewansh/storm/vaults copy
+# 4. Point clients at /etc/storm/storm.env if the token changed
 ```
 
-Until you cut over, leave the current `run.sh` server alone.
+`up` runs as the state-dir owner when vaults are on NFS — do not force
+`User=storm` against an unchownable mount.

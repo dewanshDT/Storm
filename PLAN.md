@@ -51,11 +51,11 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M12 | Adaptive layout for wide screens | **done** | 453 Dart tests · sidebar, tree, flowing grid |
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
-| M15 | Releases, versioning, apt repo | **built** | CLI up/serve · .deb metadata · release.yml · apt-repo.yml |
+| M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
 
-Last updated: 2026-08-11. M0–M14 deployed; M15 tagged **`v0.2.2`** (Release +
-apt on Pages). Next: clean VM install via apt under `/srv/storm`
-(`deploy/release-secrets.md`). Android keystore still optional.
+Last updated: 2026-08-11. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
+`/usr/share/storm/web`). Android keystore still optional.
 `docs/storm-multi-vault.md` and `docs/storm-properties.md` are the designs;
 decisions 20–30 record the choices.
 
@@ -1495,15 +1495,14 @@ writes config and enables systemd; `serve` is what the unit runs.
   and `apt-repo.yml` (reprepro → Pages). `ci.yml` also runs on `v*.*.*` tags.
 - Android release signing reads `STORM_UPLOAD_*` env when set; otherwise debug.
 
-**Still one-time and manual before the first useful tag:**
+**Still open / optional:**
 
-- Android keystore secrets (`STORM_UPLOAD_*`) — optional for the first server
-  tag; without them the APK is debug-signed.
-- Apt GPG + Pages — **done 2026-08-11** (`STORM_APT_GPG_*`, Pages =
-  GitHub Actions, public keyring in `deploy/`).
-- Land M15 on `main`, tag `v0.2.0`, then a **clean** VM install via apt under
-  `/srv/storm` (see `deploy/release-secrets.md`). Do not treat the NFS cutover
-  kit as the long-term path — remove `~/storm-m15-cutover` after apt works.
+- Android keystore secrets (`STORM_UPLOAD_*`) — without them the APK is
+  debug-signed.
+- Apt GPG + Pages — **done 2026-08-11**.
+- Clean VM install via apt — **done 2026-08-11**: `storm-server` 0.2.2-1,
+  state under `/srv/storm`, vaults on NAS, hand-rolled `~/storm` and
+  `~/storm-m15-cutover` removed.
 
 #### Versioning — the tag is the only source
 
