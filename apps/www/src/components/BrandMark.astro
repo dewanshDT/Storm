@@ -30,9 +30,11 @@ const px = size === "sm" ? 28 : size === "lg" ? 72 : 40;
     display: inline-flex;
     align-items: center;
     gap: calc(var(--sp) * 1.5);
+    line-height: 1;
   }
 
   .brand-mark img {
+    display: block;
     border-radius: calc(var(--r-control) * 0.7);
     box-shadow: 0 0 0 1px color-mix(in oklab, var(--mint) 35%, transparent);
   }
@@ -44,6 +46,7 @@ const px = size === "sm" ? 28 : size === "lg" ? 72 : 40;
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--text);
+    line-height: 1;
   }
 
   .brand-mark--lg .wordmark {
