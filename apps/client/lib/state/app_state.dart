@@ -427,6 +427,14 @@ final openNoteIdProvider = StateProvider<String?>((ref) => null);
 /// navigator's question rather than ours.
 final propertiesOpenProvider = StateProvider<bool>((ref) => false);
 
+/// Whether the wide-layout sidebar is hidden (⌘\).
+///
+/// Deliberately not persisted, like [propertiesOpenProvider]: it is transient
+/// chrome, not a setting — re-expanding is one chord, and plumbing a per-launch
+/// preference through Settings for a layout toggle is machinery without value.
+/// Phone layout has no sidebar, so the toggle is a no-op below the breakpoint.
+final sidebarCollapsedProvider = StateProvider<bool>((ref) => false);
+
 final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
   // Deliberately `watch(apiProvider)` + `read(syncEngineProvider)`: the
   // session must be rebuilt when the server connection changes, but must

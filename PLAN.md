@@ -54,8 +54,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
+| M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 
-Last updated: 2026-08-11. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+Last updated: 2026-08-12. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
@@ -64,7 +65,10 @@ install CTAs. CI builds on PR/main. Deploy remains Cloudflare static (no
 GitHub deploy workflow). Decision 49 is the site hosting split. **M17** adds
 a Read Mode on the note screen (Storm-styled `flutter_markdown_plus`); the
 existing editor remains Edit Mode. Markdown stays canonical — no AST, no
-server/MCP/sync changes.
+server/MCP/sync changes. **M18** adds desktop-first keyboard shortcuts
+(Shortcuts/Actions/Intent), platform-aware Meta vs Control, in-note find,
+and wide-layout sidebar collapse — phone touch layout unchanged. Shipped in
+**v0.2.4** (M18 is client-only; the server release is a version stamp).
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -668,6 +672,35 @@ read-only in this phase.
 *Revisit if:* Read Mode is not enough document quality and a real
 block/AST renderer becomes worth the migration cost — decision 5's
 block-editor revisit is the larger cousin of that call.
+
+**51. Desktop keyboard shortcuts are Shortcuts/Actions/Intent, platform-aware,
+and context-scoped — not RawKeyboardListeners.**
+Chords use Meta on macOS (and Mac web) and Control elsewhere via
+`defaultTargetPlatform`. Three nesting levels: global (search, new note/
+folder, sidebar), note (save, read↔edit, find, Esc), editor-focus only
+(bold/italic). Undo/redo stay with Flutter's text-editing defaults.
+Web does not steal browser refresh/close (`⌘/Ctrl R` / `W` unbound).
+Phone touch layout is unchanged — Shortcuts only fire on key events;
+sidebar toggle is a no-op below the wide breakpoint. Deferred: shortcut
+overlay, command palette.
+
+Settled while shipping:
+
+- **Esc is a ladder, not a jump.** Close the find bar → step out of Edit back
+  to Read → *then* leave the note. An Esc that pops the note while the caret
+  is mid-body is how you lose your place; with Read Mode off there is no lower
+  rung and Esc leaves directly.
+- **The header back arrow and Esc share one leave-note answer** (pop the
+  stack, else fall back to `browse`, matching search/tags) — never a second,
+  dashboard-shaped exit that the two could drift apart on.
+- **The shell's global Focus autofocuses only where a physical keyboard
+  exists** (desktop/web). On a phone it arms nothing and would fight a field
+  that autofocuses on entry (the search field does).
+- **Sidebar collapse is transient chrome, deliberately not persisted** — like
+  the properties drawer, not a Settings field. Re-expanding is one chord, and
+  a per-launch layout preference does not earn the Settings machinery.
+*Revisit if:* a command palette becomes the primary action surface and
+needs the same Intent set exposed as searchable commands.
 
 ---
 
@@ -1663,6 +1696,48 @@ replacing the source editor or introducing an AST (decision 50).
 
 ---
 
+### M18 — Desktop keyboard shortcuts ✅
+
+Started 2026-08-12, shipped in **v0.2.4** (2026-08-12). Desktop-first chords
+via Flutter Shortcuts/Actions/Intent (decision 51). Phone touch layout
+unchanged.
+
+**Done (client):**
+
+- `lib/keyboard/` — intents, platform `stormActivator` (Meta vs Control),
+  shortcut maps, `StormGlobalShortcuts` / `StormNoteShortcuts` /
+  `StormEditorShortcuts`.
+- Global: search, new note, new folder, sidebar toggle (`sidebarCollapsedProvider`
+  + `VaultShell`).
+- Note: save now, Read↔Edit, find-in-note bar, Esc dismiss/leave.
+- Editor-focus: bold / italic via existing `toggleInline`.
+- Tests in `test/keyboard_shortcuts_test.dart` (activator, sidebar, search,
+  create, Read↔Edit, save, find, bold/italic, Esc-leaves-note, Esc ladder, and
+  the two buttons that used to be dead — the desk-width sidebar "New note" and
+  the phone note-screen nav pill).
+
+**Finding that moved the wiring:** global shortcuts could not hang off
+`StormScaffold` alone. At desk width the browse route renders the empty pane
+beside the sidebar (`NoNoteSelected`) and no `StormScaffold` at all, so the
+chords and their `NewNoteRequest` / `NewFolderRequest` callbacks now live in
+`VaultShell`, which wraps every vault route — and which fixed the pre-existing
+dead "New note" button in the desk-width sidebar toolbar. The note screen had
+an *empty* `NewNoteRequest` of its own, which made the phone nav pill's create
+button dead inside a note; both now resolve the shell's single callback.
+`StormScaffold` and the note screen dropped their own copies.
+
+**Polish during the review pass (decision 51):** `sidebarCollapsedProvider`
+moved out of `lib/keyboard/` into `state/app_state.dart` beside the other
+chrome toggles; the global Focus autofocuses only where a physical keyboard
+exists; Esc is a ladder (find → Read → leave) and the header back and Esc
+share one `_leaveNote`; the find bar's field autofocuses itself instead of a
+post-frame `requestFocus`.
+
+**Deferred:** shortcut overlay, command palette, ⌘⇧C code, sync-on-R,
+close-note-on-W.
+
+---
+
 ## A lesson worth keeping
 
 Four bugs reached the user in a row, all in the same place: **widget and
@@ -1791,6 +1866,8 @@ Use a pattern that cannot match the invoking shell.
 
 ## Open items (not v1-blocking)
 
+- **M18 Desktop keyboard shortcuts** — foundation + first-release set on
+  `feat/m18-keyboard-shortcuts`; overlay / palette deferred.
 - **M17 Markdown Read Mode** — client implementation on
   `feat/markdown-read-mode`; visual pass + ship still open.
 - **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:

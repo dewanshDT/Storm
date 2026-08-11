@@ -1,26 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
-import '../../router.dart';
 import '../../state/app_state.dart';
-import '../../state/vault_config.dart' show kColorKey;
-import '../browse_screen.dart' show createFolder;
-import '../new_note_dialog.dart';
 import '../breakpoints.dart';
 import '../tokens.dart';
 import 'corner_bubbles.dart';
-import 'vault_gate.dart';
 import 'nav_bubble.dart';
 
-/// Every screen inside the vault: content, the persistent corner bubbles, the
-/// floating nav bubble, and the new-note action wired in one place.
+/// Every screen inside the vault: content, the persistent corner bubbles and
+/// the floating nav bubble.
+///
+/// The new-note action lives one level up in `VaultShell`, so the desk-width
+/// browse pane — which has no `StormScaffold` — gets the same chords and
+/// callbacks as every other vault screen.
 ///
 /// There is no app bar. The design puts the vault and settings bubbles at the
 /// top corners of *every* vault screen and gives each screen its own [header]
 /// underneath them, so a title bar would be a third band of chrome nothing
 /// asked for.
-class StormScaffold extends ConsumerStatefulWidget {
+class StormScaffold extends ConsumerWidget {
   const StormScaffold({
     super.key,
     required this.child,
@@ -37,66 +35,18 @@ class StormScaffold extends ConsumerStatefulWidget {
   final bool showBubbles;
 
   @override
-  ConsumerState<StormScaffold> createState() => _StormScaffoldState();
-}
-
-class _StormScaffoldState extends ConsumerState<StormScaffold> {
-  /// Creating a note is offered from the nav bubble on every screen, so it
-  /// lives here rather than being duplicated onto each one.
-  Future<void> _createNote() async {
-    // The folder follows where they are rather than being typed — a note made
-    // from inside `Projects/Storm` almost always belongs there.
-    final here = Routes.folderOf(GoRouterState.of(context).uri);
-    final wanted = await promptForNewNote(context, folder: here);
-    if (wanted == null || !mounted) return;
-
-    final vaultId = VaultGate.of(context);
-    final created = await ref
-        .read(syncEngineProvider)
-        .create(
-          path: noteFileName(wanted.name, folder: here),
-          // A colour chosen up front is just the note's first property.
-          content: wanted.accent.isNone
-              ? ''
-              : '---\n$kColorKey: ${wanted.accent.name}\n---\n\n',
-        );
-    if (!mounted) return;
-
-    if (created.meta == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(created.error ?? 'Could not create the note')),
-      );
-      return;
-    }
-    ref.invalidate(treeProvider);
-    context.push(Routes.note(vaultId, created.meta!.id));
-  }
-
-  /// Creating a folder, offered alongside it.
-  Future<void> _createFolder() async {
-    final here = Routes.folderOf(GoRouterState.of(context).uri);
-    await createFolder(context, ref, VaultGate.of(context), here);
-  }
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     // Providers are lazy: without this nothing subscribes to the engine's
     // change stream, so remote edits never reach the open editor.
     ref.watch(syncListenerProvider);
     final keyboard = keyboardIsOpen(context);
 
-    return NewNoteRequest(
-      onRequest: _createNote,
-      child: NewFolderRequest(
-        onRequest: _createFolder,
-        child: Scaffold(
-          body: StormChrome(
-            header: widget.header,
-            showNav: widget.showNav && !keyboard,
-            showBubbles: widget.showBubbles,
-            child: widget.child,
-          ),
-        ),
+    return Scaffold(
+      body: StormChrome(
+        header: header,
+        showNav: showNav && !keyboard,
+        showBubbles: showBubbles,
+        child: child,
       ),
     );
   }
