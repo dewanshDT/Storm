@@ -16,9 +16,14 @@ const links = [
 
 <header class="site-header">
   <div class="wrap bar">
-    <a class="home" href="/" aria-label="Storm home">
-      <BrandMark size="sm" />
-    </a>
+    <div class="brand">
+      <a class="home" href="/" aria-label="Storm home">
+        <BrandMark size="sm" />
+      </a>
+      <span class="pre-release" title="Storm is currently a pre-release">
+        Pre-release
+      </span>
+    </div>
 
     <button
       type="button"
@@ -105,14 +110,39 @@ const links = [
     position: relative;
   }
 
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(var(--sp) * 1.25);
+    z-index: 1;
+    min-width: 0;
+  }
+
   .home {
     text-decoration: none;
     color: inherit;
-    z-index: 1;
+    flex-shrink: 0;
   }
 
   .home:hover {
     color: inherit;
+  }
+
+  .pre-release {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px calc(var(--sp) * 1);
+    border: var(--bw) solid color-mix(in oklab, var(--amber) 35%, var(--border));
+    border-radius: var(--r-card);
+    background: var(--amber-soft);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--amber);
+    white-space: nowrap;
+    line-height: 1.4;
   }
 
   .menu-toggle {
