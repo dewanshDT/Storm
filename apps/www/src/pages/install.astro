@@ -1,10 +1,9 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import CodeBlock from "../components/CodeBlock.astro";
-import GetStorm from "../components/GetStorm.astro";
 import { release } from "../data/release";
 
-const bootstrap = `curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh`;
+const bootstrap = release.installCommand;
 
 const up = `sudo storm-server up
 sudo storm-server status`;
@@ -25,10 +24,9 @@ const upCustom = `sudo storm-server up \\
     <p class="lede">
       Preferred path: one bootstrap on Debian or Ubuntu, then
       <code>storm-server up</code>. The package ships the binary, systemd unit,
-      and web client. Desktop and mobile clients come from
-      <a href={release.latestUrl} target="_blank" rel="noopener noreferrer"
-        >GitHub Releases</a
-      >.
+      and web client. Then
+      <a href="/clients">get a client</a>
+      for your device.
     </p>
   </header>
 
@@ -37,10 +35,10 @@ const upCustom = `sudo storm-server up \\
     <p class="support">
       The script adds Storm’s apt key and source, then runs
       <code>apt install storm-server</code>. Served from the apt repo root at
-      <a href="https://dewanshdt.github.io/Storm/" target="_blank" rel="noopener noreferrer"
+      <a href={release.aptRoot} target="_blank" rel="noopener noreferrer"
         >dewanshdt.github.io/Storm</a
       >
-      — that URL is the apt root, not the marketing site.
+      — that URL is the apt root, not the marketing site at storm.dewansh.space.
     </p>
     <CodeBlock code={bootstrap} label="install" />
   </section>
@@ -69,9 +67,17 @@ const upCustom = `sudo storm-server up \\
     <CodeBlock code={upCustom} label="up · custom" />
   </section>
 
-  <div class="section wrap-narrow">
-    <GetStorm />
-  </div>
+  <section class="section wrap-narrow" id="clients">
+    <h2>Clients</h2>
+    <p class="support">
+      Native builds for macOS and Android, plus the web UI served by your
+      server. Downloads and checksums live on the
+      <a href="/clients">Clients</a> page.
+    </p>
+    <p class="cta-row">
+      <a class="btn btn-primary" href="/clients">Get a client →</a>
+    </p>
+  </section>
 
   <section class="section wrap-narrow">
     <h2>MCP</h2>
@@ -98,5 +104,9 @@ const upCustom = `sudo storm-server up \\
   .support em {
     font-style: italic;
     color: var(--text);
+  }
+
+  .cta-row {
+    margin: 0;
   }
 </style>

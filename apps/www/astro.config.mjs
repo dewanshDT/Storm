@@ -5,5 +5,5 @@ import { defineConfig } from "astro/config";
 // GitHub Pages root (https://dewanshdt.github.io/Storm/).
 export default defineConfig({
   output: "static",
-  site: "https://storm.pages.dev",
+  site: "https://storm.dewansh.space",
 });

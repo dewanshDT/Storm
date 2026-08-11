@@ -1579,28 +1579,25 @@ in `apps/www`. **Not** a documentation portal; depth stays on GitHub /
   derived from `StormPreset.slowflowEarth` / the design handoff. Storm dark
   remains the app’s default identity; SlowFlow is the marketing surface.
 - Routes: `/` (hero “Your knowledge. On your infrastructure.”, foundation,
-  MCP with 12 real tools + static demo, architecture, storage, client,
-  sync, install summary, repo docs links), `/install` (apt + `up` from
-  `deploy/release-secrets.md`; no Docker), `/how-it-works` (architecture
-  sketch + MCP).
-- Positioning: Storm as its own product — no Obsidian / Syncthing / competitor
-  framing in `apps/www` or `docs/www/` page copy.
+  MCP with 12 real tools + static demo, architecture, storage, clients,
+  sync, install summary, repo docs links), `/clients` (Get Storm download
+  manifest), `/install` (apt + `up` from `deploy/release-secrets.md`; no
+  Docker), `/how-it-works` (architecture sketch + MCP).
+- Apt install command stays on `dewanshdt.github.io/Storm/install.sh` (apt
+  Pages root; marketing host is `storm.dewansh.space`).
 - `make www` / `make www-dev`; CI job `www` in `ci.yml` (build check only).
 - Page copy in vault [[Storm Website]] notes and `docs/www/`.
 
 **Still open:**
 
-- Confirm Cloudflare dashboard connection / public hostname (live preview has
-  used `storm.dewansh-dt.workers.dev`; placeholder `site` in
-  `astro.config.mjs` is still `https://storm.pages.dev`).
 - Optional: real running-app screenshot for the Client section (prototype PNGs
   stay design reference only — not shipped as product photos).
 
-**Hosting (decision 49):** Cloudflare static deploy apart from apt Pages.
-**Never** deploy to `https://dewanshdt.github.io/Storm/` — that URL is the apt
-repository root owned by `apt-repo.yml`. A marketing overwrite would break
-every `sources.list` line. Do **not** chain marketing deploys into
-`release.yml`.
+**Hosting (decision 49):** Cloudflare static deploy at `https://storm.dewansh.space`
+(apart from apt Pages). **Never** deploy to `https://dewanshdt.github.io/Storm/`
+— that URL is the apt repository root owned by `apt-repo.yml`. A marketing
+overwrite would break every `sources.list` line. Do **not** chain marketing
+deploys into `release.yml`.
 
 **Content sources of truth:**
 
