@@ -1,0 +1,333 @@
+---
+import { release } from "../data/release";
+
+interface Props {
+  /** Section label shown above the heading */
+  label?: string;
+  /** Anchor id for deep links */
+  id?: string;
+}
+
+const { label = "07 · Clients", id = "clients" } = Astro.props;
+
+const { macos, android, web } = release;
+---
+
+<section class="get-storm" id={id} aria-labelledby={`${id}-heading`} data-get-storm>
+  <p class="section-label">{label}</p>
+  <h2 id={`${id}-heading`}>Get Storm</h2>
+  <p class="support">
+    Choose a client for your device. All clients connect to your Storm server.
+  </p>
+
+  <p class="release-badge">
+    <span class="mono">Current release · {release.tag}</span>
+  </p>
+
+  <ul class="manifest" role="list">
+    <li class="row" id={macos.id} data-platform={macos.detect}>
+      <div class="row-main">
+        <div class="identity">
+          <span class="mark" aria-hidden="true"></span>
+          <div>
+            <div class="name-line">
+              <span class="name">{macos.platform}</span>
+              <span class="rec" hidden data-rec>Recommended</span>
+            </div>
+            <p class="meta mono">{macos.meta}</p>
+            <p class="ver mono">{release.tag}</p>
+          </div>
+        </div>
+        <div class="actions">
+          <a
+            class="btn btn-primary cta"
+            href={macos.url}
+            download
+            aria-label={`Download Storm for macOS (${release.tag})`}
+          >
+            Download for macOS
+          </a>
+          <p class="file mono">{macos.file}</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="row" id={android.id} data-platform={android.detect}>
+      <div class="row-main">
+        <div class="identity">
+          <span class="mark" aria-hidden="true">▢</span>
+          <div>
+            <div class="name-line">
+              <span class="name">{android.platform}</span>
+              <span class="rec" hidden data-rec>Recommended</span>
+            </div>
+            <p class="meta mono">{android.meta}</p>
+          </div>
+        </div>
+        <div class="actions">
+          <a
+            class="btn btn-primary cta"
+            href={android.url}
+            download
+            aria-label={`Download Storm APK for Android (${release.tag})`}
+          >
+            Download APK
+          </a>
+          <p class="file mono">{android.file}</p>
+        </div>
+      </div>
+    </li>
+
+    <li class="row" id={web.id} data-platform={web.detect}>
+      <div class="row-main">
+        <div class="identity">
+          <span class="mark" aria-hidden="true">◈</span>
+          <div>
+            <div class="name-line">
+              <span class="name">{web.platform}</span>
+              <span class="rec" hidden data-rec>Recommended</span>
+            </div>
+            <p class="meta mono">{web.meta}</p>
+            <p class="ver mono">http://&lt;host&gt;:{release.webPort}</p>
+          </div>
+        </div>
+        <div class="actions">
+          <a
+            class="btn btn-primary cta"
+            href="#start"
+            aria-label="Open Storm Web Client on your server after install"
+          >
+            Open Web Client →
+          </a>
+          <a
+            class="secondary"
+            href={web.url}
+            download
+            aria-label={`Download Storm web bundle ${web.file}`}
+          >
+            Download web bundle
+          </a>
+        </div>
+      </div>
+    </li>
+  </ul>
+
+  <nav class="footer-links" aria-label="Release resources">
+    <a href={release.checksumsUrl} target="_blank" rel="noopener noreferrer"
+      >Checksums</a
+    >
+    <a href={release.notesUrl} target="_blank" rel="noopener noreferrer"
+      >Release notes</a
+    >
+    <a href={release.allUrl} target="_blank" rel="noopener noreferrer"
+      >All releases</a
+    >
+    <a href="#linux">Installation instructions →</a>
+  </nav>
+</section>
+
+<script>
+  function detectPlatform(): "mac" | "android" | "web" | null {
+    const ua = navigator.userAgent;
+    if (/Android/i.test(ua)) return "android";
+    if (/Mac OS X|Macintosh/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua)) {
+      return "mac";
+    }
+    // Other desktops / unknown — web is the portable path
+    if (/Win|Linux|CrOS/i.test(ua) && !/Android/i.test(ua)) return "web";
+    return null;
+  }
+
+  function markRecommended() {
+    const root = document.querySelector("[data-get-storm]");
+    if (!root) return;
+    const platform = detectPlatform();
+    if (!platform) return;
+    root.querySelectorAll<HTMLElement>("[data-platform]").forEach((row) => {
+      const rec = row.querySelector<HTMLElement>("[data-rec]");
+      if (!rec) return;
+      const match = row.dataset.platform === platform;
+      rec.hidden = !match;
+      row.classList.toggle("is-recommended", match);
+    });
+  }
+
+  markRecommended();
+  document.addEventListener("astro:page-load", markRecommended);
+</script>
+
+<style>
+  .get-storm {
+    max-width: 40rem;
+  }
+
+  .get-storm .support {
+    margin-bottom: calc(var(--sp) * 2);
+  }
+
+  .release-badge {
+    margin: 0 0 calc(var(--sp) * 3);
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.04em;
+    color: var(--text3);
+  }
+
+  .manifest {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+    overflow: hidden;
+  }
+
+  .row {
+    border-bottom: var(--bw) solid var(--border);
+  }
+
+  .row:last-child {
+    border-bottom: 0;
+  }
+
+  .row.is-recommended {
+    background: color-mix(in oklab, var(--accent-soft) 55%, var(--surface));
+  }
+
+  .row-main {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: calc(var(--sp) * 2) calc(var(--sp) * 3);
+    padding: calc(var(--sp) * 2.75) calc(var(--sp) * 2.5);
+  }
+
+  .identity {
+    display: flex;
+    gap: calc(var(--sp) * 1.75);
+    align-items: flex-start;
+    min-width: min(100%, 14rem);
+  }
+
+  .mark {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--text3);
+    line-height: 1.6;
+    width: 1.25rem;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .name-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: calc(var(--sp) * 1) calc(var(--sp) * 1.5);
+    margin-bottom: calc(var(--sp) * 0.5);
+  }
+
+  .name {
+    font-family: var(--font-sans);
+    font-size: var(--fs-md);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .rec {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .meta,
+  .ver,
+  .file {
+    margin: 0;
+    line-height: 1.45;
+  }
+
+  .ver {
+    margin-top: 2px;
+  }
+
+  .actions {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: calc(var(--sp) * 0.75);
+    margin-left: auto;
+  }
+
+  .cta {
+    min-height: 40px;
+    white-space: nowrap;
+  }
+
+  .file {
+    max-width: 18rem;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  .secondary {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text2);
+    text-decoration: none;
+    letter-spacing: 0.02em;
+  }
+
+  .secondary:hover {
+    color: var(--accent);
+  }
+
+  .footer-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1) calc(var(--sp) * 2.5);
+    margin-top: calc(var(--sp) * 3);
+  }
+
+  .footer-links a {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.04em;
+    color: var(--text2);
+    text-decoration: none;
+  }
+
+  .footer-links a:hover {
+    color: var(--accent);
+  }
+
+  @media (max-width: 560px) {
+    .row-main {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .actions {
+      align-items: stretch;
+      margin-left: 0;
+      width: 100%;
+    }
+
+    .cta {
+      width: 100%;
+      justify-content: center;
+    }
+
+    .file,
+    .secondary {
+      text-align: left;
+    }
+  }
+</style>

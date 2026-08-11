@@ -1,6 +1,8 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import CodeBlock from "../components/CodeBlock.astro";
+import GetStorm from "../components/GetStorm.astro";
+import { release } from "../data/release";
 
 const bootstrap = `curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh`;
 
@@ -11,35 +13,30 @@ const upCustom = `sudo storm-server up \\
   --data-root /srv/storm \\
   --vault-root /path/to/vaults \\
   --state /srv/storm/state`;
-
-const aptManual = `curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \\
-  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
-echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \\
-  | sudo tee /etc/apt/sources.list.d/storm.list
-sudo apt update
-sudo apt install storm-server`;
 ---
 
 <BaseLayout
   title="Install"
-  description="Install storm-server from the apt repository, then run storm-server up."
+  description="Install storm-server from the apt repository on Debian or Ubuntu, then download clients from GitHub Releases."
 >
   <header class="page-hero wrap-narrow">
-    <p class="eyebrow">Install</p>
-    <h1>Get a server running</h1>
+    <p class="eyebrow">07 · Installation</p>
+    <h1>Install Storm</h1>
     <p class="lede">
-      Preferred path: one bootstrap on Debian/Ubuntu, then
+      Preferred path: one bootstrap on Debian or Ubuntu, then
       <code>storm-server up</code>. The package ships the binary, systemd unit,
-      and web client.
+      and web client. Desktop and mobile clients come from
+      <a href={release.latestUrl} target="_blank" rel="noopener noreferrer"
+        >GitHub Releases</a
+      >.
     </p>
   </header>
 
-  <section class="section wrap-narrow">
-    <h2>1. Install</h2>
+  <section class="section wrap-narrow" id="linux">
+    <h2>Linux · apt</h2>
     <p class="support">
-      Same pattern as Tailscale: the script adds Storm’s apt key and source,
-      then runs <code>apt install storm-server</code>. Served from the apt repo
-      root at
+      The script adds Storm’s apt key and source, then runs
+      <code>apt install storm-server</code>. Served from the apt repo root at
       <a href="https://dewanshdt.github.io/Storm/" target="_blank" rel="noopener noreferrer"
         >dewanshdt.github.io/Storm</a
       >
@@ -48,12 +45,15 @@ sudo apt install storm-server`;
     <CodeBlock code={bootstrap} label="install" />
   </section>
 
-  <section class="section wrap-narrow">
-    <h2>2. Start Storm</h2>
+  <section class="section wrap-narrow" id="start">
+    <h2>Start the server</h2>
     <p class="support">
       <code>up</code> creates the <code>storm</code> user when it can, writes
       <code>/etc/storm/storm.env</code> (mode 600, with a generated token), and
       enables the systemd unit. Default data root is <code>/srv/storm</code>.
+      The web client is then at
+      <code>http://&lt;host&gt;:{release.webPort}</code> — point every client at
+      that URL and the token from <code>storm.env</code>.
     </p>
     <CodeBlock code={up} label="up" />
   </section>
@@ -63,36 +63,26 @@ sudo apt install storm-server`;
     <p class="support">
       Point <code>--vault-root</code> at a directory that <em>contains</em>
       vaults (one folder per vault), not at a single vault. Vaults on NFS often
-      need the process to run as a user that can write the mount — <code>up</code>
-      follows the state-dir owner in that case.
+      need the process to run as a user that can write the mount —
+      <code>up</code> follows the state-dir owner in that case.
     </p>
     <CodeBlock code={upCustom} label="up · custom" />
   </section>
 
-  <section class="section wrap-narrow">
-    <h2>Manual apt (optional)</h2>
-    <p class="support">
-      Prefer reading the script over piping to shell? The bootstrap does exactly
-      this:
-    </p>
-    <CodeBlock code={aptManual} label="apt · manual" />
-  </section>
+  <div class="section wrap-narrow">
+    <GetStorm />
+  </div>
 
   <section class="section wrap-narrow">
-    <h2>Clients</h2>
+    <h2>MCP</h2>
     <p class="support">
-      Point the Flutter app (macOS, Android, or the packaged web UI) at your
-      server URL and the token from <code>/etc/storm/storm.env</code>. Releases
-      and checksums live on
+      After the server is up, enable MCP from the client under Server → AI
+      access, or via the config API. Details and the twelve tools are documented
+      in
       <a
-        href="https://github.com/dewanshDT/Storm/releases"
+        href="https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md"
         target="_blank"
-        rel="noopener noreferrer">GitHub Releases</a
-      >. Operator detail stays in
-      <a
-        href="https://github.com/dewanshDT/Storm/blob/main/deploy/README.md"
-        target="_blank"
-        rel="noopener noreferrer">deploy/README.md</a
+        rel="noopener noreferrer">apps/server/README.md</a
       >.
     </p>
   </section>

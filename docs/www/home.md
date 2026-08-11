@@ -10,46 +10,53 @@ Content for route **`/`**. Parent: [[Storm Website]].
 ## Meta
 
 - **Title:** Storm
-- **Description:** Self-hosted markdown notes. Your server owns the vault; phone, Mac, and browser sync to it.
+- **Description:** Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients and MCP access for AI agents.
+- **Theme:** SlowFlow earth (warm paper) — see `apps/www/src/styles/tokens.css`
 
 ## Hero
 
-Brand is the hero signal (BrandMark + wordmark). Visible headline is supporting
-copy — do not let a bigger H1 overpower the mark.
+**Eyebrow:** Self-hosted knowledge
 
 **Headline**
 
-> Your notes. Your server.
-> Plain markdown, always.
+> Your knowledge.
+> On your infrastructure.
 
 **Support**
 
-A small Rust sync server in the homelab owns the canonical vault. Flutter
-clients on phone, Mac, and web keep pace — offline is normal, conflicts stay
-visible in the file.
+Storm is a self-hosted, Markdown-native knowledge system with cross-platform
+clients and first-class access for AI agents through MCP.
 
 **CTAs**
 
 | Label | Target |
 |---|---|
-| Install the server | `/install` |
-| View on GitHub | `https://github.com/dewanshDT/Storm` |
+| Install Storm | `/install` |
+| Read the docs | `#docs` |
+| GitHub | `https://github.com/dewanshDT/Storm` |
 
-## Section — Why it exists
+**Install command (real)**
 
-**Eyebrow:** Why it exists
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
+```
 
-**Heading:** Obsidian + Syncthing, replaced
+**Metadata row:** Rust server · Flutter client · Markdown · MCP · Self-hosted
 
-**Body**
+## Sections
 
-Syncthing moves files without knowing what a note is. Storm keeps notes as
-ordinary markdown on disk — greppable, backupable, openable in Obsidian if you
-ever leave — and puts note-aware sync, merge, and search on a box you run.
+1. **01 · Foundation** — One source of truth. Storage-root tree; `state/` sibling.
+2. **02 · AI access** — 12 MCP tools (named); static conceptual demo.
+3. **03 · Architecture** — Flutter clients ↔ Rust server ↔ Markdown vaults; MCP.
+4. **04 · Storage** — Ordinary `.md` files.
+5. **05 · Client** — macOS · Android · Web only (no fake screenshots).
+6. **06 · Synchronization** — Synced / Offline / Conflict status language.
+7. **07 · Installation** — Links into `/install`.
+8. **08 · Documentation** — Repo deep links only (no docs portal).
 
 ## Design notes
 
-- One composition in the first viewport: brand, one headline, one support
-  sentence, one CTA group, atmospheric background — no cards in the hero.
-- Storm dark tokens; mint BrandMark ground `#96F2D7` does not re-theme.
-- Claims must match the live app / `docs/storm-ui.md` — do not invent features.
+- SlowFlow tokens; mint BrandMark ground does not retheme the page.
+- No Obsidian, Syncthing, or competitor comparisons.
+- Claims must match the live app — do not invent features.
+- Prototype screenshots are design reference only; do not ship as product photos.

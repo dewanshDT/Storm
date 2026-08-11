@@ -52,13 +52,14 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
-| M16 | Marketing / home site (Astro) | **in progress** | `apps/www` builds · CF Pages via dashboard TBD |
+| M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 
 Last updated: 2026-08-11. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
-`/usr/share/storm/web`). Android keystore still optional. **M16** Astro site is
-scaffolded under `apps/www` (`/`, `/install`, `/how-it-works`); CI builds it on
-PR/main. Deploy is Cloudflare Pages connected to the repo (build there — no
+`/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
+(`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
+positioning (no competitor framing), MCP-forward homepage, and real apt
+install CTAs. CI builds on PR/main. Deploy remains Cloudflare static (no
 GitHub deploy workflow). Decision 49 is the site hosting split.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
@@ -1572,34 +1573,41 @@ in `apps/www`. **Not** a documentation portal; depth stays on GitHub /
 
 **Done:**
 
-- Astro static app (TypeScript, npm lockfile) with Storm dark tokens, BrandMark,
-  IBM Plex Sans / Newsreader / IBM Plex Mono.
-- Routes: `/`, `/install` (apt + `up` from `deploy/release-secrets.md`),
-  `/how-it-works` (thin architecture sketch + repo links).
+- Astro static app (TypeScript, npm lockfile); BrandMark; IBM Plex Sans /
+  Newsreader / IBM Plex Mono.
+- **SlowFlow earth** tokens for www (warm paper, brown accent, tight radii) —
+  derived from `StormPreset.slowflowEarth` / the design handoff. Storm dark
+  remains the app’s default identity; SlowFlow is the marketing surface.
+- Routes: `/` (hero “Your knowledge. On your infrastructure.”, foundation,
+  MCP with 12 real tools + static demo, architecture, storage, client,
+  sync, install summary, repo docs links), `/install` (apt + `up` from
+  `deploy/release-secrets.md`; no Docker), `/how-it-works` (architecture
+  sketch + MCP).
+- Positioning: Storm as its own product — no Obsidian / Syncthing / competitor
+  framing in `apps/www` or `docs/www/` page copy.
 - `make www` / `make www-dev`; CI job `www` in `ci.yml` (build check only).
 - Page copy in vault [[Storm Website]] notes and `docs/www/`.
 
 **Still open:**
 
-- Connect the GitHub repo to Cloudflare Pages in the dashboard (root
-  `apps/www`, build `npm ci && npm run build`, output `dist`). Cloudflare
-  owns build + deploy on push — there is no GitHub deploy workflow for www.
-- Public hostname / custom domain (placeholder `site` in `astro.config.mjs`
-  is `https://storm.pages.dev` until then).
-- Visual polish against a real screenshot of the running app (hero atmosphere
-  is token-driven, not a product photo yet).
+- Confirm Cloudflare dashboard connection / public hostname (live preview has
+  used `storm.dewansh-dt.workers.dev`; placeholder `site` in
+  `astro.config.mjs` is still `https://storm.pages.dev`).
+- Optional: real running-app screenshot for the Client section (prototype PNGs
+  stay design reference only — not shipped as product photos).
 
-**Hosting (decision 49):** Cloudflare Pages. **Never** deploy to
-`https://dewanshdt.github.io/Storm/` — that URL is the apt repository root
-owned by `apt-repo.yml`. A marketing overwrite would break every
-`sources.list` line. Do **not** chain marketing deploys into `release.yml`.
+**Hosting (decision 49):** Cloudflare static deploy apart from apt Pages.
+**Never** deploy to `https://dewanshdt.github.io/Storm/` — that URL is the apt
+repository root owned by `apt-repo.yml`. A marketing overwrite would break
+every `sources.list` line. Do **not** chain marketing deploys into
+`release.yml`.
 
 **Content sources of truth:**
 
 - Marketing page copy → vault notes [[Storm Website]] (+ Home / Install /
   How it works) and the mirror under `docs/www/`
 - Install commands → `deploy/release-secrets.md` (apt) + `deploy/README.md`
-- Product claims → `docs/storm-ui.md` + live app; do not invent features
+- Product claims → live app + server/client READMEs; do not invent features
 - Architecture depth → link to repo / `PLAN.md`, do not duplicate
 
 ---
@@ -1732,8 +1740,9 @@ Use a pattern that cannot match the invoking shell.
 
 ## Open items (not v1-blocking)
 
-- **M16 marketing site** — in progress on `main`. Connect Cloudflare Pages in
-  the dashboard when ready (root `apps/www`); no GitHub deploy workflow.
+- **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
+  confirm Cloudflare hostname / dashboard connection; optional real app
+  screenshot for Client section. No GitHub deploy workflow.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.

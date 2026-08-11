@@ -3,20 +3,40 @@ const year = new Date().getFullYear();
 ---
 
 <footer class="site-footer">
-  <div class="wrap row">
-    <p>
-      Storm · self-hosted markdown notes · © {year}
-    </p>
-    <div class="links">
-      <a href="/install">Install</a>
-      <a href="https://github.com/dewanshDT/Storm" target="_blank" rel="noopener noreferrer"
-        >GitHub</a
-      >
-      <a
-        href="https://dewanshdt.github.io/Storm/"
-        target="_blank"
-        rel="noopener noreferrer">Apt repo</a
-      >
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">
+        <p class="word">Storm</p>
+        <p class="tagline">
+          Your knowledge.<br />On your infrastructure.
+        </p>
+      </div>
+      <nav class="links" aria-label="Footer">
+        <a href="/#docs">Documentation</a>
+        <a href="https://github.com/dewanshDT/Storm" target="_blank" rel="noopener noreferrer"
+          >GitHub</a
+        >
+        <a href="/install">Installation</a>
+        <a
+          href="https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md"
+          target="_blank"
+          rel="noopener noreferrer">MCP</a
+        >
+      </nav>
+    </div>
+
+    <hr class="hr" />
+
+    <div class="bottom">
+      <p class="meta">Rust · Flutter · Markdown · MCP</p>
+      <p class="legal">
+        © {year} ·
+        <a
+          href="https://github.com/dewanshDT/Storm/blob/main/LICENSE"
+          target="_blank"
+          rel="noopener noreferrer">MIT</a
+        >
+      </p>
     </div>
   </div>
 </footer>
@@ -25,28 +45,38 @@ const year = new Date().getFullYear();
   .site-footer {
     margin-top: auto;
     border-top: var(--bw) solid var(--border);
-    padding: calc(var(--sp) * 4) 0;
+    padding: calc(var(--sp) * 6) 0 calc(var(--sp) * 5);
   }
 
-  .row {
+  .top {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
     justify-content: space-between;
-    gap: calc(var(--sp) * 2);
+    gap: calc(var(--sp) * 4);
   }
 
-  p {
-    margin: 0;
+  .word {
+    margin: 0 0 calc(var(--sp) * 1.5);
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    color: var(--text3);
-    letter-spacing: 0.02em;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  .tagline {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: var(--fs-lg);
+    line-height: 1.35;
+    color: var(--text2);
   }
 
   .links {
     display: flex;
-    gap: calc(var(--sp) * 2);
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1) calc(var(--sp) * 2.5);
+    align-content: flex-start;
   }
 
   .links a {
@@ -56,6 +86,31 @@ const year = new Date().getFullYear();
   }
 
   .links a:hover {
+    color: var(--text);
+  }
+
+  .bottom {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: calc(var(--sp) * 2);
+  }
+
+  .meta,
+  .legal {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text3);
+    letter-spacing: 0.04em;
+  }
+
+  .legal a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .legal a:hover {
     color: var(--text);
   }
 </style>
