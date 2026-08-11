@@ -13,15 +13,13 @@ bool get stormUsesMetaModifier => defaultTargetPlatform == TargetPlatform.macOS;
 /// Desktop and desktop-class web only. On a phone the global Focus would grab
 /// primary focus to arm nothing, and could fight a field that autofocuses when
 /// its screen opens (the search field does).
-bool get stormHasKeyboard =>
-    switch (defaultTargetPlatform) {
-      TargetPlatform.macOS ||
-      TargetPlatform.linux ||
-      TargetPlatform.windows ||
-      TargetPlatform.fuchsia =>
-        true,
-      _ => false,
-    };
+bool get stormHasKeyboard => switch (defaultTargetPlatform) {
+  TargetPlatform.macOS ||
+  TargetPlatform.linux ||
+  TargetPlatform.windows ||
+  TargetPlatform.fuchsia => true,
+  _ => false,
+};
 
 /// Platform-aware chord: Meta on macOS, Control elsewhere.
 ///
