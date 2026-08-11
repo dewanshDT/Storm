@@ -28,6 +28,24 @@ root by `apt-repo.yml`. Manual key + `sources.list` steps are in
 generated token), and `systemctl enable --now storm-server`. The web client
 lives at `/usr/share/storm/web` and upgrades with the package.
 
+## Updating (packaged)
+
+There is no `storm-server upgrade`. Once the apt source is registered, refresh
+through apt. The package replaces the binary and `/usr/share/storm/web`; it
+does not rewrite `/etc/storm/storm.env`. Restart so the new binary is what is
+listening:
+
+```sh
+sudo apt update
+sudo apt install --only-upgrade storm-server
+sudo systemctl restart storm-server
+sudo storm-server status
+```
+
+Native clients (macOS zip, Android APK) are separate downloads from
+[GitHub Releases](https://github.com/dewanshDT/Storm/releases) — upgrade those
+on each device when a new release lands.
+
 ## First-time setup (manual)
 
 On the server, once:

@@ -20,7 +20,8 @@ import 'states.dart';
 import 'tokens.dart';
 import 'wikilink_suggestions.dart';
 
-/// The note pane: Read Mode by default, Edit Mode for the source editor.
+/// The note pane: Read Mode by default (when enabled), Edit Mode for the
+/// source editor.
 ///
 /// Bridges two things that both want to own the text: Flutter's
 /// [TextEditingController] and the [NoteSession] that talks to the server.
@@ -30,7 +31,8 @@ import 'wikilink_suggestions.dart';
 ///
 /// Read Mode consumes [NoteSession.body] through [StormMarkdownView]; it does
 /// not own a second buffer. Switching modes never drops unsaved edits because
-/// the session already holds them.
+/// the session already holds them. [Settings.readMode] off hides the switch
+/// and keeps Edit Mode only — the pre-M17 note screen.
 class NoteEditor extends ConsumerStatefulWidget {
   const NoteEditor({
     super.key,
@@ -256,7 +258,14 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     }
 
     final t = context.tokens;
-    final editing = _mode == NoteViewMode.edit;
+    final readModeEnabled =
+        ref.watch(settingsProvider).value?.readMode ?? true;
+    // Keep local mode honest while the setting is off, so turning it back on
+    // does not snap the user into Read after they have been editing.
+    if (!readModeEnabled) {
+      _mode = NoteViewMode.edit;
+    }
+    final editing = !readModeEnabled || _mode == NoteViewMode.edit;
     // 40 at desk width, as the prototype has it; on a phone the column is the
     // screen and 40 a side would leave nothing for the words.
     // The shell's inset on a phone, so the prose starts under the bubble and
@@ -281,7 +290,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
             // The same inset as the prose below it: the design lines the
             // version up with the note's first character.
             padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 0.5),
-            child: _statusBar(session),
+            child: _statusBar(session, readModeEnabled: readModeEnabled),
           ),
         ),
         if (editing && _isDegraded(session)) const _DegradedNotice(),
@@ -426,7 +435,7 @@ class _DegradedNotice extends StatelessWidget {
 extension on _NoteEditorState {
   /// The tone is the meaning, and the meanings are fixed: green is the server
   /// has it, amber is waiting, danger is it did not go, grey is in flight.
-  Widget _statusBar(NoteSession session) {
+  Widget _statusBar(NoteSession session, {required bool readModeEnabled}) {
     final (label, tone) = switch (session.saveState) {
       SaveState.idle => ('', SaveTone.working),
       SaveState.dirty => ('Unsaved', SaveTone.working),
@@ -445,8 +454,10 @@ extension on _NoteEditorState {
             error: session.error,
           ),
         ),
-        SizedBox(width: context.tokens.sp),
-        NoteModeToggle(mode: _mode, onChanged: _setMode),
+        if (readModeEnabled) ...[
+          SizedBox(width: context.tokens.sp),
+          NoteModeToggle(mode: _mode, onChanged: _setMode),
+        ],
       ],
     );
   }

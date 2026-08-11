@@ -410,7 +410,14 @@ class StormCheckbox extends StatelessWidget {
           border: value ? null : Border.all(color: t.text3, width: t.bw * 1.5),
         ),
         child: value
-            ? Icon(LucideIcons.check, size: side * 0.72, color: t.onAccent)
+            // System text scale must not inflate the mark past the box —
+            // the box itself is already sized for the user's Storm font size.
+            ? Icon(
+                LucideIcons.check,
+                size: side * 0.72,
+                color: t.onAccent,
+                applyTextScaling: false,
+              )
             : null,
       ),
     );

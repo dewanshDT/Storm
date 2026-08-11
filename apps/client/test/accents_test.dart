@@ -178,6 +178,13 @@ void main() {
       expect(BodyFont.serif.family, isNotNull);
     });
   });
+
+  group('Read mode setting', () {
+    test('defaults on, matching decision 50', () {
+      expect(const Settings().readMode, isTrue);
+      expect(const Settings().copyWith(readMode: false).readMode, isFalse);
+    });
+  });
 }
 
 /// How far apart two colours are, as a rough sum of channel differences.

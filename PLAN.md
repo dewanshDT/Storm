@@ -657,11 +657,14 @@ it does not share the apt site root.
 **50. Read Mode is a styled Markdown renderer beside the existing editor —
 not a replacement and not an AST.**
 Opening a note defaults to Read Mode (`StormMarkdownView` over
-`flutter_markdown_plus`, Storm tokens). Edit Mode keeps the source
-`TextEditingController` editor from M0/M8. Markdown remains the only
-document format; there is no Storm AST, no block editor, and no second
-persistence path. Read Mode always renders `NoteSession.body` (including
-unsaved edits). Task-list checkboxes are read-only in this phase.
+`flutter_markdown_plus`, Storm tokens) when `settings.readMode` is on
+(the default). Edit Mode keeps the source `TextEditingController` editor
+from M0/M8. Turning Read Mode off in client settings hides the Read /
+Edit switch and keeps the source editor only — the pre-M17 note screen.
+Markdown remains the only document format; there is no Storm AST, no
+block editor, and no second persistence path. Read Mode always renders
+`NoteSession.body` (including unsaved edits). Task-list checkboxes are
+read-only in this phase.
 *Revisit if:* Read Mode is not enough document quality and a real
 block/AST renderer becomes worth the migration cost — decision 5's
 block-editor revisit is the larger cousin of that call.
@@ -1577,7 +1580,10 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
 
 (`deploy/install.sh`, published at the apt Pages root by `apt-repo.yml`.) The
 script only registers the apt source and installs the package; `storm-server up`
-stays a separate step because vault/state paths are an operator choice.
+stays a separate step because vault/state paths are an operator choice. Later
+updates are apt (`apt install --only-upgrade storm-server` +
+`systemctl restart`) — documented on `/install#update`, root README, and
+`deploy/README.md`. There is no `storm-server upgrade` subcommand.
 
 ---
 
@@ -1634,11 +1640,18 @@ replacing the source editor or introducing an AST (decision 50).
 
 - `flutter_markdown_plus` + `markdown` + `url_launcher` dependencies.
 - `StormMarkdownView` + `stormMarkdownStyleSheet` under `lib/ui/markdown/`.
-- Read / Edit toggle (`NoteModeToggle`); notes open in Read Mode.
+- Read / Edit toggle (`NoteModeToggle`); notes open in Read Mode when
+  `settings.readMode` is on (default). Off hides the switch and stays in
+  Edit Mode only.
 - Edit Mode unchanged (existing controller, toolbar, attachment strip).
+- Client settings: **Read mode** switch beside Show note id.
 - Wikilinks via custom `WikilinkSyntax` (`storm-wikilink:` scheme).
 - Images resolve through `StormApi.attachmentUrl`; tables/code/HR/lists/
   task lists (read-only `StormCheckbox`) styled from tokens.
+- Task-list boxes stay square: custom `checkboxBuilder` must apply the
+  same right pad as `listBulletPadding`, or the package's tight bullet
+  column stretches the 18px box into a pill over the label.
+- Read Mode body size (and the task box) follow `settings.fontSize`.
 - Tests in `test/markdown_read_mode_test.dart`; existing editor suites
   enter Edit Mode via `enterEditMode`.
 
