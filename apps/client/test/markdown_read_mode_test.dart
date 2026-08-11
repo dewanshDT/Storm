@@ -11,7 +11,6 @@ import 'package:storm/ui/markdown/storm_markdown_view.dart';
 import 'package:storm/ui/note_mode_toggle.dart';
 import 'package:storm/ui/shell/corner_bubbles.dart';
 import 'package:storm/ui/theme.dart';
-import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/widgets.dart';
 
 import 'fake_server.dart';
@@ -30,9 +29,9 @@ void main() {
     addTearDown(c.dispose);
     await c.read(settingsProvider.future);
     final current = c.read(settingsProvider).value!;
-    await c.read(settingsProvider.notifier).save(
-      current.copyWith(fontSize: fontSize, bodyFont: bodyFont),
-    );
+    await c
+        .read(settingsProvider.notifier)
+        .save(current.copyWith(fontSize: fontSize, bodyFont: bodyFont));
 
     await tester.pumpWidget(
       UncontrolledProviderScope(
@@ -74,10 +73,7 @@ void main() {
     });
 
     testWidgets('links', (tester) async {
-      await pumpMarkdown(
-        tester,
-        'See [the plan](https://example.com/plan).\n',
-      );
+      await pumpMarkdown(tester, 'See [the plan](https://example.com/plan).\n');
       expect(
         find.textContaining('the plan', findRichText: true),
         findsOneWidget,
@@ -145,18 +141,16 @@ void main() {
     });
 
     testWidgets('Read Mode body size follows client text size', (tester) async {
-      await pumpMarkdown(
-        tester,
-        'Prose at the chosen size.\n',
-        fontSize: 22,
-      );
+      await pumpMarkdown(tester, 'Prose at the chosen size.\n', fontSize: 22);
 
       expect(find.textContaining('Prose at the chosen size'), findsOneWidget);
       final selectable = tester
           .widgetList<SelectableText>(find.byType(SelectableText))
           .where(
             (s) =>
-                s.textSpan?.toPlainText().contains('Prose at the chosen size') ??
+                s.textSpan?.toPlainText().contains(
+                  'Prose at the chosen size',
+                ) ??
                 false,
           );
       expect(selectable, isNotEmpty);
@@ -190,10 +184,7 @@ void main() {
     });
 
     testWidgets('images (placeholder when unresolved)', (tester) async {
-      await pumpMarkdown(
-        tester,
-        '![Architecture](attachments/missing.png)\n',
-      );
+      await pumpMarkdown(tester, '![Architecture](attachments/missing.png)\n');
       // Fake server has no attachment bytes; the fallback must still render.
       expect(find.textContaining('Architecture'), findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -212,10 +203,7 @@ fn main() {}
     });
 
     testWidgets('blockquote', (tester) async {
-      await pumpMarkdown(
-        tester,
-        '> The server owns the canonical vault.\n',
-      );
+      await pumpMarkdown(tester, '> The server owns the canonical vault.\n');
       expect(
         find.textContaining('The server owns the canonical vault.'),
         findsOneWidget,
@@ -380,9 +368,9 @@ fn main() {}
     ) async {
       final c = shellContainer();
       await c.read(settingsProvider.future);
-      await c.read(settingsProvider.notifier).save(
-        c.read(settingsProvider).value!.copyWith(readMode: false),
-      );
+      await c
+          .read(settingsProvider.notifier)
+          .save(c.read(settingsProvider).value!.copyWith(readMode: false));
       await pumpShell(tester, c);
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
