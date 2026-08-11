@@ -14,12 +14,15 @@ After apt works, install under `/srv/storm` and remove the hand-rolled tree /
 ## First-time setup (packaged)
 
 ```sh
-# From the apt repo on Pages (preferred once v0.2.0 ships):
-# see deploy/release-secrets.md for the sources.list lines.
-sudo apt install storm-server
+# Bootstrap apt (key + source + install) — same idea as Tailscale:
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
 sudo storm-server up                    # data root = /srv/storm
 sudo storm-server status
 ```
+
+`install.sh` lives in `deploy/install.sh` and is published at the apt Pages
+root by `apt-repo.yml`. Manual key + `sources.list` steps are in
+[release-secrets.md](release-secrets.md) if you prefer not to pipe to shell.
 
 `up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600, with a
 generated token), and `systemctl enable --now storm-server`. The web client

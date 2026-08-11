@@ -68,6 +68,10 @@ Live layout:
 | `/etc/storm/storm.env` | token + paths (mode 600) |
 
 ```sh
+# Preferred: one-liner (adds key + source, then apt install)
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
+
+# Or by hand:
 # 1. Add the apt source (Pages root IS the apt root)
 curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \
   | sudo tee /usr/share/keyrings/storm.gpg >/dev/null

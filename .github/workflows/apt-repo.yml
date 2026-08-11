@@ -94,6 +94,10 @@ jobs:
           cp -a apt-repo/. publish/
           # Keep the keyring at the site root; drop reprepro internals.
           rm -rf publish/conf publish/db
+          # Bootstrap installer (Tailscale-style one-liner). Source of truth:
+          # deploy/install.sh — republished with every apt Pages build.
+          cp deploy/install.sh publish/install.sh
+          chmod 0644 publish/install.sh
           ls -laR publish
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

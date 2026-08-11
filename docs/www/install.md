@@ -8,7 +8,8 @@ route: /install
 Content for route **`/install`**. Parent: [[Storm Website]].
 
 Operator truth lives in the repo — keep this note aligned with
-`deploy/release-secrets.md` and `deploy/README.md` when apt lines change.
+`deploy/release-secrets.md`, `deploy/install.sh`, and `deploy/README.md`
+when apt lines change.
 
 ## Meta
 
@@ -23,22 +24,21 @@ Operator truth lives in the repo — keep this note aligned with
 
 **Lede**
 
-Preferred path: apt on Debian/Ubuntu, then one `up` command. The package ships
-the binary, systemd unit, and web client.
+Preferred path: one bootstrap on Debian/Ubuntu, then `storm-server up`. The
+package ships the binary, systemd unit, and web client.
 
-## 1. Add the apt source
+## 1. Install
 
-The GitHub Pages site at [dewanshdt.github.io/Storm](https://dewanshdt.github.io/Storm/)
-*is* the apt repository root — do not put a marketing site there.
+Same pattern as Tailscale: the script adds Storm’s apt key and source, then
+runs `apt install storm-server`. Served from the apt repo root at
+[dewanshdt.github.io/Storm](https://dewanshdt.github.io/Storm/) — that URL is
+the apt root, not the marketing site.
 
 ```sh
-curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \
-  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
-echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \
-  | sudo tee /etc/apt/sources.list.d/storm.list
-sudo apt update
-sudo apt install storm-server
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
 ```
+
+Source of truth: `deploy/install.sh` (copied onto Pages by `apt-repo.yml`).
 
 ## 2. Start Storm
 
@@ -62,6 +62,19 @@ sudo storm-server up \
   --data-root /srv/storm \
   --vault-root /path/to/vaults \
   --state /srv/storm/state
+```
+
+## Manual apt (optional)
+
+Prefer reading the script over piping to shell? The bootstrap does exactly this:
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \
+  | sudo tee /etc/apt/sources.list.d/storm.list
+sudo apt update
+sudo apt install storm-server
 ```
 
 ## Clients

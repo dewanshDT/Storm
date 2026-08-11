@@ -2,12 +2,7 @@
 import BaseLayout from "../layouts/BaseLayout.astro";
 import CodeBlock from "../components/CodeBlock.astro";
 
-const aptSource = `curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \\
-  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
-echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \\
-  | sudo tee /etc/apt/sources.list.d/storm.list
-sudo apt update
-sudo apt install storm-server`;
+const bootstrap = `curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh`;
 
 const up = `sudo storm-server up
 sudo storm-server status`;
@@ -16,6 +11,13 @@ const upCustom = `sudo storm-server up \\
   --data-root /srv/storm \\
   --vault-root /path/to/vaults \\
   --state /srv/storm/state`;
+
+const aptManual = `curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \\
+  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
+echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \\
+  | sudo tee /etc/apt/sources.list.d/storm.list
+sudo apt update
+sudo apt install storm-server`;
 ---
 
 <BaseLayout
@@ -26,21 +28,24 @@ const upCustom = `sudo storm-server up \\
     <p class="eyebrow">Install</p>
     <h1>Get a server running</h1>
     <p class="lede">
-      Preferred path: apt on Debian/Ubuntu, then one <code>up</code> command.
-      The package ships the binary, systemd unit, and web client.
+      Preferred path: one bootstrap on Debian/Ubuntu, then
+      <code>storm-server up</code>. The package ships the binary, systemd unit,
+      and web client.
     </p>
   </header>
 
   <section class="section wrap-narrow">
-    <h2>1. Add the apt source</h2>
+    <h2>1. Install</h2>
     <p class="support">
-      The GitHub Pages site at
+      Same pattern as Tailscale: the script adds Storm’s apt key and source,
+      then runs <code>apt install storm-server</code>. Served from the apt repo
+      root at
       <a href="https://dewanshdt.github.io/Storm/" target="_blank" rel="noopener noreferrer"
         >dewanshdt.github.io/Storm</a
       >
-      <em>is</em> the apt repository root — do not put a marketing site there.
+      — that URL is the apt root, not the marketing site.
     </p>
-    <CodeBlock code={aptSource} label="apt" />
+    <CodeBlock code={bootstrap} label="install" />
   </section>
 
   <section class="section wrap-narrow">
@@ -62,6 +67,15 @@ const upCustom = `sudo storm-server up \\
       follows the state-dir owner in that case.
     </p>
     <CodeBlock code={upCustom} label="up · custom" />
+  </section>
+
+  <section class="section wrap-narrow">
+    <h2>Manual apt (optional)</h2>
+    <p class="support">
+      Prefer reading the script over piping to shell? The bootstrap does exactly
+      this:
+    </p>
+    <CodeBlock code={aptManual} label="apt · manual" />
   </section>
 
   <section class="section wrap-narrow">
