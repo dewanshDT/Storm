@@ -2,11 +2,15 @@
 import BrandMark from "./BrandMark.astro";
 
 const path = Astro.url.pathname.replace(/\/$/, "") || "/";
+const onHome = path === "/";
 
 const links = [
-  { href: "/install", label: "Install" },
-  { href: "/how-it-works", label: "How it works" },
-  { href: "https://github.com/dewanshDT/Storm", label: "GitHub", external: true },
+  { href: onHome ? "#docs" : "/#docs", label: "Docs" },
+  {
+    href: "https://github.com/dewanshDT/Storm",
+    label: "GitHub",
+    external: true,
+  },
 ];
 ---
 
@@ -15,15 +19,24 @@ const links = [
     <a class="home" href="/" aria-label="Storm home">
       <BrandMark size="sm" />
     </a>
-    <nav aria-label="Primary">
+
+    <button
+      type="button"
+      class="menu-toggle"
+      aria-expanded="false"
+      aria-controls="site-nav"
+      data-menu-toggle
+    >
+      <span class="sr-only">Menu</span>
+      <span class="menu-icon" aria-hidden="true"></span>
+    </button>
+
+    <nav id="site-nav" class="site-nav" aria-label="Primary" data-site-nav>
       {
         links.map((link) => (
           <a
             href={link.href}
-            class:list={[
-              "nav-link",
-              !link.external && path === link.href && "is-active",
-            ]}
+            class="nav-link"
             {...(link.external
               ? { target: "_blank", rel: "noopener noreferrer" }
               : {})}
@@ -32,18 +45,55 @@ const links = [
           </a>
         ))
       }
+      <a
+        class:list={["btn", "btn-primary", "nav-install", path === "/install" && "is-active"]}
+        href="/install"
+      >
+        Install
+      </a>
     </nav>
   </div>
 </header>
+
+<script>
+  function wireMenu() {
+    const toggle = document.querySelector<HTMLButtonElement>("[data-menu-toggle]");
+    const nav = document.querySelector<HTMLElement>("[data-site-nav]");
+    if (!toggle || !nav || toggle.dataset.wired) return;
+    toggle.dataset.wired = "1";
+
+    const setOpen = (open: boolean) => {
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      nav.classList.toggle("is-open", open);
+      document.body.classList.toggle("nav-open", open);
+    };
+
+    toggle.addEventListener("click", () => {
+      const open = toggle.getAttribute("aria-expanded") !== "true";
+      setOpen(open);
+    });
+
+    nav.querySelectorAll("a").forEach((a) => {
+      a.addEventListener("click", () => setOpen(false));
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") setOpen(false);
+    });
+  }
+
+  wireMenu();
+  document.addEventListener("astro:page-load", wireMenu);
+</script>
 
 <style>
   .site-header {
     position: sticky;
     top: 0;
     z-index: 20;
-    backdrop-filter: blur(12px);
-    background: color-mix(in oklab, var(--bg) 82%, transparent);
-    border-bottom: var(--bw) solid color-mix(in oklab, var(--border) 70%, transparent);
+    backdrop-filter: blur(10px);
+    background: color-mix(in oklab, var(--bg) 88%, transparent);
+    border-bottom: var(--bw) solid color-mix(in oklab, var(--border) 80%, transparent);
   }
 
   .bar {
@@ -52,18 +102,45 @@ const links = [
     justify-content: space-between;
     gap: calc(var(--sp) * 2);
     min-height: 64px;
+    position: relative;
   }
 
   .home {
     text-decoration: none;
     color: inherit;
+    z-index: 1;
   }
 
   .home:hover {
     color: inherit;
   }
 
-  nav {
+  .menu-toggle {
+    display: none;
+    appearance: none;
+    border: var(--bw) solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    width: 40px;
+    height: 40px;
+    border-radius: var(--r-control);
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+  }
+
+  .menu-icon {
+    display: block;
+    width: 16px;
+    height: 1px;
+    background: currentColor;
+    box-shadow:
+      0 -5px 0 currentColor,
+      0 5px 0 currentColor;
+  }
+
+  .site-nav {
     display: flex;
     align-items: center;
     gap: calc(var(--sp) * 0.5);
@@ -81,25 +158,54 @@ const links = [
       background-color var(--dur) var(--ease);
   }
 
-  .nav-link:hover,
-  .nav-link.is-active {
+  .nav-link:hover {
     color: var(--text);
     background: var(--surface);
     text-decoration: none;
   }
 
-  @media (max-width: 560px) {
+  .nav-install {
+    margin-left: calc(var(--sp) * 1);
+    min-height: 36px;
+    padding-inline: calc(var(--sp) * 1.75);
+  }
+
+  @media (max-width: 640px) {
     .bar {
       min-height: 56px;
     }
 
-    nav {
-      gap: 0;
+    .menu-toggle {
+      display: inline-flex;
+    }
+
+    .site-nav {
+      display: none;
+      position: absolute;
+      top: calc(100% + 1px);
+      left: 0;
+      right: 0;
+      flex-direction: column;
+      align-items: stretch;
+      gap: calc(var(--sp) * 0.5);
+      padding: calc(var(--sp) * 2);
+      background: var(--bg);
+      border-bottom: var(--bw) solid var(--border);
+      box-shadow: var(--shadow);
+    }
+
+    .site-nav.is-open {
+      display: flex;
     }
 
     .nav-link {
-      padding-inline: calc(var(--sp) * 0.9);
-      font-size: var(--fs-xs);
+      padding: calc(var(--sp) * 1.25) calc(var(--sp) * 1.5);
+    }
+
+    .nav-install {
+      margin-left: 0;
+      margin-top: calc(var(--sp) * 0.5);
+      width: 100%;
     }
   }
 </style>

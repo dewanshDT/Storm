@@ -1,155 +1,780 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import BrandMark from "../components/BrandMark.astro";
+import CodeBlock from "../components/CodeBlock.astro";
+
+const bootstrap = `curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh`;
+
+const mcpTools = [
+  "list_vaults",
+  "get_vault",
+  "search",
+  "get_note",
+  "get_related_notes",
+  "list_tags",
+  "recent_notes",
+  "get_note_history",
+  "get_note_version",
+  "create_note",
+  "update_note",
+  "delete_note",
+];
+
+const description =
+  "Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients and MCP access for AI agents.";
 ---
 
-<BaseLayout
-  title="Storm"
-  description="Self-hosted markdown notes. Your server owns the vault; phone, Mac, and browser sync to it."
->
-  <section class="hero" aria-label="Storm">
-    <div class="atmosphere" aria-hidden="true">
-      <div class="glow glow-a"></div>
-      <div class="glow glow-b"></div>
-      <div class="grain"></div>
-    </div>
-
-    <div class="wrap stage">
-      <div class="brand-lockup">
-        <BrandMark size="lg" />
+<BaseLayout title="Storm" description={description}>
+  <!-- HERO -->
+  <section class="hero" aria-labelledby="hero-heading">
+    <div class="wrap hero-inner">
+      <div class="hero-brand">
+        <BrandMark size="md" />
       </div>
-      <h1 class="sr-only">Storm</h1>
-      <p class="headline">
-        Your notes. Your server.<br />Plain markdown, always.
-      </p>
-      <p class="support">
-        A small Rust sync server in the homelab owns the canonical vault.
-        Flutter clients on phone, Mac, and web keep pace — offline is normal,
-        conflicts stay visible in the file.
+      <p class="eyebrow">Self-hosted knowledge</p>
+      <h1 id="hero-heading" class="display">
+        Your knowledge.<br />On your infrastructure.
+      </h1>
+      <p class="lede">
+        Storm is a self-hosted, Markdown-native knowledge system with
+        cross-platform clients and first-class access for AI agents through MCP.
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="/install">Install the server</a>
+        <a class="btn btn-primary" href="/install">Install Storm</a>
+        <a class="btn btn-ghost" href="#docs">Read the docs</a>
         <a
           class="btn btn-ghost"
           href="https://github.com/dewanshDT/Storm"
           target="_blank"
-          rel="noopener noreferrer">View on GitHub</a
+          rel="noopener noreferrer">GitHub</a
         >
+      </div>
+
+      <div class="hero-install">
+        <CodeBlock code={bootstrap} label="install" />
+        <p class="install-note">
+          Debian / Ubuntu apt bootstrap. Then
+          <code>sudo storm-server up</code>.
+          <a href="/install">Full installation →</a>
+        </p>
+      </div>
+
+      <p class="meta-row hero-meta" role="list">
+        <span role="listitem">Rust server</span>
+        <span role="listitem">Flutter client</span>
+        <span role="listitem">Markdown</span>
+        <span role="listitem">MCP</span>
+        <span role="listitem">Self-hosted</span>
+      </p>
+    </div>
+  </section>
+
+  <!-- 01 FOUNDATION -->
+  <section class="section" id="foundation" aria-labelledby="foundation-h">
+    <div class="wrap">
+      <p class="section-label">01 · Foundation</p>
+      <h2 id="foundation-h">One source of truth.</h2>
+      <p class="support">
+        Storm keeps your knowledge as ordinary Markdown on storage you control.
+        Devices connect to the same server, while the underlying files remain
+        readable, portable, searchable, and easy to back up.
+      </p>
+      <div class="terminal-panel" aria-label="Storage root example">
+        <div class="panel-head">storage root</div>
+        <pre><code>vaults/
+├── personal/
+├── work/
+└── projects/
+    └── storm.md
+
+state/          ← indexes &amp; registry (sibling, never inside vaults)</code></pre>
       </div>
     </div>
   </section>
 
-  <section class="section wrap-narrow">
-    <p class="eyebrow">Why it exists</p>
-    <h2>Obsidian + Syncthing, replaced</h2>
-    <p class="support">
-      Syncthing moves files without knowing what a note is. Storm keeps notes
-      as ordinary markdown on disk — greppable, backupable, openable in
-      Obsidian if you ever leave — and puts note-aware sync, merge, and search
-      on a box you run.
-    </p>
+  <!-- 02 AI ACCESS -->
+  <section class="section" id="mcp" aria-labelledby="mcp-h">
+    <div class="wrap">
+      <p class="section-label">02 · AI access</p>
+      <h2 id="mcp-h">Your agents can work with your knowledge.</h2>
+      <p class="support">
+        Storm exposes your vault through MCP, allowing compatible AI agents to
+        search, read, create, and modify knowledge while the underlying source
+        remains your Markdown vault. MCP is off by default; write tools require
+        writable mode.
+      </p>
+
+      <div class="mcp-stats">
+        <div class="kv-chip">
+          <span class="k">Tools</span>
+          <span class="v">12 when writable</span>
+        </div>
+        <div class="kv-chip">
+          <span class="k">Protocol</span>
+          <span class="v">Streamable HTTP</span>
+        </div>
+        <div class="kv-chip">
+          <span class="k">Endpoint</span>
+          <span class="v">/mcp</span>
+        </div>
+      </div>
+
+      <ul class="tool-list" aria-label="MCP tools">
+        {mcpTools.map((name) => <li><code>{name}</code></li>)}
+      </ul>
+
+      <div class="mcp-demo" aria-label="Conceptual MCP interaction (static)">
+        <p class="demo-label">Conceptual · not executed on this page</p>
+        <div class="demo-card">
+          <p class="demo-who">You</p>
+          <p class="demo-body">
+            What did I decide about Storm’s sync architecture?
+          </p>
+        </div>
+        <p class="demo-arrow" aria-hidden="true">↓</p>
+        <div class="demo-card demo-card--mono">
+          <p class="demo-who">Storm MCP</p>
+          <p class="demo-body">
+            <code>search(…)</code><br />
+            <code>get_note(…)</code>
+          </p>
+        </div>
+        <p class="demo-arrow" aria-hidden="true">↓</p>
+        <div class="demo-card">
+          <p class="demo-who">Agent</p>
+          <p class="demo-body">
+            You decided that the Rust server owns the canonical vault while
+            clients synchronize through the server.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 ARCHITECTURE -->
+  <section class="section" id="architecture" aria-labelledby="arch-h">
+    <div class="wrap">
+      <p class="section-label">03 · Architecture</p>
+      <h2 id="arch-h">One knowledge layer. Many interfaces.</h2>
+      <p class="support">
+        Flutter clients on macOS, Android, and web talk to a Rust sync server.
+        The server owns merge, search, and history. AI applications reach the
+        same vault through MCP.
+      </p>
+
+      <div class="arch" aria-label="Architecture diagram">
+        <div class="arch-row arch-clients">
+          <span class="arch-node">macOS</span>
+          <span class="arch-node">Android</span>
+          <span class="arch-node">Web</span>
+        </div>
+        <p class="arch-conn" aria-hidden="true">▼ REST · WebSocket</p>
+        <div class="arch-node arch-server">Storm server · Rust</div>
+        <p class="arch-conn" aria-hidden="true">▼</p>
+        <div class="arch-node">Markdown vaults</div>
+        <p class="arch-conn" aria-hidden="true">▼</p>
+        <div class="arch-node arch-muted">Your storage / NAS</div>
+        <div class="arch-mcp">
+          <span class="arch-node arch-mcp-node">AI applications</span>
+          <span class="arch-mcp-label">MCP</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 04 STORAGE -->
+  <section class="section" id="storage" aria-labelledby="storage-h">
+    <div class="wrap">
+      <p class="section-label">04 · Storage</p>
+      <h2 id="storage-h">Your knowledge is just files.</h2>
+      <p class="support">
+        Storm stores knowledge as Markdown rather than locking it inside a
+        proprietary document format. Grep it, back it up, version it with the
+        tools you already use.
+      </p>
+      <div class="storage-grid">
+        <div class="terminal-panel" aria-label="Vault tree example">
+          <div class="panel-head">vault</div>
+          <pre><code>Daily/
+└── 2026-08-11<span class="ok">.md</span>
+Projects/
+├── Storm/
+└── Website/
+Resources/
+Archive/</code></pre>
+        </div>
+        <div class="chip-stack">
+          <span class="chip chip--amber">.md</span>
+          <span class="chip">git</span>
+          <span class="chip">backup</span>
+          <span class="chip">grep</span>
+          <span class="chip">scripts</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 CLIENT -->
+  <section class="section" id="client" aria-labelledby="client-h">
+    <div class="wrap">
+      <p class="section-label">05 · Client</p>
+      <h2 id="client-h">One client across your devices.</h2>
+      <p class="support">
+        Storm uses a Flutter client for a consistent experience on the platforms
+        that ship today: macOS, Android, and web. The phone layout is the
+        default; wide screens add a sidebar without changing the small-screen
+        experience.
+      </p>
+      <div class="platform-row">
+        <div class="platform">
+          <span class="chip">macOS</span>
+          <p>Desktop app with sandbox network and file entitlements.</p>
+        </div>
+        <div class="platform">
+          <span class="chip">Android</span>
+          <p>Release APK with full network access for your server.</p>
+        </div>
+        <div class="platform">
+          <span class="chip">Web</span>
+          <p>Packaged UI served by storm-server itself.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 SYNC -->
+  <section class="section" id="sync" aria-labelledby="sync-h">
+    <div class="wrap">
+      <p class="section-label">06 · Synchronization</p>
+      <h2 id="sync-h">Work wherever you are.</h2>
+      <p class="support">
+        The server owns the canonical vault. Clients keep a local cache and an
+        outbox. When two devices diverge, Storm merges when it can — and when it
+        cannot, the conflict stays visible in the note file.
+      </p>
+      <div class="sync-states">
+        <article class="sync-card">
+          <p class="sync-status">
+            <span class="status-dot status-dot--synced" aria-hidden="true"></span>
+            Synced
+          </p>
+          <p>Your server is reachable. Local and remote agree.</p>
+        </article>
+        <article class="sync-card">
+          <p class="sync-status">
+            <span class="status-dot status-dot--offline" aria-hidden="true"></span>
+            Offline
+          </p>
+          <p>
+            Cached knowledge stays available. Creates and edits queue until the
+            server returns.
+          </p>
+        </article>
+        <article class="sync-card">
+          <p class="sync-status">
+            <span class="status-dot status-dot--conflict" aria-hidden="true"></span>
+            Conflict
+          </p>
+          <p>
+            Another device changed this note. Conflicting content remains visible
+            in the file — not a hidden sibling copy.
+          </p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- 07 INSTALLATION -->
+  <section class="section" id="installation" aria-labelledby="install-h">
+    <div class="wrap">
+      <p class="section-label">07 · Installation</p>
+      <h2 id="install-h">Run it on your own machine.</h2>
+      <p class="support">
+        Install the server, then get a client for your device.
+      </p>
+      <div class="install-paths">
+        <a class="path-card" href="/install#linux">
+          <span class="chip">Linux</span>
+          <strong>Apt bootstrap</strong>
+          <span>install.sh → storm-server up</span>
+        </a>
+        <a class="path-card" href="/install#clients">
+          <span class="chip">Clients</span>
+          <strong>Get Storm</strong>
+          <span>macOS · Android · Web</span>
+        </a>
+        <a class="path-card" href="/install#start">
+          <span class="chip">Connect</span>
+          <strong>Server + token</strong>
+          <span>Point clients at your server</span>
+        </a>
+      </div>
+      <p class="cta-inline">
+        <a class="btn btn-primary" href="/install">Installation guide</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- 08 DOCUMENTATION -->
+  <section class="section" id="docs" aria-labelledby="docs-h">
+    <div class="wrap">
+      <p class="section-label">08 · Documentation</p>
+      <h2 id="docs-h">Depth lives in the repository.</h2>
+      <p class="support">
+        Storm does not ship a separate docs portal. Operator and architecture
+        detail stays next to the code.
+      </p>
+      <ul class="doc-list">
+        <li>
+          <a
+            href="https://github.com/dewanshDT/Storm/blob/main/deploy/README.md"
+            target="_blank"
+            rel="noopener noreferrer">Installation &amp; deploy</a
+          >
+          <span>deploy/README.md</span>
+        </li>
+        <li>
+          <a
+            href="https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md"
+            target="_blank"
+            rel="noopener noreferrer">Server &amp; MCP</a
+          >
+          <span>apps/server/README.md</span>
+        </li>
+        <li>
+          <a
+            href="https://github.com/dewanshDT/Storm/blob/main/apps/client/README.md"
+            target="_blank"
+            rel="noopener noreferrer">Client</a
+          >
+          <span>apps/client/README.md</span>
+        </li>
+        <li>
+          <a
+            href="https://github.com/dewanshDT/Storm/blob/main/PLAN.md"
+            target="_blank"
+            rel="noopener noreferrer">Plan &amp; decisions</a
+          >
+          <span>PLAN.md</span>
+        </li>
+        <li>
+          <a href="/how-it-works">How it works</a>
+          <span>Architecture sketch</span>
+        </li>
+        <li>
+          <a
+            href="https://github.com/dewanshDT/Storm"
+            target="_blank"
+            rel="noopener noreferrer">Source</a
+          >
+          <span>github.com/dewanshDT/Storm</span>
+        </li>
+      </ul>
+    </div>
   </section>
 </BaseLayout>
 
 <style>
   .hero {
-    position: relative;
-    isolation: isolate;
-    min-height: min(100vh, 52rem);
-    display: flex;
-    align-items: center;
-    overflow: hidden;
-    padding: calc(var(--sp) * 8) 0 calc(var(--sp) * 10);
+    padding: calc(var(--sp) * 8) 0 calc(var(--sp) * 7);
+    border-bottom: var(--bw) solid var(--border);
   }
 
-  .atmosphere {
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    background:
-      radial-gradient(120% 80% at 50% -10%, oklch(0.28 0.04 293), transparent 55%),
-      linear-gradient(180deg, var(--bg), oklch(0.18 0.01 55));
+  .hero-inner {
+    max-width: 44rem;
   }
 
-  .glow {
-    position: absolute;
-    border-radius: 50%;
-    filter: blur(64px);
-    animation: pulse-soft 8s var(--ease) infinite;
+  .hero-brand {
+    margin-bottom: calc(var(--sp) * 3);
+    animation: rise 600ms var(--ease) both;
   }
 
-  .glow-a {
-    width: min(70vw, 36rem);
-    height: min(70vw, 36rem);
-    top: -12%;
-    left: 42%;
-    background: color-mix(in oklab, var(--mint) 28%, transparent);
-    animation: drift 18s var(--ease) infinite alternate;
+  .hero .eyebrow {
+    margin: 0 0 calc(var(--sp) * 2);
+    animation: rise 600ms var(--ease) 40ms both;
   }
 
-  .glow-b {
-    width: min(55vw, 28rem);
-    height: min(55vw, 28rem);
-    bottom: 8%;
-    left: -8%;
-    background: color-mix(in oklab, var(--accent) 22%, transparent);
-    animation: drift 22s var(--ease) infinite alternate-reverse;
-    animation-delay: -4s;
-  }
-
-  .grain {
-    position: absolute;
-    inset: 0;
-    opacity: 0.07;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-    pointer-events: none;
-  }
-
-  .stage {
-    max-width: 40rem;
-  }
-
-  .brand-lockup {
-    animation: rise 700ms var(--ease) both;
-  }
-
-  .headline {
-    margin: calc(var(--sp) * 4) 0 calc(var(--sp) * 2.5);
-    font-family: var(--font-sans);
-    font-size: clamp(1.75rem, 4.2vw, 2.75rem);
-    font-weight: 600;
-    letter-spacing: -0.03em;
-    line-height: 1.15;
+  .display {
+    margin: 0 0 calc(var(--sp) * 3);
+    font-family: var(--font-body);
+    font-size: clamp(2.25rem, 5.5vw, 3.25rem);
+    font-weight: 500;
+    letter-spacing: -0.025em;
+    line-height: 1.12;
     color: var(--text);
-    animation: rise 700ms var(--ease) 80ms both;
+    animation: rise 600ms var(--ease) 80ms both;
   }
 
-  .support {
+  .lede {
     margin: 0 0 calc(var(--sp) * 4);
-    max-width: 34rem;
+    max-width: 36rem;
     font-family: var(--font-body);
     font-size: var(--fs-lg);
     line-height: 1.65;
     color: var(--text2);
-    animation: rise 700ms var(--ease) 140ms both;
+    animation: rise 600ms var(--ease) 120ms both;
   }
 
   .cta {
     display: flex;
     flex-wrap: wrap;
-    gap: calc(var(--sp) * 1.5);
-    animation: rise 700ms var(--ease) 200ms both;
+    gap: calc(var(--sp) * 1.25);
+    margin-bottom: calc(var(--sp) * 5);
+    animation: rise 600ms var(--ease) 160ms both;
   }
 
-  .section h2 {
-    max-width: 22ch;
+  .hero-install {
+    animation: rise 600ms var(--ease) 200ms both;
+  }
+
+  .install-note {
+    margin: calc(var(--sp) * 1.5) 0 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text3);
+    line-height: 1.5;
+  }
+
+  .install-note code {
+    font: inherit;
+    color: var(--text2);
+  }
+
+  .hero-meta {
+    margin: calc(var(--sp) * 5) 0 0;
+    padding-top: calc(var(--sp) * 3);
+    border-top: var(--bw) solid var(--border);
+    animation: rise 600ms var(--ease) 240ms both;
+  }
+
+  .mcp-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1.25);
+    margin-bottom: calc(var(--sp) * 3);
+  }
+
+  .tool-list {
+    list-style: none;
+    margin: 0 0 calc(var(--sp) * 5);
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1);
+  }
+
+  .tool-list li {
+    margin: 0;
+  }
+
+  .tool-list code {
+    display: inline-block;
+    padding: calc(var(--sp) * 0.5) calc(var(--sp) * 1);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text2);
+  }
+
+  .mcp-demo {
+    max-width: 32rem;
+  }
+
+  .demo-label {
+    margin: 0 0 calc(var(--sp) * 2);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+
+  .demo-card {
+    padding: calc(var(--sp) * 2) calc(var(--sp) * 2.5);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+  }
+
+  .demo-card--mono .demo-body {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+  }
+
+  .demo-who {
+    margin: 0 0 calc(var(--sp) * 0.75);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+
+  .demo-body {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: var(--fs-md);
+    line-height: 1.55;
+    color: var(--text);
+  }
+
+  .demo-body code {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--accent);
+  }
+
+  .demo-arrow {
+    margin: calc(var(--sp) * 1) 0;
+    font-family: var(--font-mono);
+    color: var(--text3);
+    text-align: center;
+  }
+
+  .arch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: calc(var(--sp) * 1.5);
+    padding: calc(var(--sp) * 3);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+    position: relative;
+  }
+
+  .arch-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: calc(var(--sp) * 1);
+  }
+
+  .arch-node {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: calc(var(--sp) * 1.25) calc(var(--sp) * 2);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--bg);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.04em;
+    color: var(--text);
+    text-align: center;
+  }
+
+  .arch-server {
+    background: var(--accent-soft);
+    border-color: color-mix(in oklab, var(--accent) 30%, var(--border));
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .arch-muted {
+    color: var(--text2);
+  }
+
+  .arch-conn {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+
+  .arch-mcp {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: calc(var(--sp) * 1.5);
+    margin-top: calc(var(--sp) * 2);
+    padding-top: calc(var(--sp) * 2);
+    border-top: var(--bw) dashed var(--border);
+    width: 100%;
+  }
+
+  .arch-mcp-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .storage-grid {
+    display: grid;
+    gap: calc(var(--sp) * 3);
+    align-items: start;
+  }
+
+  @media (min-width: 720px) {
+    .storage-grid {
+      grid-template-columns: 1fr auto;
+    }
+  }
+
+  .chip-stack {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1);
+  }
+
+  .platform-row {
+    display: grid;
+    gap: calc(var(--sp) * 2);
+  }
+
+  @media (min-width: 720px) {
+    .platform-row {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+
+  .platform {
+    padding: calc(var(--sp) * 2.5);
+    border-top: var(--bw) solid var(--border);
+  }
+
+  .platform p {
+    margin: calc(var(--sp) * 1.5) 0 0;
+    font-family: var(--font-body);
+    font-size: var(--fs-md);
+    line-height: 1.55;
+    color: var(--text2);
+  }
+
+  .sync-states {
+    display: grid;
+    gap: calc(var(--sp) * 2);
+  }
+
+  @media (min-width: 720px) {
+    .sync-states {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+
+  .sync-card {
+    padding: calc(var(--sp) * 2.5);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+  }
+
+  .sync-status {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--sp) * 1);
+    margin: 0 0 calc(var(--sp) * 1.5);
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  .sync-card > p:last-child {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: var(--fs-md);
+    line-height: 1.55;
+    color: var(--text2);
+  }
+
+  .install-paths {
+    display: grid;
+    gap: calc(var(--sp) * 1.5);
+    margin-bottom: calc(var(--sp) * 4);
+  }
+
+  @media (min-width: 720px) {
+    .install-paths {
+      grid-template-columns: repeat(3, 1fr);
+    }
+  }
+
+  .path-card {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--sp) * 1);
+    padding: calc(var(--sp) * 2.5);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+    text-decoration: none;
+    color: inherit;
+    transition: border-color var(--dur) var(--ease);
+  }
+
+  .path-card:hover {
+    border-color: var(--text3);
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .path-card strong {
+    font-family: var(--font-sans);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .path-card > span:last-child {
+    font-family: var(--font-body);
+    font-size: var(--fs-sm);
+    color: var(--text2);
+    line-height: 1.45;
+  }
+
+  .cta-inline {
+    margin: 0;
+  }
+
+  .doc-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0;
+    border-top: var(--bw) solid var(--border);
+  }
+
+  .doc-list li {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: calc(var(--sp) * 1) calc(var(--sp) * 2);
+    padding: calc(var(--sp) * 2) 0;
+    border-bottom: var(--bw) solid var(--border);
+  }
+
+  .doc-list a {
+    font-family: var(--font-sans);
+    font-size: var(--fs-md);
+    font-weight: 500;
+    color: var(--text);
+    text-decoration: none;
+  }
+
+  .doc-list a:hover {
+    color: var(--accent);
+  }
+
+  .doc-list span {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--text3);
   }
 
   @media (max-width: 560px) {
     .hero {
-      min-height: auto;
-      padding-top: calc(var(--sp) * 6);
-      align-items: flex-start;
+      padding-top: calc(var(--sp) * 5);
     }
 
     .cta {

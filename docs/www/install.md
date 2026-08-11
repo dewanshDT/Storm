@@ -11,78 +11,52 @@ Operator truth lives in the repo — keep this note aligned with
 `deploy/release-secrets.md`, `deploy/install.sh`, and `deploy/README.md`
 when apt lines change.
 
+**Client downloads** are driven by a single config:
+`apps/www/src/data/release.ts` (`tag` + asset names from `release.yml`).
+Bump `tag` when cutting a release. UI: `GetStorm.astro`.
+
 ## Meta
 
 - **Title:** Install · Storm
-- **Description:** Install storm-server from the apt repository, then run storm-server up.
+- **Description:** Install storm-server from the apt repository on Debian or Ubuntu, then download clients from GitHub Releases.
 
 ## Page hero
 
-**Eyebrow:** Install
+**Eyebrow:** 07 · Installation
 
-**Heading:** Get a server running
+**Heading:** Install Storm
 
-**Lede**
+## Linux · apt · Start · Custom paths
 
-Preferred path: one bootstrap on Debian/Ubuntu, then `storm-server up`. The
-package ships the binary, systemd unit, and web client.
+Unchanged operator steps (bootstrap → `storm-server up` → custom roots).
+Web client default: `http://<host>:8484` (from `deploy/storm.env.example`).
+Token + URL connect detail lives in **Start the server**, not the download rows.
 
-## 1. Install
+## Clients — Get Storm
 
-Same pattern as Tailscale: the script adds Storm’s apt key and source, then
-runs `apt install storm-server`. Served from the apt repo root at
-[dewanshdt.github.io/Storm](https://dewanshdt.github.io/Storm/) — that URL is
-the apt root, not the marketing site.
+Section label: `07 · Clients`
 
-```sh
-curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
-```
+**Heading:** Get Storm
 
-Source of truth: `deploy/install.sh` (copied onto Pages by `apt-repo.yml`).
+**Support:** Choose a client for your device. All clients connect to your Storm
+server.
 
-## 2. Start Storm
+Compact release manifest (rows, not cards):
 
-`up` creates the `storm` user when it can, writes `/etc/storm/storm.env`
-(mode 600, with a generated token), and enables the systemd unit. Default data
-root is `/srv/storm`.
+| Platform | Meta | Primary action | Secondary |
+|---|---|---|---|
+| macOS | Apple Silicon · arm64 · tag | Download for macOS | filename |
+| Android | APK · tag | Download APK | filename |
+| Web | Served by Storm Server · `:8484` | Open Web Client → (`#start`) | Download web bundle |
 
-```sh
-sudo storm-server up
-sudo storm-server status
-```
+Footer: Checksums · Release notes · All releases · Installation instructions
 
-## Custom paths
+Optional: UA-based **Recommended** badge (mac / android / web) — does not hide
+other platforms.
 
-Point `--vault-root` at a directory that *contains* vaults (one folder per
-vault), not at a single vault. Vaults on NFS often need the process to run as a
-user that can write the mount — `up` follows the state-dir owner in that case.
+## MCP
 
-```sh
-sudo storm-server up \
-  --data-root /srv/storm \
-  --vault-root /path/to/vaults \
-  --state /srv/storm/state
-```
-
-## Manual apt (optional)
-
-Prefer reading the script over piping to shell? The bootstrap does exactly this:
-
-```sh
-curl -fsSL https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg \
-  | sudo tee /usr/share/keyrings/storm.gpg >/dev/null
-echo 'deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main' \
-  | sudo tee /etc/apt/sources.list.d/storm.list
-sudo apt update
-sudo apt install storm-server
-```
-
-## Clients
-
-Point the Flutter app (macOS, Android, or the packaged web UI) at your server
-URL and the token from `/etc/storm/storm.env`. Releases and checksums live on
-[GitHub Releases](https://github.com/dewanshDT/Storm/releases). Operator detail
-stays in [`deploy/README.md`](https://github.com/dewanshDT/Storm/blob/main/deploy/README.md).
+Enable from Server → AI access. Tools in `apps/server/README.md`.
 
 ## Related
 

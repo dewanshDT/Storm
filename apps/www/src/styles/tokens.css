@@ -1,21 +1,22 @@
-/* Storm dark — derived from docs/design_handoff_storm_design_system/
-   (OKLCH inputs: bgL 22, hue 55, chroma 8, accent 293/0.15/68%). */
+/* SlowFlow earth — derived from StormPreset.slowflowEarth /
+   docs/design_handoff_storm_design_system/ (bgL 84, hue 62, chroma 22,
+   accent 55/0.06/45%). Semantic colours measure against --surface, not --bg. */
 
 :root {
-  --bg: oklch(0.22 0.008 55);
-  --surface: oklch(0.27 0.008 55);
-  --surface2: oklch(0.31 0.008 55);
-  --border: oklch(0.36 0.008 55);
-  --text: oklch(0.95 0.008 55);
-  --text2: oklch(0.74 0.008 55);
-  --text3: oklch(0.66 0.008 55);
-  --accent: oklch(0.68 0.15 293);
-  --accent-soft: oklch(0.3 0.05 293);
-  --on-accent: oklch(0.16 0.03 293);
-  --amber: oklch(0.74 0.14 68);
-  --amber-soft: oklch(0.3 0.05 68);
-  --green: oklch(0.74 0.13 148);
-  --danger: oklch(0.7 0.17 25);
+  --bg: oklch(0.84 0.022 62);
+  --surface: oklch(0.79 0.022 62);
+  --surface2: oklch(0.75 0.022 62);
+  --border: oklch(0.7 0.022 62);
+  --text: oklch(0.18 0.022 62);
+  --text2: oklch(0.34 0.022 62);
+  --text3: oklch(0.4 0.022 62);
+  --accent: oklch(0.4 0.06 55);
+  --accent-soft: oklch(0.76 0.02 55);
+  --on-accent: #ffffff;
+  --amber: oklch(0.38 0.14 68);
+  --amber-soft: oklch(0.76 0.05 68);
+  --green: oklch(0.38 0.13 148);
+  --danger: oklch(0.38 0.17 25);
   --mint: #96f2d7;
   --mark-ink: #343a40;
 
@@ -32,11 +33,11 @@
   --fs-display: 39px;
 
   --sp: 8px;
-  --r-card: 16px;
+  --r-card: 2px;
   --r-control: 10px;
   --bw: 1px;
-  --shadow: 0 12px 42px -8px rgba(0, 0, 0, 0.35);
-  --dur: 180ms;
+  --shadow: 0 8px 28px -10px rgba(40, 30, 20, 0.18);
+  --dur: 320ms;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
   --content: 42rem;

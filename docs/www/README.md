@@ -9,10 +9,13 @@ Canonical **copy** for the public marketing site (`apps/www`, milestone M16).
 Edit these notes when the words should change; the Astro pages in the repo
 should follow — not the other way around for prose.
 
-Layout / tokens / BrandMark stay in code
-(`docs/design_handoff_storm_design_system/`, `apps/www/src/`). Install command
-truth still comes from `deploy/release-secrets.md` — keep [[Storm Website Install]]
+Layout / tokens / BrandMark stay in code. Visual identity for www is
+**SlowFlow earth** (`apps/www/src/styles/tokens.css`). Install command truth
+still comes from `deploy/release-secrets.md` — keep [[Storm Website Install]]
 aligned with that file.
+
+**Positioning:** Storm as its own product. No Obsidian, Syncthing, or
+competitor comparisons in marketing copy.
 
 Companion: [[Storm Codebase Map]] · [[Storm Active Work]] · [[Storm Releases]]
 
@@ -20,17 +23,17 @@ Companion: [[Storm Codebase Map]] · [[Storm Active Work]] · [[Storm Releases]]
 
 | Route | Content note | Role |
 |---|---|---|
-| `/` | [[Storm Website Home]] | Brand-first hero + why it exists |
-| `/install` | [[Storm Website Install]] | Apt source + `storm-server up` |
-| `/how-it-works` | [[Storm Website How it works]] | Short self-host sketch |
+| `/` | [[Storm Website Home]] | Product story + MCP + install CTA |
+| `/install` | [[Storm Website Install]] | Apt + `storm-server up` + clients |
+| `/how-it-works` | [[Storm Website How it works]] | Architecture sketch |
 
 Non-goal: a docs portal. Depth stays on GitHub / `PLAN.md` / `deploy/`.
 
 ## Hosting rules
 
-- **Cloudflare Pages** connected to this GitHub repo (dashboard: root
-  `apps/www`, build `npm ci && npm run build`, output `dist`). Cloudflare
-  owns build + deploy on push.
+- **Cloudflare** static deploy from this GitHub repo (root `apps/www`, build
+  `npm ci && npm run build`, output `dist`). Live preview has used
+  `storm.dewansh-dt.workers.dev`.
 - **Never** publish into `https://dewanshdt.github.io/Storm/` — that URL is the
   **apt repository root**. Overwriting it breaks every `sources.list` line
   (decision 49 in `PLAN.md`).
