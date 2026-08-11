@@ -52,11 +52,16 @@ class StormMarkdownView extends ConsumerWidget {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final api = ref.watch(apiProvider);
     final vaultId = ref.watch(activeVaultProvider);
+    final fontSize = settings.fontSize;
+    final checkboxSize = stormMarkdownCheckboxSize(fontSize);
+    // Optical centre on the first text line (prototype `align-items: center`).
+    final checkboxTop =
+        (((fontSize * 1.65) - checkboxSize) / 2).clamp(0.0, 12.0);
 
     final style = stormMarkdownStyleSheet(
       context: context,
       bodyFamily: settings.bodyFont.family,
-      fontSize: settings.fontSize,
+      fontSize: fontSize,
     );
 
     try {
@@ -66,9 +71,7 @@ class StormMarkdownView extends ConsumerWidget {
         selectable: true,
         styleSheet: style,
         styleSheetTheme: MarkdownStyleSheetBaseTheme.material,
-        // Baseline alignment fights a non-text checkbox widget; start + a hair
-        // of top pad optically centres the 18px box on the first text line,
-        // matching `align-items: center` in the prototype.
+        // Baseline alignment fights a non-text checkbox widget.
         listItemCrossAxisAlignment: MarkdownListItemCrossAxisAlignment.start,
         extensionSet: md.ExtensionSet(
           md.ExtensionSet.gitHubFlavored.blockSyntaxes,
@@ -77,14 +80,20 @@ class StormMarkdownView extends ConsumerWidget {
             ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
           ],
         ),
+        // Right pad must match [MarkdownStyleSheet.listBulletPadding]: the
+        // package sizes the bullet column to indent+pad and passes that as a
+        // *tight* width. Without the pad here the 18px box stretches to the
+        // full column and paints over the label.
         checkboxBuilder: (checked) => Padding(
-          // ~((16 * 1.65) - 18) / 2 ≈ 4 — keeps the box on the text band.
-          padding: const EdgeInsets.only(top: 4),
+          padding: EdgeInsets.only(
+            top: checkboxTop,
+            right: kStormMarkdownCheckboxGap,
+          ),
           child: StormCheckbox(
             value: checked,
             // Read-only for this phase — no second mutation path.
             onChanged: null,
-            size: kStormMarkdownCheckboxSize,
+            size: checkboxSize,
           ),
         ),
         imageBuilder: (uri, title, alt) => _MarkdownImage(

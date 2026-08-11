@@ -5,7 +5,7 @@
  * Apt install lives on GitHub Pages (decision 49) — not on the marketing host.
  */
 export const release = {
-  tag: "v0.2.2",
+  tag: "v0.2.3",
   get version() {
     return this.tag.replace(/^v/, "");
   },
@@ -23,6 +23,13 @@ export const release = {
   },
   get installCommand() {
     return `curl -fsSL ${this.installScriptUrl} | sudo sh`;
+  },
+  /** Apt already registered — refresh binary + bundled web client. */
+  get upgradeCommand() {
+    return `sudo apt update
+sudo apt install --only-upgrade storm-server
+sudo systemctl restart storm-server
+sudo storm-server status`;
   },
   get assetBase() {
     return `https://github.com/dewanshDT/Storm/releases/download/${this.tag}`;

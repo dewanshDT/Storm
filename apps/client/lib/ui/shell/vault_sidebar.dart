@@ -210,7 +210,17 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
               const PopoverDivider(),
               // Not "All vaults": there is no dashboard at this width, and an
               // entry that navigates to a screen the layout does not have is
-              // worse than no entry.
+              // worse than no entry. Sync now sits above settings, same order
+              // as the phone vault bubble.
+              PopoverItem(
+                label: 'Sync now',
+                tone: PopoverTone.accent,
+                onTap: () async {
+                  Navigator.pop(popContext);
+                  await ref.read(syncEngineProvider).sync();
+                  ref.invalidate(treeProvider);
+                },
+              ),
               PopoverItem(
                 label: 'Server settings ›',
                 tone: PopoverTone.accent,

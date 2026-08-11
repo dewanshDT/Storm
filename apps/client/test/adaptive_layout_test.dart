@@ -240,12 +240,9 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('and server settings are the entry beneath the vaults', (
-      tester,
-    ) async {
-      // Not "All vaults": there is no dashboard at this width, and an entry
-      // that navigates to a screen the layout does not have is worse than no
-      // entry at all.
+    testWidgets('and sync now sits above server settings', (tester) async {
+      // Same order as the phone vault bubble: Sync now, then Server settings.
+      // Not "All vaults": there is no dashboard at this width.
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);
       await openVault(tester, c);
@@ -253,6 +250,11 @@ void main() {
       await tester.tap(find.text('Primary'));
       await tester.pumpAndSettle();
       expect(find.text('All vaults'), findsNothing);
+      expect(find.text('Sync now'), findsOneWidget);
+
+      final syncY = tester.getTopLeft(find.text('Sync now')).dy;
+      final settingsY = tester.getTopLeft(find.text('Server settings ›')).dy;
+      expect(syncY, lessThan(settingsY));
 
       await tester.tap(find.text('Server settings ›'));
       await tester.pumpAndSettle();

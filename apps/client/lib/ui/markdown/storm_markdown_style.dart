@@ -41,10 +41,11 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
     color: t.text,
   );
 
-  // Checkbox column in the prototype is an 18px box + 10px gap. Regular
-  // bullets share the same indent so lists line up.
-  const checkboxSide = kStormMarkdownCheckboxSize;
-  const checkboxGap = 10.0;
+  // Checkbox column: box + gap. Regular bullets share the indent so lists
+  // line up. The gap is listBulletPadding — custom checkboxBuilder must
+  // apply the same right pad or the package's tight column width stretches
+  // the box into a pill that eats the gap (and the label).
+  final checkboxSide = stormMarkdownCheckboxSize(fontSize);
 
   return MarkdownStyleSheet(
     a: body.copyWith(
@@ -93,7 +94,7 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
     ),
     listIndent: checkboxSide,
     listBullet: body.copyWith(color: t.text2),
-    listBulletPadding: const EdgeInsets.only(right: checkboxGap),
+    listBulletPadding: const EdgeInsets.only(right: kStormMarkdownCheckboxGap),
     checkbox: body.copyWith(color: t.accent),
     // Inserted between *every* sibling, including list items. Prototype
     // checklists use an 8px gap; bullets rely on line-height alone.
@@ -119,5 +120,17 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
   );
 }
 
-/// Prototype checkbox is a fixed 18×18 rounded square (`Storm.dc.html` boxStyle).
+/// Prototype checkbox at the default body size (`Storm.dc.html` boxStyle).
 const kStormMarkdownCheckboxSize = 18.0;
+
+/// Gap between the box and the label — prototype `gap:10px`.
+const kStormMarkdownCheckboxGap = 10.0;
+
+/// Body size the 18px box was drawn against.
+const kStormMarkdownCheckboxAtFont = 16.0;
+
+/// Scales the task-list box with the user's text size so it stays on the
+/// text band when they move the slider off 16.
+double stormMarkdownCheckboxSize(double fontSize) =>
+    (kStormMarkdownCheckboxSize * fontSize / kStormMarkdownCheckboxAtFont)
+        .clamp(14.0, 28.0);

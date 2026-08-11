@@ -26,11 +26,25 @@ Bump `tag` when cutting a release. UI: `GetStorm.astro`.
 
 **Heading:** Install Storm
 
-## Linux · apt · Start · Custom paths
+## Linux · apt · Update · Start · Custom paths
 
 Unchanged operator steps (bootstrap → `storm-server up` → custom roots).
 Web client default: `http://<host>:8484` (from `deploy/storm.env.example`).
 Token + URL connect detail lives in **Start the server**, not the download rows.
+
+### Update (apt already registered)
+
+No `storm-server upgrade` — refresh through apt, then restart:
+
+```sh
+sudo apt update
+sudo apt install --only-upgrade storm-server
+sudo systemctl restart storm-server
+sudo storm-server status
+```
+
+Refreshes the binary and `/usr/share/storm/web`. Leaves `/etc/storm/storm.env`
+alone. Site section: `/install#update` (`release.upgradeCommand`).
 
 ## Clients — Get Storm
 

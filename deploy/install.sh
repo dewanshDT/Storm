@@ -79,6 +79,10 @@ main() {
   echo "  sudo storm-server up"
   echo "  sudo storm-server status"
   echo
+  echo "Later, update with:"
+  echo "  sudo apt update && sudo apt install --only-upgrade storm-server"
+  echo "  sudo systemctl restart storm-server"
+  echo
   echo "Custom vaults/state: see deploy/README.md or the install page."
 }
 

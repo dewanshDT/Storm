@@ -4,6 +4,7 @@ import CodeBlock from "../components/CodeBlock.astro";
 import { release } from "../data/release";
 
 const bootstrap = release.installCommand;
+const upgrade = release.upgradeCommand;
 
 const up = `sudo storm-server up
 sudo storm-server status`;
@@ -41,6 +42,18 @@ const upCustom = `sudo storm-server up \\
       — that URL is the apt root, not the marketing site at storm.dewansh.space.
     </p>
     <CodeBlock code={bootstrap} label="install" />
+  </section>
+
+  <section class="section wrap-narrow" id="update">
+    <h2>Update</h2>
+    <p class="support">
+      Once the apt source is registered, upgrade through apt — there is no
+      <code>storm-server upgrade</code>. That refreshes the binary and the web
+      client under <code>/usr/share/storm/web</code>. Restart the unit so the
+      new binary is what is listening; <code>/etc/storm/storm.env</code> is left
+      alone across upgrades.
+    </p>
+    <CodeBlock code={upgrade} label="update" />
   </section>
 
   <section class="section wrap-narrow" id="start">
