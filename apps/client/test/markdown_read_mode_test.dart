@@ -11,7 +11,6 @@ import 'package:storm/ui/markdown/storm_markdown_view.dart';
 import 'package:storm/ui/note_mode_toggle.dart';
 import 'package:storm/ui/shell/corner_bubbles.dart';
 import 'package:storm/ui/theme.dart';
-import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/widgets.dart';
 
 import 'fake_server.dart';
