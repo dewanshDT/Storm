@@ -423,25 +423,7 @@ impl Db {
     /// SQLite does this correctly against a live database, and the result is
     /// a single compacted file with no sidecars to keep together.
     pub fn snapshot_to(&self, dest: &Path) -> Result<()> {
-        if dest.exists() {
-            // Only ever replace a regular file. `VACUUM INTO` refuses to write
-            // over anything, so the destination has to be removed first — and
-            // a caller pointing this at /dev/null or a directory must get an
-            // error rather than have it deleted.
-            let meta = std::fs::metadata(dest)
-                .with_context(|| format!("inspecting {}", dest.display()))?;
-            if !meta.is_file() {
-                anyhow::bail!(
-                    "refusing to overwrite {}: not a regular file",
-                    dest.display()
-                );
-            }
-            std::fs::remove_file(dest).with_context(|| format!("replacing {}", dest.display()))?;
-        }
-        self.conn
-            .execute("VACUUM INTO ?1", params![dest.to_string_lossy()])
-            .with_context(|| format!("snapshotting to {}", dest.display()))?;
-        Ok(())
+        snapshot_connection(&self.conn, dest)
     }
 
     // ---- attachments ---------------------------------------------------
@@ -706,6 +688,38 @@ impl Db {
         let rows = stmt.query_map(params![tag], Self::note_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+}
+
+/// Writes a consistent snapshot of any Storm database to `dest`.
+///
+/// `VACUUM INTO` rather than copying the file: these run in WAL mode with the
+/// server holding them open, so an rsync of `index.db` can catch a torn state
+/// with committed pages still sitting in the -wal. SQLite does this correctly
+/// against a live database, and the result is a single compacted file with no
+/// sidecars to keep together.
+///
+/// Shared with `auth.db` ([`crate::auth::AuthDb::snapshot_to`]) rather than
+/// written twice: the guard below is the load-bearing part, and two copies of
+/// it is one copy that eventually loses it.
+pub fn snapshot_connection(conn: &Connection, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        // Only ever replace a regular file. `VACUUM INTO` refuses to write over
+        // anything, so the destination has to be removed first — and a caller
+        // pointing this at /dev/null or a directory must get an error rather
+        // than have it deleted.
+        let meta =
+            std::fs::metadata(dest).with_context(|| format!("inspecting {}", dest.display()))?;
+        if !meta.is_file() {
+            anyhow::bail!(
+                "refusing to overwrite {}: not a regular file",
+                dest.display()
+            );
+        }
+        std::fs::remove_file(dest).with_context(|| format!("replacing {}", dest.display()))?;
+    }
+    conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])
+        .with_context(|| format!("snapshotting to {}", dest.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]

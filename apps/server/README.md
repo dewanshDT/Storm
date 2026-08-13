@@ -88,13 +88,15 @@ tags: [homelab, project]                   # yours, untouched
 
 ## API
 
-All routes need `Authorization: Bearer <token>`, except `/v1/health`.
-WebSocket clients may pass `?token=` instead, since browsers can't set headers
-on a handshake.
+All routes need `Authorization: Bearer <token>`, except `/v1/health` and the
+two server-identity routes below. WebSocket clients may pass `?token=` instead,
+since browsers can't set headers on a handshake.
 
 | | |
 |---|---|
 | `GET /v1/health` | liveness, unauthenticated |
+| `GET /v1/server` | this server's identity — unauthenticated, see below |
+| `POST /v1/server/challenge` | `{nonce}` → a signature over it, unauthenticated |
 | `GET /v1/vaults` | every vault: id, name, directory, note count, missing |
 | `POST /v1/vaults` | `{name}` — creates the directory under the root |
 | `PATCH /v1/vaults/{v}` | `{name}` — display name only, nothing moves |
@@ -126,6 +128,42 @@ Everything note-shaped is scoped to a vault:
 
 A vault id that was never registered is a `404`; one whose directory has gone
 is a `409`, and stays in the registry rather than disappearing.
+
+### Server identity
+
+On first boot the server mints itself an identity and keeps it in
+`state/auth.db`, with the private key at `state/identity/<key_id>.key`, mode
+`0600`. The id is random and never derived from the key, so a credential can be
+rotated later without every paired client having to start over.
+
+```
+GET /v1/server
+  → {server_id, name, key_id, algorithm, public_key}
+
+POST /v1/server/challenge  {"nonce": "<16-128 printable chars>"}
+  → {server_id, key_id, signature}
+```
+
+Both are **deliberately unauthenticated** — a client has to be able to ask a
+server who it is before it holds any credential at all, which is what the
+pairing flow is built on. They publish an id, a label and a public key, and
+nothing else; the private key is a file precisely so it can never be in a
+payload.
+
+The signature covers `storm-challenge:v1:<server_id>:<nonce>`, **not** the bare
+nonce. This endpoint will sign whatever anyone sends it, so the domain prefix
+and the server id are what stop the result being replayable as a signature over
+something else. A client rebuilds the same string, so changing it is a
+wire-format change. The nonce is refused if it is shorter than 16 characters,
+longer than 128, or contains anything but printable ASCII (`:` and `"` are
+excluded, so it cannot forge the message's field boundaries).
+
+`state/auth.db` is the first thing in `state/` that **cannot be rebuilt** —
+`backup-db` snapshots it and copies the key files, and `deploy/README.md` says
+how to check a restore actually brought the identity back.
+
+Users, sessions and pairing are not built yet; the shared bearer token is
+unchanged. See `PLAN.md` decisions 52 / 52a.
 
 ### Vaults, folders, and the storage root
 
@@ -249,17 +287,22 @@ which stays correct even when events arrive late, coalesced, or out of order.
   can leave a stray temp file but never a truncated note.
 - Paths from the API cannot escape the vault (`..`, absolute paths, symlinks,
   and dotted segments are all rejected).
-- `state/` is rebuildable from `vault/` at any time — but it holds version
-  history, which the merge needs, so back up both.
+- `state/` is *mostly* rebuildable from the vaults at any time — but it holds
+  version history, which the merge needs, and `auth.db` + `identity/`, which
+  nothing rebuilds at all. Back up all of it; `deploy/README.md` has the how
+  and the restore check.
 
 ## Tests
 
 ```sh
-cargo test      # 91 unit tests
+cargo test      # 180 unit tests
 cargo clippy --all-targets
 ```
 
 The unit tests cover the sharp edges: frontmatter byte-preservation, merge
-outcomes, path traversal, tag/link extraction against code blocks, and index
-reconciliation. There is also an end-to-end script that drives a live server
-through the sync matrix (`apps/server/tests/e2e.py`).
+outcomes, path traversal, tag/link extraction against code blocks, index
+reconciliation, and the auth database's schema and identity handling. There are
+three end-to-end scripts driving a live server — `tests/e2e.py` for the sync
+matrix, `tests/mcp_e2e.py` for the MCP endpoint, and `tests/auth_e2e.py` for
+the unauthenticated identity routes (it verifies the Ed25519 signature against
+the key the same server published, with no dependencies).

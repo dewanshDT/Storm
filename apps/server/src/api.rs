@@ -54,6 +54,12 @@ pub struct AppState {
     pub events: broadcast::Sender<Change>,
     pub token: String,
     pub state_dir: PathBuf,
+    /// Who this server is, loaded from `state/auth.db` at boot.
+    ///
+    /// Held in memory rather than read per request: signing a challenge needs
+    /// the private key, and the file is read once so its bytes are not walking
+    /// through the filesystem on every unauthenticated call.
+    pub identity: Arc<crate::auth::ServerIdentity>,
     /// Notifies the watcher that the root moved, so it can be respawned
     /// against the new one. Sends the new root.
     pub root_changed: broadcast::Sender<PathBuf>,
@@ -233,7 +239,41 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             state.clone(),
             require_token,
         ))
+        // Below the layer on purpose. axum applies a layer only to the routes
+        // registered *above* it, so these two are the server's unauthenticated
+        // surface — the `none` tier, which has to answer before the caller owns
+        // any credential at all: a client cannot pair with a server it is not
+        // allowed to ask who it is. They publish nothing secret (an id, a name
+        // and a public key) and sign only a domain-separated challenge.
+        //
+        // `/v1/health` is above the layer and exempted by path inside
+        // `require_token` instead — the older shape, kept as it is because this
+        // slice does not touch the middleware.
+        // `the_server_endpoints_answer_without_a_token` is the test that holds
+        // this ordering, and its pair asserts an ordinary route still 401s.
+        .route("/v1/server", get(server_info))
+        .route("/v1/server/challenge", post(server_challenge))
         .with_state(state)
+}
+
+// ---- server identity (unauthenticated) ---------------------------------
+
+/// Answered flat rather than in an envelope: every field is the client's, and
+/// there is no list here for a key to name.
+async fn server_info(State(state): State<Shared>) -> ApiResult<Json<crate::ops::ServerInfo>> {
+    Ok(Json(crate::ops::server_info(&state).await?))
+}
+
+#[derive(Deserialize)]
+struct ChallengeRequest {
+    nonce: String,
+}
+
+async fn server_challenge(
+    State(state): State<Shared>,
+    Json(body): Json<ChallengeRequest>,
+) -> ApiResult<Json<crate::ops::ChallengeAnswer>> {
+    Ok(Json(crate::ops::sign_challenge(&state, &body.nonce).await?))
 }
 
 /// Single shared bearer token, per the v1 auth decision.
@@ -979,6 +1019,190 @@ async fn push_changes(mut socket: WebSocket, state: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
+
+    /// A router over an empty state directory — no vaults, a real identity.
+    ///
+    /// Enough for every question about the auth tiers, which are decided
+    /// before any vault is touched.
+    fn test_router(dir: &FsPath) -> (Router, Arc<crate::auth::ServerIdentity>) {
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let root = dir.join("vaults");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let identity = {
+            let mut db = crate::auth::AuthDb::open(&state_dir).unwrap();
+            Arc::new(
+                crate::auth::identity::load_or_create(&mut db, &state_dir, "2026-08-13T00:00:00Z")
+                    .unwrap(),
+            )
+        };
+        let (events, _) = broadcast::channel(8);
+        let (root_changed, _) = broadcast::channel(2);
+        let registry = Registry::load(&state_dir, &root).unwrap();
+        let state: Shared = Arc::new(AppState {
+            vaults: RwLock::new(VaultSet {
+                registry,
+                open: HashMap::new(),
+            }),
+            events,
+            token: "testtoken".into(),
+            state_dir,
+            identity: identity.clone(),
+            root_changed,
+            mcp_enabled: std::sync::atomic::AtomicBool::new(false),
+            mcp_writable: std::sync::atomic::AtomicBool::new(false),
+        });
+        (
+            router(
+                state,
+                crate::mcp::McpOptions {
+                    allowed_hosts: vec![],
+                },
+            ),
+            identity,
+        )
+    }
+
+    async fn send(
+        app: &Router,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    fn get(path: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn post_json(path: &str, body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_server_endpoints_answer_without_a_token() {
+        // The `none` tier. These have to work before the caller owns any
+        // credential — a client cannot pair with a server it may not ask who it
+        // is. axum applies a layer only to routes registered above it, so this
+        // fails the moment they move up past `require_token`.
+        let dir = tempdir::TempDir::new("storm-none-tier").unwrap();
+        let (app, identity) = test_router(dir.path());
+
+        let (status, body) = send(&app, get("/v1/server")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["server_id"], identity.server_id);
+        assert_eq!(body["key_id"], identity.key_id);
+        assert_eq!(body["algorithm"], "ed25519");
+        assert_eq!(body["public_key"], identity.public_key_b64());
+
+        let (status, body) = send(
+            &app,
+            post_json(
+                "/v1/server/challenge",
+                serde_json::json!({ "nonce": "0123456789abcdef" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["signature"],
+            identity.sign_challenge("0123456789abcdef")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_server_endpoints_publish_nothing_secret() {
+        // The private key is a file precisely so it is never in a payload. The
+        // check is on the bytes of the response, not on the field list, so a
+        // future field carrying it is caught too.
+        let dir = tempdir::TempDir::new("storm-no-secret").unwrap();
+        let (app, identity) = test_router(dir.path());
+        let key_bytes = std::fs::read(crate::auth::identity::key_path(
+            &dir.path().join("state"),
+            &identity.key_id,
+        ))
+        .unwrap();
+        let secret_b64 = data_encoding::BASE64URL_NOPAD.encode(&key_bytes);
+
+        let (_, info) = send(&app, get("/v1/server")).await;
+        let (_, answer) = send(
+            &app,
+            post_json(
+                "/v1/server/challenge",
+                serde_json::json!({ "nonce": "0123456789abcdef" }),
+            ),
+        )
+        .await;
+        for body in [info.to_string(), answer.to_string()] {
+            assert!(!body.contains(&secret_b64), "the private key is in {body}");
+            assert!(
+                !body.contains(&data_encoding::HEXLOWER.encode(&key_bytes)),
+                "the private key is in {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_route_still_needs_the_token() {
+        // The other half of the pair: this slice is additive, so nothing that
+        // used to demand a token may have stopped. Without it, moving the two
+        // new routes below the layer could take everything else with them.
+        let dir = tempdir::TempDir::new("storm-still-authed").unwrap();
+        let (app, _) = test_router(dir.path());
+
+        let (status, _) = send(&app, get("/v1/vaults")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let authed = axum::http::Request::builder()
+            .uri("/v1/vaults")
+            .header("authorization", "Bearer testtoken")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, _) = send(&app, authed).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_challenge_nonce_is_validated() {
+        let dir = tempdir::TempDir::new("storm-nonce").unwrap();
+        let (app, _) = test_router(dir.path());
+
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/v1/server/challenge",
+                serde_json::json!({ "nonce": "tiny" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = send(
+            &app,
+            post_json("/v1/server/challenge", serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a body with no nonce is a malformed request, not a signature"
+        );
+    }
 
     #[test]
     fn constant_time_eq_behaves_like_eq() {

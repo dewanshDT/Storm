@@ -55,8 +55,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
+| M19 | Auth phase 1 — server identity | **in progress** | slice 1 done: `auth.db`, Ed25519 identity, backup, `/v1/server` |
 
-Last updated: 2026-08-12. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+Last updated: 2026-08-13. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
@@ -69,6 +70,12 @@ server/MCP/sync changes. **M18** adds desktop-first keyboard shortcuts
 (Shortcuts/Actions/Intent), platform-aware Meta vs Control, in-note find,
 and wide-layout sidebar collapse — phone touch layout unchanged. Shipped in
 **v0.2.4** (M18 is client-only; the server release is a version stamp).
+**M19** starts authentication (decisions 52 / 52a). Slice 1 is in: the server
+mints and keeps its own cryptographic identity, `state/auth.db` exists with the
+full designed schema, backups carry it, and `GET /v1/server` /
+`POST /v1/server/challenge` answer unauthenticated. **Nothing else changed** —
+`require_token` and the shared token are exactly as they were, so every
+existing client keeps working. Not deployed.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -88,12 +95,16 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 140 Rust and 453 Dart unit tests
-make test-live   # 81 server e2e checks + 19 client integration checks
+make check       # clippy + analyze + 180 Rust and 581 Dart unit tests
+make test-live   # 81 server + 56 MCP + 21 auth e2e checks, 19 client checks
 ```
 
-`make test-live` starts a server, runs both integration suites and tears it
+`make test-live` starts a server, runs every integration suite and tears it
 down, failing fast with the server log if it cannot bind.
+
+The **81** is load-bearing during the auth work: `e2e.py` is deliberately left
+alone, so an unchanged pass there is the evidence that a slice which adds
+authentication has not quietly changed the existing API.
 
 Both need a server. `apps/server/tests/e2e.py` creates its own fixtures under
 `E2E/` and deletes them afterwards, so it is safe to run repeatedly against any
@@ -769,6 +780,34 @@ client and `storm-relay` all on one machine · **4** self-hosted relay on a VPS
 — the milestone that actually solves the problem · **5** the Cloudflare-hosted
 relay as a convenience. Remote MCP and the Agent Runtime transport come after.
 Details in **Storm Auth Data Model** and **Storm Auth Protocol**.
+
+**52b. Every auth slice is additive until the middleware slice, and the
+challenge signs a domain-separated message.** *(2026-08-13, slice 1 shipped)*
+Two things settled by building the first slice:
+
+- **Additive, one slice at a time.** `require_token` and the shared token are
+  untouched until the three-tier middleware lands, so each slice ships without a
+  client change and `e2e.py`'s 81 checks pass unmodified. That unchanged pass is
+  the evidence, which is why new coverage went into a *new* `tests/auth_e2e.py`
+  rather than being mixed into the file that serves as the control.
+- **`/v1/server/challenge` signs `storm-challenge:v1:<server_id>:<nonce>`,
+  never the bare nonce.** The endpoint is unauthenticated by design, so it will
+  sign whatever it is sent — a signing oracle unless the signed bytes are
+  domain-separated and bound to this server. The nonce is bounded (16–128
+  printable ASCII, no `:` or `"`) so it cannot forge the message's own field
+  boundaries. The client rebuilds this string, so it is a wire-format
+  commitment.
+
+And one amendment to **A4**, found while writing `backup_all()`: the ADR named
+`auth.db`, but the private keys live *outside* it at
+`state/identity/<key_id>.key` (A2). Backing up the database alone restores a
+server that knows which key is active and cannot sign with it — an identity
+loss wearing a healthy-looking database. `backup-db` therefore copies the key
+files too, at `0600`, into the same layout so a restore stays a plain copy. The
+ADR in the vault is amended with this rather than the code quietly doing more
+than the design says.
+*Revisit if:* the middleware slice finds that "additive" cannot hold — at which
+point client and server ship together, as decision 46 already assumes.
 
 ---
 
@@ -1827,6 +1866,63 @@ post-frame `requestFocus`.
 **Deferred:** shortcut overlay, command palette, ⌘⇧C code, sync-on-R,
 close-note-on-W.
 
+### M19 — Authentication (decision 52 phase 1) · in progress
+
+The design is complete and lives in the personal vault: **Storm Auth Data
+Model**, **Storm Auth Protocol**, ADRs **A1–A11** in *Storm Remote Decisions*,
+and the checklist *TODO — Storm Authentication*. Read those before touching
+this; the checklist is the work list, not the design.
+
+**Slice 1 — server identity and its storage ✅** (2026-08-13, not deployed)
+
+- `apps/server/src/auth/` — `db.rs` creates `state/auth.db` with
+  `PRAGMA user_version = 1` and **every** table the data model names (only
+  `server` and `server_credentials` are written yet; the rest cost one
+  `CREATE TABLE` now and a migration later). `identity.rs` mints a random
+  `srv_`-prefixed id in Crockford base32 and an Ed25519 keypair, private bytes
+  at `state/identity/<key_id>.key` mode `0600` in a `0700` directory, created
+  *with* that mode rather than chmod-ed afterwards.
+- `GET /v1/server` and `POST /v1/server/challenge`, both unauthenticated, both
+  registered **below** the `require_token` layer — axum applies a layer only to
+  routes above it, and `the_server_endpoints_answer_without_a_token` fails if
+  they move.
+- `backup_all()` snapshots `auth.db` with `VACUUM INTO` and copies the key
+  files, *before* the "no vaults registered" early return — a server with no
+  vaults still has an identity worth keeping. `deploy/storm-backup.sh` and
+  `deploy/README.md` updated in the same change.
+- `Db::snapshot_to` and `AuthDb::snapshot_to` share one
+  `db::snapshot_connection`, so the "never overwrite a non-file" guard cannot
+  drift between them.
+
+**Evidence.** 180 Rust tests, clippy clean. `e2e.py` still 81/81 **unchanged**,
+which is the proof the slice is additive; 21 new checks in `tests/auth_e2e.py`,
+including a vendored Ed25519 verifier so a *running* server's signature is
+checked against the key that same server published. Every new test was verified
+by deliberately breaking what it names — 13 mutations (routes moved above the
+layer, raw-nonce signing, identity regenerated per boot, backup skipping
+`auth.db` or the keys, `backup_auth` moved after the early return, `0644` key
+files, the credential-count check disabled, a table dropped, `server_id` derived
+from the key, nonce validation removed, a missing key silently regenerated,
+`user_version` never stamped) and all 13 failed the right test.
+
+A real backup → wipe → restore cycle with the binary and a live server returned
+the identical `server_id`, `key_id`, public key and challenge signature, with
+the restored key still `0600`.
+
+**Decided while building** (see decision 52b): the challenge signs
+`storm-challenge:v1:<server_id>:<nonce>`; A4 is amended so backups carry
+`state/identity/` as well as `auth.db`; a second active credential is a refusal
+at boot rather than "use the newest" (data model invariant 2); a `server` row
+whose key file is missing is a hard failure, never a regenerated keypair.
+
+The server name defaults to `/etc/hostname` (falling back to `Storm`) and is
+set once, at creation. There is no rename path yet — that belongs with the
+settings surface in a later slice.
+
+**Next slices, in order:** user model + Argon2id (blocked on **Q18**, measuring
+the parameters on the VM) → sessions → the three-tier middleware → pairing →
+client. The middleware slice is the one that stops being additive.
+
 ---
 
 ## A lesson worth keeping
@@ -1966,17 +2062,20 @@ Use a pattern that cannot match the invoking shell.
 - **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
   confirm Cloudflare hostname / dashboard connection; optional real app
   screenshot for Client section. No GitHub deploy workflow.
-- **Remote connectivity + authentication** — architecture **accepted**
-  2026-08-13, nothing built (decision 52). Server-local users, a cryptographic
-  server identity, QR pairing, and an optional self-hostable relay. Docs in the
-  personal vault under `Storm/Remote/`: *Storm Remote Connectivity* (index),
-  *Storm Authentication*, *Storm Relay*, *Storm Remote Decisions* (R1–R11),
-  *Storm Remote Open Questions*, and the checklists
-  *TODO — Storm Authentication* / *TODO — Storm Relay*.
-  **Auth is fully designed** (decision 52a): *Storm Auth Data Model* +
-  *Storm Auth Protocol*, Q1–Q9 resolved as A1–A11. Next step is human review,
-  then measuring Argon2id parameters on the VM (Q18), then working the auth
-  checklist top-down. Relay work does not start until auth is done.
+- **Remote connectivity + authentication** — architecture accepted
+  2026-08-13; **auth phase 1 has started** (decision 52, and M19 above).
+  Server-local users, a cryptographic server identity, QR pairing, and an
+  optional self-hostable relay. Docs in the personal vault under
+  `Storm/Remote/`: *Storm Remote Connectivity* (index), *Storm Authentication*,
+  *Storm Relay*, *Storm Remote Decisions* (R1–R11), *Storm Remote Open
+  Questions*, and the checklists *TODO — Storm Authentication* /
+  *TODO — Storm Relay*. **Auth is fully designed** (decision 52a): *Storm Auth
+  Data Model* + *Storm Auth Protocol*, Q1–Q9 resolved as A1–A11. **Built so
+  far:** the server identity slice — `auth.db`, the Ed25519 credential, backup
+  coverage, and the two unauthenticated identity routes. Still to do, in order:
+  the user model (blocked on **Q18**, measuring Argon2id on the VM), sessions,
+  the three-tier middleware, pairing, then the client. Relay work does not
+  start until auth is done.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.

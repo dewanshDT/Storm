@@ -12,6 +12,7 @@
 //! and per-device tokens first.
 
 mod api;
+mod auth;
 mod db;
 mod frontmatter;
 mod index;
@@ -338,7 +339,8 @@ fn migrate_legacy_index(state_dir: &Path, registry: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// Snapshots every vault's index into `dest`.
+/// Snapshots the auth database, the server's keys and every vault's index into
+/// `dest`.
 fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
 
@@ -347,6 +349,13 @@ fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
         std::fs::copy(&registry_src, dest.join(registry::REGISTRY_FILE))
             .with_context(|| format!("copying {}", registry_src.display()))?;
     }
+
+    // Before the vault loop, and before the "no vaults" early return below:
+    // this is the one thing in state/ that cannot be rebuilt by rescanning
+    // markdown, so a backup that skipped it would restore into a server holding
+    // every note with nobody able to log in. A server with no vaults yet still
+    // has an identity worth keeping.
+    backup_auth(state_dir, dest)?;
 
     let registry = Registry::load(state_dir, Path::new("/"))?;
     if registry.vaults.is_empty() {
@@ -371,6 +380,81 @@ fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
             .with_context(|| format!("writing snapshot to {}", out.display()))?;
         println!("  {} -> {}", entry.name, out.display());
     }
+    Ok(())
+}
+
+/// Copies `auth.db` and the private keys it describes into `dest`.
+///
+/// The database goes through `VACUUM INTO`, like an index, because it runs in
+/// WAL mode with the server holding it open — a plain copy can catch committed
+/// pages still sitting in the -wal and produce a file that opens and is missing
+/// rows.
+///
+/// The key files are copied as files, which is right for them: they are written
+/// once and never modified, so there is no torn state to catch. They have to
+/// travel with the database, and this is an extension of the design's backup
+/// rule rather than a restatement of it — `auth.db` alone restores a server that
+/// knows which key is active and cannot sign with it, which is an identity loss
+/// wearing a healthy-looking database.
+fn backup_auth(state_dir: &Path, dest: &Path) -> Result<()> {
+    let src = auth::AuthDb::path_in(state_dir);
+    if !src.exists() {
+        return Ok(());
+    }
+    let db = auth::AuthDb::open_at(&src).context("opening the auth database")?;
+    let out = dest.join(auth::AUTH_DB_FILE);
+    db.snapshot_to(&out)
+        .with_context(|| format!("writing snapshot to {}", out.display()))?;
+    println!("  auth -> {}", out.display());
+
+    let keys = state_dir.join(auth::IDENTITY_DIR);
+    if !keys.is_dir() {
+        return Ok(());
+    }
+    let keys_out = dest.join(auth::IDENTITY_DIR);
+    std::fs::create_dir_all(&keys_out)
+        .with_context(|| format!("creating {}", keys_out.display()))?;
+    restrict_to_owner(&keys_out)?;
+
+    let mut copied = 0;
+    for entry in std::fs::read_dir(&keys).with_context(|| format!("reading {}", keys.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let to = keys_out.join(entry.file_name());
+        std::fs::copy(entry.path(), &to)
+            .with_context(|| format!("copying {}", entry.path().display()))?;
+        // Set explicitly rather than trusting the copy to carry the mode: this
+        // is the whole reason the key is a file instead of a row.
+        restrict_key_file(&to)?;
+        copied += 1;
+    }
+    println!("  keys -> {} ({copied})", keys_out.display());
+    Ok(())
+}
+
+fn restrict_to_owner(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("tightening {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+fn restrict_key_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("tightening {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -473,6 +557,28 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         generated
     });
 
+    // Identity before anything is served. A first boot mints it; every boot
+    // after reads it back, and a mismatch between the recorded key and the file
+    // is a hard failure rather than a quietly regenerated keypair.
+    //
+    // The database handle is dropped straight after: nothing in this slice
+    // writes to it at runtime, and holding an idle connection open would put
+    // auth.db in the way of `backup-db` for no reason.
+    let identity = {
+        let mut auth_db = auth::AuthDb::open(&state_dir).context("opening the auth database")?;
+        Arc::new(auth::identity::load_or_create(
+            &mut auth_db,
+            &state_dir,
+            &index::now_rfc3339(),
+        )?)
+    };
+    tracing::info!(
+        server_id = %identity.server_id,
+        name = %identity.name,
+        key_id = %identity.key_id,
+        "server identity"
+    );
+
     let (events, _) = broadcast::channel(1024);
     let (root_changed, _) = broadcast::channel(4);
 
@@ -498,6 +604,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         events,
         token,
         state_dir: state_dir.clone(),
+        identity,
         root_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
@@ -750,6 +857,113 @@ mod tests {
 
         let id = &registry.vaults[0].id;
         assert!(state.join(id).join("index.db").exists());
+    }
+
+    /// A state directory with an identity and one indexed vault.
+    fn seeded_state(dir: &Path) -> (PathBuf, auth::ServerIdentity) {
+        let root = dir.join("vaults");
+        let state = dir.join("state");
+        std::fs::create_dir_all(root.join("personal")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+
+        let mut registry = Registry::load(&state, &root).unwrap();
+        registry.scan_root(&state, "2026-08-13T00:00:00Z").unwrap();
+        registry.save(&state).unwrap();
+        let id = &registry.vaults[0].id;
+        Db::open(&state.join(id).join("index.db"), id).unwrap();
+
+        let mut auth_db = auth::AuthDb::open(&state).unwrap();
+        let identity =
+            auth::identity::load_or_create(&mut auth_db, &state, "2026-08-13T00:00:00Z").unwrap();
+        (state, identity)
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), &dest).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_backup_carries_the_auth_database_and_its_keys() {
+        let dir = tempdir::TempDir::new("storm-backup-auth").unwrap();
+        let (state, identity) = seeded_state(dir.path());
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+
+        assert!(
+            dest.join(auth::AUTH_DB_FILE).exists(),
+            "auth.db is not in the snapshot — a restore would have every note \
+             and nobody able to log in"
+        );
+        let key = auth::identity::key_path(&dest, &identity.key_id);
+        assert!(
+            key.exists(),
+            "the private key is not in the snapshot; auth.db alone restores a \
+             server that knows its key and cannot sign with it"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the backed-up key is {mode:o}");
+        }
+    }
+
+    #[test]
+    fn a_server_with_no_vaults_still_backs_up_its_identity() {
+        // `backup_all` returns early when the registry is empty. The identity
+        // is not a vault's, so that return must not skip it.
+        let dir = tempdir::TempDir::new("storm-backup-empty").unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut auth_db = auth::AuthDb::open(&state).unwrap();
+        let identity =
+            auth::identity::load_or_create(&mut auth_db, &state, "2026-08-13T00:00:00Z").unwrap();
+
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+        assert!(dest.join(auth::AUTH_DB_FILE).exists());
+        assert!(auth::identity::key_path(&dest, &identity.key_id).exists());
+    }
+
+    #[test]
+    fn backup_wipe_restore_gives_back_a_server_that_can_still_sign() {
+        // The cycle that matters, end to end: file existence proves nothing —
+        // what has to survive is the ability to answer a challenge with the
+        // same key clients pinned.
+        let dir = tempdir::TempDir::new("storm-restore").unwrap();
+        let (state, before) = seeded_state(dir.path());
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+
+        let nonce = "0123456789abcdef0123";
+        let signature = before.sign_challenge(nonce);
+
+        std::fs::remove_dir_all(&state).unwrap();
+        assert!(!state.exists());
+        copy_tree(&dest, &state);
+
+        let mut auth_db = auth::AuthDb::open(&state).unwrap();
+        let after =
+            auth::identity::load_or_create(&mut auth_db, &state, "2026-09-01T00:00:00Z").unwrap();
+
+        assert_eq!(before.server_id, after.server_id, "the identity changed");
+        assert_eq!(before.key_id, after.key_id);
+        assert_eq!(before.public_key_b64(), after.public_key_b64());
+        assert_eq!(
+            after.sign_challenge(nonce),
+            signature,
+            "the restored server signs differently — every pinned client would \
+             have to re-pair"
+        );
     }
 
     #[test]
