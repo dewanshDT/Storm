@@ -1,33 +1,38 @@
 ---
-description: Keep Storm/Active Work.md in the personal vault current via Storm MCP
+description: Keep Storm/Active Work.md and Storm/Global Todo.md in the personal vault current via Storm MCP
 alwaysApply: true
 ---
 
-# Storm Active Work (vault todo)
+# Storm Active Work + Global Todo (vault tracking)
 
-Maintain a live checklist in the **personal** vault at `Storm/Active Work.md`
-using the Storm MCP. It is the short in-flight queue; `PLAN.md` remains the
-decision log and milestone record.
+Maintain live checklists in the **personal** vault using the Storm MCP:
+`Storm/Active Work.md` is the short in-flight queue and `Storm/Global Todo.md`
+is the one aggregate view (milestones, Agent Runtime phases, in-flight,
+backlog, parking lot). `PLAN.md` remains the decision log and milestone record.
 
-## When to touch it
+## When to touch them
 
 - Starting a multi-step Storm task: read Active Work first (`list_vaults` →
-  `search` query `Active Work` → `get_note`).
+  `search` query `Active Work` → `get_note`), and skim Global Todo
+  (`Storm/Global Todo.md`).
 - Finishing or blocking an item: `get_note` then `update_note` with the same
   `base_version` — check off done work, add new open items, note blockers.
+  Update **both** Active Work (queue) and Global Todo (aggregate) when a
+  milestone, phase, or queue item changes state.
 - Do not leave the only status in a chat transcript.
 
 ## How
 
 1. Vault id from `list_vaults` (name `personal`).
-2. Find the note with `search` (`Active Work` or path `Storm/Active Work.md`).
+2. Find the note with `search` (`Active Work` / `Global Todo` or their paths).
 3. Always `get_note` before `update_note`; send back full markdown + `base_version`.
-4. Keep the note short: **Now** / **Done recently** / **Parking lot**. Link
-   companion notes with wikilinks (`[[Storm Releases]]`, etc.).
+4. Keep Active Work short: **Now** / **Done recently** / **Parking lot**. Link
+   companion notes with wikilinks (`[[Storm Releases]]`, etc.). Global Todo
+   mirrors state rather than replacing it.
 
 ## Do not
 
-- Duplicate the whole of `PLAN.md` into the vault note.
-- Create a second competing todo note; update this one.
-- Skip the update because the repo `PLAN.md` already changed — update both when
+- Duplicate the whole of `PLAN.md` into the vault notes.
+- Create a second competing todo note; update these.
+- Skip the update because the repo `PLAN.md` already changed — update all when
   the active queue moved.

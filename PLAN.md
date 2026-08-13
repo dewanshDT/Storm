@@ -702,6 +702,74 @@ Settled while shipping:
 *Revisit if:* a command palette becomes the primary action surface and
 needs the same Intent set exposed as searchable commands.
 
+**52. Remote access is two separate subsystems, and the relay is not one of
+the authorities.** *(architecture accepted 2026-08-13; nothing built)*
+Decision 4 said TLS and per-device credential rotation land **before** the
+server is ever reachable off the LAN. This is the design that discharges it,
+and it deliberately splits into two things that never answer each other's
+question:
+
+- **Authentication** — Storm owns it. Users are **local to a server**, so the
+  canonical identity is `(server_id, user_id)` and there is no global Storm
+  account; a server has its own cryptographic `server_id`; passwords with a
+  modern KDF; revocable per-device sessions; QR pairing that carries a
+  short-lived nonce and **never** a permanent secret. No external identity
+  provider is the source of truth — a self-hosted server that cannot log a
+  user in with the internet unplugged is not self-hosted.
+- **Connectivity** — an optional, self-hostable WSS tunnel (`storm-relay`)
+  that the *server* dials outward, so a NATed homelab box needs no port
+  forwarding. It carries Storm protocol traffic only, never generic TCP, and
+  it is an availability mechanism rather than an authority: no identity
+  store, no vault store, no authorization ownership. Storm may host one for
+  convenience (Cloudflare Worker + Durable Object initially); the protocol
+  stays provider-independent, and the self-hosted relay is what proves it.
+  **A relay outage costs remote access, never vault access.**
+
+MCP rides the same transport rather than getting a network architecture of its
+own — the same reasoning as `ops.rs` (decision 37), one layer down. Agent
+Runtime later reuses it too, and is deliberately *not* built alongside it.
+
+Order matters: authentication ships completely before any relay work starts.
+Building both at once means debugging an identity bug through a tunnel.
+
+Full architecture, the ADRs (R1–R11), the open questions and two
+implementation checklists live in the personal vault under `Storm/Remote/` —
+start at **Storm Remote Connectivity**. Decision 4 is not superseded until
+authentication actually ships.
+*Revisit if:* any of R1–R11 changes — amend the ADR with why rather than
+relitigating here.
+
+**52a. The auth design is complete; the build order puts it entirely before
+any networking.** *(2026-08-13, still no code)*
+Q1–Q9 are resolved as ADRs **A1–A11**: Argon2id with parameters *measured on
+the VM* (verify on `spawn_blocking`), an Ed25519 server credential whose
+private bytes are a `0600` file while its public metadata is a row, a
+server-scoped **`state/auth.db`**, opaque blake3-hashed tokens resolved
+server-side (never a JWT — revocation has to be immediate), three credential
+tiers (none → device → session) so pairing creates a *device* and never a
+login, owner/admin/member plus `vault_grants` with refusal as an explicit
+`403`, `storm-server passwd` as the honest recovery bypass, and a **reversible
+`legacy_token_enabled` switch** that lets `testtoken` keep working for one
+release but can never create the first user.
+
+Two findings from writing it that change existing code:
+
+- **`auth.db` is the first thing in `state/` that cannot be rebuilt.**
+  `backup_all()` walks vault indexes only, so a restore would produce a server
+  with every note and nobody able to log in. It learns about `auth.db` in the
+  same change that creates it.
+- **Short session lifetimes are wrong here.** This client is offline-first
+  with an outbox; a session expiring while a phone is out of range means an
+  auth wall in front of edits that exist nowhere else. Access 30d / refresh
+  180d sliding is safe *because* revocation is server-side and instant.
+
+Phases: **1** auth, complete and local · **2** a `StormConnection` seam so
+nothing above it knows local from relayed · **3** a minimal relay with server,
+client and `storm-relay` all on one machine · **4** self-hosted relay on a VPS
+— the milestone that actually solves the problem · **5** the Cloudflare-hosted
+relay as a convenience. Remote MCP and the Agent Runtime transport come after.
+Details in **Storm Auth Data Model** and **Storm Auth Protocol**.
+
 ---
 
 ## Data model
@@ -1521,7 +1589,24 @@ The handoff's own vocabulary — atoms, molecules, organisms — is a documentat
 device and does not appear in the code. Shared widgets are `lib/ui/widgets.dart`
 and overlay containers `lib/ui/surfaces.dart`.
 
-### The VM does not run the layout deploy/README.md describes
+### The VM did not run the layout deploy/README.md describes — resolved by M15
+
+> **Resolved.** The M15 apt install moved the VM onto the packaged layout, and
+> that was re-verified on 2026-08-13: unit `storm-server` **active**, process
+> `/usr/bin/storm-server serve`, package **0.2.5-1**, state `/srv/storm/state`,
+> web `/usr/share/storm/web`, storage root `/mnt/media/Docs/storm` (NFS), all
+> three vaults present and none `missing`, `/etc/storm/storm.env` at `0600`.
+> `/home/dewansh/storm` and `~/storm-m15-cutover` are gone. `systemctl
+> is-active` is now the right question. **`make deploy` / `deploy-check` were
+> never corrected and are still written against a `storm` service account —
+> apt is the update channel, not them.**
+>
+> One thing the re-check did turn up: **the shared token is still `testtoken`**
+> — it returns 200 from `/v1/vaults` — even though `postinst` and
+> `storm-server up` generate a real one. LAN-only, so a known risk rather than
+> an exposure; decision 52 is the design that removes the class.
+
+The original finding, kept because the lesson is not layout-specific:
 
 Found on 2026-08-09 while adding `deploy-web`, and worth recording because
 every deploy target in the Makefile is written against the wrong paths.
@@ -1817,9 +1902,11 @@ and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
 - *Sudo on the VM.* `apt install` / `storm-server up` need a password; packaging
   shortens the manual step rather than discharging it. Clean apt install is
   **done** (M15): packaged unit, state under `/srv/storm`, vaults on NAS.
-- *The shared token* may still be the long-lived LAN token on some clients —
-  rotating it means updating every device at once. Fresh `up` / `postinst`
-  installs generate a real token.
+- *The shared token is still `testtoken`* — confirmed 2026-08-13, a request
+  carrying it returns 200 from `/v1/vaults` on the VM, despite `postinst` and
+  `up` generating a real one. Rotating means updating every device at the same
+  moment, which is the whole problem; decision 52's per-device sessions are the
+  real fix. LAN-only today, so a known risk rather than an exposure.
 
 Both former build blockers are discharged as of 2026-08-05:
 
@@ -1879,6 +1966,17 @@ Use a pattern that cannot match the invoking shell.
 - **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
   confirm Cloudflare hostname / dashboard connection; optional real app
   screenshot for Client section. No GitHub deploy workflow.
+- **Remote connectivity + authentication** — architecture **accepted**
+  2026-08-13, nothing built (decision 52). Server-local users, a cryptographic
+  server identity, QR pairing, and an optional self-hostable relay. Docs in the
+  personal vault under `Storm/Remote/`: *Storm Remote Connectivity* (index),
+  *Storm Authentication*, *Storm Relay*, *Storm Remote Decisions* (R1–R11),
+  *Storm Remote Open Questions*, and the checklists
+  *TODO — Storm Authentication* / *TODO — Storm Relay*.
+  **Auth is fully designed** (decision 52a): *Storm Auth Data Model* +
+  *Storm Auth Protocol*, Q1–Q9 resolved as A1–A11. Next step is human review,
+  then measuring Argon2id parameters on the VM (Q18), then working the auth
+  checklist top-down. Relay work does not start until auth is done.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.
