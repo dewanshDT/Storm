@@ -1,0 +1,17 @@
+[package]
+name = "argon2-bench"
+version = "0.1.0"
+edition = "2024"
+description = "Measures Argon2id verify latency on the box it runs on (Storm Q18 / A1)"
+publish = false
+
+[dependencies]
+argon2 = { version = "0.5", features = ["std", "password-hash"] }
+
+# Pure Rust, no C dependencies on purpose: it cross-compiles to
+# x86_64-unknown-linux-musl with plain cargo and rust-lld, so measuring the
+# deployment box needs no zig, no gcc and nothing installed on the VM.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
