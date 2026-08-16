@@ -34,7 +34,7 @@ pub const AUTH_DB_FILE: &str = "auth.db";
 /// **1** — the original schema (slice 1).
 /// **2** — `sessions.previous_refresh_hash` (slice 3).
 /// **3** — `ws_tickets` (slice 4).
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct AuthDb {
     /// Visible to the rest of `auth` so each area keeps its own SQL beside its
@@ -211,6 +211,18 @@ impl AuthDb {
                 remote    TEXT,
                 detail    TEXT   -- JSON. Never a secret, never a token.
             );
+
+            -- Short-lived, single-use tokens for WebSocket handshakes. The
+            -- client POSTs to get one, then presents it on the GET /v1/stream
+            -- handshake.
+            CREATE TABLE IF NOT EXISTS ws_tickets (
+                id          TEXT PRIMARY KEY,
+                session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                access_hash BLOB NOT NULL UNIQUE,
+                created     TEXT NOT NULL,
+                expires     TEXT NOT NULL,
+                used        TEXT
+            );
             "#,
         )?;
 
@@ -364,6 +376,22 @@ mod tests {
         revoked_reason  TEXT
     )";
 
+    /// The v2 sessions table, with `previous_refresh_hash`.
+    const V2_SESSIONS: &str = "CREATE TABLE sessions (
+        id                    TEXT PRIMARY KEY,
+        user_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id             TEXT NOT NULL REFERENCES client_devices(id) ON DELETE CASCADE,
+        access_hash           BLOB NOT NULL UNIQUE,
+        refresh_hash          BLOB NOT NULL UNIQUE,
+        previous_refresh_hash BLOB,
+        created               TEXT NOT NULL,
+        expires               TEXT NOT NULL,
+        refresh_expires       TEXT NOT NULL,
+        last_used             TEXT,
+        revoked               TEXT,
+        revoked_reason        TEXT
+    )";
+
     fn table_names(db: &AuthDb) -> Vec<String> {
         let mut stmt = db
             .conn
@@ -389,6 +417,7 @@ mod tests {
             "sessions",
             "users",
             "vault_grants",
+            "ws_tickets",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -513,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn a_v1_database_gets_previous_refresh_hash_and_bumps_to_v2() {
+    fn a_v1_database_gets_previous_refresh_hash_and_bumps_to_current() {
         let dir = tempdir::TempDir::new("storm-auth-mig-v2").unwrap();
         // Build a v1 database by hand.
         {
@@ -530,11 +559,47 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 2, "schema should be at v2 after migration");
+        assert_eq!(ver, 3, "schema should be at v3 (current) after migration");
         assert!(
             db.column_exists("sessions", "previous_refresh_hash")
                 .unwrap(),
             "sessions should have previous_refresh_hash after v1→v2 migration"
+        );
+    }
+
+    #[test]
+    fn a_v2_database_gets_ws_tickets_and_bumps_to_v3() {
+        let dir = tempdir::TempDir::new("storm-auth-mig-v3").unwrap();
+        // Build a v2 database: v1 schema + previous_refresh_hash column.
+        {
+            let conn = Connection::open(dir.path().join("auth.db")).unwrap();
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+                .unwrap();
+            conn.execute_batch(V2_SESSIONS).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS ws_tickets (
+                    id          TEXT PRIMARY KEY,
+                    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    access_hash BLOB NOT NULL UNIQUE,
+                    created     TEXT NOT NULL,
+                    expires     TEXT NOT NULL,
+                    used        TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        }
+
+        let db = AuthDb::open(dir.path()).unwrap();
+        let ver: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 3, "schema should be at v3 after migration");
+        assert!(
+            db.column_exists("sessions", "previous_refresh_hash")
+                .unwrap(),
+            "v2→v3 must preserve the previous_refresh_hash column"
         );
     }
 }

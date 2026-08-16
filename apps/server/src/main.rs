@@ -900,17 +900,14 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // after reads it back, and a mismatch between the recorded key and the file
     // is a hard failure rather than a quietly regenerated keypair.
     //
-    // The database handle is dropped straight after: nothing in this slice
-    // writes to it at runtime, and holding an idle connection open would put
-    // auth.db in the way of `backup-db` for no reason.
-    let identity = {
-        let mut auth_db = auth::AuthDb::open(&state_dir).context("opening the auth database")?;
-        Arc::new(auth::identity::load_or_create(
-            &mut auth_db,
-            &state_dir,
-            &index::now_rfc3339(),
-        )?)
-    };
+    // The database handle stays open in `AppState` so request handlers can
+    // authenticate sessions and mint WS tickets without racing on open/close.
+    let mut auth_db = auth::AuthDb::open(&state_dir).context("opening the auth database")?;
+    let identity = Arc::new(auth::identity::load_or_create(
+        &mut auth_db,
+        &state_dir,
+        &index::now_rfc3339(),
+    )?);
     tracing::info!(
         server_id = %identity.server_id,
         name = %identity.name,
@@ -947,6 +944,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         root_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
+        auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+        legacy_token_enabled: true,
     });
 
     // One watcher over the whole root, attributing each event to a vault by

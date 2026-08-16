@@ -41,6 +41,9 @@ pub const REFRESH_LIFETIME_DAYS: i64 = 180;
 /// write per poll per device, forever.
 pub const LAST_USED_THROTTLE_SECS: i64 = 60;
 
+/// WS ticket lifetime: 60 seconds, single-use.
+pub const WS_TICKET_LIFETIME_SECS: i64 = 60;
+
 pub const EVENT_LOGIN_OK: &str = "login_ok";
 pub const EVENT_LOGIN_FAIL: &str = "login_fail";
 pub const EVENT_LOGIN_LOCKED: &str = "login_locked";
@@ -369,6 +372,52 @@ impl AuthDb {
             params![id, now],
         )?;
         Ok(())
+    }
+
+    // ---- ws tickets --------------------------------------------------------
+
+    fn insert_ws_ticket(
+        &self,
+        id: &str,
+        session_id: &str,
+        access_hash: &[u8],
+        created: &str,
+        expires: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO ws_tickets (id, session_id, access_hash, created, expires)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, session_id, access_hash, created, expires],
+        )?;
+        Ok(())
+    }
+
+    fn ws_ticket_by_access_hash(&self, hash: &[u8]) -> Result<Option<(String, String)>> {
+        // Returns (ticket_id, session_id) for an unused, unexpired ticket.
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, session_id FROM ws_tickets
+                 WHERE access_hash = ?1 AND used IS NULL",
+                params![hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    fn mark_ws_ticket_used(&self, id: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ws_tickets SET used = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        Ok(())
+    }
+
+    fn purge_expired_ws_tickets(&self, now: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM ws_tickets WHERE expires <= ?1 OR used IS NOT NULL",
+            params![now],
+        )?)
     }
 }
 
@@ -729,6 +778,62 @@ pub async fn login(
         &format!(r#"{{"session":{:?}}}"#, issued.session_id),
     )?;
     Ok(issued)
+}
+
+/// Mints a short-lived, single-use ticket for WebSocket authentication.
+///
+/// The client POSTs to get one, then presents it on the `GET /v1/stream`
+/// handshake. The ticket is bound to the session that created it and dies
+/// after 60 seconds or one use, whichever comes first.
+pub fn create_ws_ticket(db: &mut AuthDb, session_id: &str, now: &str) -> Result<IssuedWsTicket> {
+    let at = parse_time(now)?;
+    let ticket = token::mint("stt_");
+    let ticket_id = random_id("stt_");
+    let expires = format_time(at + Duration::seconds(WS_TICKET_LIFETIME_SECS));
+
+    db.insert_ws_ticket(&ticket_id, session_id, &token::hash(&ticket), now, &expires)?;
+
+    Ok(IssuedWsTicket {
+        ticket,
+        expires_in: WS_TICKET_LIFETIME_SECS,
+    })
+}
+
+/// Validates a WebSocket ticket, consuming it if valid.
+///
+/// Returns the session id the ticket was bound to, or an error.
+pub fn consume_ws_ticket(db: &mut AuthDb, ticket: &str, now: &str) -> Result<String, SessionError> {
+    let hash = token::hash(ticket);
+    let at = parse_time(now)?;
+
+    let (ticket_id, session_id) = db
+        .ws_ticket_by_access_hash(&hash)?
+        .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
+
+    // Check expiry.
+    let session = db
+        .session_by_id(&session_id)?
+        .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
+    if session.is_revoked() {
+        return Err(SessionError::Refused(AuthFailure::Revoked));
+    }
+    if parse_time(&session.expires).is_ok_and(|exp| at > exp) {
+        return Err(SessionError::Refused(AuthFailure::Expired));
+    }
+
+    // Mark used (single-use).
+    db.mark_ws_ticket_used(&ticket_id, now)?;
+
+    // Purge old tickets to keep the table small.
+    let _ = db.purge_expired_ws_tickets(now)?;
+
+    Ok(session_id)
+}
+
+/// The response from `POST /v1/auth/ws-ticket`.
+pub struct IssuedWsTicket {
+    pub ticket: String,
+    pub expires_in: i64,
 }
 
 #[cfg(test)]

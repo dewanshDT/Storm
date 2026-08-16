@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Path, Query, State,
+        Extension, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -70,6 +70,13 @@ pub struct AppState {
     /// Whether MCP may change the vault. Read per request, so the switch takes
     /// effect on the next call rather than the next restart.
     pub mcp_writable: std::sync::atomic::AtomicBool,
+    /// The auth database, held open for request-time use (device lookup,
+    /// session authenticate, login, refresh, ws-ticket).
+    pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
+    /// Whether the legacy `STORM_TOKEN` is accepted on session-tier routes.
+    /// Defaults `true`; the operator turns it off from the app after pairing
+    /// devices (A10).
+    pub legacy_token_enabled: bool,
 }
 
 pub type Shared = Arc<AppState>;
@@ -176,8 +183,8 @@ pub async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
 /// `mcp` mounts the Model Context Protocol endpoint. It is a parameter rather
 /// than something bolted on afterwards for a load-bearing reason: axum applies
 /// a layer only to the routes registered *above* it, so `/mcp` has to be nested
-/// before `require_token` or it would be the one unauthenticated route on the
-/// server. `mcp_requires_the_bearer_token` is the test that holds this.
+/// before the session auth layer or it would be the one unauthenticated route on
+/// the server. `mcp_requires_the_bearer_token` is the test that holds this.
 pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
     // Always mounted, never conditionally: whether MCP answers is a runtime
     // setting the app can toggle, and a route that only exists when a flag was
@@ -190,17 +197,36 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             require_mcp_enabled,
         ));
 
-    Router::new()
+    // Each tier is a self-contained Router with its own auth layer.
+    // `merge` combines routes without leaking layers across tiers.
+
+    // ---- none tier: no credential required --------------------------------
+    let none_router = Router::new()
         .route("/v1/health", get(health))
-        .nest("/mcp", mcp_router)
-        // Server-level: which vaults exist and where they live.
+        .route("/v1/server", get(server_info))
+        .route("/v1/server/challenge", post(server_challenge))
+        .layer(Extension(RequiredTier::None));
+
+    // ---- device tier: `StormDevice <id>:<secret>` -------------------------
+    let device_router = Router::new()
+        .route("/v1/users", get(list_users))
+        .route("/v1/users/first", post(create_first_user))
+        .route("/v1/auth/login", post(login_handler))
+        .route("/v1/auth/refresh", post(refresh_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
+        .layer(Extension(RequiredTier::Device));
+
+    // ---- session tier: `Bearer <token>` -----------------------------------
+    let session_router = Router::new()
         .route("/v1/vaults", get(list_vaults).post(create_vault))
         .route("/v1/vaults/{vault}", patch(rename_vault))
         .route("/v1/vaults/{vault}", delete(remove_vault))
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/recents", get(recents))
-        // Vault-scoped: everything that touches notes.
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
         .route("/v1/vaults/{vault}/notes", post(create_note))
@@ -228,31 +254,37 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
                 .put(put_attachment)
                 .delete(delete_attachment),
         )
-        // Attachments are images and PDFs, well past axum's 2 MB default.
-        // Capped so one upload can't exhaust a small homelab box.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
-        // One socket for every vault, with `vault_id` on each frame. A socket
-        // per vault would hold connections open for vaults nobody is looking
-        // at.
+        .route("/v1/auth/logout", post(logout_handler))
+        .route("/v1/auth/sessions", get(list_sessions_handler))
+        .route("/v1/auth/sessions/{id}", delete(revoke_session_handler))
+        .route("/v1/auth/devices", get(list_devices_handler))
+        .route("/v1/auth/devices/{id}", delete(revoke_device_handler))
+        .route("/v1/auth/password", post(change_password_handler))
+        .route("/v1/auth/ws-ticket", post(ws_ticket_handler))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            require_token,
+            require_auth,
         ))
-        // Below the layer on purpose. axum applies a layer only to the routes
-        // registered *above* it, so these two are the server's unauthenticated
-        // surface — the `none` tier, which has to answer before the caller owns
-        // any credential at all: a client cannot pair with a server it is not
-        // allowed to ask who it is. They publish nothing secret (an id, a name
-        // and a public key) and sign only a domain-separated challenge.
-        //
-        // `/v1/health` is above the layer and exempted by path inside
-        // `require_token` instead — the older shape, kept as it is because this
-        // slice does not touch the middleware.
-        // `the_server_endpoints_answer_without_a_token` is the test that holds
-        // this ordering, and its pair asserts an ordinary route still 401s.
-        .route("/v1/server", get(server_info))
-        .route("/v1/server/challenge", post(server_challenge))
+        .layer(Extension(RequiredTier::Session));
+
+    // MCP needs session auth + the mcp_enabled gate. It is nested under /mcp
+    // rather than merged, so its paths don't collide with REST routes.
+    let mcp_with_auth = Router::new()
+        .nest("/mcp", mcp_router)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
+        .layer(Extension(RequiredTier::Session));
+
+    // Merge all tiers: none is checked first, then device, then session, then
+    // MCP. Each carries its own auth layer; merge does not leak them.
+    none_router
+        .merge(device_router)
+        .merge(session_router)
+        .merge(mcp_with_auth)
         .with_state(state)
 }
 
@@ -276,38 +308,477 @@ async fn server_challenge(
     Ok(Json(crate::ops::sign_challenge(&state, &body.nonce).await?))
 }
 
-/// Single shared bearer token, per the v1 auth decision.
+// ---- device-tier endpoints ------------------------------------------------
+
+/// GET /v1/users — list all users (device tier).
+async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::auth::users::User>>> {
+    let auth_db = state.auth_db.lock().await;
+    let users = auth_db
+        .list_users()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(users))
+}
+
+/// POST /v1/users/first — create the owner account (unauthenticated).
 ///
-/// This is only defensible because v1 binds to the LAN. Exposing the server
-/// beyond it requires TLS and per-device token rotation *first*.
-async fn require_token(
+/// Fails if any user already exists. This is the one endpoint that is
+/// genuinely unauthenticated; it is registered in the `none` tier.
+///
+/// The password is hashed here and stored immediately. The caller must supply a
+/// valid password that passes `validate_password`. The operator `user add` CLI
+/// is the other path and is more ergonomic for interactive use.
+async fn create_first_user(
+    State(state): State<Shared>,
+    Json(body): Json<FirstUserRequest>,
+) -> ApiResult<StatusCode> {
+    if let Err(msg) = crate::auth::password::validate_password(&body.password) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let hasher = crate::auth::Hasher::new();
+    let hash = hasher
+        .hash(body.password.clone())
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match crate::auth::users::create_user(
+        &mut auth_db,
+        crate::auth::users::NewUser {
+            username: &body.username,
+            display_name: None,
+            password_hash: &hash,
+            role: crate::auth::users::Role::Owner,
+        },
+        &now,
+    ) {
+        Ok(_) => Ok(StatusCode::CREATED),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE") || msg.contains("already") {
+                Err(ApiError(StatusCode::CONFLICT, "username taken".into()))
+            } else {
+                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FirstUserRequest {
+    username: String,
+    password: String,
+}
+
+/// POST /v1/auth/login — exchange username/password for a token pair.
+///
+/// The caller must present a `StormDevice` header (device tier). The device
+/// must be paired; if not the login fails with 401. After authentication the
+/// caller receives access + refresh tokens bound to this device.
+async fn login_handler(
     State(state): State<Shared>,
     headers: HeaderMap,
-    request: axum::extract::Request,
+    Json(body): Json<LoginRequest>,
+) -> ApiResult<Json<crate::auth::sessions::IssuedSession>> {
+    let now = crate::index::now_rfc3339();
+
+    // The device must be present and paired — require_auth already checked
+    // this, but we need the device_id for session binding.
+    let device_id = extract_device_id(&headers)
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "device header required".into()))?;
+
+    let hasher = crate::auth::Hasher::new();
+    let mut auth_db = state.auth_db.lock().await;
+    match crate::auth::sessions::login(
+        &mut auth_db,
+        &hasher,
+        &body.username,
+        body.password.clone(),
+        &device_id,
+        &now,
+    )
+    .await
+    {
+        Ok(issued) => Ok(Json(issued)),
+        Err(crate::auth::sessions::LoginError::Refused(failure)) => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            failure.code().to_string(),
+        )),
+        Err(crate::auth::sessions::LoginError::Internal(e)) => {
+            Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
+}
+
+/// Extracts the device id from a `StormDevice <id>:<secret>` header.
+fn extract_device_id(headers: &HeaderMap) -> Option<String> {
+    let val = headers.get("authorization")?.to_str().ok()?;
+    let rest = val.strip_prefix("StormDevice ")?;
+    let (id, _) = rest.split_once(':')?;
+    Some(id.to_string())
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+/// POST /v1/auth/refresh — exchange a refresh token for a new token pair.
+async fn refresh_handler(
+    State(state): State<Shared>,
+    Json(body): Json<RefreshRequest>,
+) -> ApiResult<Json<crate::auth::sessions::IssuedSession>> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    match crate::auth::sessions::refresh(&mut auth_db, &body.refresh_token, &now) {
+        Ok(issued) => Ok(Json(issued)),
+        Err(crate::auth::sessions::SessionError::Refused(
+            crate::auth::sessions::AuthFailure::Unknown,
+        )) => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid refresh token".into(),
+        )),
+        Err(crate::auth::sessions::SessionError::Refused(
+            crate::auth::sessions::AuthFailure::Revoked,
+        )) => Err(ApiError(StatusCode::UNAUTHORIZED, "session revoked".into())),
+        Err(crate::auth::sessions::SessionError::Refused(_)) => {
+            Err(ApiError(StatusCode::UNAUTHORIZED, "token rejected".into()))
+        }
+        Err(crate::auth::sessions::SessionError::Internal(e)) => {
+            Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RefreshRequest {
+    refresh_token: String,
+}
+
+// ---- session-tier auth management endpoints -------------------------------
+
+/// POST /v1/auth/logout — revoke the current session.
+async fn logout_handler(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+) -> ApiResult<StatusCode> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    crate::auth::sessions::revoke(
+        &mut auth_db,
+        &auth.authenticated.session.id,
+        "user logout",
+        &now,
+    )
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /v1/auth/sessions — list all sessions for the current user.
+async fn list_sessions_handler(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+) -> ApiResult<Json<Vec<crate::auth::sessions::Session>>> {
+    let auth_db = state.auth_db.lock().await;
+    let sessions = auth_db
+        .list_sessions(Some(&auth.authenticated.user.id))
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(sessions))
+}
+
+/// DELETE /v1/auth/sessions/{id} — revoke a session (own sessions only).
+async fn revoke_session_handler(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+
+    // Verify ownership.
+    let session = auth_db
+        .session_by_id(&id)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "session not found".into()))?;
+
+    if session.user_id != auth.authenticated.user.id {
+        return Err(ApiError(StatusCode::FORBIDDEN, "not your session".into()));
+    }
+
+    crate::auth::sessions::revoke(&mut auth_db, &id, "user revoked", &now)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /v1/auth/devices — list all paired devices.
+async fn list_devices_handler(
+    State(state): State<Shared>,
+) -> ApiResult<Json<Vec<crate::auth::devices::Device>>> {
+    let auth_db = state.auth_db.lock().await;
+    let devices = auth_db
+        .list_devices()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(devices))
+}
+
+/// DELETE /v1/auth/devices/{id} — revoke a paired device.
+async fn revoke_device_handler(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    crate::auth::devices::revoke(&mut auth_db, &id, "user revoked", &now)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /v1/auth/password — change the current user's password.
+///
+/// Verifies the current password, hashes the new one, and stores it. The
+/// caller must be authenticated.
+async fn change_password_handler(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+    Json(body): Json<ChangePasswordRequest>,
+) -> ApiResult<StatusCode> {
+    if let Err(msg) = crate::auth::password::validate_password(&body.new_password) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+
+    // Verify the current password before allowing the change.
+    let stored_hash = auth_db
+        .password_hash_of(&auth.authenticated.user.id)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "account has no password".into(),
+            )
+        })?;
+
+    let hasher = crate::auth::Hasher::new();
+    let ok = hasher
+        .verify(body.current_password.clone(), stored_hash)
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !ok {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "wrong password".into()));
+    }
+
+    let new_hash = hasher
+        .hash(body.new_password.clone())
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    crate::auth::users::set_password(
+        &mut auth_db,
+        &auth.authenticated.user.username,
+        &new_hash,
+        &now,
+    )
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// POST /v1/auth/ws-ticket — mint a short-lived ticket for WebSocket auth.
+async fn ws_ticket_handler(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let issued =
+        crate::auth::sessions::create_ws_ticket(&mut auth_db, &auth.authenticated.session.id, &now)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "ticket": issued.ticket,
+        "expires_in": issued.expires_in,
+    })))
+}
+
+/// Three credential tiers: `none` (unauthenticated), `device` (paired
+/// installation), `session` (logged-in user). Set per-route via axum
+/// `Extension<RequiredTier>`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RequiredTier {
+    None,
+    Device,
+    Session,
+}
+
+/// A device that has proven it is paired with this server.
+///
+/// Set as a request extension by `require_auth` on device-tier and session-tier
+/// routes when the credential is a `StormDevice` header.
+#[derive(Clone)]
+pub struct DeviceAuth {
+    #[allow(dead_code)]
+    pub device: crate::auth::devices::Device,
+}
+
+/// A caller that has proven who it is (user + device + session).
+///
+/// Set as a request extension by `require_auth` on session-tier routes when the
+/// credential is a `Bearer` token.
+#[derive(Clone)]
+pub struct SessionAuth {
+    pub authenticated: crate::auth::sessions::Authenticated,
+}
+
+/// Tier-aware authentication middleware.
+///
+/// Reads `RequiredTier` from the request extensions (set by the router layer)
+/// and checks the appropriate credential:
+///
+/// - **none**: always passes.
+/// - **device**: `Authorization: StormDevice <id>:<secret>` → verify secret →
+///   reject revoked. Sets `DeviceAuth` extension.
+/// - **session**: `Authorization: Bearer <token>` → `sessions::authenticate()` →
+///   reject expired/revoked/disabled. Sets `SessionAuth` extension.
+///
+/// On session tier only, the legacy `STORM_TOKEN` is accepted as
+/// owner-equivalent when `legacy_token_enabled` is on (A10). It is never
+/// accepted on device tier — login and refresh require a real device.
+async fn require_auth(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if request.uri().path() == "/v1/health" {
+    let tier = request
+        .extensions()
+        .get::<RequiredTier>()
+        .copied()
+        .unwrap_or(RequiredTier::Session);
+
+    if tier == RequiredTier::None {
         return next.run(request).await;
     }
 
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        // Browsers can't set headers on a WebSocket handshake, so the token may
-        // also arrive as a query parameter.
         .map(str::to_string)
         .or_else(|| {
+            // Browsers can't set headers on a WebSocket handshake, so the token
+            // may also arrive as a query parameter.
             request.uri().query().and_then(|q| {
                 q.split('&')
                     .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
             })
         });
 
-    match presented {
-        Some(t) if constant_time_eq(&t, &state.token) => next.run(request).await,
-        _ => ApiError(StatusCode::UNAUTHORIZED, "invalid or missing token".into()).into_response(),
+    let Some(credential) = presented else {
+        return unauthorized("invalid or missing token");
+    };
+
+    // --- StormDevice: `StormDevice <id>:<secret>` ---
+    if let Some(rest) = credential.strip_prefix("StormDevice ") {
+        let auth_db = state.auth_db.lock().await;
+        match parse_device_credential(rest) {
+            Ok((id, secret)) => match auth_db.verify_device_secret(id, secret) {
+                Ok(Some(device)) => {
+                    if device.is_revoked() {
+                        return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
+                    }
+                    request.extensions_mut().insert(DeviceAuth { device });
+                    return next.run(request).await;
+                }
+                Ok(None) => {
+                    return unauthorized("invalid or missing token");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "device verification failed");
+                    return internal_error();
+                }
+            },
+            Err(_) => {
+                return unauthorized("invalid or missing token");
+            }
+        }
     }
+
+    // --- Bearer token: session or legacy ---
+    if let Some(token) = credential.strip_prefix("Bearer ") {
+        // Session-tier only: legacy token fallback.
+        if tier == RequiredTier::Session
+            && state.legacy_token_enabled
+            && constant_time_eq(token, &state.token)
+        {
+            // Legacy token: owner-equivalent. No device, no session extension —
+            // handlers that need them will have to handle the absence. This is
+            // the deliberate contract: the legacy path exists for backward
+            // compatibility and cannot create the first user (A10).
+            return next.run(request).await;
+        }
+
+        // Normal session authentication.
+        let now = crate::index::now_rfc3339();
+        let mut auth_db = state.auth_db.lock().await;
+        match crate::auth::sessions::authenticate(&mut auth_db, token, &now) {
+            Ok(authenticated) => {
+                drop(auth_db);
+                request
+                    .extensions_mut()
+                    .insert(SessionAuth { authenticated });
+                return next.run(request).await;
+            }
+            Err(crate::auth::sessions::SessionError::Refused(failure)) => {
+                return tier_error(failure.code(), StatusCode::UNAUTHORIZED);
+            }
+            Err(crate::auth::sessions::SessionError::Internal(e)) => {
+                tracing::error!(error = %e, "session authentication failed");
+                return internal_error();
+            }
+        }
+    }
+
+    unauthorized("invalid or missing token")
+}
+
+/// Parses `StormDevice <id>:<secret>` → `(id, secret)`.
+fn parse_device_credential(rest: &str) -> Result<(&str, &str), ()> {
+    let (id, secret) = rest.split_once(':').ok_or(())?;
+    if id.is_empty() || secret.is_empty() {
+        return Err(());
+    }
+    Ok((id, secret))
+}
+
+fn unauthorized(msg: &str) -> Response {
+    ApiError(StatusCode::UNAUTHORIZED, msg.to_string()).into_response()
+}
+
+fn tier_error(code: &str, status: StatusCode) -> Response {
+    (status, Json(serde_json::json!({ "error": code }))).into_response()
+}
+
+fn internal_error() -> Response {
+    ApiError(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal error".to_string(),
+    )
+    .into_response()
 }
 
 /// Refuses `/mcp` while MCP is switched off.
@@ -1031,13 +1502,11 @@ mod tests {
         let root = dir.join("vaults");
         std::fs::create_dir_all(&root).unwrap();
 
-        let identity = {
-            let mut db = crate::auth::AuthDb::open(&state_dir).unwrap();
-            Arc::new(
-                crate::auth::identity::load_or_create(&mut db, &state_dir, "2026-08-13T00:00:00Z")
-                    .unwrap(),
-            )
-        };
+        let mut auth_db = crate::auth::AuthDb::open(&state_dir).unwrap();
+        let identity = Arc::new(
+            crate::auth::identity::load_or_create(&mut auth_db, &state_dir, "2026-08-13T00:00:00Z")
+                .unwrap(),
+        );
         let (events, _) = broadcast::channel(8);
         let (root_changed, _) = broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
@@ -1053,6 +1522,8 @@ mod tests {
             root_changed,
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            legacy_token_enabled: true,
         });
         (
             router(
