@@ -45,7 +45,10 @@ Future<bool> verifyChallenge({
 
     final message = utf8.encode(challengeMessage(serverId, nonce));
 
-    final publicKey = SimplePublicKey(publicKeyBytes, type: KeyPairType.ed25519);
+    final publicKey = SimplePublicKey(
+      publicKeyBytes,
+      type: KeyPairType.ed25519,
+    );
     final signature = Signature(signatureBytes, publicKey: publicKey);
 
     final algorithm = Ed25519();

@@ -15,11 +15,11 @@ import 'fake_server.dart';
 /// an exhaustively tested sync layer.
 void main() {
   group('redirects', () {
-    testWidgets('an unconfigured app lands on connect', (tester) async {
+    testWidgets('an unconfigured app lands on pairing', (tester) async {
       final c = shellContainer(configured: false);
       await pumpShell(tester, c);
 
-      expect(find.text('Connect to your homelab vault'), findsOneWidget);
+      expect(find.text('Pair with your Storm server'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -35,7 +35,39 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('disconnecting sends an open app back to connect', (
+    testWidgets('a legacy token install is never sent to pairing', (
+      tester,
+    ) async {
+      // The harness is exactly an install that predates auth: a URL and a
+      // token, no device. Requiring pairing here would lock it out of a vault
+      // it can already read, which is what "auth stays additive" forbids.
+      final c = shellContainer();
+      await pumpShell(tester, c);
+
+      expect(c.read(settingsProvider).value?.isPaired, isFalse);
+      expect(find.text('Pair with your Storm server'), findsNothing);
+      expect(find.text('VAULTS'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('pairing stays reachable before anything is configured', (
+      tester,
+    ) async {
+      // /connect is not dead: a server with no auth still needs it.
+      final c = shellContainer(configured: false);
+      await pumpShell(tester, c);
+
+      c.read(routerProvider).go(Routes.connect);
+      await tester.pumpAndSettle();
+      expect(find.text('Connect to your homelab vault'), findsOneWidget);
+
+      c.read(routerProvider).go(Routes.pairing);
+      await tester.pumpAndSettle();
+      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('disconnecting sends an open app back to pairing', (
       tester,
     ) async {
       // The regression that motivated `refreshListenable`: watching settings
@@ -48,7 +80,7 @@ void main() {
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
 
-      expect(find.text('Connect to your homelab vault'), findsOneWidget);
+      expect(find.text('Pair with your Storm server'), findsOneWidget);
       await disposeShell(tester, c);
     });
 

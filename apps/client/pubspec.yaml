@@ -50,6 +50,7 @@ dependencies:
   url_launcher: ^6.3.2
   markdown: ^7.3.1
   package_info_plus: ^10.2.1
+  cryptography: ^2.7.1
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.

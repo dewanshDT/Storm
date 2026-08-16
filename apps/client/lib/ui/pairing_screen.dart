@@ -79,7 +79,9 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       return;
     }
     if (uri.isExpired) {
-      setState(() => _error = 'This pairing QR has expired. Ask for a new one.');
+      setState(
+        () => _error = 'This pairing QR has expired. Ask for a new one.',
+      );
       return;
     }
 
@@ -102,7 +104,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       }
       if (serverInfo.publicKey != uri.publicKey) {
         setState(() {
-          _error = 'Server public key mismatch. This QR may be for a different server.';
+          _error =
+              'Server public key mismatch. This QR may be for a different server.';
           _verifying = false;
         });
         return;
@@ -119,7 +122,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       );
       if (!valid) {
         setState(() {
-          _error = 'Server failed the cryptographic challenge. Connection may be intercepted.';
+          _error =
+              'Server failed the cryptographic challenge. Connection may be intercepted.';
           _verifying = false;
         });
         return;
@@ -144,10 +148,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         _error = e.isGone
             ? 'This pairing QR has expired. Ask for a new one.'
             : e.isConflict
-                ? 'This pairing QR has already been used. Ask for a new one.'
-                : e.isRateLimited
-                    ? 'Too many pairing attempts. Ask for a new QR code.'
-                    : 'Server error: ${e.message}';
+            ? 'This pairing QR has already been used. Ask for a new one.'
+            : e.isRateLimited
+            ? 'Too many pairing attempts. Ask for a new QR code.'
+            : 'Server error: ${e.message}';
         _verifying = false;
       });
     } catch (e) {
@@ -231,7 +235,9 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
           .add(Duration(seconds: tokens.accessExpiresIn))
           .toUtc()
           .toIso8601String();
-      await ref.read(settingsProvider.notifier).save(
+      await ref
+          .read(settingsProvider.notifier)
+          .save(
             current.copyWith(
               baseUrl: uri.address,
               // Device credentials.
@@ -471,7 +477,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   /// A random 16-character nonce for the challenge step.
   static String _randomNonce() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const chars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     final rng = Random.secure();
     return List.generate(16, (_) => chars[rng.nextInt(chars.length)]).join();
   }

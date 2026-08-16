@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../api/auth_api.dart';
 import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
@@ -34,6 +35,17 @@ class Settings {
     // On by default: notes open as a document. Off restores the pre-M17
     // editor-only note screen (no Read / Edit switch).
     this.readMode = true,
+    // Auth: device identity from pairing.
+    this.deviceId = '',
+    this.deviceSecret = '',
+    this.serverKeyId = '',
+    this.serverPublicKey = '',
+    // Auth: session from login.
+    this.accessToken = '',
+    this.refreshToken = '',
+    this.accessTokenExpiresAt = '',
+    this.userId = '',
+    this.serverId = '',
   });
 
   final String baseUrl;
@@ -71,6 +83,51 @@ class Settings {
   /// editor only — the note screen as it was before M17.
   final bool readMode;
 
+  // ── Auth: device identity ──────────────────────────────────────────────
+
+  /// Device id assigned by the server during pairing.
+  final String deviceId;
+
+  /// Device secret for the StormDevice header (shared secret from pairing).
+  final String deviceSecret;
+
+  /// The server's key id — used for future challenge verification.
+  final String serverKeyId;
+
+  /// The server's public key (Ed25519, base64url) — for challenge verification.
+  final String serverPublicKey;
+
+  // ── Auth: session ──────────────────────────────────────────────────────
+
+  /// Bearer token for authenticated API calls.
+  final String accessToken;
+
+  /// Refresh token for extending the session.
+  final String refreshToken;
+
+  /// ISO 8601 timestamp when `accessToken` expires.
+  final String accessTokenExpiresAt;
+
+  /// The user id that owns this session.
+  final String userId;
+
+  /// Server id from pairing — proves the device belongs to this server.
+  final String serverId;
+
+  /// The device has completed pairing (has device credentials).
+  bool get isPaired => deviceId.isNotEmpty;
+
+  /// The device has a live (or refreshable) session.
+  bool get hasSession => accessToken.isNotEmpty;
+
+  /// The token to send as `Authorization: Bearer …` on authenticated calls.
+  ///
+  /// Falls back to the legacy plain token for un-paired installs.
+  String get bearerToken => accessToken.isNotEmpty ? accessToken : token;
+
+  /// The `StormDevice` header value for device-tier endpoints.
+  String get deviceHeader => 'StormDevice $deviceId:$deviceSecret';
+
   /// Which vault the note-level providers are serving.
   ///
   /// The **route** is the source of truth for which vault is open; this is a
@@ -83,7 +140,9 @@ class Settings {
   /// Persisting it also reopens the last vault on launch, for free.
   final String activeVault;
 
-  bool get isConfigured => baseUrl.isNotEmpty && token.isNotEmpty;
+  /// The app has a server URL and either a session or a legacy token.
+  bool get isConfigured =>
+      baseUrl.isNotEmpty && (hasSession || token.isNotEmpty);
 
   Settings copyWith({
     String? baseUrl,
@@ -94,6 +153,15 @@ class Settings {
     BodyFont? bodyFont,
     bool? showNoteId,
     bool? readMode,
+    String? deviceId,
+    String? deviceSecret,
+    String? serverKeyId,
+    String? serverPublicKey,
+    String? accessToken,
+    String? refreshToken,
+    String? accessTokenExpiresAt,
+    String? userId,
+    String? serverId,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     token: token ?? this.token,
@@ -103,6 +171,15 @@ class Settings {
     bodyFont: bodyFont ?? this.bodyFont,
     showNoteId: showNoteId ?? this.showNoteId,
     readMode: readMode ?? this.readMode,
+    deviceId: deviceId ?? this.deviceId,
+    deviceSecret: deviceSecret ?? this.deviceSecret,
+    serverKeyId: serverKeyId ?? this.serverKeyId,
+    serverPublicKey: serverPublicKey ?? this.serverPublicKey,
+    accessToken: accessToken ?? this.accessToken,
+    refreshToken: refreshToken ?? this.refreshToken,
+    accessTokenExpiresAt: accessTokenExpiresAt ?? this.accessTokenExpiresAt,
+    userId: userId ?? this.userId,
+    serverId: serverId ?? this.serverId,
   );
 }
 
@@ -116,6 +193,15 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kBodyFont = 'storm.bodyFont';
   static const _kShowId = 'storm.showNoteId';
   static const _kReadMode = 'storm.readMode';
+  static const _kDeviceId = 'storm.deviceId';
+  static const _kDeviceSecret = 'storm.deviceSecret';
+  static const _kServerKeyId = 'storm.serverKeyId';
+  static const _kServerPubKey = 'storm.serverPubKey';
+  static const _kAccessToken = 'storm.accessToken';
+  static const _kRefreshToken = 'storm.refreshToken';
+  static const _kAccessExpires = 'storm.accessTokenExpiresAt';
+  static const _kUserId = 'storm.userId';
+  static const _kServerId = 'storm.serverId';
 
   @override
   Future<Settings> build() async {
@@ -131,6 +217,15 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       // Missing key → on: matches a fresh install and anyone who has never
       // opted out. Only an explicit `false` turns Read Mode off.
       readMode: prefs.getBool(_kReadMode) ?? true,
+      deviceId: prefs.getString(_kDeviceId) ?? '',
+      deviceSecret: prefs.getString(_kDeviceSecret) ?? '',
+      serverKeyId: prefs.getString(_kServerKeyId) ?? '',
+      serverPublicKey: prefs.getString(_kServerPubKey) ?? '',
+      accessToken: prefs.getString(_kAccessToken) ?? '',
+      refreshToken: prefs.getString(_kRefreshToken) ?? '',
+      accessTokenExpiresAt: prefs.getString(_kAccessExpires) ?? '',
+      userId: prefs.getString(_kUserId) ?? '',
+      serverId: prefs.getString(_kServerId) ?? '',
     );
   }
 
@@ -164,7 +259,89 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setString(_kBodyFont, cleaned.bodyFont.name);
     await prefs.setBool(_kShowId, cleaned.showNoteId);
     await prefs.setBool(_kReadMode, cleaned.readMode);
+    await prefs.setString(_kDeviceId, cleaned.deviceId);
+    await prefs.setString(_kDeviceSecret, cleaned.deviceSecret);
+    await prefs.setString(_kServerKeyId, cleaned.serverKeyId);
+    await prefs.setString(_kServerPubKey, cleaned.serverPublicKey);
+    await prefs.setString(_kAccessToken, cleaned.accessToken);
+    await prefs.setString(_kRefreshToken, cleaned.refreshToken);
+    await prefs.setString(_kAccessExpires, cleaned.accessTokenExpiresAt);
+    await prefs.setString(_kUserId, cleaned.userId);
+    await prefs.setString(_kServerId, cleaned.serverId);
   }
+
+  /// Extends the session using the refresh token.
+  ///
+  /// Returns `true` on success. On failure (revoked, expired) the caller
+  /// should redirect to the pairing/login flow.
+  Future<bool> refreshSession() async {
+    final s = state.value;
+    if (s == null || s.refreshToken.isEmpty) return false;
+    final api = AuthApi(baseUrl: s.baseUrl);
+    try {
+      final tokens = await api.refresh(s.refreshToken);
+      await save(
+        s.copyWith(
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          accessTokenExpiresAt: _expiryFrom(tokens.accessExpiresIn),
+        ),
+      );
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      api.dispose();
+    }
+  }
+
+  /// Ends the session but keeps the device paired.
+  ///
+  /// Device credentials survive so a re-login does not need a second pairing.
+  /// Nothing calls this yet: `PairingScreen` is first-run only, so a
+  /// logged-out device would still land there. The login-only screen that
+  /// makes this reachable is the next slice.
+  Future<void> logout() async {
+    final s = state.value;
+    if (s == null) return;
+    await save(
+      s.copyWith(
+        accessToken: '',
+        refreshToken: '',
+        accessTokenExpiresAt: '',
+        userId: '',
+        // A stale legacy token would keep `isConfigured` true and skip login.
+        token: '',
+      ),
+    );
+  }
+
+  /// Forgets the server entirely — device credentials included.
+  ///
+  /// The app returns to the pairing screen on the next redirect cycle.
+  Future<void> unpair() async {
+    final s = state.value;
+    if (s == null) return;
+    await save(
+      s.copyWith(
+        deviceId: '',
+        deviceSecret: '',
+        serverKeyId: '',
+        serverPublicKey: '',
+        serverId: '',
+        accessToken: '',
+        refreshToken: '',
+        accessTokenExpiresAt: '',
+        userId: '',
+        token: '',
+      ),
+    );
+  }
+
+  /// `accessExpiresIn` seconds from now, as the ISO 8601 UTC stamp the
+  /// pairing flow stores.
+  static String _expiryFrom(int seconds) =>
+      DateTime.now().toUtc().add(Duration(seconds: seconds)).toIso8601String();
 }
 
 /// The faces a note body can be set in.
@@ -224,7 +401,7 @@ final apiProvider = Provider<StormApi?>((ref) {
   final settings = ref.watch(settingsProvider).value;
   if (settings == null || !settings.isConfigured) return null;
 
-  final api = StormApi(baseUrl: settings.baseUrl, token: settings.token);
+  final api = StormApi(baseUrl: settings.baseUrl, token: settings.bearerToken);
   ref.onDispose(api.dispose);
   return api;
 });
