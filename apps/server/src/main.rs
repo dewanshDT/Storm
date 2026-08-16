@@ -57,6 +57,10 @@ enum Commands {
     Status,
     /// Report what an import would change, then exit without writing.
     DryRun(VaultArgs),
+    /// Create and manage local user accounts.
+    User(UserArgs),
+    /// Set a user's password. The recovery path when one is forgotten (A11).
+    Passwd(PasswdArgs),
     /// Snapshot every vault index into DIR, then exit.
     BackupDb {
         /// State directory holding the registry and indexes.
@@ -98,6 +102,82 @@ struct UpArgs {
     /// Built Flutter web client directory (package default).
     #[arg(long, default_value = "/usr/share/storm/web")]
     web: PathBuf,
+}
+
+/// Account management, on the host.
+///
+/// These run on the box rather than over the network, and that is the design
+/// rather than a limitation for now: creating a user remotely needs device auth
+/// (A8), which arrives with pairing. Until then the only way to make an account
+/// is to have shell access, which is the same trust level A11 already accepts
+/// for `passwd`.
+///
+/// **There is deliberately no `--password` flag anywhere in here.** A password
+/// in an argument is in the shell history and, while the process runs, in `ps`
+/// for every other user on the box. The password is prompted for without echo,
+/// or read from stdin with `--password-stdin` for scripts.
+#[derive(clap::Args, Debug)]
+struct UserArgs {
+    /// State directory holding auth.db.
+    ///
+    /// `global` so it reads naturally in either position — `user --state X add
+    /// name` and `user add name --state X` are the same command. Without it
+    /// clap accepts only the first, which is not where a hand reaches for it.
+    #[arg(long, default_value = "./state", global = true)]
+    state: PathBuf,
+
+    #[command(subcommand)]
+    command: UserCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum UserCommand {
+    /// Create an account. The first one on a server is always an owner.
+    Add {
+        username: String,
+
+        /// owner, admin or member. Defaults to owner for the first account on a
+        /// server and member for every one after it.
+        #[arg(long)]
+        role: Option<String>,
+
+        /// Name to show instead of the username. Unrestricted, unlike the username.
+        #[arg(long)]
+        display_name: Option<String>,
+
+        /// Read the password from stdin instead of prompting.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// List accounts.
+    List,
+    /// Keep the account but refuse its logins.
+    Disable { username: String },
+    /// Re-enable a disabled account.
+    Enable { username: String },
+    /// Change an account's role.
+    Role { username: String, role: String },
+    /// Delete an account, its sessions and its vault grants.
+    Delete {
+        username: String,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct PasswdArgs {
+    /// State directory holding auth.db.
+    #[arg(long, default_value = "./state")]
+    state: PathBuf,
+
+    username: String,
+
+    /// Read the password from stdin instead of prompting.
+    #[arg(long)]
+    password_stdin: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -540,6 +620,256 @@ fn run_dry_run(args: VaultArgs) -> Result<()> {
     Ok(())
 }
 
+/// Opens `auth.db` for a CLI command, warning about the ownership trap.
+///
+/// The database is created on first use, so `sudo storm-server user add` on a
+/// server that runs as `storm` leaves a root-owned `auth.db` the service cannot
+/// write. That surfaces much later as a login that fails for no visible reason,
+/// so it is worth a line here.
+fn open_auth_db(state_dir: &Path) -> Result<auth::AuthDb> {
+    let existed = auth::AuthDb::path_in(state_dir).exists();
+    let db = auth::AuthDb::open(state_dir)
+        .with_context(|| format!("opening the auth database in {}", state_dir.display()))?;
+    if !existed {
+        println!("created {}", auth::AuthDb::path_in(state_dir).display());
+    }
+    warn_if_owner_mismatch(state_dir);
+    Ok(db)
+}
+
+#[cfg(unix)]
+fn warn_if_owner_mismatch(state_dir: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let path = auth::AuthDb::path_in(state_dir);
+    let (Ok(dir), Ok(file)) = (std::fs::metadata(state_dir), std::fs::metadata(&path)) else {
+        return;
+    };
+    if dir.uid() != file.uid() {
+        eprintln!(
+            "warning: {} is owned by uid {} but its directory by uid {}. The server \
+             may not be able to write it — run this as the service user \
+             (`sudo -u storm storm-server …`) or chown it back.",
+            path.display(),
+            file.uid(),
+            dir.uid()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_owner_mismatch(_state_dir: &Path) {}
+
+/// Reads a new password, without echoing it.
+///
+/// Prompted twice, because there is no "forgot password" flow behind this — a
+/// typo in the only copy of a password is an account nobody can reach until an
+/// operator runs `passwd`. `--password-stdin` is the scriptable path.
+fn read_new_password(from_stdin: bool, prompt: &str) -> Result<String> {
+    let password = if from_stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading the password from stdin")?;
+        // Only the line ending is stripped. Trimming whitespace generally would
+        // silently change a password that legitimately ends in a space, and the
+        // account would then refuse the password its owner thinks they set.
+        buf.trim_end_matches(['\n', '\r']).to_string()
+    } else {
+        let first = rpassword::prompt_password(prompt).context("reading the password")?;
+        let again = rpassword::prompt_password("Repeat: ").context("reading the password")?;
+        if first != again {
+            bail!("the two passwords do not match");
+        }
+        first
+    };
+
+    if let Err(why) = auth::password::validate_password(&password) {
+        bail!(why);
+    }
+    Ok(password)
+}
+
+/// Reads the stored hash back and checks the password against it.
+///
+/// A password that was written but does not verify is an account nobody can
+/// reach, and the person who discovers it is the user at a login prompt some
+/// weeks later. This costs one extra verify on a rare interactive command, and
+/// it exercises the same hash-then-verify path login will use.
+async fn confirm_stored_password(
+    db: &auth::AuthDb,
+    hasher: &auth::Hasher,
+    user_id: &str,
+    password: String,
+) -> Result<()> {
+    let stored = db
+        .password_hash_of(user_id)?
+        .context("the account has no password hash immediately after one was written")?;
+    if !hasher.verify(password, stored).await? {
+        bail!(
+            "the password was stored but does not verify against what was written. \
+             Do not rely on this account; auth.db may be damaged."
+        );
+    }
+    Ok(())
+}
+
+async fn run_user(args: UserArgs) -> Result<()> {
+    let mut db = open_auth_db(&args.state)?;
+    let now = index::now_rfc3339();
+
+    match args.command {
+        UserCommand::Add {
+            username,
+            role,
+            display_name,
+            password_stdin,
+        } => {
+            let role = match role.as_deref() {
+                Some(name) => auth::users::Role::parse(name)?,
+                // The first account must be an owner and `create_user` enforces
+                // it; defaulting the rest to member keeps "add a user" from
+                // quietly minting another administrator.
+                None if db.user_count()? == 0 => auth::users::Role::Owner,
+                None => auth::users::Role::Member,
+            };
+            // Validate the name before asking for a password: being told the
+            // username is malformed after typing a password twice is a small
+            // cruelty, and `create_user` checks it again anyway.
+            if let Err(why) = auth::users::validate_username(&username) {
+                bail!(why);
+            }
+
+            let password = read_new_password(password_stdin, "New password: ")?;
+            let hasher = auth::Hasher::new();
+            let hash = hasher.hash(password.clone()).await?;
+            let user = auth::users::create_user(
+                &mut db,
+                auth::users::NewUser {
+                    username: &username,
+                    display_name: display_name.as_deref(),
+                    password_hash: &hash,
+                    role,
+                },
+                &now,
+            )?;
+            confirm_stored_password(&db, &hasher, &user.id, password).await?;
+            println!("created {} ({}) as {}", user.username, user.id, role.as_str());
+        }
+
+        UserCommand::List => {
+            let users = db.list_users()?;
+            if users.is_empty() {
+                println!(
+                    "no users yet — `storm-server user add <name>` creates the first, \
+                     which is always an owner"
+                );
+                return Ok(());
+            }
+            println!(
+                "{:<20} {:<7} {:<9} {:<22} {:<22} PASSWORD",
+                "USERNAME", "ROLE", "STATUS", "CREATED", "LAST LOGIN"
+            );
+            let mut outdated = 0;
+            for user in &users {
+                let password = match db.password_hash_of(&user.id)? {
+                    Some(phc) if auth::password::needs_rehash(&phc) => {
+                        outdated += 1;
+                        "outdated"
+                    }
+                    Some(_) => "current",
+                    None => "missing",
+                };
+                println!(
+                    "{:<20} {:<7} {:<9} {:<22} {:<22} {}",
+                    user.username,
+                    user.role.as_str(),
+                    user.status.as_str(),
+                    user.created,
+                    user.last_login.as_deref().unwrap_or("never"),
+                    password
+                );
+            }
+            println!(
+                "\n{} user(s), {} active owner(s)",
+                users.len(),
+                db.active_owner_count()?
+            );
+            if outdated > 0 {
+                println!(
+                    "{outdated} password(s) hashed with weaker parameters than this build uses; \
+                     they are upgraded on next login."
+                );
+            }
+        }
+
+        UserCommand::Disable { username } => {
+            let user = auth::users::set_status(&mut db, &username, auth::users::Status::Disabled, &now)?;
+            println!("disabled {}", user.username);
+        }
+
+        UserCommand::Enable { username } => {
+            let user = auth::users::set_status(&mut db, &username, auth::users::Status::Active, &now)?;
+            println!("enabled {}", user.username);
+        }
+
+        UserCommand::Role { username, role } => {
+            let role = auth::users::Role::parse(&role)?;
+            let user = auth::users::set_role(&mut db, &username, role, &now)?;
+            println!("{} is now {}", user.username, role.as_str());
+        }
+
+        UserCommand::Delete { username, yes } => {
+            if !yes {
+                // There is no undo, and the delete takes sessions and vault
+                // grants with it. Typing the name is cheap insurance against a
+                // mistyped argument.
+                print!("Delete `{username}`, its sessions and its vault grants? Type the username to confirm: ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .context("reading the confirmation")?;
+                if line.trim() != username {
+                    bail!("not confirmed; nothing was deleted");
+                }
+            }
+            let user = auth::users::delete_user(&mut db, &username, &now)?;
+            println!("deleted {} ({})", user.username, user.id);
+        }
+    }
+    Ok(())
+}
+
+/// `storm-server passwd` — the recovery path (A11).
+///
+/// Deliberately a host-side bypass: root on the box can already read `auth.db`
+/// and every vault, so pretending a password reset needs more than shell access
+/// would be theatre. It writes a security event so the reset is visible.
+async fn run_passwd(args: PasswdArgs) -> Result<()> {
+    let mut db = open_auth_db(&args.state)?;
+    let now = index::now_rfc3339();
+
+    if db.find_user(&args.username)?.is_none() {
+        bail!(
+            "no user named `{}` — `storm-server user list` shows the accounts on this server",
+            args.username
+        );
+    }
+
+    let password = read_new_password(
+        args.password_stdin,
+        &format!("New password for {}: ", args.username),
+    )?;
+    let hasher = auth::Hasher::new();
+    let hash = hasher.hash(password.clone()).await?;
+    let user = auth::users::set_password(&mut db, &args.username, &hash, &now)?;
+    confirm_stored_password(&db, &hasher, &user.id, password).await?;
+    println!("password updated for {} ({})", user.username, user.id);
+    Ok(())
+}
+
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
     let registry = prepared.registry;
@@ -700,6 +1030,8 @@ async fn main() -> Result<()> {
         Commands::Down => install::down(),
         Commands::Status => install::status(),
         Commands::DryRun(args) => run_dry_run(args),
+        Commands::User(args) => run_user(args).await,
+        Commands::Passwd(args) => run_passwd(args).await,
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
             println!("index snapshots written to {}", dest.display());
@@ -711,6 +1043,37 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stored_password_that_does_not_verify_is_caught() {
+        // The guard on `user add` and `passwd`: it reads the hash back out of
+        // the database and checks it, so a row that was written but cannot be
+        // logged into is reported now rather than at a login prompt weeks later.
+        let dir = tempdir::TempDir::new("storm-confirm").unwrap();
+        let mut db = auth::AuthDb::open(dir.path()).unwrap();
+        let hasher = auth::Hasher::new();
+        let hash = hasher.hash("correct horse battery".into()).await.unwrap();
+        let user = auth::users::create_user(
+            &mut db,
+            auth::users::NewUser {
+                username: "dewansh",
+                display_name: None,
+                password_hash: &hash,
+                role: auth::users::Role::Owner,
+            },
+            "2026-08-16T00:00:00Z",
+        )
+        .unwrap();
+
+        confirm_stored_password(&db, &hasher, &user.id, "correct horse battery".into())
+            .await
+            .expect("the password just written must verify");
+
+        let err = confirm_stored_password(&db, &hasher, &user.id, "a different password".into())
+            .await
+            .expect_err("a password that does not match must be reported");
+        assert!(err.to_string().contains("does not verify"), "{err}");
+    }
 
     fn vault_args(vault_root: Option<PathBuf>, vault: Option<PathBuf>) -> VaultArgs {
         VaultArgs {

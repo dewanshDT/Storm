@@ -37,8 +37,11 @@ fn crockford() -> &'static Encoding {
     })
 }
 
-/// `srv_` + 26 Crockford base32 characters — 128 random bits.
-fn random_id(prefix: &str) -> String {
+/// A prefixed id: 26 Crockford base32 characters — 128 random bits.
+///
+/// Shared across the auth module (`srv_`, `usr_`, and later `dev_`/`ses_`) so
+/// every Storm id is minted from one alphabet with one amount of entropy.
+pub(super) fn random_id(prefix: &str) -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     format!("{prefix}{}", crockford().encode(&bytes))

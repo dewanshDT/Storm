@@ -33,7 +33,10 @@ pub const AUTH_DB_FILE: &str = "auth.db";
 const SCHEMA_VERSION: i64 = 1;
 
 pub struct AuthDb {
-    conn: Connection,
+    /// Visible to the rest of `auth` so each area keeps its own SQL beside its
+    /// own rules — users in `users.rs`, identity here — rather than growing one
+    /// module that knows every table.
+    pub(super) conn: Connection,
 }
 
 /// The one row in `server`.
@@ -266,6 +269,27 @@ impl AuthDb {
             [],
             |r| r.get(0),
         )?)
+    }
+
+    /// Appends to the audit trail.
+    ///
+    /// `detail` is JSON and **never contains a secret** — not a password, not a
+    /// hash, not a token. The table exists so an operator can answer "what
+    /// happened to this account"; a trail that leaks credentials would be worse
+    /// than no trail. `user_id` deliberately has no foreign key, so the record
+    /// of a deletion outlives the row it describes.
+    pub fn record_event(
+        &self,
+        kind: &str,
+        user_id: Option<&str>,
+        at: &str,
+        detail: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO security_events (at, kind, user_id, detail) VALUES (?1, ?2, ?3, ?4)",
+            params![at, kind, user_id, detail],
+        )?;
+        Ok(())
     }
 
     /// Records the server row and its first credential together.
