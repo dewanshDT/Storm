@@ -138,3 +138,44 @@ class SessionTokens {
     deviceId: j['device_id'] as String,
   );
 }
+
+/// An account on the server, as the login picker sees it.
+///
+/// Behind device auth (A7/A8): a stranger on the LAN cannot enumerate account
+/// names, but a paired device can offer a list instead of demanding you
+/// remember a username.
+class AuthUser {
+  const AuthUser({
+    required this.id,
+    required this.username,
+    required this.displayName,
+    required this.role,
+    required this.status,
+  });
+
+  final String id;
+  final String username;
+
+  /// Unrestricted, unlike [username], which is ASCII-only.
+  final String? displayName;
+  final String role;
+  final String status;
+
+  /// What to show in the picker. Falls back to the username, which always
+  /// exists.
+  String get label => (displayName != null && displayName!.isNotEmpty)
+      ? displayName!
+      : username;
+
+  /// A disabled account cannot log in, so the picker shows it as unavailable
+  /// rather than letting someone type a password that will always be refused.
+  bool get isDisabled => status == 'disabled';
+
+  factory AuthUser.fromJson(Map<String, dynamic> j) => AuthUser(
+    id: j['id'] as String? ?? '',
+    username: j['username'] as String? ?? '',
+    displayName: j['display_name'] as String?,
+    role: j['role'] as String? ?? 'member',
+    status: j['status'] as String? ?? 'active',
+  );
+}

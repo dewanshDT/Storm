@@ -31,7 +31,11 @@ const vaultPaths = [
 
 /// A container wired to a [FakeServer], with the engine never `start()`ed so
 /// no reconnect timer is left pending when the test ends.
-ProviderContainer shellContainer({bool configured = true}) {
+/// [settings] replaces the default fake wholesale, for tests that need a state
+/// [configured] cannot express — a paired device with no session, say. The
+/// server fakes are still wired, so a redirect that lands on the dashboard
+/// does not leave a real sync engine's timer running.
+ProviderContainer shellContainer({bool configured = true, Settings? settings}) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
 
@@ -64,7 +68,11 @@ ProviderContainer shellContainer({bool configured = true}) {
           vaultId: ref.watch(activeVaultProvider),
         ),
       ),
-      settingsProvider.overrideWith(() => FakeSettings(configured)),
+      settingsProvider.overrideWith(
+        () => settings == null
+            ? FakeSettings(configured)
+            : FixedSettings(settings),
+      ),
       // Widget tests have no platform package info; keep Client settings
       // deterministic and free of MissingPluginException noise.
       clientVersionProvider.overrideWith((ref) async => '0.0.0-test'),
@@ -162,4 +170,20 @@ Future<void> openVault(
 Future<void> enterEditMode(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('mode-edit')));
   await tester.pumpAndSettle();
+}
+
+/// A notifier that just holds the settings it was handed.
+///
+/// `FakeSettings` only knows "configured or not"; auth needs states between
+/// those two — paired without a session, a legacy token with no device.
+class FixedSettings extends SettingsNotifier {
+  FixedSettings(this.value);
+
+  final Settings value;
+
+  @override
+  Future<Settings> build() async => value;
+
+  @override
+  Future<void> save(Settings next) async => state = AsyncData(next);
 }
