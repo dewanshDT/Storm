@@ -118,7 +118,11 @@ pub fn validate_username(name: &str) -> std::result::Result<(), String> {
             "username must be {MIN_USERNAME_CHARS}–{MAX_USERNAME_CHARS} characters; `{name}` is {chars}"
         ));
     }
-    if !name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
         return Err("username must start with a letter or a digit".to_string());
     }
     if let Some(bad) = name
@@ -329,13 +333,22 @@ pub fn create_user(db: &mut AuthDb, spec: NewUser<'_>, now: &str) -> Result<User
         EVENT_USER_CREATED,
         Some(&user.id),
         now,
-        &format!(r#"{{"username":{:?},"role":"{}"}}"#, user.username, user.role.as_str()),
+        &format!(
+            r#"{{"username":{:?},"role":"{}"}}"#,
+            user.username,
+            user.role.as_str()
+        ),
     )?;
     Ok(user)
 }
 
 /// Replaces a password. The caller hashes; this never sees plaintext.
-pub fn set_password(db: &mut AuthDb, username: &str, password_hash: &str, now: &str) -> Result<User> {
+pub fn set_password(
+    db: &mut AuthDb,
+    username: &str,
+    password_hash: &str,
+    now: &str,
+) -> Result<User> {
     let user = require_user(db, username)?;
     db.update_password_hash(&user.id, password_hash, now)?;
     // Clearing the lockout counters is part of the change, not a side effect:
@@ -465,14 +478,20 @@ mod tests {
         let err = add(&mut db, "dewansh", Role::Member).unwrap_err();
         assert!(err.to_string().contains("already exists"), "{err}");
         // And the fold is what finds it, whichever case is asked for.
-        assert_eq!(db.find_user("DEWANSH").unwrap().unwrap().username, "Dewansh");
+        assert_eq!(
+            db.find_user("DEWANSH").unwrap().unwrap().username,
+            "Dewansh"
+        );
     }
 
     #[test]
     fn the_first_user_must_be_an_owner() {
         let mut db = AuthDb::open_in_memory().unwrap();
         let err = add(&mut db, "member", Role::Member).unwrap_err();
-        assert!(err.to_string().contains("first user must be an owner"), "{err}");
+        assert!(
+            err.to_string().contains("first user must be an owner"),
+            "{err}"
+        );
         assert_eq!(db.user_count().unwrap(), 0, "nothing was written");
 
         add(&mut db, "boss", Role::Owner).unwrap();
@@ -584,7 +603,13 @@ mod tests {
             )
             .unwrap();
 
-        set_password(&mut db, "owner", "$argon2id$v=19$m=196608,t=1,p=1$c2FsdA$bmV3", NOW).unwrap();
+        set_password(
+            &mut db,
+            "owner",
+            "$argon2id$v=19$m=196608,t=1,p=1$c2FsdA$bmV3",
+            NOW,
+        )
+        .unwrap();
 
         let (failed, locked): (i64, Option<String>) = db
             .conn

@@ -241,7 +241,10 @@ mod tests {
         // hardware they were taken on.
         assert_eq!(MEMORY_KIB, 196_608, "192 MiB");
         assert_eq!(TIME_COST, 1);
-        assert_eq!(LANES, 1, "the argon2 crate does not thread without `parallel`");
+        assert_eq!(
+            LANES, 1,
+            "the argon2 crate does not thread without `parallel`"
+        );
     }
 
     #[test]
