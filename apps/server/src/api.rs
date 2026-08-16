@@ -399,13 +399,14 @@ async fn login_handler(
     State(state): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
-) -> ApiResult<Json<crate::auth::sessions::IssuedSession>> {
+) -> Result<Json<crate::auth::sessions::IssuedSession>, Response> {
     let now = crate::index::now_rfc3339();
 
     // The device must be present and paired — require_auth already checked
     // this, but we need the device_id for session binding.
-    let device_id = extract_device_id(&headers)
-        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "device header required".into()))?;
+    let device_id = extract_device_id(&headers).ok_or_else(|| {
+        ApiError(StatusCode::UNAUTHORIZED, "device header required".into()).into_response()
+    })?;
 
     let hasher = crate::auth::Hasher::new();
     let mut auth_db = state.auth_db.lock().await;
@@ -420,14 +421,42 @@ async fn login_handler(
     .await
     {
         Ok(issued) => Ok(Json(issued)),
-        Err(crate::auth::sessions::LoginError::Refused(failure)) => Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            failure.code().to_string(),
-        )),
+        // Rate limiting is the one refusal that is not a 401, because the
+        // client's remedy is "wait", not "try different credentials" — and it
+        // cannot say *how long* to wait without the number. Hence a `Response`
+        // return type for this handler: `ApiError` is a status and a string,
+        // with nowhere to put a header.
+        Err(crate::auth::sessions::LoginError::Refused(
+            crate::auth::sessions::LoginFailure::RateLimited { retry_after_secs },
+        )) => Err(rate_limited(retry_after_secs)),
+        Err(crate::auth::sessions::LoginError::Refused(failure)) => {
+            Err(ApiError(StatusCode::UNAUTHORIZED, failure.code().to_string()).into_response())
+        }
         Err(crate::auth::sessions::LoginError::Internal(e)) => {
-            Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+            Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
         }
     }
+}
+
+/// `429` with `Retry-After`, per the error table in *Storm Auth Protocol*.
+///
+/// The seconds go in the body as well as the header: the header is the correct
+/// HTTP answer, and the body is what the client actually renders, since a
+/// message that says "too many attempts" without saying for how long invites
+/// exactly the retry it is trying to stop.
+fn rate_limited(retry_after_secs: i64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            retry_after_secs.to_string(),
+        )],
+        Json(serde_json::json!({
+            "error": "rate_limited",
+            "retry_after": retry_after_secs,
+        })),
+    )
+        .into_response()
 }
 
 /// Extracts the device id from a `StormDevice <id>:<secret>` header.
