@@ -2147,16 +2147,59 @@ mod tests {
         let owner = seed_owner(&state).await;
         let token = session_token(&state, &owner).await;
         let auth = format!("Bearer {token}");
+        // A vault has to exist, or "the list is empty" is true whether or not
+        // anything filtered — which is how this test first passed while doing
+        // nothing at all.
+        register_vault(&state, "Notes").await;
 
         let (status, body) = send(&app, get_with_auth("/v1/vaults", &auth)).await;
         assert_eq!(status, StatusCode::OK, "a list is filtered, never refused");
-        assert_eq!(body["vaults"].as_array().map(|v| v.len()), Some(0));
+        assert_eq!(
+            body["vaults"].as_array().map(|v| v.len()),
+            Some(0),
+            "the registered vault must be filtered out, not listed"
+        );
 
         let (status, _) = send(&app, get_with_auth("/v1/recents", &auth)).await;
         assert_eq!(
             status,
             StatusCode::OK,
             "recents spans vaults; it filters too"
+        );
+    }
+
+    /// Registers a vault so a collection test has something to filter.
+    async fn register_vault(state: &Shared, name: &str) {
+        let mut vaults = state.vaults.write().await;
+        let entry = vaults
+            .registry
+            .create(name, "2026-08-17T00:00:00Z")
+            .unwrap();
+        // `create` already appends to the registry; pushing again double-counts.
+        std::fs::create_dir_all(vaults.registry.path_of(&entry)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_collection_lists_what_the_shipped_policy_allows() {
+        // The pair to the filtering test above. Without this one, "the list is
+        // empty" could mean the filter works *or* that listing is broken.
+        let dir = tempdir::TempDir::new("storm-authz-list").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        register_vault(&state, "Notes").await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/vaults", &format!("Bearer {token}")),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["vaults"].as_array().map(|v| v.len()),
+            Some(1),
+            "AllowAuthenticated must not filter anything out"
         );
     }
 
