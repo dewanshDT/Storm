@@ -1088,18 +1088,22 @@ struct LegacyTokenBody {
 /// on the machine holding the only copy of a vault, is how someone locks
 /// themselves out.
 ///
-/// Two refusals guard exactly that, because neither is expressible as a type:
+/// **One refusal guards exactly that: you may not switch it off over the
+/// legacy token itself.** A caller authenticated by `STORM_TOKEN` disabling
+/// `STORM_TOKEN` loses access with the response and cannot turn it back on, so
+/// the reversibility above would be a fiction. A10 orders it plainly: pair,
+/// create the user, log in, *then* switch.
 ///
-/// - **Not while there is no active owner.** Disabling the legacy token on a
-///   server with no account that can log in leaves nobody who can administer
-///   it. Recovery would mean reading a pairing QR out of the journal, which is
-///   not a thing to discover *after* the fact.
-/// - **Not over the legacy token itself.** A caller authenticated by
-///   `STORM_TOKEN` disabling `STORM_TOKEN` loses access with the response, and
-///   cannot turn it back on — the reversibility above would be a fiction. A10
-///   orders it plainly: pair, create the user, log in, *then* switch.
+/// That one check also covers "nobody could administer this server afterwards",
+/// which looks like it wants a guard of its own and does not. The last-active-
+/// owner invariant means any existing user implies an active owner, so zero
+/// owners is only reachable when there are *no users at all* — and then no
+/// session can exist, so the only credential that can reach this route is the
+/// legacy one, which is already refused. A separate owner count here would be
+/// unreachable code. *(It was written, and a mutation campaign showed nothing
+/// could make it fire.)*
 ///
-/// Re-enabling has neither guard. Getting back in is always allowed.
+/// Re-enabling is unguarded. Getting back in is always allowed.
 ///
 /// The atomic is set *after* the registry is saved, matching `put_mcp`: if the
 /// write fails the credential keeps working, which is the honest outcome. The
@@ -1109,29 +1113,14 @@ async fn put_legacy_token(
     legacy: Option<Extension<LegacyAuth>>,
     Json(body): Json<LegacyTokenBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if !body.enabled {
-        if legacy.is_some() {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "this request is authenticated with the legacy token, and turning \
-                 it off would revoke your own access with no way to turn it back \
-                 on. Pair a device and log in, then disable it."
-                    .into(),
-            ));
-        }
-        let active_owners = {
-            let auth_db = state.auth_db.lock().await;
-            auth_db.active_owner_count()?
-        };
-        if active_owners == 0 {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "no active owner account exists, so disabling the legacy token \
-                 would leave nobody able to administer this server. Create an \
-                 account first."
-                    .into(),
-            ));
-        }
+    if !body.enabled && legacy.is_some() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this request is authenticated with the legacy token, and turning it \
+             off would revoke your own access with no way to turn it back on. \
+             Pair a device, create an account and log in, then disable it."
+                .into(),
+        ));
     }
 
     {
@@ -1888,8 +1877,13 @@ mod tests {
     #[tokio::test]
     async fn the_legacy_token_stays_on_while_nobody_can_log_in() {
         // With no account, turning the shared token off leaves no way into the
-        // server except a pairing QR in the journal. Refuse rather than let
-        // someone discover that afterwards.
+        // server except a pairing QR in the journal.
+        //
+        // The same guard as the test above catches it, and that is the point:
+        // with no users there is no session, so the legacy credential is the
+        // only thing that can reach this route. Kept as its own test because it
+        // is a distinct *state* an operator can be in — a fresh server they
+        // have not paired yet — not a distinct code path.
         let dir = tempdir::TempDir::new("storm-legacy-noowner").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
 
