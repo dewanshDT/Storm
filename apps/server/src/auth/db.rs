@@ -97,9 +97,7 @@ impl AuthDb {
     }
 
     fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let exists = stmt
             .query_map([], |r| r.get::<_, String>(1))?
             .filter_map(Result::ok)
@@ -233,12 +231,9 @@ impl AuthDb {
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current < SCHEMA_VERSION {
             // v1→v2: add previous_refresh_hash to sessions.
-            if current < 2
-                && !self.column_exists("sessions", "previous_refresh_hash")?
-            {
-                self.conn.execute_batch(
-                    "ALTER TABLE sessions ADD COLUMN previous_refresh_hash BLOB;",
-                )?;
+            if current < 2 && !self.column_exists("sessions", "previous_refresh_hash")? {
+                self.conn
+                    .execute_batch("ALTER TABLE sessions ADD COLUMN previous_refresh_hash BLOB;")?;
             }
 
             self.conn
@@ -405,19 +400,12 @@ impl AuthDb {
     }
 
     pub fn count_users(&self) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM users",
-            [],
-            |r| r.get(0),
-        )?)
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?)
     }
 
-    pub fn mark_pairing_consumed(
-        &self,
-        id: &str,
-        consumed_by: &str,
-        now: &str,
-    ) -> Result<()> {
+    pub fn mark_pairing_consumed(&self, id: &str, consumed_by: &str, now: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE pairing_sessions SET consumed = ?2, consumed_by = ?3 WHERE id = ?1",
             params![id, now, consumed_by],
@@ -624,7 +612,8 @@ mod tests {
         // Build a v1 database by hand.
         {
             let conn = Connection::open(dir.path().join("auth.db")).unwrap();
-            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;").unwrap();
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+                .unwrap();
             // Create the old schema minus the new column.
             conn.execute_batch(V1_SESSIONS).unwrap();
             conn.execute_batch("PRAGMA user_version = 1;").unwrap();
@@ -649,7 +638,8 @@ mod tests {
         // Build a v2 database: v1 schema + previous_refresh_hash column.
         {
             let conn = Connection::open(dir.path().join("auth.db")).unwrap();
-            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;").unwrap();
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+                .unwrap();
             conn.execute_batch(V2_SESSIONS).unwrap();
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS ws_tickets (

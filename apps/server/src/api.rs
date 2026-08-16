@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Extension, Path, Query, State, ws::{Message, WebSocket, WebSocketUpgrade}},
+    extract::{
+        Extension, Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -263,15 +266,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
         .route("/v1/auth/logout", post(logout_handler))
         .route("/v1/auth/sessions", get(list_sessions_handler))
-        .route(
-            "/v1/auth/sessions/{id}",
-            delete(revoke_session_handler),
-        )
+        .route("/v1/auth/sessions/{id}", delete(revoke_session_handler))
         .route("/v1/auth/devices", get(list_devices_handler))
-        .route(
-            "/v1/auth/devices/{id}",
-            delete(revoke_device_handler),
-        )
+        .route("/v1/auth/devices/{id}", delete(revoke_device_handler))
         .route("/v1/auth/password", post(change_password_handler))
         .route("/v1/auth/ws-ticket", post(ws_ticket_handler))
         .route("/v1/pairings", post(issue_pairing_handler))
@@ -324,9 +321,7 @@ async fn server_challenge(
 // ---- device-tier endpoints ------------------------------------------------
 
 /// GET /v1/users — list all users (device tier).
-async fn list_users(
-    State(state): State<Shared>,
-) -> ApiResult<Json<Vec<crate::auth::users::User>>> {
+async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::auth::users::User>>> {
     let auth_db = state.auth_db.lock().await;
     let users = auth_db
         .list_users()
@@ -419,9 +414,10 @@ async fn login_handler(
     .await
     {
         Ok(issued) => Ok(Json(issued)),
-        Err(crate::auth::sessions::LoginError::Refused(failure)) => {
-            Err(ApiError(StatusCode::UNAUTHORIZED, failure.code().to_string()))
-        }
+        Err(crate::auth::sessions::LoginError::Refused(failure)) => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            failure.code().to_string(),
+        )),
         Err(crate::auth::sessions::LoginError::Internal(e)) => {
             Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
@@ -451,12 +447,15 @@ async fn refresh_handler(
     let mut auth_db = state.auth_db.lock().await;
     match crate::auth::sessions::refresh(&mut auth_db, &body.refresh_token, &now) {
         Ok(issued) => Ok(Json(issued)),
-        Err(crate::auth::sessions::SessionError::Refused(crate::auth::sessions::AuthFailure::Unknown)) => {
-            Err(ApiError(StatusCode::UNAUTHORIZED, "invalid refresh token".into()))
-        }
-        Err(crate::auth::sessions::SessionError::Refused(crate::auth::sessions::AuthFailure::Revoked)) => {
-            Err(ApiError(StatusCode::UNAUTHORIZED, "session revoked".into()))
-        }
+        Err(crate::auth::sessions::SessionError::Refused(
+            crate::auth::sessions::AuthFailure::Unknown,
+        )) => Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid refresh token".into(),
+        )),
+        Err(crate::auth::sessions::SessionError::Refused(
+            crate::auth::sessions::AuthFailure::Revoked,
+        )) => Err(ApiError(StatusCode::UNAUTHORIZED, "session revoked".into())),
         Err(crate::auth::sessions::SessionError::Refused(_)) => {
             Err(ApiError(StatusCode::UNAUTHORIZED, "token rejected".into()))
         }
@@ -617,12 +616,9 @@ async fn ws_ticket_handler(
 ) -> ApiResult<Json<serde_json::Value>> {
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    let issued = crate::auth::sessions::create_ws_ticket(
-        &mut auth_db,
-        &auth.authenticated.session.id,
-        &now,
-    )
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let issued =
+        crate::auth::sessions::create_ws_ticket(&mut auth_db, &auth.authenticated.session.id, &now)
+            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "ticket": issued.ticket,
@@ -779,26 +775,22 @@ async fn require_auth(
     if let Some(rest) = credential.strip_prefix("StormDevice ") {
         let auth_db = state.auth_db.lock().await;
         match parse_device_credential(rest) {
-            Ok((id, secret)) => {
-                match auth_db.verify_device_secret(id, secret) {
-                    Ok(Some(device)) => {
-                        if device.is_revoked() {
-                            return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
-                        }
-                        request
-                            .extensions_mut()
-                            .insert(DeviceAuth { device });
-                        return next.run(request).await;
+            Ok((id, secret)) => match auth_db.verify_device_secret(id, secret) {
+                Ok(Some(device)) => {
+                    if device.is_revoked() {
+                        return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
                     }
-                    Ok(None) => {
-                        return unauthorized("invalid or missing token");
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "device verification failed");
-                        return internal_error();
-                    }
+                    request.extensions_mut().insert(DeviceAuth { device });
+                    return next.run(request).await;
                 }
-            }
+                Ok(None) => {
+                    return unauthorized("invalid or missing token");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "device verification failed");
+                    return internal_error();
+                }
+            },
             Err(_) => {
                 return unauthorized("invalid or missing token");
             }
@@ -853,19 +845,11 @@ fn parse_device_credential(rest: &str) -> Result<(&str, &str), ()> {
 }
 
 fn unauthorized(msg: &str) -> Response {
-    ApiError(
-        StatusCode::UNAUTHORIZED,
-        msg.to_string(),
-    )
-    .into_response()
+    ApiError(StatusCode::UNAUTHORIZED, msg.to_string()).into_response()
 }
 
 fn tier_error(code: &str, status: StatusCode) -> Response {
-    (
-        status,
-        Json(serde_json::json!({ "error": code })),
-    )
-        .into_response()
+    (status, Json(serde_json::json!({ "error": code }))).into_response()
 }
 
 fn internal_error() -> Response {

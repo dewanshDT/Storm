@@ -17,7 +17,7 @@ import 'auth_models.dart';
 /// credential storage in `credentials.dart`.
 class AuthApi {
   AuthApi({required this.baseUrl, http.Client? client})
-      : _client = client ?? http.Client();
+    : _client = client ?? http.Client();
 
   final String baseUrl;
   final http.Client _client;
@@ -70,8 +70,8 @@ class AuthApi {
         body: jsonEncode({
           'n': nonce,
           'name': deviceName,
-          if (platform != null) 'platform': platform,
-          if (version != null) 'version': version,
+          'platform': ?platform,
+          'version': ?version,
         }),
       ),
     );

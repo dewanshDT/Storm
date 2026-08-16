@@ -59,8 +59,7 @@ pub const EVENT_REFRESH_REPLAYED: &str = "refresh_replayed";
 /// it would cost a full hash on every process start, including every CLI
 /// invocation. `the_absent_user_hash_costs_what_a_real_one_costs` fails if it
 /// ever drifts from the current parameters.
-const ABSENT_USER_HASH: &str =
-    "$argon2id$v=19$m=196608,t=1,p=1$c3Rvcm1hYnNlbnR1c2Vy$eIINKY1WRCFNrH6DnrOMUQtDLvtk7kldNz93ger+7lE";
+const ABSENT_USER_HASH: &str = "$argon2id$v=19$m=196608,t=1,p=1$c3Rvcm1hYnNlbnR1c2Vy$eIINKY1WRCFNrH6DnrOMUQtDLvtk7kldNz93ger+7lE";
 
 /// Why a credential was refused. The middleware slice maps these onto the
 /// protocol's error codes; the mapping lives here so both stay in one place.
@@ -101,7 +100,9 @@ pub enum LoginFailure {
     UserDisabled,
     DeviceRevoked,
     NotPaired,
-    RateLimited { retry_after_secs: i64 },
+    RateLimited {
+        retry_after_secs: i64,
+    },
 }
 
 impl LoginFailure {
@@ -276,9 +277,7 @@ impl AuthDb {
         Ok(self
             .conn
             .query_row(
-                &format!(
-                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE previous_refresh_hash = ?1"
-                ),
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE previous_refresh_hash = ?1"),
                 params![hash],
                 row_to_session,
             )
@@ -419,7 +418,6 @@ impl AuthDb {
             params![now],
         )?)
     }
-
 }
 
 /// Issues a session for a user on a device.
@@ -428,12 +426,7 @@ impl AuthDb {
 /// earned it: [`login`] proves a password first, `storm-server token` is an
 /// operator acting on the host. Both end here, so a session looks the same in
 /// the device list however it was obtained.
-pub fn create(
-    db: &mut AuthDb,
-    user_id: &str,
-    device_id: &str,
-    now: &str,
-) -> Result<IssuedSession> {
+pub fn create(db: &mut AuthDb, user_id: &str, device_id: &str, now: &str) -> Result<IssuedSession> {
     let issued_at = parse_time(now)?;
     let access_token = token::mint(token::ACCESS_PREFIX);
     let refresh_token = token::mint(token::REFRESH_PREFIX);
@@ -792,23 +785,13 @@ pub async fn login(
 /// The client POSTs to get one, then presents it on the `GET /v1/stream`
 /// handshake. The ticket is bound to the session that created it and dies
 /// after 60 seconds or one use, whichever comes first.
-pub fn create_ws_ticket(
-    db: &mut AuthDb,
-    session_id: &str,
-    now: &str,
-) -> Result<IssuedWsTicket> {
+pub fn create_ws_ticket(db: &mut AuthDb, session_id: &str, now: &str) -> Result<IssuedWsTicket> {
     let at = parse_time(now)?;
     let ticket = token::mint("stt_");
     let ticket_id = random_id("stt_");
     let expires = format_time(at + Duration::seconds(WS_TICKET_LIFETIME_SECS));
 
-    db.insert_ws_ticket(
-        &ticket_id,
-        session_id,
-        &token::hash(&ticket),
-        now,
-        &expires,
-    )?;
+    db.insert_ws_ticket(&ticket_id, session_id, &token::hash(&ticket), now, &expires)?;
 
     Ok(IssuedWsTicket {
         ticket,
@@ -820,11 +803,7 @@ pub fn create_ws_ticket(
 ///
 /// Returns the session id the ticket was bound to, or an error.
 #[allow(dead_code)] // Awaits the WS upgrade handler.
-pub fn consume_ws_ticket(
-    db: &mut AuthDb,
-    ticket: &str,
-    now: &str,
-) -> Result<String, SessionError> {
+pub fn consume_ws_ticket(db: &mut AuthDb, ticket: &str, now: &str) -> Result<String, SessionError> {
     let hash = token::hash(ticket);
     let at = parse_time(now)?;
 
@@ -942,10 +921,7 @@ mod tests {
     async fn an_unknown_token_is_refused() {
         let (mut db, _, _, _) = fixture().await;
         let err = authenticate(&mut db, "sta_nonsense", NOW).unwrap_err();
-        assert!(matches!(
-            err,
-            SessionError::Refused(AuthFailure::Unknown)
-        ));
+        assert!(matches!(err, SessionError::Refused(AuthFailure::Unknown)));
     }
 
     #[tokio::test]
@@ -1074,19 +1050,31 @@ mod tests {
         let issued = create(&mut db, &user.id, &device.id, NOW).unwrap();
 
         authenticate(&mut db, &issued.access_token, NOW).unwrap();
-        let first = db.session_by_id(&issued.session_id).unwrap().unwrap().last_used;
+        let first = db
+            .session_by_id(&issued.session_id)
+            .unwrap()
+            .unwrap()
+            .last_used;
         assert_eq!(first.as_deref(), Some(NOW));
 
         // Ten seconds later: still the first stamp. Writing here would put
         // auth.db in the path of every sync poll.
         let soon = format_time(parse_time(NOW).unwrap() + Duration::seconds(10));
         authenticate(&mut db, &issued.access_token, &soon).unwrap();
-        let again = db.session_by_id(&issued.session_id).unwrap().unwrap().last_used;
+        let again = db
+            .session_by_id(&issued.session_id)
+            .unwrap()
+            .unwrap()
+            .last_used;
         assert_eq!(again, first, "last_used was written inside the throttle");
 
         let after = later(2);
         authenticate(&mut db, &issued.access_token, &after).unwrap();
-        let moved = db.session_by_id(&issued.session_id).unwrap().unwrap().last_used;
+        let moved = db
+            .session_by_id(&issued.session_id)
+            .unwrap()
+            .unwrap()
+            .last_used;
         assert_eq!(moved.as_deref(), Some(after.as_str()));
     }
 
@@ -1191,15 +1179,7 @@ mod tests {
     async fn five_failures_lock_the_account_and_success_clears_it() {
         let (mut db, hasher, _, device) = fixture().await;
         for _ in 0..5 {
-            let _ = login(
-                &mut db,
-                &hasher,
-                "dewansh",
-                "wrong".into(),
-                &device.id,
-                NOW,
-            )
-            .await;
+            let _ = login(&mut db, &hasher, "dewansh", "wrong".into(), &device.id, NOW).await;
         }
 
         // Even the right password is refused while the lock holds — and it is
@@ -1218,7 +1198,10 @@ mod tests {
         .unwrap_err();
         match err {
             LoginError::Refused(LoginFailure::RateLimited { retry_after_secs }) => {
-                assert!(retry_after_secs > 0 && retry_after_secs <= 60, "{retry_after_secs}");
+                assert!(
+                    retry_after_secs > 0 && retry_after_secs <= 60,
+                    "{retry_after_secs}"
+                );
             }
             other => panic!("expected a lockout, got {other:?}"),
         }
@@ -1295,7 +1278,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, LoginError::Refused(LoginFailure::UserDisabled)));
+        assert!(matches!(
+            err,
+            LoginError::Refused(LoginFailure::UserDisabled)
+        ));
     }
 
     #[tokio::test]
@@ -1403,7 +1389,10 @@ mod tests {
         assert_eq!(AuthFailure::ReplayedRefresh.code(), "session_revoked");
         assert_eq!(AuthFailure::DeviceRevoked.code(), "device_revoked");
         assert_eq!(AuthFailure::UserDisabled.code(), "user_disabled");
-        assert_eq!(LoginFailure::InvalidCredentials.code(), "invalid_credentials");
+        assert_eq!(
+            LoginFailure::InvalidCredentials.code(),
+            "invalid_credentials"
+        );
         assert_eq!(LoginFailure::NotPaired.code(), "not_paired");
         assert_eq!(
             LoginFailure::RateLimited {

@@ -279,7 +279,9 @@ pub fn consume(
 
     // Server info the client needs to pin.
     let server = db.server()?.context("server identity missing")?;
-    let credential = db.active_credential()?.context("server credential missing")?;
+    let credential = db
+        .active_credential()?
+        .context("server credential missing")?;
 
     Ok(ConsumeResult {
         device_id: device.id,
@@ -337,7 +339,9 @@ mod tests {
             let nonce = generate_nonce();
             assert_eq!(nonce.len(), 32, "24 bytes → 32 base64url chars");
             assert!(
-                nonce.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+                nonce
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
                 "nonce contains unexpected character: {nonce:?}"
             );
         }
@@ -420,9 +424,7 @@ mod tests {
         let err = consume(&mut db, &nonce, "B", None, None, now);
         assert!(err.is_err());
         assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("already used"),
+            err.unwrap_err().to_string().contains("already used"),
             "expected 'already used' error"
         );
     }

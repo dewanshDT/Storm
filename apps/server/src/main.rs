@@ -770,7 +770,12 @@ async fn run_user(args: UserArgs) -> Result<()> {
                 &now,
             )?;
             confirm_stored_password(&db, &hasher, &user.id, password).await?;
-            println!("created {} ({}) as {}", user.username, user.id, role.as_str());
+            println!(
+                "created {} ({}) as {}",
+                user.username,
+                user.id,
+                role.as_str()
+            );
         }
 
         UserCommand::List => {
@@ -820,12 +825,14 @@ async fn run_user(args: UserArgs) -> Result<()> {
         }
 
         UserCommand::Disable { username } => {
-            let user = auth::users::set_status(&mut db, &username, auth::users::Status::Disabled, &now)?;
+            let user =
+                auth::users::set_status(&mut db, &username, auth::users::Status::Disabled, &now)?;
             println!("disabled {}", user.username);
         }
 
         UserCommand::Enable { username } => {
-            let user = auth::users::set_status(&mut db, &username, auth::users::Status::Active, &now)?;
+            let user =
+                auth::users::set_status(&mut db, &username, auth::users::Status::Active, &now)?;
             println!("enabled {}", user.username);
         }
 
@@ -840,7 +847,9 @@ async fn run_user(args: UserArgs) -> Result<()> {
                 // There is no undo, and the delete takes sessions and vault
                 // grants with it. Typing the name is cheap insurance against a
                 // mistyped argument.
-                print!("Delete `{username}`, its sessions and its vault grants? Type the username to confirm: ");
+                print!(
+                    "Delete `{username}`, its sessions and its vault grants? Type the username to confirm: "
+                );
                 use std::io::Write;
                 std::io::stdout().flush().ok();
                 let mut line = String::new();
@@ -909,12 +918,8 @@ fn run_pair(args: PairArgs) -> Result<()> {
     // booted at least once.
     let mut auth_db_check = auth::AuthDb::open(&args.state)
         .with_context(|| format!("opening the auth database in {}", args.state.display()))?;
-    let identity = auth::identity::load_or_create(
-        &mut auth_db_check,
-        &args.state,
-        &now,
-    )
-    .context("loading server identity — has the server booted at least once?")?;
+    let identity = auth::identity::load_or_create(&mut auth_db_check, &args.state, &now)
+        .context("loading server identity — has the server booted at least once?")?;
 
     let addr = args.addr.unwrap_or_else(|| {
         eprintln!("no --addr given; using 127.0.0.1:8484 as the address hint");

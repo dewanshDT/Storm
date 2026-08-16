@@ -144,7 +144,11 @@ fn a_refused_password_exits_non_zero_and_writes_nothing() {
         Some("short"),
     );
     assert!(!out.ok, "a short password must fail");
-    assert!(out.combined().contains("minimum is 12"), "{}", out.combined());
+    assert!(
+        out.combined().contains("minimum is 12"),
+        "{}",
+        out.combined()
+    );
 
     let list = run(state, &["user", "list"], None);
     assert!(
@@ -162,7 +166,11 @@ fn usernames_collide_case_insensitively() {
 
     let out = add(state, &["dewansh"]);
     assert!(!out.ok, "a case variant is the same account");
-    assert!(out.combined().contains("already exists"), "{}", out.combined());
+    assert!(
+        out.combined().contains("already exists"),
+        "{}",
+        out.combined()
+    );
 }
 
 #[test]
@@ -211,10 +219,22 @@ fn disable_enable_and_delete_round_trip() {
     assert!(!list.stdout.contains("disabled"), "{}", list.stdout);
 
     // Unconfirmed deletes are refused: the prompt wants the username back.
-    let out = run(state, &["user", "delete", "helper"], Some("something else\n"));
+    let out = run(
+        state,
+        &["user", "delete", "helper"],
+        Some("something else\n"),
+    );
     assert!(!out.ok, "{}", out.combined());
-    assert!(out.combined().contains("not confirmed"), "{}", out.combined());
-    assert!(run(state, &["user", "list"], None).stdout.contains("helper"));
+    assert!(
+        out.combined().contains("not confirmed"),
+        "{}",
+        out.combined()
+    );
+    assert!(
+        run(state, &["user", "list"], None)
+            .stdout
+            .contains("helper")
+    );
 
     // Typing the name through is the confirmation.
     let out = run(state, &["user", "delete", "helper"], Some("helper\n"));

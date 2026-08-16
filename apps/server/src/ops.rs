@@ -507,16 +507,8 @@ pub async fn issue_pairing_qr(
         .map_err(|e| bad_request(e.to_string()))?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    let (nonce, session) = crate::auth::pairing::create(
-        &mut auth_db,
-        purpose,
-        user_id,
-        &now,
-    )
-    .map_err(|e| ApiError(
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        e.to_string(),
-    ))?;
+    let (nonce, session) = crate::auth::pairing::create(&mut auth_db, purpose, user_id, &now)
+        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let qr = crate::auth::pairing::encode_qr(
         &state.identity.server_id,

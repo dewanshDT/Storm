@@ -23,10 +23,7 @@ void main() {
     final messageBytes = utf8.encode(message);
 
     // Sign with the private key.
-    final sig = await algorithm.sign(
-      messageBytes,
-      keyPair: keyPair,
-    );
+    final sig = await algorithm.sign(messageBytes, keyPair: keyPair);
 
     // Encode public key and signature as base64url without padding.
     final pkB64 = base64Url.encode(publicKey.bytes).replaceAll('=', '');
@@ -53,10 +50,7 @@ void main() {
     final messageBytes = utf8.encode(message);
 
     // Sign with a *different* private key.
-    final sig = await algorithm.sign(
-      messageBytes,
-      keyPair: otherKeyPair,
-    );
+    final sig = await algorithm.sign(messageBytes, keyPair: otherKeyPair);
 
     final pkB64 = base64Url.encode(publicKey.bytes).replaceAll('=', '');
     final sigB64 = base64Url.encode(sig.bytes).replaceAll('=', '');
@@ -80,10 +74,7 @@ void main() {
     final message = challengeMessage(serverId, nonce);
     final messageBytes = utf8.encode(message);
 
-    final sig = await algorithm.sign(
-      messageBytes,
-      keyPair: keyPair,
-    );
+    final sig = await algorithm.sign(messageBytes, keyPair: keyPair);
 
     final pkB64 = base64Url.encode(publicKey.bytes).replaceAll('=', '');
     final sigB64 = base64Url.encode(sig.bytes).replaceAll('=', '');

@@ -18,11 +18,11 @@ class ServerInfo {
   final String publicKey;
 
   factory ServerInfo.fromJson(Map<String, dynamic> j) => ServerInfo(
-        serverId: j['server_id'] as String,
-        keyId: j['key_id'] as String,
-        algorithm: j['algorithm'] as String,
-        publicKey: j['public_key'] as String,
-      );
+    serverId: j['server_id'] as String,
+    keyId: j['key_id'] as String,
+    algorithm: j['algorithm'] as String,
+    publicKey: j['public_key'] as String,
+  );
 }
 
 /// Challenge signature, from `POST /v1/server/challenge`.
@@ -52,12 +52,12 @@ class PairingResult {
   final String keyId;
 
   factory PairingResult.fromJson(Map<String, dynamic> j) => PairingResult(
-        deviceId: j['device_id'] as String,
-        deviceSecret: j['device_secret'] as String,
-        serverId: j['server_id'] as String,
-        publicKey: j['public_key'] as String,
-        keyId: j['key_id'] as String,
-      );
+    deviceId: j['device_id'] as String,
+    deviceSecret: j['device_secret'] as String,
+    serverId: j['server_id'] as String,
+    publicKey: j['public_key'] as String,
+    keyId: j['key_id'] as String,
+  );
 }
 
 /// A parsed `storm://pair` URI.
@@ -130,11 +130,11 @@ class SessionTokens {
   final String deviceId;
 
   factory SessionTokens.fromJson(Map<String, dynamic> j) => SessionTokens(
-        accessToken: j['access_token'] as String,
-        refreshToken: j['refresh_token'] as String,
-        accessExpiresIn: (j['access_expires_in'] as num).toInt(),
-        refreshExpiresIn: (j['refresh_expires_in'] as num).toInt(),
-        userId: j['user_id'] as String,
-        deviceId: j['device_id'] as String,
-      );
+    accessToken: j['access_token'] as String,
+    refreshToken: j['refresh_token'] as String,
+    accessExpiresIn: (j['access_expires_in'] as num).toInt(),
+    refreshExpiresIn: (j['refresh_expires_in'] as num).toInt(),
+    userId: j['user_id'] as String,
+    deviceId: j['device_id'] as String,
+  );
 }
