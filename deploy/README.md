@@ -162,6 +162,31 @@ journalctl -u storm-server -f
 
 `make deploy` restarts the service and fails loudly if it doesn't come back.
 
+## User accounts
+
+Accounts are managed on the host — there is no network path to create one yet,
+because that needs device authentication and arrives with pairing.
+
+```sh
+sudo -u storm storm-server user add dewansh --state /srv/storm/state
+sudo -u storm storm-server user list --state /srv/storm/state
+sudo -u storm storm-server passwd dewansh --state /srv/storm/state
+```
+
+**Run them as `storm`, not as root.** `auth.db` is created on first use, so
+`sudo storm-server user add` leaves a root-owned database that the service
+cannot write — and the symptom arrives much later, as a login that fails with
+nothing useful in the journal. The commands print a warning if they notice, but
+`sudo -u storm` avoids the situation entirely.
+
+The first account created is always an owner, and the last active owner cannot
+be deleted, disabled or demoted — promote a second owner first if you need to
+retire the first. `storm-server user --help` lists the rest.
+
+Nothing authenticates against these accounts yet: the shared bearer token is
+still what clients send. Creating them now is safe and is what the sessions
+slice will build on.
+
 ## Backups
 
 `storm-backup.timer` runs nightly at 03:30 with a randomised delay, and
@@ -176,11 +201,11 @@ Three things are backed up, for different reasons:
   history that the 3-way merge uses as its base, plus `vaults.json`. The rest
   of an index can be rebuilt by rescanning; the history cannot.
 - **`state/auth.db` and `state/identity/`** — the server's own identity: its
-  `server_id`, the public half of its Ed25519 credential, and later its users
-  and sessions. **Nothing rebuilds this.** An index restores itself from the
-  markdown; a server that loses its identity cannot prove who it is to a single
-  paired device, and once there are users, a restore without it is a server
-  holding every note that nobody can log into. The private key files are copied
+  `server_id`, the public half of its Ed25519 credential, **its user accounts**,
+  and later its sessions. **Nothing rebuilds this.** An index restores itself
+  from the markdown; a server that loses its identity cannot prove who it is to
+  a single paired device, and a restore without it is a server holding every
+  note that nobody can log into. The private key files are copied
   as files at mode `0600` — they are written once and never modified, so there
   is no torn state to worry about, and they have to travel with `auth.db`:
   the database alone restores a server that knows which key is active and

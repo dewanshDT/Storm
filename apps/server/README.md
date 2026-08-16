@@ -162,8 +162,49 @@ excluded, so it cannot forge the message's field boundaries).
 `backup-db` snapshots it and copies the key files, and `deploy/README.md` says
 how to check a restore actually brought the identity back.
 
-Users, sessions and pairing are not built yet; the shared bearer token is
-unchanged. See `PLAN.md` decisions 52 / 52a.
+Sessions and pairing are not built yet; the shared bearer token is unchanged.
+See `PLAN.md` decisions 52 / 52a / 52c.
+
+### User accounts
+
+Accounts exist, and for now they are managed **on the host only**. Creating one
+over the network needs device authentication, which arrives with pairing — so
+until then making an account requires shell access, the same trust level the
+password-recovery command already assumes.
+
+```sh
+storm-server user add dewansh --state /srv/storm/state   # prompts, no echo
+storm-server user list --state /srv/storm/state
+storm-server user role dewansh admin
+storm-server user disable dewansh        # keeps the account, refuses its logins
+storm-server user delete helper          # asks for the username back
+storm-server passwd dewansh              # the recovery path
+```
+
+Run these **as the service user** (`sudo -u storm storm-server …`). The database
+is created on first use, so running as root on a server that runs as `storm`
+leaves an `auth.db` the service cannot write — which surfaces much later as a
+login that fails for no visible reason. The commands warn when they spot it.
+
+The rules worth knowing before they surprise you:
+
+- **The first account is always an owner**, and the last active owner cannot be
+  deleted, disabled or demoted. Transfer ownership by promoting someone else
+  first. A disabled owner does not count as one — it cannot log in, so it cannot
+  administer.
+- **Usernames are ASCII**, 3–32 characters of letters, digits, `.`, `_` and `-`,
+  and are compared case-insensitively: `Dewansh` and `dewansh` are one account.
+  `--display-name` is unrestricted if you want something else on screen.
+- **Passwords are at least 12 characters** and are refused, never silently
+  shortened, above 1024 bytes.
+- **There is no `--password` flag** and there will not be one: an argument is in
+  your shell history and visible in `ps` to everyone on the box while the command
+  runs. Pipe it with `--password-stdin` for scripts.
+- Passwords are hashed with **Argon2id at 192 MiB, t=1, p=1** — measured on the
+  deployment VM at ~174 ms per verify, not copied from a blog post. Expect
+  `user add` to take about a third of a second: it hashes, then reads the hash
+  back and verifies it, so an account nobody can log into is caught immediately
+  rather than at a login prompt weeks later.
 
 ### Vaults, folders, and the storage root
 
@@ -295,14 +336,17 @@ which stays correct even when events arrive late, coalesced, or out of order.
 ## Tests
 
 ```sh
-cargo test      # 180 unit tests
+cargo test      # 204 unit tests + 9 driving the real binary
 cargo clippy --all-targets
 ```
 
 The unit tests cover the sharp edges: frontmatter byte-preservation, merge
 outcomes, path traversal, tag/link extraction against code blocks, index
-reconciliation, and the auth database's schema and identity handling. There are
-three end-to-end scripts driving a live server — `tests/e2e.py` for the sync
+reconciliation, the auth database's schema and identity handling, and the user
+rules — password length, the concurrency bound on Argon2id, and the last-owner
+guard. `tests/cli_users.rs` runs the built binary as a process, because a
+subcommand that does not parse or an exit status of 0 on a refusal are invisible
+from inside the crate. There are three end-to-end scripts driving a live server — `tests/e2e.py` for the sync
 matrix, `tests/mcp_e2e.py` for the MCP endpoint, and `tests/auth_e2e.py` for
 the unauthenticated identity routes (it verifies the Ed25519 signature against
 the key the same server published, with no dependencies).
