@@ -219,6 +219,36 @@ and *Storm Auth Protocol*; ADRs A1–A11 in *Storm Remote Decisions*):
   checks pass unmodified — that unchanged pass is the evidence. New coverage
   goes in `tests/auth_e2e.py`.
 
+From M19 slice 2 (users and passwords):
+
+- **Argon2id's parameters are measured, not chosen** — `m = 192 MiB, t = 1,
+  p = 1` on the VM (Q18/A1). `p` stays 1 because the `argon2` crate does not
+  thread without its `parallel` feature, so more lanes cost memory and buy no
+  speed. Different hardware is a re-measure with `tools/argon2-bench`, not an
+  edit.
+- **Every Argon2 call goes through `Hasher`, which holds a semaphore of 2.**
+  A verify runs on `spawn_blocking`, whose pool defaults to 512 threads, and
+  512 × 192 MiB is an OOM that takes the vault server down with it — the notes
+  go offline because someone held the login button. **Never shrink the KDF to
+  work around a missing bound; the bound is the fix.**
+- **A password is refused above 1024 bytes, never truncated.** Accept 200
+  characters, hash the first 72, and every password sharing that prefix opens
+  the account. A test hashes 1000 bytes and checks that a variant differing at
+  byte 900 fails.
+- **The first account is an owner, and the last *active* owner cannot be
+  deleted, disabled or demoted.** Disabled owners do not count: an account that
+  cannot log in cannot administer, so leaving only disabled ones is the same
+  lockout as leaving none. SQLite cannot express either rule.
+- **Usernames are ASCII and unique by casefold.** Uniqueness is decided on the
+  fold, so the fold must be unambiguous — Unicode brings locale-dependent case
+  rules and homoglyphs, and two visually identical usernames as separate rows
+  is a security bug. `display_name` is unrestricted.
+- **No `--password` flag, in any command, ever.** A password in an argument is
+  in the shell history and in `ps` for every other user on the box. Prompt
+  without echo, or read `--password-stdin`.
+- **`security_events` never contains a secret** — not a password, not a hash,
+  not a token. A test asserts it for every administrative act.
+
 ## Style
 
 Match the surrounding code. Comments explain *why*, especially where something

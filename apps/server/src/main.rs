@@ -1329,6 +1329,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_restore_gives_back_users_who_can_still_log_in() {
+        // The failure the data model names: a restore that carries the notes and
+        // not `auth.db` is a server holding every note that nobody can log into.
+        // Now that accounts exist, "the users came back" means their passwords
+        // still verify — not that a row is present.
+        let dir = tempdir::TempDir::new("storm-restore-users").unwrap();
+        let (state, _identity) = seeded_state(dir.path());
+
+        let hasher = auth::Hasher::new();
+        let hash = hasher.hash("correct horse battery".into()).await.unwrap();
+        {
+            let mut db = auth::AuthDb::open(&state).unwrap();
+            auth::users::create_user(
+                &mut db,
+                auth::users::NewUser {
+                    username: "dewansh",
+                    display_name: None,
+                    password_hash: &hash,
+                    role: auth::users::Role::Owner,
+                },
+                "2026-08-16T00:00:00Z",
+            )
+            .unwrap();
+        }
+
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+        std::fs::remove_dir_all(&state).unwrap();
+        copy_tree(&dest, &state);
+
+        let db = auth::AuthDb::open(&state).unwrap();
+        let user = db
+            .find_user("dewansh")
+            .unwrap()
+            .expect("the restored server has no users");
+        assert_eq!(user.role, auth::users::Role::Owner);
+        let stored = db.password_hash_of(&user.id).unwrap().unwrap();
+        assert!(
+            hasher
+                .verify("correct horse battery".into(), stored)
+                .await
+                .unwrap(),
+            "the restored account exists but its password does not verify"
+        );
+    }
+
     #[test]
     fn normalize_argv_inserts_serve_for_legacy_flags() {
         let out = normalize_argv(vec![
