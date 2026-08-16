@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–6 **merged to main**, not deployed · login-only screen next · A9 (vault grants) deferred |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–8 **merged to main**, not deployed · secure storage → A9 → cutover |
 
 Last updated: 2026-08-17. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -93,9 +93,20 @@ bootstrap QR from the CLI. Not deployed.
 creates the owner and logs in; `Settings` carries the device credentials and
 session tokens; `apiProvider` sends the session token.
 
-**Next:** a login-only screen. Slice 6 left one gap on purpose: `PairingScreen`
-is first-run only, so a device that is paired but has no session has nowhere to
-enter a password. `logout()` therefore has no caller yet. A9 (vault-level
+**Slice 7:** the legacy-token switch becomes real (above). **Slice 8:** a
+login-only screen — `/login` with an account picker from `GET /v1/users` on the
+device credential, "Sign out" in settings so `logout()` finally has a caller,
+and every wire error code mapped to its own sentence. *"Couldn't reach the
+server" is now reserved for the one case that really is unreachable*, and a
+test asserts no auth refusal can claim it; describing an HTTP refusal as a
+network failure is the M9/M10 bug. Slice 8 also fixed a protocol divergence
+found while wiring those messages: a rate-limited login answered `401` with
+`retry_after_secs` discarded, where the table says `429` + `Retry-After`.
+
+**Next, in order:** secure credential storage → A9 → the cutover. The client
+holds the device secret and both session tokens in plain `shared_preferences`,
+which is three secrets where there used to be one, and that is the gap to close
+before the client auth is production-grade. A9 (vault-level
 grants) is deferred to after the client ships and
 before the relay — the `vault_grants` table and role checks are built but
 unwired; single-user servers (Owner role) bypass them entirely. Not deployed.
@@ -110,16 +121,31 @@ against the VM, and only then the flag off. **A backup that has not been
 restored is a hope, not a backup** — and `auth.db` plus the key files are the
 only part of `state/` that cannot be rebuilt by rescanning markdown.
 
-**But the flag cannot be turned off today.** `legacy_token_enabled` is
-`AppState`'s field, hardcoded `true` at `main.rs:1050` — it is not read from
-`vaults.json`, not a CLI flag, and not reachable from the app. A10 and the
-protocol note both describe a *persisted, app-togglable, reversible* switch,
-and that is the thing that does not exist; what exists is a constant with the
-right name. So the cutover as designed — flip it off, check, flip it back if
-something broke — is currently impossible without editing source and
-redeploying, which is precisely the irreversible-migration shape A10 was
-written to avoid. **Building the real switch is a prerequisite for the
-cutover, not part of it.**
+**The flag was a constant, and is now the switch A10 specified.** It had been
+`AppState`'s field, hardcoded `true` — not read from `vaults.json`, not a CLI
+flag, not reachable from the app — so the cutover as designed (flip it off,
+check, flip it back if something broke) meant editing source and redeploying,
+precisely the irreversible-migration shape A10 was written to avoid. As of
+2026-08-17 it is persisted in the registry, atomic in `AppState` so it applies
+to the next request rather than the next restart, togglable at
+`PUT /v1/config/legacy-token`, and shown in Server settings.
+
+**Its default direction is the opposite of the MCP switches, deliberately.**
+`mcp_enabled` defaults off on an older registry because the risk there is
+exposure; this defaults *on*, because a registry written before the field
+existed belongs to a server whose clients all hold the shared token, and
+loading it as `false` would refuse every one of them on the first boot after an
+upgrade. `Registry`'s `Default` is hand-written for the same reason —
+`derive(Default)` yields `false` for bools, safe for MCP and a lockout here.
+
+**One guard, and one that was deleted.** It refuses to switch *off* over the
+legacy token itself: the caller would lose access with the response and could
+not turn it back on, so reversibility would be a fiction. An "at least one
+active owner" guard was also written, and the mutation campaign showed nothing
+could make it fire — the last-active-owner invariant means zero owners implies
+zero users, which implies no session, which means only the legacy credential
+can reach the route, already refused by the first guard. Unreachable code,
+removed.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
