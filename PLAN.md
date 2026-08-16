@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–5 + pairing done · Flutter client auth next · A9 (vault grants) deferred |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–6 done · login-only screen next · A9 (vault grants) deferred |
 
 Last updated: 2026-08-13. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -85,8 +85,15 @@ tier for vault ops and auth management, the shared bearer token retired. **Slice
 boot, `storm://pair` URI scheme. **`storm-server pair`** regenerates the
 bootstrap QR from the CLI. Not deployed.
 
-**Next:** Flutter client auth integration (login, session lifecycle, token
-refresh). A9 (vault-level grants) is deferred to after the client ships and
+**Slice 6:** the Flutter client pairs — a first-run `PairingScreen` that takes a
+`storm://pair` URI, verifies the server's Ed25519 identity, claims the nonce,
+creates the owner and logs in; `Settings` carries the device credentials and
+session tokens; `apiProvider` sends the session token.
+
+**Next:** a login-only screen. Slice 6 left one gap on purpose: `PairingScreen`
+is first-run only, so a device that is paired but has no session has nowhere to
+enter a password. `logout()` therefore has no caller yet. A9 (vault-level
+grants) is deferred to after the client ships and
 before the relay — the `vault_grants` table and role checks are built but
 unwired; single-user servers (Owner role) bypass them entirely. Not deployed.
 
@@ -2064,6 +2071,38 @@ for other reasons.
 semaphore and `needs_rehash` finally sit on a request path) → the three-tier
 middleware → pairing → client. The middleware slice is the one that stops being
 additive. *(All three shipped as of 2026-08-17; now building the Flutter client.)*
+
+**Slice 6 — the Flutter client pairs ✅** (2026-08-17, not deployed)
+
+`PairingScreen` walks the whole first run in one screen: paste a `storm://pair`
+URI, verify the server's identity, claim the nonce for device credentials,
+create the owner account, log in. `Settings` gained the device credentials
+(`deviceId`, `deviceSecret`), the server's identity (`serverId`, `serverKeyId`,
+`serverPublicKey`) and the session (`accessToken`, `refreshToken`,
+`accessTokenExpiresAt`, `userId`), all persisted; `apiProvider` now sends
+`bearerToken`, which prefers the session token.
+
+Two things worth keeping from building it:
+
+- **The client verifies the server before it trusts the pairing URI.** The URI
+  carries the server's public key, so the client rebuilds
+  `storm-challenge:v1:<server_id>:<nonce>` and checks the signature against it
+  before sending the nonce anywhere. `ed25519_verify.dart` is that check, and
+  the string it rebuilds is a wire-format commitment shared with the server.
+- **`isConfigured` had to stay true for a legacy install, and briefly did not.**
+  The first redirect sent anything unpaired to `/pairing`, which is every
+  install that predates auth — a URL and a shared token, no device — and would
+  have locked each of them out of a vault it could already read. `isConfigured`
+  is now "a session *or* a legacy token", the redirect keys off it alone, and
+  `router_test.dart` asserts a legacy install never reaches the pairing screen.
+  This is decision 52b (additive until the middleware slice) applying to the
+  client, and it is the kind of break a green server suite cannot see.
+
+The session lifecycle is `refreshSession()`, `logout()` (keeps the device
+paired) and `unpair()` (forgets the server). Only `refreshSession` has a
+plausible caller today — see the login-screen gap noted above — so
+`auth_settings_test.dart` covers all three directly rather than letting them
+ship untested.
 
 ---
 

@@ -8,6 +8,7 @@ import 'ui/client_settings_screen.dart';
 import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/note_screen.dart';
+import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
 import 'ui/server_settings_screen.dart';
 import 'ui/shell/dashboard.dart';
@@ -23,6 +24,7 @@ import 'ui/tags_screen.dart';
 abstract final class Routes {
   static const dashboard = '/';
   static const connect = '/connect';
+  static const pairing = '/pairing';
 
   /// Reachable without a vault, from the phone's dashboard — which is the
   /// screen you are on when there is no vault yet.
@@ -93,6 +95,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       final settings = ref.read(settingsProvider);
       final configured = settings.value?.isConfigured ?? false;
       final atConnect = state.matchedLocation == Routes.connect;
+      final atPairing = state.matchedLocation == Routes.pairing;
 
       // Settings are still loading; hold still rather than flashing the
       // connect screen at someone who is already set up.
@@ -102,10 +105,19 @@ final routerProvider = Provider<GoRouter>((ref) {
       // unreachable on exactly the install where the theme is being judged.
       if (state.matchedLocation == Routes.gallery) return null;
 
-      if (!configured) return atConnect ? null : Routes.connect;
-      return atConnect ? Routes.dashboard : null;
+      // Set up — by pairing *or* by the legacy URL+token — so both auth
+      // screens are behind us. Pairing is deliberately not required here: an
+      // install that predates auth has a token and no device, and sending it
+      // to /pairing would lock it out of a vault it can already read.
+      if (configured) return atConnect || atPairing ? Routes.dashboard : null;
+
+      // Nothing configured. Pairing is the first-run flow, but /connect stays
+      // reachable for a server that has no auth yet.
+      if (atConnect || atPairing) return null;
+      return Routes.pairing;
     },
     routes: [
+      GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
