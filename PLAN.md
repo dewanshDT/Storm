@@ -110,6 +110,17 @@ against the VM, and only then the flag off. **A backup that has not been
 restored is a hope, not a backup** — and `auth.db` plus the key files are the
 only part of `state/` that cannot be rebuilt by rescanning markdown.
 
+**But the flag cannot be turned off today.** `legacy_token_enabled` is
+`AppState`'s field, hardcoded `true` at `main.rs:1050` — it is not read from
+`vaults.json`, not a CLI flag, and not reachable from the app. A10 and the
+protocol note both describe a *persisted, app-togglable, reversible* switch,
+and that is the thing that does not exist; what exists is a constant with the
+right name. So the cutover as designed — flip it off, check, flip it back if
+something broke — is currently impossible without editing source and
+redeploying, which is precisely the irreversible-migration shape A10 was
+written to avoid. **Building the real switch is a prerequisite for the
+cutover, not part of it.**
+
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
 `scanned=7 indexed=0 updated=0`, which is the proof that the index was *carried
