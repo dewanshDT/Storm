@@ -7,6 +7,7 @@ import 'ui/browse_screen.dart';
 import 'ui/client_settings_screen.dart';
 import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
+import 'ui/login_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
@@ -25,6 +26,10 @@ abstract final class Routes {
   static const dashboard = '/';
   static const connect = '/connect';
   static const pairing = '/pairing';
+
+  /// Sign in on a device that is already paired. Distinct from [pairing],
+  /// which is first-run only and asks for a QR nobody needs twice.
+  static const login = '/login';
 
   /// Reachable without a vault, from the phone's dashboard — which is the
   /// screen you are on when there is no vault yet.
@@ -94,8 +99,11 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) {
       final settings = ref.read(settingsProvider);
       final configured = settings.value?.isConfigured ?? false;
+      final paired = settings.value?.isPaired ?? false;
       final atConnect = state.matchedLocation == Routes.connect;
       final atPairing = state.matchedLocation == Routes.pairing;
+      final atLogin = state.matchedLocation == Routes.login;
+      final atAuthScreen = atConnect || atPairing || atLogin;
 
       // Settings are still loading; hold still rather than flashing the
       // connect screen at someone who is already set up.
@@ -105,19 +113,27 @@ final routerProvider = Provider<GoRouter>((ref) {
       // unreachable on exactly the install where the theme is being judged.
       if (state.matchedLocation == Routes.gallery) return null;
 
-      // Set up — by pairing *or* by the legacy URL+token — so both auth
-      // screens are behind us. Pairing is deliberately not required here: an
+      // Set up — by pairing *or* by the legacy URL+token — so every auth
+      // screen is behind us. Pairing is deliberately not required here: an
       // install that predates auth has a token and no device, and sending it
       // to /pairing would lock it out of a vault it can already read.
-      if (configured) return atConnect || atPairing ? Routes.dashboard : null;
+      if (configured) return atAuthScreen ? Routes.dashboard : null;
 
-      // Nothing configured. Pairing is the first-run flow, but /connect stays
-      // reachable for a server that has no auth yet.
+      // Paired, but no session — signed out, or the session was revoked. This
+      // is /login's whole reason to exist: the device already has credentials,
+      // so asking for a pairing QR again would be asking for something the
+      // user does not have and does not need.
+      if (paired) return atLogin ? null : Routes.login;
+
+      // Nothing at all. Pairing is the first-run flow, but /connect stays
+      // reachable for a server that has no auth yet. /login is not — there is
+      // no device credential to log in with.
       if (atConnect || atPairing) return null;
       return Routes.pairing;
     },
     routes: [
       GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
+      GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it

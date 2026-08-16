@@ -353,6 +353,20 @@ class ClientSettingsBody extends ConsumerWidget {
         _ClientSection(
           label: 'Connection',
           children: [
+            // Only for a session. A legacy token install has nothing to sign
+            // out *of* — there is no account behind it — and offering the
+            // action would leave it at a login screen it cannot satisfy.
+            if (settings.hasSession)
+              PopoverItem(
+                key: const Key('sign-out'),
+                label: 'Sign out',
+                subtitle: 'Stay paired, ask for the password again',
+                tone: PopoverTone.muted,
+                onTap: () {
+                  onDone?.call();
+                  notifier.logout();
+                },
+              ),
             PopoverItem(
               label: 'Disconnect',
               subtitle: 'Forget this server and its token',
