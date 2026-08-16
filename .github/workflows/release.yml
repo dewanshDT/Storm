@@ -31,6 +31,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - run: flutter pub get
         working-directory: apps/client
@@ -57,6 +58,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - name: Install musl tools, zig, cargo-deb
         run: |
@@ -121,6 +123,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - uses: actions/setup-java@v4
         with:
@@ -163,6 +166,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - name: Build macOS app
         working-directory: apps/client
@@ -192,6 +196,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - name: Build web bundle
         working-directory: apps/client
