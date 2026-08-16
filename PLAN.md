@@ -55,8 +55,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–6 done · login-only screen next · A9 (vault grants) deferred |
 
-Last updated: 2026-08-12. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+Last updated: 2026-08-13. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
@@ -69,6 +70,32 @@ server/MCP/sync changes. **M18** adds desktop-first keyboard shortcuts
 (Shortcuts/Actions/Intent), platform-aware Meta vs Control, in-note find,
 and wide-layout sidebar collapse — phone touch layout unchanged. Shipped in
 **v0.2.4** (M18 is client-only; the server release is a version stamp).
+**M19** starts authentication (decisions 52 / 52a). Five server-side slices are
+complete. **Slice 1:** the server mints and keeps its own cryptographic identity,
+`state/auth.db` exists with the full designed schema, backups carry it, and
+`GET /v1/server` / `POST /v1/server/challenge` answer unauthenticated. **Slice
+2:** local user accounts with Argon2id passwords at the parameters measured on the
+VM, plus `storm-server user …` and `passwd` — no new routes, because creating a
+user over the network needs device auth (A8) and that arrives with pairing.
+**Slice 3:** session domain — `(user, device)` sessions, access/refresh tokens,
+replay detection, WS tickets, device registration and revocation. **Slice 4:**
+three-tier HTTP middleware in `api.rs` — device tier for pairing and login, session
+tier for vault ops and auth management, the shared bearer token retired. **Slice
+5:** QR-based pairing — `POST /v1/pair`, `POST /v1/pairings`, bootstrap QR at
+boot, `storm://pair` URI scheme. **`storm-server pair`** regenerates the
+bootstrap QR from the CLI. Not deployed.
+
+**Slice 6:** the Flutter client pairs — a first-run `PairingScreen` that takes a
+`storm://pair` URI, verifies the server's Ed25519 identity, claims the nonce,
+creates the owner and logs in; `Settings` carries the device credentials and
+session tokens; `apiProvider` sends the session token.
+
+**Next:** a login-only screen. Slice 6 left one gap on purpose: `PairingScreen`
+is first-run only, so a device that is paired but has no session has nowhere to
+enter a password. `logout()` therefore has no caller yet. A9 (vault-level
+grants) is deferred to after the client ships and
+before the relay — the `vault_grants` table and role checks are built but
+unwired; single-user servers (Owner role) bypass them entirely. Not deployed.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -88,12 +115,16 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 140 Rust and 453 Dart unit tests
-make test-live   # 81 server e2e checks + 19 client integration checks
+make check       # clippy + analyze + 213 Rust and 581 Dart unit tests
+make test-live   # 81 server + 56 MCP + 21 auth e2e checks, 19 client checks
 ```
 
-`make test-live` starts a server, runs both integration suites and tears it
+`make test-live` starts a server, runs every integration suite and tears it
 down, failing fast with the server log if it cannot bind.
+
+The **81** is load-bearing during the auth work: `e2e.py` is deliberately left
+alone, so an unchanged pass there is the evidence that a slice which adds
+authentication has not quietly changed the existing API.
 
 Both need a server. `apps/server/tests/e2e.py` creates its own fixtures under
 `E2E/` and deletes them afterwards, so it is safe to run repeatedly against any
@@ -701,6 +732,135 @@ Settled while shipping:
   a per-launch layout preference does not earn the Settings machinery.
 *Revisit if:* a command palette becomes the primary action surface and
 needs the same Intent set exposed as searchable commands.
+
+**52. Remote access is two separate subsystems, and the relay is not one of
+the authorities.** *(architecture accepted 2026-08-13; nothing built)*
+Decision 4 said TLS and per-device credential rotation land **before** the
+server is ever reachable off the LAN. This is the design that discharges it,
+and it deliberately splits into two things that never answer each other's
+question:
+
+- **Authentication** — Storm owns it. Users are **local to a server**, so the
+  canonical identity is `(server_id, user_id)` and there is no global Storm
+  account; a server has its own cryptographic `server_id`; passwords with a
+  modern KDF; revocable per-device sessions; QR pairing that carries a
+  short-lived nonce and **never** a permanent secret. No external identity
+  provider is the source of truth — a self-hosted server that cannot log a
+  user in with the internet unplugged is not self-hosted.
+- **Connectivity** — an optional, self-hostable WSS tunnel (`storm-relay`)
+  that the *server* dials outward, so a NATed homelab box needs no port
+  forwarding. It carries Storm protocol traffic only, never generic TCP, and
+  it is an availability mechanism rather than an authority: no identity
+  store, no vault store, no authorization ownership. Storm may host one for
+  convenience (Cloudflare Worker + Durable Object initially); the protocol
+  stays provider-independent, and the self-hosted relay is what proves it.
+  **A relay outage costs remote access, never vault access.**
+
+MCP rides the same transport rather than getting a network architecture of its
+own — the same reasoning as `ops.rs` (decision 37), one layer down. Agent
+Runtime later reuses it too, and is deliberately *not* built alongside it.
+
+Order matters: authentication ships completely before any relay work starts.
+Building both at once means debugging an identity bug through a tunnel.
+
+Full architecture, the ADRs (R1–R11), the open questions and two
+implementation checklists live in the personal vault under `Storm/Remote/` —
+start at **Storm Remote Connectivity**. Decision 4 is not superseded until
+authentication actually ships.
+*Revisit if:* any of R1–R11 changes — amend the ADR with why rather than
+relitigating here.
+
+**52a. The auth design is complete; the build order puts it entirely before
+any networking.** *(2026-08-13, still no code)*
+Q1–Q9 are resolved as ADRs **A1–A11**: Argon2id with parameters *measured on
+the VM* (verify on `spawn_blocking`), an Ed25519 server credential whose
+private bytes are a `0600` file while its public metadata is a row, a
+server-scoped **`state/auth.db`**, opaque blake3-hashed tokens resolved
+server-side (never a JWT — revocation has to be immediate), three credential
+tiers (none → device → session) so pairing creates a *device* and never a
+login, owner/admin/member plus `vault_grants` with refusal as an explicit
+`403`, `storm-server passwd` as the honest recovery bypass, and a **reversible
+`legacy_token_enabled` switch** that lets `testtoken` keep working for one
+release but can never create the first user.
+
+Two findings from writing it that change existing code:
+
+- **`auth.db` is the first thing in `state/` that cannot be rebuilt.**
+  `backup_all()` walks vault indexes only, so a restore would produce a server
+  with every note and nobody able to log in. It learns about `auth.db` in the
+  same change that creates it.
+- **Short session lifetimes are wrong here.** This client is offline-first
+  with an outbox; a session expiring while a phone is out of range means an
+  auth wall in front of edits that exist nowhere else. Access 30d / refresh
+  180d sliding is safe *because* revocation is server-side and instant.
+
+Phases: **1** auth, complete and local · **2** a `StormConnection` seam so
+nothing above it knows local from relayed · **3** a minimal relay with server,
+client and `storm-relay` all on one machine · **4** self-hosted relay on a VPS
+— the milestone that actually solves the problem · **5** the Cloudflare-hosted
+relay as a convenience. Remote MCP and the Agent Runtime transport come after.
+Details in **Storm Auth Data Model** and **Storm Auth Protocol**.
+
+**52b. Every auth slice is additive until the middleware slice, and the
+challenge signs a domain-separated message.** *(2026-08-13, slice 1 shipped)*
+Two things settled by building the first slice:
+
+- **Additive, one slice at a time.** `require_token` and the shared token are
+  untouched until the three-tier middleware lands, so each slice ships without a
+  client change and `e2e.py`'s 81 checks pass unmodified. That unchanged pass is
+  the evidence, which is why new coverage went into a *new* `tests/auth_e2e.py`
+  rather than being mixed into the file that serves as the control.
+- **`/v1/server/challenge` signs `storm-challenge:v1:<server_id>:<nonce>`,
+  never the bare nonce.** The endpoint is unauthenticated by design, so it will
+  sign whatever it is sent — a signing oracle unless the signed bytes are
+  domain-separated and bound to this server. The nonce is bounded (16–128
+  printable ASCII, no `:` or `"`) so it cannot forge the message's own field
+  boundaries. The client rebuilds this string, so it is a wire-format
+  commitment.
+
+And one amendment to **A4**, found while writing `backup_all()`: the ADR named
+`auth.db`, but the private keys live *outside* it at
+`state/identity/<key_id>.key` (A2). Backing up the database alone restores a
+server that knows which key is active and cannot sign with it — an identity
+loss wearing a healthy-looking database. `backup-db` therefore copies the key
+files too, at `0600`, into the same layout so a restore stays a plain copy. The
+ADR in the vault is amended with this rather than the code quietly doing more
+than the design says.
+*Revisit if:* the middleware slice finds that "additive" cannot hold — at which
+point client and server ship together, as decision 46 already assumes.
+
+**52c. Accounts are created on the host until pairing exists, and the KDF gets a
+concurrency bound rather than smaller parameters.** *(2026-08-16, slice 2
+shipped)*
+
+- **`storm-server user add` can create the first user, and any user.** A8 says
+  the first account needs device auth plus an empty user table plus a console
+  nonce — all of which is the pairing slice. Rather than stall the user model
+  behind it, account creation is a host-side command, which is the same trust
+  level A11 already grants `passwd`: root on the box can read `auth.db` and every
+  vault anyway, so requiring more than shell access would be theatre. **A8 is
+  amended** to name the CLI as a second, host-only path rather than the code
+  quietly exceeding the design. A8's actual subject — what an *unauthenticated
+  network client* may do — is untouched, and stays untouched until pairing.
+- **A semaphore of 2, not a cheaper hash.** Q18's 192 MiB is only safe because
+  the number of simultaneous verifies is capped; `spawn_blocking`'s 512-thread
+  default would otherwise turn a login burst into an OOM that takes the notes
+  offline. The temptation when that is discovered is to shrink the KDF, which
+  trades an availability bug for a security one. `Hasher` owns the permits and
+  is the only way to reach Argon2id.
+- **Passwords: 12 characters minimum, refused rather than truncated above 1024
+  bytes.** A homelab owner account is a single high-value credential with no MFA
+  behind it. Silent truncation is the failure worth naming explicitly — accept
+  200 characters, hash the first 72, and every password sharing that prefix now
+  opens the account.
+- **Usernames are ASCII and unique by casefold.** Uniqueness is decided on the
+  fold, so the fold has to be unambiguous; Unicode brings locale-dependent case
+  rules and homoglyphs that would make two visually identical usernames distinct
+  rows. `display_name` is unrestricted.
+
+*Revisit if:* pairing lands and the console-nonce flow makes the CLI creation
+path redundant — at which point it stays anyway as the recovery path, beside
+`passwd`.
 
 ---
 
@@ -1521,7 +1681,24 @@ The handoff's own vocabulary — atoms, molecules, organisms — is a documentat
 device and does not appear in the code. Shared widgets are `lib/ui/widgets.dart`
 and overlay containers `lib/ui/surfaces.dart`.
 
-### The VM does not run the layout deploy/README.md describes
+### The VM did not run the layout deploy/README.md describes — resolved by M15
+
+> **Resolved.** The M15 apt install moved the VM onto the packaged layout, and
+> that was re-verified on 2026-08-13: unit `storm-server` **active**, process
+> `/usr/bin/storm-server serve`, package **0.2.5-1**, state `/srv/storm/state`,
+> web `/usr/share/storm/web`, storage root `/mnt/media/Docs/storm` (NFS), all
+> three vaults present and none `missing`, `/etc/storm/storm.env` at `0600`.
+> `/home/dewansh/storm` and `~/storm-m15-cutover` are gone. `systemctl
+> is-active` is now the right question. **`make deploy` / `deploy-check` were
+> never corrected and are still written against a `storm` service account —
+> apt is the update channel, not them.**
+>
+> One thing the re-check did turn up: **the shared token is still `testtoken`**
+> — it returns 200 from `/v1/vaults` — even though `postinst` and
+> `storm-server up` generate a real one. LAN-only, so a known risk rather than
+> an exposure; decision 52 is the design that removes the class.
+
+The original finding, kept because the lesson is not layout-specific:
 
 Found on 2026-08-09 while adding `deploy-web`, and worth recording because
 every deploy target in the Makefile is written against the wrong paths.
@@ -1742,6 +1919,191 @@ post-frame `requestFocus`.
 **Deferred:** shortcut overlay, command palette, ⌘⇧C code, sync-on-R,
 close-note-on-W.
 
+### M19 — Authentication (decision 52 phase 1) · in progress
+
+The design is complete and lives in the personal vault: **Storm Auth Data
+Model**, **Storm Auth Protocol**, ADRs **A1–A12** in *Storm Remote Decisions*,
+and the checklist *TODO — Storm Authentication*. Read those before touching
+this; the checklist is the work list, not the design.
+
+**Slice 1 — server identity and its storage ✅** (2026-08-13, not deployed)
+
+- `apps/server/src/auth/` — `db.rs` creates `state/auth.db` with
+  `PRAGMA user_version = 1` and **every** table the data model names (only
+  `server` and `server_credentials` are written yet; the rest cost one
+  `CREATE TABLE` now and a migration later). `identity.rs` mints a random
+  `srv_`-prefixed id in Crockford base32 and an Ed25519 keypair, private bytes
+  at `state/identity/<key_id>.key` mode `0600` in a `0700` directory, created
+  *with* that mode rather than chmod-ed afterwards.
+- `GET /v1/server` and `POST /v1/server/challenge`, both unauthenticated, both
+  registered **below** the `require_token` layer — axum applies a layer only to
+  routes above it, and `the_server_endpoints_answer_without_a_token` fails if
+  they move.
+- `backup_all()` snapshots `auth.db` with `VACUUM INTO` and copies the key
+  files, *before* the "no vaults registered" early return — a server with no
+  vaults still has an identity worth keeping. `deploy/storm-backup.sh` and
+  `deploy/README.md` updated in the same change.
+- `Db::snapshot_to` and `AuthDb::snapshot_to` share one
+  `db::snapshot_connection`, so the "never overwrite a non-file" guard cannot
+  drift between them.
+
+**Evidence.** 180 Rust tests, clippy clean. `e2e.py` still 81/81 **unchanged**,
+which is the proof the slice is additive; 21 new checks in `tests/auth_e2e.py`,
+including a vendored Ed25519 verifier so a *running* server's signature is
+checked against the key that same server published. Every new test was verified
+by deliberately breaking what it names — 13 mutations (routes moved above the
+layer, raw-nonce signing, identity regenerated per boot, backup skipping
+`auth.db` or the keys, `backup_auth` moved after the early return, `0644` key
+files, the credential-count check disabled, a table dropped, `server_id` derived
+from the key, nonce validation removed, a missing key silently regenerated,
+`user_version` never stamped) and all 13 failed the right test.
+
+A real backup → wipe → restore cycle with the binary and a live server returned
+the identical `server_id`, `key_id`, public key and challenge signature, with
+the restored key still `0600`.
+
+**Decided while building** (see decision 52b): the challenge signs
+`storm-challenge:v1:<server_id>:<nonce>`; A4 is amended so backups carry
+`state/identity/` as well as `auth.db`; a second active credential is a refusal
+at boot rather than "use the newest" (data model invariant 2); a `server` row
+whose key file is missing is a hard failure, never a regenerated keypair.
+
+The server name defaults to `/etc/hostname` (falling back to `Storm`) and is
+set once, at creation. There is no rename path yet — that belongs with the
+settings surface in a later slice.
+
+**Q18 — Argon2id parameters, measured ✅** (2026-08-16, on the VM)
+
+`tools/argon2-bench` is the instrument, because A1's revisit trigger is a
+*re-measure* and a number pasted into a chat is not one. Measured on the
+homelab VM (3 vCPU, 3815 MB) while prod was serving, `nice`d, prod health
+checked before and after:
+
+```
+m = 196608 KiB (192 MiB), t = 1, p = 1   ->  173.6 ms per verify
+```
+
+Stable across four runs (173.6 / 173.0 / 173.6 / 174.8 ms). Raw sweep in
+`tools/argon2-bench/q18-vm-results.txt`.
+
+Three findings that constrain the user-model slice:
+
+- **`p` stays 1.** p=1 and p=2 measure identically — the `argon2` crate does
+  not thread without its `parallel` feature, so more lanes would cost memory
+  and buy no speed.
+- **Memory beats passes.** 192 MiB / t=1 is preferred over the leanest
+  in-window option (96 MiB / t=2, 150.5 ms): at a fixed time budget the
+  attacker's cost is bounded by memory, which is also RFC 9106's ordering.
+- **Login must bound its concurrency.** Verify runs on `spawn_blocking`, whose
+  pool defaults to 512 threads; 512 × 192 MiB is an OOM that takes the vault
+  server down. A semaphore of 2 holds the peak at ~384 MiB (measured 207 ms
+  wall for two at once). **Do not shrink the KDF to work around a missing
+  bound — add the bound.** The laptop, for contrast, wanted 192 MiB *at t=2*
+  for the same latency, which is exactly the gap A1 was written about.
+
+**Slice 1 verified on the VM** (2026-08-16). A staging server on :8585 with its
+own vault root and state under `/tmp` — never `storm-server up`, never
+systemctl, prod on :8484 untouched throughout and health-checked either side.
+It minted `srv_Q2T0B4C90VQDQW9HGW7JNHJYB4`, named itself `ubuntu` from
+`/etc/hostname`, wrote its key at `-rw-------`, answered `/v1/server` and the
+challenge with no credential, still refused `/v1/vaults` without the token, and
+came back from a backup → wipe → restore with an identical identity. Torn down;
+prod's `state/` has no `auth.db`, which is the proof staging stayed in its own
+directory.
+
+**Slice 2 — user accounts and Argon2id ✅** (2026-08-16, not deployed)
+
+The data model's `users` table, finally written to. **No new routes:** creating
+a user over the network needs device auth (A8), which arrives with pairing, so
+this slice is reachable only from the operator CLI and `e2e.py` stays untouched.
+
+- `auth/password.rs` — Argon2id at Q18's measured parameters, behind a semaphore
+  of **2 permits**. The bound is the point: `Hasher::hash` and `Hasher::verify`
+  are the only way in, and both hold a permit across the whole `spawn_blocking`
+  job. Passwords are 12 characters minimum and **refused, never truncated**,
+  above 1024 bytes. `needs_rehash` compares a stored PHC string's parameters
+  against this build's, which is what will let login upgrade old hashes.
+- `auth/users.rs` — accounts, roles, and two enforced invariants: **the first
+  account is an owner** (a server whose only user is a member has nobody who can
+  promote anyone), and **the last *active* owner cannot be deleted, disabled or
+  demoted**. Disabled owners deliberately do not count — an account that cannot
+  log in cannot administer, so leaving only disabled owners is the same lockout
+  as leaving none.
+- Usernames are ASCII, 3–32 characters, unique by casefold. That is a decision:
+  uniqueness is decided on the fold, and Unicode brings locale-dependent case
+  rules and homoglyphs, so `dewansh` and a Cyrillic-`е` lookalike would be two
+  accounts that render identically in the user list. `display_name` is
+  unrestricted, so nobody is stuck with an ASCII name on screen.
+- `storm-server user add|list|disable|enable|role|delete` and
+  `storm-server passwd` (A11). **No `--password` flag anywhere** — an argument
+  is in the shell history and in `ps` for every other user on the box while the
+  process runs. The password is prompted for without echo, or piped with
+  `--password-stdin`.
+- Both writing commands **read the stored hash back and verify it** before
+  reporting success, so a row that was written but cannot be logged into is
+  caught immediately rather than at a login prompt weeks later.
+- Every administrative act writes a `security_events` row — the table's first
+  writer. A test asserts no password or hash ever reaches it.
+
+**Evidence.** 213 Rust tests (204 unit + 9 driving the real binary as a
+process), clippy clean, 581 Dart. `e2e.py` still **81/81 unchanged**. **19
+mutations**, each a plausible mistake rather than a random edit — the semaphore
+removed, `hash` bypassing it, passwords truncated at 72 bytes, the minimum and
+maximum length checks disabled, the KDF weakened below what was measured,
+`needs_rehash` always false, the last-owner guard removed, disabled owners
+counted as owners, the first account allowed to be a member, the username fold
+dropped, non-ASCII usernames allowed, the audit trail silenced, foreign keys
+off, a reset leaving the lockout in place, the read-back verify removed, a piped
+password keeping its newline, the username checked only after the password, and
+the backup skipping `auth.db` — all 19 failed the right test.
+
+A backup → wipe → restore now also proves the *accounts* came back: the restored
+user's stored hash still verifies against their password, which is the thing
+"the users survived" actually means.
+
+**Open, deliberately:** the plaintext password is an ordinary `String` and is
+not zeroed after use. Doing that properly needs a zeroizing type threaded
+through `clap` and `rpassword`, and it buys little against an attacker who can
+already read this process's memory. Worth revisiting if a `SecretString` lands
+for other reasons.
+
+**Next slices, in order:** sessions (login, refresh, revocation — where the
+semaphore and `needs_rehash` finally sit on a request path) → the three-tier
+middleware → pairing → client. The middleware slice is the one that stops being
+additive. *(All three shipped as of 2026-08-17; now building the Flutter client.)*
+
+**Slice 6 — the Flutter client pairs ✅** (2026-08-17, not deployed)
+
+`PairingScreen` walks the whole first run in one screen: paste a `storm://pair`
+URI, verify the server's identity, claim the nonce for device credentials,
+create the owner account, log in. `Settings` gained the device credentials
+(`deviceId`, `deviceSecret`), the server's identity (`serverId`, `serverKeyId`,
+`serverPublicKey`) and the session (`accessToken`, `refreshToken`,
+`accessTokenExpiresAt`, `userId`), all persisted; `apiProvider` now sends
+`bearerToken`, which prefers the session token.
+
+Two things worth keeping from building it:
+
+- **The client verifies the server before it trusts the pairing URI.** The URI
+  carries the server's public key, so the client rebuilds
+  `storm-challenge:v1:<server_id>:<nonce>` and checks the signature against it
+  before sending the nonce anywhere. `ed25519_verify.dart` is that check, and
+  the string it rebuilds is a wire-format commitment shared with the server.
+- **`isConfigured` had to stay true for a legacy install, and briefly did not.**
+  The first redirect sent anything unpaired to `/pairing`, which is every
+  install that predates auth — a URL and a shared token, no device — and would
+  have locked each of them out of a vault it could already read. `isConfigured`
+  is now "a session *or* a legacy token", the redirect keys off it alone, and
+  `router_test.dart` asserts a legacy install never reaches the pairing screen.
+  This is decision 52b (additive until the middleware slice) applying to the
+  client, and it is the kind of break a green server suite cannot see.
+
+The session lifecycle is `refreshSession()`, `logout()` (keeps the device
+paired) and `unpair()` (forgets the server). Only `refreshSession` has a
+plausible caller today — see the login-screen gap noted above — so
+`auth_settings_test.dart` covers all three directly rather than letting them
+ship untested.
+
 ---
 
 ## A lesson worth keeping
@@ -1817,9 +2179,11 @@ and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
 - *Sudo on the VM.* `apt install` / `storm-server up` need a password; packaging
   shortens the manual step rather than discharging it. Clean apt install is
   **done** (M15): packaged unit, state under `/srv/storm`, vaults on NAS.
-- *The shared token* may still be the long-lived LAN token on some clients —
-  rotating it means updating every device at once. Fresh `up` / `postinst`
-  installs generate a real token.
+- *The shared token is still `testtoken`* — confirmed 2026-08-13, a request
+  carrying it returns 200 from `/v1/vaults` on the VM, despite `postinst` and
+  `up` generating a real one. Rotating means updating every device at the same
+  moment, which is the whole problem; decision 52's per-device sessions are the
+  real fix. LAN-only today, so a known risk rather than an exposure.
 
 Both former build blockers are discharged as of 2026-08-05:
 
@@ -1879,6 +2243,25 @@ Use a pattern that cannot match the invoking shell.
 - **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
   confirm Cloudflare hostname / dashboard connection; optional real app
   screenshot for Client section. No GitHub deploy workflow.
+- **Remote connectivity + authentication** — architecture accepted
+  2026-08-13; **auth phase 1 has started** (decision 52, and M19 above).
+  Server-local users, a cryptographic server identity, QR pairing, and an
+  optional self-hostable relay. Docs in the personal vault under
+  `Storm/Remote/`: *Storm Remote Connectivity* (index), *Storm Authentication*,
+  *Storm Relay*, *Storm Remote Decisions* (R1–R11), *Storm Remote Open
+  Questions*, and the checklists *TODO — Storm Authentication* /
+  *TODO — Storm Relay*. **Auth is fully designed** (decision 52a): *Storm Auth
+  Data Model* + *Storm Auth Protocol*, Q1–Q9 resolved as A1–A12. **Built so
+  far:** the server identity slice — `auth.db`, the Ed25519 credential, backup
+  coverage, and the two unauthenticated identity routes — verified on the VM
+  against a staging server, with **Q18 measured** (192 MiB, t=1, p=1, 173.6 ms);
+  and the user model — accounts, roles, Argon2id behind a 2-permit semaphore,
+  and the `storm-server user` / `passwd` commands, with no network surface until
+  pairing (decision 52c). **Built after the above was written:** sessions,
+  three-tier middleware, pairing, `storm-server pair` — all server-side auth
+  phase 1 complete. **Next:** Flutter client auth integration. A9 (vault-level
+  grants) ships between client and relay. Relay work does not start until auth is
+  done.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.

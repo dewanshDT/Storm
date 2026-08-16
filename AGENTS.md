@@ -22,6 +22,18 @@ the short in-flight checklist. Read it when starting multi-step work; update it
 when an item moves. `.cursor/rules/storm-active-work.mdc` requires this.
 `PLAN.md` still wins for decisions; Active Work is the queue.
 
+**`Storm/Global Todo.md` is the one aggregate tracking surface** — every
+milestone, the Agent Runtime phases, in-flight items, backlog and parking lot
+in a single checklist. `PLAN.md` and Active Work stay authoritative for
+decisions and the queue; Global Todo mirrors their status. When a milestone,
+phase, or queue item changes state, update Global Todo in the same change.
+
+**Every vault note an agent edits carries a `summary:` in its frontmatter.**
+Add it when creating a note; refresh it whenever you update one — one
+plain-text line capturing what the note is (for a change, what it now is).
+It is what search indexes and what a later agent skims first; a note whose
+summary still says "proposed" long after it shipped is a note that lied.
+
 `docs/prd.md` is the original brief and is **not** maintained.
 Where it and `PLAN.md` disagree, `PLAN.md` is current.
 

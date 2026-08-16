@@ -85,6 +85,8 @@ test-live:
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- mcp e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- auth e2e ---"; \
+	python3 "$$ROOT/$(SERVER)/tests/auth_e2e.py"; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/
 

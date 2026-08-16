@@ -22,6 +22,18 @@ the short in-flight checklist. Read it when starting multi-step work; update it
 when an item moves. `.cursor/rules/storm-active-work.mdc` requires this.
 `PLAN.md` still wins for decisions; Active Work is the queue.
 
+**`Storm/Global Todo.md` is the one aggregate tracking surface** — every
+milestone, the Agent Runtime phases, in-flight items, backlog and parking lot
+in a single checklist. `PLAN.md` and Active Work stay authoritative for
+decisions and the queue; Global Todo mirrors their status. When a milestone,
+phase, or queue item changes state, update Global Todo in the same change.
+
+**Every vault note an agent edits carries a `summary:` in its frontmatter.**
+Add it when creating a note; refresh it whenever you update one — one
+plain-text line capturing what the note is (for a change, what it now is).
+It is what search indexes and what a later agent skims first; a note whose
+summary still says "proposed" long after it shipped is a note that lied.
+
 `docs/prd.md` is the original brief and is **not** maintained.
 Where it and `PLAN.md` disagree, `PLAN.md` is current.
 
@@ -173,6 +185,69 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   recorded, ignored on the next boot, then erased by the next save — with every
   vault adopted under it left registered as `missing`. **A setting that does not
   survive a restart is not a setting.**
+
+From M19 (auth phase 1 — design in the personal vault, *Storm Auth Data Model*
+and *Storm Auth Protocol*; ADRs A1–A11 in *Storm Remote Decisions*):
+
+- **`state/auth.db` and `state/identity/` cannot be rebuilt.** Everything else
+  in `state/` regenerates by rescanning markdown; these do not. Anything that
+  touches `backup_all()` must keep carrying both — and the key files, not just
+  the database, because `auth.db` alone restores a server that knows which key
+  is active and cannot sign with it. Backing up before the "no vaults
+  registered" early return is deliberate.
+- **The private key is a file so its protection is `ls -l`-auditable.** Mode
+  `0600`, in a `0700` directory, created *with* that mode rather than chmod-ed
+  afterwards. It is never logged, never serialized, and never in a payload —
+  `ServerIdentity`'s `Debug` impl is hand-written to redact it.
+- **`server_id` is random, never derived from a key** (A3). Deriving it would
+  make rotating a credential change the server's identity and force every
+  paired client to re-pair.
+- **A route that must be unauthenticated goes *below* the `require_token`
+  layer.** axum applies a layer only to the routes registered above it.
+  `/v1/health` is the older shape — above the layer, exempted by path inside
+  the middleware — and `/v1/server` + `/v1/server/challenge` are below it.
+  Both patterns have a test; do not change one to match the other by eye.
+- **The challenge signs `storm-challenge:v1:<server_id>:<nonce>`, not the
+  nonce.** An unauthenticated endpoint signs whatever it is sent, so the domain
+  prefix and the server id are what stop it being a signing oracle. The client
+  rebuilds the same string, so this is a wire-format commitment.
+- **Passwords and tokens will hash differently on purpose.** Argon2id for
+  low-entropy secrets, blake3 for 256-bit random ones. This is not an
+  inconsistency to tidy up in either direction.
+- **Auth work is additive until the middleware slice.** `require_token` and the
+  shared token stay exactly as they are, so `apps/server/tests/e2e.py`'s 81
+  checks pass unmodified — that unchanged pass is the evidence. New coverage
+  goes in `tests/auth_e2e.py`.
+
+From M19 slice 2 (users and passwords):
+
+- **Argon2id's parameters are measured, not chosen** — `m = 192 MiB, t = 1,
+  p = 1` on the VM (Q18/A1). `p` stays 1 because the `argon2` crate does not
+  thread without its `parallel` feature, so more lanes cost memory and buy no
+  speed. Different hardware is a re-measure with `tools/argon2-bench`, not an
+  edit.
+- **Every Argon2 call goes through `Hasher`, which holds a semaphore of 2.**
+  A verify runs on `spawn_blocking`, whose pool defaults to 512 threads, and
+  512 × 192 MiB is an OOM that takes the vault server down with it — the notes
+  go offline because someone held the login button. **Never shrink the KDF to
+  work around a missing bound; the bound is the fix.**
+- **A password is refused above 1024 bytes, never truncated.** Accept 200
+  characters, hash the first 72, and every password sharing that prefix opens
+  the account. A test hashes 1000 bytes and checks that a variant differing at
+  byte 900 fails.
+- **The first account is an owner, and the last *active* owner cannot be
+  deleted, disabled or demoted.** Disabled owners do not count: an account that
+  cannot log in cannot administer, so leaving only disabled ones is the same
+  lockout as leaving none. SQLite cannot express either rule.
+- **Usernames are ASCII and unique by casefold.** Uniqueness is decided on the
+  fold, so the fold must be unambiguous — Unicode brings locale-dependent case
+  rules and homoglyphs, and two visually identical usernames as separate rows
+  is a security bug. `display_name` is unrestricted.
+- **No `--password` flag, in any command, ever.** A password in an argument is
+  in the shell history and in `ps` for every other user on the box. Prompt
+  without echo, or read `--password-stdin`.
+- **`security_events` never contains a secret** — not a password, not a hash,
+  not a token. A test asserts it for every administrative act.
 
 ## Style
 

@@ -23,7 +23,7 @@
 
 use serde::Serialize;
 
-use crate::api::{ApiResult, Shared, not_found, vault_of};
+use crate::api::{ApiError, ApiResult, Shared, bad_request, not_found, vault_of};
 use crate::db::{NoteRow, RecentRow, SearchHit};
 
 // ---- vaults ------------------------------------------------------------
@@ -431,6 +431,100 @@ pub async fn recents(state: &Shared, limit: i64) -> ApiResult<Vec<RecentEntry>> 
     all.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
     all.truncate(limit as usize);
     Ok(all)
+}
+
+// ---- server identity ---------------------------------------------------
+
+/// What a client needs to pin this server: who it is, and which key to check.
+///
+/// Public by design — this is the `none` tier, answered before any credential
+/// exists. It carries nothing an attacker on the LAN does not already learn by
+/// connecting, and a client that cannot read it cannot pair.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerInfo {
+    pub server_id: String,
+    pub name: String,
+    pub key_id: String,
+    pub algorithm: String,
+    /// base64url, no padding.
+    pub public_key: String,
+}
+
+pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
+    let identity = &state.identity;
+    Ok(ServerInfo {
+        server_id: identity.server_id.clone(),
+        name: identity.name.clone(),
+        key_id: identity.key_id.clone(),
+        algorithm: crate::auth::identity::ALGORITHM.to_string(),
+        public_key: identity.public_key_b64(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChallengeAnswer {
+    pub server_id: String,
+    pub key_id: String,
+    /// base64url, no padding, over
+    /// `storm-challenge:v1:<server_id>:<nonce>` — never over the bare nonce.
+    pub signature: String,
+}
+
+/// Proves the host the client actually reached holds the private half of the
+/// key it read out of a QR.
+///
+/// The QR itself cannot be signed — it carries the very key a signature would
+/// be checked with — so this round trip is what turns "I was shown a public
+/// key" into "this address holds it".
+pub async fn sign_challenge(state: &Shared, nonce: &str) -> ApiResult<ChallengeAnswer> {
+    crate::auth::identity::validate_nonce(nonce).map_err(bad_request)?;
+    Ok(ChallengeAnswer {
+        server_id: state.identity.server_id.clone(),
+        key_id: state.identity.key_id.clone(),
+        signature: state.identity.sign_challenge(nonce),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PairingQrPayload {
+    pub sid: String,
+    pub pk: String,
+    pub n: String,
+    pub exp: String,
+    pub addr: String,
+}
+
+/// Creates a new pairing session and returns the QR payload.
+///
+/// Called by `POST /v1/pairings` (session tier). The client renders this as a
+/// QR code for the new device to scan.
+pub async fn issue_pairing_qr(
+    state: &Shared,
+    purpose: &str,
+    user_id: Option<&str>,
+) -> ApiResult<PairingQrPayload> {
+    let purpose = crate::auth::pairing::PairingPurpose::from_str(purpose)
+        .map_err(|e| bad_request(e.to_string()))?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let (nonce, session) = crate::auth::pairing::create(&mut auth_db, purpose, user_id, &now)
+        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let qr = crate::auth::pairing::encode_qr(
+        &state.identity.server_id,
+        &state.identity.public_key_b64(),
+        &nonce,
+        &session.expires,
+        &state.listen_addr,
+    );
+
+    Ok(PairingQrPayload {
+        sid: qr.sid,
+        pk: qr.pk,
+        n: qr.n,
+        exp: qr.exp,
+        addr: qr.addr,
+    })
 }
 
 #[cfg(test)]

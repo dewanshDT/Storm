@@ -41,6 +41,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - run: flutter pub get
       - run: dart format --set-exit-if-changed lib test test_live
@@ -59,6 +60,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.44.8
           cache: true
       - run: flutter pub get
         working-directory: apps/client

@@ -366,5 +366,10 @@ class StormApi {
         .toList();
   }
 
+  /// `POST /v1/auth/logout` — revoke the current session.
+  Future<void> logout() async {
+    await _client.post(_uri('/v1/auth/logout'), headers: _headers);
+  }
+
   void dispose() => _client.close();
 }

@@ -12,6 +12,7 @@
 //! and per-device tokens first.
 
 mod api;
+mod auth;
 mod db;
 mod frontmatter;
 mod index;
@@ -56,6 +57,12 @@ enum Commands {
     Status,
     /// Report what an import would change, then exit without writing.
     DryRun(VaultArgs),
+    /// Create and manage local user accounts.
+    User(UserArgs),
+    /// Set a user's password. The recovery path when one is forgotten (A11).
+    Passwd(PasswdArgs),
+    /// Print a bootstrap pairing QR code for a fresh server (no users yet).
+    Pair(PairArgs),
     /// Snapshot every vault index into DIR, then exit.
     BackupDb {
         /// State directory holding the registry and indexes.
@@ -97,6 +104,93 @@ struct UpArgs {
     /// Built Flutter web client directory (package default).
     #[arg(long, default_value = "/usr/share/storm/web")]
     web: PathBuf,
+}
+
+/// Account management, on the host.
+///
+/// These run on the box rather than over the network, and that is the design
+/// rather than a limitation for now: creating a user remotely needs device auth
+/// (A8), which arrives with pairing. Until then the only way to make an account
+/// is to have shell access, which is the same trust level A11 already accepts
+/// for `passwd`.
+///
+/// **There is deliberately no `--password` flag anywhere in here.** A password
+/// in an argument is in the shell history and, while the process runs, in `ps`
+/// for every other user on the box. The password is prompted for without echo,
+/// or read from stdin with `--password-stdin` for scripts.
+#[derive(clap::Args, Debug)]
+struct UserArgs {
+    /// State directory holding auth.db.
+    ///
+    /// `global` so it reads naturally in either position — `user --state X add
+    /// name` and `user add name --state X` are the same command. Without it
+    /// clap accepts only the first, which is not where a hand reaches for it.
+    #[arg(long, default_value = "./state", global = true)]
+    state: PathBuf,
+
+    #[command(subcommand)]
+    command: UserCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum UserCommand {
+    /// Create an account. The first one on a server is always an owner.
+    Add {
+        username: String,
+
+        /// owner, admin or member. Defaults to owner for the first account on a
+        /// server and member for every one after it.
+        #[arg(long)]
+        role: Option<String>,
+
+        /// Name to show instead of the username. Unrestricted, unlike the username.
+        #[arg(long)]
+        display_name: Option<String>,
+
+        /// Read the password from stdin instead of prompting.
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// List accounts.
+    List,
+    /// Keep the account but refuse its logins.
+    Disable { username: String },
+    /// Re-enable a disabled account.
+    Enable { username: String },
+    /// Change an account's role.
+    Role { username: String, role: String },
+    /// Delete an account, its sessions and its vault grants.
+    Delete {
+        username: String,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct PasswdArgs {
+    /// State directory holding auth.db.
+    #[arg(long, default_value = "./state")]
+    state: PathBuf,
+
+    username: String,
+
+    /// Read the password from stdin instead of prompting.
+    #[arg(long)]
+    password_stdin: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct PairArgs {
+    /// State directory holding auth.db and the server identity.
+    #[arg(long, default_value = "./state")]
+    state: PathBuf,
+
+    /// Address the QR code tells the client to connect to.
+    #[arg(long)]
+    addr: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -164,6 +258,9 @@ fn normalize_argv(args: Vec<OsString>) -> Vec<OsString> {
         "status",
         "dry-run",
         "backup-db",
+        "user",
+        "passwd",
+        "pair",
         "help",
         "-h",
         "--help",
@@ -338,7 +435,8 @@ fn migrate_legacy_index(state_dir: &Path, registry: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// Snapshots every vault's index into `dest`.
+/// Snapshots the auth database, the server's keys and every vault's index into
+/// `dest`.
 fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
 
@@ -347,6 +445,13 @@ fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
         std::fs::copy(&registry_src, dest.join(registry::REGISTRY_FILE))
             .with_context(|| format!("copying {}", registry_src.display()))?;
     }
+
+    // Before the vault loop, and before the "no vaults" early return below:
+    // this is the one thing in state/ that cannot be rebuilt by rescanning
+    // markdown, so a backup that skipped it would restore into a server holding
+    // every note with nobody able to log in. A server with no vaults yet still
+    // has an identity worth keeping.
+    backup_auth(state_dir, dest)?;
 
     let registry = Registry::load(state_dir, Path::new("/"))?;
     if registry.vaults.is_empty() {
@@ -371,6 +476,81 @@ fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
             .with_context(|| format!("writing snapshot to {}", out.display()))?;
         println!("  {} -> {}", entry.name, out.display());
     }
+    Ok(())
+}
+
+/// Copies `auth.db` and the private keys it describes into `dest`.
+///
+/// The database goes through `VACUUM INTO`, like an index, because it runs in
+/// WAL mode with the server holding it open — a plain copy can catch committed
+/// pages still sitting in the -wal and produce a file that opens and is missing
+/// rows.
+///
+/// The key files are copied as files, which is right for them: they are written
+/// once and never modified, so there is no torn state to catch. They have to
+/// travel with the database, and this is an extension of the design's backup
+/// rule rather than a restatement of it — `auth.db` alone restores a server that
+/// knows which key is active and cannot sign with it, which is an identity loss
+/// wearing a healthy-looking database.
+fn backup_auth(state_dir: &Path, dest: &Path) -> Result<()> {
+    let src = auth::AuthDb::path_in(state_dir);
+    if !src.exists() {
+        return Ok(());
+    }
+    let db = auth::AuthDb::open_at(&src).context("opening the auth database")?;
+    let out = dest.join(auth::AUTH_DB_FILE);
+    db.snapshot_to(&out)
+        .with_context(|| format!("writing snapshot to {}", out.display()))?;
+    println!("  auth -> {}", out.display());
+
+    let keys = state_dir.join(auth::IDENTITY_DIR);
+    if !keys.is_dir() {
+        return Ok(());
+    }
+    let keys_out = dest.join(auth::IDENTITY_DIR);
+    std::fs::create_dir_all(&keys_out)
+        .with_context(|| format!("creating {}", keys_out.display()))?;
+    restrict_to_owner(&keys_out)?;
+
+    let mut copied = 0;
+    for entry in std::fs::read_dir(&keys).with_context(|| format!("reading {}", keys.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let to = keys_out.join(entry.file_name());
+        std::fs::copy(entry.path(), &to)
+            .with_context(|| format!("copying {}", entry.path().display()))?;
+        // Set explicitly rather than trusting the copy to carry the mode: this
+        // is the whole reason the key is a file instead of a row.
+        restrict_key_file(&to)?;
+        copied += 1;
+    }
+    println!("  keys -> {} ({copied})", keys_out.display());
+    Ok(())
+}
+
+fn restrict_to_owner(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("tightening {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+fn restrict_key_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("tightening {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -456,6 +636,319 @@ fn run_dry_run(args: VaultArgs) -> Result<()> {
     Ok(())
 }
 
+/// Opens `auth.db` for a CLI command, warning about the ownership trap.
+///
+/// The database is created on first use, so `sudo storm-server user add` on a
+/// server that runs as `storm` leaves a root-owned `auth.db` the service cannot
+/// write. That surfaces much later as a login that fails for no visible reason,
+/// so it is worth a line here.
+fn open_auth_db(state_dir: &Path) -> Result<auth::AuthDb> {
+    let existed = auth::AuthDb::path_in(state_dir).exists();
+    let db = auth::AuthDb::open(state_dir)
+        .with_context(|| format!("opening the auth database in {}", state_dir.display()))?;
+    if !existed {
+        println!("created {}", auth::AuthDb::path_in(state_dir).display());
+    }
+    warn_if_owner_mismatch(state_dir);
+    Ok(db)
+}
+
+#[cfg(unix)]
+fn warn_if_owner_mismatch(state_dir: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let path = auth::AuthDb::path_in(state_dir);
+    let (Ok(dir), Ok(file)) = (std::fs::metadata(state_dir), std::fs::metadata(&path)) else {
+        return;
+    };
+    if dir.uid() != file.uid() {
+        eprintln!(
+            "warning: {} is owned by uid {} but its directory by uid {}. The server \
+             may not be able to write it — run this as the service user \
+             (`sudo -u storm storm-server …`) or chown it back.",
+            path.display(),
+            file.uid(),
+            dir.uid()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_owner_mismatch(_state_dir: &Path) {}
+
+/// Reads a new password, without echoing it.
+///
+/// Prompted twice, because there is no "forgot password" flow behind this — a
+/// typo in the only copy of a password is an account nobody can reach until an
+/// operator runs `passwd`. `--password-stdin` is the scriptable path.
+fn read_new_password(from_stdin: bool, prompt: &str) -> Result<String> {
+    let password = if from_stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading the password from stdin")?;
+        // Only the line ending is stripped. Trimming whitespace generally would
+        // silently change a password that legitimately ends in a space, and the
+        // account would then refuse the password its owner thinks they set.
+        buf.trim_end_matches(['\n', '\r']).to_string()
+    } else {
+        let first = rpassword::prompt_password(prompt).context("reading the password")?;
+        let again = rpassword::prompt_password("Repeat: ").context("reading the password")?;
+        if first != again {
+            bail!("the two passwords do not match");
+        }
+        first
+    };
+
+    if let Err(why) = auth::password::validate_password(&password) {
+        bail!(why);
+    }
+    Ok(password)
+}
+
+/// Reads the stored hash back and checks the password against it.
+///
+/// A password that was written but does not verify is an account nobody can
+/// reach, and the person who discovers it is the user at a login prompt some
+/// weeks later. This costs one extra verify on a rare interactive command, and
+/// it exercises the same hash-then-verify path login will use.
+async fn confirm_stored_password(
+    db: &auth::AuthDb,
+    hasher: &auth::Hasher,
+    user_id: &str,
+    password: String,
+) -> Result<()> {
+    let stored = db
+        .password_hash_of(user_id)?
+        .context("the account has no password hash immediately after one was written")?;
+    if !hasher.verify(password, stored).await? {
+        bail!(
+            "the password was stored but does not verify against what was written. \
+             Do not rely on this account; auth.db may be damaged."
+        );
+    }
+    Ok(())
+}
+
+async fn run_user(args: UserArgs) -> Result<()> {
+    let mut db = open_auth_db(&args.state)?;
+    let now = index::now_rfc3339();
+
+    match args.command {
+        UserCommand::Add {
+            username,
+            role,
+            display_name,
+            password_stdin,
+        } => {
+            let role = match role.as_deref() {
+                Some(name) => auth::users::Role::parse(name)?,
+                // The first account must be an owner and `create_user` enforces
+                // it; defaulting the rest to member keeps "add a user" from
+                // quietly minting another administrator.
+                None if db.user_count()? == 0 => auth::users::Role::Owner,
+                None => auth::users::Role::Member,
+            };
+            // Validate the name before asking for a password: being told the
+            // username is malformed after typing a password twice is a small
+            // cruelty, and `create_user` checks it again anyway.
+            if let Err(why) = auth::users::validate_username(&username) {
+                bail!(why);
+            }
+
+            let password = read_new_password(password_stdin, "New password: ")?;
+            let hasher = auth::Hasher::new();
+            let hash = hasher.hash(password.clone()).await?;
+            let user = auth::users::create_user(
+                &mut db,
+                auth::users::NewUser {
+                    username: &username,
+                    display_name: display_name.as_deref(),
+                    password_hash: &hash,
+                    role,
+                },
+                &now,
+            )?;
+            confirm_stored_password(&db, &hasher, &user.id, password).await?;
+            println!(
+                "created {} ({}) as {}",
+                user.username,
+                user.id,
+                role.as_str()
+            );
+        }
+
+        UserCommand::List => {
+            let users = db.list_users()?;
+            if users.is_empty() {
+                println!(
+                    "no users yet — `storm-server user add <name>` creates the first, \
+                     which is always an owner"
+                );
+                return Ok(());
+            }
+            println!(
+                "{:<20} {:<7} {:<9} {:<22} {:<22} PASSWORD",
+                "USERNAME", "ROLE", "STATUS", "CREATED", "LAST LOGIN"
+            );
+            let mut outdated = 0;
+            for user in &users {
+                let password = match db.password_hash_of(&user.id)? {
+                    Some(phc) if auth::password::needs_rehash(&phc) => {
+                        outdated += 1;
+                        "outdated"
+                    }
+                    Some(_) => "current",
+                    None => "missing",
+                };
+                println!(
+                    "{:<20} {:<7} {:<9} {:<22} {:<22} {}",
+                    user.username,
+                    user.role.as_str(),
+                    user.status.as_str(),
+                    user.created,
+                    user.last_login.as_deref().unwrap_or("never"),
+                    password
+                );
+            }
+            println!(
+                "\n{} user(s), {} active owner(s)",
+                users.len(),
+                db.active_owner_count()?
+            );
+            if outdated > 0 {
+                println!(
+                    "{outdated} password(s) hashed with weaker parameters than this build uses; \
+                     they are upgraded on next login."
+                );
+            }
+        }
+
+        UserCommand::Disable { username } => {
+            let user =
+                auth::users::set_status(&mut db, &username, auth::users::Status::Disabled, &now)?;
+            println!("disabled {}", user.username);
+        }
+
+        UserCommand::Enable { username } => {
+            let user =
+                auth::users::set_status(&mut db, &username, auth::users::Status::Active, &now)?;
+            println!("enabled {}", user.username);
+        }
+
+        UserCommand::Role { username, role } => {
+            let role = auth::users::Role::parse(&role)?;
+            let user = auth::users::set_role(&mut db, &username, role, &now)?;
+            println!("{} is now {}", user.username, role.as_str());
+        }
+
+        UserCommand::Delete { username, yes } => {
+            if !yes {
+                // There is no undo, and the delete takes sessions and vault
+                // grants with it. Typing the name is cheap insurance against a
+                // mistyped argument.
+                print!(
+                    "Delete `{username}`, its sessions and its vault grants? Type the username to confirm: "
+                );
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .context("reading the confirmation")?;
+                if line.trim() != username {
+                    bail!("not confirmed; nothing was deleted");
+                }
+            }
+            let user = auth::users::delete_user(&mut db, &username, &now)?;
+            println!("deleted {} ({})", user.username, user.id);
+        }
+    }
+    Ok(())
+}
+
+/// `storm-server passwd` — the recovery path (A11).
+///
+/// Deliberately a host-side bypass: root on the box can already read `auth.db`
+/// and every vault, so pretending a password reset needs more than shell access
+/// would be theatre. It writes a security event so the reset is visible.
+async fn run_passwd(args: PasswdArgs) -> Result<()> {
+    let mut db = open_auth_db(&args.state)?;
+    let now = index::now_rfc3339();
+
+    if db.find_user(&args.username)?.is_none() {
+        bail!(
+            "no user named `{}` — `storm-server user list` shows the accounts on this server",
+            args.username
+        );
+    }
+
+    let password = read_new_password(
+        args.password_stdin,
+        &format!("New password for {}: ", args.username),
+    )?;
+    let hasher = auth::Hasher::new();
+    let hash = hasher.hash(password.clone()).await?;
+    let user = auth::users::set_password(&mut db, &args.username, &hash, &now)?;
+    confirm_stored_password(&db, &hasher, &user.id, password).await?;
+    println!("password updated for {} ({})", user.username, user.id);
+    Ok(())
+}
+
+/// `storm-server pair` — print a bootstrap pairing QR code.
+///
+/// Only valid when the user table is empty (fresh server). The QR encodes the
+/// server's public key, a short-lived nonce, and the address the client should
+/// connect to. Scanning it with Storm Client triggers device registration and
+/// first-user creation.
+fn run_pair(args: PairArgs) -> Result<()> {
+    let mut db = open_auth_db(&args.state)?;
+    let now = index::now_rfc3339();
+
+    let user_count = db.count_users()?;
+    if user_count > 0 {
+        bail!(
+            "users already exist — use `POST /v1/pairings` from an authenticated client \
+             to add a new device"
+        );
+    }
+
+    // Load the server identity. It must exist by the time `pair` is called —
+    // `serve` creates it, and `pair` only makes sense on a server that has
+    // booted at least once.
+    let mut auth_db_check = auth::AuthDb::open(&args.state)
+        .with_context(|| format!("opening the auth database in {}", args.state.display()))?;
+    let identity = auth::identity::load_or_create(&mut auth_db_check, &args.state, &now)
+        .context("loading server identity — has the server booted at least once?")?;
+
+    let addr = args.addr.unwrap_or_else(|| {
+        eprintln!("no --addr given; using 127.0.0.1:8484 as the address hint");
+        "127.0.0.1:8484".to_string()
+    });
+
+    let (nonce, session) = auth::pairing::create(
+        &mut db,
+        auth::pairing::PairingPurpose::FirstUser,
+        None,
+        &now,
+    )
+    .context("creating pairing session")?;
+
+    let qr = auth::pairing::encode_qr(
+        &identity.server_id,
+        &identity.public_key_b64(),
+        &nonce,
+        &session.expires,
+        &addr,
+    );
+
+    println!("\n  Pairing QR — scan with Storm Client to create the first user:\n");
+    println!("    {}\n", qr.to_uri());
+    println!("  Expires: {}", session.expires);
+    println!("  Session: {}\n", session.id);
+    Ok(())
+}
+
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
     let registry = prepared.registry;
@@ -472,6 +965,25 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         println!("  Pass --token or set STORM_TOKEN to keep it stable across restarts.\n");
         generated
     });
+
+    // Identity before anything is served. A first boot mints it; every boot
+    // after reads it back, and a mismatch between the recorded key and the file
+    // is a hard failure rather than a quietly regenerated keypair.
+    //
+    // The database handle stays open in `AppState` so request handlers can
+    // authenticate sessions and mint WS tickets without racing on open/close.
+    let mut auth_db = auth::AuthDb::open(&state_dir).context("opening the auth database")?;
+    let identity = Arc::new(auth::identity::load_or_create(
+        &mut auth_db,
+        &state_dir,
+        &index::now_rfc3339(),
+    )?);
+    tracing::info!(
+        server_id = %identity.server_id,
+        name = %identity.name,
+        key_id = %identity.key_id,
+        "server identity"
+    );
 
     let (events, _) = broadcast::channel(1024);
     let (root_changed, _) = broadcast::channel(4);
@@ -493,14 +1005,51 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         "MCP endpoint at /mcp (read-only tools, same bearer token)"
     );
 
+    let listen_addr = format!("{}:{}", args.host, args.port);
+
+    // Bootstrap pairing: when no users exist, create a pairing session and log
+    // the QR URI so the operator can scan it with a Storm Client.
+    let bootstrap_nonce = {
+        let now = crate::index::now_rfc3339();
+        let user_count = auth_db.count_users()?;
+        if user_count == 0 {
+            let (nonce, session) = crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::FirstUser,
+                None,
+                &now,
+            )
+            .context("creating bootstrap pairing session")?;
+            let qr = crate::auth::pairing::encode_qr(
+                &identity.server_id,
+                &identity.public_key_b64(),
+                &nonce,
+                &session.expires,
+                &listen_addr,
+            );
+            tracing::info!(
+                uri = %qr.to_uri(),
+                "bootstrap pairing QR — scan with Storm Client to create the first user"
+            );
+            Some(nonce)
+        } else {
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
         token,
         state_dir: state_dir.clone(),
+        identity,
         root_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
+        auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+        legacy_token_enabled: true,
+        bootstrap_nonce,
+        listen_addr,
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -593,6 +1142,9 @@ async fn main() -> Result<()> {
         Commands::Down => install::down(),
         Commands::Status => install::status(),
         Commands::DryRun(args) => run_dry_run(args),
+        Commands::User(args) => run_user(args).await,
+        Commands::Passwd(args) => run_passwd(args).await,
+        Commands::Pair(args) => run_pair(args),
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
             println!("index snapshots written to {}", dest.display());
@@ -604,6 +1156,37 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_stored_password_that_does_not_verify_is_caught() {
+        // The guard on `user add` and `passwd`: it reads the hash back out of
+        // the database and checks it, so a row that was written but cannot be
+        // logged into is reported now rather than at a login prompt weeks later.
+        let dir = tempdir::TempDir::new("storm-confirm").unwrap();
+        let mut db = auth::AuthDb::open(dir.path()).unwrap();
+        let hasher = auth::Hasher::new();
+        let hash = hasher.hash("correct horse battery".into()).await.unwrap();
+        let user = auth::users::create_user(
+            &mut db,
+            auth::users::NewUser {
+                username: "dewansh",
+                display_name: None,
+                password_hash: &hash,
+                role: auth::users::Role::Owner,
+            },
+            "2026-08-16T00:00:00Z",
+        )
+        .unwrap();
+
+        confirm_stored_password(&db, &hasher, &user.id, "correct horse battery".into())
+            .await
+            .expect("the password just written must verify");
+
+        let err = confirm_stored_password(&db, &hasher, &user.id, "a different password".into())
+            .await
+            .expect_err("a password that does not match must be reported");
+        assert!(err.to_string().contains("does not verify"), "{err}");
+    }
 
     fn vault_args(vault_root: Option<PathBuf>, vault: Option<PathBuf>) -> VaultArgs {
         VaultArgs {
@@ -750,6 +1333,160 @@ mod tests {
 
         let id = &registry.vaults[0].id;
         assert!(state.join(id).join("index.db").exists());
+    }
+
+    /// A state directory with an identity and one indexed vault.
+    fn seeded_state(dir: &Path) -> (PathBuf, auth::ServerIdentity) {
+        let root = dir.join("vaults");
+        let state = dir.join("state");
+        std::fs::create_dir_all(root.join("personal")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+
+        let mut registry = Registry::load(&state, &root).unwrap();
+        registry.scan_root(&state, "2026-08-13T00:00:00Z").unwrap();
+        registry.save(&state).unwrap();
+        let id = &registry.vaults[0].id;
+        Db::open(&state.join(id).join("index.db"), id).unwrap();
+
+        let mut auth_db = auth::AuthDb::open(&state).unwrap();
+        let identity =
+            auth::identity::load_or_create(&mut auth_db, &state, "2026-08-13T00:00:00Z").unwrap();
+        (state, identity)
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), &dest).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_backup_carries_the_auth_database_and_its_keys() {
+        let dir = tempdir::TempDir::new("storm-backup-auth").unwrap();
+        let (state, identity) = seeded_state(dir.path());
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+
+        assert!(
+            dest.join(auth::AUTH_DB_FILE).exists(),
+            "auth.db is not in the snapshot — a restore would have every note \
+             and nobody able to log in"
+        );
+        let key = auth::identity::key_path(&dest, &identity.key_id);
+        assert!(
+            key.exists(),
+            "the private key is not in the snapshot; auth.db alone restores a \
+             server that knows its key and cannot sign with it"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the backed-up key is {mode:o}");
+        }
+    }
+
+    #[test]
+    fn a_server_with_no_vaults_still_backs_up_its_identity() {
+        // `backup_all` returns early when the registry is empty. The identity
+        // is not a vault's, so that return must not skip it.
+        let dir = tempdir::TempDir::new("storm-backup-empty").unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut auth_db = auth::AuthDb::open(&state).unwrap();
+        let identity =
+            auth::identity::load_or_create(&mut auth_db, &state, "2026-08-13T00:00:00Z").unwrap();
+
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+        assert!(dest.join(auth::AUTH_DB_FILE).exists());
+        assert!(auth::identity::key_path(&dest, &identity.key_id).exists());
+    }
+
+    #[test]
+    fn backup_wipe_restore_gives_back_a_server_that_can_still_sign() {
+        // The cycle that matters, end to end: file existence proves nothing —
+        // what has to survive is the ability to answer a challenge with the
+        // same key clients pinned.
+        let dir = tempdir::TempDir::new("storm-restore").unwrap();
+        let (state, before) = seeded_state(dir.path());
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+
+        let nonce = "0123456789abcdef0123";
+        let signature = before.sign_challenge(nonce);
+
+        std::fs::remove_dir_all(&state).unwrap();
+        assert!(!state.exists());
+        copy_tree(&dest, &state);
+
+        let mut auth_db = auth::AuthDb::open(&state).unwrap();
+        let after =
+            auth::identity::load_or_create(&mut auth_db, &state, "2026-09-01T00:00:00Z").unwrap();
+
+        assert_eq!(before.server_id, after.server_id, "the identity changed");
+        assert_eq!(before.key_id, after.key_id);
+        assert_eq!(before.public_key_b64(), after.public_key_b64());
+        assert_eq!(
+            after.sign_challenge(nonce),
+            signature,
+            "the restored server signs differently — every pinned client would \
+             have to re-pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restore_gives_back_users_who_can_still_log_in() {
+        // The failure the data model names: a restore that carries the notes and
+        // not `auth.db` is a server holding every note that nobody can log into.
+        // Now that accounts exist, "the users came back" means their passwords
+        // still verify — not that a row is present.
+        let dir = tempdir::TempDir::new("storm-restore-users").unwrap();
+        let (state, _identity) = seeded_state(dir.path());
+
+        let hasher = auth::Hasher::new();
+        let hash = hasher.hash("correct horse battery".into()).await.unwrap();
+        {
+            let mut db = auth::AuthDb::open(&state).unwrap();
+            auth::users::create_user(
+                &mut db,
+                auth::users::NewUser {
+                    username: "dewansh",
+                    display_name: None,
+                    password_hash: &hash,
+                    role: auth::users::Role::Owner,
+                },
+                "2026-08-16T00:00:00Z",
+            )
+            .unwrap();
+        }
+
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+        std::fs::remove_dir_all(&state).unwrap();
+        copy_tree(&dest, &state);
+
+        let db = auth::AuthDb::open(&state).unwrap();
+        let user = db
+            .find_user("dewansh")
+            .unwrap()
+            .expect("the restored server has no users");
+        assert_eq!(user.role, auth::users::Role::Owner);
+        let stored = db.password_hash_of(&user.id).unwrap().unwrap();
+        assert!(
+            hasher
+                .verify("correct horse battery".into(), stored)
+                .await
+                .unwrap(),
+            "the restored account exists but its password does not verify"
+        );
     }
 
     #[test]

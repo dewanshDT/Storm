@@ -1,5 +1,6 @@
 # Rust
 /apps/server/target/
+/tools/argon2-bench/target/
 
 # Flutter / Dart
 .dart_tool/
