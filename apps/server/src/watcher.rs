@@ -132,6 +132,14 @@ async fn apply(state: &Shared, hit: &Attributed) {
         let vaults = state.vaults.read().await;
         // An event under a directory that is not a registered vault is dropped
         // rather than treated as an error — the root can hold anything.
+        //
+        // **The one lookup that does not go through `api::vault_of`, and the
+        // only one that should not.** There is no caller here to authorize:
+        // the watcher is the server reacting to its own filesystem, so there
+        // is no user, no credential, and nothing a policy could sensibly
+        // refuse. Routing it through the boundary would also change its
+        // semantics — an unregistered directory is silently ignored here,
+        // where `vault_of` answers 404.
         match vaults.registry.by_dir(&hit.dir) {
             Some(entry) => vaults.get(&entry.id),
             None => None,

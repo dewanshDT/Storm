@@ -23,6 +23,7 @@
 //! - **`auth.db` is not derived.** Everything else in `state/` can be rebuilt
 //!   from the markdown; this cannot. See [`db`].
 
+pub mod authz;
 pub mod db;
 pub mod devices;
 pub mod identity;
