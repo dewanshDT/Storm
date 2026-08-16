@@ -230,6 +230,7 @@ class ServerConfig {
     required this.vaultCount,
     required this.mcpEnabled,
     required this.mcpWritable,
+    required this.legacyTokenEnabled,
   });
 
   final String vaultRoot;
@@ -249,12 +250,22 @@ class ServerConfig {
   /// does not know about writes must never appear to have them switched on.
   final bool mcpWritable;
 
+  /// Whether the server still accepts the legacy shared token (A10).
+  ///
+  /// **Absent reads as `true`, the opposite of the MCP flags above.** A server
+  /// old enough not to send the key is one where the shared token is the only
+  /// way in, so reading it as off would show "you have already migrated" to
+  /// someone who has not — and invite them to retire a credential the server
+  /// has no replacement for.
+  final bool legacyTokenEnabled;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
     vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
     mcpWritable: j['mcp_writable'] as bool? ?? false,
+    legacyTokenEnabled: j['legacy_token_enabled'] as bool? ?? true,
   );
 }
 
