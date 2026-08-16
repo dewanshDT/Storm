@@ -1,18 +1,9 @@
-#![allow(dead_code)] // Used by tests; REST/middleware callers land in a later slice.
 //! Client devices — an app installation, never a person.
 //!
 //! A device belongs to no user. A [`super::sessions::Session`] binds
 //! `(user, device)`, which is what lets two people share an iPad, lets "log
 //! out" mean one user on one device, and lets "revoke this device" mean all of
 //! it at once.
-//!
-//! **This module does not implement pairing.** The real enrolment path —
-//! `pairing_sessions`, the QR, the console nonce, `POST /v1/pair` — is a later
-//! slice and nothing here touches it. What exists here is the *synthetic*
-//! device the protocol names for operator-minted credentials:
-//!
-//! > `storm-server token --user dewansh --name "claude-code"`
-//! > → creates a synthetic client_device, logs in, prints one access token
 //!
 //! Synthetic or paired, a device is one row in one table and one entry in the
 //! device list, so revoking an agent's access is the same gesture as revoking a
@@ -29,6 +20,7 @@ pub const EVENT_DEVICE_CREATED: &str = "device_created";
 pub const EVENT_DEVICE_REVOKED: &str = "device_revoked";
 
 /// Recorded on devices this server minted for itself rather than paired.
+#[allow(dead_code)] // Used only by `create_synthetic`, which is wired by future CLI callers.
 pub const PLATFORM_SYNTHETIC: &str = "synthetic";
 
 /// A device row. **No `secret_hash`**, for the same reason [`super::users::User`]
@@ -99,6 +91,7 @@ impl AuthDb {
         self.find_device(id)
     }
 
+    #[allow(dead_code)] // Used only by `create_synthetic`.
     fn insert_device(&mut self, device: &Device, secret_hash: &[u8]) -> Result<()> {
         self.conn.execute(
             "INSERT INTO client_devices
@@ -168,6 +161,7 @@ fn row_to_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
 /// token the operator is handed; nothing will ever present this secret, and
 /// printing a second secret beside the token would only invite pasting the
 /// wrong one. Pairing mints — and hands over — its own.
+#[allow(dead_code)] // Called by `storm-server token` (not yet built) and tests.
 pub fn create_synthetic(db: &mut AuthDb, name: &str, now: &str) -> Result<Device> {
     let name = name.trim();
     if name.is_empty() {

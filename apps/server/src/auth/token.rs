@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Used by tests; REST/middleware callers land in a later slice.
 //! Opaque credentials: 256 random bits, stored as a blake3 hash.
 //!
 //! **These are not passwords and must not be hashed like them** (A5). A token
