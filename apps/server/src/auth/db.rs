@@ -30,7 +30,11 @@ pub const AUTH_DB_FILE: &str = "auth.db";
 /// Same rule as the index's `SCHEMA_VERSION`. When this needs its first real
 /// migration, build the old schema by hand in the test and migrate it: opening
 /// a fresh database runs the create path and never exercises the upgrade.
-const SCHEMA_VERSION: i64 = 1;
+///
+/// **1** — the original schema (slice 1).
+/// **2** — `sessions.previous_refresh_hash` (slice 3).
+/// **3** — `ws_tickets` (slice 4).
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct AuthDb {
     /// Visible to the rest of `auth` so each area keeps its own SQL beside its
@@ -92,6 +96,15 @@ impl AuthDb {
         Ok(db)
     }
 
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == column);
+        Ok(exists)
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
@@ -151,17 +164,18 @@ impl AuthDb {
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
-                id              TEXT PRIMARY KEY,
-                user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                device_id       TEXT NOT NULL REFERENCES client_devices(id) ON DELETE CASCADE,
-                access_hash     BLOB NOT NULL UNIQUE,
-                refresh_hash    BLOB NOT NULL UNIQUE,
-                created         TEXT NOT NULL,
-                expires         TEXT NOT NULL,
-                refresh_expires TEXT NOT NULL,
-                last_used       TEXT,
-                revoked         TEXT,
-                revoked_reason  TEXT
+                id                  TEXT PRIMARY KEY,
+                user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                device_id           TEXT NOT NULL REFERENCES client_devices(id) ON DELETE CASCADE,
+                access_hash         BLOB NOT NULL UNIQUE,
+                refresh_hash        BLOB NOT NULL UNIQUE,
+                previous_refresh_hash BLOB,
+                created             TEXT NOT NULL,
+                expires             TEXT NOT NULL,
+                refresh_expires     TEXT NOT NULL,
+                last_used           TEXT,
+                revoked             TEXT,
+                revoked_reason      TEXT
             );
             CREATE INDEX IF NOT EXISTS sessions_by_user   ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS sessions_by_device ON sessions(device_id);
@@ -204,6 +218,12 @@ impl AuthDb {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if current < SCHEMA_VERSION {
+            // v1→v2: add previous_refresh_hash to sessions.
+            if current < 2 && !self.column_exists("sessions", "previous_refresh_hash")? {
+                self.conn
+                    .execute_batch("ALTER TABLE sessions ADD COLUMN previous_refresh_hash BLOB;")?;
+            }
+
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -282,12 +302,13 @@ impl AuthDb {
         &self,
         kind: &str,
         user_id: Option<&str>,
+        device_id: Option<&str>,
         at: &str,
         detail: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO security_events (at, kind, user_id, detail) VALUES (?1, ?2, ?3, ?4)",
-            params![at, kind, user_id, detail],
+            "INSERT INTO security_events (at, kind, user_id, device_id, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![at, kind, user_id, device_id, detail],
         )?;
         Ok(())
     }
@@ -327,6 +348,21 @@ impl AuthDb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The v1 sessions table, without `previous_refresh_hash`.
+    const V1_SESSIONS: &str = "CREATE TABLE sessions (
+        id              TEXT PRIMARY KEY,
+        user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id       TEXT NOT NULL REFERENCES client_devices(id) ON DELETE CASCADE,
+        access_hash     BLOB NOT NULL UNIQUE,
+        refresh_hash    BLOB NOT NULL UNIQUE,
+        created         TEXT NOT NULL,
+        expires         TEXT NOT NULL,
+        refresh_expires TEXT NOT NULL,
+        last_used       TEXT,
+        revoked         TEXT,
+        revoked_reason  TEXT
+    )";
 
     fn table_names(db: &AuthDb) -> Vec<String> {
         let mut stmt = db
@@ -474,5 +510,31 @@ mod tests {
         let restored = AuthDb::open_at(&dest).unwrap();
         assert_eq!(restored.server().unwrap().unwrap().id, "srv_snapshot");
         assert_eq!(restored.active_credential_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_v1_database_gets_previous_refresh_hash_and_bumps_to_v2() {
+        let dir = tempdir::TempDir::new("storm-auth-mig-v2").unwrap();
+        // Build a v1 database by hand.
+        {
+            let conn = Connection::open(dir.path().join("auth.db")).unwrap();
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+                .unwrap();
+            // Create the old schema minus the new column.
+            conn.execute_batch(V1_SESSIONS).unwrap();
+            conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+        }
+
+        let db = AuthDb::open(dir.path()).unwrap();
+        let ver: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 2, "schema should be at v2 after migration");
+        assert!(
+            db.column_exists("sessions", "previous_refresh_hash")
+                .unwrap(),
+            "sessions should have previous_refresh_hash after v1→v2 migration"
+        );
     }
 }

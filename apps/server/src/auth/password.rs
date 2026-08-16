@@ -118,6 +118,7 @@ pub struct Hasher {
     permits: Arc<Semaphore>,
     in_flight: Arc<AtomicUsize>,
     peak: Arc<AtomicUsize>,
+    total_jobs: Arc<AtomicUsize>,
 }
 
 impl Default for Hasher {
@@ -145,6 +146,7 @@ impl Hasher {
             permits: Arc::new(Semaphore::new(permits)),
             in_flight: Arc::new(AtomicUsize::new(0)),
             peak: Arc::new(AtomicUsize::new(0)),
+            total_jobs: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -152,6 +154,13 @@ impl Hasher {
     #[cfg(test)]
     pub fn peak_in_flight(&self) -> usize {
         self.peak.load(Ordering::SeqCst)
+    }
+
+    /// Total number of jobs this hasher has completed. Used in tests to prove
+    /// that a missing user still pays for a hash.
+    #[cfg(test)]
+    pub fn jobs_run(&self) -> usize {
+        self.total_jobs.load(Ordering::SeqCst)
     }
 
     /// Runs one memory-hard job on the blocking pool, holding a permit for its
@@ -174,13 +183,16 @@ impl Hasher {
             .expect("the hashing semaphore is never closed");
         let in_flight = self.in_flight.clone();
         let peak = self.peak.clone();
+        let total_jobs = self.total_jobs.clone();
 
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let running = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             let _counted = InFlight(in_flight.clone());
             peak.fetch_max(running, Ordering::SeqCst);
-            job()
+            let result = job();
+            total_jobs.fetch_add(1, Ordering::SeqCst);
+            result
         })
         .await
         .context("the password hashing task failed")

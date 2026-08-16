@@ -21,12 +21,23 @@
 
 use anyhow::{Result, bail};
 use rusqlite::{OptionalExtension, params};
+use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime};
 
 use super::db::AuthDb;
 use super::identity::random_id;
 
 pub const MIN_USERNAME_CHARS: usize = 3;
 pub const MAX_USERNAME_CHARS: usize = 32;
+
+/// Failed logins tolerated before the account locks.
+pub const LOCKOUT_AFTER_FAILURES: i64 = 5;
+/// The first lock's length. It doubles per further failure.
+pub const LOCKOUT_BASE_MINUTES: i64 = 1;
+/// The ceiling. Past this, locking longer only helps someone locking a real
+/// user out on purpose — rate limiting per address is the answer to that, and
+/// it belongs to the middleware slice.
+pub const LOCKOUT_CAP_MINUTES: i64 = 15;
 
 /// Security event kinds written by this module. Every one of them is an
 /// administrative act on an account, which is exactly what an operator needs a
@@ -38,7 +49,7 @@ pub const EVENT_DISABLED: &str = "user_disabled";
 pub const EVENT_ENABLED: &str = "user_enabled";
 pub const EVENT_DELETED: &str = "user_deleted";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Role {
     Owner,
     Admin,
@@ -64,7 +75,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Status {
     Active,
     Disabled,
@@ -92,7 +103,7 @@ impl Status {
 /// **There is no `password_hash` field, on purpose.** A struct that carries the
 /// hash ends up in a log line or a JSON body eventually; the hash is fetched by
 /// [`AuthDb::password_hash_of`], a call whose name says what it is doing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct User {
     pub id: String,
     pub username: String,
@@ -193,6 +204,19 @@ impl AuthDb {
             users.push(row??);
         }
         Ok(users)
+    }
+
+    pub fn user_by_id(&self, id: &str) -> Result<Option<User>> {
+        let found = self
+            .conn
+            .query_row(
+                "SELECT id, username, display_name, role, status, created, last_login
+                 FROM users WHERE id = ?1",
+                params![id],
+                row_to_user,
+            )
+            .optional()?;
+        found.transpose()
     }
 
     /// Looks a user up by name, casefolded — `Dewansh` and `dewansh` are the
@@ -332,6 +356,7 @@ pub fn create_user(db: &mut AuthDb, spec: NewUser<'_>, now: &str) -> Result<User
     db.record_event(
         EVENT_USER_CREATED,
         Some(&user.id),
+        None,
         now,
         &format!(
             r#"{{"username":{:?},"role":"{}"}}"#,
@@ -354,7 +379,7 @@ pub fn set_password(
     // Clearing the lockout counters is part of the change, not a side effect:
     // A11 exists so an operator can rescue an account, and handing back one
     // that is still locked out would only half-work.
-    db.record_event(EVENT_PASSWORD_CHANGED, Some(&user.id), now, "{}")?;
+    db.record_event(EVENT_PASSWORD_CHANGED, Some(&user.id), None, now, "{}")?;
     Ok(user)
 }
 
@@ -370,6 +395,7 @@ pub fn set_role(db: &mut AuthDb, username: &str, role: Role, now: &str) -> Resul
     db.record_event(
         EVENT_ROLE_CHANGED,
         Some(&user.id),
+        None,
         now,
         &format!(
             r#"{{"from":"{}","to":"{}"}}"#,
@@ -390,7 +416,7 @@ pub fn set_status(db: &mut AuthDb, username: &str, status: Status, now: &str) ->
         Status::Disabled => EVENT_DISABLED,
         Status::Active => EVENT_ENABLED,
     };
-    db.record_event(kind, Some(&user.id), now, "{}")?;
+    db.record_event(kind, Some(&user.id), None, now, "{}")?;
     Ok(user)
 }
 
@@ -403,6 +429,7 @@ pub fn delete_user(db: &mut AuthDb, username: &str, now: &str) -> Result<User> {
     db.record_event(
         EVENT_DELETED,
         Some(&user.id),
+        None,
         now,
         &format!(r#"{{"username":{:?}}}"#, user.username),
     )?;
@@ -428,6 +455,95 @@ fn refuse_if_last_owner(db: &AuthDb, user: &User, verb: &str) -> Result<()> {
             user.username
         );
     }
+    Ok(())
+}
+
+// ---- lockout and login helpers (called by [`super::sessions::login`]) -------
+
+fn parse_time(ts: &str) -> Result<OffsetDateTime> {
+    OffsetDateTime::parse(ts, &Rfc3339)
+        .map_err(|e| anyhow::anyhow!("parsing timestamp `{ts}`: {e}"))
+}
+
+fn format_time(at: OffsetDateTime) -> String {
+    at.format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+/// Seconds until a locked account's window expires, or `None` if it is open.
+///
+/// Called before the hash: a locked account costs an attacker nothing to keep
+/// locked but costs us nothing either.
+pub fn lockout_remaining(db: &AuthDb, user_id: &str, now: &str) -> Result<Option<i64>> {
+    let locked_until: Option<String> = db.conn.query_row(
+        "SELECT locked_until FROM users WHERE id = ?1",
+        params![user_id],
+        |r| r.get(0),
+    )?;
+    let Some(locked) = locked_until else {
+        return Ok(None);
+    };
+    let at = parse_time(now)?;
+    let until = parse_time(&locked)?;
+    if until <= at {
+        return Ok(None);
+    }
+    Ok(Some((until - at).whole_seconds()))
+}
+
+/// Records a failed login attempt. Returns `Some(locked_until)` if the account
+/// was locked by this failure.
+pub fn note_failed_login(db: &mut AuthDb, user_id: &str, now: &str) -> Result<Option<String>> {
+    db.conn.execute(
+        "UPDATE users SET failed_count = failed_count + 1, updated = ?2
+         WHERE id = ?1",
+        params![user_id, now],
+    )?;
+
+    let (failed_count, current_lock): (i64, Option<String>) = db.conn.query_row(
+        "SELECT failed_count, locked_until FROM users WHERE id = ?1",
+        params![user_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    if let Some(ref locked) = current_lock
+        && parse_time(locked)? > parse_time(now)?
+    {
+        return Ok(Some(locked.clone()));
+    }
+
+    if failed_count >= LOCKOUT_AFTER_FAILURES {
+        let exponent = (failed_count - LOCKOUT_AFTER_FAILURES) as u32;
+        let minutes = std::cmp::min(
+            LOCKOUT_BASE_MINUTES.saturating_mul(2i64.saturating_pow(exponent)),
+            LOCKOUT_CAP_MINUTES,
+        );
+        let locked_until = format_time(parse_time(now)? + Duration::minutes(minutes));
+        db.conn.execute(
+            "UPDATE users SET locked_until = ?2 WHERE id = ?1",
+            params![user_id, locked_until],
+        )?;
+        return Ok(Some(locked_until));
+    }
+
+    Ok(None)
+}
+
+/// Clears the lockout counters on a successful login.
+pub fn note_successful_login(db: &mut AuthDb, user_id: &str, now: &str) -> Result<()> {
+    db.conn.execute(
+        "UPDATE users SET failed_count = 0, locked_until = NULL, last_login = ?2, updated = ?2
+         WHERE id = ?1",
+        params![user_id, now],
+    )?;
+    Ok(())
+}
+
+/// Upgrades a password hash (e.g. after a parameter bump). Clears lockout
+/// counters as a side effect — A11 exists so an operator can rescue an account,
+/// and handing back one that is still locked out would only half-rescue it.
+pub fn upgrade_password_hash(db: &mut AuthDb, user_id: &str, hash: &str, now: &str) -> Result<()> {
+    db.update_password_hash(user_id, hash, now)?;
     Ok(())
 }
 
