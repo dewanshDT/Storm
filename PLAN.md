@@ -55,9 +55,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–6 done · login-only screen next · A9 (vault grants) deferred |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–6 **merged to main**, not deployed · login-only screen next · A9 (vault grants) deferred |
 
-Last updated: 2026-08-13. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+Last updated: 2026-08-17. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
@@ -70,8 +70,11 @@ server/MCP/sync changes. **M18** adds desktop-first keyboard shortcuts
 (Shortcuts/Actions/Intent), platform-aware Meta vs Control, in-note find,
 and wide-layout sidebar collapse — phone touch layout unchanged. Shipped in
 **v0.2.4** (M18 is client-only; the server release is a version stamp).
-**M19** starts authentication (decisions 52 / 52a). Five server-side slices are
-complete. **Slice 1:** the server mints and keeps its own cryptographic identity,
+**M19** starts authentication (decisions 52 / 52a). Six slices — five server,
+one client — are complete and **merged to main** (PRs #10, #11, #13–#16,
+2026-08-17). Nothing is deployed: the VM still runs 0.2.2-1 with the shared
+token, and `legacy_token_enabled` defaults on, so merging changed nothing for
+any live client. **Slice 1:** the server mints and keeps its own cryptographic identity,
 `state/auth.db` exists with the full designed schema, backups carry it, and
 `GET /v1/server` / `POST /v1/server/challenge` answer unauthenticated. **Slice
 2:** local user accounts with Argon2id passwords at the parameters measured on the
@@ -96,6 +99,16 @@ enter a password. `logout()` therefore has no caller yet. A9 (vault-level
 grants) is deferred to after the client ships and
 before the relay — the `vault_grants` table and role checks are built but
 unwired; single-user servers (Owner role) bypass them entirely. Not deployed.
+
+**Deploying M19 is its own step, and the risky one.** Everything so far has been
+merged behind `legacy_token_enabled`, which defaults on — the shared token still
+works, which is exactly why the merge was safe. Turning it off is the cutover,
+and it is the first change in this project that can lock a working client out of
+a working server. It needs, in order: a release carrying `auth.db` and
+`state/identity/` through `backup_all()` on a real upgrade, a device paired
+against the VM, and only then the flag off. **A backup that has not been
+restored is a hope, not a backup** — and `auth.db` plus the key files are the
+only part of `state/` that cannot be rebuilt by rescanning markdown.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -2071,6 +2084,7 @@ for other reasons.
 semaphore and `needs_rehash` finally sit on a request path) → the three-tier
 middleware → pairing → client. The middleware slice is the one that stops being
 additive. *(All three shipped as of 2026-08-17; now building the Flutter client.)*
+*(Superseded: slice 6 shipped too, and all six merged to main the same day.)*
 
 **Slice 6 — the Flutter client pairs ✅** (2026-08-17, not deployed)
 
@@ -2103,6 +2117,32 @@ paired) and `unpair()` (forgets the server). Only `refreshSession` has a
 plausible caller today — see the login-screen gap noted above — so
 `auth_settings_test.dart` covers all three directly rather than letting them
 ship untested.
+
+**All six slices merged to main on 2026-08-17** (PRs #10, #11, #13–#16), in
+stack order. Nothing is deployed.
+
+**Two formatter failures that `make check` cannot see.** Both had been red in CI
+for days while `make check` reported clean, and getting the stack green meant
+fixing them first:
+
+- **`cargo fmt --check`** had been failing PR #11 since it opened — ordinary
+  line-wrap drift in the slice 2 files. Fixed at the base of the stack and
+  propagated by rebase.
+- **`dart format --set-exit-if-changed`** was failing the client job on *every*
+  PR, including #10, which contains no client changes at all. CI's
+  `channel: stable` had resolved to Flutter **3.47.0** while development runs
+  **3.44.8**, and the newer formatter rewrites two files nothing had touched.
+  `main` was last green 2026-08-11 — before the upstream bump. Fixed by pinning
+  `flutter-version: 3.44.8` in `ci.yml` *and* `release.yml`.
+
+The finding worth keeping: **`make check` runs clippy and the tests but never
+checks formatting**, so it is not the gate it looks like. `make fmt` rewrites
+files, which means the only thing that ever *checks* formatting is CI. And
+**a floating toolchain is a build input nobody wrote down** — `channel: stable`
+meant the SDK could change under a branch that had not been touched, turning
+the whole repo red with no commit to blame. Pinning `release.yml` too is
+deliberate: a release should be built by the SDK that CI validated, not by
+whatever `stable` pointed at that morning.
 
 ---
 
