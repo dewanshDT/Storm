@@ -1972,6 +1972,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_rate_limited_login_says_how_long_to_wait() {
+        // The protocol table maps rate limiting to 429 + Retry-After, and it is
+        // the one login refusal that is not a 401: the remedy is to wait, not
+        // to try different credentials. Driving `login_handler` to this state
+        // costs five real Argon2 verifies at 192 MiB, so the contract is pinned
+        // on the helper instead — the match arm that reaches it is one line.
+        let response = rate_limited(240);
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("240"),
+            "the header is the correct HTTP answer"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "rate_limited");
+        assert_eq!(
+            body["retry_after"], 240,
+            "and the body is what the client renders — a message that says \
+             'too many attempts' without saying for how long invites the retry \
+             it is trying to stop"
+        );
+    }
+
     #[test]
     fn a_registry_predating_the_switch_keeps_the_legacy_token() {
         // The direction that matters. An upgrade must not refuse every client
