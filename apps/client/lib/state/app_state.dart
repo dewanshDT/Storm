@@ -8,6 +8,7 @@ import '../api/auth_api.dart';
 import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
+import 'secret_store.dart';
 import '../ui/theme.dart';
 import '../ui/tokens.dart';
 import '../sync/sync_engine.dart';
@@ -203,12 +204,19 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kUserId = 'storm.userId';
   static const _kServerId = 'storm.serverId';
 
+  /// Holds the credentials, and knows how to get them out of prefs. Injectable
+  /// so tests can drive a fake keychain.
+  SecretStore secrets = SecretStore();
+
   @override
   Future<Settings> build() async {
     final prefs = await SharedPreferences.getInstance();
+    // Credentials come from the keychain, not from `prefs`, and the first load
+    // after an upgrade migrates whatever is still in `prefs` across.
+    final secret = await secrets.load(prefs);
     return Settings(
       baseUrl: prefs.getString(_kUrl) ?? '',
-      token: prefs.getString(_kToken) ?? '',
+      token: secret[_kToken] ?? '',
       theme: _themeFrom(prefs),
       fontSize: prefs.getDouble(_kFont) ?? 16,
       activeVault: prefs.getString(_kVault) ?? '',
@@ -218,11 +226,11 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       // opted out. Only an explicit `false` turns Read Mode off.
       readMode: prefs.getBool(_kReadMode) ?? true,
       deviceId: prefs.getString(_kDeviceId) ?? '',
-      deviceSecret: prefs.getString(_kDeviceSecret) ?? '',
+      deviceSecret: secret[_kDeviceSecret] ?? '',
       serverKeyId: prefs.getString(_kServerKeyId) ?? '',
       serverPublicKey: prefs.getString(_kServerPubKey) ?? '',
-      accessToken: prefs.getString(_kAccessToken) ?? '',
-      refreshToken: prefs.getString(_kRefreshToken) ?? '',
+      accessToken: secret[_kAccessToken] ?? '',
+      refreshToken: secret[_kRefreshToken] ?? '',
       accessTokenExpiresAt: prefs.getString(_kAccessExpires) ?? '',
       userId: prefs.getString(_kUserId) ?? '',
       serverId: prefs.getString(_kServerId) ?? '',
@@ -252,7 +260,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_kUrl, cleaned.baseUrl);
-    await prefs.setString(_kToken, cleaned.token);
     await prefs.setString(_kTheme, cleaned.theme.wire);
     await prefs.setDouble(_kFont, cleaned.fontSize);
     await prefs.setString(_kVault, cleaned.activeVault);
@@ -260,14 +267,20 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setBool(_kShowId, cleaned.showNoteId);
     await prefs.setBool(_kReadMode, cleaned.readMode);
     await prefs.setString(_kDeviceId, cleaned.deviceId);
-    await prefs.setString(_kDeviceSecret, cleaned.deviceSecret);
     await prefs.setString(_kServerKeyId, cleaned.serverKeyId);
     await prefs.setString(_kServerPubKey, cleaned.serverPublicKey);
-    await prefs.setString(_kAccessToken, cleaned.accessToken);
-    await prefs.setString(_kRefreshToken, cleaned.refreshToken);
     await prefs.setString(_kAccessExpires, cleaned.accessTokenExpiresAt);
     await prefs.setString(_kUserId, cleaned.userId);
     await prefs.setString(_kServerId, cleaned.serverId);
+
+    // The four credentials, to the keychain. Last, so a failure here cannot
+    // leave the non-secret half of a save unwritten.
+    await secrets.save(prefs, {
+      _kToken: cleaned.token,
+      _kDeviceSecret: cleaned.deviceSecret,
+      _kAccessToken: cleaned.accessToken,
+      _kRefreshToken: cleaned.refreshToken,
+    });
   }
 
   /// Extends the session using the refresh token.
