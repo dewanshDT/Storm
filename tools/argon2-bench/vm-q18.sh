@@ -32,6 +32,34 @@ WITH_STAGING=0
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
+# Teardown runs from a trap, not from the end of the script: anything that
+# leaves state on someone's server has to clean up on *every* exit path,
+# including the ones that were not planned. The prod re-check lives here too,
+# so a failed run still tells you whether prod is fine.
+#
+# It kills by **pidfile, never `pkill -f`**. `pkill -f 'storm-server-staging
+# serve'` matches on the whole command line — and the command line of the very
+# ssh shell running the pkill contains that string, so it kills its own parent
+# and the `rm` after it never runs. The symptom is a teardown that prints its
+# heading, reports nothing, and quietly leaves a binary in /tmp on the server.
+cleaned=0
+teardown() {
+    [ "$cleaned" = 1 ] && return
+    cleaned=1
+    say "teardown — nothing of ours is left running"
+    ssh "$HOST" "if [ -f $STAGING/server.pid ]; then
+        kill \$(cat $STAGING/server.pid) 2>/dev/null || true
+        sleep 1
+      fi
+      rm -rf $REMOTE $STAGING
+      echo 'leftover dirs:' \$(ls -d $REMOTE $STAGING 2>/dev/null | wc -l)" || true
+
+    say "prod, after all of that"
+    ssh "$HOST" "systemctl is-active storm-server
+      curl -sf -o /dev/null -w 'prod health: HTTP %{http_code}\n' http://127.0.0.1:8484/v1/health
+      pgrep -af 'storm-server serve' | head -1" || true
+}
+
 if [ ! -x "$BENCH" ]; then
     echo "no Linux benchmark binary at $BENCH" >&2
     echo "build it first:  ./build.sh" >&2
@@ -44,6 +72,10 @@ if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$HOST" true 2>/dev/null; then
     echo "network — check you are on the right Wi-Fi, not a guest or hotspot." >&2
     exit 1
 fi
+
+# Armed only now: before this point nothing has been copied to the VM, and a
+# teardown that ran on a failed connectivity check would just be noise.
+trap teardown EXIT
 
 say "preflight: prod must be healthy before we touch anything"
 ssh "$HOST" "set -e
@@ -76,6 +108,7 @@ if [ "$WITH_STAGING" = 1 ]; then
       nohup $REMOTE/storm-server-staging serve \
         --vault-root $STAGING/vaults --state $STAGING/state \
         --token stagingtoken --port $PORT > $STAGING/server.log 2>&1 &
+      echo \$! > $STAGING/server.pid
       for i in \$(seq 1 40); do
         curl -sf -o /dev/null http://127.0.0.1:$PORT/v1/health && break
         sleep 0.5
@@ -102,13 +135,14 @@ if [ "$WITH_STAGING" = 1 ]; then
     ssh "$HOST" "set -e
       BEFORE=\$(curl -sf http://127.0.0.1:$PORT/v1/server)
       $REMOTE/storm-server-staging backup-db --state $STAGING/state $STAGING/backup
-      pkill -f 'storm-server-staging serve' || true
+      kill \$(cat $STAGING/server.pid) 2>/dev/null || true
       sleep 1
       rm -rf $STAGING/state && mkdir -p $STAGING/state
       cp -a $STAGING/backup/. $STAGING/state/
       nohup $REMOTE/storm-server-staging serve \
         --vault-root $STAGING/vaults --state $STAGING/state \
         --token stagingtoken --port $PORT > $STAGING/server2.log 2>&1 &
+      echo \$! > $STAGING/server.pid
       for i in \$(seq 1 40); do
         curl -sf -o /dev/null http://127.0.0.1:$PORT/v1/health && break
         sleep 0.5
@@ -122,17 +156,7 @@ if [ "$WITH_STAGING" = 1 ]; then
   fi
 fi
 
-say "teardown — nothing of ours is left running"
-ssh "$HOST" "pkill -f 'storm-server-staging serve' || true
-  sleep 1
-  rm -rf $REMOTE $STAGING
-  echo 'staging processes:' \$(pgrep -fc 'storm-server-staging' || echo 0)
-  echo 'leftover dirs:' \$(ls -d $REMOTE $STAGING 2>/dev/null | wc -l)"
-
-say "prod, after all of that"
-ssh "$HOST" "systemctl is-active storm-server
-  curl -sf -o /dev/null -w 'prod health: HTTP %{http_code}\n' http://127.0.0.1:8484/v1/health
-  pgrep -af 'storm-server serve' | head -1"
+teardown
 
 echo
 echo "Q18 numbers saved to $RESULTS"

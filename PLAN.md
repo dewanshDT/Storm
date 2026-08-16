@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity | **in progress** | slice 1 done: `auth.db`, Ed25519 identity, backup, `/v1/server` |
+| M19 | Auth phase 1 — server identity | **in progress** | slice 1 verified on the VM · Q18 measured: 192 MiB, t=1, p=1 |
 
 Last updated: 2026-08-13. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -1919,9 +1919,48 @@ The server name defaults to `/etc/hostname` (falling back to `Storm`) and is
 set once, at creation. There is no rename path yet — that belongs with the
 settings surface in a later slice.
 
-**Next slices, in order:** user model + Argon2id (blocked on **Q18**, measuring
-the parameters on the VM) → sessions → the three-tier middleware → pairing →
-client. The middleware slice is the one that stops being additive.
+**Q18 — Argon2id parameters, measured ✅** (2026-08-16, on the VM)
+
+`tools/argon2-bench` is the instrument, because A1's revisit trigger is a
+*re-measure* and a number pasted into a chat is not one. Measured on the
+homelab VM (3 vCPU, 3815 MB) while prod was serving, `nice`d, prod health
+checked before and after:
+
+```
+m = 196608 KiB (192 MiB), t = 1, p = 1   ->  173.6 ms per verify
+```
+
+Stable across four runs (173.6 / 173.0 / 173.6 / 174.8 ms). Raw sweep in
+`tools/argon2-bench/q18-vm-results.txt`.
+
+Three findings that constrain the user-model slice:
+
+- **`p` stays 1.** p=1 and p=2 measure identically — the `argon2` crate does
+  not thread without its `parallel` feature, so more lanes would cost memory
+  and buy no speed.
+- **Memory beats passes.** 192 MiB / t=1 is preferred over the leanest
+  in-window option (96 MiB / t=2, 150.5 ms): at a fixed time budget the
+  attacker's cost is bounded by memory, which is also RFC 9106's ordering.
+- **Login must bound its concurrency.** Verify runs on `spawn_blocking`, whose
+  pool defaults to 512 threads; 512 × 192 MiB is an OOM that takes the vault
+  server down. A semaphore of 2 holds the peak at ~384 MiB (measured 207 ms
+  wall for two at once). **Do not shrink the KDF to work around a missing
+  bound — add the bound.** The laptop, for contrast, wanted 192 MiB *at t=2*
+  for the same latency, which is exactly the gap A1 was written about.
+
+**Slice 1 verified on the VM** (2026-08-16). A staging server on :8585 with its
+own vault root and state under `/tmp` — never `storm-server up`, never
+systemctl, prod on :8484 untouched throughout and health-checked either side.
+It minted `srv_Q2T0B4C90VQDQW9HGW7JNHJYB4`, named itself `ubuntu` from
+`/etc/hostname`, wrote its key at `-rw-------`, answered `/v1/server` and the
+challenge with no credential, still refused `/v1/vaults` without the token, and
+came back from a backup → wipe → restore with an identical identity. Torn down;
+prod's `state/` has no `auth.db`, which is the proof staging stayed in its own
+directory.
+
+**Next slices, in order:** user model + Argon2id (Q18 now answered) → sessions
+→ the three-tier middleware → pairing → client. The middleware slice is the one
+that stops being additive.
 
 ---
 
@@ -2072,10 +2111,10 @@ Use a pattern that cannot match the invoking shell.
   *TODO — Storm Relay*. **Auth is fully designed** (decision 52a): *Storm Auth
   Data Model* + *Storm Auth Protocol*, Q1–Q9 resolved as A1–A11. **Built so
   far:** the server identity slice — `auth.db`, the Ed25519 credential, backup
-  coverage, and the two unauthenticated identity routes. Still to do, in order:
-  the user model (blocked on **Q18**, measuring Argon2id on the VM), sessions,
-  the three-tier middleware, pairing, then the client. Relay work does not
-  start until auth is done.
+  coverage, and the two unauthenticated identity routes — verified on the VM
+  against a staging server, with **Q18 measured** (192 MiB, t=1, p=1, 173.6 ms).
+  Still to do, in order: the user model, sessions, the three-tier middleware,
+  pairing, then the client. Relay work does not start until auth is done.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.

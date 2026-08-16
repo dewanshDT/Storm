@@ -208,6 +208,33 @@ fn main() {
             println!("  one verify: {:.1} ms (median)", s.median_ms);
             println!("  Params::new({}, {}, {}, None)", s.m_kib, s.t, s.p);
 
+            // The headline maximises memory, which is the axis that costs an
+            // attacker. Someone re-measuring on a smaller box may want to trade
+            // that for a smaller blast radius under a login burst, so name the
+            // cheapest in-window option rather than making them re-read the
+            // table for it.
+            if let Some(lean) = all
+                .iter()
+                .filter(|c| c.in_target())
+                .min_by_key(|c| (c.m_kib, c.t))
+                && lean.m_kib != s.m_kib
+            {
+                println!(
+                    "\n  leanest in-window alternative: m = {} KiB ({:.0} MiB), t = {}, p = {} \
+                     at {:.1} ms",
+                    lean.m_kib,
+                    lean.mib(),
+                    lean.t,
+                    lean.p,
+                    lean.median_ms
+                );
+                println!(
+                    "  ({:.0} MiB less per concurrent verify; take it only if the box \
+                     cannot afford the burst)",
+                    s.mib() - lean.mib()
+                );
+            }
+
             let cpus = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(2);

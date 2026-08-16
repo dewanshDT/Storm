@@ -42,12 +42,38 @@ each holding the full memory cost. The burst is capped at 512 MiB total by
 default (`STORM_BENCH_BURST_MIB`) so measuring a live homelab server cannot
 push it into swap.
 
-## Reference: an M-series Mac, which is *not* the answer
+## The answer, measured 2026-08-16
 
-Recorded only to show the gap A1 is warning about. On an M-series laptop
-(10 cores) the sweep tops out needing **192 MiB, t=2, p=1** for 151 ms — a
-setting that would be far too slow on a 3-vCPU guest. Measure the guest.
+On the homelab VM — 3 vCPU, 3815 MB RAM, Ubuntu, *while prod was serving*,
+`nice -n 10`. Raw output in `q18-vm-results.txt`.
 
-Once the VM numbers exist, write them into the vault note **Storm Auth
-Protocol** (and A1 in **Storm Remote Decisions**), then tick Q18 in
-**TODO — Storm Authentication**.
+```
+m = 196608 KiB (192 MiB), t = 1, p = 1   ->  173.6 ms per verify
+Params::new(196608, 1, 1, None)
+```
+
+Stable across four runs: 173.6 / 173.0 / 173.6 / 174.8 ms.
+
+Three things the sweep settled beyond the headline number:
+
+- **`p` must stay 1.** The p=1 and p=2 columns are identical to within noise,
+  because the `argon2` crate does not thread without its `parallel` feature.
+  Raising `p` there would buy the memory cost of more lanes and no speed at
+  all.
+- **Memory over passes.** At a fixed time budget the attacker's cost is bounded
+  by memory, so 192 MiB / t=1 beats 96 MiB / t=2 (150.5 ms) even though the
+  latter is cheaper per verify. RFC 9106 makes the same ordering.
+- **The login path needs a concurrency bound, and this is why.** Storm verifies
+  on `spawn_blocking`, whose pool defaults to 512 threads — 512 × 192 MiB is an
+  OOM that takes the vault server down with it. A semaphore of 2 keeps the peak
+  at ~384 MiB, measured at 207 ms wall for two simultaneous verifies. Do not
+  shrink the KDF to work around a missing bound; add the bound.
+
+If the box ever cannot afford that burst, the leanest in-window setting is
+**96 MiB, t=2, p=1** at 150.5 ms.
+
+### Reference: an M-series Mac, which is *not* the answer
+
+Recorded to show the gap A1 warns about. The same sweep on an M-series laptop
+tops out needing **192 MiB, t=2, p=1** for 151 ms — nearly twice the work for
+the same latency. Measure the guest, always.

@@ -1,0 +1,62 @@
+Argon2id parameter sweep — Storm Q18 / decision A1
+target: 150-300 ms per verify
+
+     memory    t   p     median        min        max
+  --------------------------------------------------------
+      19 MiB    1   1     16.0 ms     15.8 ms     16.6 ms
+      32 MiB    1   1     27.9 ms     27.8 ms     28.0 ms
+      46 MiB    1   1     40.8 ms     40.7 ms     41.4 ms
+      64 MiB    1   1     57.2 ms     57.2 ms     57.3 ms
+      96 MiB    1   1     86.7 ms     86.7 ms     86.9 ms
+     128 MiB    1   1    118.5 ms    115.8 ms    119.0 ms
+     192 MiB    1   1    174.8 ms    174.5 ms    175.0 ms   <- in target
+      19 MiB    2   1     26.4 ms     26.3 ms     27.0 ms
+      32 MiB    2   1     47.9 ms     47.7 ms     48.1 ms
+      46 MiB    2   1     73.2 ms     70.4 ms     74.0 ms
+      64 MiB    2   1     99.3 ms     99.1 ms     99.5 ms
+      96 MiB    2   1    150.5 ms    150.4 ms    150.9 ms   <- in target
+     128 MiB    2   1    202.4 ms    202.0 ms    203.2 ms   <- in target
+     192 MiB    2   1    308.4 ms    307.9 ms    309.4 ms
+      19 MiB    3   1     37.8 ms     37.6 ms     38.1 ms
+      32 MiB    3   1     68.4 ms     67.9 ms     68.6 ms
+      46 MiB    3   1     99.1 ms     98.6 ms     99.5 ms
+      64 MiB    3   1    141.3 ms    140.6 ms    145.4 ms
+      96 MiB    3   1    220.4 ms    218.2 ms    220.7 ms   <- in target
+     128 MiB    3   1    289.9 ms    289.6 ms    290.3 ms   <- in target
+     192 MiB    3   1    443.0 ms    442.4 ms    446.8 ms
+      19 MiB    1   2     15.3 ms     15.2 ms     15.3 ms
+      32 MiB    1   2     28.1 ms     28.0 ms     28.2 ms
+      46 MiB    1   2     41.5 ms     41.3 ms     41.6 ms
+      64 MiB    1   2     57.5 ms     57.5 ms     57.8 ms
+      96 MiB    1   2     87.7 ms     87.3 ms     88.8 ms
+     128 MiB    1   2    119.5 ms    118.0 ms    119.9 ms
+     192 MiB    1   2    176.4 ms    176.3 ms    178.1 ms   <- in target
+      19 MiB    2   2     26.9 ms     26.7 ms     27.0 ms
+      32 MiB    2   2     49.1 ms     48.9 ms     49.2 ms
+      46 MiB    2   2     73.5 ms     72.2 ms     74.0 ms
+      64 MiB    2   2     99.9 ms     99.8 ms    100.3 ms
+      96 MiB    2   2    150.9 ms    150.6 ms    152.1 ms   <- in target
+     128 MiB    2   2    204.5 ms    204.2 ms    204.8 ms   <- in target
+     192 MiB    2   2    313.4 ms    310.5 ms    314.2 ms
+      19 MiB    3   2     38.6 ms     38.3 ms     38.8 ms
+      32 MiB    3   2     69.8 ms     69.5 ms     70.5 ms
+      46 MiB    3   2    101.8 ms    101.6 ms    102.2 ms
+      64 MiB    3   2    145.8 ms    143.0 ms    146.5 ms
+      96 MiB    3   2    215.6 ms    214.8 ms    215.9 ms   <- in target
+     128 MiB    3   2    288.4 ms    287.4 ms    288.8 ms   <- in target
+     192 MiB    3   2    443.6 ms    443.3 ms    444.4 ms
+
+==========================================================
+RECOMMENDED for this box:
+  m = 196608 KiB (192 MiB), t = 1, p = 1
+  one verify: 174.8 ms (median)
+  Params::new(196608, 1, 1, None)
+
+  leanest in-window alternative: m = 98304 KiB (96 MiB), t = 2, p = 1 at 150.5 ms
+  (96 MiB less per concurrent verify; take it only if the box cannot afford the burst)
+
+  (burst capped at 2 of 3 threads to stay under the 512 MiB budget — this box is serving something)
+
+  burst of 2 simultaneous verifies: 207.0 ms wall, slowest 206.6 ms
+  peak memory for that burst: ~384 MiB (2 x 192 MiB)
+==========================================================
