@@ -74,9 +74,14 @@ pub struct AppState {
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
     /// Whether the legacy `STORM_TOKEN` is accepted on session-tier routes.
-    /// Defaults `true`; the operator turns it off from the app after pairing
-    /// devices (A10).
-    pub legacy_token_enabled: bool,
+    ///
+    /// Mirrors `Registry::legacy_token_enabled`, which is the persisted copy;
+    /// this one exists so the middleware can read it without taking the vault
+    /// lock on every request. Atomic rather than a plain `bool` because the
+    /// switch has to take effect on the *next request* — an operator turning
+    /// the legacy token off and still being let in until they restart would
+    /// make the confirmation step of the A10 cutover meaningless.
+    pub legacy_token_enabled: std::sync::atomic::AtomicBool,
     /// Bootstrap pairing nonce (plaintext), if one was created at boot when
     /// the user table was empty. Needed to reconstruct the QR payload for
     /// the console log. Not read after boot — the field exists so a future
@@ -235,6 +240,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/vaults/{vault}", delete(remove_vault))
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
+        .route("/v1/config/legacy-token", put(put_legacy_token))
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
@@ -724,6 +730,14 @@ pub struct SessionAuth {
     pub authenticated: crate::auth::sessions::Authenticated,
 }
 
+/// The caller authenticated with the legacy shared `STORM_TOKEN`.
+///
+/// Set instead of [`SessionAuth`] on the legacy path, which has no user,
+/// device or session behind it. Only `put_legacy_token` reads it, to refuse a
+/// request that would switch off the very credential it arrived on.
+#[derive(Clone)]
+pub struct LegacyAuth;
+
 /// Tier-aware authentication middleware.
 ///
 /// Reads `RequiredTier` from the request extensions (set by the router layer)
@@ -801,13 +815,20 @@ async fn require_auth(
     if let Some(token) = credential.strip_prefix("Bearer ") {
         // Session-tier only: legacy token fallback.
         if tier == RequiredTier::Session
-            && state.legacy_token_enabled
+            && state
+                .legacy_token_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
             && constant_time_eq(token, &state.token)
         {
             // Legacy token: owner-equivalent. No device, no session extension —
             // handlers that need them will have to handle the absence. This is
             // the deliberate contract: the legacy path exists for backward
             // compatibility and cannot create the first user (A10).
+            //
+            // The marker lets a handler notice it is talking to the legacy
+            // credential. Only the legacy-token switch uses it, to refuse to
+            // saw off the branch the caller is sitting on.
+            request.extensions_mut().insert(LegacyAuth);
             return next.run(request).await;
         }
 
@@ -986,6 +1007,10 @@ struct ConfigResponse {
     mcp_enabled: bool,
     /// Whether MCP may create, edit and delete notes.
     mcp_writable: bool,
+    /// Whether the legacy shared token is still accepted (A10). The app shows
+    /// this and can change it, which is the whole point — the migration is a
+    /// reversible switch, not a release boundary.
+    legacy_token_enabled: bool,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -996,6 +1021,7 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         vault_count: vaults.registry.vaults.len(),
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
+        legacy_token_enabled: vaults.registry.legacy_token_enabled,
     }))
 }
 
@@ -1045,6 +1071,84 @@ async fn put_mcp(
     Ok(Json(serde_json::json!({
         "mcp_enabled": body.enabled,
         "mcp_writable": body.enabled && body.writable,
+    })))
+}
+
+#[derive(Deserialize)]
+struct LegacyTokenBody {
+    enabled: bool,
+}
+
+/// Turns the legacy shared `STORM_TOKEN` on or off, now and across restarts.
+///
+/// This is the switch A10 specifies, and the last step of the migration off
+/// the shared token. It is deliberately a *switch* rather than a release
+/// boundary: the operator turns it off, checks that their paired devices still
+/// work, and turns it back on if anything broke. A migration you cannot undo,
+/// on the machine holding the only copy of a vault, is how someone locks
+/// themselves out.
+///
+/// Two refusals guard exactly that, because neither is expressible as a type:
+///
+/// - **Not while there is no active owner.** Disabling the legacy token on a
+///   server with no account that can log in leaves nobody who can administer
+///   it. Recovery would mean reading a pairing QR out of the journal, which is
+///   not a thing to discover *after* the fact.
+/// - **Not over the legacy token itself.** A caller authenticated by
+///   `STORM_TOKEN` disabling `STORM_TOKEN` loses access with the response, and
+///   cannot turn it back on — the reversibility above would be a fiction. A10
+///   orders it plainly: pair, create the user, log in, *then* switch.
+///
+/// Re-enabling has neither guard. Getting back in is always allowed.
+///
+/// The atomic is set *after* the registry is saved, matching `put_mcp`: if the
+/// write fails the credential keeps working, which is the honest outcome. The
+/// other order would report success while the setting reverted on next boot.
+async fn put_legacy_token(
+    State(state): State<Shared>,
+    legacy: Option<Extension<LegacyAuth>>,
+    Json(body): Json<LegacyTokenBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !body.enabled {
+        if legacy.is_some() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "this request is authenticated with the legacy token, and turning \
+                 it off would revoke your own access with no way to turn it back \
+                 on. Pair a device and log in, then disable it."
+                    .into(),
+            ));
+        }
+        let active_owners = {
+            let auth_db = state.auth_db.lock().await;
+            auth_db.active_owner_count()?
+        };
+        if active_owners == 0 {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "no active owner account exists, so disabling the legacy token \
+                 would leave nobody able to administer this server. Create an \
+                 account first."
+                    .into(),
+            ));
+        }
+    }
+
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.legacy_token_enabled = body.enabled;
+        vaults.registry.save(&state.state_dir)?;
+    }
+    state
+        .legacy_token_enabled
+        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
+
+    tracing::info!(
+        enabled = body.enabled,
+        "legacy shared token toggled (A10 migration switch)"
+    );
+    Ok(Json(serde_json::json!({
+        "legacy_token_enabled": body.enabled,
     })))
 }
 
@@ -1576,6 +1680,13 @@ mod tests {
     /// Enough for every question about the auth tiers, which are decided
     /// before any vault is touched.
     fn test_router(dir: &FsPath) -> (Router, Arc<crate::auth::ServerIdentity>) {
+        let (app, identity, _) = test_router_with_state(dir);
+        (app, identity)
+    }
+
+    /// As [`test_router`], but hands back the state too — for the tests that
+    /// have to look at what a request *persisted*, not only what it answered.
+    fn test_router_with_state(dir: &FsPath) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let root = dir.join("vaults");
@@ -1602,18 +1713,19 @@ mod tests {
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            legacy_token_enabled: true,
+            legacy_token_enabled: std::sync::atomic::AtomicBool::new(true),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
         });
         (
             router(
-                state,
+                state.clone(),
                 crate::mcp::McpOptions {
                     allowed_hosts: vec![],
                 },
             ),
             identity,
+            state,
         )
     }
 
@@ -1644,6 +1756,214 @@ mod tests {
             .header("content-type", "application/json")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    fn get_with_auth(path: &str, auth: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .uri(path)
+            .header("authorization", auth)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn put_json(
+        path: &str,
+        body: serde_json::Value,
+        auth: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(credential) = auth {
+            builder = builder.header("authorization", credential);
+        }
+        builder
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// Gives the server one active owner, so the "nobody could administer this"
+    /// guard is satisfied and the *other* guard is what a test is measuring.
+    ///
+    /// The stored hash is a fixed PHC string and is never verified: these tests
+    /// are about the switch, not about login, and a real Argon2id hash at the
+    /// measured parameters would cost 192 MiB and ~170 ms apiece to prove
+    /// nothing they assert.
+    async fn seed_owner(state: &Shared) -> String {
+        let mut auth_db = state.auth_db.lock().await;
+        crate::auth::users::create_user(
+            &mut auth_db,
+            crate::auth::users::NewUser {
+                username: "dewansh",
+                display_name: None,
+                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
+                role: crate::auth::users::Role::Owner,
+            },
+            "2026-08-17T00:00:00Z",
+        )
+        .unwrap()
+        .id
+    }
+
+    /// A session token for `user_id`, minted directly rather than through
+    /// `login`, for the same reason [`seed_owner`] fakes the hash.
+    async fn session_token(state: &Shared, user_id: &str) -> String {
+        let mut auth_db = state.auth_db.lock().await;
+        let device =
+            crate::auth::devices::create_synthetic(&mut auth_db, "test", "2026-08-17T00:00:00Z")
+                .unwrap();
+        crate::auth::sessions::create(&mut auth_db, user_id, &device.id, "2026-08-17T00:00:00Z")
+            .unwrap()
+            .access_token
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_switch_persists_and_takes_effect_at_once() {
+        // The A10 migration switch. It has to survive a restart (the registry)
+        // *and* apply to the next request (the atomic) — a switch that only
+        // takes effect on reboot makes "turn it off and check" meaningless.
+        let dir = tempdir::TempDir::new("storm-legacy-switch").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/legacy-token",
+                serde_json::json!({ "enabled": false }),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["legacy_token_enabled"], false);
+
+        // Applied now, without a restart.
+        assert!(
+            !state
+                .legacy_token_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        // And the legacy credential really stops working.
+        let (status, _) = send(&app, get_with_auth("/v1/config", "Bearer testtoken")).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the shared token must be refused once the switch is off"
+        );
+
+        // Persisted, so a restart does not silently re-enable it.
+        let reloaded = Registry::load(&state.state_dir, FsPath::new("/nonexistent")).unwrap();
+        assert!(!reloaded.legacy_token_enabled);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_cannot_switch_itself_off() {
+        // Reversibility is the whole point of A10's switch, and a caller who
+        // disables the credential they are holding cannot turn it back on.
+        let dir = tempdir::TempDir::new("storm-legacy-selfoff").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner(&state).await;
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/legacy-token",
+                serde_json::json!({ "enabled": false }),
+                Some("Bearer testtoken"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            state
+                .legacy_token_enabled
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "a refused request must not have changed the setting"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_stays_on_while_nobody_can_log_in() {
+        // With no account, turning the shared token off leaves no way into the
+        // server except a pairing QR in the journal. Refuse rather than let
+        // someone discover that afterwards.
+        let dir = tempdir::TempDir::new("storm-legacy-noowner").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/legacy-token",
+                serde_json::json!({ "enabled": false }),
+                Some("Bearer testtoken"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            state
+                .legacy_token_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn re_enabling_the_legacy_token_is_always_allowed() {
+        // Getting back in is never guarded. The switch is only dangerous in one
+        // direction, and treating both the same would strand an operator who
+        // turned it off and found their devices broken.
+        let dir = tempdir::TempDir::new("storm-legacy-reenable").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/legacy-token",
+                serde_json::json!({ "enabled": false }),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/legacy-token",
+                serde_json::json!({ "enabled": true }),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["legacy_token_enabled"], true);
+        assert!(
+            state
+                .legacy_token_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn a_registry_predating_the_switch_keeps_the_legacy_token() {
+        // The direction that matters. An upgrade must not refuse every client
+        // that has been working all along, so an absent field reads as `true` —
+        // the opposite of the MCP flags beside it.
+        let registry: Registry =
+            serde_json::from_str(r#"{"root":"/srv/storm/vaults","vaults":[],"mcp_enabled":true}"#)
+                .unwrap();
+        assert!(
+            registry.legacy_token_enabled,
+            "an older registry must load with the shared token still accepted"
+        );
+        // And the type's own default agrees, so a `Registry::default()` cannot
+        // lock a server out either.
+        assert!(Registry::default().legacy_token_enabled);
     }
 
     #[tokio::test]
