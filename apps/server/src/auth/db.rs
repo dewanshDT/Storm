@@ -355,6 +355,71 @@ impl AuthDb {
         tx.commit()?;
         Ok(())
     }
+
+    // ---- pairing sessions ------------------------------------------------
+
+    pub fn insert_pairing_session(
+        &self,
+        id: &str,
+        nonce_hash: &[u8],
+        purpose: &str,
+        created_by: Option<&str>,
+        created: &str,
+        expires: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO pairing_sessions
+                 (id, nonce_hash, purpose, created_by, created, expires)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, nonce_hash, purpose, created_by, created, expires],
+        )?;
+        Ok(())
+    }
+
+    pub fn pairing_session_by_nonce_hash(
+        &self,
+        nonce_hash: &[u8],
+    ) -> Result<Option<crate::auth::pairing::PairingRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, purpose, expires, consumed, attempts
+                 FROM pairing_sessions WHERE nonce_hash = ?1",
+                params![nonce_hash],
+                |r| {
+                    Ok(crate::auth::pairing::PairingRow {
+                        id: r.get(0)?,
+                        purpose: r.get(1)?,
+                        expires: r.get(2)?,
+                        consumed: r.get(3)?,
+                        attempts: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn count_users(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?)
+    }
+
+    pub fn mark_pairing_consumed(&self, id: &str, consumed_by: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pairing_sessions SET consumed = ?2, consumed_by = ?3 WHERE id = ?1",
+            params![id, now, consumed_by],
+        )?;
+        Ok(())
+    }
+
+    pub fn increment_pairing_attempts(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pairing_sessions SET attempts = attempts + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

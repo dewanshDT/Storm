@@ -1,4 +1,3 @@
-#![allow(dead_code)] // Used by tests; REST/middleware callers land in a later slice.
 //! Sessions: `(user, device)`, opaque tokens, revocation that takes effect now.
 //!
 //! A session is always a pair. A device credential never reads a note, and a
@@ -13,10 +12,6 @@
 //! back, and the user meets an auth wall in front of edits that exist nowhere
 //! else. That trade only works because there is no stateless token to wait out —
 //! every check is a lookup against this table (A5).
-//!
-//! Nothing here is reachable over HTTP yet. These are the operations the
-//! three-tier middleware will call; until that slice lands, `require_token` is
-//! untouched and the only callers are the operator commands.
 
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
@@ -194,6 +189,7 @@ impl std::fmt::Debug for IssuedSession {
 pub struct Authenticated {
     pub session: Session,
     pub user: User,
+    #[allow(dead_code)] // Used by future vault-level access control; tested here.
     pub device: Device,
 }
 
@@ -392,6 +388,7 @@ impl AuthDb {
         Ok(())
     }
 
+    #[allow(dead_code)] // Used only by `consume_ws_ticket`, which awaits the WS upgrade handler.
     fn ws_ticket_by_access_hash(&self, hash: &[u8]) -> Result<Option<(String, String)>> {
         // Returns (ticket_id, session_id) for an unused, unexpired ticket.
         Ok(self
@@ -405,6 +402,7 @@ impl AuthDb {
             .optional()?)
     }
 
+    #[allow(dead_code)] // Used only by `consume_ws_ticket`.
     fn mark_ws_ticket_used(&self, id: &str, now: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE ws_tickets SET used = ?2 WHERE id = ?1",
@@ -413,6 +411,7 @@ impl AuthDb {
         Ok(())
     }
 
+    #[allow(dead_code)] // Used only by `consume_ws_ticket`.
     fn purge_expired_ws_tickets(&self, now: &str) -> Result<usize> {
         Ok(self.conn.execute(
             "DELETE FROM ws_tickets WHERE expires <= ?1 OR used IS NOT NULL",
@@ -666,6 +665,7 @@ pub fn revoke_for_device(
 }
 
 /// Revokes every live session belonging to a user, on every device.
+#[allow(dead_code)] // Called by future admin endpoints; tested here.
 pub fn revoke_for_user(db: &mut AuthDb, user_id: &str, reason: &str, now: &str) -> Result<usize> {
     let closed = db.revoke_sessions_where("user_id", user_id, reason, now)?;
     if closed > 0 {
@@ -802,6 +802,7 @@ pub fn create_ws_ticket(db: &mut AuthDb, session_id: &str, now: &str) -> Result<
 /// Validates a WebSocket ticket, consuming it if valid.
 ///
 /// Returns the session id the ticket was bound to, or an error.
+#[allow(dead_code)] // Awaits the WS upgrade handler.
 pub fn consume_ws_ticket(db: &mut AuthDb, ticket: &str, now: &str) -> Result<String, SessionError> {
     let hash = token::hash(ticket);
     let at = parse_time(now)?;

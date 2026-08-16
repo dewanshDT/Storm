@@ -1,20 +1,18 @@
-//! Authentication: who this server is, and later who may use it.
+//! Authentication: who this server is, and who may use it.
 //!
-//! Phase 1 of the remote-access work (`PLAN.md` decisions 52 / 52a / 52c). Three
-//! slices exist so far:
+//! Phase 1 of the remote-access work (`PLAN.md` decisions 52 / 52a / 52c).
+//! Five slices:
 //!
 //! 1. **Server identity** — the database and the keypair, plus the two
 //!    unauthenticated endpoints a client needs to pin a server ([`identity`]).
 //! 2. **Users** — accounts, roles and Argon2id passwords ([`users`],
 //!    [`password`]), reachable only from the operator CLI.
 //! 3. **Sessions** — `(user, device)`, opaque tokens, login, refresh and
-//!    revocation ([`sessions`], [`token`], [`devices`]). Still no HTTP surface:
-//!    the shared bearer token in `api.rs` is untouched and these are the
-//!    operations the three-tier middleware will call.
-//!
-//! Pairing and the three-tier middleware are later slices, and the shared
-//! bearer token in `api.rs` is untouched by all of it: nothing here changes
-//! what an existing client has to send.
+//!    revocation ([`sessions`], [`token`], [`devices`]).
+//! 4. **Three-tier middleware** — `api.rs` checks credentials on every
+//!    handler; device tier for unauthenticated flows, session tier for
+//!    authenticated ones.
+//! 5. **Pairing** — QR-based device enrolment ([`pairing`]).
 //!
 //! Two rules from the design that the code has to keep saying out loud:
 //!
@@ -28,6 +26,7 @@
 pub mod db;
 pub mod devices;
 pub mod identity;
+pub mod pairing;
 pub mod password;
 pub mod sessions;
 pub mod token;

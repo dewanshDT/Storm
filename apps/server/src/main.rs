@@ -61,6 +61,8 @@ enum Commands {
     User(UserArgs),
     /// Set a user's password. The recovery path when one is forgotten (A11).
     Passwd(PasswdArgs),
+    /// Print a bootstrap pairing QR code for a fresh server (no users yet).
+    Pair(PairArgs),
     /// Snapshot every vault index into DIR, then exit.
     BackupDb {
         /// State directory holding the registry and indexes.
@@ -181,6 +183,17 @@ struct PasswdArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct PairArgs {
+    /// State directory holding auth.db and the server identity.
+    #[arg(long, default_value = "./state")]
+    state: PathBuf,
+
+    /// Address the QR code tells the client to connect to.
+    #[arg(long)]
+    addr: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
 struct VaultArgs {
     /// Storage root — a directory holding one directory per vault.
     #[arg(long, env = "STORM_VAULT_ROOT")]
@@ -245,6 +258,9 @@ fn normalize_argv(args: Vec<OsString>) -> Vec<OsString> {
         "status",
         "dry-run",
         "backup-db",
+        "user",
+        "passwd",
+        "pair",
         "help",
         "-h",
         "--help",
@@ -879,6 +895,60 @@ async fn run_passwd(args: PasswdArgs) -> Result<()> {
     Ok(())
 }
 
+/// `storm-server pair` — print a bootstrap pairing QR code.
+///
+/// Only valid when the user table is empty (fresh server). The QR encodes the
+/// server's public key, a short-lived nonce, and the address the client should
+/// connect to. Scanning it with Storm Client triggers device registration and
+/// first-user creation.
+fn run_pair(args: PairArgs) -> Result<()> {
+    let mut db = open_auth_db(&args.state)?;
+    let now = index::now_rfc3339();
+
+    let user_count = db.count_users()?;
+    if user_count > 0 {
+        bail!(
+            "users already exist — use `POST /v1/pairings` from an authenticated client \
+             to add a new device"
+        );
+    }
+
+    // Load the server identity. It must exist by the time `pair` is called —
+    // `serve` creates it, and `pair` only makes sense on a server that has
+    // booted at least once.
+    let mut auth_db_check = auth::AuthDb::open(&args.state)
+        .with_context(|| format!("opening the auth database in {}", args.state.display()))?;
+    let identity = auth::identity::load_or_create(&mut auth_db_check, &args.state, &now)
+        .context("loading server identity — has the server booted at least once?")?;
+
+    let addr = args.addr.unwrap_or_else(|| {
+        eprintln!("no --addr given; using 127.0.0.1:8484 as the address hint");
+        "127.0.0.1:8484".to_string()
+    });
+
+    let (nonce, session) = auth::pairing::create(
+        &mut db,
+        auth::pairing::PairingPurpose::FirstUser,
+        None,
+        &now,
+    )
+    .context("creating pairing session")?;
+
+    let qr = auth::pairing::encode_qr(
+        &identity.server_id,
+        &identity.public_key_b64(),
+        &nonce,
+        &session.expires,
+        &addr,
+    );
+
+    println!("\n  Pairing QR — scan with Storm Client to create the first user:\n");
+    println!("    {}\n", qr.to_uri());
+    println!("  Expires: {}", session.expires);
+    println!("  Session: {}\n", session.id);
+    Ok(())
+}
+
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
     let registry = prepared.registry;
@@ -935,6 +1005,38 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         "MCP endpoint at /mcp (read-only tools, same bearer token)"
     );
 
+    let listen_addr = format!("{}:{}", args.host, args.port);
+
+    // Bootstrap pairing: when no users exist, create a pairing session and log
+    // the QR URI so the operator can scan it with a Storm Client.
+    let bootstrap_nonce = {
+        let now = crate::index::now_rfc3339();
+        let user_count = auth_db.count_users()?;
+        if user_count == 0 {
+            let (nonce, session) = crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::FirstUser,
+                None,
+                &now,
+            )
+            .context("creating bootstrap pairing session")?;
+            let qr = crate::auth::pairing::encode_qr(
+                &identity.server_id,
+                &identity.public_key_b64(),
+                &nonce,
+                &session.expires,
+                &listen_addr,
+            );
+            tracing::info!(
+                uri = %qr.to_uri(),
+                "bootstrap pairing QR — scan with Storm Client to create the first user"
+            );
+            Some(nonce)
+        } else {
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -946,6 +1048,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
         legacy_token_enabled: true,
+        bootstrap_nonce,
+        listen_addr,
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -1040,6 +1144,7 @@ async fn main() -> Result<()> {
         Commands::DryRun(args) => run_dry_run(args),
         Commands::User(args) => run_user(args).await,
         Commands::Passwd(args) => run_passwd(args).await,
+        Commands::Pair(args) => run_pair(args),
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
             println!("index snapshots written to {}", dest.display());

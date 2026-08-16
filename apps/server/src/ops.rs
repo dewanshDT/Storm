@@ -23,7 +23,7 @@
 
 use serde::Serialize;
 
-use crate::api::{ApiResult, Shared, bad_request, not_found, vault_of};
+use crate::api::{ApiError, ApiResult, Shared, bad_request, not_found, vault_of};
 use crate::db::{NoteRow, RecentRow, SearchHit};
 
 // ---- vaults ------------------------------------------------------------
@@ -482,6 +482,48 @@ pub async fn sign_challenge(state: &Shared, nonce: &str) -> ApiResult<ChallengeA
         server_id: state.identity.server_id.clone(),
         key_id: state.identity.key_id.clone(),
         signature: state.identity.sign_challenge(nonce),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PairingQrPayload {
+    pub sid: String,
+    pub pk: String,
+    pub n: String,
+    pub exp: String,
+    pub addr: String,
+}
+
+/// Creates a new pairing session and returns the QR payload.
+///
+/// Called by `POST /v1/pairings` (session tier). The client renders this as a
+/// QR code for the new device to scan.
+pub async fn issue_pairing_qr(
+    state: &Shared,
+    purpose: &str,
+    user_id: Option<&str>,
+) -> ApiResult<PairingQrPayload> {
+    let purpose = crate::auth::pairing::PairingPurpose::from_str(purpose)
+        .map_err(|e| bad_request(e.to_string()))?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let (nonce, session) = crate::auth::pairing::create(&mut auth_db, purpose, user_id, &now)
+        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let qr = crate::auth::pairing::encode_qr(
+        &state.identity.server_id,
+        &state.identity.public_key_b64(),
+        &nonce,
+        &session.expires,
+        &state.listen_addr,
+    );
+
+    Ok(PairingQrPayload {
+        sid: qr.sid,
+        pk: qr.pk,
+        n: qr.n,
+        exp: qr.exp,
+        addr: qr.addr,
     })
 }
 

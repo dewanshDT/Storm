@@ -77,6 +77,14 @@ pub struct AppState {
     /// Defaults `true`; the operator turns it off from the app after pairing
     /// devices (A10).
     pub legacy_token_enabled: bool,
+    /// Bootstrap pairing nonce (plaintext), if one was created at boot when
+    /// the user table was empty. Needed to reconstruct the QR payload for
+    /// the console log. Not read after boot — the field exists so a future
+    /// CLI or settings surface can regenerate the QR without restarting.
+    #[allow(dead_code)]
+    pub bootstrap_nonce: Option<String>,
+    /// The server's listen address, used as the `addr` hint in QR payloads.
+    pub listen_addr: String,
 }
 
 pub type Shared = Arc<AppState>;
@@ -205,6 +213,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/server", get(server_info))
         .route("/v1/server/challenge", post(server_challenge))
+        .route("/v1/pair", post(pair_handler))
         .layer(Extension(RequiredTier::None));
 
     // ---- device tier: `StormDevice <id>:<secret>` -------------------------
@@ -262,6 +271,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/auth/devices/{id}", delete(revoke_device_handler))
         .route("/v1/auth/password", post(change_password_handler))
         .route("/v1/auth/ws-ticket", post(ws_ticket_handler))
+        .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -614,6 +624,75 @@ async fn ws_ticket_handler(
         "ticket": issued.ticket,
         "expires_in": issued.expires_in,
     })))
+}
+
+// ---- pairing endpoints ---------------------------------------------------
+
+/// POST /v1/pair — consume a pairing nonce and receive device credentials.
+///
+/// This is a `none`-tier endpoint: the nonce itself is the trust anchor. The
+/// client has already verified the server's identity via the challenge step
+/// before reaching here.
+async fn pair_handler(
+    State(state): State<Shared>,
+    Json(body): Json<PairRequest>,
+) -> ApiResult<Json<crate::auth::pairing::ConsumeResult>> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    crate::auth::pairing::consume(
+        &mut auth_db,
+        &body.n,
+        &body.name,
+        body.platform.as_deref(),
+        body.version.as_deref(),
+        &now,
+    )
+    .map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("already used") {
+            ApiError(StatusCode::CONFLICT, "pairing_consumed".into())
+        } else if msg.contains("expired") {
+            ApiError(StatusCode::GONE, "pairing_expired".into())
+        } else if msg.contains("too many") {
+            ApiError(StatusCode::TOO_MANY_REQUESTS, "rate_limited".into())
+        } else {
+            ApiError(StatusCode::UNAUTHORIZED, msg)
+        }
+    })
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+pub struct PairRequest {
+    /// The pairing nonce from the QR.
+    n: String,
+    /// A human-readable device name, e.g. "Pixel 10".
+    name: String,
+    /// Platform, e.g. "android", "ios", "macos", "linux", "web".
+    platform: Option<String>,
+    /// Client version string.
+    version: Option<String>,
+}
+
+/// POST /v1/pairings — issue a new pairing QR for another device.
+///
+/// Session tier: the caller must be logged in. Returns the QR payload as JSON
+/// so the client can render it as a QR image.
+async fn issue_pairing_handler(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+    Json(body): Json<IssuePairingRequest>,
+) -> ApiResult<Json<crate::ops::PairingQrPayload>> {
+    let purpose = body.purpose.as_deref().unwrap_or("add_device");
+    Ok(Json(
+        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id)).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct IssuePairingRequest {
+    /// The pairing purpose: "first_user" or "add_device" (default).
+    purpose: Option<String>,
 }
 
 /// Three credential tiers: `none` (unauthenticated), `device` (paired
@@ -1524,6 +1603,8 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
             legacy_token_enabled: true,
+            bootstrap_nonce: None,
+            listen_addr: "http://127.0.0.1:8080".into(),
         });
         (
             router(

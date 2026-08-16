@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–2 done · Q18 measured: 192 MiB, t=1, p=1 · sessions next |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–5 + pairing done · Flutter client auth next · A9 (vault grants) deferred |
 
 Last updated: 2026-08-13. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -70,15 +70,25 @@ server/MCP/sync changes. **M18** adds desktop-first keyboard shortcuts
 (Shortcuts/Actions/Intent), platform-aware Meta vs Control, in-note find,
 and wide-layout sidebar collapse — phone touch layout unchanged. Shipped in
 **v0.2.4** (M18 is client-only; the server release is a version stamp).
-**M19** starts authentication (decisions 52 / 52a). Two slices are in. **Slice
-1:** the server mints and keeps its own cryptographic identity, `state/auth.db`
-exists with the full designed schema, backups carry it, and `GET /v1/server` /
-`POST /v1/server/challenge` answer unauthenticated. **Slice 2:** local user
-accounts with Argon2id passwords at the parameters measured on the VM, plus
-`storm-server user …` and `passwd` — no new routes, because creating a user over
-the network needs device auth (A8) and that arrives with pairing. **Nothing else
-changed** — `require_token` and the shared token are exactly as they were, so
-every existing client keeps working. Not deployed.
+**M19** starts authentication (decisions 52 / 52a). Five server-side slices are
+complete. **Slice 1:** the server mints and keeps its own cryptographic identity,
+`state/auth.db` exists with the full designed schema, backups carry it, and
+`GET /v1/server` / `POST /v1/server/challenge` answer unauthenticated. **Slice
+2:** local user accounts with Argon2id passwords at the parameters measured on the
+VM, plus `storm-server user …` and `passwd` — no new routes, because creating a
+user over the network needs device auth (A8) and that arrives with pairing.
+**Slice 3:** session domain — `(user, device)` sessions, access/refresh tokens,
+replay detection, WS tickets, device registration and revocation. **Slice 4:**
+three-tier HTTP middleware in `api.rs` — device tier for pairing and login, session
+tier for vault ops and auth management, the shared bearer token retired. **Slice
+5:** QR-based pairing — `POST /v1/pair`, `POST /v1/pairings`, bootstrap QR at
+boot, `storm://pair` URI scheme. **`storm-server pair`** regenerates the
+bootstrap QR from the CLI. Not deployed.
+
+**Next:** Flutter client auth integration (login, session lifecycle, token
+refresh). A9 (vault-level grants) is deferred to after the client ships and
+before the relay — the `vault_grants` table and role checks are built but
+unwired; single-user servers (Owner role) bypass them entirely. Not deployed.
 
 **M9/M10 deployment.** Client and server together — M9 breaks the wire format,
 so they cannot go separately. The migration ran clean: the reconcile reported
@@ -2053,7 +2063,7 @@ for other reasons.
 **Next slices, in order:** sessions (login, refresh, revocation — where the
 semaphore and `needs_rehash` finally sit on a request path) → the three-tier
 middleware → pairing → client. The middleware slice is the one that stops being
-additive.
+additive. *(All three shipped as of 2026-08-17; now building the Flutter client.)*
 
 ---
 
@@ -2208,8 +2218,10 @@ Use a pattern that cannot match the invoking shell.
   against a staging server, with **Q18 measured** (192 MiB, t=1, p=1, 173.6 ms);
   and the user model — accounts, roles, Argon2id behind a 2-permit semaphore,
   and the `storm-server user` / `passwd` commands, with no network surface until
-  pairing (decision 52c). Still to do, in order: sessions, the three-tier
-  middleware, pairing, then the client. Relay work does not start until auth is
+  pairing (decision 52c). **Built after the above was written:** sessions,
+  three-tier middleware, pairing, `storm-server pair` — all server-side auth
+  phase 1 complete. **Next:** Flutter client auth integration. A9 (vault-level
+  grants) ships between client and relay. Relay work does not start until auth is
   done.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
