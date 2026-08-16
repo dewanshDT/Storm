@@ -1063,6 +1063,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         legacy_token_enabled: std::sync::atomic::AtomicBool::new(vault_set_legacy_token_enabled),
         bootstrap_nonce,
         listen_addr,
+        // The policy Storm ships: every authenticated caller reaches every
+        // vault, which is what the server already did. The boundary is what
+        // is new — see `auth/authz.rs`.
+        vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
     });
 
     // One watcher over the whole root, attributing each event to a vault by

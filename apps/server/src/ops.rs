@@ -24,6 +24,7 @@
 use serde::Serialize;
 
 use crate::api::{ApiError, ApiResult, Shared, bad_request, not_found, vault_of};
+use crate::auth::authz::{Access, Actor};
 use crate::db::{NoteRow, RecentRow, SearchHit};
 
 // ---- vaults ------------------------------------------------------------
@@ -39,11 +40,18 @@ pub struct VaultInfo {
     pub missing: bool,
 }
 
-pub async fn list_vaults(state: &Shared) -> ApiResult<Vec<VaultInfo>> {
+pub async fn list_vaults(state: &Shared, actor: &Actor) -> ApiResult<Vec<VaultInfo>> {
     let vaults = state.vaults.read().await;
     let mut out = Vec::with_capacity(vaults.registry.vaults.len());
 
     for entry in &vaults.registry.vaults {
+        // A collection **filters**; it does not refuse. `403` is the right
+        // answer for a named vault and the wrong one for a list — there is no
+        // way to refuse half a list, and one unreachable vault must not blank
+        // the whole thing. Today `AllowAuthenticated` keeps every entry.
+        if !crate::api::may_see_vault(state, actor, &entry.id) {
+            continue;
+        }
         let (note_count, missing) = match vaults.get(&entry.id) {
             Some(handle) => {
                 let ix = handle.indexer.lock().await;
@@ -82,8 +90,8 @@ pub struct VaultDetail {
 /// Storm and needs no schema change. Reading it here is the first time the
 /// *server* has looked inside that note — until now `_storm/` was only ever
 /// something to exclude from counts.
-pub async fn get_vault(state: &Shared, vault: &str) -> ApiResult<VaultDetail> {
-    let info = list_vaults(state)
+pub async fn get_vault(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<VaultDetail> {
+    let info = list_vaults(state, actor)
         .await?
         .into_iter()
         .find(|v| v.id == vault)
@@ -99,7 +107,7 @@ pub async fn get_vault(state: &Shared, vault: &str) -> ApiResult<VaultDetail> {
         });
     }
 
-    let handle = vault_of(state, vault).await?;
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     let description = match ix.db.get_note_by_path(VAULT_CONFIG_PATH)? {
         Some(note) => ix
@@ -127,8 +135,13 @@ pub struct NoteDetail {
     pub content: String,
 }
 
-pub async fn get_note(state: &Shared, vault: &str, id: &str) -> ApiResult<NoteDetail> {
-    let handle = vault_of(state, vault).await?;
+pub async fn get_note(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+) -> ApiResult<NoteDetail> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     let note = ix
         .db
@@ -143,8 +156,13 @@ pub struct Backlinks {
     pub notes: Vec<NoteRow>,
 }
 
-pub async fn backlinks(state: &Shared, vault: &str, id: &str) -> ApiResult<Backlinks> {
-    let handle = vault_of(state, vault).await?;
+pub async fn backlinks(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+) -> ApiResult<Backlinks> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     let note = ix
         .db
@@ -180,8 +198,14 @@ pub struct RelatedByTag {
 /// explainable, and the brief defers embeddings until lexical search actually
 /// falls short. A related-notes list that cannot say *why* two notes are
 /// related is worse than none.
-pub async fn related(state: &Shared, vault: &str, id: &str, limit: i64) -> ApiResult<Related> {
-    let handle = vault_of(state, vault).await?;
+pub async fn related(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+    limit: i64,
+) -> ApiResult<Related> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     let note = ix
         .db
@@ -238,8 +262,13 @@ pub struct VersionInfo {
     pub size: i64,
 }
 
-pub async fn note_history(state: &Shared, vault: &str, id: &str) -> ApiResult<Vec<VersionInfo>> {
-    let handle = vault_of(state, vault).await?;
+pub async fn note_history(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+) -> ApiResult<Vec<VersionInfo>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     if ix.db.get_note(id)?.is_none() {
         return Err(not_found("no such note"));
@@ -249,11 +278,12 @@ pub async fn note_history(state: &Shared, vault: &str, id: &str) -> ApiResult<Ve
 
 pub async fn note_version(
     state: &Shared,
+    actor: &Actor,
     vault: &str,
     id: &str,
     version: i64,
 ) -> ApiResult<String> {
-    let handle = vault_of(state, vault).await?;
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     ix.db
         .version_content(id, version)?
@@ -285,11 +315,12 @@ pub fn broadcast_latest(state: &Shared, ix: &crate::index::Indexer, seq: i64) {
 
 pub async fn create_note(
     state: &Shared,
+    actor: &Actor,
     vault: &str,
     path: &str,
     content: &str,
 ) -> ApiResult<crate::index::WriteResult> {
-    let handle = vault_of(state, vault).await?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
     let result = ix
         .create_note(path, content)
@@ -307,13 +338,14 @@ pub async fn create_note(
 /// which is the same contract the Flutter client obeys.
 pub async fn update_note(
     state: &Shared,
+    actor: &Actor,
     vault: &str,
     id: &str,
     base_version: i64,
     content: &str,
     device_id: Option<&str>,
 ) -> ApiResult<crate::index::WriteResult> {
-    let handle = vault_of(state, vault).await?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
     let result = ix
         .put_note(id, base_version, content, device_id)
@@ -322,8 +354,8 @@ pub async fn update_note(
     Ok(result)
 }
 
-pub async fn delete_note(state: &Shared, vault: &str, id: &str) -> ApiResult<i64> {
-    let handle = vault_of(state, vault).await?;
+pub async fn delete_note(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<i64> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
     let seq = ix.delete_note(id).map_err(|e| not_found(e.to_string()))?;
     broadcast_latest(state, &ix, seq);
@@ -334,11 +366,12 @@ pub async fn delete_note(state: &Shared, vault: &str, id: &str) -> ApiResult<i64
 
 pub async fn search(
     state: &Shared,
+    actor: &Actor,
     vault: &str,
     query: &str,
     limit: i64,
 ) -> ApiResult<Vec<SearchHit>> {
-    let handle = vault_of(state, vault).await?;
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     // FTS5 treats bare punctuation as syntax; a user typing `foo-bar` should
     // get a search, not a parse error.
@@ -367,8 +400,8 @@ pub struct TagCount {
     pub count: i64,
 }
 
-pub async fn list_tags(state: &Shared, vault: &str) -> ApiResult<Vec<TagCount>> {
-    let handle = vault_of(state, vault).await?;
+pub async fn list_tags(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<Vec<TagCount>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
     let ix = handle.indexer.lock().await;
     Ok(ix
         .db
@@ -396,12 +429,17 @@ pub struct RecentEntry {
 /// One call regardless of vault count. Sorting by the server's `modified`
 /// instead would mean fetching every vault's whole tree on every load of the
 /// home screen.
-pub async fn recents(state: &Shared, limit: i64) -> ApiResult<Vec<RecentEntry>> {
+pub async fn recents(state: &Shared, actor: &Actor, limit: i64) -> ApiResult<Vec<RecentEntry>> {
     let limit = limit.clamp(1, 200);
     let vaults = state.vaults.read().await;
     let mut all: Vec<RecentEntry> = Vec::new();
 
     for entry in &vaults.registry.vaults {
+        // Filtered, not refused — see `list_vaults`. `/v1/recents` spans every
+        // vault, so refusing on one would take the dashboard with it.
+        if !crate::api::may_see_vault(state, actor, &entry.id) {
+            continue;
+        }
         let Some(handle) = vaults.get(&entry.id) else {
             continue;
         };

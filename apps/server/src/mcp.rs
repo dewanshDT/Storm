@@ -30,6 +30,7 @@ use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
 use crate::api::Shared;
+use crate::auth::authz::Actor;
 
 /// How the endpoint is configured at startup.
 #[derive(Debug, Clone)]
@@ -271,7 +272,10 @@ impl Storm {
         description = "List the vaults on this Storm server, with their ids, names and note counts. Call this first — every other tool needs a vault id."
     )]
     async fn list_vaults(&self) -> Result<CallToolResult, ErrorData> {
-        respond(crate::ops::list_vaults(&self.state).await, Some("vaults"))
+        respond(
+            crate::ops::list_vaults(&self.state, &Actor::Mcp).await,
+            Some("vaults"),
+        )
     }
 
     #[tool(
@@ -281,7 +285,7 @@ impl Storm {
         &self,
         Parameters(VaultParams { vault }): Parameters<VaultParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::get_vault(&self.state, &vault).await)
+        respond_object(crate::ops::get_vault(&self.state, &Actor::Mcp, &vault).await)
     }
 
     #[tool(
@@ -296,7 +300,14 @@ impl Storm {
         }): Parameters<SearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::search(&self.state, &vault, &query, limit.unwrap_or(20)).await,
+            crate::ops::search(
+                &self.state,
+                &Actor::Mcp,
+                &vault,
+                &query,
+                limit.unwrap_or(20),
+            )
+            .await,
             Some("hits"),
         )
     }
@@ -306,7 +317,7 @@ impl Storm {
         &self,
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::get_note(&self.state, &vault, &note_id).await)
+        respond_object(crate::ops::get_note(&self.state, &Actor::Mcp, &vault, &note_id).await)
     }
 
     #[tool(
@@ -321,7 +332,14 @@ impl Storm {
         }): Parameters<RelatedParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond_object(
-            crate::ops::related(&self.state, &vault, &note_id, limit.unwrap_or(20)).await,
+            crate::ops::related(
+                &self.state,
+                &Actor::Mcp,
+                &vault,
+                &note_id,
+                limit.unwrap_or(20),
+            )
+            .await,
         )
     }
 
@@ -331,7 +349,7 @@ impl Storm {
         Parameters(VaultParams { vault }): Parameters<VaultParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::list_tags(&self.state, &vault).await,
+            crate::ops::list_tags(&self.state, &Actor::Mcp, &vault).await,
             Some("tags"),
         )
     }
@@ -344,7 +362,7 @@ impl Storm {
         Parameters(RecentParams { limit }): Parameters<RecentParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::recents(&self.state, limit.unwrap_or(20)).await,
+            crate::ops::recents(&self.state, &Actor::Mcp, limit.unwrap_or(20)).await,
             Some("recents"),
         )
     }
@@ -357,7 +375,7 @@ impl Storm {
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::note_history(&self.state, &vault, &note_id).await,
+            crate::ops::note_history(&self.state, &Actor::Mcp, &vault, &note_id).await,
             Some("versions"),
         )
     }
@@ -372,7 +390,7 @@ impl Storm {
         }): Parameters<VersionParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::note_version(&self.state, &vault, &note_id, version).await,
+            crate::ops::note_version(&self.state, &Actor::Mcp, &vault, &note_id, version).await,
             Some("content"),
         )
     }
@@ -397,7 +415,9 @@ impl Storm {
         // not carry it. `set_scalars` splices a single line and passes every
         // other byte through, so a user's YAML keeps its order and comments.
         let stamped = crate::frontmatter::set_scalars(&content, &[("source", "ai")]);
-        respond_object(crate::ops::create_note(&self.state, &vault, &path, &stamped).await)
+        respond_object(
+            crate::ops::create_note(&self.state, &Actor::Mcp, &vault, &path, &stamped).await,
+        )
     }
 
     #[tool(
@@ -415,6 +435,7 @@ impl Storm {
         respond_object(
             crate::ops::update_note(
                 &self.state,
+                &Actor::Mcp,
                 &vault,
                 &note_id,
                 base_version,
@@ -433,7 +454,7 @@ impl Storm {
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::delete_note(&self.state, &vault, &note_id).await,
+            crate::ops::delete_note(&self.state, &Actor::Mcp, &vault, &note_id).await,
             Some("seq"),
         )
     }

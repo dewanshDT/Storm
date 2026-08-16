@@ -20,6 +20,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
+use crate::auth::authz::{Access, Actor, Decision, VaultPolicy};
 use crate::db::{Change, Db};
 use crate::index::Indexer;
 use crate::registry::Registry;
@@ -90,6 +91,12 @@ pub struct AppState {
     pub bootstrap_nonce: Option<String>,
     /// The server's listen address, used as the `addr` hint in QR payloads.
     pub listen_addr: String,
+    /// Decides whether an actor may reach a vault.
+    ///
+    /// Behind a trait object so the RBAC slice can replace it without touching
+    /// a handler — that is the whole reason the boundary exists. Today it is
+    /// `AllowAuthenticated`, which is the behaviour the server already had.
+    pub vault_policy: Arc<dyn VaultPolicy>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -171,13 +178,51 @@ pub fn conflict(msg: impl Into<String>) -> ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
-/// Resolves a vault id to its open handle.
+/// Resolves a vault id to its open handle — **the authorization boundary**.
 ///
 /// One place, so no handler repeats the distinction: unknown is a 404, while a
 /// registered vault whose directory has gone is a 409 — the difference between
 /// "never existed" and "is not where it should be" is the whole point of
 /// keeping missing vaults in the registry.
-pub async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
+///
+/// It also takes an [`Actor`] and an [`Access`], and that is the load-bearing
+/// part. **This is the only way to obtain a `VaultHandle` for a named vault**,
+/// so a handler cannot forget to ask whether the caller is allowed — it has
+/// nothing to operate on until it has said who is asking and what for. The
+/// check is not a rule people follow; it is a parameter they cannot omit.
+///
+/// REST handlers and MCP tools both arrive here, because both go through
+/// `ops.rs` or call this directly. A middleware layer could not do the same
+/// job: MCP's vault id lives in the JSON-RPC body, not the URL, so a
+/// URL-matching layer sees one `POST /mcp` and cannot tell which vault is
+/// being asked for.
+///
+/// The policy is consulted **before** existence is checked, so a refusal never
+/// doubles as a probe for which vault ids are real. `AllowAuthenticated`
+/// never refuses today; the ordering is here so the answer does not change
+/// when a policy that does arrives.
+pub async fn vault_of(
+    state: &Shared,
+    actor: &Actor,
+    access: Access,
+    id: &str,
+) -> ApiResult<Arc<VaultHandle>> {
+    if let Decision::Deny(reason) = state.vault_policy.decide(actor, id, access) {
+        tracing::info!(
+            actor = actor.describe(),
+            vault = id,
+            ?access,
+            reason,
+            "vault access refused"
+        );
+        // 403, never 404 and never an empty list: "you may not see this" has
+        // to be distinguishable from "your notes are gone" (decision 25).
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "you do not have access to this vault".into(),
+        ));
+    }
+
     let vaults = state.vaults.read().await;
     if let Some(handle) = vaults.get(id) {
         return Ok(handle);
@@ -189,6 +234,19 @@ pub async fn vault_of(state: &Shared, id: &str) -> ApiResult<Arc<VaultHandle>> {
         ))),
         None => Err(not_found("no such vault")),
     }
+}
+
+/// Whether a vault belongs in a *collection* this actor is reading.
+///
+/// The other half of the rule, and it is not the same answer. `403` is right
+/// for a named vault and wrong for a list: you cannot refuse a list, so
+/// `GET /v1/vaults` and `/v1/recents` **filter** instead. Converting these to
+/// refusals would mean one ungranted vault blanking the whole dashboard.
+pub fn may_see_vault(state: &Shared, actor: &Actor, id: &str) -> bool {
+    state
+        .vault_policy
+        .decide(actor, id, Access::Read)
+        .is_allowed()
 }
 
 /// Builds the HTTP surface.
@@ -858,6 +916,7 @@ async fn require_auth(
             // credential. Only the legacy-token switch uses it, to refuse to
             // saw off the branch the caller is sitting on.
             request.extensions_mut().insert(LegacyAuth);
+            request.extensions_mut().insert(Actor::Legacy);
             return next.run(request).await;
         }
 
@@ -867,6 +926,10 @@ async fn require_auth(
         match crate::auth::sessions::authenticate(&mut auth_db, token, &now) {
             Ok(authenticated) => {
                 drop(auth_db);
+                request.extensions_mut().insert(Actor::Session {
+                    user_id: authenticated.user.id.clone(),
+                    role: authenticated.user.role,
+                });
                 request
                     .extensions_mut()
                     .insert(SessionAuth { authenticated });
@@ -950,8 +1013,11 @@ async fn health() -> impl IntoResponse {
 
 // ---- vaults ------------------------------------------------------------
 
-async fn list_vaults(State(state): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
-    let vaults = crate::ops::list_vaults(&state).await?;
+async fn list_vaults(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let vaults = crate::ops::list_vaults(&state, &actor).await?;
     Ok(Json(serde_json::json!({ "vaults": vaults })))
 }
 
@@ -1293,9 +1359,10 @@ fn default_recents_limit() -> i64 {
 
 async fn recents(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Query(q): Query<RecentsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let recents = crate::ops::recents(&state, q.limit).await?;
+    let recents = crate::ops::recents(&state, &actor, q.limit).await?;
     Ok(Json(serde_json::json!({ "recents": recents })))
 }
 
@@ -1308,9 +1375,10 @@ struct TreeResponse {
 
 async fn tree(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<TreeResponse>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     let notes = ix.db.list_notes()?;
     // Derived from note paths, union the ones created explicitly — only the
@@ -1344,10 +1412,11 @@ struct SyncResponse {
 
 async fn sync(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Query(q): Query<SyncQuery>,
 ) -> ApiResult<Json<SyncResponse>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     let changes = ix.db.changes_since(q.since, q.limit.clamp(1, 5000))?;
     let seq = ix.db.latest_seq()?;
@@ -1356,9 +1425,12 @@ async fn sync(
 
 async fn get_note(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<crate::ops::NoteDetail>> {
-    Ok(Json(crate::ops::get_note(&state, &vault, &id).await?))
+    Ok(Json(
+        crate::ops::get_note(&state, &actor, &vault, &id).await?,
+    ))
 }
 
 /// Every stored revision of a note, newest first, without their content.
@@ -1367,17 +1439,19 @@ async fn get_note(
 /// before this, even though `note_versions` has been populated since M1.
 async fn note_versions(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let versions = crate::ops::note_history(&state, &vault, &id).await?;
+    let versions = crate::ops::note_history(&state, &actor, &vault, &id).await?;
     Ok(Json(serde_json::json!({ "versions": versions })))
 }
 
 async fn note_version(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id, version)): Path<(String, String, i64)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let content = crate::ops::note_version(&state, &vault, &id, version).await?;
+    let content = crate::ops::note_version(&state, &actor, &vault, &id, version).await?;
     Ok(Json(
         serde_json::json!({ "version": version, "content": content }),
     ))
@@ -1390,9 +1464,10 @@ async fn note_version(
 /// every other device.
 async fn mark_opened(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let ix = handle.indexer.lock().await;
     if ix.db.get_note(&id)?.is_none() {
         return Err(not_found("no such note"));
@@ -1410,11 +1485,12 @@ struct CreateBody {
 
 async fn create_note(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Json(body): Json<CreateBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
     Ok(Json(
-        crate::ops::create_note(&state, &vault, &body.path, &body.content).await?,
+        crate::ops::create_note(&state, &actor, &vault, &body.path, &body.content).await?,
     ))
 }
 
@@ -1428,12 +1504,14 @@ struct PutBody {
 
 async fn put_note(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<PutBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
     Ok(Json(
         crate::ops::update_note(
             &state,
+            &actor,
             &vault,
             &id,
             body.base_version,
@@ -1451,10 +1529,11 @@ struct MoveBody {
 
 async fn move_note(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
     let result = ix
         .move_note(&id, &body.new_path)
@@ -1465,9 +1544,10 @@ async fn move_note(
 
 async fn delete_note(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let seq = crate::ops::delete_note(&state, &vault, &id).await?;
+    let seq = crate::ops::delete_note(&state, &actor, &vault, &id).await?;
     Ok(Json(serde_json::json!({ "seq": seq })))
 }
 
@@ -1480,10 +1560,11 @@ struct FolderBody {
 
 async fn create_folder(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Json(body): Json<FolderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
     ix.create_folder(&body.path)
         .map_err(|e| bad_request(e.to_string()))?;
@@ -1492,9 +1573,10 @@ async fn create_folder(
 
 async fn delete_folder(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
     // Refused rather than recursive: deleting someone's notes because they
     // tapped "delete folder" is not something to do quietly.
@@ -1511,10 +1593,11 @@ struct RenameFolderBody {
 
 async fn rename_folder(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Json(body): Json<RenameFolderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
     let seqs = ix
         .rename_folder(&body.from, &body.to)
@@ -1544,18 +1627,20 @@ fn default_search_limit() -> i64 {
 
 async fn search(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Query(q): Query<SearchQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let hits = crate::ops::search(&state, &vault, &q.q, q.limit).await?;
+    let hits = crate::ops::search(&state, &actor, &vault, &q.q, q.limit).await?;
     Ok(Json(serde_json::json!({ "hits": hits })))
 }
 
 async fn backlinks(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let links = crate::ops::backlinks(&state, &vault, &id).await?;
+    let links = crate::ops::backlinks(&state, &actor, &vault, &id).await?;
     Ok(Json(
         serde_json::json!({ "title": links.title, "backlinks": links.notes }),
     ))
@@ -1563,17 +1648,19 @@ async fn backlinks(
 
 async fn tags(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let tags = crate::ops::list_tags(&state, &vault).await?;
+    let tags = crate::ops::list_tags(&state, &actor, &vault).await?;
     Ok(Json(serde_json::json!({ "tags": tags })))
 }
 
 async fn notes_by_tag(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, tag)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     Ok(Json(
         serde_json::json!({ "notes": ix.db.notes_with_tag(&tag)? }),
@@ -1584,9 +1671,10 @@ async fn notes_by_tag(
 
 async fn list_attachments(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     Ok(Json(
         serde_json::json!({ "attachments": ix.db.list_attachments()? }),
@@ -1595,9 +1683,10 @@ async fn list_attachments(
 
 async fn get_attachment(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     let bytes = ix.attachment(&path).map_err(|e| not_found(e.to_string()))?;
 
@@ -1606,13 +1695,14 @@ async fn get_attachment(
 
 async fn put_attachment(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     if body.is_empty() {
         return Err(bad_request("empty upload"));
     }
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
     ix.put_attachment(&path, &body)
         .map_err(|e| bad_request(e.to_string()))?;
@@ -1623,9 +1713,10 @@ async fn put_attachment(
 
 async fn delete_attachment(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &vault).await?;
+    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
     ix.delete_attachment(&path)
         .map_err(|e| not_found(e.to_string()))?;
@@ -1702,9 +1793,31 @@ mod tests {
         (app, identity)
     }
 
+    /// A policy that refuses everything — the only way to exercise the refusal
+    /// path while the shipped policy is `AllowAuthenticated`.
+    ///
+    /// Without it `Decision::Deny` would be code that first runs in production.
+    /// The point of the seam is that swapping the policy is all it takes, and
+    /// this is that claim under test.
+    #[derive(Debug)]
+    struct DenyAll;
+
+    impl crate::auth::authz::VaultPolicy for DenyAll {
+        fn decide(&self, _: &Actor, _: &str, _: Access) -> Decision {
+            Decision::Deny("test policy refuses everything")
+        }
+    }
+
     /// As [`test_router`], but hands back the state too — for the tests that
     /// have to look at what a request *persisted*, not only what it answered.
     fn test_router_with_state(dir: &FsPath) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_with_policy(dir, Arc::new(crate::auth::authz::AllowAuthenticated))
+    }
+
+    fn test_router_with_policy(
+        dir: &FsPath,
+        policy: Arc<dyn crate::auth::authz::VaultPolicy>,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let root = dir.join("vaults");
@@ -1734,6 +1847,7 @@ mod tests {
             legacy_token_enabled: std::sync::atomic::AtomicBool::new(true),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
+            vault_policy: policy,
         });
         (
             router(
@@ -1970,6 +2084,100 @@ mod tests {
                 .legacy_token_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+
+    #[tokio::test]
+    async fn a_refused_vault_is_403_and_not_404() {
+        // The refusal path, which `AllowAuthenticated` never takes — so
+        // without a policy swap this would be code that first runs in
+        // production. It is also the claim the whole seam rests on: changing
+        // the policy is all it takes to change the answer.
+        //
+        // 403 specifically. Decision 25: "you may not see this" has to be
+        // distinguishable from "your notes are gone", so never 404 and never
+        // an empty success.
+        let dir = tempdir::TempDir::new("storm-authz-deny").unwrap();
+        let (app, _, state) = test_router_with_policy(dir.path(), Arc::new(DenyAll));
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/vaults/any-vault/tree", &format!("Bearer {token}")),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_ne!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_does_not_reveal_whether_the_vault_exists() {
+        // The policy is consulted before the registry, so a refusal cannot
+        // double as a probe for which vault ids are real: a made-up id and a
+        // real one have to answer identically.
+        let dir = tempdir::TempDir::new("storm-authz-probe").unwrap();
+        let (app, _, state) = test_router_with_policy(dir.path(), Arc::new(DenyAll));
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        let auth = format!("Bearer {token}");
+
+        let (real, _) = send(&app, get_with_auth("/v1/vaults/nope/tree", &auth)).await;
+        let (fake, _) = send(
+            &app,
+            get_with_auth("/v1/vaults/definitely-not-a-vault/tree", &auth),
+        )
+        .await;
+
+        assert_eq!(real, StatusCode::FORBIDDEN);
+        assert_eq!(
+            fake,
+            StatusCode::FORBIDDEN,
+            "the two must be the same answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_collection_filters_where_a_named_vault_refuses() {
+        // The other half of the rule, and the one that is easy to get wrong by
+        // making it consistent: there is no way to 403 half a list, and one
+        // unreachable vault must not blank the dashboard.
+        let dir = tempdir::TempDir::new("storm-authz-filter").unwrap();
+        let (app, _, state) = test_router_with_policy(dir.path(), Arc::new(DenyAll));
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        let auth = format!("Bearer {token}");
+
+        let (status, body) = send(&app, get_with_auth("/v1/vaults", &auth)).await;
+        assert_eq!(status, StatusCode::OK, "a list is filtered, never refused");
+        assert_eq!(body["vaults"].as_array().map(|v| v.len()), Some(0));
+
+        let (status, _) = send(&app, get_with_auth("/v1/recents", &auth)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "recents spans vaults; it filters too"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shipped_policy_changes_nothing_for_an_ordinary_caller() {
+        // The other direction, and the reason this slice is safe to merge:
+        // with `AllowAuthenticated` the boundary is invisible. A vault that is
+        // simply absent still answers 404, not 403 — the seam did not turn
+        // "no such vault" into "forbidden" for everyone.
+        let dir = tempdir::TempDir::new("storm-authz-allow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            get_with_auth("/v1/vaults/nope/tree", &format!("Bearer {token}")),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
