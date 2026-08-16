@@ -34,7 +34,7 @@ pub struct VaultEntry {
     pub created: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
     pub root: PathBuf,
     #[serde(default)]
@@ -58,6 +58,43 @@ pub struct Registry {
     /// field simply being absent.
     #[serde(default)]
     pub mcp_writable: bool,
+    /// Whether the legacy shared `STORM_TOKEN` is still accepted (A10).
+    ///
+    /// **Defaults *on*, which is the opposite direction to the MCP switches
+    /// above, and deliberately so.** A registry written before this field
+    /// existed belongs to a server whose clients all authenticate with the
+    /// shared token, so loading it as `false` would refuse every one of them
+    /// on the first boot after an upgrade — the vault would look gone. MCP
+    /// defaults off because the risk there is exposure; this defaults on
+    /// because the risk here is lockout, and lockout is the worse one on a
+    /// machine holding the only copy of a vault.
+    ///
+    /// Turning it off is the migration's final step and is meant to be
+    /// reversible — see A10 and *Storm Auth Protocol*.
+    #[serde(default = "legacy_token_default")]
+    pub legacy_token_enabled: bool,
+}
+
+/// `true` — see [`Registry::legacy_token_enabled`]. A free function because
+/// `serde(default = …)` needs a path, and a `bool` literal is not one.
+fn legacy_token_default() -> bool {
+    true
+}
+
+/// Hand-written rather than derived, so `Registry::default()` cannot quietly
+/// disable the legacy token. `#[derive(Default)]` yields `false` for every
+/// bool, which is the safe direction for the MCP flags and the *unsafe* one
+/// here.
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::new(),
+            vaults: Vec::new(),
+            mcp_enabled: false,
+            mcp_writable: false,
+            legacy_token_enabled: legacy_token_default(),
+        }
+    }
 }
 
 /// What a scan of a candidate root would do, without doing it.
@@ -94,9 +131,7 @@ impl Registry {
         if !path.exists() {
             return Ok(Self {
                 root: first_run_root.to_path_buf(),
-                vaults: Vec::new(),
-                mcp_enabled: false,
-                mcp_writable: false,
+                ..Default::default()
             });
         }
         let raw = fs::read_to_string(&path)
