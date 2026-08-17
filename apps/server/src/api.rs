@@ -2201,7 +2201,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    // **`multi_thread` matters.** `#[tokio::test]` defaults to a current-thread
+    // runtime, where "concurrent" tasks interleave only at await points on one
+    // thread — and a mutation that stored the identity in a shared `Mutex`
+    // instead of a per-task scope *passed* under it. Real parallelism is what
+    // makes the leak observable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_mcp_calls_do_not_share_an_identity() {
         // The property the whole mechanism rests on. rmcp builds the handler on
         // the request task and then runs it inside a `tokio::spawn`, so the
@@ -2237,7 +2242,7 @@ mod tests {
         // Interleaved on purpose: alternating users maximises the chance that
         // one request's scope is live while another's factory runs.
         let mut tasks = Vec::new();
-        for i in 0..24 {
+        for i in 0..64 {
             let (user_vault, auth) = if i % 2 == 0 {
                 (alice_vault.clone(), format!("Bearer {alice_token}"))
             } else {
@@ -2267,7 +2272,7 @@ mod tests {
         }
 
         let pairs = policy.pairs();
-        assert_eq!(pairs.len(), 24, "every call must have reached the policy");
+        assert_eq!(pairs.len(), 64, "every call must have reached the policy");
         for (who, vault) in pairs {
             let expected = if who == alice {
                 &alice_vault

@@ -145,6 +145,21 @@ pub fn service(
     )
 }
 
+/// The caller, or a refusal — the fail-closed half of [`Storm::actor`].
+///
+/// Free-standing so it can be tested without an `AppState`: every request in
+/// the HTTP suite passes through `scope_actor`, so nothing there reaches the
+/// `None` branch, and a mutation returning a permitted actor here passed the
+/// entire suite until this had a test of its own.
+fn resolve_actor(actor: Option<&Actor>) -> Result<&Actor, ErrorData> {
+    actor.ok_or_else(|| {
+        ErrorData::internal_error(
+            "this MCP request carries no authenticated identity".to_string(),
+            None,
+        )
+    })
+}
+
 // ---- tool parameters ---------------------------------------------------
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -315,12 +330,7 @@ impl Storm {
     /// be an unauthenticated caller reaching a vault the moment the policy
     /// stops being permissive, which is the bypass this slice exists to remove.
     fn actor(&self) -> Result<&Actor, ErrorData> {
-        self.actor.as_ref().ok_or_else(|| {
-            ErrorData::internal_error(
-                "this MCP request carries no authenticated identity".to_string(),
-                None,
-            )
-        })
+        resolve_actor(self.actor.as_ref())
     }
 
     /// The tools this request is allowed to see and call.
@@ -568,6 +578,32 @@ impl ServerHandler for Storm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handler_without_an_identity_refuses_rather_than_defaulting() {
+        // The fail-closed half, and it needs its own test: every request in the
+        // HTTP suite goes through `scope_actor`, so nothing there ever reaches
+        // this branch. A mutation that returned a permitted actor when the
+        // identity was missing passed the whole suite.
+        //
+        // `None` means the handler was built outside a request scope. Defaulting
+        // would put an unauthenticated caller in front of a vault the moment the
+        // policy stops allowing everyone.
+        let refused = resolve_actor(None).unwrap_err();
+        assert!(
+            refused.message.contains("no authenticated identity"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[test]
+    fn a_handler_with_an_identity_hands_it_over() {
+        assert!(matches!(
+            resolve_actor(Some(&Actor::Legacy)),
+            Ok(Actor::Legacy)
+        ));
+    }
 
     #[test]
     fn read_only_mode_does_not_even_advertise_the_write_tools() {
