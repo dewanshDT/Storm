@@ -72,6 +72,39 @@ pub fn allowed_hosts(host: &str, port: u16) -> Vec<String> {
     ]
 }
 
+tokio::task_local! {
+    /// The authenticated caller of the MCP request currently being served.
+    ///
+    /// **Read by [`service`]'s factory, never by a tool.** rmcp serves a
+    /// stateless request by building the handler on the request task and then
+    /// running it inside a `tokio::spawn` (`streamable_http_server/tower.rs`:
+    /// `get_service()` at the top of `handle_post`, `tokio::spawn` a few lines
+    /// later). A task-local does **not** cross a spawn, so a tool that tried to
+    /// read this would find nothing. The factory reads it while still on the
+    /// request task and moves the value into the handler, which is what carries
+    /// the identity across the spawn — by ownership, not by ambient state.
+    ///
+    /// That is also why it cannot leak between concurrent requests: each
+    /// request is its own task with its own scope, and each handler owns a
+    /// separate `Actor` from the moment it is built.
+    static MCP_ACTOR: Actor;
+}
+
+/// Puts the authenticated actor where [`service`]'s factory can find it.
+///
+/// Layered **inside** `require_auth`, so `Extension<Actor>` is already set. A
+/// request that somehow arrives without one is served with no identity, and the
+/// vault tools refuse — see [`Storm::actor`].
+pub async fn scope_actor(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match request.extensions().get::<Actor>().cloned() {
+        Some(actor) => MCP_ACTOR.scope(actor, next.run(request)).await,
+        None => next.run(request).await,
+    }
+}
+
 /// The tower service to nest at `/mcp`.
 pub fn service(
     state: Shared,
@@ -99,7 +132,13 @@ pub fn service(
             let writable = state
                 .mcp_writable
                 .load(std::sync::atomic::Ordering::Relaxed);
-            Ok(Storm::new(state.clone(), writable))
+            // Read here, on the request task, because this closure is the last
+            // point before rmcp spawns the handler. `try_with` rather than
+            // `get`: this same factory is also called to build a throwaway
+            // service for tool-schema validation, which has no request scope
+            // and needs no identity.
+            let actor = MCP_ACTOR.try_with(Clone::clone).ok();
+            Ok(Storm::new(state.clone(), writable, actor))
         },
         Arc::new(LocalSessionManager::default()),
         config,
@@ -190,6 +229,13 @@ pub struct UpdateParams {
 #[derive(Clone)]
 pub struct Storm {
     state: Shared,
+    /// Who is calling — the same `Actor` a REST request would resolve.
+    ///
+    /// Captured when the handler is built, *not* read per tool: rmcp runs the
+    /// handler on a spawned task, and this value crossing that boundary by
+    /// ownership is what keeps concurrent requests from seeing each other's
+    /// identity.
+    actor: Option<Actor>,
     /// Whether this request may change the vault.
     ///
     /// Filters the tool router rather than gating each tool's body, so a
@@ -253,8 +299,28 @@ fn respond_object<T: serde::Serialize>(
 
 #[tool_router]
 impl Storm {
-    pub fn new(state: Shared, writable: bool) -> Self {
-        Self { state, writable }
+    pub fn new(state: Shared, writable: bool, actor: Option<Actor>) -> Self {
+        Self {
+            state,
+            writable,
+            actor,
+        }
+    }
+
+    /// The authenticated caller, or a refusal.
+    ///
+    /// `None` means the handler was built outside a request scope. That should
+    /// not happen for a tool call — `/mcp` sits behind the session tier — so it
+    /// is refused rather than defaulted. **Fail closed:** a default here would
+    /// be an unauthenticated caller reaching a vault the moment the policy
+    /// stops being permissive, which is the bypass this slice exists to remove.
+    fn actor(&self) -> Result<&Actor, ErrorData> {
+        self.actor.as_ref().ok_or_else(|| {
+            ErrorData::internal_error(
+                "this MCP request carries no authenticated identity".to_string(),
+                None,
+            )
+        })
     }
 
     /// The tools this request is allowed to see and call.
@@ -273,7 +339,7 @@ impl Storm {
     )]
     async fn list_vaults(&self) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::list_vaults(&self.state, &Actor::Mcp).await,
+            crate::ops::list_vaults(&self.state, self.actor()?).await,
             Some("vaults"),
         )
     }
@@ -285,7 +351,7 @@ impl Storm {
         &self,
         Parameters(VaultParams { vault }): Parameters<VaultParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::get_vault(&self.state, &Actor::Mcp, &vault).await)
+        respond_object(crate::ops::get_vault(&self.state, self.actor()?, &vault).await)
     }
 
     #[tool(
@@ -302,7 +368,7 @@ impl Storm {
         respond(
             crate::ops::search(
                 &self.state,
-                &Actor::Mcp,
+                self.actor()?,
                 &vault,
                 &query,
                 limit.unwrap_or(20),
@@ -317,7 +383,7 @@ impl Storm {
         &self,
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::get_note(&self.state, &Actor::Mcp, &vault, &note_id).await)
+        respond_object(crate::ops::get_note(&self.state, self.actor()?, &vault, &note_id).await)
     }
 
     #[tool(
@@ -334,7 +400,7 @@ impl Storm {
         respond_object(
             crate::ops::related(
                 &self.state,
-                &Actor::Mcp,
+                self.actor()?,
                 &vault,
                 &note_id,
                 limit.unwrap_or(20),
@@ -349,7 +415,7 @@ impl Storm {
         Parameters(VaultParams { vault }): Parameters<VaultParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::list_tags(&self.state, &Actor::Mcp, &vault).await,
+            crate::ops::list_tags(&self.state, self.actor()?, &vault).await,
             Some("tags"),
         )
     }
@@ -362,7 +428,7 @@ impl Storm {
         Parameters(RecentParams { limit }): Parameters<RecentParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::recents(&self.state, &Actor::Mcp, limit.unwrap_or(20)).await,
+            crate::ops::recents(&self.state, self.actor()?, limit.unwrap_or(20)).await,
             Some("recents"),
         )
     }
@@ -375,7 +441,7 @@ impl Storm {
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::note_history(&self.state, &Actor::Mcp, &vault, &note_id).await,
+            crate::ops::note_history(&self.state, self.actor()?, &vault, &note_id).await,
             Some("versions"),
         )
     }
@@ -390,7 +456,7 @@ impl Storm {
         }): Parameters<VersionParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::note_version(&self.state, &Actor::Mcp, &vault, &note_id, version).await,
+            crate::ops::note_version(&self.state, self.actor()?, &vault, &note_id, version).await,
             Some("content"),
         )
     }
@@ -416,7 +482,7 @@ impl Storm {
         // other byte through, so a user's YAML keeps its order and comments.
         let stamped = crate::frontmatter::set_scalars(&content, &[("source", "ai")]);
         respond_object(
-            crate::ops::create_note(&self.state, &Actor::Mcp, &vault, &path, &stamped).await,
+            crate::ops::create_note(&self.state, self.actor()?, &vault, &path, &stamped).await,
         )
     }
 
@@ -435,7 +501,7 @@ impl Storm {
         respond_object(
             crate::ops::update_note(
                 &self.state,
-                &Actor::Mcp,
+                self.actor()?,
                 &vault,
                 &note_id,
                 base_version,
@@ -454,7 +520,7 @@ impl Storm {
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::delete_note(&self.state, &Actor::Mcp, &vault, &note_id).await,
+            crate::ops::delete_note(&self.state, self.actor()?, &vault, &note_id).await,
             Some("seq"),
         )
     }

@@ -46,20 +46,14 @@ pub enum Actor {
     /// honest to write into `security_events.user_id`. It disappears with the
     /// token.
     Legacy,
-    /// An authenticated MCP session.
-    ///
-    /// **The user behind it is not propagated yet, and that has to change
-    /// before roles land.** `rmcp` builds its handler in a per-request factory
-    /// closure that receives no request, so the `Extension<Actor>` the
-    /// middleware inserted cannot be read from inside a tool. Today that costs
-    /// nothing — the policy ignores identity — but under a real policy an MCP
-    /// session would be the one caller whose grants could not be checked,
-    /// which is precisely the bypass the design review warned about. The fix
-    /// is a `tokio::task_local` scoped around `next.run(request)`; it is not
-    /// here because building it for a policy that ignores it is machinery
-    /// guarding nothing.
-    Mcp,
 }
+
+// There is deliberately **no `Mcp` variant**. There was, briefly, and it was a
+// second identity concept: an MCP call resolved as "some MCP session" while the
+// equivalent REST call resolved as a user. Under a real policy that would have
+// been the one caller whose grants could not be checked. An MCP request now
+// carries the same `Actor` its REST equivalent would — see `mcp::scope_actor`
+// for how it crosses rmcp's spawn boundary.
 
 // There is deliberately **no `System` variant**. The file watcher reaches a
 // vault without one, and that is correct rather than a gap: it is the server
@@ -75,7 +69,6 @@ impl Actor {
         match self {
             Actor::Session { .. } => "session",
             Actor::Legacy => "legacy-token",
-            Actor::Mcp => "mcp",
         }
     }
 }
@@ -160,7 +153,7 @@ mod tests {
         // The current answer, stated so a change to it is a visible diff
         // rather than a behaviour someone notices in production.
         let policy = AllowAuthenticated;
-        for actor in [session(), Actor::Legacy, Actor::Mcp] {
+        for actor in [session(), Actor::Legacy] {
             for access in [Access::Read, Access::Write] {
                 assert_eq!(
                     policy.decide(&actor, "any-vault", access),
@@ -192,7 +185,7 @@ mod tests {
         // `describe()` goes into logs and `security_events`. The legacy actor
         // is the one that could plausibly carry a token if someone extended
         // this carelessly.
-        for actor in [session(), Actor::Legacy, Actor::Mcp] {
+        for actor in [session(), Actor::Legacy] {
             let described = actor.describe();
             assert!(!described.contains("testtoken"));
             assert!(
