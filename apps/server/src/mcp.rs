@@ -579,6 +579,49 @@ impl ServerHandler for Storm {
 mod tests {
     use super::*;
 
+    // **Forced interleaving.** The HTTP-level concurrency test in `api.rs`
+    // demonstrates that two users' requests keep their own identity, but it
+    // cannot *prove* it: there is no guaranteed yield between the scope being
+    // entered and rmcp's factory reading it, so an implementation that stashed
+    // the actor in shared state could pass it on timing alone — and did, when
+    // that mutation was run.
+    //
+    // This one holds every task inside its own scope at once and then reads
+    // back, so a shared slot is guaranteed to have been overwritten. It is the
+    // isolation primitive under test, not the transport.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_request_scope_is_per_task_not_shared() {
+        let mut tasks = Vec::new();
+        for i in 0..32 {
+            tasks.push(tokio::spawn(async move {
+                let mine = Actor::Session {
+                    user_id: format!("usr_{i}"),
+                    role: crate::auth::users::Role::Member,
+                };
+                MCP_ACTOR
+                    .scope(mine, async move {
+                        // Every other task enters its own scope before this one
+                        // reads back.
+                        tokio::task::yield_now().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        MCP_ACTOR.with(|a| match a {
+                            Actor::Session { user_id, .. } => user_id.clone(),
+                            other => other.describe().to_string(),
+                        })
+                    })
+                    .await
+            }));
+        }
+
+        for (i, task) in tasks.into_iter().enumerate() {
+            assert_eq!(
+                task.await.unwrap(),
+                format!("usr_{i}"),
+                "task {i} read another task's identity"
+            );
+        }
+    }
+
     #[test]
     fn a_handler_without_an_identity_refuses_rather_than_defaulting() {
         // The fail-closed half, and it needs its own test: every request in the
