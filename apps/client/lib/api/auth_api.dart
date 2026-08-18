@@ -142,11 +142,25 @@ class AuthApi {
   }
 
   /// `POST /v1/auth/refresh` — exchange a refresh token for a new pair.
-  Future<SessionTokens> refresh(String refreshToken) async {
+  ///
+  /// **Device tier, like [login].** Rotation is bound to the device holding the
+  /// session, so the `StormDevice` header travels with it. This call used to
+  /// send no `Authorization` header at all and was refused `401` by every real
+  /// server — invisibly, because the only caller swallows the failure and
+  /// returns `false`, and the unit tests answer from a mock rather than from
+  /// `require_auth`. A session could therefore never be renewed.
+  Future<SessionTokens> refresh(
+    String refreshToken, {
+    required String deviceId,
+    required String deviceSecret,
+  }) async {
     final json = _decode(
       await _client.post(
         _uri('/v1/auth/refresh'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'StormDevice $deviceId:$deviceSecret',
+        },
         body: jsonEncode({'refresh_token': refreshToken}),
       ),
     );

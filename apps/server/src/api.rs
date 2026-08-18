@@ -2749,32 +2749,75 @@ mod tests {
         // The session branch had always dropped the guard first. Nothing caught
         // the device branch because no test used a device credential at all.
         //
-        // `GET /v1/users` is the cheapest handler that takes the lock — no
-        // Argon2id — so this test times out in milliseconds rather than hanging
-        // a suite for a minute.
+        // **Every device-tier route, not just one.** The bug was in the
+        // middleware, so it took all four down together; a test that covers one
+        // of them would pass over a regression reintroduced for the others (a
+        // per-route `drop`, say, instead of a scoped guard).
+        //
+        // Each request below is chosen to *reach* its handler's lock. That
+        // matters for `users/first`, which validates the password before
+        // locking: a short password would return 422 without ever touching the
+        // mutex, and the test would prove nothing.
         let dir = tempdir::TempDir::new("storm-device-deadlock").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let device = pair_a_device(&state).await;
+        seed_owner(&state).await;
 
-        let answered = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            send(&app, get_with_auth("/v1/users", &device)),
-        )
-        .await;
+        let cases: Vec<(&str, axum::http::Request<axum::body::Body>)> = vec![
+            ("GET /v1/users", get_with_auth("/v1/users", &device)),
+            (
+                // An account exists, so this reaches the lock and is refused by
+                // the bootstrap-window check — without paying for a hash.
+                "POST /v1/users/first",
+                post_json_with_auth(
+                    "/v1/users/first",
+                    serde_json::json!({"username": "someone", "password": "a-long-enough-password"}),
+                    &device,
+                ),
+            ),
+            (
+                "POST /v1/auth/login",
+                post_json_with_auth(
+                    "/v1/auth/login",
+                    serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
+                    &device,
+                ),
+            ),
+            (
+                "POST /v1/auth/refresh",
+                post_json_with_auth(
+                    "/v1/auth/refresh",
+                    serde_json::json!({"refresh_token": "not-a-real-token"}),
+                    &device,
+                ),
+            ),
+        ];
 
-        let (status, body) = answered.expect(
-            "a device-tier request deadlocked: the middleware is holding the \
-             auth_db lock across next.run()",
-        );
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, serde_json::json!([]), "a fresh server has no users");
+        for (name, request) in cases {
+            let answered =
+                tokio::time::timeout(std::time::Duration::from_secs(20), send(&app, request)).await;
+            let (status, _) = answered.unwrap_or_else(|_| {
+                panic!(
+                    "{name} deadlocked: the middleware is holding the auth_db \
+                     lock across next.run()"
+                )
+            });
+            // Which status is not the point — that the handler *answered at
+            // all* is. A 401 or 409 here still proves it reached the lock and
+            // came back.
+            assert!(
+                status != StatusCode::INTERNAL_SERVER_ERROR,
+                "{name} answered {status}"
+            );
 
-        // And the lock really is free afterwards, which is the half that turns
-        // one hung request into an outage.
-        assert!(
-            state.auth_db.try_lock().is_ok(),
-            "the middleware left the auth_db mutex held"
-        );
+            // And the lock is free again afterwards. This is the half that
+            // turns one hung request into a server-wide outage: the wedged task
+            // never released the mutex, so everything behind it queued forever.
+            assert!(
+                state.auth_db.try_lock().is_ok(),
+                "{name} left the auth_db mutex held"
+            );
+        }
     }
 
     #[tokio::test]

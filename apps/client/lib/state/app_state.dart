@@ -292,7 +292,12 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     if (s == null || s.refreshToken.isEmpty) return false;
     final api = AuthApi(baseUrl: s.baseUrl);
     try {
-      final tokens = await api.refresh(s.refreshToken);
+      // Device tier: refresh is bound to the device holding the session.
+      final tokens = await api.refresh(
+        s.refreshToken,
+        deviceId: s.deviceId,
+        deviceSecret: s.deviceSecret,
+      );
       await save(
         s.copyWith(
           accessToken: tokens.accessToken,
