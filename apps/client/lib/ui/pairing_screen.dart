@@ -112,7 +112,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     });
 
     try {
-      final authApi = AuthApi(baseUrl: uri.address);
+      final authApi = AuthApi(baseUrl: uri.baseUrl);
 
       // 1. Fetch server identity and verify it matches the QR.
       final serverInfo = await authApi.serverInfo();
@@ -232,7 +232,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
     try {
       final uri = _parsedUri!;
-      final authApi = AuthApi(baseUrl: uri.address);
+      final authApi = AuthApi(baseUrl: uri.baseUrl);
       // Device tier: the credential from pairing, a step earlier in this flow.
       final pair = _pairResult!;
       await authApi.createFirstUser(
@@ -271,7 +271,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     try {
       final uri = _parsedUri!;
       final pair = _pairResult!;
-      final authApi = AuthApi(baseUrl: uri.address);
+      final authApi = AuthApi(baseUrl: uri.baseUrl);
       final tokens = await authApi.login(
         deviceId: pair.deviceId,
         deviceSecret: pair.deviceSecret,
@@ -289,7 +289,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
           .read(settingsProvider.notifier)
           .save(
             current.copyWith(
-              baseUrl: uri.address,
+              baseUrl: uri.baseUrl,
               // Device credentials.
               deviceId: pair.deviceId,
               deviceSecret: pair.deviceSecret,

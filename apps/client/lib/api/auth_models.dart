@@ -112,7 +112,27 @@ class PairingUri {
   final String publicKey;
   final String nonce;
   final String expires;
+
+  /// The `addr` field exactly as the QR carries it: a bare `host:port`.
   final String address;
+
+  /// [address] as something an HTTP client can actually be given.
+  ///
+  /// **A bare `host:port` is not a URL.** `Uri.parse('192.168.91.51:8585/…')`
+  /// reads `192.168.91.51` as the *scheme*, and a scheme may not start with a
+  /// digit, so it throws `Scheme not starting with alphabetic character` — the
+  /// error a real phone showed after scanning a perfectly good code. Every
+  /// caller was passing `address` straight in as `baseUrl`, including the one
+  /// that persists it into `Settings`, so this broke the whole app after
+  /// pairing and not merely the pairing screen.
+  ///
+  /// The live tests missed it because the harness hands them a full
+  /// `http://host:port` and they never read this field — the same blind spot
+  /// that hid the wildcard bind address.
+  String get baseUrl =>
+      address.startsWith('http://') || address.startsWith('https://')
+      ? address
+      : 'http://$address';
 
   /// Parses `storm://pair?v=1&sid=...&pk=...&n=...&exp=...&addr=...`.
   ///

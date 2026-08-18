@@ -52,6 +52,33 @@ void main() {
     expect(PairingUri.parse(hostless), isNull);
   });
 
+  test('the address becomes a URL an HTTP client can use', () {
+    // `addr` is a bare host:port. Handed to Uri.parse as-is it reads the host
+    // as a scheme — and a scheme may not start with a digit, so a real phone
+    // scanned a perfectly good code and got "Scheme not starting with
+    // alphabetic character". Every caller passed this straight in as baseUrl,
+    // including the one that persists it, so it broke the whole app after
+    // pairing.
+    final p = PairingUri.parse(good)!;
+    expect(p.baseUrl, 'http://192.168.91.51:8585');
+    expect(
+      () => Uri.parse('${p.baseUrl}/v1/server'),
+      returnsNormally,
+      reason: 'this is the call that threw',
+    );
+    expect(Uri.parse('${p.baseUrl}/v1/server').host, '192.168.91.51');
+  });
+
+  test('an address that already carries a scheme is left alone', () {
+    for (final scheme in ['http', 'https']) {
+      final withScheme = good.replaceFirst(
+        'addr=192.168.91.51:8585',
+        'addr=$scheme://storm.example.com',
+      );
+      expect(PairingUri.parse(withScheme)!.baseUrl, '$scheme://storm.example.com');
+    }
+  });
+
   test('a non-storm URI is refused', () {
     expect(PairingUri.parse('https://example.com/pair?v=1'), isNull);
     expect(PairingUri.parse('storm://other?v=1'), isNull);

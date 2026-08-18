@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/auth_api.dart';
+import 'package:storm/api/auth_models.dart';
 import 'package:storm/api/storm_api.dart';
 
 /// The client's device-tier path, against a real server.
@@ -38,31 +39,43 @@ void main() {
   }
 
   test('pair, log in, use the session, refresh, log out', () async {
-    final auth = AuthApi(baseUrl: base);
-    addTearDown(auth.dispose);
-
     // ---- the bootstrap QR -------------------------------------------------
     //
     // A fresh server logs a `storm://pair` URI at boot. This is the operator
     // reading it off the console, which is exactly what the first device does.
     final log = await File(logPath).readAsString();
-    final uri = RegExp(r'storm://pair\?\S+').firstMatch(log)?.group(0);
-    expect(uri, isNotNull, reason: 'no bootstrap pairing URI in $logPath');
+    final raw = RegExp(r'storm://pair\?\S+').firstMatch(log)?.group(0);
+    expect(raw, isNotNull, reason: 'no bootstrap pairing URI in $logPath');
 
-    final nonce = Uri.parse(uri!.replaceFirst('storm://', 'https://'))
-        .queryParameters['n'];
-    expect(nonce, isNotNull);
+    // Parsed with the client's own parser, and **dialled at the address the
+    // QR carries** rather than one the harness supplied. That distinction is
+    // the whole point: this test passed for a week while the real app could
+    // not pair at all, because `addr` is a bare host:port and every caller
+    // handed it to Uri.parse as if it were a URL.
+    final pairing = PairingUri.parse(raw!);
+    expect(pairing, isNotNull, reason: 'the client cannot read its own QR');
+    final serverBase = pairing!.baseUrl;
+    expect(
+      serverBase,
+      base,
+      reason: 'the QR should advertise the address the harness is serving on',
+    );
+
+    final auth = AuthApi(baseUrl: serverBase);
+    addTearDown(auth.dispose);
+
+    final nonce = pairing.nonce;
+    expect(nonce, isNotEmpty);
 
     // The identity in the QR is what the client pins, so it must match what
     // the server publishes about itself.
     final info = await auth.serverInfo();
-    final qr = Uri.parse(uri.replaceFirst('storm://', 'https://'));
-    expect(qr.queryParameters['sid'], info.serverId);
-    expect(qr.queryParameters['pk'], info.publicKey);
+    expect(pairing.serverId, info.serverId);
+    expect(pairing.publicKey, info.publicKey);
 
     // ---- pair -------------------------------------------------------------
     final paired = await auth.pair(
-      nonce: nonce!,
+      nonce: nonce,
       deviceName: 'integration test',
       platform: 'linux',
     );
@@ -110,7 +123,7 @@ void main() {
     expect(DateTime.parse(session.refreshExpires).isAfter(DateTime.now()), isTrue);
 
     // ---- an authenticated vault request -----------------------------------
-    final api = StormApi(baseUrl: base, token: session.accessToken);
+    final api = StormApi(baseUrl: serverBase, token: session.accessToken);
     addTearDown(api.dispose);
     final vaults = await api.vaults();
     expect(vaults, isNotEmpty, reason: 'the harness seeds one vault');
@@ -129,14 +142,14 @@ void main() {
     expect(rotated.accessToken, isNot(session.accessToken));
     expect(rotated.refreshToken, isNot(session.refreshToken));
 
-    final rotatedApi = StormApi(baseUrl: base, token: rotated.accessToken);
+    final rotatedApi = StormApi(baseUrl: serverBase, token: rotated.accessToken);
     addTearDown(rotatedApi.dispose);
     expect(await rotatedApi.vaults(), isNotEmpty);
 
     // ---- logout, and the door actually shuts ------------------------------
     await rotatedApi.logout();
 
-    final dead = StormApi(baseUrl: base, token: rotated.accessToken);
+    final dead = StormApi(baseUrl: serverBase, token: rotated.accessToken);
     addTearDown(dead.dispose);
     await expectLater(
       dead.vaults(),
