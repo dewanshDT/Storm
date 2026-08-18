@@ -116,24 +116,36 @@ class SessionTokens {
   const SessionTokens({
     required this.accessToken,
     required this.refreshToken,
-    required this.accessExpiresIn,
-    required this.refreshExpiresIn,
+    required this.expires,
+    required this.refreshExpires,
     required this.userId,
     required this.deviceId,
   });
 
   final String accessToken;
   final String refreshToken;
-  final int accessExpiresIn;
-  final int refreshExpiresIn;
+
+  /// When the access token dies — an **absolute RFC3339 instant**, the wire
+  /// contract in *Storm Auth Protocol* and the `sessions` table's own `expires`
+  /// column projected unchanged.
+  ///
+  /// This used to be `accessExpiresIn`, an integer count of seconds read from
+  /// `access_expires_in` — a field no server has ever sent and no note in the
+  /// vault ever described. `fromJson` threw `Null is not a subtype of num` on
+  /// every real login, and the mock-backed tests could not see it because they
+  /// were built to the same wrong assumption.
+  final String expires;
+
+  /// When the refresh token dies. Absolute RFC3339, as [expires].
+  final String refreshExpires;
   final String userId;
   final String deviceId;
 
   factory SessionTokens.fromJson(Map<String, dynamic> j) => SessionTokens(
     accessToken: j['access_token'] as String,
     refreshToken: j['refresh_token'] as String,
-    accessExpiresIn: (j['access_expires_in'] as num).toInt(),
-    refreshExpiresIn: (j['refresh_expires_in'] as num).toInt(),
+    expires: j['expires'] as String,
+    refreshExpires: j['refresh_expires'] as String,
     userId: j['user_id'] as String,
     deviceId: j['device_id'] as String,
   );

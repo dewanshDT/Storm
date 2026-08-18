@@ -302,7 +302,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
         s.copyWith(
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
-          accessTokenExpiresAt: _expiryFrom(tokens.accessExpiresIn),
+          accessTokenExpiresAt: tokens.expires,
         ),
       );
       return true;
@@ -356,10 +356,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     );
   }
 
-  /// `accessExpiresIn` seconds from now, as the ISO 8601 UTC stamp the
-  /// pairing flow stores.
-  static String _expiryFrom(int seconds) =>
-      DateTime.now().toUtc().add(Duration(seconds: seconds)).toIso8601String();
 }
 
 /// The faces a note body can be set in.

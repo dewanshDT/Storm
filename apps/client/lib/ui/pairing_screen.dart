@@ -231,10 +231,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
       // Save everything to Settings.
       final current = ref.read(settingsProvider).value ?? const Settings();
-      final expiresAt = DateTime.now()
-          .add(Duration(seconds: tokens.accessExpiresIn))
-          .toUtc()
-          .toIso8601String();
+      // The server sends the absolute instant; there is nothing to compute.
+      final expiresAt = tokens.expires;
       await ref
           .read(settingsProvider.notifier)
           .save(

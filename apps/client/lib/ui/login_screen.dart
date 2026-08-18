@@ -121,10 +121,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         username: username,
         password: _passwordController.text,
       );
-      final expiresAt = DateTime.now()
-          .add(Duration(seconds: tokens.accessExpiresIn))
-          .toUtc()
-          .toIso8601String();
+      // The server sends the absolute instant; there is nothing to compute.
+      final expiresAt = tokens.expires;
       await ref
           .read(settingsProvider.notifier)
           .save(
