@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–11 **merged to main**, not deployed · device tier was deadlocked and is fixed · RBAC policy → cutover |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–12 **merged to main**, not deployed · auth has never run against a real server · client device tier → VM pass → RBAC → cutover |
 
 Last updated: 2026-08-18. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -113,12 +113,24 @@ that the device tier deadlocked on every request, that the first-user endpoint
 never closed, and that the Argon2id bound was decorative. Details below; **the
 authentication path could not have worked against a real server before it.**
 
-**Next, in order:** the RBAC **policy** → the cutover. A9's seam exists; what
-is still deferred is the decision it defers to — roles are enforced against
-each other but nothing consults them for access, and `vault_grants` remains the
-only table in the data model never read or written. Q19–Q25 in *Auth
-Authorization Review (A9)* are the questions that slice has to answer, left
-open on purpose so the boundary did not have to guess them. Not deployed.
+**Next, in order:** the **client half of the device tier** → a pass against the
+VM → the RBAC **policy** → the cutover.
+
+Slice 12 reordered this. The RBAC policy was next while the assumption held
+that the authentication path worked and only lacked a permission model; it did
+not work — the device tier deadlocked on its first request, so **no
+authentication code has ever completed against a real server.** The client's
+`test_live/` suite still authenticates with the legacy shared token, which
+leaves its half of that tier untested in precisely the way the server's half
+was. Close that, pair against the VM, and only then build a permission model on
+top of a path known to run.
+
+The RBAC policy itself is unchanged and still deferred on purpose: A9's seam
+exists, roles are enforced against each other but nothing consults them for
+access, and `vault_grants` remains the only table in the data model never read
+or written. Q19–Q25 in *Auth Authorization Review (A9)* are the questions that
+slice has to answer, left open so the boundary did not have to guess them. Not
+deployed.
 
 **Deploying M19 is its own step, and the risky one.** Everything so far has been
 merged behind `legacy_token_enabled`, which defaults on — the shared token still
