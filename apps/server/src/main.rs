@@ -922,8 +922,18 @@ fn run_pair(args: PairArgs) -> Result<()> {
         .context("loading server identity — has the server booted at least once?")?;
 
     let addr = args.addr.unwrap_or_else(|| {
-        eprintln!("no --addr given; using 127.0.0.1:8484 as the address hint");
-        "127.0.0.1:8484".to_string()
+        // The client dials whatever lands in this field, so a loopback guess
+        // is unusable from the one device that matters — a phone, where
+        // 127.0.0.1 is the phone itself. Default to an address on this box
+        // that something else can actually reach, and say plainly that the
+        // port is still a guess.
+        let host = advertised_host("0.0.0.0");
+        eprintln!(
+            "no --addr given; using {host}:8484. If the server listens on \
+             another port or interface, re-run with --addr host:port — the \
+             client dials this exactly as written."
+        );
+        format!("{host}:8484")
     });
 
     let (nonce, session) = auth::pairing::create(
@@ -942,7 +952,9 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &addr,
     );
 
-    println!("\n  Pairing QR — scan with Storm Client to create the first user:\n");
+    // Called a QR everywhere, rendered as a QR nowhere, and no Storm client
+    // can scan one. Print what this actually is until a scanner exists.
+    println!("\n  Pairing URI — paste into Storm Client to create the first user:\n");
     println!("    {}\n", qr.to_uri());
     println!("  Expires: {}", session.expires);
     println!("  Session: {}\n", session.id);

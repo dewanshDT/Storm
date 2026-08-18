@@ -334,7 +334,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 ),
                 SizedBox(height: t.sp * 1),
                 Text(
-                  'Scan or paste the pairing QR from your server.',
+                  // Not "scan": there is no scanner in this app, and offering
+                  // one that does not exist sends people hunting for a camera
+                  // button on their first run. `storm-server pair` prints the
+                  // URI as text — say the thing that is actually possible.
+                  'Run `storm-server pair` and paste the URI it prints.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
