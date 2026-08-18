@@ -72,6 +72,39 @@ pub fn allowed_hosts(host: &str, port: u16) -> Vec<String> {
     ]
 }
 
+tokio::task_local! {
+    /// The authenticated caller of the MCP request currently being served.
+    ///
+    /// **Read by [`service`]'s factory, never by a tool.** rmcp serves a
+    /// stateless request by building the handler on the request task and then
+    /// running it inside a `tokio::spawn` (`streamable_http_server/tower.rs`:
+    /// `get_service()` at the top of `handle_post`, `tokio::spawn` a few lines
+    /// later). A task-local does **not** cross a spawn, so a tool that tried to
+    /// read this would find nothing. The factory reads it while still on the
+    /// request task and moves the value into the handler, which is what carries
+    /// the identity across the spawn — by ownership, not by ambient state.
+    ///
+    /// That is also why it cannot leak between concurrent requests: each
+    /// request is its own task with its own scope, and each handler owns a
+    /// separate `Actor` from the moment it is built.
+    static MCP_ACTOR: Actor;
+}
+
+/// Puts the authenticated actor where [`service`]'s factory can find it.
+///
+/// Layered **inside** `require_auth`, so `Extension<Actor>` is already set. A
+/// request that somehow arrives without one is served with no identity, and the
+/// vault tools refuse — see [`Storm::actor`].
+pub async fn scope_actor(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match request.extensions().get::<Actor>().cloned() {
+        Some(actor) => MCP_ACTOR.scope(actor, next.run(request)).await,
+        None => next.run(request).await,
+    }
+}
+
 /// The tower service to nest at `/mcp`.
 pub fn service(
     state: Shared,
@@ -99,11 +132,32 @@ pub fn service(
             let writable = state
                 .mcp_writable
                 .load(std::sync::atomic::Ordering::Relaxed);
-            Ok(Storm::new(state.clone(), writable))
+            // Read here, on the request task, because this closure is the last
+            // point before rmcp spawns the handler. `try_with` rather than
+            // `get`: this same factory is also called to build a throwaway
+            // service for tool-schema validation, which has no request scope
+            // and needs no identity.
+            let actor = MCP_ACTOR.try_with(Clone::clone).ok();
+            Ok(Storm::new(state.clone(), writable, actor))
         },
         Arc::new(LocalSessionManager::default()),
         config,
     )
+}
+
+/// The caller, or a refusal — the fail-closed half of [`Storm::actor`].
+///
+/// Free-standing so it can be tested without an `AppState`: every request in
+/// the HTTP suite passes through `scope_actor`, so nothing there reaches the
+/// `None` branch, and a mutation returning a permitted actor here passed the
+/// entire suite until this had a test of its own.
+fn resolve_actor(actor: Option<&Actor>) -> Result<&Actor, ErrorData> {
+    actor.ok_or_else(|| {
+        ErrorData::internal_error(
+            "this MCP request carries no authenticated identity".to_string(),
+            None,
+        )
+    })
 }
 
 // ---- tool parameters ---------------------------------------------------
@@ -190,6 +244,13 @@ pub struct UpdateParams {
 #[derive(Clone)]
 pub struct Storm {
     state: Shared,
+    /// Who is calling — the same `Actor` a REST request would resolve.
+    ///
+    /// Captured when the handler is built, *not* read per tool: rmcp runs the
+    /// handler on a spawned task, and this value crossing that boundary by
+    /// ownership is what keeps concurrent requests from seeing each other's
+    /// identity.
+    actor: Option<Actor>,
     /// Whether this request may change the vault.
     ///
     /// Filters the tool router rather than gating each tool's body, so a
@@ -253,8 +314,23 @@ fn respond_object<T: serde::Serialize>(
 
 #[tool_router]
 impl Storm {
-    pub fn new(state: Shared, writable: bool) -> Self {
-        Self { state, writable }
+    pub fn new(state: Shared, writable: bool, actor: Option<Actor>) -> Self {
+        Self {
+            state,
+            writable,
+            actor,
+        }
+    }
+
+    /// The authenticated caller, or a refusal.
+    ///
+    /// `None` means the handler was built outside a request scope. That should
+    /// not happen for a tool call — `/mcp` sits behind the session tier — so it
+    /// is refused rather than defaulted. **Fail closed:** a default here would
+    /// be an unauthenticated caller reaching a vault the moment the policy
+    /// stops being permissive, which is the bypass this slice exists to remove.
+    fn actor(&self) -> Result<&Actor, ErrorData> {
+        resolve_actor(self.actor.as_ref())
     }
 
     /// The tools this request is allowed to see and call.
@@ -273,7 +349,7 @@ impl Storm {
     )]
     async fn list_vaults(&self) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::list_vaults(&self.state, &Actor::Mcp).await,
+            crate::ops::list_vaults(&self.state, self.actor()?).await,
             Some("vaults"),
         )
     }
@@ -285,7 +361,7 @@ impl Storm {
         &self,
         Parameters(VaultParams { vault }): Parameters<VaultParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::get_vault(&self.state, &Actor::Mcp, &vault).await)
+        respond_object(crate::ops::get_vault(&self.state, self.actor()?, &vault).await)
     }
 
     #[tool(
@@ -302,7 +378,7 @@ impl Storm {
         respond(
             crate::ops::search(
                 &self.state,
-                &Actor::Mcp,
+                self.actor()?,
                 &vault,
                 &query,
                 limit.unwrap_or(20),
@@ -317,7 +393,7 @@ impl Storm {
         &self,
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::get_note(&self.state, &Actor::Mcp, &vault, &note_id).await)
+        respond_object(crate::ops::get_note(&self.state, self.actor()?, &vault, &note_id).await)
     }
 
     #[tool(
@@ -334,7 +410,7 @@ impl Storm {
         respond_object(
             crate::ops::related(
                 &self.state,
-                &Actor::Mcp,
+                self.actor()?,
                 &vault,
                 &note_id,
                 limit.unwrap_or(20),
@@ -349,7 +425,7 @@ impl Storm {
         Parameters(VaultParams { vault }): Parameters<VaultParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::list_tags(&self.state, &Actor::Mcp, &vault).await,
+            crate::ops::list_tags(&self.state, self.actor()?, &vault).await,
             Some("tags"),
         )
     }
@@ -362,7 +438,7 @@ impl Storm {
         Parameters(RecentParams { limit }): Parameters<RecentParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::recents(&self.state, &Actor::Mcp, limit.unwrap_or(20)).await,
+            crate::ops::recents(&self.state, self.actor()?, limit.unwrap_or(20)).await,
             Some("recents"),
         )
     }
@@ -375,7 +451,7 @@ impl Storm {
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::note_history(&self.state, &Actor::Mcp, &vault, &note_id).await,
+            crate::ops::note_history(&self.state, self.actor()?, &vault, &note_id).await,
             Some("versions"),
         )
     }
@@ -390,7 +466,7 @@ impl Storm {
         }): Parameters<VersionParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::note_version(&self.state, &Actor::Mcp, &vault, &note_id, version).await,
+            crate::ops::note_version(&self.state, self.actor()?, &vault, &note_id, version).await,
             Some("content"),
         )
     }
@@ -416,7 +492,7 @@ impl Storm {
         // other byte through, so a user's YAML keeps its order and comments.
         let stamped = crate::frontmatter::set_scalars(&content, &[("source", "ai")]);
         respond_object(
-            crate::ops::create_note(&self.state, &Actor::Mcp, &vault, &path, &stamped).await,
+            crate::ops::create_note(&self.state, self.actor()?, &vault, &path, &stamped).await,
         )
     }
 
@@ -435,7 +511,7 @@ impl Storm {
         respond_object(
             crate::ops::update_note(
                 &self.state,
-                &Actor::Mcp,
+                self.actor()?,
                 &vault,
                 &note_id,
                 base_version,
@@ -454,7 +530,7 @@ impl Storm {
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::delete_note(&self.state, &Actor::Mcp, &vault, &note_id).await,
+            crate::ops::delete_note(&self.state, self.actor()?, &vault, &note_id).await,
             Some("seq"),
         )
     }
@@ -502,6 +578,75 @@ impl ServerHandler for Storm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // **Forced interleaving.** The HTTP-level concurrency test in `api.rs`
+    // demonstrates that two users' requests keep their own identity, but it
+    // cannot *prove* it: there is no guaranteed yield between the scope being
+    // entered and rmcp's factory reading it, so an implementation that stashed
+    // the actor in shared state could pass it on timing alone — and did, when
+    // that mutation was run.
+    //
+    // This one holds every task inside its own scope at once and then reads
+    // back, so a shared slot is guaranteed to have been overwritten. It is the
+    // isolation primitive under test, not the transport.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_request_scope_is_per_task_not_shared() {
+        let mut tasks = Vec::new();
+        for i in 0..32 {
+            tasks.push(tokio::spawn(async move {
+                let mine = Actor::Session {
+                    user_id: format!("usr_{i}"),
+                    role: crate::auth::users::Role::Member,
+                };
+                MCP_ACTOR
+                    .scope(mine, async move {
+                        // Every other task enters its own scope before this one
+                        // reads back.
+                        tokio::task::yield_now().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        MCP_ACTOR.with(|a| match a {
+                            Actor::Session { user_id, .. } => user_id.clone(),
+                            other => other.describe().to_string(),
+                        })
+                    })
+                    .await
+            }));
+        }
+
+        for (i, task) in tasks.into_iter().enumerate() {
+            assert_eq!(
+                task.await.unwrap(),
+                format!("usr_{i}"),
+                "task {i} read another task's identity"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handler_without_an_identity_refuses_rather_than_defaulting() {
+        // The fail-closed half, and it needs its own test: every request in the
+        // HTTP suite goes through `scope_actor`, so nothing there ever reaches
+        // this branch. A mutation that returned a permitted actor when the
+        // identity was missing passed the whole suite.
+        //
+        // `None` means the handler was built outside a request scope. Defaulting
+        // would put an unauthenticated caller in front of a vault the moment the
+        // policy stops allowing everyone.
+        let refused = resolve_actor(None).unwrap_err();
+        assert!(
+            refused.message.contains("no authenticated identity"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[test]
+    fn a_handler_with_an_identity_hands_it_over() {
+        assert!(matches!(
+            resolve_actor(Some(&Actor::Legacy)),
+            Ok(Actor::Legacy)
+        ));
+    }
 
     #[test]
     fn read_only_mode_does_not_even_advertise_the_write_tools() {

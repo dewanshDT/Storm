@@ -347,6 +347,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
     // rather than merged, so its paths don't collide with REST routes.
     let mcp_with_auth = Router::new()
         .nest("/mcp", mcp_router)
+        // Inner to `require_auth`, so `Extension<Actor>` is already set when it
+        // runs. Layers apply outermost-last, so listing it *first* here is what
+        // puts it after authentication. It exists because rmcp's handler is
+        // built by a factory that receives no request — see `mcp::scope_actor`.
+        .layer(axum::middleware::from_fn(crate::mcp::scope_actor))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -2084,6 +2089,202 @@ mod tests {
                 .legacy_token_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+
+    /// Records every authorization decision, so a test can see which actor
+    /// reached which vault.
+    ///
+    /// Allows everything — the question here is *whose identity arrived*, not
+    /// whether it was permitted.
+    #[derive(Debug, Default)]
+    struct RecordingPolicy {
+        seen: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingPolicy {
+        fn pairs(&self) -> Vec<(String, String)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::auth::authz::VaultPolicy for RecordingPolicy {
+        fn decide(&self, actor: &Actor, vault_id: &str, _: Access) -> Decision {
+            let who = match actor {
+                Actor::Session { user_id, .. } => user_id.clone(),
+                Actor::Legacy => "legacy".to_string(),
+            };
+            self.seen.lock().unwrap().push((who, vault_id.to_string()));
+            Decision::Allow
+        }
+    }
+
+    /// One MCP `tools/call` over the real router.
+    fn mcp_call(
+        tool: &str,
+        args: serde_json::Value,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": args },
+        });
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            // Streamable HTTP requires the client to accept both, even when the
+            // server answers in plain JSON.
+            .header("accept", "application/json, text/event-stream")
+            .header("authorization", auth)
+            // rmcp rejects a request with no Host header outright (DNS-rebinding
+            // defence). A real client always sends one; `oneshot` does not.
+            .header("host", "localhost")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap()
+    }
+
+    /// A second account, so two MCP requests can carry different identities.
+    async fn seed_member(state: &Shared, username: &str) -> String {
+        let mut auth_db = state.auth_db.lock().await;
+        crate::auth::users::create_user(
+            &mut auth_db,
+            crate::auth::users::NewUser {
+                username,
+                display_name: None,
+                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
+                role: crate::auth::users::Role::Member,
+            },
+            "2026-08-17T00:00:00Z",
+        )
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn an_mcp_call_carries_the_authenticated_user() {
+        // The gap this slice closes. An MCP tool used to resolve as a generic
+        // `Actor::Mcp` with no user behind it, so the policy could not tell who
+        // was asking — harmless while it allows everyone, an authorization
+        // bypass the moment it does not.
+        let dir = tempdir::TempDir::new("storm-mcp-identity").unwrap();
+        let policy = Arc::new(RecordingPolicy::default());
+        let (app, _, state) = test_router_with_policy(dir.path(), policy.clone());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        register_vault(&state, "Notes").await;
+        let vault = {
+            let vaults = state.vaults.read().await;
+            vaults.registry.vaults[0].id.clone()
+        };
+
+        let (status, body) = send(
+            &app,
+            mcp_call(
+                "get_vault",
+                serde_json::json!({ "vault": vault }),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        assert_eq!(
+            policy.pairs(),
+            vec![(owner.clone(), vault)],
+            "the tool must reach the policy as the logged-in user, not as an \
+             anonymous MCP caller"
+        );
+    }
+
+    // **`multi_thread` matters.** `#[tokio::test]` defaults to a current-thread
+    // runtime, where "concurrent" tasks interleave only at await points on one
+    // thread — and a mutation that stored the identity in a shared `Mutex`
+    // instead of a per-task scope *passed* under it. Real parallelism is what
+    // makes the leak observable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_mcp_calls_do_not_share_an_identity() {
+        // The property the whole mechanism rests on. rmcp builds the handler on
+        // the request task and then runs it inside a `tokio::spawn`, so the
+        // identity crosses that boundary by **ownership** — captured into the
+        // handler by the factory — rather than as ambient state a second
+        // request could overwrite.
+        //
+        // Two users, two vaults, many interleaved requests. If the identity
+        // were shared, some request would be recorded against the other user's
+        // vault.
+        let dir = tempdir::TempDir::new("storm-mcp-concurrent").unwrap();
+        let policy = Arc::new(RecordingPolicy::default());
+        let (app, _, state) = test_router_with_policy(dir.path(), policy.clone());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let alice = seed_owner(&state).await;
+        let bob = seed_member(&state, "bob").await;
+        let alice_token = session_token(&state, &alice).await;
+        let bob_token = session_token(&state, &bob).await;
+
+        register_vault(&state, "Alice").await;
+        register_vault(&state, "Bob").await;
+        let (alice_vault, bob_vault) = {
+            let vaults = state.vaults.read().await;
+            (
+                vaults.registry.vaults[0].id.clone(),
+                vaults.registry.vaults[1].id.clone(),
+            )
+        };
+
+        // Interleaved on purpose: alternating users maximises the chance that
+        // one request's scope is live while another's factory runs.
+        let mut tasks = Vec::new();
+        for i in 0..64 {
+            let (user_vault, auth) = if i % 2 == 0 {
+                (alice_vault.clone(), format!("Bearer {alice_token}"))
+            } else {
+                (bob_vault.clone(), format!("Bearer {bob_token}"))
+            };
+            let app = app.clone();
+            tasks.push(tokio::spawn(async move {
+                // `list_tags`, because it makes **exactly one** authorization
+                // decision. `get_vault` also enumerates vaults to build its
+                // listing, and those filter checks legitimately ask about other
+                // users' vaults — which would make a crossed pair ambiguous
+                // rather than proof of a leak.
+                let (status, _) = send(
+                    &app,
+                    mcp_call(
+                        "list_tags",
+                        serde_json::json!({ "vault": user_vault }),
+                        &auth,
+                    ),
+                )
+                .await;
+                status
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), StatusCode::OK);
+        }
+
+        let pairs = policy.pairs();
+        assert_eq!(pairs.len(), 64, "every call must have reached the policy");
+        for (who, vault) in pairs {
+            let expected = if who == alice {
+                &alice_vault
+            } else {
+                &bob_vault
+            };
+            assert_eq!(
+                &vault, expected,
+                "{who} was recorded against another user's vault — identity leaked \
+                 between concurrent MCP requests"
+            );
+        }
     }
 
     #[tokio::test]
