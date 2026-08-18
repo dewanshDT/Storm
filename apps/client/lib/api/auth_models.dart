@@ -60,6 +60,42 @@ class PairingResult {
   );
 }
 
+/// A pairing invite minted by `POST /v1/pairings`, for a new device.
+///
+/// The mirror image of [PairingUri]: the server hands back the same five
+/// fields, and [toUri] renders them into the string a new device consumes.
+/// **The format is shared with the server's `encode_qr`** — the two are a wire
+/// commitment, so a field added on one side and not the other produces a URI
+/// its own client cannot read.
+class PairingInvite {
+  const PairingInvite({
+    required this.serverId,
+    required this.publicKey,
+    required this.nonce,
+    required this.expires,
+    required this.address,
+  });
+
+  final String serverId;
+  final String publicKey;
+  final String nonce;
+  final String expires;
+  final String address;
+
+  factory PairingInvite.fromJson(Map<String, dynamic> j) => PairingInvite(
+    serverId: j['sid'] as String,
+    publicKey: j['pk'] as String,
+    nonce: j['n'] as String,
+    expires: j['exp'] as String,
+    address: j['addr'] as String,
+  );
+
+  /// The `storm://pair` URI a new device scans or pastes.
+  String toUri() =>
+      'storm://pair?v=1&sid=$serverId&pk=$publicKey&n=$nonce'
+      '&exp=$expires&addr=$address';
+}
+
 /// A parsed `storm://pair` URI.
 class PairingUri {
   const PairingUri({

@@ -36,6 +36,8 @@ class StormTokens extends ThemeExtension<StormTokens> {
     required this.amberSoft,
     required this.green,
     required this.danger,
+    required this.codePlate,
+    required this.onCodePlate,
     required this.fs,
     required this.scale,
     required this.sp,
@@ -86,6 +88,16 @@ class StormTokens extends ThemeExtension<StormTokens> {
 
   /// Failure and conflict.
   final Color danger;
+
+  /// The plate a QR code is drawn on, and the ink drawn on it.
+  ///
+  /// **Fixed in both themes, deliberately.** A QR is read by a camera through
+  /// contrast, so this is a functional requirement rather than a palette
+  /// choice — themed to Storm dark it would be a dark code on a dark ground
+  /// and simply would not scan. Named here rather than written as a literal so
+  /// the reason travels with it and the conformance test stays absolute.
+  final Color codePlate;
+  final Color onCodePlate;
 
   /// Base type size. The user can move this between 12 and 24.
   final double fs;
@@ -219,6 +231,9 @@ class StormTokens extends ThemeExtension<StormTokens> {
       amberSoft: oklch(bgL + dir * 0.08, 0.05, 68),
       green: oklch(dark ? 0.74 : 0.38, 0.13, 148),
       danger: oklch(dark ? 0.70 : 0.38, 0.17, 25),
+      // Not theme-dependent: a camera needs the contrast either way.
+      codePlate: const Color(0xFFFFFFFF),
+      onCodePlate: const Color(0xFF000000),
       fs: fs ?? i.fs,
       scale: i.scale,
       sp: i.sp,

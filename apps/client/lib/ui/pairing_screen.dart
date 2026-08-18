@@ -2,7 +2,7 @@
 /// paired, authenticated installation.
 ///
 /// Flow:
-/// 1. User pastes a `storm://pair` URI (or scans a QR on mobile later).
+/// 1. User scans a `storm://pair` QR, or pastes the URI (slice 14).
 /// 2. Client verifies the server's identity via the challenge step.
 /// 3. Client consumes the pairing nonce → device credentials.
 /// 4. Client creates the owner account (first user).
@@ -21,6 +21,7 @@ import '../api/auth_api.dart';
 import '../api/auth_models.dart';
 import '../api/ed25519_verify.dart';
 import '../state/app_state.dart';
+import 'scan_pairing_screen.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 
@@ -63,6 +64,21 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   }
 
   // ---- Step 1: parse and verify ----
+
+  /// Opens the camera and drops whatever it reads into the paste field.
+  ///
+  /// Deliberately routed through the field and `_onUriChanged` rather than
+  /// straight into `_verifyAndPair`: the scanned string then goes through
+  /// exactly the same parse and the same validation as a pasted one, and the
+  /// person can see what was read before anything is sent.
+  Future<void> _scan() async {
+    final scanned = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const ScanPairingScreen()),
+    );
+    if (scanned == null || !mounted) return;
+    _uriController.text = scanned;
+    _onUriChanged(scanned);
+  }
 
   void _onUriChanged(String value) {
     final parsed = PairingUri.parse(value.trim());
@@ -201,8 +217,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       setState(() => _error = 'Username must be at least 3 characters.');
       return;
     }
-    if (password.length < 8) {
-      setState(() => _error = 'Password must be at least 8 characters.');
+    // 12, matching the server's `MIN_PASSWORD_CHARS`. At 8 this screen
+    // accepted a password the server then refused with a 422, which reads as
+    // the app breaking rather than as the rule it is.
+    if (password.length < 12) {
+      setState(() => _error = 'Password must be at least 12 characters.');
       return;
     }
 
@@ -382,6 +401,18 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                   keyboardType: TextInputType.url,
                   onChanged: _onUriChanged,
                 ),
+                // Only where a camera exists. On desktop and web the paste
+                // field is the whole story, and a button that opens nothing is
+                // the same broken promise the old "Scan or paste" copy made.
+                if (canScanPairingQr) ...[
+                  SizedBox(height: t.sp * 1.5),
+                  OutlinedButton.icon(
+                    key: const Key('scan-pairing-qr'),
+                    onPressed: _scan,
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan a code instead'),
+                  ),
+                ],
                 if (_error != null) ...[
                   SizedBox(height: t.sp * 2),
                   Container(

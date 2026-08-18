@@ -7,6 +7,7 @@ import 'ui/browse_screen.dart';
 import 'ui/client_settings_screen.dart';
 import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
+import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
@@ -34,6 +35,10 @@ abstract final class Routes {
   /// Reachable without a vault, from the phone's dashboard — which is the
   /// screen you are on when there is no vault yet.
   static const serverSettings = '/settings/server';
+
+  /// Show a pairing QR so another device can join. Session tier: only a
+  /// signed-in client can vouch for a new one.
+  static const addDevice = '/add-device';
 
   /// The same two screens, mounted inside the vault shell.
   ///
@@ -134,6 +139,10 @@ final routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
+      GoRoute(
+        path: Routes.addDevice,
+        builder: (_, _) => const AddDeviceScreen(),
+      ),
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it

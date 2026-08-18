@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'auth_models.dart';
 import 'models.dart';
 
 /// REST client for `storm-server`.
@@ -385,6 +386,26 @@ class StormApi {
   /// `POST /v1/auth/logout` — revoke the current session.
   Future<void> logout() async {
     await _client.post(_uri('/v1/auth/logout'), headers: _headers);
+  }
+
+  /// `POST /v1/pairings` — mint a pairing invite for a **new** device.
+  ///
+  /// Session tier: an already-signed-in client vouches for the device being
+  /// added. Purpose is always `add_device` — the `first_user` window is a
+  /// one-shot that belongs to the server console (A8), and asking for it here
+  /// would be asking the server for something it must refuse.
+  Future<PairingInvite> issuePairing() async {
+    final r = await _client.post(
+      _uri('/v1/pairings'),
+      headers: _headers,
+      body: jsonEncode({'purpose': 'add_device'}),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}: ${r.body}');
+    }
+    return PairingInvite.fromJson(
+      jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>,
+    );
   }
 
   void dispose() => _client.close();
