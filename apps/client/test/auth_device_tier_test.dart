@@ -81,6 +81,22 @@ void main() {
     expect(seen.headers['Authorization'], expectedHeader);
   });
 
+  test('createFirstUser sends the device credential', () async {
+    // A8: creating an account over the network costs a paired device, and the
+    // legacy token deliberately cannot reach it. This sent no header at all,
+    // so a first run could pair and then fail to create the owner.
+    final api = AuthApi(baseUrl: 'http://server', client: capturing({}));
+
+    await api.createFirstUser(
+      username: 'dewansh',
+      password: 'a-long-enough-password',
+      deviceId: deviceId,
+      deviceSecret: deviceSecret,
+    );
+
+    expect(seen.headers['Authorization'], expectedHeader);
+  });
+
   test('listUsers sends the device credential', () async {
     final api = AuthApi(baseUrl: 'http://server', client: capturing([]));
 

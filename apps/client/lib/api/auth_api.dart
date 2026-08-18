@@ -80,16 +80,29 @@ class AuthApi {
     return PairingResult.fromJson(json as Map<String, dynamic>);
   }
 
-  /// `POST /v1/users/first` — create the owner account (unauthenticated).
+  /// `POST /v1/users/first` — create the owner account, once.
   ///
-  /// Only works when the user table is empty.
+  /// **Device tier, not unauthenticated** (A8): creating an account over the
+  /// network costs a paired device, and the legacy shared token deliberately
+  /// cannot reach it (A10). This said "unauthenticated" and sent no
+  /// `Authorization` header, which every real server answers `401` — so the
+  /// first run could pair and then fail to create the owner. The server's own
+  /// doc comment carried the same wrong claim until slice 12.
+  ///
+  /// Only works when the user table is empty; afterwards the server answers
+  /// `409` and keeps doing so.
   Future<void> createFirstUser({
     required String username,
     required String password,
+    required String deviceId,
+    required String deviceSecret,
   }) async {
     final r = await _client.post(
       _uri('/v1/users/first'),
-      headers: {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'StormDevice $deviceId:$deviceSecret',
+      },
       body: jsonEncode({'username': username, 'password': password}),
     );
     if (r.statusCode < 200 || r.statusCode >= 300) {

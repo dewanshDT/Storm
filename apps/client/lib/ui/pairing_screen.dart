@@ -188,7 +188,14 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     try {
       final uri = _parsedUri!;
       final authApi = AuthApi(baseUrl: uri.address);
-      await authApi.createFirstUser(username: username, password: password);
+      // Device tier: the credential from pairing, a step earlier in this flow.
+      final pair = _pairResult!;
+      await authApi.createFirstUser(
+        username: username,
+        password: password,
+        deviceId: pair.deviceId,
+        deviceSecret: pair.deviceSecret,
+      );
       if (!mounted) return;
       // Account created — now log in.
       await _login(username, password);

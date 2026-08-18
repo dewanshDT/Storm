@@ -21,6 +21,10 @@ VAULT_ROOT ?= .dev/vaults
 STATE ?= .dev/state
 TOKEN ?= testtoken
 PORT  ?= 8484
+# The device-tier client test needs its own server: it consumes the bootstrap
+# pairing nonce and creates the first user, both of which are once-per-server
+# and both of which `auth_e2e.py` has already used up on $(PORT).
+AUTH_PORT ?= 8485
 
 .DEFAULT_GOAL := help
 
@@ -88,8 +92,28 @@ test-live:
 	echo "--- auth e2e ---"; \
 	STORM_SERVER_LOG="$$ROOT/.dev/live-server.log" \
 		python3 "$$ROOT/$(SERVER)/tests/auth_e2e.py"; \
+	echo "--- client device-tier auth (its own fresh server) ---"; \
+	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
+	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \
+	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/auth-vaults/primary/Seed.md"; \
+	"$$ROOT/$(SERVER)/target/debug/storm-server" serve \
+		--vault-root "$$ROOT/.dev/auth-vaults" --state "$$ROOT/.dev/auth-state" \
+		--token $(TOKEN) --port $(AUTH_PORT) > "$$ROOT/.dev/auth-server.log" 2>&1 & \
+	AUTH_PID=$$!; \
+	trap 'kill $$SERVER_PID $$AUTH_PID 2>/dev/null; true' EXIT; \
+	for i in $$(seq 1 60); do \
+		curl -sf -o /dev/null http://127.0.0.1:$(AUTH_PORT)/v1/health && break; \
+		if [ $$i -eq 60 ]; then \
+			echo "auth server did not start within 30s; log follows:" >&2; \
+			cat "$$ROOT/.dev/auth-server.log" >&2; \
+			exit 1; \
+		fi; \
+		sleep 0.5; \
+	done; \
 	echo "--- client integration ---"; \
-	cd "$$ROOT/$(CLIENT)" && flutter test test_live/
+	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
+		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
+		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
 
 ## fmt: format both codebases
 fmt:

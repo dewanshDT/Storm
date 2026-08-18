@@ -1018,7 +1018,18 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         );
     }
 
-    let listen_addr = format!("{}:{}", args.host, args.port);
+    // **The QR's `addr` is where a client should dial, not where we bind.**
+    //
+    // A server told `--host 0.0.0.0` (which is every real deployment, and what
+    // the systemd unit passes) would otherwise advertise `0.0.0.0:8484` in the
+    // pairing URI. The client takes that field as the base URL it will use for
+    // every subsequent call, so pairing from a phone failed at the first
+    // request: a wildcard bind is not an address anything can connect to.
+    //
+    // Found by pairing a real phone against a real server — the local suites
+    // and the client's own live tests all dial an address they were handed by
+    // the harness, so none of them ever read this field.
+    let listen_addr = format!("{}:{}", advertised_host(&args.host), args.port);
 
     // Bootstrap pairing: when no users exist, create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
@@ -1122,6 +1133,43 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     tracing::info!("storm-server listening on http://{addr}");
     axum::serve(listener, app).await.context("serving")?;
     Ok(())
+}
+
+/// The host a *client* should dial, given the host we were told to bind.
+///
+/// A wildcard bind (`0.0.0.0`, `::`, or empty) means "every interface", which
+/// is not somewhere anything can connect to. Anything else was chosen
+/// deliberately by the operator and is passed through untouched — including
+/// `127.0.0.1`, which is correct for a client on the same machine and is what
+/// the test harnesses use.
+///
+/// Resolved by asking the OS which local address it would use to reach a
+/// public one. No packet is sent: a UDP socket's `connect` only sets the peer
+/// and picks the route, so this works with no network and no DNS.
+fn advertised_host(bind_host: &str) -> String {
+    if !matches!(bind_host, "0.0.0.0" | "::" | "[::]" | "") {
+        return bind_host.to_string();
+    }
+    let routable = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("203.0.113.1:80")?; // TEST-NET-3; never actually reached
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string());
+
+    match routable {
+        Ok(ip) => ip,
+        Err(e) => {
+            // Better a hostname the operator can fix than a wildcard that
+            // silently breaks every pairing.
+            tracing::warn!(
+                error = %e,
+                "could not determine a routable address for the pairing QR; \
+                 falling back to the bind host"
+            );
+            bind_host.to_string()
+        }
+    }
 }
 
 #[tokio::main]
@@ -1544,5 +1592,31 @@ mod tests {
         assert_eq!(out[1], "backup-db");
         assert_eq!(out[2], "/tmp/out");
         assert!(!out.iter().any(|a| a == "--backup-db"));
+    }
+
+    #[test]
+    fn a_wildcard_bind_is_never_advertised_to_a_client() {
+        // The pairing QR's `addr` is the base URL the client will use for
+        // every call after pairing. `0.0.0.0` is where we listen, not
+        // somewhere anything can connect to — a phone handed that fails on its
+        // first request, which is exactly how this was found.
+        for wildcard in ["0.0.0.0", "::", "[::]", ""] {
+            let advertised = advertised_host(wildcard);
+            assert_ne!(
+                advertised, wildcard,
+                "a client cannot dial the wildcard {wildcard:?}"
+            );
+            assert!(!advertised.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_deliberate_bind_host_is_passed_through() {
+        // An operator who says 127.0.0.1 means it — that is right for a client
+        // on the same box, and it is what the test harnesses dial. Substituting
+        // a LAN address here would break every local suite.
+        for chosen in ["127.0.0.1", "192.168.1.10", "storm.example.com"] {
+            assert_eq!(advertised_host(chosen), chosen);
+        }
     }
 }
