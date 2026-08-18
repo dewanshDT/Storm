@@ -55,9 +55,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–8 **merged to main**, not deployed · secure storage → A9 → cutover |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–10 **merged to main**, not deployed · slice 11 (MCP identity) in PR #25 · RBAC policy → cutover |
 
-Last updated: 2026-08-17. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+Last updated: 2026-08-18. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
@@ -103,13 +103,18 @@ network failure is the M9/M10 bug. Slice 8 also fixed a protocol divergence
 found while wiring those messages: a rate-limited login answered `401` with
 `retry_after_secs` discarded, where the table says `429` + `Retry-After`.
 
-**Next, in order:** secure credential storage → A9 → the cutover. The client
-holds the device secret and both session tokens in plain `shared_preferences`,
-which is three secrets where there used to be one, and that is the gap to close
-before the client auth is production-grade. A9 (vault-level
-grants) is deferred to after the client ships and
-before the relay — the `vault_grants` table and role checks are built but
-unwired; single-user servers (Owner role) bypass them entirely. Not deployed.
+**Slice 9:** the client's credentials move out of `shared_preferences` into the
+platform keychain. **Slice 10:** the vault access **boundary** — `vault_of` is
+the only route to a vault handle and will not hand one over without an `Actor`
+and an `Access`, with the shipped policy (`AllowAuthenticated`) deliberately
+permissive. **Slice 11:** the identity behind an MCP request, below.
+
+**Next, in order:** the RBAC **policy** → the cutover. A9's seam exists; what
+is still deferred is the decision it defers to — roles are enforced against
+each other but nothing consults them for access, and `vault_grants` remains the
+only table in the data model never read or written. Q19–Q25 in *Auth
+Authorization Review (A9)* are the questions that slice has to answer, left
+open on purpose so the boundary did not have to guess them. Not deployed.
 
 **Deploying M19 is its own step, and the risky one.** Everything so far has been
 merged behind `legacy_token_enabled`, which defaults on — the shared token still
@@ -2180,6 +2185,83 @@ meant the SDK could change under a branch that had not been touched, turning
 the whole repo red with no commit to blame. Pinning `release.yml` too is
 deliberate: a release should be built by the SDK that CI validated, not by
 whatever `stable` pointed at that morning.
+
+**Slices 9 and 10 ✅** (2026-08-16, not deployed, PRs #23 and #24). Slice 9 moved
+the device secret, both session tokens and the legacy token into the platform
+keychain — migration is write-then-erase rather than move, a leftover prefs copy
+is erased even when the keychain already holds the value, and a platform with no
+reachable keychain degrades to prefs rather than locking anyone out. Slice 10
+built the vault access boundary described under A9 above. Both are recorded
+per-item in *TODO — Storm Authentication*; the finding worth keeping from slice
+10 is in the mutation note below.
+
+**Slice 11 — the identity behind an MCP request** (code complete 2026-08-17;
+**PR #25 open, not merged**, not deployed)
+
+Slice 10 left one caller unfinished, and said so: an MCP tool resolved as
+`Actor::Mcp` — "some MCP session", with no user behind it — while the identical
+call over REST resolved as a real user. Harmless while the policy allows
+everyone, and an authorization bypass the moment it does not, since MCP would be
+the single caller whose grants could not be checked. That is why it had to land
+**before** roles, not with them.
+
+- **The mechanism follows rmcp's actual lifecycle, which was read rather than
+  assumed** (`streamable_http_server/tower.rs`, 3.1.2): `handle_post` calls
+  `get_service()` on the *request* task, then `tokio::spawn`s the task the
+  handler runs on. **A `task_local` does not cross a spawn**, so a tool reading
+  one would find nothing — the shape the earlier design review proposed could
+  not have worked. Instead a layer inside `require_auth` scopes the `Actor` on
+  the request task, the factory reads it *there*, and the value is moved into
+  the `Storm` handler. The identity crosses the spawn **by ownership, not as
+  ambient state** — which is also the isolation argument: one factory call per
+  HTTP request, one owned `Actor` per handler, nothing shared.
+- **`Actor::Mcp` is removed rather than populated.** Keeping it would have left
+  a second identity concept beside the real one — the second authorization
+  system this slice exists to prevent.
+- **Fail closed.** A handler built with no identity refuses the vault tools
+  rather than defaulting to a permitted one. The factory still tolerates `None`,
+  because rmcp also builds a throwaway service for tool-schema validation that
+  has no request scope and touches no vault.
+- **No policy change.** `AllowAuthenticated` still allows everything; this slice
+  moves *who is asking*, not *what they may do*.
+
+**Evidence.** 272 Rust tests (263 unit + 9 driving the real binary as a
+process), clippy clean. `make test-live` — the 81 server, 56 MCP and 21 auth
+e2e checks against a real server — is green on this branch in CI, which is what
+says the MCP transport still behaves as it did while its identity changed
+underneath.
+
+**Two mutations survived the first campaign, and both were test defects rather
+than code defects:**
+
+- **The concurrency test was not concurrent.** `#[tokio::test]` defaults to a
+  **current-thread runtime**, so "parallel" tasks interleave only at await
+  points on one thread — and a mutation that stashed the identity in a shared
+  `Mutex` instead of a per-task scope passed underneath it. Rewritten as
+  `multi_thread` with 4 workers and 64 interleaved requests.
+- **Nothing reached the fail-closed branch.** Every HTTP test goes through
+  `scope_actor`, so a mutation returning a permitted actor when the identity is
+  missing passed the entire suite. The decision is now `resolve_actor()`, free
+  of `AppState` so it can be called directly, with both branches covered.
+
+Even then the HTTP test could only show that two users keep their own identity,
+not that they *must*: there is no guaranteed yield between the scope being
+entered and the factory reading it, so the shared-`Mutex` mutation survived on
+timing alone — twice, including under 4 workers and 64 requests. The test that
+finally pins it holds **32 tasks inside their own scope simultaneously** and
+then reads back, so a shared slot is certain to have been overwritten. It tests
+the isolation primitive rather than the transport; with the mutation proving the
+factory reads the scope, and capture-by-value carrying it across rmcp's spawn,
+the chain is covered end to end.
+
+**The finding worth keeping: a concurrency test written under `#[tokio::test]`
+is not a concurrency test.** One thread, interleaving only at await points — it
+will happily pass over an implementation that shares one slot between every
+caller. And **a test whose subject is reachable only through the happy path
+never runs the other branch**: extracting the decision away from `AppState` is
+what made the refusal testable at all. Both are the same lesson as slice 10's
+vacuous collection-filter test — *a test that passes when you remove the thing
+it names is not a test of that thing* — arriving by two new routes.
 
 ---
 
