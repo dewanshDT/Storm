@@ -83,12 +83,23 @@ class PairingUri {
   /// Returns `null` on any parse failure rather than throwing, because the
   /// input comes from a QR scan or paste and is expected to be malformed
   /// sometimes.
+  ///
+  /// **Whitespace is stripped first.** This URI is copied out of a terminal by
+  /// hand, and a wrapped line or a phone keyboard helpfully breaking a long
+  /// token puts a space inside it — one real paste arrived with `&a ddr=`,
+  /// which silently produced an empty address. A URI cannot contain raw
+  /// whitespace, so removing it can only ever repair the input.
+  ///
+  /// **Every field must be present and non-empty.** Defaulting a missing key
+  /// to `''` is what made that paste fail three screens later as "couldn't
+  /// reach the server" instead of "this URI is incomplete": an empty `addr`
+  /// became an empty base URL, and the first request had nowhere to go.
   static PairingUri? parse(String uri) {
     try {
-      final url = Uri.parse(uri);
+      final url = Uri.parse(uri.replaceAll(RegExp(r'\s+'), ''));
       if (url.scheme != 'storm' || url.host != 'pair') return null;
       final q = url.queryParameters;
-      return PairingUri(
+      final parsed = PairingUri(
         version: q['v'] ?? '',
         serverId: q['sid'] ?? '',
         publicKey: q['pk'] ?? '',
@@ -96,6 +107,21 @@ class PairingUri {
         expires: q['exp'] ?? '',
         address: q['addr'] ?? '',
       );
+      if (parsed.version.isEmpty ||
+          parsed.serverId.isEmpty ||
+          parsed.publicKey.isEmpty ||
+          parsed.nonce.isEmpty ||
+          parsed.expires.isEmpty ||
+          parsed.address.isEmpty) {
+        return null;
+      }
+      // The address is dialled as a base URL, so it has to carry a host. A
+      // bare port or a stray fragment gets caught here rather than at the
+      // first request.
+      if (Uri.tryParse('http://${parsed.address}')?.host.isEmpty ?? true) {
+        return null;
+      }
+      return parsed;
     } catch (_) {
       return null;
     }

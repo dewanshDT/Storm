@@ -75,7 +75,12 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   Future<void> _verifyAndPair() async {
     final uri = _parsedUri;
     if (uri == null) {
-      setState(() => _error = 'Invalid storm://pair URI.');
+      setState(
+        () => _error =
+            'That does not look like a complete pairing URI.\n\n'
+            'It should start `storm://pair?` and carry v, sid, pk, n, exp and '
+            'addr. Copy the whole line `storm-server pair` printed.',
+      );
       return;
     }
     if (uri.isExpired) {
@@ -154,9 +159,30 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             : 'Server error: ${e.message}';
         _verifying = false;
       });
-    } catch (e) {
+    } on ArgumentError catch (e) {
+      // A local fault, not a network one. An unusable address raises this
+      // *before* a packet is sent, and calling that "couldn't reach the
+      // server" is the M9/M10 bug: it sends someone debugging their wifi when
+      // the real answer is that the URI they pasted lost a character.
       setState(() {
-        _error = "Couldn't reach the server.\n\n$e";
+        _error =
+            'That pairing URI is not usable: ${e.message}\n\n'
+            'Copy the whole line `storm-server pair` printed — a line break or '
+            'a stray space inside it will do this.';
+        _verifying = false;
+      });
+    } on FormatException catch (e) {
+      setState(() {
+        _error =
+            'That pairing URI could not be read: ${e.message}\n\n'
+            'Copy the whole line `storm-server pair` printed.';
+        _verifying = false;
+      });
+    } catch (e) {
+      // Naming the address matters: this is the one message that should send
+      // someone to look at the network, so it should say what it dialled.
+      setState(() {
+        _error = "Couldn't reach the server at ${uri.address}.\n\n$e";
         _verifying = false;
       });
     }
