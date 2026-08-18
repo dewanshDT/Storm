@@ -14,6 +14,10 @@ axum = { version = "0.8.9", features = ["ws"] }
 blake3 = "1.8.5"
 clap = { version = "4.6.5", features = ["derive", "env"] }
 data-encoding = "2.11.1"
+# Renders the pairing URI as a scannable block for `storm-server pair --qr`.
+# Default features off: the image/svg renderers pull a decoder stack we never
+# use, and the terminal is the only surface this has.
+qrcode = { version = "0.14", default-features = false }
 diffy = "0.5.1"
 ed25519-dalek = "3.0.0"
 notify = "8.2.0"

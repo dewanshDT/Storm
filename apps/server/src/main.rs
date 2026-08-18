@@ -191,6 +191,14 @@ struct PairArgs {
     /// Address the QR code tells the client to connect to.
     #[arg(long)]
     addr: Option<String>,
+
+    /// Also draw the URI as a scannable QR block.
+    ///
+    /// Opt-in rather than the default: the block is ~45 columns wide and is
+    /// noise when the output is being read by a script, which is how the
+    /// deploy scripts and `auth_e2e.py` consume this command.
+    #[arg(long)]
+    qr: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -952,9 +960,17 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &addr,
     );
 
-    // Called a QR everywhere, rendered as a QR nowhere, and no Storm client
-    // can scan one. Print what this actually is until a scanner exists.
-    println!("\n  Pairing URI — paste into Storm Client to create the first user:\n");
+    if args.qr {
+        // The URI is still printed below. A terminal can be too narrow for the
+        // block, the colours can be inverted, and pasting has to keep working
+        // when it is — so the QR is an addition, never a replacement.
+        match render_qr(&qr.to_uri()) {
+            Ok(block) => println!("\n{block}"),
+            Err(e) => eprintln!("could not render the QR ({e}); the URI follows"),
+        }
+    }
+
+    println!("\n  Pairing URI — scan the code above, or paste this into Storm:\n");
     println!("    {}\n", qr.to_uri());
     println!("  Expires: {}", session.expires);
     println!("  Session: {}\n", session.id);
@@ -1145,6 +1161,55 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     tracing::info!("storm-server listening on http://{addr}");
     axum::serve(listener, app).await.context("serving")?;
     Ok(())
+}
+
+/// Draws a string as a QR block for a terminal.
+///
+/// Two rows of modules per line of text via the half-block character, because
+/// a terminal cell is about twice as tall as it is wide — one module per line
+/// produces a stretched code that phones read poorly, and takes twice the
+/// screen. **Dark modules are drawn light and light modules dark**: this is
+/// printed on a dark terminal, and a scanner needs the *quiet zone and light
+/// modules* to be the bright ones. On a light terminal it reads inverted,
+/// which most phone cameras handle.
+fn render_qr(data: &str) -> Result<String> {
+    use qrcode::{EcLevel, QrCode};
+
+    // Low correction on purpose: the URI is ~200 bytes, and a higher level
+    // makes the code denser rather than more readable at this size.
+    let code = QrCode::with_error_correction_level(data, EcLevel::L)
+        .context("encoding the pairing URI as a QR code")?;
+    let modules = code.to_colors();
+    let width = code.width();
+
+    // Four modules of quiet zone on every side; a code flush against other
+    // output is one a scanner will not find.
+    const QUIET: usize = 4;
+    let dark = |x: usize, y: usize| -> bool {
+        if x < QUIET || y < QUIET || x >= width + QUIET || y >= width + QUIET {
+            return false;
+        }
+        modules[(y - QUIET) * width + (x - QUIET)] == qrcode::Color::Dark
+    };
+
+    let total = width + QUIET * 2;
+    let mut out = String::new();
+    for row in (0..total).step_by(2) {
+        for x in 0..total {
+            let top = dark(x, row);
+            let bottom = if row + 1 < total { dark(x, row + 1) } else { false };
+            // Inverted, per the note above: a "dark" module prints as an unlit
+            // half so the light ones carry the brightness.
+            out.push(match (top, bottom) {
+                (true, true) => ' ',
+                (true, false) => '▄',
+                (false, true) => '▀',
+                (false, false) => '█',
+            });
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// The host a *client* should dial, given the host we were told to bind.
