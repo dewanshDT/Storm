@@ -1067,6 +1067,9 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         // vault, which is what the server already did. The boundary is what
         // is new — see `auth/authz.rs`.
         vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
+        // One hasher for the process, so the semaphore actually bounds
+        // anything. See the field's documentation in `api.rs`.
+        hasher: auth::Hasher::new(),
     });
 
     // One watcher over the whole root, attributing each event to a vault by

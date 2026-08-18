@@ -97,6 +97,28 @@ pub struct AppState {
     /// a handler — that is the whole reason the boundary exists. Today it is
     /// `AllowAuthenticated`, which is the behaviour the server already had.
     pub vault_policy: Arc<dyn VaultPolicy>,
+    /// **The one Argon2id gate for the whole process.**
+    ///
+    /// [`crate::auth::Hasher`] bounds concurrent hashes with a semaphore, and
+    /// its own documentation states the condition that makes that bound real:
+    /// *the bound is only a bound if every caller goes through the same one.*
+    /// Every handler called `Hasher::new()`, which mints a **fresh** pair of
+    /// permits — so the limit applied within a single request, which never
+    /// makes more than one hash anyway, and to nothing across requests. The
+    /// semaphore was decorative on every path an HTTP client can reach.
+    ///
+    /// **This was latent rather than live, and the reason is worth knowing.**
+    /// Each of these handlers takes the `auth_db` mutex and holds it across the
+    /// `.await` on the KDF, so Argon2id calls were already serialized at
+    /// concurrency 1 — by a global lock, accidentally, not by the mechanism
+    /// built for it. The exposure is the next person to narrow that lock scope,
+    /// which is an obvious thing to want (holding one mutex over a ~170 ms KDF
+    /// serializes all authentication) and would remove the only real bound
+    /// while leaving the one that looks like a bound in place. `spawn_blocking`
+    /// runs 512 threads and each hash takes 192 MiB.
+    ///
+    /// Lives here so there is exactly one, for the process's whole life.
+    pub hasher: crate::auth::Hasher,
 }
 
 pub type Shared = Arc<AppState>;
@@ -398,10 +420,12 @@ async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::au
     Ok(Json(users))
 }
 
-/// POST /v1/users/first — create the owner account (unauthenticated).
+/// POST /v1/users/first — create the owner account, once.
 ///
-/// Fails if any user already exists. This is the one endpoint that is
-/// genuinely unauthenticated; it is registered in the `none` tier.
+/// **Registered in the *device* tier, not the `none` tier** (A8): creating a
+/// user over the network costs a paired device, and the legacy shared token
+/// cannot reach it (A10). The doc comment here used to say "genuinely
+/// unauthenticated", which described neither the routing nor the intent.
 ///
 /// The password is hashed here and stored immediately. The caller must supply a
 /// valid password that passes `validate_password`. The operator `user add` CLI
@@ -419,7 +443,29 @@ async fn create_first_user(
 
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    let hasher = crate::auth::Hasher::new();
+
+    // **The bootstrap window closes after the first account, and stays closed.**
+    // Without this, the only refusal was `create_user`'s duplicate-username
+    // check, so any paired device could pick an unused name and get another
+    // account — and this handler hardcodes `Role::Owner`, so every one of them
+    // would be an owner. That is privilege escalation the moment a server has a
+    // second user: a member's device mints an owner and logs into it.
+    //
+    // Checked before the hash on purpose. A refusal must not consume one of the
+    // two `Hasher` permits, or an attacker can hold the login path down by
+    // POSTing here.
+    if auth_db
+        .count_users()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        > 0
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "an account already exists".into(),
+        ));
+    }
+
+    let hasher = &state.hasher;
     let hash = hasher
         .hash(body.password.clone())
         .await
@@ -471,11 +517,11 @@ async fn login_handler(
         ApiError(StatusCode::UNAUTHORIZED, "device header required".into()).into_response()
     })?;
 
-    let hasher = crate::auth::Hasher::new();
+    let hasher = &state.hasher;
     let mut auth_db = state.auth_db.lock().await;
     match crate::auth::sessions::login(
         &mut auth_db,
-        &hasher,
+        hasher,
         &body.username,
         body.password.clone(),
         &device_id,
@@ -676,7 +722,7 @@ async fn change_password_handler(
             )
         })?;
 
-    let hasher = crate::auth::Hasher::new();
+    let hasher = &state.hasher;
     let ok = hasher
         .verify(body.current_password.clone(), stored_hash)
         .await
@@ -879,28 +925,41 @@ async fn require_auth(
 
     // --- StormDevice: `StormDevice <id>:<secret>` ---
     if let Some(rest) = credential.strip_prefix("StormDevice ") {
-        let auth_db = state.auth_db.lock().await;
-        match parse_device_credential(rest) {
-            Ok((id, secret)) => match auth_db.verify_device_secret(id, secret) {
-                Ok(Some(device)) => {
-                    if device.is_revoked() {
-                        return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
+        // **The lock is released before the handler runs, and that is the whole
+        // point of this block's shape.** `auth_db` is a `tokio::sync::Mutex`,
+        // which is not reentrant, and every device-tier handler — login,
+        // refresh, `users`, `users/first` — takes it. Holding the guard across
+        // `next.run(request)` deadlocked the request forever, and because the
+        // hung task never released the mutex it took *all* later authentication
+        // with it: one login attempt wedged the server until restart.
+        //
+        // The session branch below has always been written this way (it calls
+        // `drop(auth_db)` explicitly). This branch was not, and no test noticed
+        // because nothing exercised a device-tier route at all.
+        let device = {
+            let auth_db = state.auth_db.lock().await;
+            match parse_device_credential(rest) {
+                Ok((id, secret)) => match auth_db.verify_device_secret(id, secret) {
+                    Ok(Some(device)) => device,
+                    Ok(None) => {
+                        return unauthorized("invalid or missing token");
                     }
-                    request.extensions_mut().insert(DeviceAuth { device });
-                    return next.run(request).await;
-                }
-                Ok(None) => {
+                    Err(e) => {
+                        tracing::error!(error = %e, "device verification failed");
+                        return internal_error();
+                    }
+                },
+                Err(_) => {
                     return unauthorized("invalid or missing token");
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "device verification failed");
-                    return internal_error();
-                }
-            },
-            Err(_) => {
-                return unauthorized("invalid or missing token");
             }
+        };
+
+        if device.is_revoked() {
+            return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
         }
+        request.extensions_mut().insert(DeviceAuth { device });
+        return next.run(request).await;
     }
 
     // --- Bearer token: session or legacy ---
@@ -1853,6 +1912,7 @@ mod tests {
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
+            hasher: crate::auth::Hasher::new(),
         });
         (
             router(
@@ -2636,5 +2696,192 @@ mod tests {
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
         assert!(validate_root(&root, &state).is_ok());
+    }
+
+    // ---- the bootstrap window, and the gate in front of Argon2id ----------
+
+    /// A paired device, which is what the device tier costs.
+    ///
+    /// Goes through the real pairing code rather than inserting a row, so a
+    /// change to how a device credential is minted breaks these tests too.
+    async fn pair_a_device(state: &Shared) -> String {
+        let now = crate::index::now_rfc3339();
+        let mut auth_db = state.auth_db.lock().await;
+        let (nonce, _) = crate::auth::pairing::create(
+            &mut auth_db,
+            crate::auth::pairing::PairingPurpose::FirstUser,
+            None,
+            &now,
+        )
+        .unwrap();
+        let paired =
+            crate::auth::pairing::consume(&mut auth_db, &nonce, "test device", None, None, &now)
+                .unwrap();
+        format!("StormDevice {}:{}", paired.device_id, paired.device_secret)
+    }
+
+    fn post_json_with_auth(
+        path: &str,
+        body: serde_json::Value,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_device_tier_handler_can_take_the_auth_db_lock() {
+        // The most expensive kind of bug to find and the cheapest to assert.
+        //
+        // `require_auth`'s device branch held the `auth_db` guard across
+        // `next.run(request)`. `tokio::sync::Mutex` is not reentrant, so every
+        // device-tier handler that takes the lock — login, refresh, `users`,
+        // `users/first`, i.e. all of them — hung forever. Worse, the wedged
+        // task never released the mutex, so every later request needing
+        // `auth_db` blocked behind it: **one login attempt took the whole
+        // server's authentication down until restart.**
+        //
+        // The session branch had always dropped the guard first. Nothing caught
+        // the device branch because no test used a device credential at all.
+        //
+        // `GET /v1/users` is the cheapest handler that takes the lock — no
+        // Argon2id — so this test times out in milliseconds rather than hanging
+        // a suite for a minute.
+        let dir = tempdir::TempDir::new("storm-device-deadlock").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send(&app, get_with_auth("/v1/users", &device)),
+        )
+        .await;
+
+        let (status, body) = answered.expect(
+            "a device-tier request deadlocked: the middleware is holding the \
+             auth_db lock across next.run()",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!([]), "a fresh server has no users");
+
+        // And the lock really is free afterwards, which is the half that turns
+        // one hung request into an outage.
+        assert!(
+            state.auth_db.try_lock().is_ok(),
+            "the middleware left the auth_db mutex held"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_user_endpoint_closes_after_the_first_user() {
+        // `POST /v1/users/first` used to refuse only a *duplicate username* —
+        // `create_user`'s check — so a paired device could pick an unused name
+        // and get another account. This handler hardcodes `Role::Owner`, so
+        // every one of those would be an owner: on a server with more than one
+        // user that is privilege escalation, a member's device minting an owner
+        // and logging into it. A8 calls this a one-shot bootstrap window.
+        let dir = tempdir::TempDir::new("storm-first-user").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"username": "dewansh", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "the bootstrap window opens once"
+        );
+
+        // A *different* username, so a duplicate-name refusal cannot be what
+        // makes this pass — which is exactly how the hole stayed open.
+        let (status, body) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"username": "someone-else", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a second account through the bootstrap endpoint is a second owner"
+        );
+        assert_eq!(body["error"], "an account already exists");
+
+        let auth_db = state.auth_db.lock().await;
+        assert_eq!(
+            auth_db.count_users().unwrap(),
+            1,
+            "the refusal has to be a refusal, not a 409 after the insert"
+        );
+
+        // And the refusal came *before* Argon2id. A caller who can make the
+        // server hash on a request it was always going to reject can hold the
+        // login path down for everyone: two permits, 192 MiB each.
+        assert_eq!(
+            state.hasher.jobs_run(),
+            1,
+            "only the accepted request should have paid for a hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_password_hash_goes_through_the_one_shared_hasher() {
+        // `Hasher`'s own documentation states the condition: *the bound is only
+        // a bound if every caller goes through the same one.* Each handler
+        // called `Hasher::new()`, minting a fresh pair of permits per request —
+        // so the semaphore bounded one request against itself, and nothing
+        // against anything else.
+        //
+        // Latent rather than live: these handlers hold the `auth_db` mutex
+        // across the KDF, so hashes were serialized anyway. This test exists so
+        // that when someone narrows that lock scope — and they should — the
+        // documented bound is the one still standing.
+        //
+        // Counting jobs on the state's hasher is what distinguishes the two:
+        // with a per-request hasher this count stays at zero however many
+        // requests hash.
+        let dir = tempdir::TempDir::new("storm-shared-hasher").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        assert_eq!(state.hasher.jobs_run(), 0);
+
+        // A login for a user who does not exist still pays for a hash — that is
+        // deliberate, so response time does not answer "does this account
+        // exist". It also means these need no accounts to set up.
+        for _ in 0..2 {
+            let (status, _) = send(
+                &app,
+                post_json_with_auth(
+                    "/v1/auth/login",
+                    serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
+                    &device,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+
+        assert_eq!(
+            state.hasher.jobs_run(),
+            2,
+            "every hash must go through the process-wide hasher, or the \
+             semaphore bounds nothing across requests"
+        );
     }
 }

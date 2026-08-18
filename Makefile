@@ -86,7 +86,8 @@ test-live:
 	echo "--- mcp e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
 	echo "--- auth e2e ---"; \
-	python3 "$$ROOT/$(SERVER)/tests/auth_e2e.py"; \
+	STORM_SERVER_LOG="$$ROOT/.dev/live-server.log" \
+		python3 "$$ROOT/$(SERVER)/tests/auth_e2e.py"; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/
 

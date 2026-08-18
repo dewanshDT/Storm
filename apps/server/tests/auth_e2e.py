@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end exercise of the server's identity endpoints.
+"""End-to-end exercise of the server's identity and authentication endpoints.
 
 Third companion to `e2e.py` and `mcp_e2e.py`, same style and no dependencies.
 `e2e.py`'s checks are deliberately left alone — an unchanged pass there is what
@@ -22,14 +22,28 @@ What it is really for, beyond "the endpoints answer":
     stayed the size of two routes;
   * no private key material is in any payload.
 
+And, from the second half, the path a real client actually walks: the bootstrap
+QR out of the server's own log, pairing, the first account, login, refresh
+rotation, logout, and the lockout. **Nothing in this repo sent a `StormDevice`
+credential before that half existed** — the credential every authentication
+route requires — which is how three defects sat undisturbed on it, one of them
+wedging the server's entire authentication on the first login attempt.
+
+That half needs a *fresh* server: the bootstrap pairing session is created at
+boot only when the user table is empty, and it reads the URI out of
+`STORM_SERVER_LOG` (default `.dev/live-server.log`, which is where
+`make test-live` puts it).
+
 Exits non-zero if any check fails.
 """
 import base64
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("STORM_BASE", "http://127.0.0.1:8484")
@@ -49,23 +63,39 @@ def check(label, cond, detail=""):
         print(f"  FAIL  {label}   {detail}")
 
 
-def call(method, path, body=None, token=None):
-    """A request that sends the Authorization header only when asked to."""
+def call_full(method, path, body=None, token=None, auth=None):
+    """As `call`, but hands back the response headers too.
+
+    `auth` sends a raw Authorization value, which is what the device tier needs
+    (`StormDevice <id>:<secret>`); `token` keeps the `Bearer ` convenience the
+    identity checks were written against.
+    """
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"{BASE}{path}", data=data, method=method)
-    if token is not None:
+    if auth is not None:
+        req.add_header("Authorization", auth)
+    elif token is not None:
         req.add_header("Authorization", f"Bearer {token}")
     if data:
         req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req) as r:
-            return r.status, json.loads(r.read())
+            # 201 and 204 answer with no body at all, so "no bytes" has to mean
+            # an empty result rather than a decode error.
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {}), dict(r.headers)
     except urllib.error.HTTPError as e:
         raw = e.read()
         try:
-            return e.code, json.loads(raw or b"{}")
+            return e.code, json.loads(raw or b"{}"), dict(e.headers)
         except json.JSONDecodeError:
-            return e.code, {"error": raw.decode(errors="replace")}
+            return e.code, {"error": raw.decode(errors="replace")}, dict(e.headers)
+
+
+def call(method, path, body=None, token=None, auth=None):
+    """A request that sends the Authorization header only when asked to."""
+    status, body_out, _ = call_full(method, path, body, token, auth)
+    return status, body_out
 
 
 def b64url(s):
@@ -253,6 +283,300 @@ check("and still answers with it", status == 200, status)
 
 status, _ = call("GET", "/v1/health")
 check("health is unauthenticated as before", status == 200, status)
+
+
+# ---- pairing, the first account, and login ------------------------------
+#
+# Everything above this line is slice 1: two unauthenticated routes. What
+# follows is the path a real client walks on first run, and until it was
+# written nothing in the repo had ever sent a `StormDevice` credential — the
+# credential every authentication route requires. Three defects were sitting on
+# it, one of which wedged the server's whole auth on the first login attempt.
+#
+# It needs a *fresh* server, because the bootstrap pairing session is created
+# at boot only when the user table is empty. `make test-live` gives it one.
+
+print("--- the bootstrap pairing QR ---")
+
+LOG = os.environ.get("STORM_SERVER_LOG", ".dev/live-server.log")
+
+bootstrap_uri = None
+try:
+    with open(LOG, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            found = re.search(r"storm://pair\?\S+", line)
+            if found:
+                bootstrap_uri = found.group(0).rstrip('"')
+except OSError as e:
+    print(f"  (could not read {LOG}: {e})")
+
+check(
+    "the server logged a bootstrap pairing URI at boot",
+    bootstrap_uri is not None,
+    f"looked in {LOG}; this section needs a server whose user table was empty at boot",
+)
+if bootstrap_uri is None:
+    print(f"\n{ok} passed, {fail} failed")
+    sys.exit(1)
+
+qr = urllib.parse.parse_qs(urllib.parse.urlparse(bootstrap_uri).query)
+check("the QR is version 1", qr.get("v") == ["1"], qr)
+check(
+    "the QR names the same server and key the identity endpoint publishes",
+    qr.get("sid") == [info["server_id"]] and qr.get("pk") == [info["public_key"]],
+    qr,
+)
+check("the QR carries an expiry", bool(qr.get("exp", [""])[0]), qr)
+nonce = qr.get("n", [""])[0]
+check("the QR carries a pairing nonce", len(nonce) >= 24, nonce)
+
+print("--- POST /v1/pair (tier: none) ---")
+
+# A device pairs before anyone can log in, so this route cannot require a
+# credential — there is nothing to present yet.
+status, paired = call(
+    "POST", "/v1/pair", {"n": nonce, "name": "e2e device", "platform": "linux"}
+)
+check("pairs with no Authorization header at all", status == 200, (status, paired))
+if status != 200:
+    print("  cannot continue without a device credential")
+    print(f"\n{ok} passed, {fail} failed")
+    sys.exit(1)
+
+check(
+    "hands back a device id and secret",
+    bool(paired.get("device_id")) and bool(paired.get("device_secret")),
+    sorted(paired),
+)
+check(
+    "repeats the identity the client is about to pin",
+    paired.get("server_id") == info["server_id"]
+    and paired.get("public_key") == info["public_key"]
+    and paired.get("key_id") == info["key_id"],
+    paired,
+)
+
+DEVICE = f"StormDevice {paired['device_id']}:{paired['device_secret']}"
+
+# Single-use, or a QR photographed over someone's shoulder is a second device.
+status, again = call(
+    "POST", "/v1/pair", {"n": nonce, "name": "thief", "platform": "linux"}
+)
+check("the pairing nonce is single-use", status == 409, (status, again))
+
+status, _ = call(
+    "POST", "/v1/pair", {"n": "A" * 32, "name": "thief", "platform": "linux"}
+)
+check("an invented nonce is refused", status == 401, status)
+
+print("--- the device tier ---")
+
+status, _ = call("GET", "/v1/users")
+check("the user list refuses an anonymous caller", status == 401, status)
+
+# A10: the legacy shared token is owner-equivalent on *session* routes and must
+# not reach the device tier, or the one credential every old install holds could
+# create the first account.
+status, _ = call("GET", "/v1/users", token=TOKEN)
+check("the legacy token cannot reach the device tier", status == 401, status)
+
+status, users = call("GET", "/v1/users", auth=DEVICE)
+check("a paired device may list users", status == 200, (status, users))
+check("a fresh server has no accounts yet", users == [], users)
+
+print("--- POST /v1/users/first ---")
+
+PASSWORD = "a-long-enough-password"
+
+status, _ = call(
+    "POST", "/v1/users/first", {"username": "dewansh", "password": "short"}, auth=DEVICE
+)
+check("a short password is refused", status == 422, status)
+
+# Refused rather than truncated: accept 200 characters, hash the first 72, and
+# every password sharing that prefix opens the account.
+status, _ = call(
+    "POST",
+    "/v1/users/first",
+    {"username": "dewansh", "password": "x" * 1100},
+    auth=DEVICE,
+)
+check("an over-long password is refused, not truncated", status == 422, status)
+
+status, _ = call(
+    "POST", "/v1/users/first", {"username": "dewänsh", "password": PASSWORD}, auth=DEVICE
+)
+check("a non-ASCII username is refused", status == 422, status)
+
+status, _ = call(
+    "POST", "/v1/users/first", {"username": "dewansh", "password": PASSWORD}, auth=DEVICE
+)
+check("the first account is created", status == 201, status)
+
+# The window closes and stays closed. A *different* username, so a
+# duplicate-name refusal cannot be what makes this pass — which is exactly how
+# the hole stayed open: this handler hardcodes the owner role, so a second
+# account through it is a second owner.
+status, second = call(
+    "POST",
+    "/v1/users/first",
+    {"username": "someone-else", "password": PASSWORD},
+    auth=DEVICE,
+)
+check("the bootstrap window is closed afterwards", status == 409, (status, second))
+
+status, users = call("GET", "/v1/users", auth=DEVICE)
+check("and no second account reached the table", len(users) == 1, users)
+check(
+    "the first account is an owner",
+    bool(users) and str(users[0].get("role", "")).lower() == "owner",
+    users,
+)
+check(
+    "a listed user carries no password material",
+    users and not any("hash" in k or "password" in k for k in users[0]),
+    sorted(users[0]) if users else [],
+)
+
+print("--- POST /v1/auth/login ---")
+
+status, refused = call(
+    "POST",
+    "/v1/auth/login",
+    {"username": "dewansh", "password": "not-the-password"},
+    auth=DEVICE,
+)
+check("a wrong password is refused", status == 401, (status, refused))
+
+status, session = call(
+    "POST", "/v1/auth/login", {"username": "dewansh", "password": PASSWORD}, auth=DEVICE
+)
+check("the right password issues a session", status == 200, (status, session))
+if status != 200:
+    print(f"\n{ok} passed, {fail} failed")
+    sys.exit(1)
+
+check(
+    "the session carries an access and a refresh token",
+    bool(session.get("access_token")) and bool(session.get("refresh_token")),
+    sorted(session),
+)
+check(
+    "the session names the user and the device it is bound to",
+    bool(session.get("user_id")) and session.get("device_id") == paired["device_id"],
+    session,
+)
+check(
+    "the login answer carries no password material",
+    not any("hash" in k or "password" in k for k in session),
+    sorted(session),
+)
+
+status, _ = call("GET", "/v1/vaults", token=session["access_token"])
+check("the access token opens a session-tier route", status == 200, status)
+
+# Two tokens with different jobs. A refresh token that authenticates requests
+# is an access token with a 180-day life.
+status, _ = call("GET", "/v1/vaults", token=session["refresh_token"])
+check("the refresh token is not an access token", status == 401, status)
+
+print("--- refresh rotation ---")
+
+# Refresh is device tier: rotation is bound to the device that holds the
+# session, so the device credential travels with it. Sending it without one
+# answers 401 — which also makes the replay check below pass for the wrong
+# reason if you forget, since a refresh that never happened cannot be replayed.
+status, rotated = call(
+    "POST",
+    "/v1/auth/refresh",
+    {"refresh_token": session["refresh_token"]},
+    auth=DEVICE,
+)
+check("a refresh token buys a new pair", status == 200, (status, rotated))
+if status != 200:
+    print(f"\n{ok} passed, {fail} failed")
+    sys.exit(1)
+
+check(
+    "and the pair is actually new",
+    rotated.get("access_token") != session["access_token"]
+    and rotated.get("refresh_token") != session["refresh_token"],
+    "rotation that returns the same token is not rotation",
+)
+
+status, replayed = call(
+    "POST",
+    "/v1/auth/refresh",
+    {"refresh_token": session["refresh_token"]},
+    auth=DEVICE,
+)
+check("the old refresh token is refused after rotation", status == 401, (status, replayed))
+
+# A replayed refresh token means one of two things: a stolen token, or a client
+# that lost the race. Neither is safe to keep serving, so the *whole session*
+# dies rather than just the request — which is why the logout check below needs
+# a fresh login rather than reusing this one.
+status, _ = call("GET", "/v1/vaults", token=rotated["access_token"])
+check("a replayed refresh token revokes the whole session", status == 401, status)
+
+print("--- logout ---")
+
+status, fresh = call(
+    "POST", "/v1/auth/login", {"username": "dewansh", "password": PASSWORD}, auth=DEVICE
+)
+check("logging in again after the replay revocation works", status == 200, status)
+if status != 200:
+    print(f"\n{ok} passed, {fail} failed")
+    sys.exit(1)
+
+status, _ = call("GET", "/v1/vaults", token=fresh["access_token"])
+check("the new session's access token works before logout", status == 200, status)
+
+status, _ = call("POST", "/v1/auth/logout", token=fresh["access_token"])
+check("logout answers 204", status == 204, status)
+
+status, _ = call("GET", "/v1/vaults", token=fresh["access_token"])
+check("the access token is dead after logout", status == 401, status)
+
+print("--- the login lockout (last: it locks the account for a minute) ---")
+
+# Deliberately last. The account is locked for a minute afterwards, so anything
+# needing a working login has to have run already.
+locked = None
+for attempt in range(8):
+    status, body, headers = call_full(
+        "POST",
+        "/v1/auth/login",
+        {"username": "dewansh", "password": "not-the-password"},
+        auth=DEVICE,
+    )
+    if status == 429:
+        locked = (body, headers, attempt + 1)
+        break
+    if attempt < 3:
+        check(f"attempt {attempt + 1} is a plain refusal, not a lockout", status == 401, status)
+
+check("repeated wrong passwords end in a lockout", locked is not None, "no 429 in 8 attempts")
+if locked:
+    body, headers, attempts = locked
+    retry_header = next(
+        (v for k, v in headers.items() if k.lower() == "retry-after"), None
+    )
+    # The header is the correct HTTP answer; the body is what the client
+    # renders. "Too many attempts" without a number invites the retry it is
+    # trying to stop.
+    check("the lockout carries a Retry-After header", retry_header is not None, sorted(headers))
+    check(
+        "the header parses as a number of seconds",
+        retry_header is not None and retry_header.isdigit() and int(retry_header) > 0,
+        retry_header,
+    )
+    check(
+        "and the body says how long too",
+        isinstance(body.get("retry_after"), int) and body["retry_after"] > 0,
+        body,
+    )
+    check("the lockout is a 429, never a 401", body.get("error") == "rate_limited", body)
 
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)
