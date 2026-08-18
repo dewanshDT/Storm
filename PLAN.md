@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–10 **merged to main**, not deployed · slice 11 (MCP identity) in PR #25 · RBAC policy → cutover |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–11 **merged to main**, not deployed · device tier was deadlocked and is fixed · RBAC policy → cutover |
 
 Last updated: 2026-08-18. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -108,6 +108,10 @@ platform keychain. **Slice 10:** the vault access **boundary** — `vault_of` is
 the only route to a vault handle and will not hand one over without an `Actor`
 and an `Access`, with the shipped policy (`AllowAuthenticated`) deliberately
 permissive. **Slice 11:** the identity behind an MCP request, below.
+**Slice 12:** the first tests that present a device credential — which found
+that the device tier deadlocked on every request, that the first-user endpoint
+never closed, and that the Argon2id bound was decorative. Details below; **the
+authentication path could not have worked against a real server before it.**
 
 **Next, in order:** the RBAC **policy** → the cutover. A9's seam exists; what
 is still deferred is the decision it defers to — roles are enforced against
@@ -170,8 +174,8 @@ summary written from memory is not evidence.
 ### Verify the current state
 
 ```sh
-make check       # clippy + analyze + 213 Rust and 581 Dart unit tests
-make test-live   # 81 server + 56 MCP + 21 auth e2e checks, 19 client checks
+make check       # clippy + analyze + 266 Rust and 581 Dart unit tests
+make test-live   # 81 server + 56 MCP + 66 auth e2e checks, 19 client checks
 ```
 
 `make test-live` starts a server, runs every integration suite and tears it
@@ -2262,6 +2266,69 @@ never runs the other branch**: extracting the decision away from `AppState` is
 what made the refusal testable at all. Both are the same lesson as slice 10's
 vacuous collection-filter test — *a test that passes when you remove the thing
 it names is not a test of that thing* — arriving by two new routes.
+
+**Slice 12 — the device tier, actually exercised ✅** (2026-08-18, not deployed)
+
+Written as "add the missing e2e coverage for login and account creation". The
+coverage was the deliverable; what it found is the entry.
+
+**No test in this repo had ever sent a `StormDevice` credential.** `e2e.py`
+covers session-tier vault operations, `auth_e2e.py` stopped at slice 1's two
+unauthenticated routes, and the client's `test_live/` suite authenticates with
+the legacy shared token. Every route that *is* authentication — login, refresh,
+`users`, `users/first` — sits behind the one credential nothing presented. All
+three defects below were found by writing the first test that did.
+
+- **The device tier was deadlocked, and one request took the server with it.**
+  `require_auth`'s device branch held the `auth_db` guard across
+  `next.run(request)`. `tokio::sync::Mutex` is not reentrant and every
+  device-tier handler takes that lock, so the request hung forever — and since
+  the wedged task never released the mutex, every later request needing
+  `auth_db` queued behind it. **One `POST /v1/auth/login` disabled all
+  authentication on the server until restart.** The session branch immediately
+  below has always called `drop(auth_db)` first; this branch never did. The
+  asymmetry is the whole story: the tested path was written correctly.
+- **`POST /v1/users/first` had no bootstrap window.** Its only refusal was
+  `create_user`'s duplicate-username check, so a paired device could pick an
+  unused name and get another account — and the handler hardcodes
+  `Role::Owner`. Any authenticated user can issue a pairing, pair a device and
+  mint an owner: privilege escalation on any server with more than one user.
+  The doc comment already said "fails if any user already exists"; only the
+  code disagreed. A8 called this a one-shot window. It is now checked before
+  the hash, so a refusal cannot burn a KDF permit.
+- **The Argon2id semaphore bounded nothing.** Every handler called
+  `Hasher::new()`, minting a fresh pair of permits per request, against
+  `Hasher`'s own documentation: *the bound is only a bound if every caller goes
+  through the same one.* Latent rather than live — these handlers hold `auth_db`
+  across the KDF, so hashes were serialized at concurrency 1 by a global lock
+  instead of by the mechanism built for it. The exposure is the next person to
+  narrow that lock scope, which is an obvious thing to want (one mutex over a
+  ~170 ms KDF serializes all authentication) and would remove the only real
+  bound while leaving the decorative one in place. One `Hasher` now lives in
+  `AppState`.
+
+**Evidence.** 266 Rust unit tests + 9 process tests, clippy clean. `e2e.py`
+**still 81/81 unchanged**, mcp 56/56, and `auth_e2e.py` 21 → **66**. Three
+mutations, one per fix — the guard held across `next.run` again, the bootstrap
+count check deleted, the handlers minting their own `Hasher` — and all three
+failed the right test, the first by hanging, which is the bug reproducing.
+
+Two of the new e2e checks exist because the suite failed honestly while being
+written. `/v1/auth/refresh` is device tier, and sending it without the device
+header made the replay check pass **for the wrong reason** — a refresh that
+never happened cannot be replayed. Fixing that surfaced the next one: a replayed
+refresh token revokes the *whole session*, so the logout checks had been running
+against a token the replay had already killed. Both are now explicit checks
+rather than accidents.
+
+**The finding worth keeping: a tier is not covered until a test presents its
+credential.** Three defects, one of them an outage on the first login, lived in
+four routes for five slices while the suite around them stayed green — and the
+green was honest, because every test used a credential that routed around them.
+Coverage counted in checks says nothing about which *doors* were opened. It is
+the M7/M8 lesson again (the layer the user touches is the untested one), and
+slice 6's client redirect bug was the same shape: *a fully green server suite
+could not have seen it.*
 
 ---
 
