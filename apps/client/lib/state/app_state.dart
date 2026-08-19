@@ -343,6 +343,33 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     }
   }
 
+  /// Drops a device credential the server has rejected.
+  ///
+  /// **A credential the server does not know is not a credential.** Without
+  /// this the client is stuck: it holds a device id that fails every
+  /// device-tier call, and `bootstrapWebDevice` short-circuits on `isPaired`,
+  /// so a browser would never mint another one. That is the state a wiped or
+  /// restored `auth.db` leaves every client in — and the state a revoked
+  /// device leaves *one* client in, which is the case that will happen in
+  /// normal use.
+  ///
+  /// The session goes with it: a session belongs to a device, so a device the
+  /// server disowns cannot have a live one.
+  Future<void> forgetDevice() async {
+    final s = state.value;
+    if (s == null) return;
+    await save(
+      s.copyWith(
+        deviceId: '',
+        deviceSecret: '',
+        accessToken: '',
+        refreshToken: '',
+        accessTokenExpiresAt: '',
+        userId: '',
+      ),
+    );
+  }
+
   /// Extends the session using the refresh token.
   ///
   /// Returns `true` on success. On failure (revoked, expired) the caller

@@ -18,6 +18,7 @@ import '../api/auth_api.dart';
 import '../api/auth_models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
+import '../state/web_bootstrap.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 
@@ -166,6 +167,32 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // /login sends us to the dashboard.
     } on AuthApiException catch (e) {
       if (!mounted) return;
+
+      // **The device credential is the problem, not the password.** The server
+      // does not know this device — its `auth.db` was wiped or restored, or
+      // the device was revoked. No amount of retyping fixes that, and until
+      // this branch existed the client could not recover at all: it held a
+      // credential every device-tier call refused, and `bootstrapWebDevice`
+      // short-circuits on `isPaired`, so a browser never minted another.
+      //
+      // Recovering here rather than on screen load is deliberate. This path
+      // runs because a person pressed Sign in, so it cannot become a loop.
+      if (isDeviceRejected(e)) {
+        await ref.read(settingsProvider.notifier).forgetDevice();
+        if (!mounted) return;
+        // The web client needs a *new document* to be issued a new nonce: the
+        // one it was served is single-use and already spent. Off the web this
+        // is a no-op and the router sends us to pairing instead.
+        reloadForFreshBootstrap();
+        setState(() {
+          _error =
+              'This device is no longer registered with the server. '
+              'Setting it up again — sign in once more when it reloads.';
+          _signingIn = false;
+        });
+        return;
+      }
+
       setState(() {
         _error = authFailureMessage(e);
         _signingIn = false;

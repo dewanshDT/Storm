@@ -20,3 +20,12 @@ String? readWebBootstrapNonce() {
 void clearWebBootstrapNonce() {
   web.document.querySelector('meta[name="storm-bootstrap"]')?.remove();
 }
+
+/// Reloads the page so the server issues a fresh bootstrap nonce.
+///
+/// The nonce in this document is single-use and already spent, so recovering
+/// from a rejected device credential needs a *new* document — there is no way
+/// to ask for another one without one, by design.
+void reloadForFreshBootstrap() {
+  web.window.location.reload();
+}

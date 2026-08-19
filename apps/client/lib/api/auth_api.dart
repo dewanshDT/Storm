@@ -265,6 +265,21 @@ class AuthApiException implements Exception {
 /// HTTP answer, not a socket failure — reporting it as a network problem is the
 /// M9/M10 bug, where a local failure was described as a network one and
 /// everything after it failed as offline too.
+/// Whether this refusal means *the device credential is no good*, rather than
+/// the password.
+///
+/// `require_auth` answers "invalid or missing token" for a device it does not
+/// know — which is what a client holds after the server's `auth.db` was
+/// restored, rebuilt, or wiped, and after the device was revoked. It is not a
+/// wrong password and no amount of retyping fixes it.
+bool isDeviceRejected(AuthApiException e) =>
+    e.statusCode == 401 &&
+    const {
+      'invalid or missing token',
+      'device_revoked',
+      'not_paired',
+    }.contains(e.message);
+
 String authFailureMessage(AuthApiException e) {
   switch (e.message) {
     case 'invalid_credentials':

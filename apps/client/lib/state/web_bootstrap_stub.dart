@@ -3,3 +3,7 @@
 String? readWebBootstrapNonce() => null;
 
 void clearWebBootstrapNonce() {}
+
+/// Off the web there is no document to reload; the router sends a device with
+/// no credential to the pairing screen instead.
+void reloadForFreshBootstrap() {}
