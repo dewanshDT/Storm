@@ -96,6 +96,50 @@ impl AuthDb {
         Ok(db)
     }
 
+    /// The v3→v4 `pairing_sessions` rebuild, in one transaction.
+    ///
+    /// Called with `foreign_keys` already OFF — see the caller for why that
+    /// cannot happen in here. The transaction is what makes a failed attempt
+    /// leave nothing behind, so the migration can simply be retried on the
+    /// next boot.
+    ///
+    /// **The column list must match the `CREATE TABLE` above field for field.**
+    /// The first version of this dropped `consumed_by` — it was in the fresh
+    /// schema and not in the rebuilt one — so a migrated server pairing a
+    /// device failed in `mark_pairing_consumed` with `no such column`, *after*
+    /// `create_paired` had already written the device row. Fresh installs
+    /// worked and upgraded ones did not, which is the hardest shape of this
+    /// bug to notice.
+    fn rebuild_pairing_sessions_v4(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            BEGIN;
+            -- A previous attempt that died mid-rebuild leaves this behind.
+            DROP TABLE IF EXISTS pairing_sessions_new;
+            CREATE TABLE pairing_sessions_new (
+              id           TEXT PRIMARY KEY,
+              nonce_hash   BLOB NOT NULL UNIQUE,
+              purpose      TEXT NOT NULL CHECK (purpose IN ('first_user','add_device','web_bootstrap')),
+              peer_ip      TEXT,
+              created_by   TEXT REFERENCES users(id),
+              created      TEXT NOT NULL,
+              expires      TEXT NOT NULL,
+              consumed     TEXT,
+              consumed_by  TEXT REFERENCES client_devices(id),
+              attempts     INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO pairing_sessions_new
+              (id, nonce_hash, purpose, peer_ip, created_by, created, expires, consumed, consumed_by, attempts)
+            SELECT id, nonce_hash, purpose, NULL, created_by, created, expires, consumed, consumed_by, attempts
+              FROM pairing_sessions;
+            DROP TABLE pairing_sessions;
+            ALTER TABLE pairing_sessions_new RENAME TO pairing_sessions;
+            COMMIT;
+            "#,
+        )?;
+        Ok(())
+    }
+
     fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
         let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let exists = stmt
@@ -245,28 +289,34 @@ impl AuthDb {
             // Pairing sessions are short-lived by nature, so this carries very
             // little and could almost be a truncate; it copies anyway, because
             // "almost" is not a reason to drop a user's pending pairing.
+            //
+            // **This follows SQLite's documented rebuild procedure exactly, and
+            // every part of it is load-bearing.** The obvious version — four
+            // statements in one `execute_batch` — is wrong in two ways that
+            // only appear on a database someone has actually used:
+            //
+            //   * `client_devices.paired_via` references this table and
+            //     `foreign_keys` is ON, so `DROP TABLE` (an implicit
+            //     `DELETE FROM`) is refused the moment any device has ever
+            //     been paired. FK enforcement cannot be toggled inside a
+            //     transaction, hence the pragma outside it.
+            //   * `execute_batch` wraps nothing in a transaction, so that
+            //     refusal leaves `pairing_sessions_new` behind with
+            //     `user_version` still at 3 — and the *next* boot fails on
+            //     "table already exists". A migration that cannot be retried
+            //     turns one bad upgrade into a server that never starts again.
+            //
+            // `auth.db` is the one file in `state/` that cannot be rebuilt by
+            // rescanning markdown, so a migration that can strand it is the
+            // most expensive bug available here.
             if current < 4 && !self.column_exists("pairing_sessions", "peer_ip")? {
-                self.conn.execute_batch(
-                    r#"
-                    CREATE TABLE pairing_sessions_new (
-                      id           TEXT PRIMARY KEY,
-                      nonce_hash   BLOB NOT NULL UNIQUE,
-                      purpose      TEXT NOT NULL CHECK (purpose IN ('first_user','add_device','web_bootstrap')),
-                      created_by   TEXT REFERENCES users(id),
-                      peer_ip      TEXT,
-                      created      TEXT NOT NULL,
-                      expires      TEXT NOT NULL,
-                      consumed     TEXT,
-                      attempts     INTEGER NOT NULL DEFAULT 0
-                    );
-                    INSERT INTO pairing_sessions_new
-                      (id, nonce_hash, purpose, created_by, peer_ip, created, expires, consumed, attempts)
-                    SELECT id, nonce_hash, purpose, created_by, NULL, created, expires, consumed, attempts
-                      FROM pairing_sessions;
-                    DROP TABLE pairing_sessions;
-                    ALTER TABLE pairing_sessions_new RENAME TO pairing_sessions;
-                    "#,
-                )?;
+                // Outside the transaction: SQLite ignores this pragma inside one.
+                self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+                let rebuilt = self.rebuild_pairing_sessions_v4();
+                // Restored whether or not the rebuild worked — leaving FK
+                // enforcement off would silently disarm every other table.
+                self.conn.pragma_update(None, "foreign_keys", "ON")?;
+                rebuilt?;
             }
 
             self.conn
@@ -727,6 +777,32 @@ mod tests {
                 "2099-01-01T00:00:00Z",
             )
             .unwrap();
+
+            // **A device that was paired through that session.** This is the
+            // row the first version of this test lacked, and its absence is
+            // exactly why the migration looked fine: `client_devices.paired_via`
+            // references `pairing_sessions(id)`, so with `foreign_keys = ON`
+            // the rebuild's `DROP TABLE` is refused only when such a row
+            // exists. Every real server that has ever paired anything has one.
+            db.conn
+                .execute(
+                    "INSERT INTO client_devices
+                       (id, name, secret_hash, paired, paired_via)
+                     VALUES ('dev_1', 'Pixel 10', X'00', ?1, 'pair_keepme')",
+                    params!["2026-01-01T00:00:00Z"],
+                )
+                .unwrap();
+            // And a pairing that records which device consumed it, so the
+            // rebuild has a `consumed_by` value it has to carry rather than an
+            // all-NULL column that would survive being dropped unnoticed.
+            db.conn
+                .execute_batch(
+                    "UPDATE pairing_sessions
+                        SET consumed = '2026-01-02T00:00:00Z', consumed_by = 'dev_1'
+                      WHERE id = 'pair_keepme';",
+                )
+                .unwrap();
+
             // Pretend it predates the new column.
             db.conn
                 .execute_batch("ALTER TABLE pairing_sessions DROP COLUMN peer_ip;")
@@ -740,6 +816,39 @@ mod tests {
             .unwrap();
         assert_eq!(ver, SCHEMA_VERSION);
         assert!(db.column_exists("pairing_sessions", "peer_ip").unwrap());
+        // `consumed_by` is in the fresh schema, so it has to be in the rebuilt
+        // one too — `mark_pairing_consumed` writes it on every pair.
+        assert!(
+            db.column_exists("pairing_sessions", "consumed_by").unwrap(),
+            "the rebuild must not drop a column the fresh schema has"
+        );
+        let consumed_by: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT consumed_by FROM pairing_sessions WHERE id = 'pair_keepme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(consumed_by.as_deref(), Some("dev_1"), "and must carry it");
+
+        // Foreign keys are back on, and the device still points at its pairing.
+        let fk_on: i64 = db
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            fk_on, 1,
+            "FK enforcement must be restored after the rebuild"
+        );
+        let violations = db
+            .conn
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query_map([], |_| Ok(()))
+            .unwrap()
+            .count();
+        assert_eq!(violations, 0, "the rebuild must not orphan a device");
 
         let kept: i64 = db
             .conn

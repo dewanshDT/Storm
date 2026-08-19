@@ -419,11 +419,48 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   ///   the login screen. The device credential is kept, because the device is
   ///   still paired and asking for a QR again would be asking for something
   ///   nobody needs.
+  /// True while [ensureSession] is in flight.
+  ///
+  /// A refresh **rotates** the refresh token, and presenting a rotated one
+  /// twice is replay — which the server answers by revoking the whole session.
+  /// Startup and `resumed` can both land here, so two overlapping calls would
+  /// sign the user out using the mechanism meant to keep them signed in.
+  bool _ensuringSession = false;
+
   Future<void> ensureSession() async {
-    final s = state.value;
-    if (s == null || !s.hasSession) return;
+    if (_ensuringSession) return;
+
+    // **Wait for the provider rather than reading through it.**
+    // This used to open `final s = state.value; if (s == null) return;` and be
+    // called from `addPostFrameCallback` — which fires after the first frame,
+    // while `build()` is still awaiting `SharedPreferences.getInstance()` and
+    // `secrets.load()`. During `AsyncLoading` `state.value` is null, so the
+    // check returned immediately and did nothing at all; `resumed` is only
+    // delivered on a *change*, so it did not arrive at launch either.
+    // A session that had lapsed therefore stayed "configured" forever — the
+    // exact failure this method exists to prevent.
+    final Settings s;
+    try {
+      s = await future;
+    } catch (_) {
+      // Settings could not be loaded; there is nothing to renew and no way to
+      // tell whether a session exists. The app has bigger problems than this.
+      return;
+    }
+
+    if (!s.hasSession) return;
     if (!s.accessTokenNeedsRefresh && !s.accessTokenExpired) return;
 
+    _ensuringSession = true;
+    try {
+      await _renewOrRetire();
+    } finally {
+      _ensuringSession = false;
+    }
+  }
+
+  /// Renews the session, or clears it when it is expired and unrenewable.
+  Future<void> _renewOrRetire() async {
     final renewed = await refreshSession();
     if (renewed) return;
 

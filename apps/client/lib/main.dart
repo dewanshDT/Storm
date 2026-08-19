@@ -27,8 +27,12 @@ class _StormAppState extends ConsumerState<StormApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Once, at startup, after the first frame so it never fights the build.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkSession());
+    // Once, at startup. **Not `addPostFrameCallback`** — that fires after the
+    // first frame, which is well before `settingsProvider` has finished
+    // loading preferences and the keychain, so the check ran against a null
+    // value and silently did nothing. `ensureSession` now awaits the provider
+    // itself, so calling it here is safe and no longer racy.
+    _checkSession();
   }
 
   @override

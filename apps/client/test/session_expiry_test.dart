@@ -1,4 +1,7 @@
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/state/app_state.dart';
 
@@ -59,5 +62,92 @@ void main() {
     expect(s.hasSession, isFalse);
     expect(s.accessTokenExpired, isFalse);
     expect(s.accessTokenNeedsRefresh, isFalse);
+  });
+
+  /// The startup race, which is what made every getter above unreachable.
+  ///
+  /// `ensureSession()` used to open `final s = state.value; if (s == null)
+  /// return;` and was called from `addPostFrameCallback` — which fires after
+  /// the first frame, while `build()` is still awaiting
+  /// `SharedPreferences.getInstance()` and the keychain. During `AsyncLoading`
+  /// `state.value` is null, so it returned having done nothing, and
+  /// `didChangeAppLifecycleState` only fires on a *change*, so `resumed` never
+  /// arrived at launch either. The answers above were all correct and nothing
+  /// ever asked for them.
+  group('ensureSession at launch', () {
+    /// A container whose settings load has **not** been awaited — which is the
+    /// state the app is genuinely in when startup calls this.
+    ///
+    /// The tokens go into the **keychain**, not prefs: slice 9 moved every
+    /// credential into `SecretStore`, so seeding `storm.accessToken` in prefs
+    /// alone leaves `hasSession` false and `ensureSession` returns early — a
+    /// test that would then pass without exercising anything.
+    ProviderContainer unsettled({
+      required Map<String, Object> prefs,
+      required Map<String, String> secrets,
+    }) {
+      FlutterSecureStorage.setMockInitialValues(secrets);
+      SharedPreferences.setMockInitialValues(prefs);
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      expect(
+        container.read(settingsProvider).value,
+        isNull,
+        reason:
+            'precondition: the provider must still be loading, or this test '
+            'proves nothing about the race it exists for',
+      );
+      return container;
+    }
+
+    test(
+      'an expired session is retired even before settings have loaded',
+      () async {
+        final container = unsettled(
+          prefs: {
+            'storm.baseUrl': 'http://127.0.0.1:1',
+            // Long dead, and the address above refuses connections, so the
+            // refresh cannot succeed — the only correct outcome is that the
+            // session is cleared and the router falls to /login.
+            'storm.accessTokenExpiresAt': DateTime.now()
+                .toUtc()
+                .subtract(const Duration(days: 2))
+                .toIso8601String(),
+            'storm.userId': 'u1',
+          },
+          secrets: {
+            'storm.accessToken': 'stale',
+            'storm.refreshToken': 'also-stale',
+          },
+        );
+
+        await container.read(settingsProvider.notifier).ensureSession();
+
+        final after = container.read(settingsProvider).value!;
+        expect(
+          after.accessToken,
+          isEmpty,
+          reason: 'a dead session must not survive',
+        );
+        expect(after.hasSession, isFalse);
+      },
+    );
+
+    test('a live session is left alone', () async {
+      final container = unsettled(
+        prefs: {
+          'storm.baseUrl': 'http://127.0.0.1:1',
+          'storm.accessTokenExpiresAt': DateTime.now()
+              .toUtc()
+              .add(const Duration(days: 20))
+              .toIso8601String(),
+        },
+        secrets: {'storm.accessToken': 'good'},
+      );
+
+      await container.read(settingsProvider.notifier).ensureSession();
+
+      expect(container.read(settingsProvider).value!.accessToken, 'good');
+    });
   });
 }
