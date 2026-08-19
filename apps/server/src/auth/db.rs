@@ -34,7 +34,7 @@ pub const AUTH_DB_FILE: &str = "auth.db";
 /// **1** — the original schema (slice 1).
 /// **2** — `sessions.previous_refresh_hash` (slice 3).
 /// **3** — `ws_tickets` (slice 4).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct AuthDb {
     /// Visible to the rest of `auth` so each area keeps its own SQL beside its
@@ -183,7 +183,10 @@ impl AuthDb {
             CREATE TABLE IF NOT EXISTS pairing_sessions (
                 id           TEXT PRIMARY KEY,
                 nonce_hash   BLOB NOT NULL UNIQUE,
-                purpose      TEXT NOT NULL CHECK (purpose IN ('first_user','add_device')),
+                purpose      TEXT NOT NULL CHECK (purpose IN ('first_user','add_device','web_bootstrap')),
+                -- The peer that was issued this nonce, for web_bootstrap only.
+                -- NULL for the QR purposes, which are carried by a human.
+                peer_ip      TEXT,
                 created_by   TEXT REFERENCES users(id),
                 created      TEXT NOT NULL,
                 expires      TEXT NOT NULL,
@@ -234,6 +237,36 @@ impl AuthDb {
             if current < 2 && !self.column_exists("sessions", "previous_refresh_hash")? {
                 self.conn
                     .execute_batch("ALTER TABLE sessions ADD COLUMN previous_refresh_hash BLOB;")?;
+            }
+
+            // v3→v4: pairing_sessions gains the `web_bootstrap` purpose and a
+            // `peer_ip` binding. SQLite cannot alter a CHECK constraint, so
+            // the table is rebuilt — copy, drop, rename — rather than patched.
+            // Pairing sessions are short-lived by nature, so this carries very
+            // little and could almost be a truncate; it copies anyway, because
+            // "almost" is not a reason to drop a user's pending pairing.
+            if current < 4 && !self.column_exists("pairing_sessions", "peer_ip")? {
+                self.conn.execute_batch(
+                    r#"
+                    CREATE TABLE pairing_sessions_new (
+                      id           TEXT PRIMARY KEY,
+                      nonce_hash   BLOB NOT NULL UNIQUE,
+                      purpose      TEXT NOT NULL CHECK (purpose IN ('first_user','add_device','web_bootstrap')),
+                      created_by   TEXT REFERENCES users(id),
+                      peer_ip      TEXT,
+                      created      TEXT NOT NULL,
+                      expires      TEXT NOT NULL,
+                      consumed     TEXT,
+                      attempts     INTEGER NOT NULL DEFAULT 0
+                    );
+                    INSERT INTO pairing_sessions_new
+                      (id, nonce_hash, purpose, created_by, peer_ip, created, expires, consumed, attempts)
+                    SELECT id, nonce_hash, purpose, created_by, NULL, created, expires, consumed, attempts
+                      FROM pairing_sessions;
+                    DROP TABLE pairing_sessions;
+                    ALTER TABLE pairing_sessions_new RENAME TO pairing_sessions;
+                    "#,
+                )?;
             }
 
             self.conn
@@ -358,22 +391,61 @@ impl AuthDb {
 
     // ---- pairing sessions ------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_pairing_session(
         &self,
         id: &str,
         nonce_hash: &[u8],
         purpose: &str,
         created_by: Option<&str>,
+        peer_ip: Option<&str>,
         created: &str,
         expires: &str,
     ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO pairing_sessions
-                 (id, nonce_hash, purpose, created_by, created, expires)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, nonce_hash, purpose, created_by, created, expires],
+                 (id, nonce_hash, purpose, created_by, peer_ip, created, expires)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id, nonce_hash, purpose, created_by, peer_ip, created, expires
+            ],
         )?;
         Ok(())
+    }
+
+    /// How many web-bootstrap nonces this peer has been issued since `since`.
+    ///
+    /// The rate limit's input. Counts issuance rather than consumption: a
+    /// client fetching the page in a loop is the thing being bounded, and it
+    /// never consumes anything.
+    pub fn web_bootstrap_issued_since(&self, peer_ip: &str, since: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM pairing_sessions
+             WHERE purpose = 'web_bootstrap' AND peer_ip = ?1 AND created >= ?2",
+            params![peer_ip, since],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Live (unconsumed, unexpired) web-bootstrap nonces, across all peers.
+    pub fn web_bootstrap_outstanding(&self, now: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM pairing_sessions
+             WHERE purpose = 'web_bootstrap' AND consumed IS NULL AND expires > ?1",
+            params![now],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Drops expired, unconsumed pairing sessions.
+    ///
+    /// Every web page load mints one and almost none are consumed, so without a
+    /// sweep the table grows with traffic rather than with devices.
+    pub fn sweep_expired_pairings(&self, now: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM pairing_sessions WHERE consumed IS NULL AND expires <= ?1",
+            params![now],
+        )?)
     }
 
     pub fn pairing_session_by_nonce_hash(
@@ -383,7 +455,7 @@ impl AuthDb {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, purpose, expires, consumed, attempts
+                "SELECT id, purpose, expires, consumed, attempts, peer_ip
                  FROM pairing_sessions WHERE nonce_hash = ?1",
                 params![nonce_hash],
                 |r| {
@@ -393,6 +465,7 @@ impl AuthDb {
                         expires: r.get(2)?,
                         consumed: r.get(3)?,
                         attempts: r.get(4)?,
+                        peer_ip: r.get(5)?,
                     })
                 },
             )
@@ -624,12 +697,71 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 3, "schema should be at v3 (current) after migration");
+        assert_eq!(
+            ver, SCHEMA_VERSION,
+            "an old database should migrate all the way to the current schema"
+        );
         assert!(
             db.column_exists("sessions", "previous_refresh_hash")
                 .unwrap(),
             "sessions should have previous_refresh_hash after v1→v2 migration"
         );
+    }
+
+    #[test]
+    fn a_v3_database_gains_web_bootstrap_and_keeps_its_pairings() {
+        // v3→v4 rebuilds pairing_sessions, because SQLite cannot alter a CHECK
+        // constraint. A rebuild that dropped rows would be a silent data loss
+        // in a table someone may have a pending pairing in.
+        let dir = tempdir::TempDir::new("storm-auth-mig-v4").unwrap();
+        {
+            let db = AuthDb::open(dir.path()).unwrap();
+            db.conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+            db.insert_pairing_session(
+                "pair_keepme",
+                b"hash",
+                "first_user",
+                None,
+                None,
+                "2026-01-01T00:00:00Z",
+                "2099-01-01T00:00:00Z",
+            )
+            .unwrap();
+            // Pretend it predates the new column.
+            db.conn
+                .execute_batch("ALTER TABLE pairing_sessions DROP COLUMN peer_ip;")
+                .unwrap();
+        }
+
+        let db = AuthDb::open(dir.path()).unwrap();
+        let ver: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, SCHEMA_VERSION);
+        assert!(db.column_exists("pairing_sessions", "peer_ip").unwrap());
+
+        let kept: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pairing_sessions WHERE id = 'pair_keepme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "the rebuild must carry existing pairings across");
+
+        // And the new purpose is now accepted, which the old CHECK refused.
+        db.insert_pairing_session(
+            "pair_web",
+            b"hash2",
+            "web_bootstrap",
+            None,
+            Some("192.168.1.20"),
+            "2026-01-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -660,7 +792,10 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 3, "schema should be at v3 after migration");
+        assert_eq!(
+            ver, SCHEMA_VERSION,
+            "a v2 database should reach the current schema"
+        );
         assert!(
             db.column_exists("sessions", "previous_refresh_hash")
                 .unwrap(),

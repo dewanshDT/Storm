@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Extension, Path, Query, State,
+        ConnectInfo, Extension, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -772,6 +772,188 @@ async fn ws_ticket_handler(
 
 // ---- pairing endpoints ---------------------------------------------------
 
+/// How many web-bootstrap nonces one peer may be issued per minute.
+pub const WEB_BOOTSTRAP_PER_MINUTE: i64 = 12;
+
+/// Default ceiling on *outstanding* (unconsumed, unexpired) web-bootstrap
+/// nonces, across every peer.
+///
+/// A bound on the pairing table, not on how many devices may exist — a
+/// permanent cap on devices would be a different and unjustified restriction.
+/// Reachable only by a client fetching the page far faster than a person does.
+pub const WEB_BOOTSTRAP_MAX_OUTSTANDING: i64 = 256;
+
+/// Headers whose presence means the peer address belongs to a proxy.
+const FORWARDING_HEADERS: [&str; 4] = [
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "forwarded",
+];
+
+/// Mints a web bootstrap nonce for `peer`, or `None` if it should not have one.
+///
+/// `None` is never an error to the caller: the index document is served either
+/// way, and a client that does not get a nonce simply sees the pairing screen.
+/// Serving the app is not the thing being rationed.
+async fn web_bootstrap_nonce(
+    state: &Shared,
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+) -> Option<(String, String)> {
+    // **Behind a proxy, nobody gets one.** The peer address would be the
+    // proxy's, so binding would bind the entire LAN to a single address —
+    // the exact opposite of the intent. `X-Forwarded-For` is not consulted as
+    // a substitute because it is set by the client. A deployment that wants
+    // this behind a proxy needs explicit trusted-proxy configuration, which is
+    // deferred rather than guessed at.
+    if FORWARDING_HEADERS.iter().any(|h| headers.contains_key(*h)) {
+        tracing::debug!("no web bootstrap: a forwarding header hides the real peer");
+        return None;
+    }
+
+    let peer_ip = peer.to_string();
+    let now = crate::index::now_rfc3339();
+
+    {
+        let auth_db = state.auth_db.lock().await;
+
+        // Sweep first: every page load mints one of these and almost none are
+        // consumed, so without this the table grows with traffic rather than
+        // with devices — and the outstanding count below would be measuring
+        // litter.
+        if let Err(e) = auth_db.sweep_expired_pairings(&now) {
+            tracing::warn!(error = %e, "sweeping expired pairing sessions");
+        }
+
+        let minute_ago = crate::index::rfc3339_minus_secs(&now, 60);
+        match auth_db.web_bootstrap_issued_since(&peer_ip, &minute_ago) {
+            Ok(n) if n >= WEB_BOOTSTRAP_PER_MINUTE => {
+                tracing::warn!(peer = %peer_ip, issued = n, "web bootstrap rate limit");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "counting web bootstrap issuance");
+                return None;
+            }
+            _ => {}
+        }
+
+        match auth_db.web_bootstrap_outstanding(&now) {
+            Ok(n) if n >= WEB_BOOTSTRAP_MAX_OUTSTANDING => {
+                tracing::warn!(outstanding = n, "web bootstrap ceiling reached");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "counting outstanding web bootstraps");
+                return None;
+            }
+            _ => {}
+        }
+    }
+
+    match crate::ops::issue_pairing_qr(state, "web_bootstrap", None, Some(&peer_ip)).await {
+        Ok(qr) => Some((qr.n, qr.exp)),
+        Err(e) => {
+            tracing::warn!(error = %e.1, "minting a web bootstrap nonce");
+            None
+        }
+    }
+}
+
+/// Puts the bootstrap nonce into the document Storm serves its web client from.
+///
+/// **This is the only place a web bootstrap nonce is issued.** A dedicated
+/// endpoint would be a second front door; the entry point of the app is the one
+/// moment where bootstrapping means anything.
+fn inject_bootstrap(html: &str, nonce: &str, expires: &str) -> String {
+    let tag = format!(
+        r#"<meta name="storm-bootstrap" content="{}" data-expires="{}">"#,
+        html_escape(nonce),
+        html_escape(expires)
+    );
+    // Before `</head>` where there is one, and at the top otherwise — a
+    // document we cannot find a head in still has to work.
+    match html.find("</head>") {
+        Some(i) => format!("{}{}{}", &html[..i], tag, &html[i..]),
+        None => format!("{tag}{html}"),
+    }
+}
+
+/// Minimal attribute escaping for the injected values.
+///
+/// The nonce is base64url and the expiry is RFC3339, so neither can contain
+/// these today. Escaped anyway: "the input cannot contain a quote" is a
+/// property of code somewhere else, and this is the line where that assumption
+/// would become an injected attribute.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Serves the SPA document, carrying a bootstrap nonce.
+///
+/// Paths that look like files go to `ServeDir`; everything else is a client
+/// route and gets the document. That split is deliberate rather than clever: it
+/// means the injected document is served for `/` and for every deep link,
+/// without having to ask `ServeDir` after the fact whether what it returned was
+/// the fallback index.
+pub async fn serve_web_index(
+    state: Shared,
+    index: std::path::PathBuf,
+    peer: std::net::SocketAddr,
+    headers: HeaderMap,
+) -> Response {
+    let html = match tokio::fs::read_to_string(&index).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, path = %index.display(), "reading the web index");
+            return (StatusCode::NOT_FOUND, "no web client installed").into_response();
+        }
+    };
+
+    let body = match web_bootstrap_nonce(&state, peer.ip(), &headers).await {
+        Some((nonce, expires)) => inject_bootstrap(&html, &nonce, &expires),
+        None => html,
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // **Never cached.** This document carries a single-use credential;
+            // a cached copy is that credential with an unbounded lifetime,
+            // sitting wherever the cache is.
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// The web document with no bootstrap nonce in it.
+///
+/// For the case where the peer address is unavailable, which means the nonce
+/// could not be bound to anyone. An unbound web nonce is exactly what this
+/// design refuses to mint, so the document is served plain and the client falls
+/// back to the pairing screen — the pre-slice-15 behaviour, which still works.
+pub async fn serve_web_index_without_bootstrap(index: std::path::PathBuf) -> Response {
+    match tokio::fs::read_to_string(&index).await {
+        Ok(html) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, path = %index.display(), "reading the web index");
+            (StatusCode::NOT_FOUND, "no web client installed").into_response()
+        }
+    }
+}
+
 /// POST /v1/pair — consume a pairing nonce and receive device credentials.
 ///
 /// This is a `none`-tier endpoint: the nonce itself is the trust anchor. The
@@ -779,16 +961,22 @@ async fn ws_ticket_handler(
 /// before reaching here.
 async fn pair_handler(
     State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Json(body): Json<PairRequest>,
 ) -> ApiResult<Json<crate::auth::pairing::ConsumeResult>> {
     let now = crate::index::now_rfc3339();
+    let peer_ip = peer.ip().to_string();
     let mut auth_db = state.auth_db.lock().await;
+    // The peer is passed for every purpose; only a nonce that recorded one
+    // (web bootstrap) is checked against it. A QR nonce stays unbound, because
+    // it is meant to be carried to a different machine.
     crate::auth::pairing::consume(
         &mut auth_db,
         &body.n,
         &body.name,
         body.platform.as_deref(),
         body.version.as_deref(),
+        Some(&peer_ip),
         &now,
     )
     .map_err(|e| {
@@ -797,6 +985,11 @@ async fn pair_handler(
             ApiError(StatusCode::CONFLICT, "pairing_consumed".into())
         } else if msg.contains("expired") {
             ApiError(StatusCode::GONE, "pairing_expired".into())
+        } else if msg.contains("different client") {
+            // Distinct from "invalid": the nonce was real, but it belongs to
+            // another peer. Says so, because a bootstrap nonce replayed from
+            // elsewhere is the thing the binding exists to catch.
+            ApiError(StatusCode::FORBIDDEN, "pairing_wrong_peer".into())
         } else if msg.contains("too many") {
             ApiError(StatusCode::TOO_MANY_REQUESTS, "rate_limited".into())
         } else {
@@ -829,7 +1022,8 @@ async fn issue_pairing_handler(
 ) -> ApiResult<Json<crate::ops::PairingQrPayload>> {
     let purpose = body.purpose.as_deref().unwrap_or("add_device");
     Ok(Json(
-        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id)).await?,
+        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id), None)
+            .await?,
     ))
 }
 
@@ -2711,12 +2905,20 @@ mod tests {
             &mut auth_db,
             crate::auth::pairing::PairingPurpose::FirstUser,
             None,
+            None,
             &now,
         )
         .unwrap();
-        let paired =
-            crate::auth::pairing::consume(&mut auth_db, &nonce, "test device", None, None, &now)
-                .unwrap();
+        let paired = crate::auth::pairing::consume(
+            &mut auth_db,
+            &nonce,
+            "test device",
+            None,
+            None,
+            None,
+            &now,
+        )
+        .unwrap();
         format!("StormDevice {}:{}", paired.device_id, paired.device_secret)
     }
 
@@ -2732,6 +2934,202 @@ mod tests {
             .header("authorization", auth)
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    // ---- web bootstrap (slice 15) ----------------------------------------
+
+    /// Mints a web-bootstrap nonce for `peer`, the way the index handler does.
+    async fn web_nonce(state: &Shared, peer: &str) -> String {
+        let now = crate::index::now_rfc3339();
+        let mut auth_db = state.auth_db.lock().await;
+        let (nonce, _) = crate::auth::pairing::create(
+            &mut auth_db,
+            crate::auth::pairing::PairingPurpose::WebBootstrap,
+            None,
+            Some(peer),
+            &now,
+        )
+        .unwrap();
+        nonce
+    }
+
+    fn pair_from(nonce: &str, peer: &str) -> axum::http::Request<axum::body::Body> {
+        let mut req = post_json(
+            "/v1/pair",
+            serde_json::json!({"n": nonce, "name": "browser", "platform": "web"}),
+        );
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            format!("{peer}:54321")
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ));
+        req
+    }
+
+    #[tokio::test]
+    async fn a_web_bootstrap_nonce_pairs_a_real_device() {
+        // The whole claim of the design: what comes back is an ordinary device,
+        // not a web-shaped special case.
+        let dir = tempdir::TempDir::new("storm-wb-device").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+
+        let device_id = body["device_id"].as_str().unwrap().to_string();
+        let secret = body["device_secret"].as_str().unwrap().to_string();
+        assert!(device_id.starts_with("dev_"));
+
+        // And it is a *device tier* credential, which is the point.
+        let auth = format!("StormDevice {device_id}:{secret}");
+        let (status, _) = send(&app, get_with_auth("/v1/users", &auth)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_web_bootstrap_nonce_is_single_use() {
+        let dir = tempdir::TempDir::new("storm-wb-once").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+
+        let (first, _) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(first, StatusCode::OK);
+
+        let (second, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(second, StatusCode::CONFLICT, "a replay must not pair again");
+        assert_eq!(body["error"], "pairing_consumed");
+    }
+
+    #[tokio::test]
+    async fn a_web_bootstrap_nonce_is_bound_to_the_peer_it_was_issued_to() {
+        // The control that makes "anyone who can fetch the page gets a nonce"
+        // survivable: one scraped from a log or a shared screen is not
+        // spendable from anywhere else.
+        let dir = tempdir::TempDir::new("storm-wb-peer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.99")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+        assert_eq!(body["error"], "pairing_wrong_peer");
+
+        // Still spendable by the peer it belongs to — a refusal must not burn
+        // the nonce for its rightful owner.
+        let (status, _) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_ipv4_mapped_peer_matches_its_plain_form() {
+        // A dual-stack listener reports an IPv4 client as ::ffff:192.168.1.20
+        // on one connection and 192.168.1.20 on another. Textually different,
+        // the same machine — and comparing as strings would refuse the
+        // legitimate client.
+        let dir = tempdir::TempDir::new("storm-wb-v6").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let nonce = web_nonce(&state, "::ffff:192.168.1.20").await;
+
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn a_qr_nonce_stays_unbound() {
+        // Native pairing must be unchanged: a QR is carried across the room to
+        // a *different* device, so binding it to the issuing peer would break
+        // the only flow it has.
+        let dir = tempdir::TempDir::new("storm-wb-qr").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let nonce = {
+            let now = crate::index::now_rfc3339();
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::FirstUser,
+                None,
+                None,
+                &now,
+            )
+            .unwrap()
+            .0
+        };
+
+        let (status, body) = send(&app, pair_from(&nonce, "10.0.0.7")).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn an_expired_web_bootstrap_nonce_is_refused() {
+        let dir = tempdir::TempDir::new("storm-wb-exp").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        // Created in the past by more than its TTL.
+        let nonce = {
+            let past = "2020-01-01T00:00:00Z";
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::WebBootstrap,
+                None,
+                Some("192.168.1.20"),
+                past,
+            )
+            .unwrap()
+            .0
+        };
+
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::GONE, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn web_bootstrap_does_not_open_the_device_tier_to_everyone() {
+        // The line this slice must not cross. Bootstrap hands out a *pairing
+        // nonce*, never a session and never an exemption: without a device
+        // credential the device tier still refuses.
+        let dir = tempdir::TempDir::new("storm-wb-tier").unwrap();
+        let (app, _, _) = test_router_with_state(dir.path());
+
+        let (status, _) = send(&app, get("/v1/users")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/v1/auth/login",
+                serde_json::json!({"username": "dewansh", "password": "a-long-enough-password"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "login must still demand a StormDevice credential"
+        );
+    }
+
+    #[test]
+    fn the_bootstrap_tag_goes_into_the_document() {
+        let html = "<html><head><title>Storm</title></head><body></body></html>";
+        let out = inject_bootstrap(html, "NONCE", "2026-01-01T00:00:00Z");
+        assert!(out.contains(r#"<meta name="storm-bootstrap" content="NONCE""#));
+        assert!(out.find("storm-bootstrap").unwrap() < out.find("</head>").unwrap());
+
+        // A document with no head still has to work rather than lose the tag.
+        let headless = inject_bootstrap("<body>hi</body>", "N", "E");
+        assert!(headless.contains("storm-bootstrap"));
+    }
+
+    #[test]
+    fn injected_values_cannot_break_out_of_the_attribute() {
+        // The nonce is base64url and cannot contain a quote today. That is a
+        // property of code somewhere else, and this is the line where trusting
+        // it would become an injected attribute.
+        let out = inject_bootstrap("<head></head>", r#"" onload="x"#, "E");
+        assert!(!out.contains(r#"content="" onload="#));
+        assert!(out.contains("&quot;"));
     }
 
     #[tokio::test]

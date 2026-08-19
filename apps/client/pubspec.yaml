@@ -59,6 +59,9 @@ dependencies:
   # CLAUDE.md's rule is that only a real release APK proves an Android plugin
   # compiles against Flutter's built-in Kotlin.
   mobile_scanner: ^7.1.4
+  # Reading the bootstrap nonce out of the document Storm served (slice 15).
+  # Web-only, behind a conditional import, so native builds never see it.
+  web: ^1.1.1
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.

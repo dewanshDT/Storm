@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -113,6 +116,20 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Settings are still loading; hold still rather than flashing the
       // connect screen at someone who is already set up.
       if (settings.isLoading) return null;
+
+      // **The web client bootstraps its own device rather than showing a QR.**
+      // Storm served this page, so the browser already knows the server; the
+      // document carries a short-lived nonce and this spends it. Fire-and-
+      // forget: it saves settings on success, which notifies `refresh` and
+      // re-runs this redirect with `paired` true, so the browser lands on
+      // /login instead of /pairing. A returning browser short-circuits inside
+      // `bootstrapWebDevice` on `isPaired` and mints nothing.
+      //
+      // Native clients are untouched — off the web the nonce reader is a stub
+      // that returns null, and the QR flow is the only way in.
+      if (kIsWeb && !paired && !configured) {
+        unawaited(ref.read(settingsProvider.notifier).bootstrapWebDevice());
+      }
 
       // The gallery needs no server, and bouncing it to Connect would make it
       // unreachable on exactly the install where the theme is being judged.

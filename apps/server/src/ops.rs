@@ -540,13 +540,15 @@ pub async fn issue_pairing_qr(
     state: &Shared,
     purpose: &str,
     user_id: Option<&str>,
+    peer_ip: Option<&str>,
 ) -> ApiResult<PairingQrPayload> {
     let purpose = crate::auth::pairing::PairingPurpose::from_str(purpose)
         .map_err(|e| bad_request(e.to_string()))?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    let (nonce, session) = crate::auth::pairing::create(&mut auth_db, purpose, user_id, &now)
-        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (nonce, session) =
+        crate::auth::pairing::create(&mut auth_db, purpose, user_id, peer_ip, &now)
+            .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let qr = crate::auth::pairing::encode_qr(
         &state.identity.server_id,

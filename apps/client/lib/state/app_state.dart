@@ -10,6 +10,7 @@ import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import 'secret_store.dart';
+import 'web_bootstrap.dart';
 import '../ui/theme.dart';
 import '../ui/tokens.dart';
 import '../sync/sync_engine.dart';
@@ -287,6 +288,59 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       _kAccessToken: cleaned.accessToken,
       _kRefreshToken: cleaned.refreshToken,
     });
+  }
+
+  /// Spends the bootstrap nonce Storm put in the page it served.
+  ///
+  /// Web only, first load only. Returns `true` when this device is now paired
+  /// — including when it already was, because "already has a device" is the
+  /// successful outcome, not a failure.
+  ///
+  /// **Nothing here is a shortcut around the device tier.** It consumes an
+  /// ordinary pairing nonce through the ordinary `POST /v1/pair` and gets an
+  /// ordinary device credential; login still needs that credential *and* a
+  /// password. See *Storm Web Bootstrap*.
+  Future<bool> bootstrapWebDevice() async {
+    final s = state.value;
+    if (s == null) return false;
+
+    // **A returning browser must not mint a second device on every load.**
+    // The server injects a nonce into every document it serves, because it
+    // cannot know whether this browser is already paired — so the client is
+    // what decides, and the check is the same `isPaired` the pairing screen
+    // uses. The unspent nonce simply expires.
+    if (s.isPaired) return true;
+
+    final nonce = readWebBootstrapNonce();
+    if (nonce == null) return false;
+
+    final api = AuthApi(baseUrl: s.baseUrl);
+    try {
+      final paired = await api.pair(
+        nonce: nonce,
+        deviceName: 'Storm (web)',
+        platform: 'web',
+      );
+      await save(
+        s.copyWith(
+          deviceId: paired.deviceId,
+          deviceSecret: paired.deviceSecret,
+          serverId: paired.serverId,
+          serverKeyId: paired.keyId,
+          serverPublicKey: paired.publicKey,
+        ),
+      );
+      return true;
+    } catch (_) {
+      // Expired, already spent, bound to another peer, or the server is not
+      // answering. All of them mean the same thing here: no device yet, and
+      // the pairing screen is still the way through.
+      return false;
+    } finally {
+      // Spent or not, it is not worth keeping in the DOM.
+      clearWebBootstrapNonce();
+      api.dispose();
+    }
   }
 
   /// Extends the session using the refresh token.

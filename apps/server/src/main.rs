@@ -948,6 +948,9 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &mut db,
         auth::pairing::PairingPurpose::FirstUser,
         None,
+        // Unbound: a QR is carried across the room to another device, which
+        // is the opposite of the web nonce's one-peer rule.
+        None,
         &now,
     )
     .context("creating pairing session")?;
@@ -1069,6 +1072,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 &mut auth_db,
                 crate::auth::pairing::PairingPurpose::FirstUser,
                 None,
+                None,
                 &now,
             )
             .context("creating bootstrap pairing session")?;
@@ -1117,6 +1121,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     watcher::spawn(root.clone(), state.clone()).context("starting file watcher")?;
     tracing::info!(path = %root.display(), "watching the storage root for external edits");
 
+    // Kept for the web fallback below, which mints bootstrap nonces and so
+    // needs the same state the API has.
+    let web_state = state.clone();
+
     let mut app = api::router(
         state,
         mcp::McpOptions {
@@ -1132,11 +1140,51 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         use tower_http::set_header::SetResponseHeaderLayer;
 
         let index = web_dir.join("index.html");
-        // `fallback` rather than `not_found_service`: the latter serves
-        // index.html's body but keeps ServeDir's 404 status, which breaks
-        // caching and the Flutter service worker on any deep link.
+        let assets = ServeDir::new(web_dir).fallback(ServeFile::new(index.clone()));
+
+        // **A path that looks like a file is an asset; everything else is a
+        // client route and gets the document.** The document is the only thing
+        // that carries a bootstrap nonce, and it has to carry one on a deep
+        // link (`/login`) as well as on `/`. Deciding by shape up front beats
+        // asking `ServeDir` afterwards whether what it returned happened to be
+        // its index fallback — a question its response cannot answer.
+        //
+        // `fallback` rather than `not_found_service` for the asset service:
+        // the latter serves index.html's body but keeps ServeDir's 404 status,
+        // which breaks caching and the Flutter service worker on any deep link.
         app = app
-            .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)))
+            .fallback(move |req: axum::extract::Request| {
+                let state = web_state.clone();
+                let index = index.clone();
+                let assets = assets.clone();
+                async move {
+                    let looks_like_a_file = req
+                        .uri()
+                        .path()
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|last| last.contains('.'));
+                    if looks_like_a_file {
+                        use tower::ServiceExt;
+                        return assets
+                            .oneshot(req)
+                            .await
+                            .map(axum::response::IntoResponse::into_response)
+                            .unwrap_or_else(|e| match e {});
+                    }
+                    let peer = req
+                        .extensions()
+                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                        .map(|c| c.0);
+                    let headers = req.headers().clone();
+                    match peer {
+                        Some(peer) => api::serve_web_index(state, index, peer, headers).await,
+                        // No peer means no binding is possible, and an unbound
+                        // web nonce is the thing this design refuses to mint.
+                        None => api::serve_web_index_without_bootstrap(index).await,
+                    }
+                }
+            })
             // Cross-origin isolation. Without these the browser withholds
             // `SharedArrayBuffer`, and drift's web backend silently falls back
             // from OPFS to IndexedDB — slower, and on Chrome for Android it
@@ -1159,7 +1207,15 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("binding {addr}"))?;
 
     tracing::info!("storm-server listening on http://{addr}");
-    axum::serve(listener, app).await.context("serving")?;
+    // `into_make_service_with_connect_info` is what makes the peer address
+    // available to handlers. `/v1/pair/local` refuses anything that is not
+    // loopback, and without this it would have no way to tell.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("serving")?;
     Ok(())
 }
 
@@ -1197,7 +1253,11 @@ fn render_qr(data: &str) -> Result<String> {
     for row in (0..total).step_by(2) {
         for x in 0..total {
             let top = dark(x, row);
-            let bottom = if row + 1 < total { dark(x, row + 1) } else { false };
+            let bottom = if row + 1 < total {
+                dark(x, row + 1)
+            } else {
+                false
+            };
             // Inverted, per the note above: a "dark" module prints as an unlit
             // half so the light ones carry the brightness.
             out.push(match (top, bottom) {
