@@ -22,6 +22,7 @@ class ServerSettingsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final config = ref.watch(serverConfigProvider);
     final vaults = ref.watch(vaultsProvider);
+    final settings = ref.watch(settingsProvider).value;
 
     return Scaffold(
       appBar: AppBar(
@@ -76,6 +77,23 @@ class ServerSettingsScreen extends ConsumerWidget {
                     ],
                   ),
           ),
+          const SizedBox(height: 24),
+          _Section(label: 'MCP keys'),
+          // Only for a signed-in caller: minting is session tier, and a key
+          // belongs to an account. An install still on the legacy shared token
+          // has no account for one to belong to.
+          if (settings?.hasSession ?? false)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                key: const Key('manage-mcp-keys'),
+                onPressed: () => context.push(Routes.mcpKeys),
+                icon: const Icon(Icons.key),
+                label: const Text('Manage MCP keys'),
+              ),
+            )
+          else
+            const _Muted('Sign in to create keys for MCP clients.'),
           const SizedBox(height: 24),
           _Section(label: 'Vaults'),
           vaults.when(

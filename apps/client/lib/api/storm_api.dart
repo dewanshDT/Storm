@@ -160,6 +160,52 @@ class StormApi {
     );
   }
 
+  // ---- MCP keys (A14) ---------------------------------------------------
+
+  /// Mints an MCP key. **The secret in the response is the only copy.**
+  ///
+  /// Session tier: minting costs a real sign-in, which is also what makes "a
+  /// key cannot mint a key" true without a special case — a key never reaches
+  /// this route.
+  Future<CreatedMcpKey> createMcpKey({
+    required String name,
+    String? expires,
+  }) async {
+    final json = _decode(
+      await _client.post(
+        _uri('/v1/keys'),
+        headers: _headers,
+        body: jsonEncode({'name': name, 'expires': ?expires}),
+      ),
+    );
+    return CreatedMcpKey.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// The caller's keys — or another user's, which only an owner may ask for.
+  Future<List<McpKey>> mcpKeys({String? user}) async {
+    final json = _decode(
+      await _client.get(
+        _uri('/v1/keys', user == null ? null : {'user': user}),
+        headers: _headers,
+      ),
+    );
+    return (json as List)
+        .map((e) => McpKey.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Revokes a key. Effective on the next request the holder makes.
+  Future<void> revokeMcpKey(String id) async {
+    final r = await _client.delete(
+      _uri('/v1/keys/${Uri.encodeComponent(id)}'),
+      headers: _headers,
+    );
+    // 204 carries no body, so `_decode` would choke on the empty string.
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    }
+  }
+
   /// Switches the server's acceptance of the legacy shared token (A10).
   ///
   /// The last step of migrating off `STORM_TOKEN`, and reversible on purpose.

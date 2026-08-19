@@ -12,6 +12,7 @@ import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
+import 'ui/mcp_keys_screen.dart';
 import 'ui/signup_screen.dart';
 import 'ui/starting_screen.dart';
 import 'ui/note_screen.dart';
@@ -52,6 +53,10 @@ abstract final class Routes {
   /// Show a pairing QR so another device can join. Session tier: only a
   /// signed-in client can vouch for a new one.
   static const addDevice = '/add-device';
+
+  /// Manage the MCP keys this account holds (A14). Session tier, for the same
+  /// reason: a key belongs to a user, and minting one is the user vouching.
+  static const mcpKeys = '/settings/mcp-keys';
 
   /// The same two screens, mounted inside the vault shell.
   ///
@@ -201,6 +206,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: Routes.addDevice,
         builder: (_, _) => const AddDeviceScreen(),
       ),
+      GoRoute(path: Routes.mcpKeys, builder: (_, _) => const McpKeysScreen()),
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
