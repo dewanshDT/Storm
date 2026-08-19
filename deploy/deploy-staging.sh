@@ -2,7 +2,7 @@
 #
 # Deploy the working tree's server to **staging** on the VM.
 #
-#   ./deploy/deploy-staging.sh [--no-build]
+#   ./deploy/deploy-staging.sh [--no-build] [--no-web]
 #
 # Staging exists so auth work can be exercised against a real server, over a
 # real network, without risking the vault. Three properties make that true, and
@@ -23,6 +23,12 @@ set -euo pipefail
 HOST="${HOST:-proxmox-mcp-vm}"
 PORT="${STAGING_PORT:-8585}"
 REMOTE="${STAGING_DIR:-/home/dewansh/storm-staging}"
+# Ship the web client too, unless asked not to. Without it the server answers
+# 404 for everything that is not an API route, and staging silently lacks a
+# surface prod has — which is exactly the kind of difference that makes a
+# staging pass mean nothing. `--no-web` skips the (slow) Flutter web build when
+# only the server changed.
+WITH_WEB=1
 TARGET=x86_64-unknown-linux-musl
 
 # The staging token is a credential, so it is never a literal in this file and
@@ -40,7 +46,22 @@ BIN="$HERE/apps/server/target/$TARGET/release/storm-server"
 # toolchain ships no musl std, and the failure blames a missing target that
 # rustup has actually installed. Pin both the toolchain and ~/.cargo/bin (where
 # cargo-zigbuild lives) rather than trusting PATH order.
-if [ "${1:-}" != "--no-build" ]; then
+BUILD=1
+WEB_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-build) BUILD=0 ;;
+    --no-web)   WITH_WEB=0 ;;
+    # Ship only the web bundle and restart. The Makefile keeps a `deploy-web`
+    # for prod for the same reason: a presentation change touches neither the
+    # binary nor the wire format, and a Rust release build is minutes and
+    # gigabytes.
+    --web-only) BUILD=0; WEB_ONLY=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+if [ "$BUILD" = 1 ]; then
   RUSTUP_BIN="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
   if [ ! -x "$RUSTUP_BIN/cargo" ]; then
     echo "no rustup toolchain at $RUSTUP_BIN" >&2
@@ -58,13 +79,27 @@ if [ "${1:-}" != "--no-build" ]; then
        cargo zigbuild --release --target "$TARGET" )
 fi
 
-test -x "$BIN" || { echo "no binary at $BIN" >&2; exit 1; }
-echo "=== binary $(du -h "$BIN" | cut -f1) ==="
+if [ "$WITH_WEB" = 1 ]; then
+  echo "=== building the web client ==="
+  ( cd "$HERE/apps/client" && flutter build web --release )
+fi
+
+if [ "$WEB_ONLY" = 0 ]; then
+  test -x "$BIN" || {
+    echo "no binary at $BIN" >&2
+    echo "build one, or use --web-only to ship just the web client" >&2
+    exit 1
+  }
+  echo "=== binary $(du -h "$BIN" | cut -f1) ==="
+fi
 
 # --- ship -------------------------------------------------------------------
 echo "=== shipping to $HOST:$REMOTE ==="
 ssh "$HOST" "mkdir -p '$REMOTE/vaults/scratch' '$REMOTE/state'"
-scp -q "$BIN" "$HOST:$REMOTE/storm-server.new"
+[ "$WEB_ONLY" = 1 ] || scp -q "$BIN" "$HOST:$REMOTE/storm-server.new"
+if [ "$WITH_WEB" = 1 ]; then
+  rsync -az --delete "$HERE/apps/client/build/web/" "$HOST:$REMOTE/web/"
+fi
 
 # Establish the token on the VM without it ever crossing argv. If the caller
 # exported one, plant it; otherwise keep what is there, or mint one.
@@ -100,7 +135,10 @@ if [ -f staging.pid ] && kill -0 "\$(cat staging.pid)" 2>/dev/null; then
 fi
 rm -f staging.pid
 
-mv -f storm-server.new storm-server
+# Only when a new one was shipped; --web-only keeps what is running.
+if [ -f storm-server.new ]; then
+  mv -f storm-server.new storm-server
+fi
 chmod +x storm-server
 
 [ -f vaults/scratch/Seed.md ] || printf '# Seed\n\nStaging scratch note.\n' > vaults/scratch/Seed.md
@@ -110,10 +148,13 @@ chmod +x storm-server
 set -a
 . '$REMOTE/staging.env'
 set +a
+WEB_ARG=""
+[ -d '$REMOTE/web' ] && WEB_ARG="--web $REMOTE/web"
 setsid ./storm-server serve \
   --vault-root '$REMOTE/vaults' \
   --state '$REMOTE/state' \
   --host 0.0.0.0 --port $PORT \
+  \$WEB_ARG \
   > '$REMOTE/staging.log' 2>&1 &
 echo \$! > staging.pid
 disown || true
