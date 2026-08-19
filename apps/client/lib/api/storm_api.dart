@@ -388,6 +388,20 @@ class StormApi {
     await _client.post(_uri('/v1/auth/logout'), headers: _headers);
   }
 
+  /// `PUT /v1/config/registration` — open or close registration (A13).
+  ///
+  /// Owner only, enforced server-side. Off by default: with web bootstrap in
+  /// play, on means anyone who can reach this server can make an account.
+  Future<void> setRegistrationOpen(bool enabled) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/registration'),
+        headers: _headers,
+        body: jsonEncode({'enabled': enabled}),
+      ),
+    );
+  }
+
   /// `POST /v1/pairings` — mint a pairing invite for a **new** device.
   ///
   /// Session tier: an already-signed-in client vouches for the device being

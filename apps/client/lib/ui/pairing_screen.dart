@@ -159,6 +159,48 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         version: packageInfo.version,
       );
 
+      // **Does this server already have accounts?**
+      //
+      // Pairing and first-run are not the same thing, and this screen used to
+      // assume they were: every successful pair went straight to "create the
+      // owner account". That was invisible while the only way to pair was a
+      // fresh server — and wrong the moment "Add a device" made joining an
+      // existing server normal, which is how it was found. Someone adding
+      // their phone to a server they already have an account on was asked to
+      // invent a second one.
+      //
+      // *Storm Auth Protocol* has always described this branch: the user list
+      // behind device auth is what tells a client which screen it is on.
+      final users = await authApi.listUsers(
+        deviceId: pairResult.deviceId,
+        deviceSecret: pairResult.deviceSecret,
+      );
+
+      if (users.isNotEmpty) {
+        // Keep the device credential and let the router take it from here:
+        // paired with no session is exactly what /login exists for, and it
+        // already offers the account picker this device can now fetch.
+        final current = ref.read(settingsProvider).value ?? const Settings();
+        await ref
+            .read(settingsProvider.notifier)
+            .save(
+              current.copyWith(
+                baseUrl: uri.baseUrl,
+                deviceId: pairResult.deviceId,
+                deviceSecret: pairResult.deviceSecret,
+                serverId: serverInfo.serverId,
+                serverKeyId: serverInfo.keyId,
+                serverPublicKey: serverInfo.publicKey,
+                // Paired now; a stale legacy token would keep `isConfigured`
+                // true and skip the sign-in this pairing was for.
+                token: '',
+              ),
+            );
+        if (!mounted) return;
+        setState(() => _verifying = false);
+        return;
+      }
+
       setState(() {
         _serverInfo = serverInfo;
         _pairResult = pairResult;

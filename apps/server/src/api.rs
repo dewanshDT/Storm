@@ -83,6 +83,12 @@ pub struct AppState {
     /// the legacy token off and still being let in until they restart would
     /// make the confirmation step of the A10 cutover meaningless.
     pub legacy_token_enabled: std::sync::atomic::AtomicBool,
+    /// Whether registration is open (A13), mirrored out of the registry.
+    ///
+    /// Atomic and read per request for the same reason as the switch above: an
+    /// operator who turns registration off and is still handing out accounts
+    /// until they restart has not turned it off.
+    pub allow_registration: std::sync::atomic::AtomicBool,
     /// Bootstrap pairing nonce (plaintext), if one was created at boot when
     /// the user table was empty. Needed to reconstruct the QR payload for
     /// the console log. Not read after boot — the field exists so a future
@@ -304,6 +310,8 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
     // ---- device tier: `StormDevice <id>:<secret>` -------------------------
     let device_router = Router::new()
         .route("/v1/users", get(list_users))
+        .route("/v1/users", post(register_user))
+        .route("/v1/auth/registration", get(registration_state))
         .route("/v1/users/first", post(create_first_user))
         .route("/v1/auth/login", post(login_handler))
         .route("/v1/auth/refresh", post(refresh_handler))
@@ -321,6 +329,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/legacy-token", put(put_legacy_token))
+        .route("/v1/config/registration", put(put_registration))
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
@@ -418,6 +427,150 @@ async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::au
         .list_users()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(users))
+}
+
+/// GET /v1/auth/registration — is registration open?
+///
+/// Device tier, because the login screen already holds a device credential by
+/// the time it needs to ask, and whether accounts can be created is policy
+/// rather than identity — which is why it is not a field on `GET /v1/server`,
+/// whose field set is asserted exactly and whose job is the identity
+/// handshake.
+///
+/// **This is UX, not a gate.** `POST /v1/users` enforces the switch itself; a
+/// client that lies to itself about this learns the truth at `403`.
+async fn registration_state(State(state): State<Shared>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": state
+            .allow_registration
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }))
+}
+
+/// POST /v1/users — create an ordinary account, when registration is open.
+///
+/// Device tier: the caller has a paired device, which after web bootstrap
+/// means anyone who can reach the web app. That is the deliberate meaning of
+/// the switch (A13), and the reason it is off until someone turns it on.
+///
+/// **Always a member.** Owner belongs to the bootstrap account; registration
+/// must not be able to mint one, or an open server would hand out the role
+/// that can disable every other account.
+async fn register_user(
+    State(state): State<Shared>,
+    Json(body): Json<FirstUserRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state
+        .allow_registration
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        // Explicit rather than a bare 404: a client that raced the setting —
+        // drew the button, then submitted after it was turned off — can say
+        // what happened instead of guessing.
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "registration_disabled".into(),
+        ));
+    }
+
+    if let Err(msg) = crate::auth::password::validate_password(&body.password) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+
+    // Registration cannot be the first account. The bootstrap window is
+    // `/v1/users/first`'s alone, and `create_user` would otherwise force this
+    // one to be an owner — exactly the thing this endpoint must never mint.
+    if auth_db
+        .count_users()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        == 0
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this server has no owner yet; create the first account instead".into(),
+        ));
+    }
+
+    let hasher = &state.hasher;
+    let hash = hasher
+        .hash(body.password.clone())
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match crate::auth::users::create_user(
+        &mut auth_db,
+        crate::auth::users::NewUser {
+            username: &body.username,
+            display_name: None,
+            password_hash: &hash,
+            role: crate::auth::users::Role::Member,
+        },
+        &now,
+    ) {
+        Ok(user) => Ok(Json(serde_json::json!({
+            "user_id": user.id,
+            "role": user.role.as_str(),
+        }))),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE") || msg.contains("already") {
+                Err(ApiError(StatusCode::CONFLICT, "username_taken".into()))
+            } else {
+                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
+            }
+        }
+    }
+}
+
+/// PUT /v1/config/registration — open or close registration (A13).
+///
+/// Owner only. Roles are enforced against each other elsewhere but consulted
+/// for access nowhere yet, so this is one explicit check rather than the start
+/// of a policy system: opening a server to the world is not a thing a member
+/// should be able to do to an owner.
+async fn put_registration(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+    Json(body): Json<RegistrationBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if auth.authenticated.user.role != crate::auth::users::Role::Owner {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "only an owner can change registration".into(),
+        ));
+    }
+
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.allow_registration = body.enabled;
+        vaults.registry.save(&state.state_dir)?;
+    }
+    // Atomic, so it applies to the next request rather than the next restart.
+    state
+        .allow_registration
+        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
+
+    let auth_db = state.auth_db.lock().await;
+    let _ = auth_db.record_event(
+        "registration_changed",
+        Some(&auth.authenticated.user.id),
+        None,
+        &crate::index::now_rfc3339(),
+        &format!(r#"{{"enabled":{}}}"#, body.enabled),
+    );
+
+    Ok(Json(serde_json::json!({ "enabled": body.enabled })))
+}
+
+#[derive(Deserialize)]
+struct RegistrationBody {
+    enabled: bool,
 }
 
 /// POST /v1/users/first — create the owner account, once.
@@ -1119,6 +1272,20 @@ async fn require_auth(
 
     // --- StormDevice: `StormDevice <id>:<secret>` ---
     if let Some(rest) = credential.strip_prefix("StormDevice ") {
+        // **A device credential is not a session, and the tier check has to
+        // say so here.** This branch used to run whatever tier the route
+        // asked for, so a `StormDevice` header satisfied `require_auth` on a
+        // *session* route and the request reached the handler. Nothing was
+        // stolen — the handler then failed extracting a `SessionAuth` that had
+        // never been inserted — but the boundary was being enforced by a
+        // missing extension rather than by the check that exists for it, and
+        // the caller saw `500` where `401` is the truth.
+        //
+        // Found by a device credential trying to flip a session-tier setting
+        // and getting an extension panic instead of a refusal.
+        if tier == RequiredTier::Session {
+            return tier_error("session_required", StatusCode::UNAUTHORIZED);
+        }
         // **The lock is released before the handler runs, and that is the whole
         // point of this block's shape.** `auth_db` is a `tokio::sync::Mutex`,
         // which is not reentrant, and every device-tier handler — login,
@@ -1364,6 +1531,8 @@ struct ConfigResponse {
     /// this and can change it, which is the whole point — the migration is a
     /// reversible switch, not a release boundary.
     legacy_token_enabled: bool,
+    /// Whether anyone with a device credential may create an account (A13).
+    allow_registration: bool,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -1375,6 +1544,7 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
         legacy_token_enabled: vaults.registry.legacy_token_enabled,
+        allow_registration: vaults.registry.allow_registration,
     }))
 }
 
@@ -2103,6 +2273,7 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
             legacy_token_enabled: std::sync::atomic::AtomicBool::new(true),
+            allow_registration: std::sync::atomic::AtomicBool::new(false),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
@@ -2934,6 +3105,279 @@ mod tests {
             .header("authorization", auth)
             .body(axum::body::Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_device_credential_is_refused_on_a_session_route() {
+        // The tiers are a boundary, not a suggestion. A device credential
+        // satisfied `require_auth` on session routes and was stopped only by
+        // handlers failing to extract a `SessionAuth` nobody had inserted —
+        // enforcement by accident, reported as `500`.
+        let dir = tempdir::TempDir::new("storm-tier-device").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        for path in ["/v1/vaults", "/v1/config", "/v1/auth/sessions"] {
+            let (status, _) = send(&app, get_with_auth(path, &device)).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{path} must refuse a device credential, not fail on it"
+            );
+        }
+
+        // And the device tier still accepts it, which is the half that matters.
+        let (status, _) = send(&app, get_with_auth("/v1/users", &device)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ---- registration (slice 16, A13) ------------------------------------
+
+    /// A paired device plus an owner, which is what registration needs around
+    /// it: it is device tier, and it refuses to be the first account.
+    async fn device_and_owner(state: &Shared) -> (String, String) {
+        let device = pair_a_device(state).await;
+        let owner = seed_owner(state).await;
+        (device, owner)
+    }
+
+    fn register(auth: &str, username: &str) -> axum::http::Request<axum::body::Body> {
+        post_json_with_auth(
+            "/v1/users",
+            serde_json::json!({"username": username, "password": "a-long-enough-password"}),
+            auth,
+        )
+    }
+
+    #[tokio::test]
+    async fn registration_is_off_until_someone_turns_it_on() {
+        // The default is the decision. Turning it on composes with web
+        // bootstrap into "anyone who can reach this server can make an
+        // account", so it is never the shipped state.
+        let dir = tempdir::TempDir::new("storm-reg-default").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, _) = device_and_owner(&state).await;
+
+        let (status, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], false, "registration must ship closed");
+
+        let (status, body) = send(&app, register(&device, "stranger")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body["error"], "registration_disabled",
+            "an explicit code, so a client that raced the switch can say so"
+        );
+
+        let auth_db = state.auth_db.lock().await;
+        assert_eq!(auth_db.count_users().unwrap(), 1, "no account was created");
+    }
+
+    #[tokio::test]
+    async fn an_owner_opens_registration_and_it_applies_at_once() {
+        // No restart. A switch you cannot verify by flipping it is not a
+        // switch — the same property the legacy-token switch has.
+        let dir = tempdir::TempDir::new("storm-reg-on").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, owner) = device_and_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/registration",
+                serde_json::json!({"enabled": true}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+
+        // Visible immediately, on this same running server.
+        let (_, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
+        assert_eq!(body["enabled"], true);
+
+        let (status, body) = send(&app, register(&device, "newcomer")).await;
+        assert_eq!(status, StatusCode::CREATED.min(StatusCode::OK), "{body:?}");
+        assert_eq!(
+            body["role"], "member",
+            "registration mints members and nothing else"
+        );
+
+        // And it survives a reload of the registry, because it is persisted.
+        let vaults = state.vaults.read().await;
+        assert!(vaults.registry.allow_registration);
+    }
+
+    #[tokio::test]
+    async fn registration_can_never_mint_an_owner() {
+        // The guarantee that makes an open switch survivable: owner is the
+        // bootstrap account, and an open endpoint must not reach the role that
+        // can disable every other account.
+        let dir = tempdir::TempDir::new("storm-reg-role").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, _) = device_and_owner(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        send(&app, register(&device, "newcomer")).await;
+
+        let auth_db = state.auth_db.lock().await;
+        let users = auth_db.list_users().unwrap();
+        let owners: Vec<_> = users
+            .iter()
+            .filter(|u| u.role == crate::auth::users::Role::Owner)
+            .collect();
+        assert_eq!(owners.len(), 1, "still exactly one owner");
+        assert_eq!(owners[0].username, "dewansh", "and it is the bootstrap one");
+    }
+
+    #[tokio::test]
+    async fn registration_still_needs_a_device_credential() {
+        // Open does not mean unauthenticated. The device tier is what the
+        // whole design rests on, and this endpoint sits behind it like the
+        // rest.
+        let dir = tempdir::TempDir::new("storm-reg-tier").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        device_and_owner(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/v1/users",
+                serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send(&app, get("/v1/auth/registration")).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "even the question is device tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_an_owner_may_change_registration() {
+        let dir = tempdir::TempDir::new("storm-reg-owner").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, _owner) = device_and_owner(&state).await;
+
+        // A member's session must not be able to open the server to the world.
+        let member = {
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut auth_db,
+                crate::auth::users::NewUser {
+                    username: "member",
+                    display_name: None,
+                    password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
+                    role: crate::auth::users::Role::Member,
+                },
+                "2026-08-19T00:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let token = session_token(&state, &member).await;
+
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/registration",
+                serde_json::json!({"enabled": true}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            !state
+                .allow_registration
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bootstrap_flow_is_untouched_by_registration() {
+        // `/v1/users/first` is the one-shot bootstrap and must behave exactly
+        // as before: registration being open does not reopen it, and
+        // registration cannot stand in for it on an empty server.
+        let dir = tempdir::TempDir::new("storm-reg-bootstrap").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Registration refuses to be the first account.
+        let (status, _) = send(&app, register(&device, "first")).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an empty server has no owner; that is the bootstrap's job"
+        );
+
+        // The bootstrap still works, and still closes afterwards.
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"username": "dewansh", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"username": "another", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "still one-shot");
+    }
+
+    #[tokio::test]
+    async fn closing_registration_leaves_existing_accounts_alone() {
+        let dir = tempdir::TempDir::new("storm-reg-close").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, owner) = device_and_owner(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        send(&app, register(&device, "newcomer")).await;
+
+        let token = session_token(&state, &owner).await;
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/registration",
+                serde_json::json!({"enabled": false}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The account made while it was open is still there and still active.
+        let auth_db = state.auth_db.lock().await;
+        let users = auth_db.list_users().unwrap();
+        assert!(
+            users.iter().any(|u| u.username == "newcomer"
+                && u.status == crate::auth::users::Status::Active),
+            "closing the door must not evict the people already through it"
+        );
     }
 
     // ---- web bootstrap (slice 15) ----------------------------------------

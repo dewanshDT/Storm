@@ -131,6 +131,56 @@ class AuthApi {
         .toList();
   }
 
+  /// `GET /v1/auth/registration` — may this server take new accounts? (A13)
+  ///
+  /// Device tier, like the calls around it. **This is UX only**: the server
+  /// enforces the switch on `register`, so a client that gets this wrong finds
+  /// out at `403` rather than creating something it should not have.
+  ///
+  /// Any failure answers `false`. Not being able to ask is not permission, and
+  /// a login screen that quietly hides a button is better than one offering a
+  /// door that is not there.
+  Future<bool> registrationOpen({
+    required String deviceId,
+    required String deviceSecret,
+  }) async {
+    try {
+      final json = _decode(
+        await _client.get(
+          _uri('/v1/auth/registration'),
+          headers: {'Authorization': 'StormDevice $deviceId:$deviceSecret'},
+        ),
+      );
+      return (json as Map)['enabled'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// `POST /v1/users` — create an ordinary account, when registration is open.
+  ///
+  /// Always a member; the owner is the bootstrap account and registration
+  /// cannot mint one. Throws `registration_disabled` when the switch is off,
+  /// which is the case a client that raced the setting has to be able to
+  /// report honestly.
+  Future<void> register({
+    required String deviceId,
+    required String deviceSecret,
+    required String username,
+    required String password,
+  }) async {
+    _decode(
+      await _client.post(
+        _uri('/v1/users'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'StormDevice $deviceId:$deviceSecret',
+        },
+        body: jsonEncode({'username': username, 'password': password}),
+      ),
+    );
+  }
+
   /// `POST /v1/auth/login` — exchange device credentials + password for
   /// session tokens.
   ///
@@ -231,6 +281,10 @@ String authFailureMessage(AuthApiException e) {
       return 'This account is disabled.';
     case 'forbidden':
       return "You don't have access to this vault.";
+    case 'registration_disabled':
+      return 'This server is not accepting new accounts.';
+    case 'username_taken':
+      return 'That username is taken.';
     case 'already_initialized':
       return 'This server already has an account.';
     case 'pairing_consumed':

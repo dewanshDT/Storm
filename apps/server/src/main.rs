@@ -1040,6 +1040,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // Absent from an older registry it loads as `true`, because that registry
     // belongs to a server whose clients all hold the shared token.
     let vault_set_legacy_token_enabled = vault_set.registry.legacy_token_enabled;
+    let vault_set_allow_registration = vault_set.registry.allow_registration;
     if !vault_set_legacy_token_enabled {
         tracing::info!("legacy shared token is disabled; only paired devices and sessions");
     } else {
@@ -1104,6 +1105,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
         legacy_token_enabled: std::sync::atomic::AtomicBool::new(vault_set_legacy_token_enabled),
+        allow_registration: std::sync::atomic::AtomicBool::new(vault_set_allow_registration),
         bootstrap_nonce,
         listen_addr,
         // The policy Storm ships: every authenticated caller reaches every

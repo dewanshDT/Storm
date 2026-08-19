@@ -12,6 +12,7 @@ import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
+import 'ui/signup_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
@@ -34,6 +35,10 @@ abstract final class Routes {
   /// Sign in on a device that is already paired. Distinct from [pairing],
   /// which is first-run only and asks for a QR nobody needs twice.
   static const login = '/login';
+
+  /// Create an account, on a server whose owner has opened registration (A13).
+  /// Reachable from [login] only when the server says so.
+  static const signup = '/signup';
 
   /// Reachable without a vault, from the phone's dashboard — which is the
   /// screen you are on when there is no vault yet.
@@ -111,7 +116,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       final atConnect = state.matchedLocation == Routes.connect;
       final atPairing = state.matchedLocation == Routes.pairing;
       final atLogin = state.matchedLocation == Routes.login;
-      final atAuthScreen = atConnect || atPairing || atLogin;
+      final atSignup = state.matchedLocation == Routes.signup;
+      final atAuthScreen = atConnect || atPairing || atLogin || atSignup;
 
       // Settings are still loading; hold still rather than flashing the
       // connect screen at someone who is already set up.
@@ -145,7 +151,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       // is /login's whole reason to exist: the device already has credentials,
       // so asking for a pairing QR again would be asking for something the
       // user does not have and does not need.
-      if (paired) return atLogin ? null : Routes.login;
+      // /signup is the same situation as /login — paired, no session — so it
+      // has to be reachable from here, or the link on the login screen would
+      // bounce straight back to the screen it was offered on.
+      if (paired) return (atLogin || atSignup) ? null : Routes.login;
 
       // Nothing at all. Pairing is the first-run flow, but /connect stays
       // reachable for a server that has no auth yet. /login is not — there is
@@ -156,6 +165,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
+      GoRoute(path: Routes.signup, builder: (_, _) => const SignupScreen()),
       GoRoute(
         path: Routes.addDevice,
         builder: (_, _) => const AddDeviceScreen(),

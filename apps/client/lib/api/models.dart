@@ -231,6 +231,7 @@ class ServerConfig {
     required this.mcpEnabled,
     required this.mcpWritable,
     required this.legacyTokenEnabled,
+    required this.allowRegistration,
   });
 
   final String vaultRoot;
@@ -259,6 +260,9 @@ class ServerConfig {
   /// has no replacement for.
   final bool legacyTokenEnabled;
 
+  /// Whether anyone with a device credential may create an account (A13).
+  final bool allowRegistration;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
@@ -266,6 +270,7 @@ class ServerConfig {
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
     mcpWritable: j['mcp_writable'] as bool? ?? false,
     legacyTokenEnabled: j['legacy_token_enabled'] as bool? ?? true,
+    allowRegistration: (j['allow_registration'] as bool?) ?? false,
   );
 }
 

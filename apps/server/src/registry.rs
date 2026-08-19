@@ -73,6 +73,19 @@ pub struct Registry {
     /// reversible — see A10 and *Storm Auth Protocol*.
     #[serde(default = "legacy_token_default")]
     pub legacy_token_enabled: bool,
+
+    /// Whether anyone holding a device credential may create an account (A13).
+    ///
+    /// **Defaults off**, the same direction as the MCP switches and the
+    /// opposite of the legacy token above — the risk here is exposure rather
+    /// than lockout. Turning it on composes with web bootstrap into "anyone
+    /// who can reach this server can make themselves an account", which is a
+    /// deliberate choice on a private network and never a default.
+    ///
+    /// Registered accounts are always members; the bootstrap owner is created
+    /// by `/v1/users/first` and cannot be minted here.
+    #[serde(default)]
+    pub allow_registration: bool,
 }
 
 /// `true` — see [`Registry::legacy_token_enabled`]. A free function because
@@ -93,6 +106,9 @@ impl Default for Registry {
             mcp_enabled: false,
             mcp_writable: false,
             legacy_token_enabled: legacy_token_default(),
+            // Off. `#[derive(Default)]` would give the same answer, but this
+            // Default is hand-written precisely so nobody has to check.
+            allow_registration: false,
         }
     }
 }
