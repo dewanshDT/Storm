@@ -172,8 +172,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       // a waiting room, not a destination.
       final atStarting = state.matchedLocation == Routes.starting;
 
-      if (configured)
+      if (configured) {
         return (atAuthScreen || atStarting) ? Routes.dashboard : null;
+      }
 
       // Paired, but no session — signed out, or the session was revoked. This
       // is /login's whole reason to exist: the device already has credentials,
