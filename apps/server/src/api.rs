@@ -330,6 +330,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/legacy-token", put(put_legacy_token))
         .route("/v1/config/registration", put(put_registration))
+        // MCP keys (A14). **Session tier**: minting a key costs a real
+        // sign-in on a paired device, which is also what makes "a key cannot
+        // mint a key" true without a special case — a key never reaches here.
+        .route("/v1/keys", get(list_keys).post(create_key))
+        .route("/v1/keys/{id}", delete(revoke_key))
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
@@ -374,8 +379,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         ))
         .layer(Extension(RequiredTier::Session));
 
-    // MCP needs session auth + the mcp_enabled gate. It is nested under /mcp
+    // MCP needs authentication + the mcp_enabled gate. It is nested under /mcp
     // rather than merged, so its paths don't collide with REST routes.
+    //
+    // **`RequiredTier::Mcp`, not `Session`** (A14): this is the one surface
+    // that accepts an `stk_` key, and it still accepts everything it accepted
+    // before — a session token, and the legacy shared token while that switch
+    // is on. Nothing about the existing MCP path changed.
     let mcp_with_auth = Router::new()
         .nest("/mcp", mcp_router)
         // Inner to `require_auth`, so `Extension<Actor>` is already set when it
@@ -387,7 +397,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             state.clone(),
             require_auth,
         ))
-        .layer(Extension(RequiredTier::Session));
+        .layer(Extension(RequiredTier::Mcp));
 
     // Merge all tiers: none is checked first, then device, then session, then
     // MCP. Each carries its own auth layer; merge does not leak them.
@@ -571,6 +581,74 @@ async fn put_registration(
 #[derive(Deserialize)]
 struct RegistrationBody {
     enabled: bool,
+}
+
+/// POST /v1/keys — mint an MCP key (A14).
+///
+/// **The response carries the plaintext, and this is the only time it exists.**
+/// Nothing stores it: not the database (which holds a blake3 hash), not the
+/// server, not the client. A caller who loses it revokes and mints another.
+async fn create_key(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    // **Optional, and that is the whole reason this compiles honestly.** The
+    // legacy shared token satisfies the session tier but inserts no
+    // `SessionAuth`, so a required extractor here would panic and answer `500`
+    // where `403` is the truth — the exact shape of the bug the device tier
+    // had. `ops::create_api_key` refuses the legacy token on its own terms,
+    // because it has no user for the key to belong to.
+    session: Option<Extension<SessionAuth>>,
+    Json(body): Json<CreateKeyRequest>,
+) -> ApiResult<Json<crate::ops::CreatedApiKey>> {
+    // Which device minted it, for the audit trail — a key that turns up in a
+    // log is easier to place when you know where it was born.
+    let via = session.map(|Extension(s)| s.authenticated.device.id.clone());
+    Ok(Json(
+        crate::ops::create_api_key(
+            &state,
+            &actor,
+            &body.name,
+            body.expires.as_deref(),
+            via.as_deref(),
+        )
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct CreateKeyRequest {
+    name: String,
+    /// Optional absolute RFC3339 instant. `None` means the key does not expire
+    /// — the design's default, revisited when there is evidence for another.
+    #[serde(default)]
+    expires: Option<String>,
+}
+
+/// GET /v1/keys — the caller's keys, or another user's if the caller is an owner.
+async fn list_keys(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(q): Query<ListKeysQuery>,
+) -> ApiResult<Json<Vec<crate::auth::keys::ApiKey>>> {
+    Ok(Json(
+        crate::ops::list_api_keys(&state, &actor, q.user.as_deref()).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct ListKeysQuery {
+    #[serde(default)]
+    user: Option<String>,
+}
+
+/// DELETE /v1/keys/{id} — revoke a key, effective on the next request.
+async fn revoke_key(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::revoke_api_key(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /v1/users/first — create the owner account, once.
@@ -1194,6 +1272,16 @@ pub enum RequiredTier {
     None,
     Device,
     Session,
+    /// The MCP surface (A14). Accepts a session token, an `stk_` MCP key, and
+    /// — while the switch is on — the legacy shared token.
+    ///
+    /// **A separate tier rather than a flag on `Session`**, because the set of
+    /// credentials that may reach `/mcp` is genuinely different from the set
+    /// that may reach the REST API: a key is accepted here and refused
+    /// everywhere else (A14.2). Encoding that as "session tier, but also keys"
+    /// would put the exception in the middleware instead of on the route,
+    /// which is where it would be forgotten.
+    Mcp,
 }
 
 /// A device that has proven it is paired with this server.
@@ -1204,6 +1292,18 @@ pub enum RequiredTier {
 pub struct DeviceAuth {
     #[allow(dead_code)]
     pub device: crate::auth::devices::Device,
+}
+
+/// A caller holding a valid MCP key (A14).
+///
+/// Set on `Mcp`-tier routes when the credential is `Bearer stk_…`. The
+/// authorization-facing identity is the `Actor::Key` inserted beside it; this
+/// carries the record itself, for handlers and audit rows that want the key's
+/// name or owner without a second lookup.
+#[derive(Clone)]
+pub struct KeyAuth {
+    #[allow(dead_code)] // Read by audit/logging work, not by the boundary.
+    pub authed: crate::auth::keys::AuthenticatedKey,
 }
 
 /// A caller that has proven who it is (user + device + session).
@@ -1283,7 +1383,11 @@ async fn require_auth(
         //
         // Found by a device credential trying to flip a session-tier setting
         // and getting an extension panic instead of a refusal.
-        if tier == RequiredTier::Session {
+        //
+        // `Mcp` is in this check for the same reason `Session` is: a device
+        // credential is not an MCP credential either, and A14 added a tier
+        // rather than widening what the device branch satisfies.
+        if matches!(tier, RequiredTier::Session | RequiredTier::Mcp) {
             return tier_error("session_required", StatusCode::UNAUTHORIZED);
         }
         // **The lock is released before the handler runs, and that is the whole
@@ -1323,10 +1427,73 @@ async fn require_auth(
         return next.run(request).await;
     }
 
-    // --- Bearer token: session or legacy ---
+    // --- Bearer token: MCP key, session, or legacy ---
     if let Some(token) = credential.strip_prefix("Bearer ") {
-        // Session-tier only: legacy token fallback.
-        if tier == RequiredTier::Session
+        // **MCP keys, checked first and by prefix** (A14.1). Keys share the
+        // `Bearer` scheme because most MCP clients can send nothing else, so
+        // the `stk_` prefix is the only thing separating them from session
+        // tokens — and checking it before the legacy comparison keeps a key
+        // from ever being measured against the shared token.
+        //
+        // **A key is accepted on `/mcp` and refused everywhere else** (A14.2),
+        // and the refusal happens *here*, in the tier check, rather than
+        // downstream in a handler that fails to find an extension. That
+        // distinction is not theoretical: it is exactly the `500`-instead-of-
+        // `401` bug the device branch above had.
+        if token.starts_with(crate::auth::token::KEY_PREFIX) {
+            if tier != RequiredTier::Mcp {
+                return tier_error("mcp_key_not_accepted_here", StatusCode::UNAUTHORIZED);
+            }
+
+            // Scoped so the guard is dropped before `next.run(request)`.
+            // `auth_db` is a non-reentrant `tokio::sync::Mutex` and MCP tools
+            // take it; holding it across the handler is what wedged the device
+            // tier in slice 12 and took every later request down with it.
+            let authed = {
+                let mut auth_db = state.auth_db.lock().await;
+                let now = crate::index::now_rfc3339();
+                match crate::auth::keys::authenticate(&mut auth_db, token, &now) {
+                    Ok(authed) => authed,
+                    Err(crate::auth::keys::KeyError::Refused(failure)) => {
+                        // Audited specifically, answered generically: the row
+                        // says whether it was unknown, revoked or expired; the
+                        // client is told none of that, because distinguishing
+                        // "never existed" from "was revoked" is free
+                        // reconnaissance for an unauthenticated caller.
+                        let _ = auth_db.record_event(
+                            crate::auth::keys::EVENT_KEY_REJECTED,
+                            None,
+                            None,
+                            &now,
+                            &format!(r#"{{"reason":"{}"}}"#, failure.code()),
+                        );
+                        return unauthorized("invalid or missing token");
+                    }
+                    Err(crate::auth::keys::KeyError::Internal(e)) => {
+                        tracing::error!(error = %e, "mcp key authentication failed");
+                        return internal_error();
+                    }
+                }
+            };
+
+            request.extensions_mut().insert(Actor::Key {
+                key_id: authed.key.id.clone(),
+                user_id: authed.user.id.clone(),
+                role: authed.user.role,
+            });
+            request.extensions_mut().insert(KeyAuth { authed });
+            return next.run(request).await;
+        }
+
+        // Legacy token fallback.
+        //
+        // **`Mcp` is in this list, and leaving it out would break every
+        // existing MCP client at once.** MCP authenticates with the shared
+        // token today; moving `/mcp` from `Session` to its own tier without
+        // widening this condition silently retires that path years before the
+        // A10 cutover intends to. `the_legacy_token_still_reaches_mcp` is the
+        // regression test that holds this.
+        if matches!(tier, RequiredTier::Session | RequiredTier::Mcp)
             && state
                 .legacy_token_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -2524,21 +2691,34 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingPolicy {
         seen: std::sync::Mutex<Vec<(String, String)>>,
+        /// The full actors, for tests asking *what kind* of caller arrived
+        /// rather than only which user.
+        actors: std::sync::Mutex<Vec<Actor>>,
     }
 
     impl RecordingPolicy {
         fn pairs(&self) -> Vec<(String, String)> {
             self.seen.lock().unwrap().clone()
         }
+
+        fn actors(&self) -> Vec<Actor> {
+            self.actors.lock().unwrap().clone()
+        }
     }
 
     impl crate::auth::authz::VaultPolicy for RecordingPolicy {
         fn decide(&self, actor: &Actor, vault_id: &str, _: Access) -> Decision {
-            let who = match actor {
-                Actor::Session { user_id, .. } => user_id.clone(),
-                Actor::Legacy => "legacy".to_string(),
-            };
+            // **Via the accessor, not a match on the variant.** A key and a
+            // session are the same principal reached two ways; a policy that
+            // branched on the variant would need editing every time a new way
+            // to hold a credential is added, which is the coupling A14.3
+            // exists to avoid.
+            let who = actor
+                .user_id()
+                .map(str::to_string)
+                .unwrap_or_else(|| "legacy".to_string());
             self.seen.lock().unwrap().push((who, vault_id.to_string()));
+            self.actors.lock().unwrap().push(actor.clone());
             Decision::Allow
         }
     }
@@ -3768,5 +3948,398 @@ mod tests {
             "every hash must go through the process-wide hasher, or the \
              semaphore bounds nothing across requests"
         );
+    }
+
+    // ---- A14: MCP keys ---------------------------------------------------
+
+    /// Mints a user and a key on `state`, returning `(user_id, plaintext)`.
+    async fn seed_key(
+        state: &Shared,
+        username: &str,
+        role: crate::auth::users::Role,
+    ) -> (String, String) {
+        let mut db = state.auth_db.lock().await;
+        // The first account has to be an owner — a server whose only user is a
+        // member has nobody who can create the next one. So a member needs one
+        // ahead of it.
+        if role != crate::auth::users::Role::Owner {
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "bootstrap-owner",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Owner,
+                },
+                "2026-08-19T11:00:00Z",
+            )
+            .unwrap();
+        }
+        let user = crate::auth::users::create_user(
+            &mut db,
+            crate::auth::users::NewUser {
+                username,
+                display_name: None,
+                password_hash: "hash",
+                role,
+            },
+            "2026-08-19T12:00:00Z",
+        )
+        .unwrap();
+        let (_, secret) = crate::auth::keys::create(
+            &mut db,
+            &user.id,
+            "a machine",
+            None,
+            None,
+            "2026-08-19T12:00:00Z",
+        )
+        .unwrap();
+        (user.id, secret)
+    }
+
+    /// A minimal, valid MCP request — enough to get past the tier check and
+    /// see whether the surface answered at all.
+    fn mcp_request(bearer: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("Authorization", bearer)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_reaches_mcp() {
+        let dir = tempdir::TempDir::new("storm-key-mcp").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request(&format!("Bearer {secret}")))
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a live key must authenticate on /mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_still_reaches_mcp() {
+        // **The regression this slice is most likely to cause.** MCP
+        // authenticates with the shared token today. Moving /mcp from
+        // `Session` to `Mcp` without widening the legacy condition would
+        // retire that path immediately — years before the A10 cutover means
+        // to, and with no warning to anyone whose MCP client just stopped.
+        let dir = tempdir::TempDir::new("storm-key-legacy").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request("Bearer testtoken"))
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the legacy token must keep reaching /mcp while its switch is on"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_stops_reaching_mcp_when_switched_off() {
+        // The other half: the compatibility is the *switch's* doing, not an
+        // accident of the tier. Without this, the test above would pass just as
+        // well if the tier check had been dropped altogether.
+        let dir = tempdir::TempDir::new("storm-key-legacy-off").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .legacy_token_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request("Bearer testtoken"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_is_refused_everywhere_but_mcp() {
+        // A14.2. And **the status matters as much as the refusal**: it has to
+        // be the tier check saying no, not a handler falling over on a missing
+        // extension, which is how the device tier used to answer 500 where 401
+        // was the truth.
+        let dir = tempdir::TempDir::new("storm-key-scope").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+
+        for (method, uri) in [
+            ("GET", "/v1/vaults"),
+            ("GET", "/v1/config"),
+            ("GET", "/v1/recents"),
+            ("GET", "/v1/users"),
+        ] {
+            let (status, _) = send(
+                &app,
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("Authorization", format!("Bearer {secret}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must refuse an MCP key with 401, not {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoked_key_stops_reaching_mcp() {
+        let dir = tempdir::TempDir::new("storm-key-revoked").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+
+        // Works first, so the refusal below cannot be a setup failure.
+        let before = app
+            .clone()
+            .oneshot(mcp_request(&format!("Bearer {secret}")))
+            .await
+            .unwrap();
+        assert_ne!(before.status(), StatusCode::UNAUTHORIZED);
+
+        {
+            let mut db = state.auth_db.lock().await;
+            let key = db.api_keys_for_user(&user_id).unwrap().pop().unwrap();
+            crate::auth::keys::revoke(&mut db, &key.id, None, "test", "2026-08-19T13:00:00Z")
+                .unwrap();
+        }
+
+        let after = app
+            .clone()
+            .oneshot(mcp_request(&format!("Bearer {secret}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "revocation must take effect on the next request, not the next restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_credential_is_refused_on_mcp() {
+        // MCP is not the device tier, and the refusal must be the tier check.
+        let dir = tempdir::TempDir::new("storm-key-device").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request("StormDevice dev_1:dvs_whatever"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_minted_key_is_shown_once_and_never_again() {
+        // A14.5, end to end over the real routes. The create response is the
+        // only place the plaintext exists; the list must not carry it, and
+        // neither must the audit trail.
+        let dir = tempdir::TempDir::new("storm-key-once").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        let auth = format!("Bearer {token}");
+
+        let (status, created) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({ "name": "Claude Code, laptop" }),
+                &auth,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let secret = created["secret"].as_str().unwrap().to_string();
+        assert!(secret.starts_with("stk_"), "{secret}");
+
+        let (status, listed) = send(&app, get_with_auth("/v1/keys", &auth)).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = serde_json::to_string(&listed).unwrap();
+        assert!(
+            !listed.contains(&secret),
+            "listing keys must never return the plaintext again: {listed}"
+        );
+        assert!(listed.contains("Claude Code, laptop"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn a_member_reaches_only_their_own_keys() {
+        let dir = tempdir::TempDir::new("storm-key-scope-user").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let member = {
+            let mut db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "member",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Member,
+                },
+                "2026-08-19T12:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let member_auth = format!("Bearer {}", session_token(&state, &member).await);
+        let owner_auth = format!("Bearer {}", session_token(&state, &owner).await);
+
+        // The owner mints one for themselves.
+        let (status, owners_key) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({ "name": "owner key" }),
+                &owner_auth,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let owners_key_id = owners_key["id"].as_str().unwrap().to_string();
+
+        // A member may not read the owner's keys...
+        let (status, _) = send(
+            &app,
+            get_with_auth(&format!("/v1/keys?user={owner}"), &member_auth),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // ...nor revoke one. **404, not 403** — a member probing key ids must
+        // not learn which exist.
+        let (status, _) = send(
+            &app,
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/keys/{owners_key_id}"))
+                .header("Authorization", &member_auth)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The owner may reach the member's keys, which is the one asymmetry
+        // A14 grants and the whole of it.
+        let (status, _) = send(
+            &app,
+            get_with_auth(&format!("/v1/keys?user={member}"), &owner_auth),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_cannot_mint_a_key() {
+        // It has no user behind it (A10), so there is nobody for the key to
+        // belong to. Refusing beats inventing an owner.
+        let dir = tempdir::TempDir::new("storm-key-legacy-mint").unwrap();
+        let (app, _, _state) = test_router_with_state(dir.path());
+
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({ "name": "nope" }),
+                "Bearer testtoken",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_request_carries_its_owners_identity() {
+        // **The whole point of A14.3.** The request has to arrive at the
+        // authorization boundary as the *user*, with the key alongside for
+        // audit — not as some third kind of principal. If this resolved to
+        // anything without a `user_id`, a future policy would have one caller
+        // whose grants it could not look up, which is the `Actor::Mcp` mistake
+        // slice 11 already removed once.
+        let dir = tempdir::TempDir::new("storm-key-identity").unwrap();
+        let policy = Arc::new(RecordingPolicy::default());
+        let (app, _, state) = test_router_with_policy(dir.path(), policy.clone());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        register_vault(&state, "Notes").await;
+        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Member).await;
+
+        // A tool that reaches a vault, so the policy is actually consulted.
+        let _ = app
+            .clone()
+            .oneshot(mcp_call(
+                "list_vaults",
+                serde_json::json!({}),
+                &format!("Bearer {secret}"),
+            ))
+            .await
+            .unwrap();
+
+        let seen = policy.actors();
+        assert!(
+            !seen.is_empty(),
+            "the policy was never consulted, so this test proves nothing"
+        );
+        for actor in &seen {
+            assert_eq!(
+                actor.user_id(),
+                Some(user_id.as_str()),
+                "an MCP key must reach the boundary as its owner"
+            );
+            assert_eq!(
+                actor.role(),
+                Some(crate::auth::users::Role::Member),
+                "and with its owner's role, unnarrowed"
+            );
+            assert!(
+                actor.key_id().is_some(),
+                "and still say which key acted, for the audit trail"
+            );
+        }
     }
 }

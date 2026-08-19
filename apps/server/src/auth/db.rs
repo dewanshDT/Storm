@@ -34,7 +34,9 @@ pub const AUTH_DB_FILE: &str = "auth.db";
 /// **1** — the original schema (slice 1).
 /// **2** — `sessions.previous_refresh_hash` (slice 3).
 /// **3** — `ws_tickets` (slice 4).
-const SCHEMA_VERSION: i64 = 4;
+/// **4** — `pairing_sessions.peer_ip` + the `web_bootstrap` purpose (slice 15).
+/// **5** — `api_keys` (A14).
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct AuthDb {
     /// Visible to the rest of `auth` so each area keeps its own SQL beside its
@@ -259,6 +261,32 @@ impl AuthDb {
                 detail    TEXT   -- JSON. Never a secret, never a token.
             );
 
+            -- MCP keys (A14): a credential a user mints for a machine.
+            --
+            -- **The key belongs to the user, and `ON DELETE CASCADE` is the
+            -- data-model half of saying so** — deleting the account takes its
+            -- keys with it, with no application code left to forget. The
+            -- authority a key carries is its owner's; nothing is stored here
+            -- about *what* it may reach, because that is the authorization
+            -- model's question and it is deliberately not answered in A14.
+            --
+            -- `secret_hash` is blake3 of the whole `stk_…` string, never the
+            -- plaintext (A5, A14.5). The plaintext exists once, in the response
+            -- that created it.
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id             TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name           TEXT NOT NULL,
+                secret_hash    BLOB NOT NULL UNIQUE,
+                created        TEXT NOT NULL,
+                created_via    TEXT REFERENCES client_devices(id),
+                expires        TEXT,
+                last_used      TEXT,
+                revoked        TEXT,
+                revoked_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS api_keys_by_user ON api_keys(user_id);
+
             -- Short-lived, single-use tokens for WebSocket handshakes. The
             -- client POSTs to get one, then presents it on the GET /v1/stream
             -- handshake.
@@ -318,6 +346,16 @@ impl AuthDb {
                 self.conn.pragma_update(None, "foreign_keys", "ON")?;
                 rebuilt?;
             }
+
+            // v4→v5: `api_keys` (A14). **Deliberately nothing to do here.**
+            // The table is created by the `CREATE TABLE IF NOT EXISTS` batch
+            // above, which runs on every open, so a v4 database gains it
+            // exactly as a fresh one does and this branch would be dead code.
+            //
+            // That is the point rather than an omission: a purely additive
+            // change needs no rebuild, and a rebuild is what made v3→v4 able to
+            // strand a database it could not then retry. Keep new tables in the
+            // batch and out of here.
 
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -437,6 +475,121 @@ impl AuthDb {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    // ---- api keys (A14) --------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_api_key(
+        &self,
+        id: &str,
+        user_id: &str,
+        name: &str,
+        secret_hash: &[u8],
+        created: &str,
+        created_via: Option<&str>,
+        expires: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO api_keys
+                 (id, user_id, name, secret_hash, created, created_via, expires)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                user_id,
+                name,
+                secret_hash,
+                created,
+                created_via,
+                expires
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Looks a key up by the hash of its plaintext.
+    ///
+    /// An indexed equality lookup, not a comparison over a secret — the same
+    /// shape as `session_by_access_hash`, and for the same reason: there is no
+    /// constant-time question here because no byte-by-byte comparison happens.
+    pub fn api_key_by_hash(&self, secret_hash: &[u8]) -> Result<Option<crate::auth::keys::ApiKey>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, user_id, name, created, created_via, expires,
+                        last_used, revoked, revoked_reason
+                 FROM api_keys WHERE secret_hash = ?1",
+                params![secret_hash],
+                Self::api_key_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn api_key_by_id(&self, id: &str) -> Result<Option<crate::auth::keys::ApiKey>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, user_id, name, created, created_via, expires,
+                        last_used, revoked, revoked_reason
+                 FROM api_keys WHERE id = ?1",
+                params![id],
+                Self::api_key_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Every key a user holds, newest first, revoked ones included.
+    ///
+    /// Revoked keys are returned on purpose: "this key was revoked" is what
+    /// someone needs to see when a machine stops working, and hiding it turns a
+    /// two-second answer into a mystery.
+    pub fn api_keys_for_user(&self, user_id: &str) -> Result<Vec<crate::auth::keys::ApiKey>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, user_id, name, created, created_via, expires,
+                    last_used, revoked, revoked_reason
+             FROM api_keys WHERE user_id = ?1 ORDER BY created DESC",
+        )?;
+        let rows = stmt.query_map(params![user_id], Self::api_key_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Live (unrevoked) keys a user holds — the number the per-user cap bounds.
+    pub fn live_api_key_count(&self, user_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM api_keys WHERE user_id = ?1 AND revoked IS NULL",
+            params![user_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn revoke_api_key(&self, id: &str, at: &str, reason: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE api_keys SET revoked = ?2, revoked_reason = ?3
+             WHERE id = ?1 AND revoked IS NULL",
+            params![id, at, reason],
+        )?)
+    }
+
+    pub fn touch_api_key(&self, id: &str, at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE api_keys SET last_used = ?2 WHERE id = ?1",
+            params![id, at],
+        )?;
+        Ok(())
+    }
+
+    fn api_key_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<crate::auth::keys::ApiKey> {
+        Ok(crate::auth::keys::ApiKey {
+            id: r.get(0)?,
+            user_id: r.get(1)?,
+            name: r.get(2)?,
+            created: r.get(3)?,
+            created_via: r.get(4)?,
+            expires: r.get(5)?,
+            last_used: r.get(6)?,
+            revoked: r.get(7)?,
+            revoked_reason: r.get(8)?,
+        })
     }
 
     // ---- pairing sessions ------------------------------------------------
@@ -755,6 +908,77 @@ mod tests {
             db.column_exists("sessions", "previous_refresh_hash")
                 .unwrap(),
             "sessions should have previous_refresh_hash after v1→v2 migration"
+        );
+    }
+
+    #[test]
+    fn a_v4_database_gains_api_keys_and_keeps_everything_else() {
+        // v4→v5 is **purely additive** — the table comes from the
+        // `CREATE TABLE IF NOT EXISTS` batch, not from a migration branch. This
+        // asserts that, and asserts the thing a migration must never do: lose
+        // state that cannot be rebuilt. `auth.db` is the one file in `state/`
+        // that a rescan cannot reconstruct.
+        let dir = tempdir::TempDir::new("storm-auth-mig-v5").unwrap();
+        {
+            let db = AuthDb::open(dir.path()).unwrap();
+            db.conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+            crate::auth::users::create_user(
+                &mut AuthDb::open(dir.path()).unwrap(),
+                crate::auth::users::NewUser {
+                    username: "dewansh",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Owner,
+                },
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+            db.conn
+                .execute_batch("DROP TABLE IF EXISTS api_keys;")
+                .unwrap();
+            db.conn.execute_batch("PRAGMA user_version = 4;").unwrap();
+        }
+
+        let db = AuthDb::open(dir.path()).unwrap();
+        let ver: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, SCHEMA_VERSION);
+        assert!(
+            db.column_exists("api_keys", "secret_hash").unwrap(),
+            "a v4 database must gain api_keys"
+        );
+
+        // The account is still there. A migration that quietly emptied the one
+        // unrebuildable file would be the worst defect available here.
+        let users: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(users, 1, "the upgrade must not drop existing auth state");
+
+        // And a key minted after the upgrade works, so the table is not merely
+        // present but usable — FKs on, referencing the carried-over user.
+        let fk_on: i64 = db
+            .conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk_on, 1);
+        let mut db = db;
+        let user = db.find_user("dewansh").unwrap().unwrap();
+        let (_, secret) = crate::auth::keys::create(
+            &mut db,
+            &user.id,
+            "after the upgrade",
+            None,
+            None,
+            "2026-01-02T00:00:00Z",
+        )
+        .unwrap();
+        assert!(
+            crate::auth::keys::authenticate(&mut db, &secret, "2026-01-02T00:00:00Z").is_ok(),
+            "a key minted on an upgraded database must authenticate"
         );
     }
 

@@ -27,6 +27,7 @@ pub mod authz;
 pub mod db;
 pub mod devices;
 pub mod identity;
+pub mod keys;
 pub mod pairing;
 pub mod password;
 pub mod sessions;
