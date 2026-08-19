@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
@@ -215,7 +216,12 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     // after an upgrade migrates whatever is still in `prefs` across.
     final secret = await secrets.load(prefs);
     return Settings(
-      baseUrl: prefs.getString(_kUrl) ?? '',
+      // **On the web, the server is the origin that served this page.** Asking
+      // a browser for the address of the machine it just downloaded the app
+      // from is asking it to tell us something it already knows, and getting
+      // it wrong is the only way to fail. A stored value still wins, so a web
+      // build pointed somewhere else by hand keeps working.
+      baseUrl: prefs.getString(_kUrl) ?? (kIsWeb ? Uri.base.origin : ''),
       token: secret[_kToken] ?? '',
       theme: _themeFrom(prefs),
       fontSize: prefs.getDouble(_kFont) ?? 16,
