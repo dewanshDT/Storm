@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–12 on main · 13–16 in review · **auth now runs on the VM (staging)**, prod still pre-auth · hand-test → RBAC → cutover |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–16 + **A14 MCP keys** · the authentication foundation is **complete** · staging verified with a real MCP client, prod still pre-auth · authorization is its own release, then the cutover |
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -113,8 +113,9 @@ that the device tier deadlocked on every request, that the first-user endpoint
 never closed, and that the Argon2id bound was decorative. Details below; **the
 authentication path could not have worked against a real server before it.**
 
-**Next, in order:** the **client half of the device tier** → a pass against the
-VM → the RBAC **policy** → the cutover.
+**Next, in order:** ~~the client half of the device tier → a pass against the
+VM~~ (both done, slices 13–16) → **A14, MCP keys** (done) → the **authorization
+release** → the cutover.
 
 Slice 12 reordered this. The RBAC policy was next while the assumption held
 that the authentication path worked and only lacked a permission model; it did
@@ -2432,6 +2433,73 @@ screen, the credential in the browser — because the tests were handed a good
 value instead of the one a human produces.
 
 ---
+
+---
+
+**A14 — MCP keys: the last of the authentication foundation ✅**
+(2026-08-19, staging only)
+
+A credential a signed-in user mints for a *machine* — an MCP client, a script,
+an agent. It travels as an ordinary `Authorization: Bearer stk_…`, reaches
+`/mcp` **and nothing else**, and resolves to
+`Actor::Key { key_id, user_id, role }`: the owner's identity, with the key
+alongside for audit. Design in *Storm MCP Keys*, decision **A14** in *Storm
+Remote Decisions*, wire flow in *Storm Auth Protocol* (Flow 9).
+
+**Why it had to exist before the cutover, and this is the finding.** MCP
+authenticates with the legacy shared token today. The moment
+`legacy_token_enabled` goes false, **every MCP client stops at once** — and MCP
+is the one client that is not the Flutter app, so nothing prompts anyone to
+sign in. The cutover checklist had four steps and none of them was "migrate the
+clients that will not notice". It has five now.
+
+**The near-miss is the same shape.** Moving `/mcp` from the session tier to its
+own `RequiredTier::Mcp` silently retires the shared-token MCP path unless the
+legacy condition widens to `Session | Mcp` in the same change. That is one line,
+it breaks every existing MCP client, and nothing else would have failed.
+`the_legacy_token_still_reaches_mcp` holds it, and reverting that condition
+fails it.
+
+**Three design choices, each with a live alternative:**
+
+- **Bearer, not a `StormKey` scheme.** The symmetry with `StormDevice` reads
+  better and loses to a fact: most MCP clients can send nothing else. *A
+  credential the clients it exists for cannot present is not a credential.*
+- **`/mcp` only.** A session token lives in a keychain; a key lives in a
+  plaintext config file, and the two do not deserve the same reach.
+- **`Actor::Key`, not a reused `Actor::Session` and not a principal of its
+  own.** `authz.rs` already records why `Actor::Mcp` was deleted in slice 11;
+  a key with an identity of its own would restore that mistake under a new
+  name. `Actor` gained `user_id()` / `role()` accessors, and the authorization
+  release must read those rather than match on the variant — a policy written
+  that way covers keys the day it is written.
+
+**Deliberately absent: any way to narrow a key.** No per-vault scoping, no
+read-only key. An owner's key is an owner-powered bearer credential in a config
+file, documented rather than mitigated — scoping is the same question the
+authorization release must answer for users, and answering it twice is how two
+definitions diverge.
+
+**The migration is additive**, and that is a direct consequence of the v3→v4
+defect found days earlier: `api_keys` comes from the `CREATE TABLE IF NOT
+EXISTS` batch, so a v4 database gains it by being opened. No rebuild, nothing
+to strand. `auth.db` is the one file in `state/` a rescan cannot reconstruct.
+
+**Evidence.** 311 Rust unit + 9 process tests, clippy clean; 655 client tests,
+analyze clean. `make test-live`: **e2e 81/81 unmodified**, mcp 56/56, auth
+66/66, client 20/20. **Against staging with a real MCP client** — the official
+MCP SDK over StreamableHTTP, full `initialize` → `tools/list` → `tools/call` —
+ten checks: mint, connect, a real tool call, identity resolving to the owner,
+the legacy MCP path still working, revoke, the revoked key refused, another
+user's key unaffected, no cross-user identity, and REST/session untouched with
+a key refused there at `401`.
+
+**The bug that came back while writing it.** `create_key` required
+`Extension<SessionAuth>`, which the legacy token never inserts, so it answered
+`500` where `403` was the truth — the identical shape fixed for the device tier
+two days earlier. Caught by the test that asserts the legacy token *cannot*
+mint a key. **A refusal that arrives as an extractor panic is not a refusal**,
+and this codebase has now produced that bug three times in three tiers.
 
 ## A lesson worth keeping
 
