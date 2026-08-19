@@ -120,8 +120,46 @@ class Settings {
   /// The device has completed pairing (has device credentials).
   bool get isPaired => deviceId.isNotEmpty;
 
-  /// The device has a live (or refreshable) session.
+  /// The device has session tokens. **Says nothing about whether they work.**
+  ///
+  /// Deliberately unchanged and deliberately narrow: half the app asks this to
+  /// decide whether to send a bearer token at all, and a session that is
+  /// merely *stale* should still be sent — the refresh path needs it. Whether
+  /// the session is still good is [accessTokenExpired].
   bool get hasSession => accessToken.isNotEmpty;
+
+  /// When the access token dies, or null if unknown.
+  ///
+  /// Unknown covers an install from before this was stored, and a stamp the
+  /// server sent in a shape we cannot read. Both are treated as "not expired",
+  /// because guessing *expired* would sign someone out over a parse error.
+  DateTime? get accessTokenExpiry =>
+      accessTokenExpiresAt.isEmpty ? null : DateTime.tryParse(accessTokenExpiresAt);
+
+  /// The access token is past its expiry.
+  ///
+  /// **This used to be unknowable.** `accessTokenExpiresAt` was written by
+  /// three screens and read by none, so an expired session still counted as
+  /// configured: the router kept you on the dashboard while every request came
+  /// back 401, which is what "signed in but everything is broken" was.
+  bool get accessTokenExpired {
+    final at = accessTokenExpiry;
+    return at != null && !at.isAfter(DateTime.now().toUtc());
+  }
+
+  /// Close enough to expiry to renew it now rather than mid-use.
+  ///
+  /// A6 wants this at half the access lifetime, which needs the moment the
+  /// token was *issued* — and that is not stored, so this uses a window before
+  /// expiry instead. Storm is offline-first with an outbox: the case that
+  /// matters is a phone coming back after a while and finding its session
+  /// already dead, and a day of margin covers that without pretending to
+  /// implement a rule it cannot yet compute.
+  bool get accessTokenNeedsRefresh {
+    final at = accessTokenExpiry;
+    if (at == null) return false;
+    return at.isBefore(DateTime.now().toUtc().add(const Duration(days: 1)));
+  }
 
   /// The token to send as `Authorization: Bearer …` on authenticated calls.
   ///
@@ -300,9 +338,24 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   /// ordinary pairing nonce through the ordinary `POST /v1/pair` and gets an
   /// ordinary device credential; login still needs that credential *and* a
   /// password. See *Storm Web Bootstrap*.
+  /// True while [bootstrapWebDevice] is in flight.
+  ///
+  /// The router needs it: without it, a fresh browser is "not paired" for the
+  /// whole round trip and the redirect sends it to the QR screen, which then
+  /// vanishes a moment later. Showing someone a pairing screen they must not
+  /// use, and taking it away before they can read it, is worse than showing
+  /// nothing.
+  bool get bootstrapping => _bootstrapping;
+  bool _bootstrapping = false;
+
   Future<bool> bootstrapWebDevice() async {
     final s = state.value;
     if (s == null) return false;
+
+    // `redirect` runs on every navigation and every settings change, and
+    // `paired` stays false for the whole round trip, so without this the same
+    // nonce is spent twice and the second attempt answers 409.
+    if (_bootstrapping) return false;
 
     // **A returning browser must not mint a second device on every load.**
     // The server injects a nonce into every document it serves, because it
@@ -314,6 +367,8 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     final nonce = readWebBootstrapNonce();
     if (nonce == null) return false;
 
+    _bootstrapping = true;
+    ref.notifyListeners();
     final api = AuthApi(baseUrl: s.baseUrl);
     try {
       final paired = await api.pair(
@@ -339,7 +394,51 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     } finally {
       // Spent or not, it is not worth keeping in the DOM.
       clearWebBootstrapNonce();
+      _bootstrapping = false;
+      ref.notifyListeners();
       api.dispose();
+    }
+  }
+
+  /// Renews or retires the session, so the app never runs on a dead one.
+  ///
+  /// **Nothing used to do this.** `refreshSession()` existed and was tested,
+  /// and had no caller; the expiry was stored and never compared. So a session
+  /// that lapsed stayed "configured" forever: the router kept you on the
+  /// dashboard, every request answered 401, and the screens filled with
+  /// failures that looked like the app breaking rather than like a sign-in
+  /// that had run out.
+  ///
+  /// Three outcomes, and the last is the point:
+  ///
+  /// * still good, or no session at all → nothing happens;
+  /// * stale or expired, refresh works → the session is renewed in place;
+  /// * expired and refresh fails → the session is **cleared**, which makes
+  ///   `hasSession` false and lets the router do the ordinary thing and show
+  ///   the login screen. The device credential is kept, because the device is
+  ///   still paired and asking for a QR again would be asking for something
+  ///   nobody needs.
+  Future<void> ensureSession() async {
+    final s = state.value;
+    if (s == null || !s.hasSession) return;
+    if (!s.accessTokenNeedsRefresh && !s.accessTokenExpired) return;
+
+    final renewed = await refreshSession();
+    if (renewed) return;
+
+    // A failed refresh on a token that still has life left is not fatal — the
+    // network may simply be down, and the outbox is built for that. Only an
+    // expired one is retired.
+    if (state.value?.accessTokenExpired ?? false) {
+      final now = state.value!;
+      await save(
+        now.copyWith(
+          accessToken: '',
+          refreshToken: '',
+          accessTokenExpiresAt: '',
+          userId: '',
+        ),
+      );
     }
   }
 

@@ -13,6 +13,7 @@ import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
 import 'ui/signup_screen.dart';
+import 'ui/starting_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
@@ -29,6 +30,10 @@ import 'ui/tags_screen.dart';
 /// single-screen shell simply didn't have.
 abstract final class Routes {
   static const dashboard = '/';
+
+  /// Shown while the app decides where to send you. Never navigated to
+  /// directly — the redirect holds here instead of guessing.
+  static const starting = '/starting';
   static const connect = '/connect';
   static const pairing = '/pairing';
 
@@ -119,9 +124,13 @@ final routerProvider = Provider<GoRouter>((ref) {
       final atSignup = state.matchedLocation == Routes.signup;
       final atAuthScreen = atConnect || atPairing || atLogin || atSignup;
 
-      // Settings are still loading; hold still rather than flashing the
-      // connect screen at someone who is already set up.
-      if (settings.isLoading) return null;
+      // **Hold on a neutral screen rather than guessing.** `null` means "stay
+      // where you are", which on a cold start is the dashboard — so returning
+      // it here rendered the vault shell for someone who may not even be
+      // signed in. Holding costs a frame; guessing costs a wrong screen.
+      if (settings.isLoading) {
+        return state.matchedLocation == Routes.starting ? null : Routes.starting;
+      }
 
       // **The web client bootstraps its own device rather than showing a QR.**
       // Storm served this page, so the browser already knows the server; the
@@ -134,7 +143,17 @@ final routerProvider = Provider<GoRouter>((ref) {
       // Native clients are untouched — off the web the nonce reader is a stub
       // that returns null, and the QR flow is the only way in.
       if (kIsWeb && !paired && !configured) {
-        unawaited(ref.read(settingsProvider.notifier).bootstrapWebDevice());
+        final notifier = ref.read(settingsProvider.notifier);
+        // Not paired *yet* — the bootstrap is in flight. Sending them to the
+        // QR screen now means showing a pairing screen they must not use and
+        // taking it away a moment later, which is the flicker this avoids.
+        if (notifier.bootstrapping) {
+          return state.matchedLocation == Routes.starting
+              ? null
+              : Routes.starting;
+        }
+        unawaited(notifier.bootstrapWebDevice());
+        return state.matchedLocation == Routes.starting ? null : Routes.starting;
       }
 
       // The gallery needs no server, and bouncing it to Connect would make it
@@ -145,7 +164,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       // screen is behind us. Pairing is deliberately not required here: an
       // install that predates auth has a token and no device, and sending it
       // to /pairing would lock it out of a vault it can already read.
-      if (configured) return atAuthScreen ? Routes.dashboard : null;
+      // Anyone who reached /starting and is now settled gets moved on; it is
+      // a waiting room, not a destination.
+      final atStarting = state.matchedLocation == Routes.starting;
+
+      if (configured) return (atAuthScreen || atStarting) ? Routes.dashboard : null;
 
       // Paired, but no session — signed out, or the session was revoked. This
       // is /login's whole reason to exist: the device already has credentials,
@@ -155,6 +178,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       // has to be reachable from here, or the link on the login screen would
       // bounce straight back to the screen it was offered on.
       if (paired) return (atLogin || atSignup) ? null : Routes.login;
+      if (atStarting) return Routes.pairing;
 
       // Nothing at all. Pairing is the first-run flow, but /connect stays
       // reachable for a server that has no auth yet. /login is not — there is
@@ -163,6 +187,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       return Routes.pairing;
     },
     routes: [
+      GoRoute(path: Routes.starting, builder: (_, _) => const StartingScreen()),
       GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
       GoRoute(path: Routes.signup, builder: (_, _) => const SignupScreen()),
