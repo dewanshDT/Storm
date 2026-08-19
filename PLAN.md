@@ -55,9 +55,9 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–12 **merged to main**, not deployed · auth has never run against a real server · client device tier → VM pass → RBAC → cutover |
+| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–12 on main · 13–16 in review · **auth now runs on the VM (staging)**, prod still pre-auth · hand-test → RBAC → cutover |
 
-Last updated: 2026-08-18. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
@@ -2341,6 +2341,95 @@ Coverage counted in checks says nothing about which *doors* were opened. It is
 the M7/M8 lesson again (the layer the user touches is the untested one), and
 slice 6's client redirect bug was the same shape: *a fully green server suite
 could not have seen it.*
+
+---
+
+**Slices 13–16 — the client half, and what a real device found** (2026-08-19,
+staging only)
+
+Four slices in one branch, because each was found by the previous one. The
+through-line: **every defect below was invisible to a green suite and obvious
+within minutes of a real client.**
+
+**Slice 13 — the client's device tier.** `test_live/` authenticated with the
+legacy shared token, so no client test had ever presented a device credential.
+Writing one found that `AuthApi.refresh` sent **no `Authorization` header** at
+all (device tier, so every real server refused it — invisibly, because the only
+caller swallows the failure into `false`), that `createFirstUser` did the same,
+and that the login response did not parse: the client read
+`access_expires_in` as seconds where the server sends `expires` as an absolute
+RFC3339 instant, so `SessionTokens.fromJson` threw on every real login. The
+wire contract had only ever existed as `{access, refresh, expires…}` in a
+diagram — an ellipsis where a field list belongs — so both sides had guessed.
+It is now written out exactly in *Storm Auth Protocol*.
+
+**Slice 14 — the pairing QR.** "QR" had meant *a URI printed as text*
+everywhere it appeared: nothing drew one, nothing scanned one, and the
+first-run screen told people to scan. `storm-server pair --qr` now draws a
+scannable block, an authenticated client shows one for a new device, and the
+phone scans either. The scanner hands its string to the same `PairingUri.parse`
+the paste field uses, because a scanner with its own parsing is a second
+implementation of the security-critical step.
+
+**Slice 15 — web bootstrap** (design: *Storm Web Bootstrap*; A7/A8 amended).
+Storm serves its own web client and then asked the person who opened it to scan
+a QR to reach a server the browser already knew. The served document now
+carries a short-lived, single-use, **peer-bound** nonce, spent through the
+ordinary `POST /v1/pair`. The browser becomes an ordinary device — listed,
+revocable, session-bound. The accepted cost is recorded rather than stumbled
+into: anything that can fetch the page can obtain a nonce, so username
+enumeration via `/v1/users` is open to anyone who can reach the server.
+
+**Slice 16 — registration is a switch** (A13). Persisted beside
+`legacy_token_enabled`, **default off**, owner-only, member-only, taking effect
+on the next request. `/v1/users/first` is untouched and still one-shot.
+
+**Five defects a real device found, that no suite did:**
+
+- **A bare `host:port` is not a URL.** The QR's `addr` was passed straight in as
+  `baseUrl`; `Uri.parse` reads `192.168.91.51` as a scheme and a scheme may not
+  begin with a digit. One of those callers persisted it into `Settings`, so this
+  broke the whole app after pairing. The live test missed it because the harness
+  hands it a full `http://host:port` and it never read the field.
+- **The QR advertised the bind address.** `--host 0.0.0.0` is every real
+  deployment, and no phone can dial a wildcard. The CLI's `--addr` default was
+  `127.0.0.1`, which on a phone is the phone.
+- **A mangled paste was reported as a network failure.** A keyboard broke the
+  URI with a space; the parser half-succeeded into an empty address and the
+  screen said *"Couldn't reach the server"* — the M9/M10 bug again, in the one
+  place the rule had not been applied.
+- **Pairing assumed first-run.** Every successful pair went to "create the owner
+  account", so adding a second device asked for a second account on a server you
+  already had one on. Invisible until "Add a device" made joining an existing
+  server normal.
+- **A device the server disowns bricked the client.** After a wipe or a
+  *revocation*, the browser held a credential every device-tier call refused, and
+  `bootstrapWebDevice` short-circuits on `isPaired` — so it could never mint
+  another. Revoking a device is a normal thing to do, and it would have shipped
+  as "revoke a browser and it bricks until someone clears storage".
+
+**Two boundaries that were being enforced by accident.** `require_auth`'s device
+branch ran whatever tier the route asked for, so a `StormDevice` header
+satisfied *session* routes and was stopped only by handlers failing to extract a
+`SessionAuth` nobody had inserted — a `500` where `401` was the truth. And
+`accessTokenExpiresAt` was written by three screens and read by none:
+`refreshSession()` existed, was tested, and had no caller, so a lapsed session
+stayed "configured" forever while every request answered 401. Both now checked
+where they are claimed.
+
+**Evidence.** 286 Rust unit + 9 process tests, clippy clean; 649 client tests,
+analyze clean. `make test-live`: **e2e 81/81 unchanged**, mcp 56/56, auth 66/66,
+client 20/20. Against the VM over the network: auth_e2e 66/66, the Flutter
+device flow, web bootstrap 12/12 and registration 13/13. A phone paired by
+scanning a real QR, created an account, signed in, signed out and signed back
+in. **The hand-test checklist is partly open** — *Auth Device Flow* in the
+personal vault — and nothing here is deployed to prod.
+
+**The finding worth keeping: a harness that supplies what a person would carry
+tests everything except the carrying.** Every one of the five defects above sat
+in a field the suites never read — the address in the QR, the message on the
+screen, the credential in the browser — because the tests were handed a good
+value instead of the one a human produces.
 
 ---
 
