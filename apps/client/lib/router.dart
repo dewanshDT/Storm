@@ -129,7 +129,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       // it here rendered the vault shell for someone who may not even be
       // signed in. Holding costs a frame; guessing costs a wrong screen.
       if (settings.isLoading) {
-        return state.matchedLocation == Routes.starting ? null : Routes.starting;
+        return state.matchedLocation == Routes.starting
+            ? null
+            : Routes.starting;
       }
 
       // **The web client bootstraps its own device rather than showing a QR.**
@@ -153,7 +155,9 @@ final routerProvider = Provider<GoRouter>((ref) {
               : Routes.starting;
         }
         unawaited(notifier.bootstrapWebDevice());
-        return state.matchedLocation == Routes.starting ? null : Routes.starting;
+        return state.matchedLocation == Routes.starting
+            ? null
+            : Routes.starting;
       }
 
       // The gallery needs no server, and bouncing it to Connect would make it
@@ -168,7 +172,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       // a waiting room, not a destination.
       final atStarting = state.matchedLocation == Routes.starting;
 
-      if (configured) return (atAuthScreen || atStarting) ? Routes.dashboard : null;
+      if (configured)
+        return (atAuthScreen || atStarting) ? Routes.dashboard : null;
 
       // Paired, but no session — signed out, or the session was revoked. This
       // is /login's whole reason to exist: the device already has credentials,

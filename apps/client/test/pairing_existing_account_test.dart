@@ -74,7 +74,10 @@ void main() {
 
     await api.listUsers(deviceId: deviceId, deviceSecret: deviceSecret);
 
-    expect(seen!.headers['Authorization'], 'StormDevice $deviceId:$deviceSecret');
+    expect(
+      seen!.headers['Authorization'],
+      'StormDevice $deviceId:$deviceSecret',
+    );
     expect(seen!.url.path, '/v1/users');
   });
 }

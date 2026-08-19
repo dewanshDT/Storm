@@ -191,7 +191,9 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
                 // accounts, so this link can never lead somewhere closed.
                 TextButton(
                   key: const Key('signup-to-login'),
-                  onPressed: _submitting ? null : () => context.go(Routes.login),
+                  onPressed: _submitting
+                      ? null
+                      : () => context.go(Routes.login),
                   child: const Text('Sign in instead'),
                 ),
               ],

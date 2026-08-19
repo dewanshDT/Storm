@@ -12,8 +12,11 @@ void main() {
   String stamp(Duration fromNow) =>
       DateTime.now().toUtc().add(fromNow).toIso8601String();
 
-  Settings withExpiry(String at) =>
-      Settings(baseUrl: 'http://server', accessToken: 'a', accessTokenExpiresAt: at);
+  Settings withExpiry(String at) => Settings(
+    baseUrl: 'http://server',
+    accessToken: 'a',
+    accessTokenExpiresAt: at,
+  );
 
   test('a live token is neither expired nor due for renewal', () {
     final s = withExpiry(stamp(const Duration(days: 20)));

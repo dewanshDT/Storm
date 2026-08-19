@@ -133,8 +133,9 @@ class Settings {
   /// Unknown covers an install from before this was stored, and a stamp the
   /// server sent in a shape we cannot read. Both are treated as "not expired",
   /// because guessing *expired* would sign someone out over a parse error.
-  DateTime? get accessTokenExpiry =>
-      accessTokenExpiresAt.isEmpty ? null : DateTime.tryParse(accessTokenExpiresAt);
+  DateTime? get accessTokenExpiry => accessTokenExpiresAt.isEmpty
+      ? null
+      : DateTime.tryParse(accessTokenExpiresAt);
 
   /// The access token is past its expiry.
   ///
@@ -541,7 +542,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       ),
     );
   }
-
 }
 
 /// The faces a note body can be set in.

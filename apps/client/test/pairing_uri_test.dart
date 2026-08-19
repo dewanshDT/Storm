@@ -24,7 +24,11 @@ void main() {
     // surfaced three screens later as "couldn't reach the server".
     final mangled = good.replaceFirst('&addr=', '&a ddr=');
     final p = PairingUri.parse(mangled);
-    expect(p, isNotNull, reason: 'a space cannot be part of a URI, so strip it');
+    expect(
+      p,
+      isNotNull,
+      reason: 'a space cannot be part of a URI, so strip it',
+    );
     expect(p!.address, '192.168.91.51:8585');
   });
 
@@ -75,7 +79,10 @@ void main() {
         'addr=192.168.91.51:8585',
         'addr=$scheme://storm.example.com',
       );
-      expect(PairingUri.parse(withScheme)!.baseUrl, '$scheme://storm.example.com');
+      expect(
+        PairingUri.parse(withScheme)!.baseUrl,
+        '$scheme://storm.example.com',
+      );
     }
   });
 

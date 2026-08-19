@@ -120,7 +120,10 @@ void main() {
     // Absolute RFC3339, per Auth Protocol. Parsing it is the assertion: the
     // client used to read a seconds count from a field no server sends.
     expect(DateTime.parse(session.expires).isAfter(DateTime.now()), isTrue);
-    expect(DateTime.parse(session.refreshExpires).isAfter(DateTime.now()), isTrue);
+    expect(
+      DateTime.parse(session.refreshExpires).isAfter(DateTime.now()),
+      isTrue,
+    );
 
     // ---- an authenticated vault request -----------------------------------
     final api = StormApi(baseUrl: serverBase, token: session.accessToken);
@@ -142,7 +145,10 @@ void main() {
     expect(rotated.accessToken, isNot(session.accessToken));
     expect(rotated.refreshToken, isNot(session.refreshToken));
 
-    final rotatedApi = StormApi(baseUrl: serverBase, token: rotated.accessToken);
+    final rotatedApi = StormApi(
+      baseUrl: serverBase,
+      token: rotated.accessToken,
+    );
     addTearDown(rotatedApi.dispose);
     expect(await rotatedApi.vaults(), isNotEmpty);
 
