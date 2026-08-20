@@ -52,6 +52,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   /// like a broken one.
   bool _registrationOpen = false;
 
+  /// The server has zero users — show the first-user creation form instead of
+  /// the login form. This happens on a fresh server reached over web bootstrap:
+  /// the device is paired but nobody has an account yet.
+  bool _noUsers = false;
+  bool _creatingAccount = false;
+
   @override
   void initState() {
     super.initState();
@@ -104,6 +110,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         final usable = users.where((u) => !u.isDisabled).toList();
         _selected = usable.length == 1 ? usable.first.username : null;
         _loadingUsers = false;
+        // A fresh server with zero users: show the first-user creation form
+        // instead of the login form. This is the web bootstrap's gap — the
+        // device is paired but nobody has an account yet.
+        _noUsers = users.isEmpty;
       });
     } on AuthApiException catch (e) {
       if (!mounted) return;
@@ -205,14 +215,80 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
+  /// Creates the first user on a fresh server, then logs in.
+  ///
+  /// The web bootstrap pairs the device but cannot create an account — that
+  /// requires a password the user must choose. This mirrors the zero-user
+  /// branch in `PairingScreen._createAccount()`, using the device credential
+  /// already stored in Settings rather than one from `_pairResult`.
+  Future<void> _createFirstUser() async {
+    final settings = ref.read(settingsProvider).value;
+    if (settings == null) return;
+    final username = _usernameController.text.trim();
+    final password = _passwordController.text;
+    if (username.isEmpty || password.isEmpty) {
+      setState(() => _error = 'Username and password are required.');
+      return;
+    }
+    if (username.length < 3) {
+      setState(() => _error = 'Username must be at least 3 characters.');
+      return;
+    }
+    if (password.length < 12) {
+      setState(() => _error = 'Password must be at least 12 characters.');
+      return;
+    }
+
+    setState(() {
+      _creatingAccount = true;
+      _error = null;
+    });
+
+    final api = AuthApi(baseUrl: settings.baseUrl);
+    try {
+      await api.createFirstUser(
+        username: username,
+        password: password,
+        deviceId: settings.deviceId,
+        deviceSecret: settings.deviceSecret,
+      );
+      if (!mounted) return;
+      // Account created — now log in. The router's redirect takes it from
+      // here: `hasSession` becomes true and /login sends us to the dashboard.
+      await _signIn();
+    } on AuthApiException catch (e) {
+      setState(() {
+        _error = e.isConflict
+            ? 'That username is already taken.'
+            : 'Server error: ${e.message}';
+        _creatingAccount = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = "Couldn't reach the server.\n\n$e";
+        _creatingAccount = false;
+      });
+    } finally {
+      api.dispose();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final settings = ref.watch(settingsProvider).value;
     final canSubmit =
         !_signingIn &&
+        !_creatingAccount &&
         _username.isNotEmpty &&
         _passwordController.text.isNotEmpty;
+
+    // First-user creation on a fresh server (web bootstrap gap).
+    final canCreate =
+        !_creatingAccount &&
+        !_signingIn &&
+        _usernameController.text.trim().length >= 3 &&
+        _passwordController.text.length >= 12;
 
     return Scaffold(
       body: Center(
@@ -227,7 +303,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 const Center(child: BrandMark(size: 44, withWordmark: true)),
                 SizedBox(height: t.sp * 2),
                 Text(
-                  'Sign in',
+                  _noUsers ? 'Create your account' : 'Sign in',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
@@ -251,7 +327,29 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
                 if (_loadingUsers)
                   const Center(child: CircularProgressIndicator())
-                else ...[
+                else if (_noUsers) ...[
+                  // First-user creation: username + password, matching
+                  // PairingScreen._buildAccountForm.
+                  StormInput(
+                    key: const Key('first-user-username'),
+                    controller: _usernameController,
+                    autofocus: true,
+                    labelText: 'Username',
+                    autocorrect: false,
+                    textInputAction: TextInputAction.next,
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  SizedBox(height: t.sp * 1.75),
+                  StormInput(
+                    key: const Key('first-user-password'),
+                    controller: _passwordController,
+                    labelText: 'Password (12+ characters)',
+                    obscureText: true,
+                    autocorrect: false,
+                    onChanged: (_) => setState(() {}),
+                    onSubmitted: canCreate ? (_) => _createFirstUser() : null,
+                  ),
+                ] else ...[
                   if (_users != null && _users!.isNotEmpty)
                     _AccountPicker(
                       users: _users!,
@@ -301,34 +399,48 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ],
 
                 SizedBox(height: t.sp * 2.5),
-                FilledButton(
-                  key: const Key('login-submit'),
-                  onPressed: canSubmit ? _signIn : null,
-                  child: _signingIn
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Sign in'),
-                ),
-                // Only when the server said yes. The switch is enforced
-                // server-side; this is the half that keeps someone from
-                // walking into a `403`.
-                if (_registrationOpen) ...[
-                  SizedBox(height: t.sp * 1.5),
-                  TextButton(
-                    key: const Key('login-create-account'),
-                    onPressed: _signingIn
-                        ? null
-                        : () => context.push(Routes.signup),
-                    child: const Text('Create an account'),
+                if (_noUsers)
+                  FilledButton(
+                    key: const Key('first-user-submit'),
+                    onPressed: canCreate ? _createFirstUser : null,
+                    child: _creatingAccount
+                        ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Create Account & Sign In'),
+                  )
+                else ...[
+                  FilledButton(
+                    key: const Key('login-submit'),
+                    onPressed: canSubmit ? _signIn : null,
+                    child: _signingIn
+                        ? const SizedBox(
+                            height: 18,
+                            width: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Sign in'),
                   ),
+                  // Only when the server said yes. The switch is enforced
+                  // server-side; this is the half that keeps someone from
+                  // walking into a `403`.
+                  if (_registrationOpen) ...[
+                    SizedBox(height: t.sp * 1.5),
+                    TextButton(
+                      key: const Key('login-create-account'),
+                      onPressed: _signingIn
+                          ? null
+                          : () => context.push(Routes.signup),
+                      child: const Text('Create an account'),
+                    ),
+                  ],
                 ],
                 SizedBox(height: t.sp * 1.5),
                 TextButton(
                   key: const Key('login-unpair'),
-                  onPressed: _signingIn
+                  onPressed: (_signingIn || _creatingAccount)
                       ? null
                       : () => ref.read(settingsProvider.notifier).unpair(),
                   child: const Text('Use a different server'),
