@@ -642,9 +642,13 @@ mod tests {
 
     #[test]
     fn a_handler_with_an_identity_hands_it_over() {
+        let actor = Actor::Session {
+            user_id: "usr_1".into(),
+            role: crate::auth::users::Role::Member,
+        };
         assert!(matches!(
-            resolve_actor(Some(&Actor::Legacy)),
-            Ok(Actor::Legacy)
+            resolve_actor(Some(&actor)),
+            Ok(Actor::Session { .. })
         ));
     }
 

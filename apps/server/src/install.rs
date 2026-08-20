@@ -27,7 +27,6 @@ pub struct UpOptions {
     pub backups: PathBuf,
     pub host: String,
     pub port: u16,
-    pub token: Option<String>,
     pub web: PathBuf,
 }
 
@@ -41,7 +40,6 @@ impl Default for UpOptions {
             data_root,
             host: DEFAULT_HOST.into(),
             port: DEFAULT_PORT,
-            token: None,
             web: PathBuf::from(DEFAULT_WEB),
         }
     }
@@ -70,11 +68,9 @@ pub fn up(opts: UpOptions) -> Result<()> {
     }
 
     fs::create_dir_all("/etc/storm").context("creating /etc/storm")?;
-    let token = resolve_token(opts.token.as_deref())?;
     write_env_file(
         Path::new(ENV_PATH),
         &EnvFile {
-            token: &token,
             vault_root: &vaults,
             state: &state,
             web: &opts.web,
@@ -107,7 +103,7 @@ pub fn up(opts: UpOptions) -> Result<()> {
     println!("  listen    : {}:{}", opts.host, opts.port);
     println!("  env       : {ENV_PATH}");
     println!();
-    println!("Clients need the token in {ENV_PATH} (mode 600).");
+    println!("Pair a device to get in: `storm-server pair` (no users yet).");
     Ok(())
 }
 
@@ -154,7 +150,6 @@ pub fn status() -> Result<()> {
 }
 
 struct EnvFile<'a> {
-    token: &'a str,
     vault_root: &'a Path,
     state: &'a Path,
     web: &'a Path,
@@ -164,27 +159,8 @@ struct EnvFile<'a> {
 }
 
 fn write_env_file(path: &Path, env: &EnvFile<'_>) -> Result<()> {
-    // Preserve an existing real token when `up` is re-run without --token and
-    // the file no longer says change-me.
-    let token = if env.token == "change-me"
-        && let Ok(existing) = fs::read_to_string(path)
-        && let Some(t) = existing
-            .lines()
-            .find_map(|l| l.strip_prefix("STORM_TOKEN="))
-    {
-        let t = t.trim();
-        if !t.is_empty() && t != "change-me" {
-            t.to_string()
-        } else {
-            env.token.to_string()
-        }
-    } else {
-        env.token.to_string()
-    };
-
     let body = format!(
-        "# Written by `storm-server up`. chmod 600 — holds the bearer token.\n\
-         STORM_TOKEN={token}\n\
+        "# Written by `storm-server up`.\n\
          STORM_VAULT_ROOT={vaults}\n\
          STORM_STATE={state}\n\
          STORM_WEB={web}\n\
@@ -297,35 +273,6 @@ fn name_for_id(db: &str, id: u32) -> Result<String> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("empty getent {db} {id}"))?;
     Ok(name.to_string())
-}
-
-fn resolve_token(explicit: Option<&str>) -> Result<String> {
-    if let Some(t) = explicit {
-        if t.is_empty() || t == "change-me" {
-            bail!("--token must not be empty or change-me");
-        }
-        return Ok(t.to_string());
-    }
-    if let Ok(existing) = fs::read_to_string(ENV_PATH)
-        && let Some(t) = existing
-            .lines()
-            .find_map(|l| l.strip_prefix("STORM_TOKEN="))
-    {
-        let t = t.trim();
-        if !t.is_empty() && t != "change-me" {
-            return Ok(t.to_string());
-        }
-    }
-    Ok(generate_token())
-}
-
-fn generate_token() -> String {
-    // 32 bytes as hex, matching `openssl rand -hex 32`.
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
 }
 
 fn ensure_storm_user() -> Result<()> {
@@ -472,7 +419,6 @@ mod tests {
         write_env_file(
             &path,
             &EnvFile {
-                token: "abc123",
                 vault_root: &vaults,
                 state: &state,
                 web: &web,
@@ -483,42 +429,8 @@ mod tests {
         )
         .unwrap();
         let body = fs::read_to_string(&path).unwrap();
-        assert!(body.contains("STORM_TOKEN=abc123"));
         assert!(body.contains("STORM_WEB=/usr/share/storm/web"));
         assert!(body.contains("STORM_VAULT_ROOT=/srv/storm/vaults"));
         let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn re_up_keeps_an_existing_real_token_when_change_me_passed() {
-        let path = tmp_env_path();
-        fs::write(&path, "STORM_TOKEN=already-set\n").unwrap();
-        let vaults = PathBuf::from("/srv/storm/vaults");
-        let state = PathBuf::from("/srv/storm/state");
-        let web = PathBuf::from(DEFAULT_WEB);
-        let backups = PathBuf::from("/srv/storm/backups");
-        write_env_file(
-            &path,
-            &EnvFile {
-                token: "change-me",
-                vault_root: &vaults,
-                state: &state,
-                web: &web,
-                host: "0.0.0.0",
-                port: 8484,
-                backup_dest: &backups,
-            },
-        )
-        .unwrap();
-        let body = fs::read_to_string(&path).unwrap();
-        assert!(body.contains("STORM_TOKEN=already-set"));
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn generate_token_is_64_hex_chars() {
-        let t = generate_token();
-        assert_eq!(t.len(), 64);
-        assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

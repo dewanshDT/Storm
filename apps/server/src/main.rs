@@ -7,7 +7,7 @@
 //! Operator commands (`up` / `down` / `status`) own the systemd install; the
 //! long-running process is `serve`.
 //!
-//! v1 binds to the LAN with a single shared bearer token. That is only
+//! v1 binds to the LAN. Authentication is per-device pairing plus sessions
 //! defensible while it stays on the LAN — exposing this beyond it needs TLS
 //! and per-device tokens first.
 
@@ -96,10 +96,6 @@ struct UpArgs {
 
     #[arg(long, default_value_t = 8484)]
     port: u16,
-
-    /// Bearer token. Generated and stored in /etc/storm/storm.env if omitted.
-    #[arg(long)]
-    token: Option<String>,
 
     /// Built Flutter web client directory (package default).
     #[arg(long, default_value = "/usr/share/storm/web")]
@@ -231,10 +227,6 @@ struct ServeArgs {
 
     #[arg(long, default_value_t = 8484)]
     port: u16,
-
-    /// Shared bearer token. Generated and printed if omitted.
-    #[arg(long, env = "STORM_TOKEN")]
-    token: Option<String>,
 
     /// Directory holding the built Flutter web client, served at `/`.
     #[arg(long)]
@@ -989,14 +981,6 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     registry.save(&state_dir).context("saving the registry")?;
     let mut vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
 
-    let token = args.token.unwrap_or_else(|| {
-        let generated = uuid::Uuid::new_v4().to_string();
-        println!("\n  No --token given. Using a generated one for this run:\n");
-        println!("      {generated}\n");
-        println!("  Pass --token or set STORM_TOKEN to keep it stable across restarts.\n");
-        generated
-    });
-
     // Identity before anything is served. A first boot mints it; every boot
     // after reads it back, and a mismatch between the recorded key and the file
     // is a hard failure rather than a quietly regenerated keypair.
@@ -1039,16 +1023,6 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // The A10 migration switch, read from the registry rather than assumed.
     // Absent from an older registry it loads as `true`, because that registry
     // belongs to a server whose clients all hold the shared token.
-    let vault_set_legacy_token_enabled = vault_set.registry.legacy_token_enabled;
-    let vault_set_allow_registration = vault_set.registry.allow_registration;
-    if !vault_set_legacy_token_enabled {
-        tracing::info!("legacy shared token is disabled; only paired devices and sessions");
-    } else {
-        tracing::warn!(
-            "legacy shared token is enabled — any client with STORM_TOKEN has \
-             owner-equivalent access. Turn it off once your devices are paired (A10)."
-        );
-    }
 
     // **The QR's `addr` is where a client should dial, not where we bind.**
     //
@@ -1062,6 +1036,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // and the client's own live tests all dial an address they were handed by
     // the harness, so none of them ever read this field.
     let listen_addr = format!("{}:{}", advertised_host(&args.host), args.port);
+
+    // Mirrored out of the registry so a change applies to the next request
+    // rather than the next restart (A13).
+    let vault_set_allow_registration = vault_set.registry.allow_registration;
 
     // Bootstrap pairing: when no users exist, create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
@@ -1097,14 +1075,12 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
-        token,
         state_dir: state_dir.clone(),
         identity,
         root_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-        legacy_token_enabled: std::sync::atomic::AtomicBool::new(vault_set_legacy_token_enabled),
         allow_registration: std::sync::atomic::AtomicBool::new(vault_set_allow_registration),
         bootstrap_nonce,
         listen_addr,
@@ -1359,7 +1335,6 @@ async fn main() -> Result<()> {
                 backups,
                 host: args.host,
                 port: args.port,
-                token: args.token,
                 web: args.web,
             })
         }

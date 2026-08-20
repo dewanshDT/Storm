@@ -589,22 +589,15 @@ pub struct CreatedApiKey {
 /// to unpick. When that release lands, this becomes one of its inputs rather
 /// than a competing system.
 fn target_user<'a>(actor: &'a Actor, requested: Option<&'a str>) -> ApiResult<&'a str> {
-    // The legacy shared token has no user behind it (A10), so there is nobody
-    // for a key to belong to. Refusing is the honest answer: minting a key
-    // here would either need a fictional owner or a second ownerless
-    // credential kind, and both are worse than "sign in first".
-    let Some(caller) = actor.user_id() else {
-        return Err(ApiError(
-            axum::http::StatusCode::FORBIDDEN,
-            "the legacy shared token has no user to own a key; sign in instead".into(),
-        ));
-    };
+    // Every caller has a user since the cutover, so there is no ownerless
+    // case to refuse any more — that branch existed only for the shared token.
+    let caller = actor.user_id();
 
     match requested {
         None => Ok(caller),
         Some(other) if other == caller => Ok(caller),
         Some(other) => {
-            if actor.role() == Some(crate::auth::users::Role::Owner) {
+            if actor.role() == crate::auth::users::Role::Owner {
                 Ok(other)
             } else {
                 Err(ApiError(
@@ -672,7 +665,7 @@ pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiR
     crate::auth::keys::revoke(
         &mut auth_db,
         key_id,
-        actor.user_id(),
+        Some(actor.user_id()),
         "revoked by user",
         &now,
     )

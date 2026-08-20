@@ -104,8 +104,6 @@ fn serve_with_web(dir: &std::path::Path) -> Server {
         .arg(dir.join("state"))
         .arg("--web")
         .arg(&web)
-        .arg("--token")
-        .arg("testtoken")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
