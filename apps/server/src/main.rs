@@ -1168,11 +1168,28 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                         .is_some_and(|last| last.contains('.'));
                     if looks_like_a_file {
                         use tower::ServiceExt;
-                        return assets
+                        let mut response = assets
                             .oneshot(req)
                             .await
                             .map(axum::response::IntoResponse::into_response)
                             .unwrap_or_else(|e| match e {});
+                        // **`no-cache`, meaning revalidate — not "do not
+                        // store".** Flutter's build output keeps stable
+                        // filenames (`main.dart.js`, `flutter_bootstrap.js`)
+                        // across builds, so there is no content hash to make a
+                        // long `max-age` safe. With no header at all, browsers
+                        // fall back to *heuristic* caching and reuse the old
+                        // bundle without even asking — which is how a deployed
+                        // release quietly failed to reach a returning browser,
+                        // twice in one afternoon.
+                        //
+                        // `ServeDir` already sends an ETag, so revalidating
+                        // costs a conditional request and a bodyless `304`.
+                        response.headers_mut().insert(
+                            axum::http::header::CACHE_CONTROL,
+                            HeaderValue::from_static("no-cache"),
+                        );
+                        return response;
                     }
                     let peer = req
                         .extensions()

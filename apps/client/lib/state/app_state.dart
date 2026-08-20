@@ -366,7 +366,13 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     if (s.isPaired) return true;
 
     final nonce = readWebBootstrapNonce();
-    if (nonce == null) return false;
+    if (nonce == null) {
+      // Nothing to spend. The router falls back to the pairing screen, which
+      // is what the server expects when it declines to mint one.
+      _bootstrapFailed = true;
+      ref.notifyListeners();
+      return false;
+    }
 
     _bootstrapping = true;
     ref.notifyListeners();
@@ -386,20 +392,39 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
           serverPublicKey: paired.publicKey,
         ),
       );
+      // Spent, so it is a used credential sitting in the DOM. Remove it.
+      clearWebBootstrapNonce();
       return true;
+    } on AuthApiException catch (e) {
+      // **Only clear the nonce when it is provably gone.** These three say the
+      // server will never accept it again: consumed (409), expired (410),
+      // bound to a different peer (403). Anything else — a 500, a dropped
+      // connection, a server restarting under us — leaves a *live* nonce, and
+      // wiping it on the way past turned one bad second into a browser that
+      // could never bootstrap again, because the only way to get another is a
+      // new document.
+      if (webNonceIsSpent(e.statusCode)) clearWebBootstrapNonce();
+      _bootstrapFailed = true;
+      return false;
     } catch (_) {
-      // Expired, already spent, bound to another peer, or the server is not
-      // answering. All of them mean the same thing here: no device yet, and
-      // the pairing screen is still the way through.
+      // Not an HTTP answer at all — the socket, or the app being offline. The
+      // nonce is untouched and may still be good on the next attempt.
+      _bootstrapFailed = true;
       return false;
     } finally {
-      // Spent or not, it is not worth keeping in the DOM.
-      clearWebBootstrapNonce();
       _bootstrapping = false;
       ref.notifyListeners();
       api.dispose();
     }
   }
+
+  /// A bootstrap attempt has run and did not produce a device.
+  ///
+  /// The router needs this to stop waiting. Without it, "no device yet" and
+  /// "no device, and there never will be on this page load" are the same
+  /// state, and the redirect holds on the starting screen forever.
+  bool get bootstrapFailed => _bootstrapFailed;
+  bool _bootstrapFailed = false;
 
   /// Renews or retires the session, so the app never runs on a dead one.
   ///
@@ -915,3 +940,14 @@ final notesWithTagProvider = FutureProvider.family<List<NoteMeta>, String>((
   if (api == null || vaultId.isEmpty) return const [];
   return api.notesWithTag(vaultId, tag);
 });
+
+/// Whether a `POST /v1/pair` refusal proves the bootstrap nonce is dead.
+///
+/// **A short allow-list, not "any 4xx".** These three are the server saying it
+/// will never accept this nonce again: `409 pairing_consumed`,
+/// `410 pairing_expired`, `403 pairing_wrong_peer`. A `429` is a rate limit and
+/// a `500` is the server having a bad moment — in both cases the nonce is still
+/// live, and throwing it away turns a transient failure into a browser that can
+/// never bootstrap, because the only way to get another is a fresh document.
+bool webNonceIsSpent(int status) =>
+    status == 409 || status == 410 || status == 403;

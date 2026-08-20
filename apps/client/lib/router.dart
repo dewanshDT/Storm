@@ -151,6 +151,23 @@ final routerProvider = Provider<GoRouter>((ref) {
       // that returns null, and the QR flow is the only way in.
       if (kIsWeb && !paired && !configured) {
         final notifier = ref.read(settingsProvider.notifier);
+
+        // **The bootstrap has run and produced nothing — fall through to the
+        // pairing screen.** This branch used to return `Routes.starting` on
+        // every path, including this one, so a browser that could not
+        // bootstrap waited on the brand mark forever with no route out.
+        //
+        // Failing to mint is *expected*, not exceptional: the server declines
+        // behind a reverse proxy (a forwarding header hides the real peer),
+        // over the per-peer rate limit, over the outstanding ceiling, and when
+        // it has no peer address to bind to. The comments here always claimed
+        // the pairing screen was the fallback; nothing implemented it.
+        if (notifier.bootstrapFailed) {
+          return state.matchedLocation == Routes.pairing
+              ? null
+              : Routes.pairing;
+        }
+
         // Not paired *yet* — the bootstrap is in flight. Sending them to the
         // QR screen now means showing a pairing screen they must not use and
         // taking it away a moment later, which is the flicker this avoids.
