@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../state/app_state.dart';
+import 'clipboard_copy.dart';
 import 'tokens.dart';
 
 /// Manage the MCP keys this account holds (A14).
@@ -412,14 +412,27 @@ class _Copyable extends StatelessWidget {
           alignment: Alignment.centerRight,
           child: TextButton.icon(
             key: Key('copy-${label.toLowerCase()}'),
-            onPressed: () async {
-              await Clipboard.setData(ClipboardData(text: value));
-              if (context.mounted) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(SnackBar(content: Text('$label copied')));
-              }
-            },
+            // **No `await` before the copy.** `execCommand` — the fallback the
+            // web uses over plain HTTP — only works inside the click that
+            // triggered it, so anything asynchronous in front of it breaks the
+            // one path that works on a LAN address.
+            onPressed: () => copyToClipboard(value).then((copied) {
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    copied
+                        ? '$label copied'
+                        // **Says so rather than lying.** This used to report
+                        // success unconditionally while copying nothing,
+                        // which is worse than failing: the text is right
+                        // there and selectable, but only if you know to.
+                        : "Couldn't copy — select the $label above and copy "
+                              'it by hand',
+                  ),
+                ),
+              );
+            }),
             icon: const Icon(Icons.copy, size: 16),
             label: Text('Copy $label'),
           ),

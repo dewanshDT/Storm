@@ -1,6 +1,11 @@
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -82,6 +87,8 @@ void main() {
     });
   });
 
+  copyButtonTests();
+
   group('the MCP config snippet', () {
     test('is valid JSON carrying the key as a Bearer header', () {
       final snippet = RevealMcpKeyDialog.configSnippet(
@@ -117,6 +124,115 @@ void main() {
         'stk_x',
       );
       expect(snippet, contains('"url": "http://server:8484/mcp"'));
+    });
+  });
+}
+
+/// The reveal dialog's whole job is getting a string onto the clipboard.
+///
+/// **The first version of these tests parsed the config snippet and never
+/// touched the copying**, so a copy that silently did nothing shipped and was
+/// found by hand on a real deployment: Storm's web client is served over plain
+/// HTTP on a LAN address, which is not a *secure context*, so the browser does
+/// not expose `navigator.clipboard` at all. The button reported success
+/// regardless.
+///
+/// These drive the button and assert what the user is *told*, which is the
+/// part that was wrong.
+void copyButtonTests() {
+  Widget host(CreatedMcpKey created) => ProviderScope(
+    child: MaterialApp(
+      home: Scaffold(body: RevealMcpKeyDialog(created: created)),
+    ),
+  );
+
+  final created = CreatedMcpKey(
+    key: McpKey.fromJson({
+      'id': 'key_1',
+      'user_id': 'u1',
+      'name': 'laptop',
+      'created': '2026-08-20T04:45:38Z',
+    }),
+    secret: 'stk_theonlycopy',
+  );
+
+  group('the copy buttons', () {
+    late List<MethodCall> calls;
+
+    setUp(() {
+      calls = [];
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+    });
+
+    void handleClipboard({required bool succeed}) {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            calls.add(call);
+            if (call.method == 'Clipboard.setData' && !succeed) {
+              throw PlatformException(code: 'unavailable');
+            }
+            return null;
+          });
+    }
+
+    testWidgets('a successful copy sends the secret and says so', (
+      tester,
+    ) async {
+      handleClipboard(succeed: true);
+      await tester.pumpWidget(host(created));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('copy-key')));
+      await tester.pumpAndSettle();
+
+      final copy = calls.firstWhere((c) => c.method == 'Clipboard.setData');
+      expect(
+        (copy.arguments as Map)['text'],
+        'stk_theonlycopy',
+        reason: 'the button must copy the key, not a label or a preview',
+      );
+      // Exact, not `textContaining`: the dialog's own dismiss button says
+      // "I've copied it", which a loose matcher happily mistakes for the
+      // confirmation.
+      expect(find.text('Key copied'), findsOneWidget);
+    });
+
+    testWidgets('a failed copy says it failed instead of claiming success', (
+      tester,
+    ) async {
+      // The real-world case: a browser with no clipboard API, because the page
+      // is served over plain HTTP. Reporting "copied" there is worse than
+      // reporting nothing — the text is selectable, but only if you are told.
+      handleClipboard(succeed: false);
+      await tester.pumpWidget(host(created));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('copy-key')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining("Couldn't copy"), findsOneWidget);
+      expect(find.text('Key copied'), findsNothing);
+    });
+
+    testWidgets('the config button copies the whole snippet', (tester) async {
+      handleClipboard(succeed: true);
+      await tester.pumpWidget(host(created));
+      await tester.pumpAndSettle();
+
+      // The snippet is tall enough to push its button off the test surface.
+      await tester.ensureVisible(find.byKey(const Key('copy-config')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('copy-config')));
+      await tester.pumpAndSettle();
+
+      final copied =
+          (calls.firstWhere((c) => c.method == 'Clipboard.setData').arguments
+              as Map)['text'];
+      final parsed = jsonDecode(copied as String) as Map<String, dynamic>;
+      expect(((parsed['mcpServers'] as Map)['storm'] as Map)['headers'], {
+        'Authorization': 'Bearer stk_theonlycopy',
+      });
     });
   });
 }
