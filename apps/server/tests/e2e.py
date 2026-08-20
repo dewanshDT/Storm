@@ -7,7 +7,7 @@ and the file watcher reacting to an external edit.
 
 Usage:
 
-    cargo run -- --vault-root /tmp/vaults --state /tmp/s --token testtoken &
+    cargo run -- --vault-root /tmp/vaults --state /tmp/s &
     VAULT_ROOT=/tmp/vaults python3 server/tests/e2e.py
 
 The vault under test is the first one the server reports, so this runs against
@@ -23,7 +23,13 @@ import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8484"
-TOKEN = "testtoken"
+# **No shared token.** The cutover removed it, so this suite now signs in the
+# way a real client does — pair a device from the boot nonce, create the first
+# account, log in — via the one helper every suite shares.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import storm_auth  # noqa: E402
+
+AUTH = None
 VAULT_ROOT = os.path.expanduser(os.environ["VAULT_ROOT"])
 
 ok = 0
@@ -34,7 +40,7 @@ def call(method, path, body=None):
     url = f"{BASE}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {TOKEN}")
+    req.add_header("Authorization", AUTH)
     if data:
         req.add_header("Content-Type", "application/json")
     try:
@@ -53,6 +59,14 @@ def check(label, cond, detail=""):
         fail += 1
         print(f"  FAIL  {label}   {detail}")
 
+
+# Sign in before anything else. Every check below needs a real session now;
+# there is no constant that opens the server.
+try:
+    AUTH, _DEVICE, _USER = storm_auth.sign_in(BASE)
+except RuntimeError as e:
+    print(f"could not authenticate: {e}")
+    sys.exit(1)
 
 # Every note-shaped route is scoped to a vault. Resolved once, from the
 # server, so the script does not have to know how the harness seeded it.

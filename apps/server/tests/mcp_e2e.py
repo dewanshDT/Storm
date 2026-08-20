@@ -6,12 +6,12 @@ real client would, over HTTP, against a live server started with `--mcp`.
 
 Usage:
 
-    cargo run -- --vault-root /tmp/vaults --state /tmp/s --token testtoken --mcp &
+    cargo run -- --vault-root /tmp/vaults --state /tmp/s --mcp &
     VAULT_ROOT=/tmp/vaults python3 server/tests/mcp_e2e.py
 
 What it is really for, beyond "the tools answer":
 
-  * the endpoint is behind the bearer token, which depends on `/mcp` being
+  * the endpoint is behind a credential, which depends on `/mcp` being
     nested *above* the auth layer in `api.rs` — an ordering nothing else would
     catch;
   * `structuredContent` is a JSON object everywhere, which the spec requires
@@ -29,7 +29,15 @@ import urllib.error
 import urllib.request
 
 BASE = os.environ.get("STORM_BASE", "http://127.0.0.1:8484")
-TOKEN = os.environ.get("STORM_TOKEN", "testtoken")
+# **Two different credentials, deliberately.** REST fixtures go through a
+# *session*; `/mcp` goes through an `stk_` **MCP key**, which is what a real
+# MCP client holds and what this suite should therefore be proving. A key is
+# refused on REST by design (A14.2), so one credential could not do both.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import storm_auth  # noqa: E402
+
+SESSION = None
+KEY = None
 VAULT_ROOT = os.path.expanduser(os.environ["VAULT_ROOT"])
 
 # Every tool this server is expected to expose. Asserted exactly, so adding one
@@ -72,7 +80,7 @@ def rest(method, path, body=None):
     """The REST API, for setting up fixtures MCP can only read."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"{BASE}{path}", data=data, method=method)
-    req.add_header("Authorization", f"Bearer {TOKEN}")
+    req.add_header("Authorization", SESSION)
     if data:
         req.add_header("Content-Type", "application/json")
     try:
@@ -88,7 +96,7 @@ def rest(method, path, body=None):
             return e.code, {"error": raw.decode(errors="replace")}
 
 
-def rpc(method, params=None, token=TOKEN):
+def rpc(method, params=None, token=None, bearer=True):
     """One JSON-RPC call to /mcp. Returns (status, body)."""
     global _id
     _id += 1
@@ -99,8 +107,12 @@ def rpc(method, params=None, token=TOKEN):
     req = urllib.request.Request(
         f"{BASE}/mcp", data=json.dumps(payload).encode(), method="POST"
     )
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
+    presented = KEY if (token is None and bearer) else token
+    if presented:
+        req.add_header(
+            "Authorization",
+            presented if presented.startswith("Bearer ") else f"Bearer {presented}",
+        )
     req.add_header("Content-Type", "application/json")
     # Streamable HTTP requires the client to accept both, even when the server
     # is configured to answer in plain JSON.
@@ -132,6 +144,15 @@ def call(tool, args=None):
         return None, body
     return body["result"], body
 
+
+# Authenticate before the handshake — the very first JSON-RPC call needs a
+# credential now, where it used to need a constant.
+try:
+    SESSION, _DEVICE, _USER = storm_auth.sign_in(BASE)
+    KEY = storm_auth.mint_mcp_key(BASE, SESSION)
+except RuntimeError as e:
+    print(f"could not authenticate: {e}")
+    sys.exit(1)
 
 print("== handshake ==")
 status, body = rpc(
@@ -283,10 +304,12 @@ check(
 result, raw = call("get_note", {"vault": vault, "note_id": "00000000-0000-0000-0000-000000000000"})
 check("an unknown note is a tool error too", (result or {}).get("isError") is True, raw)
 
-status, _ = rpc("tools/list", token=None)
-check("no token is refused", status == 401, status)
-status, _ = rpc("tools/list", token="wrong-token")
-check("a wrong token is refused", status == 401, status)
+status, _ = rpc("tools/list", bearer=False)
+check("no credential is refused", status == 401, status)
+status, _ = rpc("tools/list", token="stk_wrong")
+check("a wrong key is refused", status == 401, status)
+status, _ = rpc("tools/list", token="testtoken")
+check("the retired shared token is refused", status == 401, status)
 
 print("== the config note is not one of the user's notes ==")
 # `_storm/vault.md` is Storm's own per-vault configuration, kept as ordinary

@@ -63,11 +63,6 @@ pub enum Actor {
         user_id: String,
         role: Role,
     },
-    /// The legacy shared token (A10), which is owner-equivalent and has **no
-    /// user behind it** — nothing to look grants up against, and nothing
-    /// honest to write into `security_events.user_id`. It disappears with the
-    /// token.
-    Legacy,
 }
 
 // There is deliberately **no `Mcp` variant**. There was, briefly, and it was a
@@ -91,7 +86,6 @@ impl Actor {
         match self {
             Actor::Session { .. } => "session",
             Actor::Key { .. } => "mcp-key",
-            Actor::Legacy => "legacy-token",
         }
     }
 
@@ -103,24 +97,23 @@ impl Actor {
     /// time a new way to hold a credential is added — which is exactly the
     /// bug slice 11 fixed for MCP and A14 is written to avoid repeating.
     ///
-    /// `None` is the legacy shared token, which has no user behind it (A10).
-    pub fn user_id(&self) -> Option<&str> {
+    /// **Always present since the cutover.** While the shared token existed
+    /// there was one caller with no user behind it, so this returned an
+    /// `Option` every call site had to unwrap. Removing that credential
+    /// removed the only `None`, and the type says so now.
+    pub fn user_id(&self) -> &str {
         match self {
-            Actor::Session { user_id, .. } | Actor::Key { user_id, .. } => Some(user_id),
-            Actor::Legacy => None,
+            Actor::Session { user_id, .. } | Actor::Key { user_id, .. } => user_id,
         }
     }
 
     /// The role this caller acts with — see [`Actor::user_id`] for why this is
     /// an accessor rather than a match.
     ///
-    /// A key carries its **owner's** role, unnarrowed (A14). `None` for the
-    /// legacy token, which is owner-equivalent by a different route and has no
-    /// role row to point at.
-    pub fn role(&self) -> Option<Role> {
+    /// A key carries its **owner's** role, unnarrowed (A14).
+    pub fn role(&self) -> Role {
         match self {
-            Actor::Session { role, .. } | Actor::Key { role, .. } => Some(*role),
-            Actor::Legacy => None,
+            Actor::Session { role, .. } | Actor::Key { role, .. } => *role,
         }
     }
 
@@ -215,12 +208,20 @@ mod tests {
         }
     }
 
+    fn key() -> Actor {
+        Actor::Key {
+            key_id: "key_1".into(),
+            user_id: "usr_1".into(),
+            role: Role::Member,
+        }
+    }
+
     #[test]
     fn the_shipped_policy_allows_every_authenticated_actor() {
         // The current answer, stated so a change to it is a visible diff
         // rather than a behaviour someone notices in production.
         let policy = AllowAuthenticated;
-        for actor in [session(), Actor::Legacy] {
+        for actor in [session(), key()] {
             for access in [Access::Read, Access::Write] {
                 assert_eq!(
                     policy.decide(&actor, "any-vault", access),
@@ -249,10 +250,9 @@ mod tests {
 
     #[test]
     fn an_actor_never_describes_itself_with_a_secret() {
-        // `describe()` goes into logs and `security_events`. The legacy actor
-        // is the one that could plausibly carry a token if someone extended
-        // this carelessly.
-        for actor in [session(), Actor::Legacy] {
+        // `describe()` goes into logs and `security_events`, so it has to stay
+        // a fixed label rather than anything derived from a credential.
+        for actor in [session(), key()] {
             let described = actor.describe();
             assert!(!described.contains("testtoken"));
             assert!(

@@ -8,7 +8,6 @@ import 'package:go_router/go_router.dart';
 import 'state/app_state.dart';
 import 'ui/browse_screen.dart';
 import 'ui/client_settings_screen.dart';
-import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
@@ -35,7 +34,6 @@ abstract final class Routes {
   /// Shown while the app decides where to send you. Never navigated to
   /// directly — the redirect holds here instead of guessing.
   static const starting = '/starting';
-  static const connect = '/connect';
   static const pairing = '/pairing';
 
   /// Sign in on a device that is already paired. Distinct from [pairing],
@@ -123,11 +121,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       final settings = ref.read(settingsProvider);
       final configured = settings.value?.isConfigured ?? false;
       final paired = settings.value?.isPaired ?? false;
-      final atConnect = state.matchedLocation == Routes.connect;
       final atPairing = state.matchedLocation == Routes.pairing;
       final atLogin = state.matchedLocation == Routes.login;
       final atSignup = state.matchedLocation == Routes.signup;
-      final atAuthScreen = atConnect || atPairing || atLogin || atSignup;
+      final atAuthScreen = atPairing || atLogin || atSignup;
 
       // **Hold on a neutral screen rather than guessing.** `null` means "stay
       // where you are", which on a cold start is the dashboard — so returning
@@ -208,10 +205,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (paired) return (atLogin || atSignup) ? null : Routes.login;
       if (atStarting) return Routes.pairing;
 
-      // Nothing at all. Pairing is the first-run flow, but /connect stays
-      // reachable for a server that has no auth yet. /login is not — there is
-      // no device credential to log in with.
-      if (atConnect || atPairing) return null;
+      // Nothing at all. Pairing is the only first-run flow now — /connect
+      // went with the shared token it existed to collect, and /login needs a
+      // device credential this install does not have.
+      if (atPairing) return null;
       return Routes.pairing;
     },
     routes: [
@@ -224,7 +221,6 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, _) => const AddDeviceScreen(),
       ),
       GoRoute(path: Routes.mcpKeys, builder: (_, _) => const McpKeysScreen()),
-      GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
       // builds a stack with the dashboard underneath rather than replacing it.

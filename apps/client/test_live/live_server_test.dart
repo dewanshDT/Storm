@@ -9,6 +9,8 @@ import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/note_session.dart';
 import 'package:storm/sync/sync_engine.dart';
 
+import 'live_auth.dart';
+
 /// Client-against-real-server integration test.
 ///
 /// Unit tests use a mocked HTTP client, which proves the client behaves
@@ -19,14 +21,15 @@ import 'package:storm/sync/sync_engine.dart';
 /// Lives outside `test/` so a plain `flutter test` doesn't need a server.
 /// Run it explicitly, with a server up:
 ///
-///   cargo run -- --vault-root /tmp/vaults --state /tmp/s --token testtoken
+///   cargo run -- --vault-root /tmp/vaults --state /tmp/s
 ///   flutter test test_live/
 ///
 /// The vault under test is whichever one the server reports first, so this
 /// runs against whatever the harness seeded.
 void main() {
   const baseUrl = 'http://127.0.0.1:8484';
-  const token = 'testtoken';
+  // Obtained by pairing and signing in — there is no shared token.
+  late String token;
 
   /// Resolved once, from the running server.
   late String vaultId;
@@ -42,6 +45,21 @@ void main() {
       socket.destroy();
     } catch (_) {
       fail('No server on 127.0.0.1:8484 — start storm-server first.');
+    }
+
+    // **The harness claims the server once and passes the session in.** The
+    // bootstrap pairing nonce is single-use, so these suites cannot each pair
+    // themselves — the first would consume it and the rest would fail
+    // authenticating rather than failing at what they test.
+    const inherited = String.fromEnvironment('STORM_SESSION');
+    if (inherited.isNotEmpty) {
+      token = inherited.replaceFirst('Bearer ', '');
+    } else {
+      const logPath = String.fromEnvironment(
+        'STORM_LIVE_LOG',
+        defaultValue: '../../.dev/live-server.log',
+      );
+      token = (await signIn(baseUrl: baseUrl, logPath: logPath)).accessToken;
     }
 
     // Every note-shaped route is vault-scoped; ask the server which vault

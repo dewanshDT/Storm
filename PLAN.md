@@ -55,7 +55,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
-| M19 | Auth phase 1 — server identity, users | **in progress** | slices 1–16 + **A14 MCP keys** · the authentication foundation is **complete** · staging verified with a real MCP client, prod still pre-auth · authorization is its own release, then the cutover |
+| M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -114,8 +114,9 @@ never closed, and that the Argon2id bound was decorative. Details below; **the
 authentication path could not have worked against a real server before it.**
 
 **Next, in order:** ~~the client half of the device tier → a pass against the
-VM~~ (both done, slices 13–16) → **A14, MCP keys** (done) → the **authorization
-release** → the cutover.
+VM~~ (slices 13–16) → ~~**A14, MCP keys**~~ (done) → ~~the cutover~~ (done,
+2026-08-20 — brought forward ahead of the authorization release, see below) →
+the **authorization release**.
 
 Slice 12 reordered this. The RBAC policy was next while the assumption held
 that the authentication path worked and only lacked a permission model; it did
@@ -291,10 +292,12 @@ subsume rather than contradict.
 
 **3. V1 targets: macOS, Linux, Android, Web.** No iOS.
 
-**4. LAN-only, single shared bearer token.** No TLS, no Tailscale, no public
-exposure. This is *only* defensible on the LAN.
-*Revisit before:* the server is ever reachable from outside the LAN — TLS and
-per-device token rotation must land **first**, not after.
+**4. LAN-only, single shared bearer token.** ~~No TLS, no Tailscale, no public
+exposure.~~ **Superseded 2026-08-20 by the A10 cutover (decision 54).** The
+shared token no longer exists: authentication is per-device pairing, sessions
+and MCP keys. The *revisit trigger this decision set for itself* — "per-device
+token rotation must land first" — is what M19 was, and it has landed. TLS and
+public exposure remain out of scope, so the LAN-only half still holds.
 
 **8. Ship the server as a bare static binary, not a Docker image.**
 It is a 5.4 MB statically-linked musl binary with no runtime dependencies, so
@@ -933,6 +936,36 @@ shipped)*
 *Revisit if:* pairing lands and the console-nonce flow makes the CLI creation
 path redundant — at which point it stays anyway as the recovery path, beside
 `passwd`.
+
+**54. The shared token is removed, not disabled, and the compatibility window
+is skipped.** *(2026-08-20, the A10 cutover)*
+
+`STORM_TOKEN` no longer exists — not the flag, not the env var, not the
+`legacy_token_enabled` switch, not the `Bearer` branch that accepted it.
+Authentication is per-device pairing, sessions, and MCP keys.
+
+**This overrides A10's own sequencing, and the reason is worth stating.** A10
+specified a compatibility window: ship auth with the token still working, pair
+every device, flip the switch, confirm nothing broke, remove it a release
+later. That order exists so there is never a moment where someone is locked out
+of a server they cannot yet log into. Skipping it was chosen deliberately over
+shipping a release that contains a working backdoor, and the cost was priced
+rather than discovered: **prod has no `auth.db`, so the upgrade locks out every
+client**, and recovery is shell access to read a pairing QR out of the journal.
+
+That trade is defensible *here* — a homelab, one operator, SSH always
+available — and would not be on a machine somebody else runs. A future
+deployment story that removes shell access has to revisit this, because
+"recovery is SSH" stops being a recovery path at that point.
+
+Two rules from A10 survive unchanged and are now unconditional: the shared
+token could never create the first user, and it can now never do anything at
+all. A third was added and then made moot: it could not mint an MCP key,
+because it had no user for one to belong to.
+
+*Revisit if:* Storm is ever distributed to operators who do not have shell
+access to the machine — the bootstrap path (A8) is the only way in, and it
+assumes a console.
 
 ---
 
@@ -2500,6 +2533,72 @@ a key refused there at `401`.
 two days earlier. Caught by the test that asserts the legacy token *cannot*
 mint a key. **A refusal that arrives as an extractor panic is not a refusal**,
 and this codebase has now produced that bug three times in three tiers.
+
+---
+
+**The A10 cutover — the shared token is gone, not switched off ✅**
+(2026-08-20, decision **54**)
+
+`STORM_TOKEN` is removed. The only ways into a Storm server are a paired
+device, a session, and an MCP key — each minted per caller, each individually
+revocable, each attributable to a person.
+
+**This was brought forward, deliberately, against A10's own plan.** A10
+specified a compatibility window: ship auth with the token still working, pair
+everything calmly, flip the switch, verify, and remove it a release later. That
+sequence exists so nobody is ever locked out of a server they cannot yet log
+into. It was skipped on purpose, because the alternative was shipping a release
+that contained a working backdoor — and the trade was made with the cost
+stated: **prod has no `auth.db`, so this release locks out every existing
+client on upgrade**, and recovery is SSH to read a pairing QR out of the
+journal. On a homelab with shell access that is an outage, not a disaster. It
+would be a different answer on a machine somebody else runs.
+
+**What the removal took with it, and this is the interesting part.** Three
+things became honest that had been shaped around the token's existence:
+
+- **`Actor::user_id()` and `role()` no longer return `Option`.** There was
+  exactly one caller with no user behind it. Removing that credential removed
+  the only `None`, so every future policy reads a user and a role
+  unconditionally rather than unwrapping at each site.
+- **`create_key` takes a required `Extension<SessionAuth>` again.** It was an
+  `Option` because the shared token satisfied the session tier while inserting
+  no session — which is precisely what made it answer `500` where `403` was
+  true, the third occurrence of that bug in three tiers.
+- **`constant_time_eq` had no callers left**, and clippy said so. It existed
+  only to compare that one secret. Code that becomes unreachable when a feature
+  is removed is the cleanest evidence the removal is real rather than merely
+  disconnected.
+
+**`e2e.py` is still 81/81, unmodified in what it checks.** That number has been
+the standing evidence through sixteen slices that the vault surface did not
+move, and it survives the removal of the credential it used to present. Every
+integration suite now *earns* a credential where all of them were previously
+handed one — which means **none of them had exercised authentication at all**
+before this change; they exercised a constant compare.
+
+The bootstrap nonce is single-use, so the suites cannot each claim the server:
+`bootstrap.py` does it once and the rest inherit, which is also how a real
+deployment works. `auth_e2e.py` keeps its own virgin server, because it is the
+suite that *tests* bootstrapping. `mcp_e2e.py` now carries two credentials on
+purpose — a session for REST fixtures and an `stk_` key for `/mcp` — because a
+key is refused on REST by design, so one credential could not do both.
+
+**Evidence.** `make check` clean: clippy, analyze, 303 Rust and 660 Dart tests.
+`make test-live`: e2e **81/81**, mcp 57/57, auth 66/66, client 20/20.
+`no_shared_token_opens_anything` loops plausible bare strings over the REST
+surface and `/mcp` and asserts `401` — a loop rather than one value, because
+what it guards against is someone reintroducing a constant compare, not this
+exact string. `a_server_with_no_users_still_refuses_everything` pins the state
+prod is in the moment it upgrades: **no network route to authentication at
+all**, which is A8 working rather than failing.
+
+**The finding worth keeping: a credential every test is handed is a credential
+no test checks.** Sixteen slices of authentication work sat on top of suites
+that authenticated with a constant, so the whole surface was green against a
+path no real client would ever take. The same shape as slice 12 (a tier no test
+presented a credential for) and slices 13–16 (a harness that supplies what a
+person would have to carry) — but larger, because it was every suite at once.
 
 ## A lesson worth keeping
 

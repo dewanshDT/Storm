@@ -48,11 +48,13 @@ cargo run --release -- serve \
   --vault-root /srv/storm/vaults \
   --state /srv/storm/state \
   --host 0.0.0.0 --port 8484 \
-  --token "$(openssl rand -hex 32)" \
   --web /usr/share/storm/web   # or a local Flutter build/web
 ```
 
-Omit `--token` and one is generated and printed for that run. Set `STORM_TOKEN`
+There is no shared token. The first device gets in with `storm-server pair`,
+which prints a single-use pairing QR while the user table is empty; after that,
+authentication is per-device pairing plus sessions, and MCP clients use keys
+minted from the app. Set `STORM_VAULT_ROOT`
 in the environment to keep it stable.
 
 **v1 is LAN-only.** A single shared bearer token with no TLS is only defensible
@@ -291,7 +293,7 @@ curl -X PUT http://host:8484/v1/config/mcp -H "Authorization: Bearer $TOKEN" \
 
 # --mcp turns it on at boot. It is an override, not the source of truth:
 # switching it off in the app later sticks, until the flag is passed again.
-storm-server serve --vault-root ~/vaults --state ~/state --token "$STORM_TOKEN" --mcp
+storm-server serve --vault-root ~/vaults --state ~/state --mcp
 ```
 
 `GET /v1/config` reports `mcp_enabled` and `mcp_writable`.

@@ -13,7 +13,6 @@ import 'package:storm/state/secret_store.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  const token = 'storm.token';
   const deviceSecret = 'storm.deviceSecret';
   const accessToken = 'storm.accessToken';
   const refreshToken = 'storm.refreshToken';
@@ -31,7 +30,6 @@ void main() {
       () async {
         final prefs = await prefsWith({
           'storm.baseUrl': 'http://vault.local',
-          token: 'legacy-token',
           deviceSecret: 'dev-secret',
           accessToken: 'access-1',
           refreshToken: 'refresh-1',
@@ -40,7 +38,6 @@ void main() {
 
         final loaded = await store.load(prefs);
 
-        expect(loaded[token], 'legacy-token');
         expect(loaded[deviceSecret], 'dev-secret');
         expect(loaded[accessToken], 'access-1');
         expect(loaded[refreshToken], 'refresh-1');
@@ -129,7 +126,6 @@ void main() {
     test('clear() empties every credential', () async {
       final prefs = await prefsWith({});
       await SecretStore().save(prefs, {
-        token: 't',
         deviceSecret: 'd',
         accessToken: 'a',
         refreshToken: 'r',

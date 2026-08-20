@@ -72,7 +72,7 @@ sudo cp deploy/storm-server.service /lib/systemd/system/
 sudo cp deploy/storm-backup.service deploy/storm-backup.timer /lib/systemd/system/
 sudo cp deploy/storm.env.example /etc/storm/storm.env
 sudo chmod 600 /etc/storm/storm.env      # it holds the token
-sudoedit /etc/storm/storm.env            # set STORM_TOKEN and the backup path
+sudoedit /etc/storm/storm.env            # set the paths and the backup path
 sudo systemctl enable --now storm-server storm-backup.timer
 ```
 

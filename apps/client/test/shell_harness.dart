@@ -142,7 +142,9 @@ class FakeSettings extends SettingsNotifier {
   Future<Settings> build() async => configured
       ? Settings(
           baseUrl: 'http://test',
-          token: 't',
+          // Configured means *signed in* since the cutover — there is no
+          // shared token that could stand in for a session any more.
+          accessToken: 'sta_test',
           theme: StormPreset.stormDark,
           activeVault: activeVault,
         )

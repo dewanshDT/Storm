@@ -7,7 +7,7 @@ says this slice broke nothing — so the `none`-tier surface gets its own file.
 
 Usage:
 
-    cargo run -- serve --vault-root /tmp/vaults --state /tmp/s --token testtoken &
+    cargo run -- serve --vault-root /tmp/vaults --state /tmp/s &
     python3 apps/server/tests/auth_e2e.py
 
 What it is really for, beyond "the endpoints answer":
@@ -47,7 +47,9 @@ import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("STORM_BASE", "http://127.0.0.1:8484")
-TOKEN = os.environ.get("STORM_TOKEN", "testtoken")
+# Kept only so the check below can present it and be refused. There is no
+# shared token any more; this is the string that used to be one.
+RETIRED_TOKEN = "testtoken"
 
 ok = 0
 fail = 0
@@ -226,7 +228,7 @@ check(
 status, info_bad = call("GET", "/v1/server", token="not-the-token")
 check("a wrong token does not change the answer", status == 200 and info_bad == info, status)
 
-status, info_again = call("GET", "/v1/server", token=TOKEN)
+status, info_again = call("GET", "/v1/server", token=RETIRED_TOKEN)
 check("the identity is stable across requests", info_again == info, info_again)
 
 print("--- POST /v1/server/challenge (tier: none) ---")
@@ -276,10 +278,13 @@ check("an over-long nonce is refused", status == 400, status)
 print("--- the tier boundary held ---")
 
 status, _ = call("GET", "/v1/vaults")
-check("an ordinary route still demands the token", status == 401, status)
+check("an ordinary route demands a credential", status == 401, status)
 
-status, _ = call("GET", "/v1/vaults", token=TOKEN)
-check("and still answers with it", status == 200, status)
+# **The cutover, asserted from outside.** `testtoken` opened every session-tier
+# route until this release. Nothing accepts a bare string now, and the section
+# below goes on to earn a real session the way a client does.
+status, _ = call("GET", "/v1/vaults", token=RETIRED_TOKEN)
+check("the retired shared token is refused", status == 401, status)
 
 status, _ = call("GET", "/v1/health")
 check("health is unauthenticated as before", status == 200, status)
@@ -375,10 +380,10 @@ status, _ = call("GET", "/v1/users")
 check("the user list refuses an anonymous caller", status == 401, status)
 
 # A10: the legacy shared token is owner-equivalent on *session* routes and must
-# not reach the device tier, or the one credential every old install holds could
-# create the first account.
-status, _ = call("GET", "/v1/users", token=TOKEN)
-check("the legacy token cannot reach the device tier", status == 401, status)
+# not reach the device tier. Since the cutover it reaches nothing at all, which
+# is the stronger form of the same guarantee.
+status, _ = call("GET", "/v1/users", token=RETIRED_TOKEN)
+check("the retired shared token cannot reach the device tier", status == 401, status)
 
 status, users = call("GET", "/v1/users", auth=DEVICE)
 check("a paired device may list users", status == 200, (status, users))

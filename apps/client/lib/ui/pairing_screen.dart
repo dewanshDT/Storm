@@ -191,9 +191,6 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 serverId: serverInfo.serverId,
                 serverKeyId: serverInfo.keyId,
                 serverPublicKey: serverInfo.publicKey,
-                // Paired now; a stale legacy token would keep `isConfigured`
-                // true and skip the sign-in this pairing was for.
-                token: '',
               ),
             );
         if (!mounted) return;
@@ -344,7 +341,6 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               userId: tokens.userId,
               accessTokenExpiresAt: expiresAt,
               // Clear legacy token — we're paired now.
-              token: '',
             ),
           );
     } on AuthApiException catch (e) {

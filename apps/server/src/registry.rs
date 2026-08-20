@@ -36,6 +36,9 @@ pub struct VaultEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
+    // NOTE: `legacy_token_enabled` lived here until the cutover. An old
+    // `vaults.json` may still carry the key; serde ignores unknown fields, so
+    // such a file loads cleanly and the setting simply no longer exists.
     pub root: PathBuf,
     #[serde(default)]
     pub vaults: Vec<VaultEntry>,
@@ -58,21 +61,6 @@ pub struct Registry {
     /// field simply being absent.
     #[serde(default)]
     pub mcp_writable: bool,
-    /// Whether the legacy shared `STORM_TOKEN` is still accepted (A10).
-    ///
-    /// **Defaults *on*, which is the opposite direction to the MCP switches
-    /// above, and deliberately so.** A registry written before this field
-    /// existed belongs to a server whose clients all authenticate with the
-    /// shared token, so loading it as `false` would refuse every one of them
-    /// on the first boot after an upgrade — the vault would look gone. MCP
-    /// defaults off because the risk there is exposure; this defaults on
-    /// because the risk here is lockout, and lockout is the worse one on a
-    /// machine holding the only copy of a vault.
-    ///
-    /// Turning it off is the migration's final step and is meant to be
-    /// reversible — see A10 and *Storm Auth Protocol*.
-    #[serde(default = "legacy_token_default")]
-    pub legacy_token_enabled: bool,
 
     /// Whether anyone holding a device credential may create an account (A13).
     ///
@@ -88,12 +76,6 @@ pub struct Registry {
     pub allow_registration: bool,
 }
 
-/// `true` — see [`Registry::legacy_token_enabled`]. A free function because
-/// `serde(default = …)` needs a path, and a `bool` literal is not one.
-fn legacy_token_default() -> bool {
-    true
-}
-
 /// Hand-written rather than derived, so `Registry::default()` cannot quietly
 /// disable the legacy token. `#[derive(Default)]` yields `false` for every
 /// bool, which is the safe direction for the MCP flags and the *unsafe* one
@@ -105,7 +87,6 @@ impl Default for Registry {
             vaults: Vec::new(),
             mcp_enabled: false,
             mcp_writable: false,
-            legacy_token_enabled: legacy_token_default(),
             // Off. `#[derive(Default)]` would give the same answer, but this
             // Default is hand-written precisely so nobody has to check.
             allow_registration: false,
