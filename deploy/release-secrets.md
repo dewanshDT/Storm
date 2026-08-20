@@ -96,10 +96,12 @@ sudo mkdir -p /srv/storm/{vaults,state,backups}
 sudo storm-server up \
   --data-root /srv/storm \
   --vault-root /mnt/media/Docs/storm \
-  --state /srv/storm/state \
-  --token "$EXISTING_TOKEN"
+  --state /srv/storm/state
 
-# 4. Point clients at /etc/storm/storm.env if the token changed
+# 4. Pair each client again — the shared token is gone, so a device that
+#    predates the cutover has no credential the server will accept.
+#    `storm-server pair` on the host prints a single-use QR while the user
+#    table is empty; after that, add devices from a signed-in client.
 ```
 
 `up` runs as the state-dir owner when vaults are on NFS — do not force

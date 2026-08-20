@@ -25,7 +25,6 @@ User=storm
 Group=storm
 EnvironmentFile=/etc/storm/storm.env
 
-# STORM_TOKEN comes from the environment file, never the command line —
 # arguments are visible to every user on the box via /proc.
 # `serve` is the long-running process; `up`/`down`/`status` are operator tools.
 ExecStart=/usr/bin/storm-server serve \

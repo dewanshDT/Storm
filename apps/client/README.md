@@ -189,7 +189,7 @@ hide until runtime. Start a server first:
 
 ```sh
 cd ../server   # apps/server
-cargo run -- --vault /tmp/v --state /tmp/s --token testtoken --port 8484
+cargo run -- --vault /tmp/v --state /tmp/s --port 8484
 ```
 
 ## Deploying the web client

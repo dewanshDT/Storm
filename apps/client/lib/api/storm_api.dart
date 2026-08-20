@@ -206,13 +206,6 @@ class StormApi {
     }
   }
 
-  /// Switches the server's acceptance of the legacy shared token (A10).
-  ///
-  /// The last step of migrating off `STORM_TOKEN`, and reversible on purpose.
-  /// The server refuses to turn it *off* for a caller that authenticated with
-  /// the legacy token itself — that would revoke the caller's own access with
-  /// the response — so this throws until the device is paired and logged in.
-
   Future<void> createFolder(String vaultId, String path) async {
     _decode(
       await _client.post(

@@ -248,8 +248,6 @@ class _McpCardState extends ConsumerState<_McpCard> {
   }
 }
 
-/// The A10 migration switch: whether the server still accepts `STORM_TOKEN`.
-///
 /// Whether this server takes new accounts (A13).
 ///
 /// Off by default, and the copy says what "on" actually means rather than
