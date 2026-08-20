@@ -50,16 +50,11 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('pairing stays reachable before anything is configured', (
-      tester,
-    ) async {
-      // /connect is not dead: a server with no auth still needs it.
+    testWidgets('pairing is the only first-run screen', (tester) async {
+      // `/connect` went with the shared token it existed to collect. Pairing
+      // is now the single way in for an install with no credential.
       final c = shellContainer(configured: false);
       await pumpShell(tester, c);
-
-      c.read(routerProvider).go(Routes.connect);
-      await tester.pumpAndSettle();
-      expect(find.text('Connect to your homelab vault'), findsOneWidget);
 
       c.read(routerProvider).go(Routes.pairing);
       await tester.pumpAndSettle();
@@ -91,7 +86,7 @@ void main() {
 
       await c
           .read(settingsProvider.notifier)
-          .save(const Settings(baseUrl: 'http://other', token: 'u'));
+          .save(const Settings(baseUrl: 'http://other', accessToken: 'sta_u'));
       await tester.pumpAndSettle();
 
       expect(

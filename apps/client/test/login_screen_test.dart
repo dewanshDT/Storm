@@ -59,17 +59,21 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('a legacy token install never sees Sign in', (tester) async {
-      // It has no device credential, so /login could not succeed even if it
-      // were shown. Same invariant as decision 52b: auth stays additive.
+    testWidgets('an install with no credential is sent to pair, not Sign in', (
+      tester,
+    ) async {
+      // This is what an upgrade across the cutover looks like: a URL, no
+      // device, no session. `/login` cannot help — there is no device
+      // credential to log in *with* — so pairing is the only honest
+      // destination, and the router must pick it rather than the dashboard.
       final c = shellContainer(
-        settings: const Settings(baseUrl: 'http://test', token: 't'),
+        settings: const Settings(baseUrl: 'http://test'),
       );
       await pumpShell(tester, c);
 
       c.read(routerProvider).go(Routes.login);
       await tester.pumpAndSettle();
-      expect(pathOf(c), Routes.dashboard);
+      expect(pathOf(c), Routes.pairing);
       await disposeShell(tester, c);
     });
   });

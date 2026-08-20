@@ -62,26 +62,18 @@ class ServerSettingsScreen extends ConsumerWidget {
                 c == null ? const _Muted('Not connected') : _McpCard(config: c),
           ),
           const SizedBox(height: 24),
-          _Section(label: 'Shared token'),
+          _Section(label: 'Accounts'),
           config.when(
             loading: () => const SkeletonRows(rows: 2),
             error: (e, _) => _Muted(describeFailure(e)),
             data: (c) => c == null
                 ? const _Muted('Not connected')
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _LegacyTokenCard(config: c),
-                      const SizedBox(height: 8),
-                      _RegistrationCard(config: c),
-                    ],
-                  ),
+                : _RegistrationCard(config: c),
           ),
           const SizedBox(height: 24),
           _Section(label: 'MCP keys'),
           // Only for a signed-in caller: minting is session tier, and a key
-          // belongs to an account. An install still on the legacy shared token
-          // has no account for one to belong to.
+          // belongs to an account.
           if (settings?.hasSession ?? false)
             Align(
               alignment: Alignment.centerLeft,
@@ -328,81 +320,6 @@ class _RegistrationCardState extends ConsumerState<_RegistrationCard> {
                 : 'New accounts are added with `storm-server user add` on the '
                       'machine itself. Turn this on to let people sign up from '
                       'the app instead.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Deliberately a switch rather than a release boundary — turn it off, check
-/// that the paired devices still work, turn it back on if they do not. The
-/// server refuses to let a *legacy-authenticated* caller turn it off, so on an
-/// unmigrated device this shows the refusal rather than silently failing.
-class _LegacyTokenCard extends ConsumerStatefulWidget {
-  const _LegacyTokenCard({required this.config});
-
-  final ServerConfig config;
-
-  @override
-  ConsumerState<_LegacyTokenCard> createState() => _LegacyTokenCardState();
-}
-
-class _LegacyTokenCardState extends ConsumerState<_LegacyTokenCard> {
-  /// Held while the request is in flight so the switch shows where it is going,
-  /// not where it was — same reason as `_McpCardState._pending`.
-  bool? _pending;
-
-  Future<void> _set(bool enabled) async {
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    setState(() => _pending = enabled);
-    try {
-      await api.setLegacyTokenEnabled(enabled);
-      ref.invalidate(serverConfigProvider);
-    } catch (e) {
-      if (mounted) _toast(context, describeFailure(e));
-    } finally {
-      if (mounted) setState(() => _pending = null);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final theme = Theme.of(context);
-    final on = _pending ?? widget.config.legacyTokenEnabled;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          value: on,
-          onChanged: _pending == null ? _set : null,
-          title: const Text('Accept the shared token'),
-          subtitle: Text(
-            on
-                ? 'Any client with the token has full access'
-                : 'Off — only paired devices can sign in',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(0, 2, 8, 0),
-          child: Text(
-            on
-                ? 'The original way Storm authenticated: one token, shared by '
-                      'every client, with no idea who is holding it. Turn it '
-                      'off once your devices are paired and you have signed '
-                      'in — you can turn it back on if something breaks.'
-                : 'Retired. Pair a device to add one; there is no shared '
-                      'token to fall back on.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),

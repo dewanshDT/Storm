@@ -158,9 +158,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               refreshToken: tokens.refreshToken,
               accessTokenExpiresAt: expiresAt,
               userId: tokens.userId,
-              // A stale shared token would otherwise outlive the sign-in and
-              // keep being preferred over nothing if this session is dropped.
-              token: '',
             ),
           );
       // The router's redirect takes it from here: `hasSession` is now true, so

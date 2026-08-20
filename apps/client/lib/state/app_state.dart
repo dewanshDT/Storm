@@ -20,14 +20,11 @@ import 'vault_config.dart';
 
 /// Connection and appearance settings.
 ///
-/// v1 stores the token in plain shared_preferences. That is acceptable only
-/// because the server is LAN-only; moving to `flutter_secure_storage` on
-/// native platforms is a prerequisite for any wider exposure.
+/// Credentials live in the platform keychain (slice 9), never in prefs.
 @immutable
 class Settings {
   const Settings({
     this.baseUrl = '',
-    this.token = '',
     // Dark-first, matching the design. Someone who turns it off has `false`
     // stored, so this default never overrides a deliberate choice.
     this.theme = StormPreset.stormDark,
@@ -52,7 +49,6 @@ class Settings {
   });
 
   final String baseUrl;
-  final String token;
 
   /// Which visual identity the app wears.
   ///
@@ -164,8 +160,9 @@ class Settings {
 
   /// The token to send as `Authorization: Bearer …` on authenticated calls.
   ///
-  /// Falls back to the legacy plain token for un-paired installs.
-  String get bearerToken => accessToken.isNotEmpty ? accessToken : token;
+  /// The session's access token, and nothing else. It used to fall back to the
+  /// shared token for un-paired installs; that credential no longer exists.
+  String get bearerToken => accessToken;
 
   /// The `StormDevice` header value for device-tier endpoints.
   String get deviceHeader => 'StormDevice $deviceId:$deviceSecret';
@@ -182,13 +179,17 @@ class Settings {
   /// Persisting it also reopens the last vault on launch, for free.
   final String activeVault;
 
-  /// The app has a server URL and either a session or a legacy token.
-  bool get isConfigured =>
-      baseUrl.isNotEmpty && (hasSession || token.isNotEmpty);
+  /// The app has a server URL and a live session.
+  ///
+  /// **No longer "or a legacy token".** Slice 6's regression — sending every
+  /// un-paired install to `/pairing` — was fixed by widening this to accept
+  /// the shared token, because those installs had one. After the cutover none
+  /// do, so the narrow form is correct again and the redirect it feeds sends
+  /// exactly the people who need to pair.
+  bool get isConfigured => baseUrl.isNotEmpty && hasSession;
 
   Settings copyWith({
     String? baseUrl,
-    String? token,
     StormPreset? theme,
     double? fontSize,
     String? activeVault,
@@ -206,7 +207,6 @@ class Settings {
     String? serverId,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
-    token: token ?? this.token,
     theme: theme ?? this.theme,
     fontSize: fontSize ?? this.fontSize,
     activeVault: activeVault ?? this.activeVault,
@@ -227,7 +227,6 @@ class Settings {
 
 class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kUrl = 'storm.baseUrl';
-  static const _kToken = 'storm.token';
   static const _kDark = 'storm.darkMode';
   static const _kTheme = 'storm.theme';
   static const _kFont = 'storm.fontSize';
@@ -262,7 +261,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       // it wrong is the only way to fail. A stored value still wins, so a web
       // build pointed somewhere else by hand keeps working.
       baseUrl: prefs.getString(_kUrl) ?? (kIsWeb ? Uri.base.origin : ''),
-      token: secret[_kToken] ?? '',
       theme: _themeFrom(prefs),
       fontSize: prefs.getDouble(_kFont) ?? 16,
       activeVault: prefs.getString(_kVault) ?? '',
@@ -322,7 +320,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     // The four credentials, to the keychain. Last, so a failure here cannot
     // leave the non-secret half of a save unwritten.
     await secrets.save(prefs, {
-      _kToken: cleaned.token,
       _kDeviceSecret: cleaned.deviceSecret,
       _kAccessToken: cleaned.accessToken,
       _kRefreshToken: cleaned.refreshToken,
@@ -577,8 +574,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
         refreshToken: '',
         accessTokenExpiresAt: '',
         userId: '',
-        // A stale legacy token would keep `isConfigured` true and skip login.
-        token: '',
       ),
     );
   }
@@ -600,7 +595,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
         refreshToken: '',
         accessTokenExpiresAt: '',
         userId: '',
-        token: '',
       ),
     );
   }

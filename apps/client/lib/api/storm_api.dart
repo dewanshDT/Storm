@@ -212,15 +212,6 @@ class StormApi {
   /// The server refuses to turn it *off* for a caller that authenticated with
   /// the legacy token itself — that would revoke the caller's own access with
   /// the response — so this throws until the device is paired and logged in.
-  Future<void> setLegacyTokenEnabled(bool enabled) async {
-    _decode(
-      await _client.put(
-        _uri('/v1/config/legacy-token'),
-        headers: _headers,
-        body: jsonEncode({'enabled': enabled}),
-      ),
-    );
-  }
 
   Future<void> createFolder(String vaultId, String path) async {
     _decode(

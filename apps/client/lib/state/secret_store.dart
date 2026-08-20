@@ -15,11 +15,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// The keys that hold a credential, and therefore never belong in prefs.
 ///
-/// The legacy shared token is here too. It is owner-equivalent while
-/// `legacy_token_enabled` is on (A10), so leaving it in plain storage while
-/// moving the newer secrets would protect the lock and leave the key out.
+/// `storm.token` — the shared token — was here until the cutover removed that
+/// credential. An install upgrading from before then still has the value in
+/// its keychain; it is simply never read again.
 const secretKeys = <String>[
-  'storm.token',
   'storm.deviceSecret',
   'storm.accessToken',
   'storm.refreshToken',

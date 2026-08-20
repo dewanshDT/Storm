@@ -85,7 +85,6 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
               refreshToken: tokens.refreshToken,
               accessTokenExpiresAt: tokens.expires,
               userId: tokens.userId,
-              token: '',
             ),
           );
       // The router takes it from here: there is a session now.

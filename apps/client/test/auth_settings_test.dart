@@ -34,18 +34,21 @@ void main() {
       expect(paired.bearerToken, 'access-1');
     });
 
-    test('a legacy token install is configured without being paired', () {
-      // The invariant that keeps auth additive: an install predating pairing
-      // still reaches its vault, and the router must not bounce it.
-      const legacy = Settings(baseUrl: 'http://vault.local', token: 't');
-      expect(legacy.isPaired, isFalse);
-      expect(legacy.hasSession, isFalse);
-      expect(legacy.isConfigured, isTrue);
-      expect(legacy.bearerToken, 't');
+    test('a URL without a session is not configured', () {
+      // **The cutover reversed this.** An install carrying only the shared
+      // token used to count as configured, because that credential could
+      // actually reach the vault. It cannot any more, so such an install is
+      // not configured, and the router sends it to pair — which is exactly
+      // what its owner has to do.
+      const upgraded = Settings(baseUrl: 'http://vault.local');
+      expect(upgraded.isPaired, isFalse);
+      expect(upgraded.hasSession, isFalse);
+      expect(upgraded.isConfigured, isFalse);
+      expect(upgraded.bearerToken, isEmpty);
     });
 
-    test('a session token wins over a stale legacy token', () {
-      expect(paired.copyWith(token: 'old').bearerToken, 'access-1');
+    test('the bearer is the session access token and nothing else', () {
+      expect(paired.bearerToken, 'access-1');
     });
 
     test('a base URL alone is not configured', () {
@@ -133,7 +136,7 @@ void main() {
       // Left behind, it would keep `isConfigured` true and skip the login the
       // logout was asking for.
       final notifier = await notifierOver({});
-      await notifier.save(paired.copyWith(token: 'legacy'));
+      await notifier.save(paired.copyWith());
       await notifier.logout();
 
       expect(notifier.state.value!.isConfigured, isFalse);
