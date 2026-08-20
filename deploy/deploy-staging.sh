@@ -31,11 +31,6 @@ REMOTE="${STAGING_DIR:-/home/dewansh/storm-staging}"
 WITH_WEB=1
 TARGET=x86_64-unknown-linux-musl
 
-# The staging token is a credential, so it is never a literal in this file and
-# never an argument. Precedence: $STAGING_TOKEN from the environment, else the
-# one already on the VM, else a fresh random one written mode 600. Nothing here
-# is committed and nothing lands in shell history.
-TOKEN="${STAGING_TOKEN:-}"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$HERE/apps/server/target/$TARGET/release/storm-server"
@@ -101,21 +96,6 @@ if [ "$WITH_WEB" = 1 ]; then
   rsync -az --delete "$HERE/apps/client/build/web/" "$HOST:$REMOTE/web/"
 fi
 
-# Establish the token on the VM without it ever crossing argv. If the caller
-# exported one, plant it; otherwise keep what is there, or mint one.
-if [ -n "$TOKEN" ]; then
-  printf 'STORM_TOKEN=%s\n' "$TOKEN" \
-    | ssh "$HOST" "cat > '$REMOTE/staging.env' && chmod 600 '$REMOTE/staging.env'"
-else
-  ssh "$HOST" "set -e; \
-    if [ ! -s '$REMOTE/staging.env' ]; then \
-      umask 077; \
-      printf 'STORM_TOKEN=%s\n' \"\$(head -c 24 /dev/urandom | base64 | tr -d '/+=' )\" \
-        > '$REMOTE/staging.env'; \
-      echo '  minted a new staging token'; \
-    fi"
-fi
-
 # --- restart ----------------------------------------------------------------
 #
 # Stop by pidfile, not by pattern: `pkill -f storm-server` on this box would
@@ -143,11 +123,6 @@ chmod +x storm-server
 
 [ -f vaults/scratch/Seed.md ] || printf '# Seed\n\nStaging scratch note.\n' > vaults/scratch/Seed.md
 
-# STORM_TOKEN comes from the mode-600 env file, never argv: arguments are
-# world-readable through /proc on a shared box.
-set -a
-. '$REMOTE/staging.env'
-set +a
 WEB_ARG=""
 [ -d '$REMOTE/web' ] && WEB_ARG="--web $REMOTE/web"
 setsid ./storm-server serve \

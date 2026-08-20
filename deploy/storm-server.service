@@ -6,11 +6,11 @@
 # Manual install:
 #   sudo cp deploy/storm-server.service /lib/systemd/system/
 #   sudo cp deploy/storm.env.example /etc/storm/storm.env   # then edit it
-#   sudo chmod 600 /etc/storm/storm.env                     # it holds the token
+#   sudo chmod 600 /etc/storm/storm.env
 #   sudo systemctl enable --now storm-server
 #
 # Everything configurable lives in the env file so this unit needs no edits,
-# and so the token is not sitting in a world-readable file under
+# and so configuration is not sitting in a world-readable file under
 # /etc/systemd.
 
 [Unit]

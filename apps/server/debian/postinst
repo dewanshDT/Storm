@@ -19,17 +19,10 @@ if [ ! -e /srv/storm/state/vaults.json ]; then
 fi
 
 if [ -f /etc/storm/storm.env ]; then
-    # Fresh conf-file still says change-me — generate a real token so a later
-    # `up` (or a manual enable) is not guessable. conf-files keep a real token
-    # across upgrades.
-    if grep -q '^STORM_TOKEN=change-me$' /etc/storm/storm.env 2>/dev/null; then
-        token=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-        # Avoid sed -i portability issues on busybox; rewrite via temp.
-        tmp=$(mktemp)
-        sed "s/^STORM_TOKEN=change-me$/STORM_TOKEN=${token}/" /etc/storm/storm.env > "$tmp"
-        chmod 600 "$tmp"
-        mv "$tmp" /etc/storm/storm.env
-    fi
+    # There is no token to generate any more — authentication is per-device
+    # pairing plus sessions. The file still holds paths, and it is still 600
+    # because an upgrade from before the cutover leaves a stale STORM_TOKEN
+    # line in it that nobody reads.
     chmod 600 /etc/storm/storm.env || true
 fi
 

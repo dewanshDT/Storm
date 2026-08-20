@@ -19,7 +19,6 @@ WWW    := apps/www
 # folders as vaults.
 VAULT_ROOT ?= .dev/vaults
 STATE ?= .dev/state
-TOKEN ?= testtoken
 PORT  ?= 8484
 # The device-tier client test needs its own server: it consumes the bootstrap
 # pairing nonce and creates the first user, both of which are once-per-server
@@ -34,7 +33,7 @@ help:
 	@echo
 	@sed -n 's/^## //p' $(MAKEFILE_LIST) | awk -F': ' '{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "Variables: VAULT_ROOT=$(VAULT_ROOT) STATE=$(STATE) TOKEN=$(TOKEN) PORT=$(PORT)"
+	@echo "Variables: VAULT_ROOT=$(VAULT_ROOT) STATE=$(STATE) PORT=$(PORT)"
 
 # ---- checks ---------------------------------------------------------
 
@@ -73,7 +72,7 @@ test-live:
 	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/live-vaults/primary/Seed.md"; \
 	"$$ROOT/$(SERVER)/target/debug/storm-server" serve \
 		--vault-root "$$ROOT/.dev/live-vaults" --state "$$ROOT/.dev/live-state" \
-		--token $(TOKEN) --port $(PORT) --mcp > "$$ROOT/.dev/live-server.log" 2>&1 & \
+		--port $(PORT) --mcp > "$$ROOT/.dev/live-server.log" 2>&1 & \
 	SERVER_PID=$$!; \
 	trap 'kill $$SERVER_PID 2>/dev/null; true' EXIT; \
 	for i in $$(seq 1 60); do \
@@ -85,20 +84,21 @@ test-live:
 		fi; \
 		sleep 0.5; \
 	done; \
+	echo "--- claiming the server (the bootstrap nonce is single-use) ---"; \
+	eval "$$(python3 "$$ROOT/$(SERVER)/tests/bootstrap.py" \
+		http://127.0.0.1:$(PORT) "$$ROOT/.dev/live-server.log")"; \
+	export STORM_SESSION STORM_DEVICE; \
 	echo "--- server e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- mcp e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
-	echo "--- auth e2e ---"; \
-	STORM_SERVER_LOG="$$ROOT/.dev/live-server.log" \
-		python3 "$$ROOT/$(SERVER)/tests/auth_e2e.py"; \
-	echo "--- client device-tier auth (its own fresh server) ---"; \
+	echo "--- auth e2e + client device tier (each needs a virgin server) ---"; \
 	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
 	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \
 	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/auth-vaults/primary/Seed.md"; \
 	"$$ROOT/$(SERVER)/target/debug/storm-server" serve \
 		--vault-root "$$ROOT/.dev/auth-vaults" --state "$$ROOT/.dev/auth-state" \
-		--token $(TOKEN) --port $(AUTH_PORT) > "$$ROOT/.dev/auth-server.log" 2>&1 & \
+		--port $(AUTH_PORT) > "$$ROOT/.dev/auth-server.log" 2>&1 & \
 	AUTH_PID=$$!; \
 	trap 'kill $$SERVER_PID $$AUTH_PID 2>/dev/null; true' EXIT; \
 	for i in $$(seq 1 60); do \
@@ -110,8 +110,29 @@ test-live:
 		fi; \
 		sleep 0.5; \
 	done; \
+	echo "--- auth e2e ---"; \
+	STORM_SESSION= STORM_DEVICE= \
+	STORM_BASE=http://127.0.0.1:$(AUTH_PORT) \
+	STORM_SERVER_LOG="$$ROOT/.dev/auth-server.log" \
+		python3 "$$ROOT/$(SERVER)/tests/auth_e2e.py"; \
+	echo "--- a second virgin server for the client device tier ---"; \
+	kill $$AUTH_PID 2>/dev/null; sleep 1; \
+	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
+	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \
+	printf '# Seed\n\nA starter note.\n' > "$$ROOT/.dev/auth-vaults/primary/Seed.md"; \
+	"$$ROOT/$(SERVER)/target/debug/storm-server" serve \
+		--vault-root "$$ROOT/.dev/auth-vaults" --state "$$ROOT/.dev/auth-state" \
+		--port $(AUTH_PORT) > "$$ROOT/.dev/auth-server.log" 2>&1 & \
+	AUTH_PID=$$!; \
+	trap 'kill $$SERVER_PID $$AUTH_PID 2>/dev/null; true' EXIT; \
+	for i in $$(seq 1 60); do \
+		curl -sf -o /dev/null http://127.0.0.1:$(AUTH_PORT)/v1/health && break; \
+		[ $$i -eq 60 ] && { echo "second auth server did not start" >&2; exit 1; }; \
+		sleep 0.5; \
+	done; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
+		--dart-define=STORM_SESSION="$$STORM_SESSION" \
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
 		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
 
@@ -133,7 +154,7 @@ server:
 	@mkdir -p $(VAULT_ROOT)
 	cd $(SERVER) && cargo run -- serve \
 		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) \
-		--token $(TOKEN) --port $(PORT)
+		--port $(PORT)
 
 ## client: run the Flutter app on this machine
 client:
@@ -176,7 +197,7 @@ serve-web: web
 	@mkdir -p $(VAULT_ROOT)
 	cd $(SERVER) && cargo run --release -- serve \
 		--vault-root $(abspath $(VAULT_ROOT)) --state $(abspath $(STATE)) \
-		--token $(TOKEN) --port $(PORT) \
+		--port $(PORT) \
 		--web $(abspath $(CLIENT))/build/web
 
 # ---- deployment -----------------------------------------------------

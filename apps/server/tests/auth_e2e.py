@@ -276,10 +276,13 @@ check("an over-long nonce is refused", status == 400, status)
 print("--- the tier boundary held ---")
 
 status, _ = call("GET", "/v1/vaults")
-check("an ordinary route still demands the token", status == 401, status)
+check("an ordinary route demands a credential", status == 401, status)
 
+# **The cutover, asserted from outside.** `testtoken` opened every session-tier
+# route until this release. Nothing accepts a bare string now, and the section
+# below goes on to earn a real session the way a client does.
 status, _ = call("GET", "/v1/vaults", token=TOKEN)
-check("and still answers with it", status == 200, status)
+check("the retired shared token is refused", status == 401, status)
 
 status, _ = call("GET", "/v1/health")
 check("health is unauthenticated as before", status == 200, status)
