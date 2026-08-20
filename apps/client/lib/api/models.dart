@@ -231,6 +231,7 @@ class ServerConfig {
     required this.mcpEnabled,
     required this.mcpWritable,
     required this.legacyTokenEnabled,
+    required this.allowRegistration,
   });
 
   final String vaultRoot;
@@ -259,6 +260,9 @@ class ServerConfig {
   /// has no replacement for.
   final bool legacyTokenEnabled;
 
+  /// Whether anyone with a device credential may create an account (A13).
+  final bool allowRegistration;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
@@ -266,6 +270,7 @@ class ServerConfig {
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
     mcpWritable: j['mcp_writable'] as bool? ?? false,
     legacyTokenEnabled: j['legacy_token_enabled'] as bool? ?? true,
+    allowRegistration: (j['allow_registration'] as bool?) ?? false,
   );
 }
 
@@ -336,4 +341,57 @@ class StormApiException implements Exception {
 
   @override
   String toString() => 'StormApiException($statusCode): $message';
+}
+
+/// An MCP key as the server reports it (A14).
+///
+/// **Never carries the secret.** The plaintext exists in exactly one response
+/// — the one that created it — and is modelled separately by [CreatedMcpKey]
+/// so it is impossible to be handed one by accident from a list.
+class McpKey {
+  const McpKey({
+    required this.id,
+    required this.userId,
+    required this.name,
+    required this.created,
+    this.expires,
+    this.lastUsed,
+    this.revoked,
+  });
+
+  final String id;
+  final String userId;
+  final String name;
+  final String created;
+  final String? expires;
+  final String? lastUsed;
+  final String? revoked;
+
+  bool get isRevoked => revoked != null;
+
+  factory McpKey.fromJson(Map<String, dynamic> j) => McpKey(
+    id: j['id'] as String,
+    userId: j['user_id'] as String,
+    name: j['name'] as String,
+    created: j['created'] as String,
+    expires: j['expires'] as String?,
+    lastUsed: j['last_used'] as String?,
+    revoked: j['revoked'] as String?,
+  );
+}
+
+/// A key that has just been minted, with the plaintext.
+///
+/// The one type in the client that holds a key secret, and it is never
+/// persisted — not in prefs, not in the keychain. It is another machine's
+/// credential, not this device's, and it lives only as long as the sheet
+/// showing it (A14.5).
+class CreatedMcpKey {
+  const CreatedMcpKey({required this.key, required this.secret});
+
+  final McpKey key;
+  final String secret;
+
+  factory CreatedMcpKey.fromJson(Map<String, dynamic> j) =>
+      CreatedMcpKey(key: McpKey.fromJson(j), secret: j['secret'] as String);
 }

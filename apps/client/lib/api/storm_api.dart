@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import 'auth_models.dart';
 import 'models.dart';
 
 /// REST client for `storm-server`.
@@ -157,6 +158,52 @@ class StormApi {
         body: jsonEncode({'enabled': enabled, 'writable': writable}),
       ),
     );
+  }
+
+  // ---- MCP keys (A14) ---------------------------------------------------
+
+  /// Mints an MCP key. **The secret in the response is the only copy.**
+  ///
+  /// Session tier: minting costs a real sign-in, which is also what makes "a
+  /// key cannot mint a key" true without a special case — a key never reaches
+  /// this route.
+  Future<CreatedMcpKey> createMcpKey({
+    required String name,
+    String? expires,
+  }) async {
+    final json = _decode(
+      await _client.post(
+        _uri('/v1/keys'),
+        headers: _headers,
+        body: jsonEncode({'name': name, 'expires': ?expires}),
+      ),
+    );
+    return CreatedMcpKey.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// The caller's keys — or another user's, which only an owner may ask for.
+  Future<List<McpKey>> mcpKeys({String? user}) async {
+    final json = _decode(
+      await _client.get(
+        _uri('/v1/keys', user == null ? null : {'user': user}),
+        headers: _headers,
+      ),
+    );
+    return (json as List)
+        .map((e) => McpKey.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Revokes a key. Effective on the next request the holder makes.
+  Future<void> revokeMcpKey(String id) async {
+    final r = await _client.delete(
+      _uri('/v1/keys/${Uri.encodeComponent(id)}'),
+      headers: _headers,
+    );
+    // 204 carries no body, so `_decode` would choke on the empty string.
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    }
   }
 
   /// Switches the server's acceptance of the legacy shared token (A10).
@@ -385,6 +432,40 @@ class StormApi {
   /// `POST /v1/auth/logout` — revoke the current session.
   Future<void> logout() async {
     await _client.post(_uri('/v1/auth/logout'), headers: _headers);
+  }
+
+  /// `PUT /v1/config/registration` — open or close registration (A13).
+  ///
+  /// Owner only, enforced server-side. Off by default: with web bootstrap in
+  /// play, on means anyone who can reach this server can make an account.
+  Future<void> setRegistrationOpen(bool enabled) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/registration'),
+        headers: _headers,
+        body: jsonEncode({'enabled': enabled}),
+      ),
+    );
+  }
+
+  /// `POST /v1/pairings` — mint a pairing invite for a **new** device.
+  ///
+  /// Session tier: an already-signed-in client vouches for the device being
+  /// added. Purpose is always `add_device` — the `first_user` window is a
+  /// one-shot that belongs to the server console (A8), and asking for it here
+  /// would be asking the server for something it must refuse.
+  Future<PairingInvite> issuePairing() async {
+    final r = await _client.post(
+      _uri('/v1/pairings'),
+      headers: _headers,
+      body: jsonEncode({'purpose': 'add_device'}),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}: ${r.body}');
+    }
+    return PairingInvite.fromJson(
+      jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>,
+    );
   }
 
   void dispose() => _client.close();

@@ -356,6 +356,19 @@ class ClientSettingsBody extends ConsumerWidget {
             // Only for a session. A legacy token install has nothing to sign
             // out *of* — there is no account behind it — and offering the
             // action would leave it at a login screen it cannot satisfy.
+            // Session-only for the same reason as sign-out: minting a pairing
+            // invite is `POST /v1/pairings`, session tier. A legacy-token
+            // install has no account to vouch with.
+            if (settings.hasSession)
+              PopoverItem(
+                key: const Key('add-device'),
+                label: 'Add a device',
+                subtitle: 'Show a QR for a phone or laptop to scan',
+                onTap: () {
+                  onDone?.call();
+                  context.push(Routes.addDevice);
+                },
+              ),
             if (settings.hasSession)
               PopoverItem(
                 key: const Key('sign-out'),

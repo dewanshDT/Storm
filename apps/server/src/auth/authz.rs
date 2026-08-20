@@ -41,6 +41,28 @@ pub enum Actor {
         #[allow(dead_code)]
         role: Role,
     },
+    /// An MCP key (A14): a machine acting **as the user who minted it**.
+    ///
+    /// Note what this is not. It is not a principal of its own — the identity
+    /// is `user_id`, exactly as a session's is, which is why a key needs no
+    /// special case in a policy and why the note below about `Actor::Mcp`
+    /// still holds. The `key_id` rides along so an audit row can say *which*
+    /// key acted and so revoking one key is not revoking the person.
+    ///
+    /// **A14 gives a key its owner's full authority and no way to narrow it.**
+    /// Per-vault scoping is deferred to the authorization release, which has
+    /// to answer the same question for users anyway.
+    Key {
+        /// Which key acted. **For the audit trail, never for a decision** —
+        /// see [`Actor::key_id`]. Unread by the shipping binary today for the
+        /// same reason `Session`'s fields were before the boundary landed:
+        /// the consumer is the authorization release, and inventing a caller
+        /// now to satisfy the linter would be worse than saying so.
+        #[allow(dead_code)]
+        key_id: String,
+        user_id: String,
+        role: Role,
+    },
     /// The legacy shared token (A10), which is owner-equivalent and has **no
     /// user behind it** — nothing to look grants up against, and nothing
     /// honest to write into `security_events.user_id`. It disappears with the
@@ -68,7 +90,52 @@ impl Actor {
     pub fn describe(&self) -> &str {
         match self {
             Actor::Session { .. } => "session",
+            Actor::Key { .. } => "mcp-key",
             Actor::Legacy => "legacy-token",
+        }
+    }
+
+    /// The user this caller acts as, if there is one.
+    ///
+    /// **This is the accessor a permission model must read, not the variant.**
+    /// A session and a key are the same principal reached two ways, and a
+    /// policy that matches on the variant instead has to be revisited every
+    /// time a new way to hold a credential is added — which is exactly the
+    /// bug slice 11 fixed for MCP and A14 is written to avoid repeating.
+    ///
+    /// `None` is the legacy shared token, which has no user behind it (A10).
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Actor::Session { user_id, .. } | Actor::Key { user_id, .. } => Some(user_id),
+            Actor::Legacy => None,
+        }
+    }
+
+    /// The role this caller acts with — see [`Actor::user_id`] for why this is
+    /// an accessor rather than a match.
+    ///
+    /// A key carries its **owner's** role, unnarrowed (A14). `None` for the
+    /// legacy token, which is owner-equivalent by a different route and has no
+    /// role row to point at.
+    pub fn role(&self) -> Option<Role> {
+        match self {
+            Actor::Session { role, .. } | Actor::Key { role, .. } => Some(*role),
+            Actor::Legacy => None,
+        }
+    }
+
+    /// The key behind this caller, if it is one. **For audit, never for
+    /// access decisions** — a policy that asks "is this a key?" is the branch
+    /// this design exists to make unnecessary.
+    ///
+    /// Asserted by `an_mcp_key_request_carries_its_owners_identity`; no
+    /// shipping caller yet, because the audit work that wants it belongs to a
+    /// later release.
+    #[allow(dead_code)]
+    pub fn key_id(&self) -> Option<&str> {
+        match self {
+            Actor::Key { key_id, .. } => Some(key_id),
+            _ => None,
         }
     }
 }

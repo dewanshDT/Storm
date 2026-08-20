@@ -14,11 +14,52 @@ void main() {
   runApp(const ProviderScope(child: StormApp()));
 }
 
-class StormApp extends ConsumerWidget {
+class StormApp extends ConsumerStatefulWidget {
   const StormApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<StormApp> createState() => _StormAppState();
+}
+
+class _StormAppState extends ConsumerState<StormApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Once, at startup. **Not `addPostFrameCallback`** — that fires after the
+    // first frame, which is well before `settingsProvider` has finished
+    // loading preferences and the keychain, so the check ran against a null
+    // value and silently did nothing. `ensureSession` now awaits the provider
+    // itself, so calling it here is safe and no longer racy.
+    _checkSession();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // **Coming back is when sessions are found dead.** Storm is offline-first
+    // and a phone can be away for weeks; the access token is the thing most
+    // likely to have lapsed while nothing was watching.
+    if (state == AppLifecycleState.resumed) _checkSession();
+  }
+
+  /// Renews a stale session, retires a dead one.
+  ///
+  /// Fire-and-forget on purpose: nothing here should delay the first frame,
+  /// and every outcome is expressed by the settings it saves — the router is
+  /// listening and moves to /login by itself when a session is cleared.
+  void _checkSession() {
+    ref.read(settingsProvider.notifier).ensureSession();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider).value;
 
     return MaterialApp.router(

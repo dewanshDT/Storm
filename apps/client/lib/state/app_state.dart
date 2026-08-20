@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
@@ -9,6 +10,7 @@ import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import 'secret_store.dart';
+import 'web_bootstrap.dart';
 import '../ui/theme.dart';
 import '../ui/tokens.dart';
 import '../sync/sync_engine.dart';
@@ -118,8 +120,47 @@ class Settings {
   /// The device has completed pairing (has device credentials).
   bool get isPaired => deviceId.isNotEmpty;
 
-  /// The device has a live (or refreshable) session.
+  /// The device has session tokens. **Says nothing about whether they work.**
+  ///
+  /// Deliberately unchanged and deliberately narrow: half the app asks this to
+  /// decide whether to send a bearer token at all, and a session that is
+  /// merely *stale* should still be sent — the refresh path needs it. Whether
+  /// the session is still good is [accessTokenExpired].
   bool get hasSession => accessToken.isNotEmpty;
+
+  /// When the access token dies, or null if unknown.
+  ///
+  /// Unknown covers an install from before this was stored, and a stamp the
+  /// server sent in a shape we cannot read. Both are treated as "not expired",
+  /// because guessing *expired* would sign someone out over a parse error.
+  DateTime? get accessTokenExpiry => accessTokenExpiresAt.isEmpty
+      ? null
+      : DateTime.tryParse(accessTokenExpiresAt);
+
+  /// The access token is past its expiry.
+  ///
+  /// **This used to be unknowable.** `accessTokenExpiresAt` was written by
+  /// three screens and read by none, so an expired session still counted as
+  /// configured: the router kept you on the dashboard while every request came
+  /// back 401, which is what "signed in but everything is broken" was.
+  bool get accessTokenExpired {
+    final at = accessTokenExpiry;
+    return at != null && !at.isAfter(DateTime.now().toUtc());
+  }
+
+  /// Close enough to expiry to renew it now rather than mid-use.
+  ///
+  /// A6 wants this at half the access lifetime, which needs the moment the
+  /// token was *issued* — and that is not stored, so this uses a window before
+  /// expiry instead. Storm is offline-first with an outbox: the case that
+  /// matters is a phone coming back after a while and finding its session
+  /// already dead, and a day of margin covers that without pretending to
+  /// implement a rule it cannot yet compute.
+  bool get accessTokenNeedsRefresh {
+    final at = accessTokenExpiry;
+    if (at == null) return false;
+    return at.isBefore(DateTime.now().toUtc().add(const Duration(days: 1)));
+  }
 
   /// The token to send as `Authorization: Bearer …` on authenticated calls.
   ///
@@ -215,7 +256,12 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     // after an upgrade migrates whatever is still in `prefs` across.
     final secret = await secrets.load(prefs);
     return Settings(
-      baseUrl: prefs.getString(_kUrl) ?? '',
+      // **On the web, the server is the origin that served this page.** Asking
+      // a browser for the address of the machine it just downloaded the app
+      // from is asking it to tell us something it already knows, and getting
+      // it wrong is the only way to fail. A stored value still wins, so a web
+      // build pointed somewhere else by hand keeps working.
+      baseUrl: prefs.getString(_kUrl) ?? (kIsWeb ? Uri.base.origin : ''),
       token: secret[_kToken] ?? '',
       theme: _themeFrom(prefs),
       fontSize: prefs.getDouble(_kFont) ?? 16,
@@ -283,6 +329,209 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     });
   }
 
+  /// Spends the bootstrap nonce Storm put in the page it served.
+  ///
+  /// Web only, first load only. Returns `true` when this device is now paired
+  /// — including when it already was, because "already has a device" is the
+  /// successful outcome, not a failure.
+  ///
+  /// **Nothing here is a shortcut around the device tier.** It consumes an
+  /// ordinary pairing nonce through the ordinary `POST /v1/pair` and gets an
+  /// ordinary device credential; login still needs that credential *and* a
+  /// password. See *Storm Web Bootstrap*.
+  /// True while [bootstrapWebDevice] is in flight.
+  ///
+  /// The router needs it: without it, a fresh browser is "not paired" for the
+  /// whole round trip and the redirect sends it to the QR screen, which then
+  /// vanishes a moment later. Showing someone a pairing screen they must not
+  /// use, and taking it away before they can read it, is worse than showing
+  /// nothing.
+  bool get bootstrapping => _bootstrapping;
+  bool _bootstrapping = false;
+
+  Future<bool> bootstrapWebDevice() async {
+    final s = state.value;
+    if (s == null) return false;
+
+    // `redirect` runs on every navigation and every settings change, and
+    // `paired` stays false for the whole round trip, so without this the same
+    // nonce is spent twice and the second attempt answers 409.
+    if (_bootstrapping) return false;
+
+    // **A returning browser must not mint a second device on every load.**
+    // The server injects a nonce into every document it serves, because it
+    // cannot know whether this browser is already paired — so the client is
+    // what decides, and the check is the same `isPaired` the pairing screen
+    // uses. The unspent nonce simply expires.
+    if (s.isPaired) return true;
+
+    final nonce = readWebBootstrapNonce();
+    if (nonce == null) {
+      // Nothing to spend. The router falls back to the pairing screen, which
+      // is what the server expects when it declines to mint one.
+      _bootstrapFailed = true;
+      ref.notifyListeners();
+      return false;
+    }
+
+    _bootstrapping = true;
+    ref.notifyListeners();
+    final api = AuthApi(baseUrl: s.baseUrl);
+    try {
+      final paired = await api.pair(
+        nonce: nonce,
+        deviceName: 'Storm (web)',
+        platform: 'web',
+      );
+      await save(
+        s.copyWith(
+          deviceId: paired.deviceId,
+          deviceSecret: paired.deviceSecret,
+          serverId: paired.serverId,
+          serverKeyId: paired.keyId,
+          serverPublicKey: paired.publicKey,
+        ),
+      );
+      // Spent, so it is a used credential sitting in the DOM. Remove it.
+      clearWebBootstrapNonce();
+      return true;
+    } on AuthApiException catch (e) {
+      // **Only clear the nonce when it is provably gone.** These three say the
+      // server will never accept it again: consumed (409), expired (410),
+      // bound to a different peer (403). Anything else — a 500, a dropped
+      // connection, a server restarting under us — leaves a *live* nonce, and
+      // wiping it on the way past turned one bad second into a browser that
+      // could never bootstrap again, because the only way to get another is a
+      // new document.
+      if (webNonceIsSpent(e.statusCode)) clearWebBootstrapNonce();
+      _bootstrapFailed = true;
+      return false;
+    } catch (_) {
+      // Not an HTTP answer at all — the socket, or the app being offline. The
+      // nonce is untouched and may still be good on the next attempt.
+      _bootstrapFailed = true;
+      return false;
+    } finally {
+      _bootstrapping = false;
+      ref.notifyListeners();
+      api.dispose();
+    }
+  }
+
+  /// A bootstrap attempt has run and did not produce a device.
+  ///
+  /// The router needs this to stop waiting. Without it, "no device yet" and
+  /// "no device, and there never will be on this page load" are the same
+  /// state, and the redirect holds on the starting screen forever.
+  bool get bootstrapFailed => _bootstrapFailed;
+  bool _bootstrapFailed = false;
+
+  /// Renews or retires the session, so the app never runs on a dead one.
+  ///
+  /// **Nothing used to do this.** `refreshSession()` existed and was tested,
+  /// and had no caller; the expiry was stored and never compared. So a session
+  /// that lapsed stayed "configured" forever: the router kept you on the
+  /// dashboard, every request answered 401, and the screens filled with
+  /// failures that looked like the app breaking rather than like a sign-in
+  /// that had run out.
+  ///
+  /// Three outcomes, and the last is the point:
+  ///
+  /// * still good, or no session at all → nothing happens;
+  /// * stale or expired, refresh works → the session is renewed in place;
+  /// * expired and refresh fails → the session is **cleared**, which makes
+  ///   `hasSession` false and lets the router do the ordinary thing and show
+  ///   the login screen. The device credential is kept, because the device is
+  ///   still paired and asking for a QR again would be asking for something
+  ///   nobody needs.
+  /// True while [ensureSession] is in flight.
+  ///
+  /// A refresh **rotates** the refresh token, and presenting a rotated one
+  /// twice is replay — which the server answers by revoking the whole session.
+  /// Startup and `resumed` can both land here, so two overlapping calls would
+  /// sign the user out using the mechanism meant to keep them signed in.
+  bool _ensuringSession = false;
+
+  Future<void> ensureSession() async {
+    if (_ensuringSession) return;
+
+    // **Wait for the provider rather than reading through it.**
+    // This used to open `final s = state.value; if (s == null) return;` and be
+    // called from `addPostFrameCallback` — which fires after the first frame,
+    // while `build()` is still awaiting `SharedPreferences.getInstance()` and
+    // `secrets.load()`. During `AsyncLoading` `state.value` is null, so the
+    // check returned immediately and did nothing at all; `resumed` is only
+    // delivered on a *change*, so it did not arrive at launch either.
+    // A session that had lapsed therefore stayed "configured" forever — the
+    // exact failure this method exists to prevent.
+    final Settings s;
+    try {
+      s = await future;
+    } catch (_) {
+      // Settings could not be loaded; there is nothing to renew and no way to
+      // tell whether a session exists. The app has bigger problems than this.
+      return;
+    }
+
+    if (!s.hasSession) return;
+    if (!s.accessTokenNeedsRefresh && !s.accessTokenExpired) return;
+
+    _ensuringSession = true;
+    try {
+      await _renewOrRetire();
+    } finally {
+      _ensuringSession = false;
+    }
+  }
+
+  /// Renews the session, or clears it when it is expired and unrenewable.
+  Future<void> _renewOrRetire() async {
+    final renewed = await refreshSession();
+    if (renewed) return;
+
+    // A failed refresh on a token that still has life left is not fatal — the
+    // network may simply be down, and the outbox is built for that. Only an
+    // expired one is retired.
+    if (state.value?.accessTokenExpired ?? false) {
+      final now = state.value!;
+      await save(
+        now.copyWith(
+          accessToken: '',
+          refreshToken: '',
+          accessTokenExpiresAt: '',
+          userId: '',
+        ),
+      );
+    }
+  }
+
+  /// Drops a device credential the server has rejected.
+  ///
+  /// **A credential the server does not know is not a credential.** Without
+  /// this the client is stuck: it holds a device id that fails every
+  /// device-tier call, and `bootstrapWebDevice` short-circuits on `isPaired`,
+  /// so a browser would never mint another one. That is the state a wiped or
+  /// restored `auth.db` leaves every client in — and the state a revoked
+  /// device leaves *one* client in, which is the case that will happen in
+  /// normal use.
+  ///
+  /// The session goes with it: a session belongs to a device, so a device the
+  /// server disowns cannot have a live one.
+  Future<void> forgetDevice() async {
+    final s = state.value;
+    if (s == null) return;
+    await save(
+      s.copyWith(
+        deviceId: '',
+        deviceSecret: '',
+        accessToken: '',
+        refreshToken: '',
+        accessTokenExpiresAt: '',
+        userId: '',
+      ),
+    );
+  }
+
   /// Extends the session using the refresh token.
   ///
   /// Returns `true` on success. On failure (revoked, expired) the caller
@@ -292,12 +541,17 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     if (s == null || s.refreshToken.isEmpty) return false;
     final api = AuthApi(baseUrl: s.baseUrl);
     try {
-      final tokens = await api.refresh(s.refreshToken);
+      // Device tier: refresh is bound to the device holding the session.
+      final tokens = await api.refresh(
+        s.refreshToken,
+        deviceId: s.deviceId,
+        deviceSecret: s.deviceSecret,
+      );
       await save(
         s.copyWith(
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
-          accessTokenExpiresAt: _expiryFrom(tokens.accessExpiresIn),
+          accessTokenExpiresAt: tokens.expires,
         ),
       );
       return true;
@@ -350,11 +604,6 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       ),
     );
   }
-
-  /// `accessExpiresIn` seconds from now, as the ISO 8601 UTC stamp the
-  /// pairing flow stores.
-  static String _expiryFrom(int seconds) =>
-      DateTime.now().toUtc().add(Duration(seconds: seconds)).toIso8601String();
 }
 
 /// The faces a note body can be set in.
@@ -691,3 +940,14 @@ final notesWithTagProvider = FutureProvider.family<List<NoteMeta>, String>((
   if (api == null || vaultId.isEmpty) return const [];
   return api.notesWithTag(vaultId, tag);
 });
+
+/// Whether a `POST /v1/pair` refusal proves the bootstrap nonce is dead.
+///
+/// **A short allow-list, not "any 4xx".** These three are the server saying it
+/// will never accept this nonce again: `409 pairing_consumed`,
+/// `410 pairing_expired`, `403 pairing_wrong_peer`. A `429` is a rate limit and
+/// a `500` is the server having a bad moment — in both cases the nonce is still
+/// live, and throwing it away turns a transient failure into a browser that can
+/// never bootstrap, because the only way to get another is a fresh document.
+bool webNonceIsSpent(int status) =>
+    status == 409 || status == 410 || status == 403;

@@ -25,6 +25,15 @@ pub const ACCESS_PREFIX: &str = "sta_";
 pub const REFRESH_PREFIX: &str = "str_";
 /// Device secret, half of `Authorization: StormDevice <id>:<secret>`.
 pub const DEVICE_SECRET_PREFIX: &str = "dvs_";
+/// MCP key (A14). Sent as `Authorization: Bearer <key>`, like a session token.
+///
+/// **The prefix is what tells the two apart on the wire**, and that is load
+/// bearing rather than cosmetic here: `require_auth` routes a `Bearer` value to
+/// the key path or the session path by this prefix, so it is the only thing
+/// standing between "this is a key" and "this is a session token". Most MCP
+/// clients can only send `Bearer`, which is why keys share the scheme at all
+/// (A14.1).
+pub const KEY_PREFIX: &str = "stk_";
 
 /// 32 bytes — the same 256 bits the data model specifies for every credential.
 const TOKEN_BYTES: usize = 32;

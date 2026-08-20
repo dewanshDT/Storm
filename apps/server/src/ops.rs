@@ -540,13 +540,15 @@ pub async fn issue_pairing_qr(
     state: &Shared,
     purpose: &str,
     user_id: Option<&str>,
+    peer_ip: Option<&str>,
 ) -> ApiResult<PairingQrPayload> {
     let purpose = crate::auth::pairing::PairingPurpose::from_str(purpose)
         .map_err(|e| bad_request(e.to_string()))?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    let (nonce, session) = crate::auth::pairing::create(&mut auth_db, purpose, user_id, &now)
-        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (nonce, session) =
+        crate::auth::pairing::create(&mut auth_db, purpose, user_id, peer_ip, &now)
+            .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let qr = crate::auth::pairing::encode_qr(
         &state.identity.server_id,
@@ -563,6 +565,119 @@ pub async fn issue_pairing_qr(
         exp: qr.exp,
         addr: qr.addr,
     })
+}
+
+// ---- MCP keys (A14) ----------------------------------------------------
+
+/// A freshly minted key, **including the plaintext**.
+///
+/// The only type in Storm that carries one. It exists for exactly one response
+/// and is never persisted, logged or returned again (A14.5).
+#[derive(Debug, Clone, Serialize)]
+pub struct CreatedApiKey {
+    #[serde(flatten)]
+    pub key: crate::auth::keys::ApiKey,
+    /// Shown once. There is no endpoint that can produce this value again.
+    pub secret: String,
+}
+
+/// The user a key operation acts on, and the refusal if the caller may not.
+///
+/// **The one authorization rule A14 adds, and it is deliberately not a policy.**
+/// A user reaches their own keys; an owner reaches anyone's. That is it — no
+/// grants, no vault scoping, no new abstraction for the authorization release
+/// to unpick. When that release lands, this becomes one of its inputs rather
+/// than a competing system.
+fn target_user<'a>(actor: &'a Actor, requested: Option<&'a str>) -> ApiResult<&'a str> {
+    // The legacy shared token has no user behind it (A10), so there is nobody
+    // for a key to belong to. Refusing is the honest answer: minting a key
+    // here would either need a fictional owner or a second ownerless
+    // credential kind, and both are worse than "sign in first".
+    let Some(caller) = actor.user_id() else {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "the legacy shared token has no user to own a key; sign in instead".into(),
+        ));
+    };
+
+    match requested {
+        None => Ok(caller),
+        Some(other) if other == caller => Ok(caller),
+        Some(other) => {
+            if actor.role() == Some(crate::auth::users::Role::Owner) {
+                Ok(other)
+            } else {
+                Err(ApiError(
+                    axum::http::StatusCode::FORBIDDEN,
+                    "you can only manage your own keys".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Mints a key for the caller (A14). The plaintext is in the return value and
+/// nowhere else.
+pub async fn create_api_key(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    expires: Option<&str>,
+    created_via: Option<&str>,
+) -> ApiResult<CreatedApiKey> {
+    let owner = target_user(actor, None)?;
+    crate::auth::keys::validate_name(name).map_err(bad_request)?;
+
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let (key, secret) =
+        crate::auth::keys::create(&mut auth_db, owner, name, created_via, expires, &now)
+            .map_err(|e| bad_request(e.to_string()))?;
+
+    Ok(CreatedApiKey { key, secret })
+}
+
+/// Lists keys. Own by default; an owner may name another user.
+pub async fn list_api_keys(
+    state: &Shared,
+    actor: &Actor,
+    user: Option<&str>,
+) -> ApiResult<Vec<crate::auth::keys::ApiKey>> {
+    let owner = target_user(actor, user)?;
+    let auth_db = state.auth_db.lock().await;
+    auth_db
+        .api_keys_for_user(owner)
+        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Revokes a key. Effective on the next request, not the next restart.
+pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiResult<()> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+
+    let key = auth_db
+        .api_key_by_id(key_id)
+        .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| not_found("no such key"))?;
+
+    // **Checked against the key's real owner**, so naming someone else's key id
+    // does not reveal that it exists — the refusal is the same shape whether
+    // the id is wrong or merely not yours.
+    let allowed = target_user(actor, Some(&key.user_id));
+    if allowed.is_err() {
+        return Err(not_found("no such key"));
+    }
+
+    // The audit row is written inside `keys::revoke`, beside the act.
+    crate::auth::keys::revoke(
+        &mut auth_db,
+        key_id,
+        actor.user_id(),
+        "revoked by user",
+        &now,
+    )
+    .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]

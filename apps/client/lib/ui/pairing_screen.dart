@@ -2,7 +2,7 @@
 /// paired, authenticated installation.
 ///
 /// Flow:
-/// 1. User pastes a `storm://pair` URI (or scans a QR on mobile later).
+/// 1. User scans a `storm://pair` QR, or pastes the URI (slice 14).
 /// 2. Client verifies the server's identity via the challenge step.
 /// 3. Client consumes the pairing nonce → device credentials.
 /// 4. Client creates the owner account (first user).
@@ -21,6 +21,7 @@ import '../api/auth_api.dart';
 import '../api/auth_models.dart';
 import '../api/ed25519_verify.dart';
 import '../state/app_state.dart';
+import 'scan_pairing_screen.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 
@@ -64,6 +65,21 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   // ---- Step 1: parse and verify ----
 
+  /// Opens the camera and drops whatever it reads into the paste field.
+  ///
+  /// Deliberately routed through the field and `_onUriChanged` rather than
+  /// straight into `_verifyAndPair`: the scanned string then goes through
+  /// exactly the same parse and the same validation as a pasted one, and the
+  /// person can see what was read before anything is sent.
+  Future<void> _scan() async {
+    final scanned = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const ScanPairingScreen()),
+    );
+    if (scanned == null || !mounted) return;
+    _uriController.text = scanned;
+    _onUriChanged(scanned);
+  }
+
   void _onUriChanged(String value) {
     final parsed = PairingUri.parse(value.trim());
     setState(() {
@@ -75,7 +91,12 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   Future<void> _verifyAndPair() async {
     final uri = _parsedUri;
     if (uri == null) {
-      setState(() => _error = 'Invalid storm://pair URI.');
+      setState(
+        () => _error =
+            'That does not look like a complete pairing URI.\n\n'
+            'It should start `storm://pair?` and carry v, sid, pk, n, exp and '
+            'addr. Copy the whole line `storm-server pair` printed.',
+      );
       return;
     }
     if (uri.isExpired) {
@@ -91,7 +112,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     });
 
     try {
-      final authApi = AuthApi(baseUrl: uri.address);
+      final authApi = AuthApi(baseUrl: uri.baseUrl);
 
       // 1. Fetch server identity and verify it matches the QR.
       final serverInfo = await authApi.serverInfo();
@@ -138,6 +159,48 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         version: packageInfo.version,
       );
 
+      // **Does this server already have accounts?**
+      //
+      // Pairing and first-run are not the same thing, and this screen used to
+      // assume they were: every successful pair went straight to "create the
+      // owner account". That was invisible while the only way to pair was a
+      // fresh server — and wrong the moment "Add a device" made joining an
+      // existing server normal, which is how it was found. Someone adding
+      // their phone to a server they already have an account on was asked to
+      // invent a second one.
+      //
+      // *Storm Auth Protocol* has always described this branch: the user list
+      // behind device auth is what tells a client which screen it is on.
+      final users = await authApi.listUsers(
+        deviceId: pairResult.deviceId,
+        deviceSecret: pairResult.deviceSecret,
+      );
+
+      if (users.isNotEmpty) {
+        // Keep the device credential and let the router take it from here:
+        // paired with no session is exactly what /login exists for, and it
+        // already offers the account picker this device can now fetch.
+        final current = ref.read(settingsProvider).value ?? const Settings();
+        await ref
+            .read(settingsProvider.notifier)
+            .save(
+              current.copyWith(
+                baseUrl: uri.baseUrl,
+                deviceId: pairResult.deviceId,
+                deviceSecret: pairResult.deviceSecret,
+                serverId: serverInfo.serverId,
+                serverKeyId: serverInfo.keyId,
+                serverPublicKey: serverInfo.publicKey,
+                // Paired now; a stale legacy token would keep `isConfigured`
+                // true and skip the sign-in this pairing was for.
+                token: '',
+              ),
+            );
+        if (!mounted) return;
+        setState(() => _verifying = false);
+        return;
+      }
+
       setState(() {
         _serverInfo = serverInfo;
         _pairResult = pairResult;
@@ -154,9 +217,30 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             : 'Server error: ${e.message}';
         _verifying = false;
       });
-    } catch (e) {
+    } on ArgumentError catch (e) {
+      // A local fault, not a network one. An unusable address raises this
+      // *before* a packet is sent, and calling that "couldn't reach the
+      // server" is the M9/M10 bug: it sends someone debugging their wifi when
+      // the real answer is that the URI they pasted lost a character.
       setState(() {
-        _error = "Couldn't reach the server.\n\n$e";
+        _error =
+            'That pairing URI is not usable: ${e.message}\n\n'
+            'Copy the whole line `storm-server pair` printed — a line break or '
+            'a stray space inside it will do this.';
+        _verifying = false;
+      });
+    } on FormatException catch (e) {
+      setState(() {
+        _error =
+            'That pairing URI could not be read: ${e.message}\n\n'
+            'Copy the whole line `storm-server pair` printed.';
+        _verifying = false;
+      });
+    } catch (e) {
+      // Naming the address matters: this is the one message that should send
+      // someone to look at the network, so it should say what it dialled.
+      setState(() {
+        _error = "Couldn't reach the server at ${uri.address}.\n\n$e";
         _verifying = false;
       });
     }
@@ -175,8 +259,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       setState(() => _error = 'Username must be at least 3 characters.');
       return;
     }
-    if (password.length < 8) {
-      setState(() => _error = 'Password must be at least 8 characters.');
+    // 12, matching the server's `MIN_PASSWORD_CHARS`. At 8 this screen
+    // accepted a password the server then refused with a 422, which reads as
+    // the app breaking rather than as the rule it is.
+    if (password.length < 12) {
+      setState(() => _error = 'Password must be at least 12 characters.');
       return;
     }
 
@@ -187,8 +274,15 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
     try {
       final uri = _parsedUri!;
-      final authApi = AuthApi(baseUrl: uri.address);
-      await authApi.createFirstUser(username: username, password: password);
+      final authApi = AuthApi(baseUrl: uri.baseUrl);
+      // Device tier: the credential from pairing, a step earlier in this flow.
+      final pair = _pairResult!;
+      await authApi.createFirstUser(
+        username: username,
+        password: password,
+        deviceId: pair.deviceId,
+        deviceSecret: pair.deviceSecret,
+      );
       if (!mounted) return;
       // Account created — now log in.
       await _login(username, password);
@@ -219,7 +313,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     try {
       final uri = _parsedUri!;
       final pair = _pairResult!;
-      final authApi = AuthApi(baseUrl: uri.address);
+      final authApi = AuthApi(baseUrl: uri.baseUrl);
       final tokens = await authApi.login(
         deviceId: pair.deviceId,
         deviceSecret: pair.deviceSecret,
@@ -231,15 +325,13 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
       // Save everything to Settings.
       final current = ref.read(settingsProvider).value ?? const Settings();
-      final expiresAt = DateTime.now()
-          .add(Duration(seconds: tokens.accessExpiresIn))
-          .toUtc()
-          .toIso8601String();
+      // The server sends the absolute instant; there is nothing to compute.
+      final expiresAt = tokens.expires;
       await ref
           .read(settingsProvider.notifier)
           .save(
             current.copyWith(
-              baseUrl: uri.address,
+              baseUrl: uri.baseUrl,
               // Device credentials.
               deviceId: pair.deviceId,
               deviceSecret: pair.deviceSecret,
@@ -329,7 +421,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 ),
                 SizedBox(height: t.sp * 1),
                 Text(
-                  'Scan or paste the pairing QR from your server.',
+                  // Not "scan": there is no scanner in this app, and offering
+                  // one that does not exist sends people hunting for a camera
+                  // button on their first run. `storm-server pair` prints the
+                  // URI as text — say the thing that is actually possible.
+                  'Run `storm-server pair` and paste the URI it prints.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
@@ -347,6 +443,18 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                   keyboardType: TextInputType.url,
                   onChanged: _onUriChanged,
                 ),
+                // Only where a camera exists. On desktop and web the paste
+                // field is the whole story, and a button that opens nothing is
+                // the same broken promise the old "Scan or paste" copy made.
+                if (canScanPairingQr) ...[
+                  SizedBox(height: t.sp * 1.5),
+                  OutlinedButton.icon(
+                    key: const Key('scan-pairing-qr'),
+                    onPressed: _scan,
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan a code instead'),
+                  ),
+                ],
                 if (_error != null) ...[
                   SizedBox(height: t.sp * 2),
                   Container(

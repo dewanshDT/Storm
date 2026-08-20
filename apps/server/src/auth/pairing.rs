@@ -31,7 +31,18 @@ const NONCE_BYTES: usize = 24;
 const QR_VERSION: &str = "1";
 
 /// Pairing nonce TTL: 5 minutes.
+///
+/// Long enough to walk a QR across a room and type a password.
 pub const PAIRING_TTL_SECS: i64 = 300;
+
+/// Web bootstrap nonce TTL: 90 seconds.
+///
+/// Much shorter, because nothing human happens between issuing and consuming
+/// one — the page loads and the client spends it immediately. It is also handed
+/// to anything that can fetch the page, so its window is the main thing keeping
+/// a scraped nonce worthless, and every page load mints one that nobody will
+/// consume.
+pub const WEB_BOOTSTRAP_TTL_SECS: i64 = 90;
 
 /// Rate-limit: max verification attempts per nonce before it is locked out.
 pub const PAIRING_MAX_ATTEMPTS: i32 = 10;
@@ -47,6 +58,15 @@ pub enum PairingPurpose {
     FirstUser,
     /// Adding a new device to a server that already has users.
     AddDevice,
+    /// A browser that was served Storm's own web client.
+    ///
+    /// Distinct from the two above rather than folded into either, and that is
+    /// deliberate: overloading `FirstUser` would let a browser inherit
+    /// first-run semantics it must not have, and would make `created_by IS
+    /// NULL` mean two different things. Keeping it separate is what lets the
+    /// audit trail say which door a device came through, and gives any future
+    /// policy something to attach to. See *Storm Web Bootstrap*.
+    WebBootstrap,
 }
 
 impl PairingPurpose {
@@ -54,6 +74,7 @@ impl PairingPurpose {
         match self {
             PairingPurpose::FirstUser => "first_user",
             PairingPurpose::AddDevice => "add_device",
+            PairingPurpose::WebBootstrap => "web_bootstrap",
         }
     }
 
@@ -61,6 +82,7 @@ impl PairingPurpose {
         match s {
             "first_user" => Ok(PairingPurpose::FirstUser),
             "add_device" => Ok(PairingPurpose::AddDevice),
+            "web_bootstrap" => Ok(PairingPurpose::WebBootstrap),
             other => bail!("unknown pairing purpose: {other:?}"),
         }
     }
@@ -94,6 +116,9 @@ pub struct PairingRow {
     pub expires: String,
     pub consumed: Option<String>,
     pub attempts: i32,
+    /// The peer this nonce was issued to, for `web_bootstrap`. `None` for the
+    /// QR purposes, which travel by eye and by hand and are not bound.
+    pub peer_ip: Option<String>,
 }
 
 /// The payload a client needs to render a QR code.
@@ -136,6 +161,33 @@ pub struct ConsumeResult {
     pub key_id: String,
 }
 
+/// Whether two peer addresses are the same client, for nonce binding.
+///
+/// Compared as parsed addresses rather than as strings, because a dual-stack
+/// listener reports an IPv4 client as `::ffff:192.168.1.5` on one connection
+/// and can report `192.168.1.5` on another — textually different, the same
+/// machine. Ports are never compared: a browser opens a new connection for the
+/// API call, so the port always differs.
+pub fn same_peer(a: &str, b: &str) -> bool {
+    use std::net::IpAddr;
+    fn canonical(s: &str) -> Option<IpAddr> {
+        let ip: IpAddr = s.parse().ok()?;
+        Some(match ip {
+            // Unwrap IPv4-mapped IPv6 so both spellings compare equal.
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => IpAddr::V6(v6),
+            },
+            v4 => v4,
+        })
+    }
+    match (canonical(a), canonical(b)) {
+        (Some(x), Some(y)) => x == y,
+        // An address we cannot parse is not one we can claim matches.
+        _ => false,
+    }
+}
+
 /// Generates a pairing nonce: 24 random bytes as base64url without padding.
 ///
 /// The result contains no `:` or `"` (base64url uses `A-Z a-z 0-9 - _` only),
@@ -161,6 +213,7 @@ pub fn create(
     db: &mut AuthDb,
     purpose: PairingPurpose,
     created_by: Option<&str>,
+    peer_ip: Option<&str>,
     now: &str,
 ) -> Result<(String, PairingSession)> {
     let nonce = generate_nonce();
@@ -172,7 +225,11 @@ pub fn create(
         use time::format_description::well_known::Rfc3339;
         let at = time::OffsetDateTime::parse(now, &Rfc3339)
             .context("parsing current time for pairing expiry")?;
-        (at + Duration::seconds(PAIRING_TTL_SECS))
+        let ttl = match purpose {
+            PairingPurpose::WebBootstrap => WEB_BOOTSTRAP_TTL_SECS,
+            _ => PAIRING_TTL_SECS,
+        };
+        (at + Duration::seconds(ttl))
             .format(&Rfc3339)
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
     };
@@ -182,6 +239,7 @@ pub fn create(
         &nonce_hash,
         purpose.as_str(),
         created_by,
+        peer_ip,
         now,
         &expires,
     )?;
@@ -223,6 +281,7 @@ pub fn consume(
     device_name: &str,
     platform: Option<&str>,
     client_version: Option<&str>,
+    peer_ip: Option<&str>,
     now: &str,
 ) -> Result<ConsumeResult> {
     let nonce_hash = hash_nonce(nonce);
@@ -233,6 +292,19 @@ pub fn consume(
 
     if row.consumed.is_some() {
         bail!("pairing nonce already used");
+    }
+
+    // **A bound nonce is only good from where it was issued.** Only
+    // `web_bootstrap` sets this: that nonce is handed to anything that can
+    // fetch the page, so binding it to the peer is what stops one scraped from
+    // a log or a proxy being spent somewhere else. A QR nonce is deliberately
+    // unbound — it is carried across the room to a different device, which is
+    // its whole purpose.
+    if let Some(issued_to) = row.peer_ip.as_deref() {
+        match peer_ip {
+            Some(now_from) if same_peer(issued_to, now_from) => {}
+            _ => bail!("pairing nonce was issued to a different client"),
+        }
     }
 
     // Check expiry.
@@ -391,7 +463,7 @@ mod tests {
         let (srv, cred) = seed_server_identity(&mut db);
         let now = "2026-08-16T12:00:00Z";
 
-        let (nonce, session) = create(&mut db, PairingPurpose::FirstUser, None, now).unwrap();
+        let (nonce, session) = create(&mut db, PairingPurpose::FirstUser, None, None, now).unwrap();
         assert!(session.id.starts_with("pair_"));
         assert_eq!(session.purpose, PairingPurpose::FirstUser);
         assert!(session.created_by.is_none());
@@ -402,6 +474,7 @@ mod tests {
             "Pixel 10",
             Some("android"),
             Some("0.3.0"),
+            None,
             now,
         )
         .unwrap();
@@ -418,10 +491,10 @@ mod tests {
         seed_server_identity(&mut db);
         let now = "2026-08-16T12:00:00Z";
 
-        let (nonce, _) = create(&mut db, PairingPurpose::FirstUser, None, now).unwrap();
-        consume(&mut db, &nonce, "A", None, None, now).unwrap();
+        let (nonce, _) = create(&mut db, PairingPurpose::FirstUser, None, None, now).unwrap();
+        consume(&mut db, &nonce, "A", None, None, None, now).unwrap();
 
-        let err = consume(&mut db, &nonce, "B", None, None, now);
+        let err = consume(&mut db, &nonce, "B", None, None, None, now);
         assert!(err.is_err());
         assert!(
             err.unwrap_err().to_string().contains("already used"),
@@ -435,11 +508,11 @@ mod tests {
         seed_server_identity(&mut db);
         let now = "2026-08-16T12:00:00Z";
 
-        let (nonce, _) = create(&mut db, PairingPurpose::FirstUser, None, now).unwrap();
+        let (nonce, _) = create(&mut db, PairingPurpose::FirstUser, None, None, now).unwrap();
 
         // Step past the TTL.
         let past = "2026-08-16T12:06:00Z";
-        let err = consume(&mut db, &nonce, "A", None, None, past);
+        let err = consume(&mut db, &nonce, "A", None, None, None, past);
         assert!(err.is_err());
         assert!(
             err.unwrap_err().to_string().contains("expired"),
@@ -453,7 +526,8 @@ mod tests {
         seed_server_identity(&mut db);
         let now = "2026-08-16T12:00:00Z";
 
-        let (nonce, _session) = create(&mut db, PairingPurpose::FirstUser, None, now).unwrap();
+        let (nonce, _session) =
+            create(&mut db, PairingPurpose::FirstUser, None, None, now).unwrap();
 
         // Exhaust the attempts on a *different* session. The rate limit is
         // per-session, so the real session's counter must remain untouched.
@@ -462,7 +536,7 @@ mod tests {
         }
 
         // The real nonce still works (its session hasn't been bumped).
-        let result = consume(&mut db, &nonce, "A", None, None, now);
+        let result = consume(&mut db, &nonce, "A", None, None, None, now);
         assert!(
             result.is_ok(),
             "correct nonce should still work, got: {:?}",
@@ -476,14 +550,14 @@ mod tests {
         seed_server_identity(&mut db);
         let now = "2026-08-16T12:00:00Z";
 
-        let (nonce, session) = create(&mut db, PairingPurpose::FirstUser, None, now).unwrap();
+        let (nonce, session) = create(&mut db, PairingPurpose::FirstUser, None, None, now).unwrap();
 
         // Exhaust attempts on this specific session.
         for _ in 0..PAIRING_MAX_ATTEMPTS {
             db.increment_pairing_attempts(&session.id).unwrap();
         }
 
-        let err = consume(&mut db, &nonce, "A", None, None, now);
+        let err = consume(&mut db, &nonce, "A", None, None, None, now);
         assert!(err.is_err());
         assert!(
             err.unwrap_err().to_string().contains("too many"),
@@ -511,11 +585,17 @@ mod tests {
         )
         .unwrap();
 
-        let (nonce, session) =
-            create(&mut db, PairingPurpose::AddDevice, Some(&user.id), now).unwrap();
+        let (nonce, session) = create(
+            &mut db,
+            PairingPurpose::AddDevice,
+            Some(&user.id),
+            None,
+            now,
+        )
+        .unwrap();
         assert_eq!(session.created_by.as_deref(), Some(user.id.as_str()));
 
-        let result = consume(&mut db, &nonce, "iPad", None, None, now).unwrap();
+        let result = consume(&mut db, &nonce, "iPad", None, None, None, now).unwrap();
         assert!(!result.device_id.is_empty());
         assert_eq!(result.server_id, srv.id);
     }

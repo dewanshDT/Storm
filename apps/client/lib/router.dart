@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,7 +10,11 @@ import 'ui/browse_screen.dart';
 import 'ui/client_settings_screen.dart';
 import 'ui/connect_screen.dart';
 import 'ui/gallery_screen.dart';
+import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
+import 'ui/mcp_keys_screen.dart';
+import 'ui/signup_screen.dart';
+import 'ui/starting_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
@@ -24,6 +31,10 @@ import 'ui/tags_screen.dart';
 /// single-screen shell simply didn't have.
 abstract final class Routes {
   static const dashboard = '/';
+
+  /// Shown while the app decides where to send you. Never navigated to
+  /// directly — the redirect holds here instead of guessing.
+  static const starting = '/starting';
   static const connect = '/connect';
   static const pairing = '/pairing';
 
@@ -31,9 +42,21 @@ abstract final class Routes {
   /// which is first-run only and asks for a QR nobody needs twice.
   static const login = '/login';
 
+  /// Create an account, on a server whose owner has opened registration (A13).
+  /// Reachable from [login] only when the server says so.
+  static const signup = '/signup';
+
   /// Reachable without a vault, from the phone's dashboard — which is the
   /// screen you are on when there is no vault yet.
   static const serverSettings = '/settings/server';
+
+  /// Show a pairing QR so another device can join. Session tier: only a
+  /// signed-in client can vouch for a new one.
+  static const addDevice = '/add-device';
+
+  /// Manage the MCP keys this account holds (A14). Session tier, for the same
+  /// reason: a key belongs to a user, and minting one is the user vouching.
+  static const mcpKeys = '/settings/mcp-keys';
 
   /// The same two screens, mounted inside the vault shell.
   ///
@@ -103,11 +126,61 @@ final routerProvider = Provider<GoRouter>((ref) {
       final atConnect = state.matchedLocation == Routes.connect;
       final atPairing = state.matchedLocation == Routes.pairing;
       final atLogin = state.matchedLocation == Routes.login;
-      final atAuthScreen = atConnect || atPairing || atLogin;
+      final atSignup = state.matchedLocation == Routes.signup;
+      final atAuthScreen = atConnect || atPairing || atLogin || atSignup;
 
-      // Settings are still loading; hold still rather than flashing the
-      // connect screen at someone who is already set up.
-      if (settings.isLoading) return null;
+      // **Hold on a neutral screen rather than guessing.** `null` means "stay
+      // where you are", which on a cold start is the dashboard — so returning
+      // it here rendered the vault shell for someone who may not even be
+      // signed in. Holding costs a frame; guessing costs a wrong screen.
+      if (settings.isLoading) {
+        return state.matchedLocation == Routes.starting
+            ? null
+            : Routes.starting;
+      }
+
+      // **The web client bootstraps its own device rather than showing a QR.**
+      // Storm served this page, so the browser already knows the server; the
+      // document carries a short-lived nonce and this spends it. Fire-and-
+      // forget: it saves settings on success, which notifies `refresh` and
+      // re-runs this redirect with `paired` true, so the browser lands on
+      // /login instead of /pairing. A returning browser short-circuits inside
+      // `bootstrapWebDevice` on `isPaired` and mints nothing.
+      //
+      // Native clients are untouched — off the web the nonce reader is a stub
+      // that returns null, and the QR flow is the only way in.
+      if (kIsWeb && !paired && !configured) {
+        final notifier = ref.read(settingsProvider.notifier);
+
+        // **The bootstrap has run and produced nothing — fall through to the
+        // pairing screen.** This branch used to return `Routes.starting` on
+        // every path, including this one, so a browser that could not
+        // bootstrap waited on the brand mark forever with no route out.
+        //
+        // Failing to mint is *expected*, not exceptional: the server declines
+        // behind a reverse proxy (a forwarding header hides the real peer),
+        // over the per-peer rate limit, over the outstanding ceiling, and when
+        // it has no peer address to bind to. The comments here always claimed
+        // the pairing screen was the fallback; nothing implemented it.
+        if (notifier.bootstrapFailed) {
+          return state.matchedLocation == Routes.pairing
+              ? null
+              : Routes.pairing;
+        }
+
+        // Not paired *yet* — the bootstrap is in flight. Sending them to the
+        // QR screen now means showing a pairing screen they must not use and
+        // taking it away a moment later, which is the flicker this avoids.
+        if (notifier.bootstrapping) {
+          return state.matchedLocation == Routes.starting
+              ? null
+              : Routes.starting;
+        }
+        unawaited(notifier.bootstrapWebDevice());
+        return state.matchedLocation == Routes.starting
+            ? null
+            : Routes.starting;
+      }
 
       // The gallery needs no server, and bouncing it to Connect would make it
       // unreachable on exactly the install where the theme is being judged.
@@ -117,13 +190,23 @@ final routerProvider = Provider<GoRouter>((ref) {
       // screen is behind us. Pairing is deliberately not required here: an
       // install that predates auth has a token and no device, and sending it
       // to /pairing would lock it out of a vault it can already read.
-      if (configured) return atAuthScreen ? Routes.dashboard : null;
+      // Anyone who reached /starting and is now settled gets moved on; it is
+      // a waiting room, not a destination.
+      final atStarting = state.matchedLocation == Routes.starting;
+
+      if (configured) {
+        return (atAuthScreen || atStarting) ? Routes.dashboard : null;
+      }
 
       // Paired, but no session — signed out, or the session was revoked. This
       // is /login's whole reason to exist: the device already has credentials,
       // so asking for a pairing QR again would be asking for something the
       // user does not have and does not need.
-      if (paired) return atLogin ? null : Routes.login;
+      // /signup is the same situation as /login — paired, no session — so it
+      // has to be reachable from here, or the link on the login screen would
+      // bounce straight back to the screen it was offered on.
+      if (paired) return (atLogin || atSignup) ? null : Routes.login;
+      if (atStarting) return Routes.pairing;
 
       // Nothing at all. Pairing is the first-run flow, but /connect stays
       // reachable for a server that has no auth yet. /login is not — there is
@@ -132,8 +215,15 @@ final routerProvider = Provider<GoRouter>((ref) {
       return Routes.pairing;
     },
     routes: [
+      GoRoute(path: Routes.starting, builder: (_, _) => const StartingScreen()),
       GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
+      GoRoute(path: Routes.signup, builder: (_, _) => const SignupScreen()),
+      GoRoute(
+        path: Routes.addDevice,
+        builder: (_, _) => const AddDeviceScreen(),
+      ),
+      GoRoute(path: Routes.mcpKeys, builder: (_, _) => const McpKeysScreen()),
       GoRoute(path: Routes.connect, builder: (_, _) => const ConnectScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it

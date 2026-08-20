@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Extension, Path, Query, State,
+        ConnectInfo, Extension, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -83,6 +83,12 @@ pub struct AppState {
     /// the legacy token off and still being let in until they restart would
     /// make the confirmation step of the A10 cutover meaningless.
     pub legacy_token_enabled: std::sync::atomic::AtomicBool,
+    /// Whether registration is open (A13), mirrored out of the registry.
+    ///
+    /// Atomic and read per request for the same reason as the switch above: an
+    /// operator who turns registration off and is still handing out accounts
+    /// until they restart has not turned it off.
+    pub allow_registration: std::sync::atomic::AtomicBool,
     /// Bootstrap pairing nonce (plaintext), if one was created at boot when
     /// the user table was empty. Needed to reconstruct the QR payload for
     /// the console log. Not read after boot — the field exists so a future
@@ -304,6 +310,8 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
     // ---- device tier: `StormDevice <id>:<secret>` -------------------------
     let device_router = Router::new()
         .route("/v1/users", get(list_users))
+        .route("/v1/users", post(register_user))
+        .route("/v1/auth/registration", get(registration_state))
         .route("/v1/users/first", post(create_first_user))
         .route("/v1/auth/login", post(login_handler))
         .route("/v1/auth/refresh", post(refresh_handler))
@@ -321,6 +329,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/legacy-token", put(put_legacy_token))
+        .route("/v1/config/registration", put(put_registration))
+        // MCP keys (A14). **Session tier**: minting a key costs a real
+        // sign-in on a paired device, which is also what makes "a key cannot
+        // mint a key" true without a special case — a key never reaches here.
+        .route("/v1/keys", get(list_keys).post(create_key))
+        .route("/v1/keys/{id}", delete(revoke_key))
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
@@ -365,8 +379,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         ))
         .layer(Extension(RequiredTier::Session));
 
-    // MCP needs session auth + the mcp_enabled gate. It is nested under /mcp
+    // MCP needs authentication + the mcp_enabled gate. It is nested under /mcp
     // rather than merged, so its paths don't collide with REST routes.
+    //
+    // **`RequiredTier::Mcp`, not `Session`** (A14): this is the one surface
+    // that accepts an `stk_` key, and it still accepts everything it accepted
+    // before — a session token, and the legacy shared token while that switch
+    // is on. Nothing about the existing MCP path changed.
     let mcp_with_auth = Router::new()
         .nest("/mcp", mcp_router)
         // Inner to `require_auth`, so `Extension<Actor>` is already set when it
@@ -378,7 +397,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             state.clone(),
             require_auth,
         ))
-        .layer(Extension(RequiredTier::Session));
+        .layer(Extension(RequiredTier::Mcp));
 
     // Merge all tiers: none is checked first, then device, then session, then
     // MCP. Each carries its own auth layer; merge does not leak them.
@@ -418,6 +437,218 @@ async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::au
         .list_users()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(users))
+}
+
+/// GET /v1/auth/registration — is registration open?
+///
+/// Device tier, because the login screen already holds a device credential by
+/// the time it needs to ask, and whether accounts can be created is policy
+/// rather than identity — which is why it is not a field on `GET /v1/server`,
+/// whose field set is asserted exactly and whose job is the identity
+/// handshake.
+///
+/// **This is UX, not a gate.** `POST /v1/users` enforces the switch itself; a
+/// client that lies to itself about this learns the truth at `403`.
+async fn registration_state(State(state): State<Shared>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": state
+            .allow_registration
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }))
+}
+
+/// POST /v1/users — create an ordinary account, when registration is open.
+///
+/// Device tier: the caller has a paired device, which after web bootstrap
+/// means anyone who can reach the web app. That is the deliberate meaning of
+/// the switch (A13), and the reason it is off until someone turns it on.
+///
+/// **Always a member.** Owner belongs to the bootstrap account; registration
+/// must not be able to mint one, or an open server would hand out the role
+/// that can disable every other account.
+async fn register_user(
+    State(state): State<Shared>,
+    Json(body): Json<FirstUserRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if !state
+        .allow_registration
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        // Explicit rather than a bare 404: a client that raced the setting —
+        // drew the button, then submitted after it was turned off — can say
+        // what happened instead of guessing.
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "registration_disabled".into(),
+        ));
+    }
+
+    if let Err(msg) = crate::auth::password::validate_password(&body.password) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
+
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+
+    // Registration cannot be the first account. The bootstrap window is
+    // `/v1/users/first`'s alone, and `create_user` would otherwise force this
+    // one to be an owner — exactly the thing this endpoint must never mint.
+    if auth_db
+        .count_users()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        == 0
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this server has no owner yet; create the first account instead".into(),
+        ));
+    }
+
+    let hasher = &state.hasher;
+    let hash = hasher
+        .hash(body.password.clone())
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match crate::auth::users::create_user(
+        &mut auth_db,
+        crate::auth::users::NewUser {
+            username: &body.username,
+            display_name: None,
+            password_hash: &hash,
+            role: crate::auth::users::Role::Member,
+        },
+        &now,
+    ) {
+        Ok(user) => Ok(Json(serde_json::json!({
+            "user_id": user.id,
+            "role": user.role.as_str(),
+        }))),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("UNIQUE") || msg.contains("already") {
+                Err(ApiError(StatusCode::CONFLICT, "username_taken".into()))
+            } else {
+                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
+            }
+        }
+    }
+}
+
+/// PUT /v1/config/registration — open or close registration (A13).
+///
+/// Owner only. Roles are enforced against each other elsewhere but consulted
+/// for access nowhere yet, so this is one explicit check rather than the start
+/// of a policy system: opening a server to the world is not a thing a member
+/// should be able to do to an owner.
+async fn put_registration(
+    State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
+    Json(body): Json<RegistrationBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if auth.authenticated.user.role != crate::auth::users::Role::Owner {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "only an owner can change registration".into(),
+        ));
+    }
+
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.allow_registration = body.enabled;
+        vaults.registry.save(&state.state_dir)?;
+    }
+    // Atomic, so it applies to the next request rather than the next restart.
+    state
+        .allow_registration
+        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
+
+    let auth_db = state.auth_db.lock().await;
+    let _ = auth_db.record_event(
+        "registration_changed",
+        Some(&auth.authenticated.user.id),
+        None,
+        &crate::index::now_rfc3339(),
+        &format!(r#"{{"enabled":{}}}"#, body.enabled),
+    );
+
+    Ok(Json(serde_json::json!({ "enabled": body.enabled })))
+}
+
+#[derive(Deserialize)]
+struct RegistrationBody {
+    enabled: bool,
+}
+
+/// POST /v1/keys — mint an MCP key (A14).
+///
+/// **The response carries the plaintext, and this is the only time it exists.**
+/// Nothing stores it: not the database (which holds a blake3 hash), not the
+/// server, not the client. A caller who loses it revokes and mints another.
+async fn create_key(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    // **Optional, and that is the whole reason this compiles honestly.** The
+    // legacy shared token satisfies the session tier but inserts no
+    // `SessionAuth`, so a required extractor here would panic and answer `500`
+    // where `403` is the truth — the exact shape of the bug the device tier
+    // had. `ops::create_api_key` refuses the legacy token on its own terms,
+    // because it has no user for the key to belong to.
+    session: Option<Extension<SessionAuth>>,
+    Json(body): Json<CreateKeyRequest>,
+) -> ApiResult<Json<crate::ops::CreatedApiKey>> {
+    // Which device minted it, for the audit trail — a key that turns up in a
+    // log is easier to place when you know where it was born.
+    let via = session.map(|Extension(s)| s.authenticated.device.id.clone());
+    Ok(Json(
+        crate::ops::create_api_key(
+            &state,
+            &actor,
+            &body.name,
+            body.expires.as_deref(),
+            via.as_deref(),
+        )
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct CreateKeyRequest {
+    name: String,
+    /// Optional absolute RFC3339 instant. `None` means the key does not expire
+    /// — the design's default, revisited when there is evidence for another.
+    #[serde(default)]
+    expires: Option<String>,
+}
+
+/// GET /v1/keys — the caller's keys, or another user's if the caller is an owner.
+async fn list_keys(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(q): Query<ListKeysQuery>,
+) -> ApiResult<Json<Vec<crate::auth::keys::ApiKey>>> {
+    Ok(Json(
+        crate::ops::list_api_keys(&state, &actor, q.user.as_deref()).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct ListKeysQuery {
+    #[serde(default)]
+    user: Option<String>,
+}
+
+/// DELETE /v1/keys/{id} — revoke a key, effective on the next request.
+async fn revoke_key(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::revoke_api_key(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST /v1/users/first — create the owner account, once.
@@ -772,6 +1003,188 @@ async fn ws_ticket_handler(
 
 // ---- pairing endpoints ---------------------------------------------------
 
+/// How many web-bootstrap nonces one peer may be issued per minute.
+pub const WEB_BOOTSTRAP_PER_MINUTE: i64 = 12;
+
+/// Default ceiling on *outstanding* (unconsumed, unexpired) web-bootstrap
+/// nonces, across every peer.
+///
+/// A bound on the pairing table, not on how many devices may exist — a
+/// permanent cap on devices would be a different and unjustified restriction.
+/// Reachable only by a client fetching the page far faster than a person does.
+pub const WEB_BOOTSTRAP_MAX_OUTSTANDING: i64 = 256;
+
+/// Headers whose presence means the peer address belongs to a proxy.
+const FORWARDING_HEADERS: [&str; 4] = [
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "forwarded",
+];
+
+/// Mints a web bootstrap nonce for `peer`, or `None` if it should not have one.
+///
+/// `None` is never an error to the caller: the index document is served either
+/// way, and a client that does not get a nonce simply sees the pairing screen.
+/// Serving the app is not the thing being rationed.
+async fn web_bootstrap_nonce(
+    state: &Shared,
+    peer: std::net::IpAddr,
+    headers: &HeaderMap,
+) -> Option<(String, String)> {
+    // **Behind a proxy, nobody gets one.** The peer address would be the
+    // proxy's, so binding would bind the entire LAN to a single address —
+    // the exact opposite of the intent. `X-Forwarded-For` is not consulted as
+    // a substitute because it is set by the client. A deployment that wants
+    // this behind a proxy needs explicit trusted-proxy configuration, which is
+    // deferred rather than guessed at.
+    if FORWARDING_HEADERS.iter().any(|h| headers.contains_key(*h)) {
+        tracing::debug!("no web bootstrap: a forwarding header hides the real peer");
+        return None;
+    }
+
+    let peer_ip = peer.to_string();
+    let now = crate::index::now_rfc3339();
+
+    {
+        let auth_db = state.auth_db.lock().await;
+
+        // Sweep first: every page load mints one of these and almost none are
+        // consumed, so without this the table grows with traffic rather than
+        // with devices — and the outstanding count below would be measuring
+        // litter.
+        if let Err(e) = auth_db.sweep_expired_pairings(&now) {
+            tracing::warn!(error = %e, "sweeping expired pairing sessions");
+        }
+
+        let minute_ago = crate::index::rfc3339_minus_secs(&now, 60);
+        match auth_db.web_bootstrap_issued_since(&peer_ip, &minute_ago) {
+            Ok(n) if n >= WEB_BOOTSTRAP_PER_MINUTE => {
+                tracing::warn!(peer = %peer_ip, issued = n, "web bootstrap rate limit");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "counting web bootstrap issuance");
+                return None;
+            }
+            _ => {}
+        }
+
+        match auth_db.web_bootstrap_outstanding(&now) {
+            Ok(n) if n >= WEB_BOOTSTRAP_MAX_OUTSTANDING => {
+                tracing::warn!(outstanding = n, "web bootstrap ceiling reached");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "counting outstanding web bootstraps");
+                return None;
+            }
+            _ => {}
+        }
+    }
+
+    match crate::ops::issue_pairing_qr(state, "web_bootstrap", None, Some(&peer_ip)).await {
+        Ok(qr) => Some((qr.n, qr.exp)),
+        Err(e) => {
+            tracing::warn!(error = %e.1, "minting a web bootstrap nonce");
+            None
+        }
+    }
+}
+
+/// Puts the bootstrap nonce into the document Storm serves its web client from.
+///
+/// **This is the only place a web bootstrap nonce is issued.** A dedicated
+/// endpoint would be a second front door; the entry point of the app is the one
+/// moment where bootstrapping means anything.
+fn inject_bootstrap(html: &str, nonce: &str, expires: &str) -> String {
+    let tag = format!(
+        r#"<meta name="storm-bootstrap" content="{}" data-expires="{}">"#,
+        html_escape(nonce),
+        html_escape(expires)
+    );
+    // Before `</head>` where there is one, and at the top otherwise — a
+    // document we cannot find a head in still has to work.
+    match html.find("</head>") {
+        Some(i) => format!("{}{}{}", &html[..i], tag, &html[i..]),
+        None => format!("{tag}{html}"),
+    }
+}
+
+/// Minimal attribute escaping for the injected values.
+///
+/// The nonce is base64url and the expiry is RFC3339, so neither can contain
+/// these today. Escaped anyway: "the input cannot contain a quote" is a
+/// property of code somewhere else, and this is the line where that assumption
+/// would become an injected attribute.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Serves the SPA document, carrying a bootstrap nonce.
+///
+/// Paths that look like files go to `ServeDir`; everything else is a client
+/// route and gets the document. That split is deliberate rather than clever: it
+/// means the injected document is served for `/` and for every deep link,
+/// without having to ask `ServeDir` after the fact whether what it returned was
+/// the fallback index.
+pub async fn serve_web_index(
+    state: Shared,
+    index: std::path::PathBuf,
+    peer: std::net::SocketAddr,
+    headers: HeaderMap,
+) -> Response {
+    let html = match tokio::fs::read_to_string(&index).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, path = %index.display(), "reading the web index");
+            return (StatusCode::NOT_FOUND, "no web client installed").into_response();
+        }
+    };
+
+    let body = match web_bootstrap_nonce(&state, peer.ip(), &headers).await {
+        Some((nonce, expires)) => inject_bootstrap(&html, &nonce, &expires),
+        None => html,
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // **Never cached.** This document carries a single-use credential;
+            // a cached copy is that credential with an unbounded lifetime,
+            // sitting wherever the cache is.
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// The web document with no bootstrap nonce in it.
+///
+/// For the case where the peer address is unavailable, which means the nonce
+/// could not be bound to anyone. An unbound web nonce is exactly what this
+/// design refuses to mint, so the document is served plain and the client falls
+/// back to the pairing screen — the pre-slice-15 behaviour, which still works.
+pub async fn serve_web_index_without_bootstrap(index: std::path::PathBuf) -> Response {
+    match tokio::fs::read_to_string(&index).await {
+        Ok(html) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, path = %index.display(), "reading the web index");
+            (StatusCode::NOT_FOUND, "no web client installed").into_response()
+        }
+    }
+}
+
 /// POST /v1/pair — consume a pairing nonce and receive device credentials.
 ///
 /// This is a `none`-tier endpoint: the nonce itself is the trust anchor. The
@@ -779,16 +1192,22 @@ async fn ws_ticket_handler(
 /// before reaching here.
 async fn pair_handler(
     State(state): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Json(body): Json<PairRequest>,
 ) -> ApiResult<Json<crate::auth::pairing::ConsumeResult>> {
     let now = crate::index::now_rfc3339();
+    let peer_ip = peer.ip().to_string();
     let mut auth_db = state.auth_db.lock().await;
+    // The peer is passed for every purpose; only a nonce that recorded one
+    // (web bootstrap) is checked against it. A QR nonce stays unbound, because
+    // it is meant to be carried to a different machine.
     crate::auth::pairing::consume(
         &mut auth_db,
         &body.n,
         &body.name,
         body.platform.as_deref(),
         body.version.as_deref(),
+        Some(&peer_ip),
         &now,
     )
     .map_err(|e| {
@@ -797,6 +1216,11 @@ async fn pair_handler(
             ApiError(StatusCode::CONFLICT, "pairing_consumed".into())
         } else if msg.contains("expired") {
             ApiError(StatusCode::GONE, "pairing_expired".into())
+        } else if msg.contains("different client") {
+            // Distinct from "invalid": the nonce was real, but it belongs to
+            // another peer. Says so, because a bootstrap nonce replayed from
+            // elsewhere is the thing the binding exists to catch.
+            ApiError(StatusCode::FORBIDDEN, "pairing_wrong_peer".into())
         } else if msg.contains("too many") {
             ApiError(StatusCode::TOO_MANY_REQUESTS, "rate_limited".into())
         } else {
@@ -829,7 +1253,8 @@ async fn issue_pairing_handler(
 ) -> ApiResult<Json<crate::ops::PairingQrPayload>> {
     let purpose = body.purpose.as_deref().unwrap_or("add_device");
     Ok(Json(
-        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id)).await?,
+        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id), None)
+            .await?,
     ))
 }
 
@@ -847,6 +1272,16 @@ pub enum RequiredTier {
     None,
     Device,
     Session,
+    /// The MCP surface (A14). Accepts a session token, an `stk_` MCP key, and
+    /// — while the switch is on — the legacy shared token.
+    ///
+    /// **A separate tier rather than a flag on `Session`**, because the set of
+    /// credentials that may reach `/mcp` is genuinely different from the set
+    /// that may reach the REST API: a key is accepted here and refused
+    /// everywhere else (A14.2). Encoding that as "session tier, but also keys"
+    /// would put the exception in the middleware instead of on the route,
+    /// which is where it would be forgotten.
+    Mcp,
 }
 
 /// A device that has proven it is paired with this server.
@@ -857,6 +1292,18 @@ pub enum RequiredTier {
 pub struct DeviceAuth {
     #[allow(dead_code)]
     pub device: crate::auth::devices::Device,
+}
+
+/// A caller holding a valid MCP key (A14).
+///
+/// Set on `Mcp`-tier routes when the credential is `Bearer stk_…`. The
+/// authorization-facing identity is the `Actor::Key` inserted beside it; this
+/// carries the record itself, for handlers and audit rows that want the key's
+/// name or owner without a second lookup.
+#[derive(Clone)]
+pub struct KeyAuth {
+    #[allow(dead_code)] // Read by audit/logging work, not by the boundary.
+    pub authed: crate::auth::keys::AuthenticatedKey,
 }
 
 /// A caller that has proven who it is (user + device + session).
@@ -925,6 +1372,24 @@ async fn require_auth(
 
     // --- StormDevice: `StormDevice <id>:<secret>` ---
     if let Some(rest) = credential.strip_prefix("StormDevice ") {
+        // **A device credential is not a session, and the tier check has to
+        // say so here.** This branch used to run whatever tier the route
+        // asked for, so a `StormDevice` header satisfied `require_auth` on a
+        // *session* route and the request reached the handler. Nothing was
+        // stolen — the handler then failed extracting a `SessionAuth` that had
+        // never been inserted — but the boundary was being enforced by a
+        // missing extension rather than by the check that exists for it, and
+        // the caller saw `500` where `401` is the truth.
+        //
+        // Found by a device credential trying to flip a session-tier setting
+        // and getting an extension panic instead of a refusal.
+        //
+        // `Mcp` is in this check for the same reason `Session` is: a device
+        // credential is not an MCP credential either, and A14 added a tier
+        // rather than widening what the device branch satisfies.
+        if matches!(tier, RequiredTier::Session | RequiredTier::Mcp) {
+            return tier_error("session_required", StatusCode::UNAUTHORIZED);
+        }
         // **The lock is released before the handler runs, and that is the whole
         // point of this block's shape.** `auth_db` is a `tokio::sync::Mutex`,
         // which is not reentrant, and every device-tier handler — login,
@@ -962,10 +1427,73 @@ async fn require_auth(
         return next.run(request).await;
     }
 
-    // --- Bearer token: session or legacy ---
+    // --- Bearer token: MCP key, session, or legacy ---
     if let Some(token) = credential.strip_prefix("Bearer ") {
-        // Session-tier only: legacy token fallback.
-        if tier == RequiredTier::Session
+        // **MCP keys, checked first and by prefix** (A14.1). Keys share the
+        // `Bearer` scheme because most MCP clients can send nothing else, so
+        // the `stk_` prefix is the only thing separating them from session
+        // tokens — and checking it before the legacy comparison keeps a key
+        // from ever being measured against the shared token.
+        //
+        // **A key is accepted on `/mcp` and refused everywhere else** (A14.2),
+        // and the refusal happens *here*, in the tier check, rather than
+        // downstream in a handler that fails to find an extension. That
+        // distinction is not theoretical: it is exactly the `500`-instead-of-
+        // `401` bug the device branch above had.
+        if token.starts_with(crate::auth::token::KEY_PREFIX) {
+            if tier != RequiredTier::Mcp {
+                return tier_error("mcp_key_not_accepted_here", StatusCode::UNAUTHORIZED);
+            }
+
+            // Scoped so the guard is dropped before `next.run(request)`.
+            // `auth_db` is a non-reentrant `tokio::sync::Mutex` and MCP tools
+            // take it; holding it across the handler is what wedged the device
+            // tier in slice 12 and took every later request down with it.
+            let authed = {
+                let mut auth_db = state.auth_db.lock().await;
+                let now = crate::index::now_rfc3339();
+                match crate::auth::keys::authenticate(&mut auth_db, token, &now) {
+                    Ok(authed) => authed,
+                    Err(crate::auth::keys::KeyError::Refused(failure)) => {
+                        // Audited specifically, answered generically: the row
+                        // says whether it was unknown, revoked or expired; the
+                        // client is told none of that, because distinguishing
+                        // "never existed" from "was revoked" is free
+                        // reconnaissance for an unauthenticated caller.
+                        let _ = auth_db.record_event(
+                            crate::auth::keys::EVENT_KEY_REJECTED,
+                            None,
+                            None,
+                            &now,
+                            &format!(r#"{{"reason":"{}"}}"#, failure.code()),
+                        );
+                        return unauthorized("invalid or missing token");
+                    }
+                    Err(crate::auth::keys::KeyError::Internal(e)) => {
+                        tracing::error!(error = %e, "mcp key authentication failed");
+                        return internal_error();
+                    }
+                }
+            };
+
+            request.extensions_mut().insert(Actor::Key {
+                key_id: authed.key.id.clone(),
+                user_id: authed.user.id.clone(),
+                role: authed.user.role,
+            });
+            request.extensions_mut().insert(KeyAuth { authed });
+            return next.run(request).await;
+        }
+
+        // Legacy token fallback.
+        //
+        // **`Mcp` is in this list, and leaving it out would break every
+        // existing MCP client at once.** MCP authenticates with the shared
+        // token today; moving `/mcp` from `Session` to its own tier without
+        // widening this condition silently retires that path years before the
+        // A10 cutover intends to. `the_legacy_token_still_reaches_mcp` is the
+        // regression test that holds this.
+        if matches!(tier, RequiredTier::Session | RequiredTier::Mcp)
             && state
                 .legacy_token_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -1170,6 +1698,8 @@ struct ConfigResponse {
     /// this and can change it, which is the whole point — the migration is a
     /// reversible switch, not a release boundary.
     legacy_token_enabled: bool,
+    /// Whether anyone with a device credential may create an account (A13).
+    allow_registration: bool,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -1181,6 +1711,7 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
         legacy_token_enabled: vaults.registry.legacy_token_enabled,
+        allow_registration: vaults.registry.allow_registration,
     }))
 }
 
@@ -1909,6 +2440,7 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
             legacy_token_enabled: std::sync::atomic::AtomicBool::new(true),
+            allow_registration: std::sync::atomic::AtomicBool::new(false),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
@@ -2159,21 +2691,34 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingPolicy {
         seen: std::sync::Mutex<Vec<(String, String)>>,
+        /// The full actors, for tests asking *what kind* of caller arrived
+        /// rather than only which user.
+        actors: std::sync::Mutex<Vec<Actor>>,
     }
 
     impl RecordingPolicy {
         fn pairs(&self) -> Vec<(String, String)> {
             self.seen.lock().unwrap().clone()
         }
+
+        fn actors(&self) -> Vec<Actor> {
+            self.actors.lock().unwrap().clone()
+        }
     }
 
     impl crate::auth::authz::VaultPolicy for RecordingPolicy {
         fn decide(&self, actor: &Actor, vault_id: &str, _: Access) -> Decision {
-            let who = match actor {
-                Actor::Session { user_id, .. } => user_id.clone(),
-                Actor::Legacy => "legacy".to_string(),
-            };
+            // **Via the accessor, not a match on the variant.** A key and a
+            // session are the same principal reached two ways; a policy that
+            // branched on the variant would need editing every time a new way
+            // to hold a credential is added, which is the coupling A14.3
+            // exists to avoid.
+            let who = actor
+                .user_id()
+                .map(str::to_string)
+                .unwrap_or_else(|| "legacy".to_string());
             self.seen.lock().unwrap().push((who, vault_id.to_string()));
+            self.actors.lock().unwrap().push(actor.clone());
             Decision::Allow
         }
     }
@@ -2711,12 +3256,20 @@ mod tests {
             &mut auth_db,
             crate::auth::pairing::PairingPurpose::FirstUser,
             None,
+            None,
             &now,
         )
         .unwrap();
-        let paired =
-            crate::auth::pairing::consume(&mut auth_db, &nonce, "test device", None, None, &now)
-                .unwrap();
+        let paired = crate::auth::pairing::consume(
+            &mut auth_db,
+            &nonce,
+            "test device",
+            None,
+            None,
+            None,
+            &now,
+        )
+        .unwrap();
         format!("StormDevice {}:{}", paired.device_id, paired.device_secret)
     }
 
@@ -2735,6 +3288,475 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_device_credential_is_refused_on_a_session_route() {
+        // The tiers are a boundary, not a suggestion. A device credential
+        // satisfied `require_auth` on session routes and was stopped only by
+        // handlers failing to extract a `SessionAuth` nobody had inserted —
+        // enforcement by accident, reported as `500`.
+        let dir = tempdir::TempDir::new("storm-tier-device").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        for path in ["/v1/vaults", "/v1/config", "/v1/auth/sessions"] {
+            let (status, _) = send(&app, get_with_auth(path, &device)).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{path} must refuse a device credential, not fail on it"
+            );
+        }
+
+        // And the device tier still accepts it, which is the half that matters.
+        let (status, _) = send(&app, get_with_auth("/v1/users", &device)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // ---- registration (slice 16, A13) ------------------------------------
+
+    /// A paired device plus an owner, which is what registration needs around
+    /// it: it is device tier, and it refuses to be the first account.
+    async fn device_and_owner(state: &Shared) -> (String, String) {
+        let device = pair_a_device(state).await;
+        let owner = seed_owner(state).await;
+        (device, owner)
+    }
+
+    fn register(auth: &str, username: &str) -> axum::http::Request<axum::body::Body> {
+        post_json_with_auth(
+            "/v1/users",
+            serde_json::json!({"username": username, "password": "a-long-enough-password"}),
+            auth,
+        )
+    }
+
+    #[tokio::test]
+    async fn registration_is_off_until_someone_turns_it_on() {
+        // The default is the decision. Turning it on composes with web
+        // bootstrap into "anyone who can reach this server can make an
+        // account", so it is never the shipped state.
+        let dir = tempdir::TempDir::new("storm-reg-default").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, _) = device_and_owner(&state).await;
+
+        let (status, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["enabled"], false, "registration must ship closed");
+
+        let (status, body) = send(&app, register(&device, "stranger")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body["error"], "registration_disabled",
+            "an explicit code, so a client that raced the switch can say so"
+        );
+
+        let auth_db = state.auth_db.lock().await;
+        assert_eq!(auth_db.count_users().unwrap(), 1, "no account was created");
+    }
+
+    #[tokio::test]
+    async fn an_owner_opens_registration_and_it_applies_at_once() {
+        // No restart. A switch you cannot verify by flipping it is not a
+        // switch — the same property the legacy-token switch has.
+        let dir = tempdir::TempDir::new("storm-reg-on").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, owner) = device_and_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/registration",
+                serde_json::json!({"enabled": true}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+
+        // Visible immediately, on this same running server.
+        let (_, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
+        assert_eq!(body["enabled"], true);
+
+        let (status, body) = send(&app, register(&device, "newcomer")).await;
+        assert_eq!(status, StatusCode::CREATED.min(StatusCode::OK), "{body:?}");
+        assert_eq!(
+            body["role"], "member",
+            "registration mints members and nothing else"
+        );
+
+        // And it survives a reload of the registry, because it is persisted.
+        let vaults = state.vaults.read().await;
+        assert!(vaults.registry.allow_registration);
+    }
+
+    #[tokio::test]
+    async fn registration_can_never_mint_an_owner() {
+        // The guarantee that makes an open switch survivable: owner is the
+        // bootstrap account, and an open endpoint must not reach the role that
+        // can disable every other account.
+        let dir = tempdir::TempDir::new("storm-reg-role").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, _) = device_and_owner(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        send(&app, register(&device, "newcomer")).await;
+
+        let auth_db = state.auth_db.lock().await;
+        let users = auth_db.list_users().unwrap();
+        let owners: Vec<_> = users
+            .iter()
+            .filter(|u| u.role == crate::auth::users::Role::Owner)
+            .collect();
+        assert_eq!(owners.len(), 1, "still exactly one owner");
+        assert_eq!(owners[0].username, "dewansh", "and it is the bootstrap one");
+    }
+
+    #[tokio::test]
+    async fn registration_still_needs_a_device_credential() {
+        // Open does not mean unauthenticated. The device tier is what the
+        // whole design rests on, and this endpoint sits behind it like the
+        // rest.
+        let dir = tempdir::TempDir::new("storm-reg-tier").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        device_and_owner(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/v1/users",
+                serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send(&app, get("/v1/auth/registration")).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "even the question is device tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_an_owner_may_change_registration() {
+        let dir = tempdir::TempDir::new("storm-reg-owner").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, _owner) = device_and_owner(&state).await;
+
+        // A member's session must not be able to open the server to the world.
+        let member = {
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut auth_db,
+                crate::auth::users::NewUser {
+                    username: "member",
+                    display_name: None,
+                    password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
+                    role: crate::auth::users::Role::Member,
+                },
+                "2026-08-19T00:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let token = session_token(&state, &member).await;
+
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/registration",
+                serde_json::json!({"enabled": true}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            !state
+                .allow_registration
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bootstrap_flow_is_untouched_by_registration() {
+        // `/v1/users/first` is the one-shot bootstrap and must behave exactly
+        // as before: registration being open does not reopen it, and
+        // registration cannot stand in for it on an empty server.
+        let dir = tempdir::TempDir::new("storm-reg-bootstrap").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Registration refuses to be the first account.
+        let (status, _) = send(&app, register(&device, "first")).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an empty server has no owner; that is the bootstrap's job"
+        );
+
+        // The bootstrap still works, and still closes afterwards.
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"username": "dewansh", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"username": "another", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "still one-shot");
+    }
+
+    #[tokio::test]
+    async fn closing_registration_leaves_existing_accounts_alone() {
+        let dir = tempdir::TempDir::new("storm-reg-close").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (device, owner) = device_and_owner(&state).await;
+        state
+            .allow_registration
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        send(&app, register(&device, "newcomer")).await;
+
+        let token = session_token(&state, &owner).await;
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/registration",
+                serde_json::json!({"enabled": false}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The account made while it was open is still there and still active.
+        let auth_db = state.auth_db.lock().await;
+        let users = auth_db.list_users().unwrap();
+        assert!(
+            users.iter().any(|u| u.username == "newcomer"
+                && u.status == crate::auth::users::Status::Active),
+            "closing the door must not evict the people already through it"
+        );
+    }
+
+    // ---- web bootstrap (slice 15) ----------------------------------------
+
+    /// Mints a web-bootstrap nonce for `peer`, the way the index handler does.
+    async fn web_nonce(state: &Shared, peer: &str) -> String {
+        let now = crate::index::now_rfc3339();
+        let mut auth_db = state.auth_db.lock().await;
+        let (nonce, _) = crate::auth::pairing::create(
+            &mut auth_db,
+            crate::auth::pairing::PairingPurpose::WebBootstrap,
+            None,
+            Some(peer),
+            &now,
+        )
+        .unwrap();
+        nonce
+    }
+
+    fn pair_from(nonce: &str, peer: &str) -> axum::http::Request<axum::body::Body> {
+        let mut req = post_json(
+            "/v1/pair",
+            serde_json::json!({"n": nonce, "name": "browser", "platform": "web"}),
+        );
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            format!("{peer}:54321")
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ));
+        req
+    }
+
+    #[tokio::test]
+    async fn a_web_bootstrap_nonce_pairs_a_real_device() {
+        // The whole claim of the design: what comes back is an ordinary device,
+        // not a web-shaped special case.
+        let dir = tempdir::TempDir::new("storm-wb-device").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+
+        let device_id = body["device_id"].as_str().unwrap().to_string();
+        let secret = body["device_secret"].as_str().unwrap().to_string();
+        assert!(device_id.starts_with("dev_"));
+
+        // And it is a *device tier* credential, which is the point.
+        let auth = format!("StormDevice {device_id}:{secret}");
+        let (status, _) = send(&app, get_with_auth("/v1/users", &auth)).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_web_bootstrap_nonce_is_single_use() {
+        let dir = tempdir::TempDir::new("storm-wb-once").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+
+        let (first, _) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(first, StatusCode::OK);
+
+        let (second, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(second, StatusCode::CONFLICT, "a replay must not pair again");
+        assert_eq!(body["error"], "pairing_consumed");
+    }
+
+    #[tokio::test]
+    async fn a_web_bootstrap_nonce_is_bound_to_the_peer_it_was_issued_to() {
+        // The control that makes "anyone who can fetch the page gets a nonce"
+        // survivable: one scraped from a log or a shared screen is not
+        // spendable from anywhere else.
+        let dir = tempdir::TempDir::new("storm-wb-peer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.99")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body:?}");
+        assert_eq!(body["error"], "pairing_wrong_peer");
+
+        // Still spendable by the peer it belongs to — a refusal must not burn
+        // the nonce for its rightful owner.
+        let (status, _) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_ipv4_mapped_peer_matches_its_plain_form() {
+        // A dual-stack listener reports an IPv4 client as ::ffff:192.168.1.20
+        // on one connection and 192.168.1.20 on another. Textually different,
+        // the same machine — and comparing as strings would refuse the
+        // legitimate client.
+        let dir = tempdir::TempDir::new("storm-wb-v6").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let nonce = web_nonce(&state, "::ffff:192.168.1.20").await;
+
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn a_qr_nonce_stays_unbound() {
+        // Native pairing must be unchanged: a QR is carried across the room to
+        // a *different* device, so binding it to the issuing peer would break
+        // the only flow it has.
+        let dir = tempdir::TempDir::new("storm-wb-qr").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let nonce = {
+            let now = crate::index::now_rfc3339();
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::FirstUser,
+                None,
+                None,
+                &now,
+            )
+            .unwrap()
+            .0
+        };
+
+        let (status, body) = send(&app, pair_from(&nonce, "10.0.0.7")).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn an_expired_web_bootstrap_nonce_is_refused() {
+        let dir = tempdir::TempDir::new("storm-wb-exp").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        // Created in the past by more than its TTL.
+        let nonce = {
+            let past = "2020-01-01T00:00:00Z";
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::WebBootstrap,
+                None,
+                Some("192.168.1.20"),
+                past,
+            )
+            .unwrap()
+            .0
+        };
+
+        let (status, body) = send(&app, pair_from(&nonce, "192.168.1.20")).await;
+        assert_eq!(status, StatusCode::GONE, "{body:?}");
+    }
+
+    #[tokio::test]
+    async fn web_bootstrap_does_not_open_the_device_tier_to_everyone() {
+        // The line this slice must not cross. Bootstrap hands out a *pairing
+        // nonce*, never a session and never an exemption: without a device
+        // credential the device tier still refuses.
+        let dir = tempdir::TempDir::new("storm-wb-tier").unwrap();
+        let (app, _, _) = test_router_with_state(dir.path());
+
+        let (status, _) = send(&app, get("/v1/users")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, _) = send(
+            &app,
+            post_json(
+                "/v1/auth/login",
+                serde_json::json!({"username": "dewansh", "password": "a-long-enough-password"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "login must still demand a StormDevice credential"
+        );
+    }
+
+    #[test]
+    fn the_bootstrap_tag_goes_into_the_document() {
+        let html = "<html><head><title>Storm</title></head><body></body></html>";
+        let out = inject_bootstrap(html, "NONCE", "2026-01-01T00:00:00Z");
+        assert!(out.contains(r#"<meta name="storm-bootstrap" content="NONCE""#));
+        assert!(out.find("storm-bootstrap").unwrap() < out.find("</head>").unwrap());
+
+        // A document with no head still has to work rather than lose the tag.
+        let headless = inject_bootstrap("<body>hi</body>", "N", "E");
+        assert!(headless.contains("storm-bootstrap"));
+    }
+
+    #[test]
+    fn injected_values_cannot_break_out_of_the_attribute() {
+        // The nonce is base64url and cannot contain a quote today. That is a
+        // property of code somewhere else, and this is the line where trusting
+        // it would become an injected attribute.
+        let out = inject_bootstrap("<head></head>", r#"" onload="x"#, "E");
+        assert!(!out.contains(r#"content="" onload="#));
+        assert!(out.contains("&quot;"));
+    }
+
+    #[tokio::test]
     async fn a_device_tier_handler_can_take_the_auth_db_lock() {
         // The most expensive kind of bug to find and the cheapest to assert.
         //
@@ -2749,32 +3771,75 @@ mod tests {
         // The session branch had always dropped the guard first. Nothing caught
         // the device branch because no test used a device credential at all.
         //
-        // `GET /v1/users` is the cheapest handler that takes the lock — no
-        // Argon2id — so this test times out in milliseconds rather than hanging
-        // a suite for a minute.
+        // **Every device-tier route, not just one.** The bug was in the
+        // middleware, so it took all four down together; a test that covers one
+        // of them would pass over a regression reintroduced for the others (a
+        // per-route `drop`, say, instead of a scoped guard).
+        //
+        // Each request below is chosen to *reach* its handler's lock. That
+        // matters for `users/first`, which validates the password before
+        // locking: a short password would return 422 without ever touching the
+        // mutex, and the test would prove nothing.
         let dir = tempdir::TempDir::new("storm-device-deadlock").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let device = pair_a_device(&state).await;
+        seed_owner(&state).await;
 
-        let answered = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            send(&app, get_with_auth("/v1/users", &device)),
-        )
-        .await;
+        let cases: Vec<(&str, axum::http::Request<axum::body::Body>)> = vec![
+            ("GET /v1/users", get_with_auth("/v1/users", &device)),
+            (
+                // An account exists, so this reaches the lock and is refused by
+                // the bootstrap-window check — without paying for a hash.
+                "POST /v1/users/first",
+                post_json_with_auth(
+                    "/v1/users/first",
+                    serde_json::json!({"username": "someone", "password": "a-long-enough-password"}),
+                    &device,
+                ),
+            ),
+            (
+                "POST /v1/auth/login",
+                post_json_with_auth(
+                    "/v1/auth/login",
+                    serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
+                    &device,
+                ),
+            ),
+            (
+                "POST /v1/auth/refresh",
+                post_json_with_auth(
+                    "/v1/auth/refresh",
+                    serde_json::json!({"refresh_token": "not-a-real-token"}),
+                    &device,
+                ),
+            ),
+        ];
 
-        let (status, body) = answered.expect(
-            "a device-tier request deadlocked: the middleware is holding the \
-             auth_db lock across next.run()",
-        );
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, serde_json::json!([]), "a fresh server has no users");
+        for (name, request) in cases {
+            let answered =
+                tokio::time::timeout(std::time::Duration::from_secs(20), send(&app, request)).await;
+            let (status, _) = answered.unwrap_or_else(|_| {
+                panic!(
+                    "{name} deadlocked: the middleware is holding the auth_db \
+                     lock across next.run()"
+                )
+            });
+            // Which status is not the point — that the handler *answered at
+            // all* is. A 401 or 409 here still proves it reached the lock and
+            // came back.
+            assert!(
+                status != StatusCode::INTERNAL_SERVER_ERROR,
+                "{name} answered {status}"
+            );
 
-        // And the lock really is free afterwards, which is the half that turns
-        // one hung request into an outage.
-        assert!(
-            state.auth_db.try_lock().is_ok(),
-            "the middleware left the auth_db mutex held"
-        );
+            // And the lock is free again afterwards. This is the half that
+            // turns one hung request into a server-wide outage: the wedged task
+            // never released the mutex, so everything behind it queued forever.
+            assert!(
+                state.auth_db.try_lock().is_ok(),
+                "{name} left the auth_db mutex held"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2883,5 +3948,398 @@ mod tests {
             "every hash must go through the process-wide hasher, or the \
              semaphore bounds nothing across requests"
         );
+    }
+
+    // ---- A14: MCP keys ---------------------------------------------------
+
+    /// Mints a user and a key on `state`, returning `(user_id, plaintext)`.
+    async fn seed_key(
+        state: &Shared,
+        username: &str,
+        role: crate::auth::users::Role,
+    ) -> (String, String) {
+        let mut db = state.auth_db.lock().await;
+        // The first account has to be an owner — a server whose only user is a
+        // member has nobody who can create the next one. So a member needs one
+        // ahead of it.
+        if role != crate::auth::users::Role::Owner {
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "bootstrap-owner",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Owner,
+                },
+                "2026-08-19T11:00:00Z",
+            )
+            .unwrap();
+        }
+        let user = crate::auth::users::create_user(
+            &mut db,
+            crate::auth::users::NewUser {
+                username,
+                display_name: None,
+                password_hash: "hash",
+                role,
+            },
+            "2026-08-19T12:00:00Z",
+        )
+        .unwrap();
+        let (_, secret) = crate::auth::keys::create(
+            &mut db,
+            &user.id,
+            "a machine",
+            None,
+            None,
+            "2026-08-19T12:00:00Z",
+        )
+        .unwrap();
+        (user.id, secret)
+    }
+
+    /// A minimal, valid MCP request — enough to get past the tier check and
+    /// see whether the surface answered at all.
+    fn mcp_request(bearer: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("Authorization", bearer)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_reaches_mcp() {
+        let dir = tempdir::TempDir::new("storm-key-mcp").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request(&format!("Bearer {secret}")))
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a live key must authenticate on /mcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_still_reaches_mcp() {
+        // **The regression this slice is most likely to cause.** MCP
+        // authenticates with the shared token today. Moving /mcp from
+        // `Session` to `Mcp` without widening the legacy condition would
+        // retire that path immediately — years before the A10 cutover means
+        // to, and with no warning to anyone whose MCP client just stopped.
+        let dir = tempdir::TempDir::new("storm-key-legacy").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request("Bearer testtoken"))
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the legacy token must keep reaching /mcp while its switch is on"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_stops_reaching_mcp_when_switched_off() {
+        // The other half: the compatibility is the *switch's* doing, not an
+        // accident of the tier. Without this, the test above would pass just as
+        // well if the tier check had been dropped altogether.
+        let dir = tempdir::TempDir::new("storm-key-legacy-off").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .legacy_token_enabled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request("Bearer testtoken"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_is_refused_everywhere_but_mcp() {
+        // A14.2. And **the status matters as much as the refusal**: it has to
+        // be the tier check saying no, not a handler falling over on a missing
+        // extension, which is how the device tier used to answer 500 where 401
+        // was the truth.
+        let dir = tempdir::TempDir::new("storm-key-scope").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+
+        for (method, uri) in [
+            ("GET", "/v1/vaults"),
+            ("GET", "/v1/config"),
+            ("GET", "/v1/recents"),
+            ("GET", "/v1/users"),
+        ] {
+            let (status, _) = send(
+                &app,
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("Authorization", format!("Bearer {secret}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must refuse an MCP key with 401, not {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoked_key_stops_reaching_mcp() {
+        let dir = tempdir::TempDir::new("storm-key-revoked").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+
+        // Works first, so the refusal below cannot be a setup failure.
+        let before = app
+            .clone()
+            .oneshot(mcp_request(&format!("Bearer {secret}")))
+            .await
+            .unwrap();
+        assert_ne!(before.status(), StatusCode::UNAUTHORIZED);
+
+        {
+            let mut db = state.auth_db.lock().await;
+            let key = db.api_keys_for_user(&user_id).unwrap().pop().unwrap();
+            crate::auth::keys::revoke(&mut db, &key.id, None, "test", "2026-08-19T13:00:00Z")
+                .unwrap();
+        }
+
+        let after = app
+            .clone()
+            .oneshot(mcp_request(&format!("Bearer {secret}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "revocation must take effect on the next request, not the next restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_credential_is_refused_on_mcp() {
+        // MCP is not the device tier, and the refusal must be the tier check.
+        let dir = tempdir::TempDir::new("storm-key-device").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let response = app
+            .clone()
+            .oneshot(mcp_request("StormDevice dev_1:dvs_whatever"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_minted_key_is_shown_once_and_never_again() {
+        // A14.5, end to end over the real routes. The create response is the
+        // only place the plaintext exists; the list must not carry it, and
+        // neither must the audit trail.
+        let dir = tempdir::TempDir::new("storm-key-once").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        let auth = format!("Bearer {token}");
+
+        let (status, created) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({ "name": "Claude Code, laptop" }),
+                &auth,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let secret = created["secret"].as_str().unwrap().to_string();
+        assert!(secret.starts_with("stk_"), "{secret}");
+
+        let (status, listed) = send(&app, get_with_auth("/v1/keys", &auth)).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = serde_json::to_string(&listed).unwrap();
+        assert!(
+            !listed.contains(&secret),
+            "listing keys must never return the plaintext again: {listed}"
+        );
+        assert!(listed.contains("Claude Code, laptop"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn a_member_reaches_only_their_own_keys() {
+        let dir = tempdir::TempDir::new("storm-key-scope-user").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let member = {
+            let mut db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "member",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Member,
+                },
+                "2026-08-19T12:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let member_auth = format!("Bearer {}", session_token(&state, &member).await);
+        let owner_auth = format!("Bearer {}", session_token(&state, &owner).await);
+
+        // The owner mints one for themselves.
+        let (status, owners_key) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({ "name": "owner key" }),
+                &owner_auth,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let owners_key_id = owners_key["id"].as_str().unwrap().to_string();
+
+        // A member may not read the owner's keys...
+        let (status, _) = send(
+            &app,
+            get_with_auth(&format!("/v1/keys?user={owner}"), &member_auth),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // ...nor revoke one. **404, not 403** — a member probing key ids must
+        // not learn which exist.
+        let (status, _) = send(
+            &app,
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/keys/{owners_key_id}"))
+                .header("Authorization", &member_auth)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The owner may reach the member's keys, which is the one asymmetry
+        // A14 grants and the whole of it.
+        let (status, _) = send(
+            &app,
+            get_with_auth(&format!("/v1/keys?user={member}"), &owner_auth),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_legacy_token_cannot_mint_a_key() {
+        // It has no user behind it (A10), so there is nobody for the key to
+        // belong to. Refusing beats inventing an owner.
+        let dir = tempdir::TempDir::new("storm-key-legacy-mint").unwrap();
+        let (app, _, _state) = test_router_with_state(dir.path());
+
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({ "name": "nope" }),
+                "Bearer testtoken",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_request_carries_its_owners_identity() {
+        // **The whole point of A14.3.** The request has to arrive at the
+        // authorization boundary as the *user*, with the key alongside for
+        // audit — not as some third kind of principal. If this resolved to
+        // anything without a `user_id`, a future policy would have one caller
+        // whose grants it could not look up, which is the `Actor::Mcp` mistake
+        // slice 11 already removed once.
+        let dir = tempdir::TempDir::new("storm-key-identity").unwrap();
+        let policy = Arc::new(RecordingPolicy::default());
+        let (app, _, state) = test_router_with_policy(dir.path(), policy.clone());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        register_vault(&state, "Notes").await;
+        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Member).await;
+
+        // A tool that reaches a vault, so the policy is actually consulted.
+        let _ = app
+            .clone()
+            .oneshot(mcp_call(
+                "list_vaults",
+                serde_json::json!({}),
+                &format!("Bearer {secret}"),
+            ))
+            .await
+            .unwrap();
+
+        let seen = policy.actors();
+        assert!(
+            !seen.is_empty(),
+            "the policy was never consulted, so this test proves nothing"
+        );
+        for actor in &seen {
+            assert_eq!(
+                actor.user_id(),
+                Some(user_id.as_str()),
+                "an MCP key must reach the boundary as its owner"
+            );
+            assert_eq!(
+                actor.role(),
+                Some(crate::auth::users::Role::Member),
+                "and with its owner's role, unnarrowed"
+            );
+            assert!(
+                actor.key_id().is_some(),
+                "and still say which key acted, for the audit trail"
+            );
+        }
     }
 }

@@ -12,10 +12,13 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
+import '../router.dart';
 import '../state/app_state.dart';
+import '../state/web_bootstrap.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 
@@ -41,10 +44,34 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   /// load must not be the thing standing between someone and their notes.
   bool _pickerUnavailable = false;
 
+  /// Whether this server takes new accounts (A13).
+  ///
+  /// Starts false and is only ever raised by an answer from the server, so a
+  /// screen that could not ask offers nothing. **A link to a door that is not
+  /// there is worse than no link** — it turns a closed server into what looks
+  /// like a broken one.
+  bool _registrationOpen = false;
+
   @override
   void initState() {
     super.initState();
     _loadUsers();
+    _loadRegistrationState();
+  }
+
+  Future<void> _loadRegistrationState() async {
+    final settings = ref.read(settingsProvider).value;
+    if (settings == null || !settings.isPaired) return;
+    final api = AuthApi(baseUrl: settings.baseUrl);
+    try {
+      final open = await api.registrationOpen(
+        deviceId: settings.deviceId,
+        deviceSecret: settings.deviceSecret,
+      );
+      if (mounted) setState(() => _registrationOpen = open);
+    } finally {
+      api.dispose();
+    }
   }
 
   @override
@@ -121,10 +148,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         username: username,
         password: _passwordController.text,
       );
-      final expiresAt = DateTime.now()
-          .add(Duration(seconds: tokens.accessExpiresIn))
-          .toUtc()
-          .toIso8601String();
+      // The server sends the absolute instant; there is nothing to compute.
+      final expiresAt = tokens.expires;
       await ref
           .read(settingsProvider.notifier)
           .save(
@@ -142,6 +167,32 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       // /login sends us to the dashboard.
     } on AuthApiException catch (e) {
       if (!mounted) return;
+
+      // **The device credential is the problem, not the password.** The server
+      // does not know this device — its `auth.db` was wiped or restored, or
+      // the device was revoked. No amount of retyping fixes that, and until
+      // this branch existed the client could not recover at all: it held a
+      // credential every device-tier call refused, and `bootstrapWebDevice`
+      // short-circuits on `isPaired`, so a browser never minted another.
+      //
+      // Recovering here rather than on screen load is deliberate. This path
+      // runs because a person pressed Sign in, so it cannot become a loop.
+      if (isDeviceRejected(e)) {
+        await ref.read(settingsProvider.notifier).forgetDevice();
+        if (!mounted) return;
+        // The web client needs a *new document* to be issued a new nonce: the
+        // one it was served is single-use and already spent. Off the web this
+        // is a no-op and the router sends us to pairing instead.
+        reloadForFreshBootstrap();
+        setState(() {
+          _error =
+              'This device is no longer registered with the server. '
+              'Setting it up again — sign in once more when it reloads.';
+          _signingIn = false;
+        });
+        return;
+      }
+
       setState(() {
         _error = authFailureMessage(e);
         _signingIn = false;
@@ -264,6 +315,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         )
                       : const Text('Sign in'),
                 ),
+                // Only when the server said yes. The switch is enforced
+                // server-side; this is the half that keeps someone from
+                // walking into a `403`.
+                if (_registrationOpen) ...[
+                  SizedBox(height: t.sp * 1.5),
+                  TextButton(
+                    key: const Key('login-create-account'),
+                    onPressed: _signingIn
+                        ? null
+                        : () => context.push(Routes.signup),
+                    child: const Text('Create an account'),
+                  ),
+                ],
                 SizedBox(height: t.sp * 1.5),
                 TextButton(
                   key: const Key('login-unpair'),

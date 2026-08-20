@@ -191,6 +191,14 @@ struct PairArgs {
     /// Address the QR code tells the client to connect to.
     #[arg(long)]
     addr: Option<String>,
+
+    /// Also draw the URI as a scannable QR block.
+    ///
+    /// Opt-in rather than the default: the block is ~45 columns wide and is
+    /// noise when the output is being read by a script, which is how the
+    /// deploy scripts and `auth_e2e.py` consume this command.
+    #[arg(long)]
+    qr: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -922,13 +930,26 @@ fn run_pair(args: PairArgs) -> Result<()> {
         .context("loading server identity — has the server booted at least once?")?;
 
     let addr = args.addr.unwrap_or_else(|| {
-        eprintln!("no --addr given; using 127.0.0.1:8484 as the address hint");
-        "127.0.0.1:8484".to_string()
+        // The client dials whatever lands in this field, so a loopback guess
+        // is unusable from the one device that matters — a phone, where
+        // 127.0.0.1 is the phone itself. Default to an address on this box
+        // that something else can actually reach, and say plainly that the
+        // port is still a guess.
+        let host = advertised_host("0.0.0.0");
+        eprintln!(
+            "no --addr given; using {host}:8484. If the server listens on \
+             another port or interface, re-run with --addr host:port — the \
+             client dials this exactly as written."
+        );
+        format!("{host}:8484")
     });
 
     let (nonce, session) = auth::pairing::create(
         &mut db,
         auth::pairing::PairingPurpose::FirstUser,
+        None,
+        // Unbound: a QR is carried across the room to another device, which
+        // is the opposite of the web nonce's one-peer rule.
         None,
         &now,
     )
@@ -942,7 +963,17 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &addr,
     );
 
-    println!("\n  Pairing QR — scan with Storm Client to create the first user:\n");
+    if args.qr {
+        // The URI is still printed below. A terminal can be too narrow for the
+        // block, the colours can be inverted, and pasting has to keep working
+        // when it is — so the QR is an addition, never a replacement.
+        match render_qr(&qr.to_uri()) {
+            Ok(block) => println!("\n{block}"),
+            Err(e) => eprintln!("could not render the QR ({e}); the URI follows"),
+        }
+    }
+
+    println!("\n  Pairing URI — scan the code above, or paste this into Storm:\n");
     println!("    {}\n", qr.to_uri());
     println!("  Expires: {}", session.expires);
     println!("  Session: {}\n", session.id);
@@ -1009,6 +1040,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // Absent from an older registry it loads as `true`, because that registry
     // belongs to a server whose clients all hold the shared token.
     let vault_set_legacy_token_enabled = vault_set.registry.legacy_token_enabled;
+    let vault_set_allow_registration = vault_set.registry.allow_registration;
     if !vault_set_legacy_token_enabled {
         tracing::info!("legacy shared token is disabled; only paired devices and sessions");
     } else {
@@ -1018,7 +1050,18 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         );
     }
 
-    let listen_addr = format!("{}:{}", args.host, args.port);
+    // **The QR's `addr` is where a client should dial, not where we bind.**
+    //
+    // A server told `--host 0.0.0.0` (which is every real deployment, and what
+    // the systemd unit passes) would otherwise advertise `0.0.0.0:8484` in the
+    // pairing URI. The client takes that field as the base URL it will use for
+    // every subsequent call, so pairing from a phone failed at the first
+    // request: a wildcard bind is not an address anything can connect to.
+    //
+    // Found by pairing a real phone against a real server — the local suites
+    // and the client's own live tests all dial an address they were handed by
+    // the harness, so none of them ever read this field.
+    let listen_addr = format!("{}:{}", advertised_host(&args.host), args.port);
 
     // Bootstrap pairing: when no users exist, create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
@@ -1029,6 +1072,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
             let (nonce, session) = crate::auth::pairing::create(
                 &mut auth_db,
                 crate::auth::pairing::PairingPurpose::FirstUser,
+                None,
                 None,
                 &now,
             )
@@ -1061,6 +1105,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
         legacy_token_enabled: std::sync::atomic::AtomicBool::new(vault_set_legacy_token_enabled),
+        allow_registration: std::sync::atomic::AtomicBool::new(vault_set_allow_registration),
         bootstrap_nonce,
         listen_addr,
         // The policy Storm ships: every authenticated caller reaches every
@@ -1078,6 +1123,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     watcher::spawn(root.clone(), state.clone()).context("starting file watcher")?;
     tracing::info!(path = %root.display(), "watching the storage root for external edits");
 
+    // Kept for the web fallback below, which mints bootstrap nonces and so
+    // needs the same state the API has.
+    let web_state = state.clone();
+
     let mut app = api::router(
         state,
         mcp::McpOptions {
@@ -1093,11 +1142,68 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         use tower_http::set_header::SetResponseHeaderLayer;
 
         let index = web_dir.join("index.html");
-        // `fallback` rather than `not_found_service`: the latter serves
-        // index.html's body but keeps ServeDir's 404 status, which breaks
-        // caching and the Flutter service worker on any deep link.
+        let assets = ServeDir::new(web_dir).fallback(ServeFile::new(index.clone()));
+
+        // **A path that looks like a file is an asset; everything else is a
+        // client route and gets the document.** The document is the only thing
+        // that carries a bootstrap nonce, and it has to carry one on a deep
+        // link (`/login`) as well as on `/`. Deciding by shape up front beats
+        // asking `ServeDir` afterwards whether what it returned happened to be
+        // its index fallback — a question its response cannot answer.
+        //
+        // `fallback` rather than `not_found_service` for the asset service:
+        // the latter serves index.html's body but keeps ServeDir's 404 status,
+        // which breaks caching and the Flutter service worker on any deep link.
         app = app
-            .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)))
+            .fallback(move |req: axum::extract::Request| {
+                let state = web_state.clone();
+                let index = index.clone();
+                let assets = assets.clone();
+                async move {
+                    let looks_like_a_file = req
+                        .uri()
+                        .path()
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|last| last.contains('.'));
+                    if looks_like_a_file {
+                        use tower::ServiceExt;
+                        let mut response = assets
+                            .oneshot(req)
+                            .await
+                            .map(axum::response::IntoResponse::into_response)
+                            .unwrap_or_else(|e| match e {});
+                        // **`no-cache`, meaning revalidate — not "do not
+                        // store".** Flutter's build output keeps stable
+                        // filenames (`main.dart.js`, `flutter_bootstrap.js`)
+                        // across builds, so there is no content hash to make a
+                        // long `max-age` safe. With no header at all, browsers
+                        // fall back to *heuristic* caching and reuse the old
+                        // bundle without even asking — which is how a deployed
+                        // release quietly failed to reach a returning browser,
+                        // twice in one afternoon.
+                        //
+                        // `ServeDir` already sends an ETag, so revalidating
+                        // costs a conditional request and a bodyless `304`.
+                        response.headers_mut().insert(
+                            axum::http::header::CACHE_CONTROL,
+                            HeaderValue::from_static("no-cache"),
+                        );
+                        return response;
+                    }
+                    let peer = req
+                        .extensions()
+                        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                        .map(|c| c.0);
+                    let headers = req.headers().clone();
+                    match peer {
+                        Some(peer) => api::serve_web_index(state, index, peer, headers).await,
+                        // No peer means no binding is possible, and an unbound
+                        // web nonce is the thing this design refuses to mint.
+                        None => api::serve_web_index_without_bootstrap(index).await,
+                    }
+                }
+            })
             // Cross-origin isolation. Without these the browser withholds
             // `SharedArrayBuffer`, and drift's web backend silently falls back
             // from OPFS to IndexedDB — slower, and on Chrome for Android it
@@ -1120,8 +1226,106 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("binding {addr}"))?;
 
     tracing::info!("storm-server listening on http://{addr}");
-    axum::serve(listener, app).await.context("serving")?;
+    // `into_make_service_with_connect_info` is what makes the peer address
+    // available to handlers. `/v1/pair/local` refuses anything that is not
+    // loopback, and without this it would have no way to tell.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("serving")?;
     Ok(())
+}
+
+/// Draws a string as a QR block for a terminal.
+///
+/// Two rows of modules per line of text via the half-block character, because
+/// a terminal cell is about twice as tall as it is wide — one module per line
+/// produces a stretched code that phones read poorly, and takes twice the
+/// screen. **Dark modules are drawn light and light modules dark**: this is
+/// printed on a dark terminal, and a scanner needs the *quiet zone and light
+/// modules* to be the bright ones. On a light terminal it reads inverted,
+/// which most phone cameras handle.
+fn render_qr(data: &str) -> Result<String> {
+    use qrcode::{EcLevel, QrCode};
+
+    // Low correction on purpose: the URI is ~200 bytes, and a higher level
+    // makes the code denser rather than more readable at this size.
+    let code = QrCode::with_error_correction_level(data, EcLevel::L)
+        .context("encoding the pairing URI as a QR code")?;
+    let modules = code.to_colors();
+    let width = code.width();
+
+    // Four modules of quiet zone on every side; a code flush against other
+    // output is one a scanner will not find.
+    const QUIET: usize = 4;
+    let dark = |x: usize, y: usize| -> bool {
+        if x < QUIET || y < QUIET || x >= width + QUIET || y >= width + QUIET {
+            return false;
+        }
+        modules[(y - QUIET) * width + (x - QUIET)] == qrcode::Color::Dark
+    };
+
+    let total = width + QUIET * 2;
+    let mut out = String::new();
+    for row in (0..total).step_by(2) {
+        for x in 0..total {
+            let top = dark(x, row);
+            let bottom = if row + 1 < total {
+                dark(x, row + 1)
+            } else {
+                false
+            };
+            // Inverted, per the note above: a "dark" module prints as an unlit
+            // half so the light ones carry the brightness.
+            out.push(match (top, bottom) {
+                (true, true) => ' ',
+                (true, false) => '▄',
+                (false, true) => '▀',
+                (false, false) => '█',
+            });
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// The host a *client* should dial, given the host we were told to bind.
+///
+/// A wildcard bind (`0.0.0.0`, `::`, or empty) means "every interface", which
+/// is not somewhere anything can connect to. Anything else was chosen
+/// deliberately by the operator and is passed through untouched — including
+/// `127.0.0.1`, which is correct for a client on the same machine and is what
+/// the test harnesses use.
+///
+/// Resolved by asking the OS which local address it would use to reach a
+/// public one. No packet is sent: a UDP socket's `connect` only sets the peer
+/// and picks the route, so this works with no network and no DNS.
+fn advertised_host(bind_host: &str) -> String {
+    if !matches!(bind_host, "0.0.0.0" | "::" | "[::]" | "") {
+        return bind_host.to_string();
+    }
+    let routable = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("203.0.113.1:80")?; // TEST-NET-3; never actually reached
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string());
+
+    match routable {
+        Ok(ip) => ip,
+        Err(e) => {
+            // Better a hostname the operator can fix than a wildcard that
+            // silently breaks every pairing.
+            tracing::warn!(
+                error = %e,
+                "could not determine a routable address for the pairing QR; \
+                 falling back to the bind host"
+            );
+            bind_host.to_string()
+        }
+    }
 }
 
 #[tokio::main]
@@ -1544,5 +1748,31 @@ mod tests {
         assert_eq!(out[1], "backup-db");
         assert_eq!(out[2], "/tmp/out");
         assert!(!out.iter().any(|a| a == "--backup-db"));
+    }
+
+    #[test]
+    fn a_wildcard_bind_is_never_advertised_to_a_client() {
+        // The pairing QR's `addr` is the base URL the client will use for
+        // every call after pairing. `0.0.0.0` is where we listen, not
+        // somewhere anything can connect to — a phone handed that fails on its
+        // first request, which is exactly how this was found.
+        for wildcard in ["0.0.0.0", "::", "[::]", ""] {
+            let advertised = advertised_host(wildcard);
+            assert_ne!(
+                advertised, wildcard,
+                "a client cannot dial the wildcard {wildcard:?}"
+            );
+            assert!(!advertised.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_deliberate_bind_host_is_passed_through() {
+        // An operator who says 127.0.0.1 means it — that is right for a client
+        // on the same box, and it is what the test harnesses dial. Substituting
+        // a LAN address here would break every local suite.
+        for chosen in ["127.0.0.1", "192.168.1.10", "storm.example.com"] {
+            assert_eq!(advertised_host(chosen), chosen);
+        }
     }
 }

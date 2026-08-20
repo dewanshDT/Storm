@@ -524,6 +524,22 @@ pub fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// `stamp` minus `secs`, as an RFC3339 stamp.
+///
+/// For "how many of these happened in the last minute" windows, which compare
+/// against the same string format the rows are stored in. An unparseable stamp
+/// returns itself, which makes such a window empty rather than unbounded — the
+/// safe direction for a rate limit.
+pub fn rfc3339_minus_secs(stamp: &str, secs: i64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(stamp, &Rfc3339) {
+        Ok(t) => (t - time::Duration::seconds(secs))
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| stamp.to_string()),
+        Err(_) => stamp.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

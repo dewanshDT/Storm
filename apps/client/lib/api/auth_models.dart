@@ -60,6 +60,42 @@ class PairingResult {
   );
 }
 
+/// A pairing invite minted by `POST /v1/pairings`, for a new device.
+///
+/// The mirror image of [PairingUri]: the server hands back the same five
+/// fields, and [toUri] renders them into the string a new device consumes.
+/// **The format is shared with the server's `encode_qr`** — the two are a wire
+/// commitment, so a field added on one side and not the other produces a URI
+/// its own client cannot read.
+class PairingInvite {
+  const PairingInvite({
+    required this.serverId,
+    required this.publicKey,
+    required this.nonce,
+    required this.expires,
+    required this.address,
+  });
+
+  final String serverId;
+  final String publicKey;
+  final String nonce;
+  final String expires;
+  final String address;
+
+  factory PairingInvite.fromJson(Map<String, dynamic> j) => PairingInvite(
+    serverId: j['sid'] as String,
+    publicKey: j['pk'] as String,
+    nonce: j['n'] as String,
+    expires: j['exp'] as String,
+    address: j['addr'] as String,
+  );
+
+  /// The `storm://pair` URI a new device scans or pastes.
+  String toUri() =>
+      'storm://pair?v=1&sid=$serverId&pk=$publicKey&n=$nonce'
+      '&exp=$expires&addr=$address';
+}
+
 /// A parsed `storm://pair` URI.
 class PairingUri {
   const PairingUri({
@@ -76,19 +112,50 @@ class PairingUri {
   final String publicKey;
   final String nonce;
   final String expires;
+
+  /// The `addr` field exactly as the QR carries it: a bare `host:port`.
   final String address;
+
+  /// [address] as something an HTTP client can actually be given.
+  ///
+  /// **A bare `host:port` is not a URL.** `Uri.parse('192.168.91.51:8585/…')`
+  /// reads `192.168.91.51` as the *scheme*, and a scheme may not start with a
+  /// digit, so it throws `Scheme not starting with alphabetic character` — the
+  /// error a real phone showed after scanning a perfectly good code. Every
+  /// caller was passing `address` straight in as `baseUrl`, including the one
+  /// that persists it into `Settings`, so this broke the whole app after
+  /// pairing and not merely the pairing screen.
+  ///
+  /// The live tests missed it because the harness hands them a full
+  /// `http://host:port` and they never read this field — the same blind spot
+  /// that hid the wildcard bind address.
+  String get baseUrl =>
+      address.startsWith('http://') || address.startsWith('https://')
+      ? address
+      : 'http://$address';
 
   /// Parses `storm://pair?v=1&sid=...&pk=...&n=...&exp=...&addr=...`.
   ///
   /// Returns `null` on any parse failure rather than throwing, because the
   /// input comes from a QR scan or paste and is expected to be malformed
   /// sometimes.
+  ///
+  /// **Whitespace is stripped first.** This URI is copied out of a terminal by
+  /// hand, and a wrapped line or a phone keyboard helpfully breaking a long
+  /// token puts a space inside it — one real paste arrived with `&a ddr=`,
+  /// which silently produced an empty address. A URI cannot contain raw
+  /// whitespace, so removing it can only ever repair the input.
+  ///
+  /// **Every field must be present and non-empty.** Defaulting a missing key
+  /// to `''` is what made that paste fail three screens later as "couldn't
+  /// reach the server" instead of "this URI is incomplete": an empty `addr`
+  /// became an empty base URL, and the first request had nowhere to go.
   static PairingUri? parse(String uri) {
     try {
-      final url = Uri.parse(uri);
+      final url = Uri.parse(uri.replaceAll(RegExp(r'\s+'), ''));
       if (url.scheme != 'storm' || url.host != 'pair') return null;
       final q = url.queryParameters;
-      return PairingUri(
+      final parsed = PairingUri(
         version: q['v'] ?? '',
         serverId: q['sid'] ?? '',
         publicKey: q['pk'] ?? '',
@@ -96,6 +163,21 @@ class PairingUri {
         expires: q['exp'] ?? '',
         address: q['addr'] ?? '',
       );
+      if (parsed.version.isEmpty ||
+          parsed.serverId.isEmpty ||
+          parsed.publicKey.isEmpty ||
+          parsed.nonce.isEmpty ||
+          parsed.expires.isEmpty ||
+          parsed.address.isEmpty) {
+        return null;
+      }
+      // The address is dialled as a base URL, so it has to carry a host. A
+      // bare port or a stray fragment gets caught here rather than at the
+      // first request.
+      if (Uri.tryParse('http://${parsed.address}')?.host.isEmpty ?? true) {
+        return null;
+      }
+      return parsed;
     } catch (_) {
       return null;
     }
@@ -116,24 +198,36 @@ class SessionTokens {
   const SessionTokens({
     required this.accessToken,
     required this.refreshToken,
-    required this.accessExpiresIn,
-    required this.refreshExpiresIn,
+    required this.expires,
+    required this.refreshExpires,
     required this.userId,
     required this.deviceId,
   });
 
   final String accessToken;
   final String refreshToken;
-  final int accessExpiresIn;
-  final int refreshExpiresIn;
+
+  /// When the access token dies — an **absolute RFC3339 instant**, the wire
+  /// contract in *Storm Auth Protocol* and the `sessions` table's own `expires`
+  /// column projected unchanged.
+  ///
+  /// This used to be `accessExpiresIn`, an integer count of seconds read from
+  /// `access_expires_in` — a field no server has ever sent and no note in the
+  /// vault ever described. `fromJson` threw `Null is not a subtype of num` on
+  /// every real login, and the mock-backed tests could not see it because they
+  /// were built to the same wrong assumption.
+  final String expires;
+
+  /// When the refresh token dies. Absolute RFC3339, as [expires].
+  final String refreshExpires;
   final String userId;
   final String deviceId;
 
   factory SessionTokens.fromJson(Map<String, dynamic> j) => SessionTokens(
     accessToken: j['access_token'] as String,
     refreshToken: j['refresh_token'] as String,
-    accessExpiresIn: (j['access_expires_in'] as num).toInt(),
-    refreshExpiresIn: (j['refresh_expires_in'] as num).toInt(),
+    expires: j['expires'] as String,
+    refreshExpires: j['refresh_expires'] as String,
     userId: j['user_id'] as String,
     deviceId: j['device_id'] as String,
   );
