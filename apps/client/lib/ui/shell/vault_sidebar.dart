@@ -170,6 +170,7 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
           final vaults = ref.watch(vaultsProvider).value ?? const [];
           final status = dotStatusFor(
             online: engine.isOnline,
+            identityFailed: engine.serverIdentityFailed,
             syncing: engine.isSyncing,
             pending: engine.pendingCount,
           );

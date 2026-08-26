@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/auth_api.dart';
 import '../api/models.dart';
+import '../api/server_verifier.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import 'secret_store.dart';
@@ -90,10 +91,13 @@ class Settings {
   /// Device secret for the StormDevice header (shared secret from pairing).
   final String deviceSecret;
 
-  /// The server's key id — used for future challenge verification.
+  /// The server's key id, as pinned at pairing.
   final String serverKeyId;
 
-  /// The server's public key (Ed25519, base64url) — for challenge verification.
+  /// The server's public key (Ed25519, base64url), pinned at pairing.
+  ///
+  /// Checked on **every** connect, not only at pairing — [ServerVerifier] is
+  /// what makes a relay safe to route through without trusting it.
   final String serverPublicKey;
 
   // ── Auth: session ──────────────────────────────────────────────────────
@@ -786,10 +790,22 @@ final cacheProvider = Provider<CacheDb>((ref) {
 final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
   final api = ref.watch(apiProvider);
   final vaultId = ref.watch(activeVaultProvider);
+  final settings = ref.watch(settingsProvider).value;
   final engine = SyncEngine(
     api: api ?? StormApi(baseUrl: '', token: ''),
     cache: ref.watch(cacheProvider),
     vaultId: vaultId,
+    // Built from the *pinned* key, not from anything the server just said —
+    // a challenge verified against a key the same response supplied would
+    // prove nothing at all.
+    verifier:
+        (api == null || settings == null || settings.serverPublicKey.isEmpty)
+        ? null
+        : ServerVerifier(
+            authApi: AuthApi(baseUrl: settings.baseUrl),
+            serverId: settings.serverId,
+            publicKeyB64: settings.serverPublicKey,
+          ),
   );
   // No vault open means nothing to sync — the dashboard reads the vault list
   // and the recents endpoint, neither of which needs an engine.

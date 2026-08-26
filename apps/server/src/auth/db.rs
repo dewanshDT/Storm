@@ -431,6 +431,16 @@ impl AuthDb {
     /// happened to this account"; a trail that leaks credentials would be worse
     /// than no trail. `user_id` deliberately has no foreign key, so the record
     /// of a deletion outlives the row it describes.
+    ///
+    /// Almost every event has no network address to record, so this stays at
+    /// five arguments and [`Self::record_event_from`] takes the sixth. Adding
+    /// `remote` here instead would have meant threading a `None` through
+    /// twenty call sites whose arguments are all `Option<&str>` — three
+    /// interchangeable slots that the compiler cannot tell apart, so a
+    /// transposed one is a silent wrong column rather than a build failure.
+    /// That is not a hypothetical: the first version of this change did
+    /// exactly that, writing every device id into `remote` and leaving
+    /// `device_id` null.
     pub fn record_event(
         &self,
         kind: &str,
@@ -439,11 +449,57 @@ impl AuthDb {
         at: &str,
         detail: &str,
     ) -> Result<()> {
+        self.record_event_from(kind, user_id, device_id, None, at, detail)
+    }
+
+    /// [`Self::record_event`] plus the caller's address.
+    ///
+    /// `remote` is the socket peer, **never a client-supplied header** —
+    /// `X-Forwarded-For` is forgeable, and an audit trail that records what
+    /// the attacker typed is worse than one that records nothing. The login
+    /// throttle is the only writer today, because "who was flooding us" is the
+    /// question that trail exists to answer; the column has been in the schema
+    /// since the beginning and was never written until now.
+    pub fn record_event_from(
+        &self,
+        kind: &str,
+        user_id: Option<&str>,
+        device_id: Option<&str>,
+        remote: Option<&str>,
+        at: &str,
+        detail: &str,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO security_events (at, kind, user_id, device_id, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![at, kind, user_id, device_id, detail],
+            "INSERT INTO security_events (at, kind, user_id, device_id, remote, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![at, kind, user_id, device_id, remote, detail],
         )?;
         Ok(())
+    }
+
+    /// Audit-trail reads for tests. Nothing in production reads this table
+    /// yet — it is written for an operator's SQLite session — so these stay
+    /// `#[cfg(test)]` and beside [`Self::record_event`] rather than growing a
+    /// query surface nobody calls.
+    #[cfg(test)]
+    pub fn event_count(&self, kind: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM security_events WHERE kind = ?1",
+            [kind],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The address recorded on the most recent event of `kind`.
+    #[cfg(test)]
+    pub fn latest_event_remote(&self, kind: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT remote FROM security_events WHERE kind = ?1 ORDER BY seq DESC LIMIT 1",
+                [kind],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// Records the server row and its first credential together.

@@ -967,6 +967,59 @@ because it had no user for one to belong to.
 access to the machine — the bootstrap path (A8) is the only way in, and it
 assumes a console.
 
+**56. The relay's §0 prerequisites ship together, and the rate-limit numbers
+are a decision rather than a measurement.** *(2026-08-26, branch
+`worktree-relay-phase0`)*
+
+Two defences gate the first line of relay code, and neither depends on the
+tunnel. Both are now built.
+
+*Login-path rate limiting.* `login()` runs a full Argon2id verify for a
+username that does not exist — deliberately, so response time cannot enumerate
+accounts — which means a junk username can never trip the per-user lockout. The
+KDF's semaphore is global (2 permits, ~174 ms), so the whole server sustains
+~11 verifies/sec. Web bootstrap hands a device credential to anything that can
+fetch the app, so the full chain is: fetch app → pair → flood with random
+usernames → login is dead for everyone. Two hand-rolled token buckets, no new
+crate: **per-caller 30/min burst 30**, **global 60/min burst 60**. Per-caller
+is generous because a relay collapses a household behind one NAT address;
+global is strict because N addresses each under their own limit still saturate
+a globally bounded resource, and it is the half that actually protects the
+permits. Charged before the permit, refunded on success.
+
+**The numbers are chosen, not measured.** *Revisit if:* a real deployment sees
+legitimate users throttled (raise per-caller), or the global ceiling is reached
+by anything but an attack (it is ~9% of the Argon2 ceiling, so that would mean
+the derivation is wrong).
+
+*Challenge-on-connect.* The client re-proves the server's identity on every
+connect, including every reconnect, against the key pinned at pairing. It is
+the property that lets the relay stay untrusted infrastructure, and it was the
+one part of the relay's trust model that was designed but never running.
+
+Three findings worth keeping, each of which cost a cycle:
+
+- **`Option<ConnectInfo<SocketAddr>>` does not compile on axum 0.8.** There is
+  no blanket `Option<E>` impl; `E` must implement `OptionalFromRequestParts`
+  and `ConnectInfo` does not, so the obvious signature fails the `Handler`
+  bound with an error naming neither. This is the same shape as
+  `Option<WebSocketUpgrade>` on `stream`, already recorded — the checklist item
+  saying `pair_handler` should become `Option<ConnectInfo<..>>` is therefore
+  **not implementable as written** and needs a hand-written extractor.
+- **A sixth `Option<&str>` argument is a silent wrong column.** Adding `remote`
+  to `record_event` meant threading a `None` through twenty call sites with
+  three interchangeable optional slots; the first cut put it in the `device_id`
+  position everywhere and wrote every device id into `remote`. It compiled and
+  the suite passed. `record_event` keeps five arguments and
+  `record_event_from` takes the sixth.
+- **A rate limiter cannot be tested by a debug build sending requests one at a
+  time.** Each attempt costs a whole Argon2id verify (seconds unoptimised), so
+  the bucket refills faster than requests arrive and the limiter correctly
+  allows all of them. The router tests inject their own limits; the e2e suite
+  fires a concurrent burst, which is what a flood actually looks like.
+
+*Revisit if:* nothing here — these are properties of the tools, not choices.
+
 ---
 
 ## Data model

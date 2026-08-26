@@ -30,6 +30,7 @@ pub mod identity;
 pub mod keys;
 pub mod pairing;
 pub mod password;
+pub mod ratelimit;
 pub mod sessions;
 pub mod token;
 pub mod users;

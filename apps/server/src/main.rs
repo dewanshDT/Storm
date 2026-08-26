@@ -1091,6 +1091,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         // One hasher for the process, so the semaphore actually bounds
         // anything. See the field's documentation in `api.rs`.
         hasher: auth::Hasher::new(),
+        // Same: one limiter for the process, or the limits do not exist.
+        login_limiter: auth::ratelimit::LoginLimiter::new(),
     });
 
     // One watcher over the whole root, attributing each event to a vault by
