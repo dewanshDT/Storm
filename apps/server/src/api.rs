@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        ConnectInfo, Extension, Path, Query, State,
+        Extension, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -1260,13 +1260,28 @@ pub async fn serve_web_index_without_bootstrap(index: std::path::PathBuf) -> Res
 /// This is a `none`-tier endpoint: the nonce itself is the trust anchor. The
 /// client has already verified the server's identity via the challenge step
 /// before reaching here.
+/// The peer is [`MaybePeer`] rather than a bare `ConnectInfo` because
+/// `/v1/pair` is the *first* route a remote client touches, and over the relay
+/// it arrives by in-process dispatch with no socket behind it. A required
+/// extractor would reject before this handler ran, so the client would meet a
+/// malformed-request error where a pairing answer belongs.
+///
+/// The refusal that falls out of `None` is the correct one, and it is worth
+/// stating because it looks like a gap: a **web-bootstrap** nonce is
+/// peer-bound at issuance, so it is refused over a relayed connection — it was
+/// bound to a browser that reached the server directly. An **unbound QR**
+/// nonce still works, which is the whole point of a QR. Neither behaviour is
+/// new; `consume` has always taken `Option`.
+///
+/// Do **not** substitute a synthesized address here. A fabricated peer either
+/// always fails the binding check or, worse, sometimes coincidentally passes.
 async fn pair_handler(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    MaybePeer(peer): MaybePeer,
     Json(body): Json<PairRequest>,
 ) -> ApiResult<Json<crate::auth::pairing::ConsumeResult>> {
     let now = crate::index::now_rfc3339();
-    let peer_ip = peer.ip().to_string();
+    let peer_ip = peer.map(|p| p.ip().to_string());
     let mut auth_db = state.auth_db.lock().await;
     // The peer is passed for every purpose; only a nonce that recorded one
     // (web bootstrap) is checked against it. A QR nonce stays unbound, because
@@ -1277,7 +1292,7 @@ async fn pair_handler(
         &body.name,
         body.platform.as_deref(),
         body.version.as_deref(),
-        Some(&peer_ip),
+        peer_ip.as_deref(),
         &now,
     )
     .map_err(|e| {
@@ -3396,16 +3411,73 @@ mod tests {
     }
 
     fn pair_from(nonce: &str, peer: &str) -> axum::http::Request<axum::body::Body> {
-        let mut req = post_json(
-            "/v1/pair",
-            serde_json::json!({"n": nonce, "name": "browser", "platform": "web"}),
-        );
+        let mut req = pair_without_peer(nonce);
         req.extensions_mut().insert(axum::extract::ConnectInfo(
             format!("{peer}:54321")
                 .parse::<std::net::SocketAddr>()
                 .unwrap(),
         ));
         req
+    }
+
+    /// A pairing request with no `ConnectInfo` extension — what the relay's
+    /// in-process dispatch produces, since there is no socket behind it.
+    fn pair_without_peer(nonce: &str) -> axum::http::Request<axum::body::Body> {
+        post_json(
+            "/v1/pair",
+            serde_json::json!({"n": nonce, "name": "browser", "platform": "web"}),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unbound_nonce_pairs_with_no_connect_info_at_all() {
+        // The extractor trap, on the first route a remote client touches. A
+        // bare `ConnectInfo` rejects before the handler runs, so a relayed
+        // pairing would fail as a malformed request rather than answering.
+        // A QR nonce is unbound precisely so it can be carried elsewhere, so
+        // "elsewhere" including a tunnel has to work.
+        let dir = tempdir::TempDir::new("storm-pair-nopeer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        // `AddDevice` with no peer is the QR case: unbound on purpose.
+        let nonce = {
+            let mut auth_db = state.auth_db.lock().await;
+            let (nonce, _) = crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::AddDevice,
+                None,
+                None,
+                &crate::index::now_rfc3339(),
+            )
+            .unwrap();
+            nonce
+        };
+
+        let (status, body) = send(&app, pair_without_peer(&nonce)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an unbound nonce must pair with no socket behind the request: {body:?}"
+        );
+        assert!(body["device_id"].as_str().unwrap().starts_with("dev_"));
+    }
+
+    #[tokio::test]
+    async fn a_peer_bound_nonce_is_refused_when_there_is_no_peer() {
+        // Not a gap — the correct refusal. A web-bootstrap nonce is bound to
+        // the browser that fetched the page directly; there is nothing for it
+        // to match against over a tunnel, and inventing a peer would sometimes
+        // coincidentally pass.
+        let dir = tempdir::TempDir::new("storm-pair-bound-nopeer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+        let (status, _) = send(&app, pair_without_peer(&nonce)).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a bound nonce with no peer is wrong_peer, not a crash and not a pass"
+        );
     }
 
     #[tokio::test]
