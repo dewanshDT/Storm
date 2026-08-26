@@ -1625,18 +1625,16 @@ fn percent_decode(raw: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(b'%');
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                Ok(byte) => {
+                    out.push(byte);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             b'+' => {
                 out.push(b' ');
                 i += 1;
@@ -2731,10 +2729,7 @@ mod tests {
     fn get_with_query_token(path: &str, token: &str) -> axum::http::Request<axum::body::Body> {
         let sep = if path.contains('?') { '&' } else { '?' };
         axum::http::Request::builder()
-            .uri(format!(
-                "{path}{sep}token={}",
-                urlencoding_for_test(token)
-            ))
+            .uri(format!("{path}{sep}token={}", urlencoding_for_test(token)))
             .body(axum::body::Body::empty())
             .unwrap()
     }
