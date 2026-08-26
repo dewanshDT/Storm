@@ -1438,12 +1438,28 @@ async fn require_auth(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .or_else(|| {
-            // Browsers can't set headers on a WebSocket handshake, so the token
-            // may also arrive as a query parameter.
-            request.uri().query().and_then(|q| {
-                q.split('&')
-                    .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
-            })
+            // Browsers can't set headers on a WebSocket handshake, and image
+            // widgets can't set them on a GET, so the credential may also
+            // arrive as a query parameter. It is the *same* string the header
+            // would carry, scheme included.
+            //
+            // **Percent-decoded, which it was not.** Every credential Storm
+            // has left contains a space (`Bearer …`, `StormDevice …`), so a
+            // conforming client sends `token=Bearer%20…` — and comparing that
+            // raw against `"Bearer "` matches nothing. This path therefore
+            // could not authenticate anyone at all once the shared token was
+            // removed: that value was compared whole and had no space in it,
+            // so it was the only credential the raw form ever fit. Nothing
+            // failed loudly; the WebSocket change feed just stopped
+            // authenticating and fell back to reconnect-driven polling.
+            request
+                .uri()
+                .query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
+                })
+                .map(|raw| percent_decode(&raw))
         });
 
     let Some(credential) = presented else {
@@ -1590,6 +1606,48 @@ async fn require_auth(
     }
 
     unauthorized("invalid or missing token")
+}
+
+/// Percent-decodes a query-string value, with `+` meaning a space.
+///
+/// Hand-rolled rather than pulling a crate for it: this decodes exactly one
+/// short credential on one code path, and the alternative — routing the
+/// request through `Query` — would mean parsing and allocating the whole query
+/// map on every authenticated request to save nine lines.
+///
+/// Invalid escapes are passed through as written rather than rejected. A
+/// malformed credential fails the scheme match a moment later anyway, and
+/// there is nothing to gain by distinguishing "not a credential" from "not
+/// even valid encoding" for an unauthenticated caller.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parses `StormDevice <id>:<secret>` → `(id, secret)`.
@@ -2666,6 +2724,59 @@ mod tests {
             .header("authorization", auth)
             .body(axum::body::Body::empty())
             .unwrap()
+    }
+
+    /// A request carrying its credential in the query string and no header —
+    /// what a browser WebSocket handshake and an `<img>` tag are limited to.
+    fn get_with_query_token(path: &str, token: &str) -> axum::http::Request<axum::body::Body> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        axum::http::Request::builder()
+            .uri(format!(
+                "{path}{sep}token={}",
+                urlencoding_for_test(token)
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    /// Percent-encodes just enough for a credential: the space in `Bearer x`.
+    fn urlencoding_for_test(s: &str) -> String {
+        s.replace(' ', "%20")
+    }
+
+    #[tokio::test]
+    async fn a_query_credential_must_name_its_scheme() {
+        // The query fallback exists because a browser can set no headers on a
+        // WebSocket handshake, and an image widget none on a GET. It takes the
+        // *same* credential string the header would carry — scheme and all.
+        //
+        // Pinning both halves, because neither was covered and the bare form
+        // silently stopped working when the shared token was removed: until
+        // then `credential` was compared whole against STORM_TOKEN, so a bare
+        // value matched. Nothing failed loudly; the change feed just quietly
+        // never authenticated again.
+        let dir = tempdir::TempDir::new("storm-query-cred").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (bare, _) = send(&app, get_with_query_token("/v1/vaults", &token)).await;
+        assert_eq!(
+            bare,
+            StatusCode::UNAUTHORIZED,
+            "a bare token in the query names no scheme and must not authenticate"
+        );
+
+        let (scheme, _) = send(
+            &app,
+            get_with_query_token("/v1/vaults", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            scheme,
+            StatusCode::OK,
+            "the same credential the header would carry must work in the query"
+        );
     }
 
     fn put_json(

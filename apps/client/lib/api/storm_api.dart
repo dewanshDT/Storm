@@ -22,8 +22,16 @@ class StormApi {
   final String token;
   final http.Client _client;
 
+  /// The credential exactly as the server expects it, scheme included.
+  ///
+  /// The query-string paths below send *this*, not the bare token. The
+  /// server's query fallback takes the same string the header would carry and
+  /// matches on the scheme, so a bare token authenticates nothing — it used to
+  /// work only because the shared token was compared whole, and that is gone.
+  String get credential => 'Bearer $token';
+
   Map<String, String> get _headers => {
-    'Authorization': 'Bearer $token',
+    'Authorization': credential,
     'Content-Type': 'application/json',
   };
 
@@ -375,10 +383,10 @@ class StormApi {
 
   /// A URL an `Image.network` can fetch directly.
   ///
-  /// The token rides in the query string because Flutter's image widgets
+  /// The credential rides in the query string because Flutter's image widgets
   /// can't set headers on the request they make.
   Uri attachmentUrl(String vaultId, String path) =>
-      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': token});
+      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': credential});
 
   Future<List<TagCount>> tags(String vaultId) async {
     final json = _decode(

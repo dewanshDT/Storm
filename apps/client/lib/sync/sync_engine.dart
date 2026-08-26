@@ -721,8 +721,10 @@ class SyncEngine extends ChangeNotifier {
     _ws?.sink.close();
 
     final url = api.baseUrl.replaceFirst(RegExp(r'^http'), 'ws');
+    // The full credential, not the bare token: a WebSocket handshake carries
+    // no headers, and the server's query fallback matches on the scheme.
     final uri = Uri.parse(
-      '$url/v1/stream?token=${Uri.encodeComponent(api.token)}',
+      '$url/v1/stream?token=${Uri.encodeComponent(api.credential)}',
     );
 
     try {
