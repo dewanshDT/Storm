@@ -42,6 +42,10 @@ pub const WS_TICKET_LIFETIME_SECS: i64 = 60;
 pub const EVENT_LOGIN_OK: &str = "login_ok";
 pub const EVENT_LOGIN_FAIL: &str = "login_fail";
 pub const EVENT_LOGIN_LOCKED: &str = "login_locked";
+/// Refused by the login rate limiter before any credential check. Distinct
+/// from `login_locked` (a per-user lockout) because the remedy and the
+/// culprit differ: this one is about *who is calling*, not which account.
+pub const EVENT_LOGIN_THROTTLED: &str = "login_throttled";
 pub const EVENT_SESSION_CREATED: &str = "session_created";
 pub const EVENT_SESSION_REFRESHED: &str = "session_refreshed";
 pub const EVENT_SESSION_REVOKED: &str = "session_revoked";

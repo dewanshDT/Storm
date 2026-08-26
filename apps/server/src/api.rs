@@ -116,6 +116,15 @@ pub struct AppState {
     ///
     /// Lives here so there is exactly one, for the process's whole life.
     pub hasher: crate::auth::Hasher,
+    /// **The one login rate limiter for the whole process.**
+    ///
+    /// Same discipline as [`AppState::hasher`], for the same reason: a
+    /// per-handler limiter would be decorative in exactly the way a
+    /// per-handler `Hasher::new()` was — each request would mint a fresh pair
+    /// of full buckets and no limit would exist across requests. See
+    /// [`crate::auth::ratelimit`] for the two-bucket shape and why the global
+    /// ceiling is strict while the per-caller one is generous.
+    pub login_limiter: crate::auth::ratelimit::LoginLimiter,
 }
 
 pub type Shared = Arc<AppState>;
@@ -717,6 +726,42 @@ pub struct FirstUserRequest {
     password: String,
 }
 
+/// The socket peer, where this request has one.
+///
+/// A hand-written extractor rather than `Option<ConnectInfo<SocketAddr>>`,
+/// which **does not compile on axum 0.8**: there is no blanket `Option<E>`
+/// impl, `E` has to implement `OptionalFromRequestParts`, and `ConnectInfo`
+/// does not — so the obvious signature fails the `Handler` bound with an error
+/// that names neither `ConnectInfo` nor the missing trait. Same shape as
+/// `Option<WebSocketUpgrade>`, which the relay design already had to work
+/// around on `stream`.
+///
+/// The property that matters is that this **never rejects**. `main.rs` serves
+/// with `into_make_service_with_connect_info`, so a real socket always carries
+/// the extension; the relay's in-process dispatch reconstructs an
+/// `http::Request` and calls the router as a tower service, so it never does.
+/// A required extractor would turn every relayed login into an extractor
+/// rejection — a refusal that never reaches the handler and reads as a
+/// malformed request rather than a rate limit. `pair_handler` has the bare
+/// form and will need this same treatment when the tunnel lands.
+struct MaybePeer(Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(MaybePeer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0),
+        ))
+    }
+}
+
 /// POST /v1/auth/login — exchange username/password for a token pair.
 ///
 /// The caller must present a `StormDevice` header (device tier). The device
@@ -724,6 +769,7 @@ pub struct FirstUserRequest {
 /// caller receives access + refresh tokens bound to this device.
 async fn login_handler(
     State(state): State<Shared>,
+    MaybePeer(peer): MaybePeer,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<crate::auth::sessions::IssuedSession>, Response> {
@@ -734,6 +780,40 @@ async fn login_handler(
     let device_id = extract_device_id(&headers).ok_or_else(|| {
         ApiError(StatusCode::UNAUTHORIZED, "device header required".into()).into_response()
     })?;
+
+    // Charge the budget *before* acquiring the Argon2 permit: the point is to
+    // stop a flood from ever reaching the KDF. A successful login refunds,
+    // because a server under attack must still let real users in — see
+    // `ratelimit.rs`. The socket peer is the only identity used here;
+    // `X-Forwarded-For` is client-forgeable and never a security input.
+    use crate::auth::ratelimit::CallerKey;
+    let caller = peer
+        .map(|c| CallerKey::Ip(c.ip()))
+        .unwrap_or(CallerKey::Unattributed);
+    if let Err(retry_after_secs) = state.login_limiter.check(&caller) {
+        let remote = match &caller {
+            CallerKey::Ip(ip) => Some(ip.to_string()),
+            CallerKey::Unattributed => None,
+        };
+        let auth_db = state.auth_db.lock().await;
+        // Never a secret: the submitted username is quoted verbatim because a
+        // flood of junk names is exactly what the operator needs to see.
+        if let Err(e) = auth_db.record_event_from(
+            crate::auth::sessions::EVENT_LOGIN_THROTTLED,
+            None,
+            Some(&device_id),
+            remote.as_deref(),
+            &now,
+            &format!(
+                r#"{{"username":{:?},"retry_after_secs":{}}}"#,
+                body.username, retry_after_secs
+            ),
+        ) {
+            tracing::warn!(error = %e, "could not record login_throttled event");
+        }
+        drop(auth_db);
+        return Err(rate_limited(retry_after_secs));
+    }
 
     let hasher = &state.hasher;
     let mut auth_db = state.auth_db.lock().await;
@@ -747,7 +827,10 @@ async fn login_handler(
     )
     .await
     {
-        Ok(issued) => Ok(Json(issued)),
+        Ok(issued) => {
+            state.login_limiter.refund(&caller);
+            Ok(Json(issued))
+        }
         // Rate limiting is the one refusal that is not a 401, because the
         // client's remedy is "wait", not "try different credentials" — and it
         // cannot say *how long* to wait without the number. Hence a `Response`
@@ -2284,6 +2367,29 @@ mod tests {
         dir: &FsPath,
         policy: Arc<dyn crate::auth::authz::VaultPolicy>,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_full(dir, policy, crate::auth::ratelimit::LoginLimiter::new())
+    }
+
+    /// As [`test_router_with_state`], but with the login limiter's numbers
+    /// chosen by the caller — the rate-limit tests want a burst they can
+    /// exhaust in two requests rather than thirty, because every attempt that
+    /// reaches the handler pays a real Argon2id verify.
+    fn test_router_with_limiter(
+        dir: &FsPath,
+        limiter: crate::auth::ratelimit::LoginLimiter,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_full(
+            dir,
+            Arc::new(crate::auth::authz::AllowAuthenticated),
+            limiter,
+        )
+    }
+
+    fn test_router_full(
+        dir: &FsPath,
+        policy: Arc<dyn crate::auth::authz::VaultPolicy>,
+        login_limiter: crate::auth::ratelimit::LoginLimiter,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         let root = dir.join("vaults");
@@ -2314,6 +2420,7 @@ mod tests {
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),
+            login_limiter,
         });
         (
             router(
@@ -3442,6 +3549,129 @@ mod tests {
             status,
             StatusCode::UNAUTHORIZED,
             "login must still demand a StormDevice credential"
+        );
+    }
+
+    // ---- login rate limiting ----------------------------------------------
+
+    /// A login request, optionally carrying a `ConnectInfo` extension the way
+    /// the real service does (`into_make_service_with_connect_info`). Tests
+    /// that omit it exercise exactly what the relay's in-process dispatch
+    /// produces: no socket.
+    fn login_from(
+        device: &str,
+        username: &str,
+        peer: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut req = post_json_with_auth(
+            "/v1/auth/login",
+            serde_json::json!({"username": username, "password": "a-long-enough-password"}),
+            device,
+        );
+        if let Some(peer) = peer {
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                format!("{peer}:54321")
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ));
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn login_without_a_connect_info_extension_still_reaches_the_handler() {
+        // The extractor trap, as a regression test. A bare `ConnectInfo`
+        // extractor rejects before the handler runs and the client sees a
+        // 500-shaped error; the relay's in-process dispatch sends requests
+        // with no socket, so this must keep working — bounded by the
+        // `Unattributed` bucket, not refused outright.
+        let dir = tempdir::TempDir::new("storm-login-nopeer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        let (status, _) = send(&app, login_from(&device, "nobody", None)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the handler must run and answer 401 for unknown credentials, not fail extraction"
+        );
+    }
+    /// A limiter whose per-caller burst is two, so these tests spend two
+    /// Argon2id verifies instead of thirty. The global bucket is left roomy —
+    /// each test here is about the per-caller half, and a global trip would
+    /// mask it.
+    fn throttling_limiter() -> crate::auth::ratelimit::LoginLimiter {
+        use crate::auth::ratelimit::{Limits, LoginLimiter, tests::TEST_LIMITS};
+        LoginLimiter::with_limits(TEST_LIMITS, Limits::per_minute(1_000.0, 1_000.0))
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_logins_from_one_caller_is_throttled_while_another_is_not() {
+        // The per-caller bucket trips first: one address flooding cannot lock
+        // anybody else out, which is the whole point of splitting the buckets.
+        // Junk usernames deliberately — they never trip the per-user lockout,
+        // which is why the limiter exists at all.
+        let dir = tempdir::TempDir::new("storm-login-burst").unwrap();
+        let (app, _, state) = test_router_with_limiter(dir.path(), throttling_limiter());
+        let device = pair_a_device(&state).await;
+
+        for _ in 0..crate::auth::ratelimit::tests::TEST_BURST {
+            let (status, _) = send(&app, login_from(&device, "nobody", Some("10.0.0.1"))).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "the burst itself fits the budget and reaches the credential check"
+            );
+        }
+
+        // The next attempt from the flooded address is a 429 with Retry-After,
+        // reusing the per-user-lockout shape rather than inventing a second one.
+        let response = app
+            .clone()
+            .oneshot(login_from(&device, "nobody", Some("10.0.0.1")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        assert!(retry_after >= 1);
+
+        // ...while a different address still gets a credential check (401),
+        // not a throttle (429).
+        let (status, _) = send(&app, login_from(&device, "nobody", Some("10.0.0.2"))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "another caller must not pay for the flood"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_throttled_login_is_recorded_with_its_remote_address() {
+        let dir = tempdir::TempDir::new("storm-login-audit").unwrap();
+        let (app, _, state) = test_router_with_limiter(dir.path(), throttling_limiter());
+        let device = pair_a_device(&state).await;
+
+        for _ in 0..=crate::auth::ratelimit::tests::TEST_BURST {
+            send(&app, login_from(&device, "nobody", Some("10.9.9.9"))).await;
+        }
+
+        let auth_db = state.auth_db.lock().await;
+        let kind = crate::auth::sessions::EVENT_LOGIN_THROTTLED;
+        assert!(
+            auth_db.event_count(kind).unwrap() >= 1,
+            "a throttle refusal leaves an audit trail"
+        );
+        assert_eq!(
+            auth_db.latest_event_remote(kind).unwrap().as_deref(),
+            Some("10.9.9.9"),
+            "the offending address is auditable"
         );
     }
 
