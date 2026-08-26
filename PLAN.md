@@ -1020,6 +1020,55 @@ Three findings worth keeping, each of which cost a cycle:
 
 *Revisit if:* nothing here — these are properties of the tools, not choices.
 
+**57. Query-string authentication was dead, and the symptom had been filed as a
+flaky test.** *(2026-08-26, branch `staging`)*
+
+A WebSocket handshake carries no headers and neither does an `<img>` request,
+so `require_auth` also accepts the credential as `?token=`. Two independent
+faults meant that path could not authenticate anyone:
+
+- the server **never percent-decoded** the query value, so a conforming client
+  sending `token=Bearer%20abc` was matched raw against `"Bearer "` and missed;
+- both client call sites — the change-feed socket and `attachmentUrl` — sent
+  the **bare** token, which names no scheme and matches neither
+  `"Bearer "` nor `"StormDevice "`.
+
+Neither was noticed because the shared token contained no space and was
+compared whole. It was the only credential the raw, scheme-less form ever fit,
+so **removing it (decision 54) took query authentication with it, silently.**
+There was no test on the path at all, which is the A10 lesson recurring in the
+same release it was written about: *a credential every test is handed is a
+credential no test checks.* The one client test that did touch it asserted the
+bare token — it encoded the bug and passed while the URL it checked
+authenticated nothing.
+
+**The finding worth keeping is about the symptom, not the cause.** This was
+visible for six days as `two_client_sync_test.dart` scenario 2 — WebSocket push
+reaching the other client's cache — recorded in the vault as a timing flake
+that "failed once under CI load, passed on re-run". It was never a flake. The
+socket 401s, `_scheduleReconnect` fires, and the pull that follows does the work
+the push should have done; the test passes or fails on whether a 1s-to-60s
+backoff beats its own timeout. Every user has been on reconnect-driven polling
+rather than push since v0.2.6.
+
+> **A flaky test is a diagnosis, and it is the easiest one to reach for.**
+> Nothing else in the system reports a degraded-but-working path, so the only
+> place the breakage could surface was a test that sometimes lost a race —
+> and "flaky" is exactly the label that stops anyone looking further.
+
+The fix: the server decodes, and both clients send `api.credential` — one
+accessor shared by the header path and both query paths, so they cannot drift
+apart again. A server test pins both halves (bare refused, scheme-prefixed
+accepted), because the contract had none.
+
+*Revisit if:* the credential stops travelling in a URL.
+`POST /v1/auth/ws-ticket` exists for exactly that reason and mints a 60-second
+single-use ticket, but **nothing consumes it** — `consume_ws_ticket` has no
+callers. Wiring it up is the real answer and is now the recorded follow-up; a
+session token in a query string lands in proxy logs and browser history, and
+this decision only restores the behaviour that was intended, not the one that
+is right.
+
 ---
 
 ## Data model
