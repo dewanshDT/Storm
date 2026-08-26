@@ -219,8 +219,20 @@ check("public_key is 32 base64url bytes", len(public_key) == 32, info.get("publi
 
 check(
     "exposes exactly the identity fields and nothing else",
-    set(info) == {"server_id", "name", "key_id", "algorithm", "public_key"},
+    set(info) == {"server_id", "name", "key_id", "algorithm", "public_key", "relays"},
     sorted(info),
+)
+
+# `relays` is how a client whose server moved relays finds its way home: the
+# pairing payload is frozen at issuance, so this endpoint is the only live
+# source. It advertises the set the server is *registered* with, never the set
+# it has configured — a relay it failed to register with is a dead path, and
+# the client's connection race would spend its whole budget dialling it.
+check("carries a relay set", isinstance(info.get("relays"), list), info.get("relays"))
+check(
+    "which is empty on a server with no tunnel client",
+    info.get("relays") == [],
+    info.get("relays"),
 )
 
 # The two endpoints are unauthenticated, not "authenticated by anything". A
