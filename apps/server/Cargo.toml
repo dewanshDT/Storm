@@ -31,6 +31,9 @@ serde_json = "1.0.151"
 thiserror = "2.0.19"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
 tokio = { version = "1.53.1", features = ["full"] }
+# `ReceiverStream` only — the adapter that turns the SSE feed's channel into
+# the `Stream` `Body::from_stream` wants. Already in the tree via tokio-util.
+tokio-stream = "0.1.19"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["fs", "cors", "trace", "set-header"] }
 tracing = "0.1.44"
@@ -40,6 +43,10 @@ walkdir = "2.5.0"
 
 [dev-dependencies]
 tempdir = "0.3.7"
+# A real WebSocket client, for the one test that has to prove `/v1/stream`
+# still upgrades: `oneshot` cannot, because it never produces the
+# `hyper::upgrade::OnUpgrade` the handshake needs.
+tokio-tungstenite = "0.29.0"
 tower = { version = "0.5.3", features = ["util"] }
 
 # Packaged with `cargo deb`. The release job copies the Flutter web build into

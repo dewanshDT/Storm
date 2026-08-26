@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        Extension, Path, Query, State,
+        Extension, FromRequestParts, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -2308,35 +2308,217 @@ fn content_type_for(path: &str) -> &'static str {
     }
 }
 
-// ---- websocket ---------------------------------------------------------
+// ---- change feed (WebSocket + SSE) --------------------------------------
 
-async fn stream(State(state): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| push_changes(socket, state))
+/// The literal a lagging WebSocket client has always been sent.
+///
+/// A constant so the "must not change" invariant below has something a test
+/// can compare against; these bytes are the wire format, not an implementation
+/// detail.
+const WS_RESYNC: &str = r#"{"kind":"resync"}"#;
+
+/// The SSE form of the same thing (`docs/srp-v1.md` §5.3). Empty `data:`.
+const SSE_RESYNC: &str = "event: resync\ndata:\n\n";
+
+/// The peer is gone; stop the feed.
+struct Gone;
+
+/// Where a change goes once the feed has one.
+///
+/// Two transports carry the *same* feed. A LAN client upgrades to a WebSocket;
+/// a relayed client cannot, because a tunnelled request is dispatched
+/// in-process and `WebSocketUpgrade` needs a `hyper::upgrade::OnUpgrade` that
+/// only a real hyper connection produces. So `/v1/stream` grew a second
+/// response mode rather than a second code path — one loop, two framings.
+///
+/// **It takes a `Change`, not rendered text.** SSE has to put `vault_id` and
+/// `seq` into its `id:` line, so a `send_text(String)` shape could not build
+/// its own frame; each implementation decides its own framing instead.
+///
+/// `impl Future + Send` rather than a bare `async fn` in the trait: the loop is
+/// spawned, so its future has to be `Send`, and that is not inferable through
+/// an `async fn` declaration.
+trait ChangeSink: Send + 'static {
+    fn change(&mut self, change: &Change) -> impl Future<Output = Result<(), Gone>> + Send;
+    fn resync(&mut self) -> impl Future<Output = Result<(), Gone>> + Send;
+}
+
+/// The WebSocket framing, unchanged since the feed existed.
+struct WsSink(WebSocket);
+
+impl ChangeSink for WsSink {
+    async fn change(&mut self, change: &Change) -> Result<(), Gone> {
+        // **Byte-for-byte what this socket has always sent**: a bare
+        // `serde_json` `Change` in a text frame, no envelope and no event
+        // name. A shipped Flutter client parses exactly this, and
+        // `apps/client/test_live/two_client_sync_test.dart` gates releases on
+        // it. SSE framing belongs to the other sink and must never leak here.
+        let Ok(text) = serde_json::to_string(change) else {
+            // Unserializable is skipped, not fatal — as before.
+            return Ok(());
+        };
+        self.0
+            .send(Message::Text(text.into()))
+            .await
+            .map_err(|_| Gone)
+    }
+
+    async fn resync(&mut self) -> Result<(), Gone> {
+        // A failed resync is ignored rather than ending the feed, which is what
+        // this branch has always done: the next change's send is what discovers
+        // a dead socket.
+        let _ = self.0.send(Message::Text(WS_RESYNC.into())).await;
+        Ok(())
+    }
+}
+
+/// The SSE framing (`docs/srp-v1.md` §5.3), written into the response body's
+/// channel.
+struct SseSink(tokio::sync::mpsc::Sender<Result<String, std::convert::Infallible>>);
+
+impl ChangeSink for SseSink {
+    async fn change(&mut self, change: &Change) -> Result<(), Gone> {
+        let Ok(json) = serde_json::to_string(change) else {
+            return Ok(());
+        };
+        // **`id:` is `<vault_id>:<seq>`, never the bare `seq`.** `change_log`
+        // lives in each vault's own `index.db` and `seq` is that database's
+        // `last_insert_rowid()`, so seq is per vault (M9/M10) while this feed is
+        // cross-vault: two vaults both emit 1, 2, 3. A bare id would collide and
+        // land a `Last-Event-ID` resume at the wrong position with nothing
+        // anywhere reporting an error.
+        let frame = format!(
+            "event: change\nid: {}:{}\ndata: {json}\n\n",
+            change.vault_id, change.seq
+        );
+        self.0.send(Ok(frame)).await.map_err(|_| Gone)
+    }
+
+    async fn resync(&mut self) -> Result<(), Gone> {
+        self.0.send(Ok(SSE_RESYNC.into())).await.map_err(|_| Gone)
+    }
+}
+
+/// The change feed.
+///
+/// Answers a WebSocket upgrade when one is asked for, and an ordinary
+/// `text/event-stream` response when one is not — the shape a relay can carry,
+/// since a tunnelled request is dispatched in-process and never has an
+/// `OnUpgrade` to hand the upgrade extractor.
+///
+/// **The branch is chosen here, by hand, and that is not a style choice.**
+/// There is no `Option<WebSocketUpgrade>`: `WebSocketUpgrade` implements
+/// `FromRequestParts` and *not* `OptionalFromRequestParts`, so writing
+/// `Option<WebSocketUpgrade>` in this signature fails as an unsatisfied
+/// `Handler` bound that names neither type. The handler therefore takes the
+/// whole request, decides, and calls the extractor itself on the upgrade branch.
+///
+/// Note what did *not* change: this is an ordinary session-tier request behind
+/// `require_auth`. Subscribing to `state.events` anywhere else — in a tunnel
+/// client, say — would hand every vault's change feed to a caller that
+/// presented no credential at all.
+async fn stream(State(state): State<Shared>, request: axum::extract::Request) -> Response {
+    let (mut parts, _body) = request.into_parts();
+
+    // Subscribed before either branch answers, so nothing is missed between the
+    // response going out and the feed task starting.
+    let rx = state.events.subscribe();
+
+    if wants_websocket(&parts) {
+        return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+            Ok(ws) => ws.on_upgrade(move |socket| push_changes(WsSink(socket), rx)),
+            Err(rejection) => rejection.into_response(),
+        };
+    }
+
+    sse_response(&parts.headers, rx)
+}
+
+/// Does this request ask to become a WebSocket, as HTTP means it?
+///
+/// `Connection` is a comma-separated token list — browsers and proxies send
+/// `keep-alive, Upgrade` — and both it and `Upgrade: websocket` are
+/// case-insensitive, so comparing either header whole would miss real
+/// handshakes and answer them with an SSE body they cannot read.
+fn wants_websocket(parts: &axum::http::request::Parts) -> bool {
+    // Above HTTP/1.1 there is no `Upgrade` header at all: a WebSocket is an
+    // extended CONNECT. Mirrors what `WebSocketUpgrade` itself checks, so this
+    // branch and the extractor it calls agree on what an upgrade is.
+    if parts.version > axum::http::Version::HTTP_11 {
+        return parts.method == axum::http::Method::CONNECT;
+    }
+
+    header_has_token(&parts.headers, header::CONNECTION, "upgrade")
+        && header_has_token(&parts.headers, header::UPGRADE, "websocket")
+}
+
+fn header_has_token(headers: &HeaderMap, name: header::HeaderName, token: &str) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|candidate| candidate.trim().eq_ignore_ascii_case(token))
+}
+
+/// The non-upgrade response mode: the same feed as `text/event-stream`.
+fn sse_response(headers: &HeaderMap, rx: broadcast::Receiver<Change>) -> Response {
+    // **`Last-Event-ID` is ignored deliberately.** Whether the origin replays
+    // from it is unresolved (`docs/srp-v1.md` §5.3) — replay implies buffering,
+    // which the no-relay-storage rule bars — and an EventSource sends the header
+    // by itself on every reconnect, so accepting one in silence would read as
+    // support for a semantics nobody has chosen. Logged so a resume attempt is
+    // at least visible; not honoured.
+    if let Some(id) = headers.get("last-event-id") {
+        tracing::debug!(
+            last_event_id = ?id,
+            "ignoring Last-Event-ID: whether the origin replays is undecided (srp-v1 §5.3)"
+        );
+    }
+
+    // Bounded, so a client that stops reading cannot grow this without limit.
+    // Backpressure here stalls the feed task, `broadcast` turns that into
+    // `Lagged`, and the client is told to resync — the same recovery a slow
+    // WebSocket gets.
+    let (tx, body_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(push_changes(SseSink(tx), rx));
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        // No keep-alive comments and no inactivity timeout: a quiet vault is a
+        // normal vault, and a feed that hung up on silence would be
+        // indistinguishable from a broken one.
+        axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx)),
+    )
+        .into_response()
 }
 
 /// Pushes change events so other devices update without polling.
 ///
-/// Events carry only metadata; the client decides what to fetch. That keeps
-/// the socket cheap and means a missed message is recoverable by falling back
-/// to `GET /v1/sync?since=`.
-async fn push_changes(mut socket: WebSocket, state: Shared) {
-    let mut rx = state.events.subscribe();
+/// Events carry only metadata; the client decides what to fetch. That keeps the
+/// feed cheap and means a missed message is recoverable by falling back to
+/// `GET /v1/sync?since=`.
+///
+/// Takes the receiver rather than subscribing itself, so the caller can
+/// subscribe before it answers — a subscription taken after the response is
+/// written would miss every change in between.
+async fn push_changes<S: ChangeSink>(mut sink: S, mut rx: broadcast::Receiver<Change>) {
     loop {
         match rx.recv().await {
             Ok(change) => {
-                let Ok(text) = serde_json::to_string(&change) else {
-                    continue;
-                };
-                if socket.send(Message::Text(text.into())).await.is_err() {
+                if sink.change(&change).await.is_err() {
                     break;
                 }
             }
-            // A slow client that fell behind is told to resync rather than
-            // being silently left with a gap.
+            // A slow client that fell behind is told to resync rather than being
+            // silently left with a gap.
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let _ = socket
-                    .send(Message::Text(r#"{"kind":"resync"}"#.into()))
-                    .await;
+                if sink.resync().await.is_err() {
+                    break;
+                }
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -4391,5 +4573,306 @@ mod tests {
                 "and still say which key acted, for the audit trail"
             );
         }
+    }
+
+    // ---- change feed: WebSocket and SSE ---------------------------------
+
+    fn a_change(vault: &str, seq: i64) -> Change {
+        Change {
+            seq,
+            vault_id: vault.into(),
+            note_id: "note-1".into(),
+            kind: "updated".into(),
+            version: 1,
+            at: "2026-08-26T00:00:00Z".into(),
+        }
+    }
+
+    /// A session-tier credential, which is what `/v1/stream` needs.
+    async fn stream_credential(state: &Shared) -> String {
+        let user = seed_owner(state).await;
+        format!("Bearer {}", session_token(state, &user).await)
+    }
+
+    /// A receiver that has already fallen behind, so the next `recv` is
+    /// `Lagged`.
+    ///
+    /// Deterministic on purpose: racing a real slow consumer to make it lag is
+    /// exactly the kind of test that passes locally and fails in CI.
+    fn a_lagged_receiver() -> broadcast::Receiver<Change> {
+        let (tx, rx) = broadcast::channel(2);
+        for seq in 1..=5 {
+            tx.send(a_change("vault-a", seq)).unwrap();
+        }
+        drop(tx); // so the loop ends rather than waiting forever
+        rx
+    }
+
+    /// Records what the shared loop asked a sink to deliver, without framing.
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl ChangeSink for RecordingSink {
+        async fn change(&mut self, change: &Change) -> Result<(), Gone> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("change {}:{}", change.vault_id, change.seq));
+            Ok(())
+        }
+
+        async fn resync(&mut self) -> Result<(), Gone> {
+            self.0.lock().unwrap().push("resync".into());
+            Ok(())
+        }
+    }
+
+    /// Reads an endless body until `want` complete SSE events have arrived.
+    ///
+    /// `axum::body::to_bytes` cannot be used here at all: the change feed has
+    /// no end, so reading to completion hangs rather than failing.
+    async fn read_events(body: axum::body::Body, want: usize) -> String {
+        let mut stream = Box::pin(body.into_data_stream());
+        let mut text = String::new();
+        while text.matches("\n\n").count() < want {
+            let chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio_stream::StreamExt::next(&mut stream),
+            )
+            .await
+            .expect("the feed sent nothing before the timeout")
+            .expect("the feed ended, which it must not do")
+            .unwrap();
+            text.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn the_feed_loop_sends_changes_and_turns_lagging_into_a_resync() {
+        let seen = RecordingSink::default();
+        push_changes(seen.clone(), a_lagged_receiver()).await;
+
+        // The two retained changes, and the gap before them reported rather
+        // than dropped: a client silently missing changes has stopped syncing
+        // with nothing anywhere saying so.
+        assert_eq!(
+            *seen.0.lock().unwrap(),
+            vec!["resync", "change vault-a:4", "change vault-a:5"]
+        );
+    }
+
+    #[test]
+    fn a_lagging_websocket_client_is_sent_the_same_literal_it_always_was() {
+        // Not a tautology: these bytes are the wire format a shipped Flutter
+        // client parses, so editing `WS_RESYNC` has to fail here rather than in
+        // the field.
+        assert_eq!(WS_RESYNC, r#"{"kind":"resync"}"#);
+    }
+
+    /// The WebSocket branch, over a real socket.
+    ///
+    /// `oneshot` cannot reach it: `WebSocketUpgrade` needs a
+    /// `hyper::upgrade::OnUpgrade` in the request extensions and only a real
+    /// hyper connection produces one — which is the whole reason `/v1/stream`
+    /// grew a second response mode. So this binds an ephemeral port and speaks
+    /// the handshake for real.
+    #[tokio::test]
+    async fn the_websocket_branch_still_sends_a_bare_change_as_a_text_frame() {
+        use tokio_tungstenite::tungstenite::{Message as WsMessage, client::IntoClientRequest};
+
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut request = format!("ws://{addr}/v1/stream")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", credential.parse().unwrap());
+        let (mut socket, handshake) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(handshake.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        let change = a_change("vault-a", 3);
+        state.events.send(change.clone()).unwrap();
+
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio_stream::StreamExt::next(&mut socket),
+        )
+        .await
+        .expect("the socket sent nothing before the timeout")
+        .expect("the socket closed")
+        .unwrap();
+
+        // **The invariant, asserted rather than assumed.** A raw `serde_json`
+        // `Change` in a text frame: no event name, no envelope, nothing of the
+        // SSE framing. `apps/client/test_live/two_client_sync_test.dart` and a
+        // shipped client both parse exactly this.
+        let WsMessage::Text(text) = frame else {
+            panic!("the change feed must send text frames");
+        };
+        assert_eq!(text.as_str(), serde_json::to_string(&change).unwrap());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stream_request_without_an_upgrade_answers_event_stream() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let response = app
+            .oneshot(get_with_auth("/v1/stream", &credential))
+            .await
+            .unwrap();
+
+        // Not a rejection, and not a 426: the relay dispatches this request
+        // in-process, where an upgrade is impossible.
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sse_body_frames_a_change_as_one_event() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let response = app
+            .oneshot(get_with_auth("/v1/stream", &credential))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Safe to send only because the handler subscribes before it answers.
+        let change = a_change("vault-a", 7);
+        state.events.send(change.clone()).unwrap();
+
+        let json = serde_json::to_string(&change).unwrap();
+        assert_eq!(
+            read_events(response.into_body(), 1).await,
+            format!("event: change\nid: vault-a:7\ndata: {json}\n\n")
+        );
+    }
+
+    /// The regression test for the M9/M10 invariant.
+    ///
+    /// `change_log.seq` comes from each vault's own `index.db`, so every vault
+    /// counts 1, 2, 3 while this feed is cross-vault. A bare `id: <seq>` would
+    /// make these two events indistinguishable and land a `Last-Event-ID`
+    /// resume at the wrong position — silently, which is the failure the
+    /// composite id exists to prevent.
+    #[tokio::test]
+    async fn two_vaults_at_the_same_seq_get_distinct_event_ids() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let response = app
+            .oneshot(get_with_auth("/v1/stream", &credential))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        state.events.send(a_change("vault-a", 1)).unwrap();
+        state.events.send(a_change("vault-b", 1)).unwrap();
+
+        let body = read_events(response.into_body(), 2).await;
+        let ids: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("id:"))
+            .collect();
+        assert_eq!(ids, vec!["id: vault-a:1", "id: vault-b:1"]);
+        assert_ne!(ids[0], ids[1], "a bare seq would have collided here");
+    }
+
+    #[tokio::test]
+    async fn a_lagging_sse_client_is_sent_a_resync_event() {
+        let (tx, mut frames) = tokio::sync::mpsc::channel(8);
+        push_changes(SseSink(tx), a_lagged_receiver()).await;
+
+        assert_eq!(
+            frames.recv().await.unwrap().unwrap(),
+            "event: resync\ndata:\n\n"
+        );
+    }
+
+    /// The load-bearing one: `/v1/stream` is session tier, and the SSE mode did
+    /// not move it out from behind `require_auth`.
+    ///
+    /// The rejected design had the tunnel client subscribe to `state.events`
+    /// in-process instead of calling the handler, which would have handed every
+    /// vault's change feed to anyone who could open a trunk. This is what says
+    /// that bypass was not reintroduced.
+    #[tokio::test]
+    async fn the_change_feed_refuses_an_unauthenticated_caller() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, _) = test_router_with_state(dir.path());
+
+        let plain = app.clone().oneshot(get("/v1/stream")).await.unwrap();
+        assert_eq!(plain.status(), StatusCode::UNAUTHORIZED);
+
+        // And the upgrade branch too — the credential is checked before either
+        // branch is chosen, so neither can be the way in.
+        let upgrade = axum::http::Request::builder()
+            .uri("/v1/stream")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "WebSocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let refused = app.oneshot(upgrade).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// `Connection` is a token list and both headers are case-insensitive, so
+    /// the real-world handshake must not be mistaken for a plain GET.
+    #[tokio::test]
+    async fn an_upgrade_is_detected_by_token_not_by_whole_header() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let request = axum::http::Request::builder()
+            .uri("/v1/stream")
+            .header("authorization", &credential)
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "WebSocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        // `oneshot` puts no `OnUpgrade` in the extensions, so the handshake
+        // cannot complete — but reaching that refusal is the proof the request
+        // took the upgrade branch instead of being answered with SSE.
+        assert_ne!(response.status(), StatusCode::OK);
+        assert_ne!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "a real handshake must not be answered with an SSE body"
+        );
     }
 }
