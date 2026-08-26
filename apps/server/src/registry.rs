@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 pub const REGISTRY_FILE: &str = "vaults.json";
 
@@ -32,6 +33,128 @@ pub struct VaultEntry {
     /// when the root does.
     pub dir: String,
     pub created: String,
+}
+
+/// The relays this server is **currently registered with** (SRP v1 §4.4).
+///
+/// Configured is not registered. A relay listed in `Registry::relays` that the
+/// tunnel client never managed to register with is a dead path, and a client
+/// races its candidate addresses on a ~2 s budget — every dead entry burns part
+/// of that budget on every single reconnect. Only what is in here goes on the
+/// wire, which is why this is a separate thing from the configured list rather
+/// than a flag on it.
+///
+/// **Never persisted.** `Registry::registered_relays` carries `#[serde(skip)]`,
+/// because registration is a live fact about a connection and not a setting: a
+/// restarted server is registered with nothing until its tunnel client says
+/// otherwise, and writing the set to `vaults.json` would resurrect stale paths
+/// across a reboot — precisely the dead entries this exists to keep off the
+/// wire. Empty at boot is correct, not a gap. No tunnel client exists yet, so
+/// today it is always empty and `/v1/server` honestly says so.
+///
+/// **Why this primitive.** `mcp_enabled` next door is an `AtomicBool` because a
+/// bool fits in a word; a set does not, so the equivalent is a lock. It is
+/// `std::sync::RwLock` and not tokio's because the critical section is one
+/// `BTreeSet` insert or clone with no `.await` in it, and it sits behind an
+/// `Arc` so the future tunnel client can keep one handle from boot and update
+/// registration status without taking the vault write lock — and so the handle
+/// survives the registry clone a root change performs. `BTreeSet` rather than
+/// `Vec` so the advertised order is stable and a relay cannot appear twice.
+#[derive(Debug, Clone, Default)]
+pub struct RegisteredRelays(Arc<RwLock<BTreeSet<String>>>);
+
+// Everything below `snapshot` is dead until the tunnel client exists — it is
+// the only thing that will ever know whether a registration succeeded, and it
+// is not written yet. Committed now rather than later on purpose: the *shape*
+// is what SRP v1 §4.4 pins, `/v1/server` already reports the set, and a
+// mutation API a future caller has to invent from scratch is one that gets
+// invented differently. Drop the allow when the tunnel client lands.
+#[allow(dead_code)]
+impl RegisteredRelays {
+    /// The set, ordered, for putting on the wire.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.read().iter().cloned().collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.read().is_empty()
+    }
+
+    /// Registration with `relay_url` succeeded — start advertising it.
+    pub fn mark_registered(&self, relay_url: &str) -> Result<()> {
+        let url = normalize_relay_url(relay_url)?;
+        self.write().insert(url);
+        Ok(())
+    }
+
+    /// Registration lapsed, was refused, or the trunk died — stop advertising
+    /// it. Lenient about its argument on purpose: forgetting a relay must never
+    /// fail, or a malformed entry that got in would be advertised forever.
+    pub fn mark_unregistered(&self, relay_url: &str) {
+        let url = normalize_relay_url(relay_url).unwrap_or_else(|_| relay_url.trim().to_string());
+        self.write().remove(&url);
+    }
+
+    /// Every relay at once — a trunk supervisor shutting down.
+    pub fn clear(&self) {
+        self.write().clear();
+    }
+
+    // A poisoned lock means another thread panicked mid-update. The set is
+    // still structurally sound — a `BTreeSet` insert leaves no half-state a
+    // panic can expose — and `/v1/server` is the endpoint a stranded client
+    // uses to find its way home, so refusing to answer it is the worse
+    // failure. Recover the guard rather than propagating the panic.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeSet<String>> {
+        self.0.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeSet<String>> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Canonical form of a configured relay URL: scheme and authority, no trailing
+/// slash, no path.
+///
+/// A path is refused rather than trimmed, because [`public_address`] appends
+/// `/connect/<server_id>` to whatever is stored — a configured
+/// `wss://relay.example.com/foo` would derive an address the relay does not
+/// serve, and a client would spend its whole connection race discovering that.
+// Dead until something sets relays: the app's settings endpoint lives in
+// `api.rs` and does not exist yet. See the note above `impl RegisteredRelays`.
+#[allow(dead_code)]
+pub fn normalize_relay_url(url: &str) -> Result<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let rest = match trimmed.split_once("://") {
+        Some(("wss", rest)) => rest,
+        // `ws://` is allowed so a relay can run on a trusted LAN, or in a test,
+        // without a certificate. It is not the shape anything facing the public
+        // internet should use.
+        Some(("ws", rest)) => rest,
+        _ => bail!("a relay URL must start with wss:// or ws://"),
+    };
+    if rest.is_empty() {
+        bail!("a relay URL needs a host");
+    }
+    if rest.contains('/') {
+        bail!("a relay URL is a scheme and host only — no path");
+    }
+    if rest.contains(char::is_whitespace) {
+        bail!("a relay URL cannot contain whitespace");
+    }
+    Ok(trimmed.to_string())
+}
+
+/// `wss://<relay-host>/connect/<server_id>` — **derived, never allocated**
+/// (SRP v1 §4.4).
+///
+/// Any client holding a `server_id` can construct this, so the relay hands out
+/// no opaque identifier and there is nothing to store, expire or leak. Keep it
+/// that way: a stored address would be a second source of truth for where a
+/// server answers, and the two would drift.
+pub fn public_address(relay_url: &str, server_id: &str) -> String {
+    format!("{}/connect/{server_id}", relay_url.trim_end_matches('/'))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +197,33 @@ pub struct Registry {
     /// by `/v1/users/first` and cannot be minted here.
     #[serde(default)]
     pub allow_registration: bool,
+
+    /// Relay URLs this server should try to register with (SRP v1 §4.4).
+    ///
+    /// Here for the same reasons the MCP switches are: it has to survive a
+    /// restart, be settable from the app, and take effect on the next request
+    /// rather than the next boot. A second settings file would be a second
+    /// thing to back up and keep in step.
+    ///
+    /// **This is configuration, not advertisement.** What goes on the wire is
+    /// [`Registry::registered_relays`] — the ones registration actually
+    /// succeeded with. A relay listed here that the server never reached is a
+    /// dead path, and a client that dials it burns its connection-race budget
+    /// on a candidate that cannot answer. The two are deliberately separate
+    /// fields so no future edit can conflate them.
+    ///
+    /// `#[serde(default)]` so a `vaults.json` written before relays existed
+    /// loads with none, which is also what a server with no tunnel client has.
+    #[serde(default)]
+    pub relays: Vec<String>,
+
+    /// The relays registration currently holds — **never written to disk**.
+    ///
+    /// See [`RegisteredRelays`]. `#[serde(skip)]` is the load-bearing part:
+    /// persisting it would advertise stale paths after a restart, when the
+    /// server is in fact registered with nothing.
+    #[serde(skip)]
+    pub registered_relays: RegisteredRelays,
 }
 
 /// Hand-written rather than derived, so `Registry::default()` cannot quietly
@@ -90,6 +240,9 @@ impl Default for Registry {
             // Off. `#[derive(Default)]` would give the same answer, but this
             // Default is hand-written precisely so nobody has to check.
             allow_registration: false,
+            relays: Vec::new(),
+            // Registered with nothing until a tunnel client says otherwise.
+            registered_relays: RegisteredRelays::default(),
         }
     }
 }
@@ -316,6 +469,35 @@ impl Registry {
         let updated = entry.clone();
         self.vaults.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(updated)
+    }
+
+    /// Replaces the configured relay list, normalising and de-duplicating it.
+    ///
+    /// All-or-nothing: one bad URL rejects the whole call rather than being
+    /// dropped quietly, because a relay silently missing from the list is a
+    /// server unreachable from off the LAN with nothing to say why.
+    ///
+    /// **Does not touch [`Registry::registered_relays`].** Configuring a relay
+    /// is not registering with it; the tunnel client decides that, and until it
+    /// does the relay stays off the wire. Un-configuring one, on the other
+    /// hand, does drop it from the registered set — a relay nobody is trying to
+    /// hold a trunk with must not keep being advertised.
+    ///
+    /// The caller persists: `save` after this, the way the MCP switches do.
+    // Dead until the settings endpoint in `api.rs` calls it. See the note above
+    // `impl RegisteredRelays`.
+    #[allow(dead_code)]
+    pub fn set_relays(&mut self, urls: &[String]) -> Result<()> {
+        let mut normalized = BTreeSet::new();
+        for url in urls {
+            normalized
+                .insert(normalize_relay_url(url).with_context(|| format!("relay URL “{url}”"))?);
+        }
+        for gone in self.relays.iter().filter(|u| !normalized.contains(*u)) {
+            self.registered_relays.mark_unregistered(gone);
+        }
+        self.relays = normalized.into_iter().collect();
+        Ok(())
     }
 
     /// Forgets a vault. **Leaves every file on disk**, by design.
@@ -572,6 +754,177 @@ mod tests {
             assert!(sanitize_dir_name(bad).is_err(), "should reject {bad:?}");
         }
         assert_eq!(sanitize_dir_name("  Work  ").unwrap(), "Work");
+    }
+
+    // ---- relays --------------------------------------------------------
+
+    #[test]
+    fn configured_relays_round_trip_through_disk() {
+        // A setting that does not survive a restart is not a setting — the
+        // lesson `load`'s docstring records about the storage root, applied to
+        // the field added next to it.
+        let f = fixture();
+        let mut reg = Registry::load(&f.state, &f.root).unwrap();
+        reg.set_relays(&[
+            "wss://relay.example.com".to_string(),
+            "wss://relay.two.example/".to_string(),
+        ])
+        .unwrap();
+        reg.save(&f.state).unwrap();
+
+        let again = Registry::load(&f.state, &f.root).unwrap();
+        assert_eq!(
+            again.relays,
+            vec![
+                "wss://relay.example.com".to_string(),
+                "wss://relay.two.example".to_string(),
+            ],
+            "the configured list must come back off disk, trailing slash normalised away"
+        );
+    }
+
+    #[test]
+    fn a_registry_written_before_relays_existed_still_loads() {
+        // Adding a field to a persisted file must not turn every existing
+        // install into a server that refuses to start.
+        let f = fixture();
+        fs::write(
+            f.state.join(REGISTRY_FILE),
+            r#"{"root":"/tmp/vaults","vaults":[],"mcp_enabled":true}"#,
+        )
+        .unwrap();
+
+        let reg = Registry::load(&f.state, &f.root).unwrap();
+        assert!(reg.relays.is_empty(), "defaults to none, does not fail");
+        assert!(reg.registered_relays.is_empty());
+        assert!(reg.mcp_enabled, "the fields we kept must survive");
+    }
+
+    #[test]
+    fn the_registered_set_is_never_written_to_disk() {
+        // Persisting it would advertise, after a reboot, relays the server is
+        // not registered with — the dead paths this whole split exists to
+        // keep off the wire.
+        let f = fixture();
+        let mut reg = Registry::load(&f.state, &f.root).unwrap();
+        reg.set_relays(&["wss://relay.example.com".to_string()])
+            .unwrap();
+        reg.registered_relays
+            .mark_registered("wss://relay.example.com")
+            .unwrap();
+        reg.save(&f.state).unwrap();
+
+        let raw = fs::read_to_string(f.state.join(REGISTRY_FILE)).unwrap();
+        assert!(
+            !raw.contains("registered"),
+            "the live set must not appear in vaults.json: {raw}"
+        );
+
+        let again = Registry::load(&f.state, &f.root).unwrap();
+        assert_eq!(again.relays.len(), 1, "configuration survives");
+        assert!(
+            again.registered_relays.is_empty(),
+            "registration does not — a restarted server is registered with nothing"
+        );
+    }
+
+    #[test]
+    fn configuring_a_relay_does_not_register_it() {
+        let f = fixture();
+        let mut reg = Registry::load(&f.state, &f.root).unwrap();
+        reg.set_relays(&[
+            "wss://relay.example.com".to_string(),
+            "wss://relay.two.example".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(reg.relays.len(), 2);
+        assert!(
+            reg.registered_relays.snapshot().is_empty(),
+            "configured is not registered"
+        );
+
+        reg.registered_relays
+            .mark_registered("wss://relay.two.example")
+            .unwrap();
+        assert_eq!(
+            reg.registered_relays.snapshot(),
+            vec!["wss://relay.two.example".to_string()],
+            "only the one registration succeeded for"
+        );
+    }
+
+    #[test]
+    fn un_configuring_a_relay_drops_it_from_the_registered_set() {
+        let f = fixture();
+        let mut reg = Registry::load(&f.state, &f.root).unwrap();
+        reg.set_relays(&["wss://relay.example.com".to_string()])
+            .unwrap();
+        reg.registered_relays
+            .mark_registered("wss://relay.example.com")
+            .unwrap();
+
+        reg.set_relays(&[]).unwrap();
+        assert!(
+            reg.registered_relays.is_empty(),
+            "a relay nobody is holding a trunk with must stop being advertised"
+        );
+    }
+
+    #[test]
+    fn the_registered_set_is_shared_across_registry_clones() {
+        // `open_vaults` clones the registry into the `VaultSet`, and a root
+        // change does it again. If the tunnel client's handle did not survive
+        // that, registration status would silently stop reaching /v1/server.
+        let f = fixture();
+        let reg = Registry::load(&f.state, &f.root).unwrap();
+        let handle = reg.registered_relays.clone();
+        let copy = reg.clone();
+
+        handle.mark_registered("wss://relay.example.com").unwrap();
+        assert_eq!(copy.registered_relays.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn rejects_unusable_relay_urls() {
+        for bad in [
+            "",
+            "   ",
+            "relay.example.com",
+            "https://relay.example.com",
+            "wss://",
+            "wss://relay.example.com/connect",
+            "wss://relay example.com",
+        ] {
+            assert!(normalize_relay_url(bad).is_err(), "should reject {bad:?}");
+        }
+        assert_eq!(
+            normalize_relay_url("  wss://relay.example.com:8443/  ").unwrap(),
+            "wss://relay.example.com:8443"
+        );
+
+        let f = fixture();
+        let mut reg = Registry::load(&f.state, &f.root).unwrap();
+        assert!(
+            reg.set_relays(&["wss://ok.example".into(), "nope".into()])
+                .is_err(),
+            "one bad URL rejects the call — a relay must never go missing quietly"
+        );
+    }
+
+    #[test]
+    fn a_public_address_is_derived_from_the_relay_and_the_server_id() {
+        // Derived, not allocated (SRP v1 §4.4): the relay hands out no opaque
+        // identifier, so there is nothing to store.
+        assert_eq!(
+            public_address("wss://relay.example.com", "abc-123"),
+            "wss://relay.example.com/connect/abc-123"
+        );
+        assert_eq!(
+            public_address("wss://relay.example.com/", "abc-123"),
+            "wss://relay.example.com/connect/abc-123",
+            "no double slash"
+        );
     }
 
     #[test]

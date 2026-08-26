@@ -486,16 +486,66 @@ pub struct ServerInfo {
     pub algorithm: String,
     /// base64url, no padding.
     pub public_key: String,
+    /// The relays this server is **currently registered with** (SRP v1 §4.4).
+    ///
+    /// Appended after the existing fields, and only ever appended: an older
+    /// client parses this response by name and must not break on a key it does
+    /// not know, so the shape above stays exactly where it was.
+    ///
+    /// Empty on every server today — nothing registers with a relay yet. That
+    /// is the honest answer, not a placeholder: an empty list means "no relay
+    /// path to me", which is true.
+    pub relays: Vec<RelayAdvert>,
 }
 
+/// One reachable relay path, as a client should read it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RelayAdvert {
+    /// The relay's own base URL. Identity, so a client can match this entry
+    /// against one it already knows from its pairing payload instead of
+    /// treating a refreshed list as a set of strangers.
+    pub url: String,
+    /// `wss://<relay-host>/connect/<server_id>` — **derived, not allocated**.
+    /// Sent because it is what the client dials, not because it is stored;
+    /// any client holding the `server_id` above can rebuild it byte for byte.
+    pub public_address: String,
+}
+
+/// Who this server is, and how to reach it right now.
+///
+/// **Why the relay set is here.** A client learns its server's addresses from
+/// the pairing payload, and that payload is frozen at the moment the QR was
+/// issued. A server that later changes relays while a client is off the LAN
+/// would strand that client for good. This endpoint is the live carrier: it is
+/// the `none` tier, it is already on the identity-challenge path, and a client
+/// refreshes from it whenever the server is reachable by *any* path at all —
+/// including a relay it already knows.
+///
+/// **Registered, never merely configured.** The set comes from
+/// `registered_relays`, not from `Registry::relays`. A relay the server failed
+/// to register with is a dead path, and a client races its candidates on a
+/// ~2 s budget — one dead entry costs part of that budget on every reconnect.
 pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
     let identity = &state.identity;
+    let registered = {
+        let vaults = state.vaults.read().await;
+        vaults.registry.registered_relays.snapshot()
+    };
+    let relays = registered
+        .into_iter()
+        .map(|url| RelayAdvert {
+            public_address: crate::registry::public_address(&url, &identity.server_id),
+            url,
+        })
+        .collect();
+
     Ok(ServerInfo {
         server_id: identity.server_id.clone(),
         name: identity.name.clone(),
         key_id: identity.key_id.clone(),
         algorithm: crate::auth::identity::ALGORITHM.to_string(),
         public_key: identity.public_key_b64(),
+        relays,
     })
 }
 
@@ -685,5 +735,160 @@ mod tests {
         assert_eq!(sanitize_fts_query("NEAR(a b)"), "\"NEAR(a\" \"b)\"");
         assert_eq!(sanitize_fts_query("  "), "");
         assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"hi\"");
+    }
+
+    // ---- GET /v1/server: the live relay set -----------------------------
+
+    use crate::api::{AppState, VaultSet};
+    use crate::registry::Registry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// `ApiError` has no `Debug` impl — deliberately, it is an HTTP response —
+    /// so `.unwrap()` is unavailable on an `ApiResult`.
+    fn must<T>(result: ApiResult<T>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(ApiError(status, message)) => panic!("{status}: {message}"),
+        }
+    }
+
+    /// Enough state to answer `/v1/server`, which is decided entirely from the
+    /// identity and the registry — no vault is opened on this path.
+    fn server_state(dir: &std::path::Path) -> Shared {
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let root = dir.join("vaults");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut auth_db = crate::auth::AuthDb::open(&state_dir).unwrap();
+        let identity = Arc::new(
+            crate::auth::identity::load_or_create(&mut auth_db, &state_dir, "2026-08-26T00:00:00Z")
+                .unwrap(),
+        );
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let (root_changed, _) = tokio::sync::broadcast::channel(2);
+        let registry = Registry::load(&state_dir, &root).unwrap();
+
+        Arc::new(AppState {
+            vaults: tokio::sync::RwLock::new(VaultSet {
+                registry,
+                open: HashMap::new(),
+            }),
+            events,
+            state_dir,
+            identity,
+            root_changed,
+            mcp_enabled: std::sync::atomic::AtomicBool::new(false),
+            mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            allow_registration: std::sync::atomic::AtomicBool::new(false),
+            bootstrap_nonce: None,
+            listen_addr: "127.0.0.1:8484".into(),
+            vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
+            hasher: crate::auth::Hasher::new(),
+            login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn server_info_carries_an_empty_relay_set_on_a_fresh_server() {
+        let dir = tempdir::TempDir::new("storm-ops-relays").unwrap();
+        let state = server_state(dir.path());
+
+        let info = must(server_info(&state).await);
+        let json = serde_json::to_value(&info).unwrap();
+
+        // The field is live, not absent: a client that finds no `relays` key
+        // cannot tell "this server has no relay path" from "this server is too
+        // old to say", and would keep dialling a stale pairing payload.
+        assert_eq!(
+            json["relays"],
+            serde_json::json!([]),
+            "no tunnel client exists yet, so nothing is registered — and that is the honest answer"
+        );
+
+        // The rest of the response is unchanged, asserted key by key so a
+        // future edit cannot quietly reshape what pairing depends on.
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "algorithm".to_string(),
+                "key_id".to_string(),
+                "name".to_string(),
+                "public_key".to_string(),
+                "relays".to_string(),
+                "server_id".to_string(),
+            ],
+            "the addition is additive — nothing was added but `relays`, nothing removed"
+        );
+        assert_eq!(json["server_id"], state.identity.server_id.as_str());
+        assert_eq!(json["name"], state.identity.name.as_str());
+        assert_eq!(json["key_id"], state.identity.key_id.as_str());
+        assert_eq!(json["algorithm"], crate::auth::identity::ALGORITHM);
+        assert_eq!(json["public_key"], state.identity.public_key_b64().as_str());
+    }
+
+    #[tokio::test]
+    async fn server_info_advertises_registered_relays_never_configured_ones() {
+        // The distinction the field exists for. A relay the server failed to
+        // register with is a dead path; the client races its candidates on a
+        // ~2 s budget, so advertising one costs part of that budget on every
+        // single reconnect.
+        let dir = tempdir::TempDir::new("storm-ops-relays2").unwrap();
+        let state = server_state(dir.path());
+
+        {
+            let mut vaults = state.vaults.write().await;
+            vaults
+                .registry
+                .set_relays(&[
+                    "wss://relay.example.com".to_string(),
+                    "wss://relay.two.example".to_string(),
+                ])
+                .unwrap();
+        }
+
+        let info = must(server_info(&state).await);
+        assert!(
+            info.relays.is_empty(),
+            "configured but unregistered relays must not reach the wire"
+        );
+
+        // Now one of them registers.
+        {
+            let vaults = state.vaults.read().await;
+            vaults
+                .registry
+                .registered_relays
+                .mark_registered("wss://relay.two.example")
+                .unwrap();
+        }
+
+        let info = must(server_info(&state).await);
+        assert_eq!(info.relays.len(), 1, "only the one that registered");
+        assert_eq!(info.relays[0].url, "wss://relay.two.example");
+        assert_eq!(
+            info.relays[0].public_address,
+            format!(
+                "wss://relay.two.example/connect/{}",
+                state.identity.server_id
+            ),
+            "derived from the server_id in the same response, never allocated"
+        );
+
+        // And when registration lapses it leaves again, without the
+        // configuration changing at all.
+        {
+            let vaults = state.vaults.read().await;
+            vaults
+                .registry
+                .registered_relays
+                .mark_unregistered("wss://relay.two.example");
+            assert_eq!(vaults.registry.relays.len(), 2, "still configured");
+        }
+        assert!(must(server_info(&state).await).relays.is_empty());
     }
 }
