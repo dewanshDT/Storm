@@ -89,8 +89,34 @@ impl ServerIdentity {
     /// be replayed as a signature over anything else Storm ever signs — the
     /// ordinary defence against a signing oracle.
     pub fn sign_challenge(&self, nonce: &str) -> String {
-        let message = challenge_message(&self.server_id, nonce);
-        BASE64URL_NOPAD.encode(&self.signing.sign(&message).to_bytes())
+        self.sign_domain(&challenge_message(&self.server_id, nonce))
+    }
+
+    /// Signs a relay's nonce, proving this host holds the private key behind
+    /// the `server_id` it is registering at the relay — what stops one server
+    /// from squatting another's id and having clients routed to it.
+    ///
+    /// Reuses the existing identity key; relay registration is one more thing
+    /// it proves possession of, not a reason to mint a second keypair.
+    ///
+    /// Validates the nonce itself rather than trusting the caller to remember:
+    /// this signs whatever a relay sends, exactly like [`sign_challenge`] signs
+    /// whatever a client sends, so the same forgeable-field-boundary risk
+    /// applies and the same guard belongs here rather than upstream.
+    #[allow(dead_code)] // Called by relay registration, landing in a parallel change.
+    pub fn sign_relay_auth(&self, nonce: &str) -> std::result::Result<String, &'static str> {
+        validate_nonce(nonce)?;
+        Ok(self.sign_domain(&relay_auth_message(&self.server_id, nonce)))
+    }
+
+    /// Signs `message` and encodes the result the way the wire carries every
+    /// signature: base64url, no padding.
+    ///
+    /// The one signing path shared by every domain this identity signs for,
+    /// so adding a domain never means duplicating sign-then-encode — only the
+    /// message-building free function differs per domain.
+    fn sign_domain(&self, message: &[u8]) -> String {
+        BASE64URL_NOPAD.encode(&self.signing.sign(message).to_bytes())
     }
 }
 
@@ -101,6 +127,19 @@ impl ServerIdentity {
 /// is a wire-format change.
 pub fn challenge_message(server_id: &str, nonce: &str) -> Vec<u8> {
     format!("storm-challenge:v1:{server_id}:{nonce}").into_bytes()
+}
+
+/// The exact bytes a relay-auth signature covers.
+///
+/// Deliberately a different prefix from [`challenge_message`], not a shared
+/// builder with a domain parameter: `sign_challenge` proves this server's
+/// identity *to a client*, this proves the right to register *at a relay*,
+/// and a signature made for one must be structurally impossible to replay as
+/// the other. Two free functions make that a type-level fact instead of
+/// something a caller could get wrong by passing the wrong string.
+#[allow(dead_code)] // Called by `sign_relay_auth` and relay registration; tested directly here.
+pub fn relay_auth_message(server_id: &str, nonce: &str) -> Vec<u8> {
+    format!("storm-relay-auth:v1:{server_id}:{nonce}").into_bytes()
 }
 
 /// Loads this server's identity, creating it on first boot.
@@ -525,6 +564,114 @@ mod tests {
         assert!(
             key.verify(nonce.as_bytes(), &sig).is_err(),
             "the raw nonce must not be what gets signed"
+        );
+    }
+
+    #[test]
+    fn a_relay_auth_signature_verifies_against_the_published_key() {
+        let dir = tempdir::TempDir::new("storm-identity-relay-sign").unwrap();
+        let id = fresh(dir.path());
+
+        let nonce = "0123456789abcdef0123";
+        let signature = id.sign_relay_auth(nonce).unwrap();
+        let raw = BASE64URL_NOPAD.decode(signature.as_bytes()).unwrap();
+        let sig = ed25519_dalek::Signature::from_slice(&raw).unwrap();
+
+        let published = BASE64URL_NOPAD
+            .decode(id.public_key_b64().as_bytes())
+            .unwrap();
+        let key = VerifyingKey::from_bytes(&published.as_slice().try_into().unwrap()).unwrap();
+
+        assert!(
+            key.verify(&relay_auth_message(&id.server_id, nonce), &sig)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn challenge_and_relay_auth_messages_diverge_on_the_same_inputs() {
+        // The domain-separation property itself: same server_id, same nonce,
+        // different bytes — because the two prove different things.
+        let server_id = "srv_SAMEID";
+        let nonce = "0123456789abcdef0123";
+        assert_ne!(
+            challenge_message(server_id, nonce),
+            relay_auth_message(server_id, nonce)
+        );
+    }
+
+    #[test]
+    fn a_challenge_signature_does_not_verify_as_a_relay_auth_signature() {
+        let dir = tempdir::TempDir::new("storm-identity-no-cross-domain").unwrap();
+        let id = fresh(dir.path());
+        let nonce = "0123456789abcdef0123";
+
+        let published = BASE64URL_NOPAD
+            .decode(id.public_key_b64().as_bytes())
+            .unwrap();
+        let key = VerifyingKey::from_bytes(&published.as_slice().try_into().unwrap()).unwrap();
+
+        let challenge_sig = {
+            let raw = BASE64URL_NOPAD
+                .decode(id.sign_challenge(nonce).as_bytes())
+                .unwrap();
+            ed25519_dalek::Signature::from_slice(&raw).unwrap()
+        };
+        let relay_sig = {
+            let raw = BASE64URL_NOPAD
+                .decode(id.sign_relay_auth(nonce).unwrap().as_bytes())
+                .unwrap();
+            ed25519_dalek::Signature::from_slice(&raw).unwrap()
+        };
+
+        assert!(
+            key.verify(&relay_auth_message(&id.server_id, nonce), &challenge_sig)
+                .is_err(),
+            "a challenge signature must not verify as a relay-auth signature"
+        );
+        assert!(
+            key.verify(&challenge_message(&id.server_id, nonce), &relay_sig)
+                .is_err(),
+            "a relay-auth signature must not verify as a challenge signature"
+        );
+    }
+
+    #[test]
+    fn the_message_formats_are_pinned_byte_for_byte() {
+        // A refactor of the shared signing path must not be able to drift
+        // either wire format silently — both clients and relays rebuild these
+        // strings independently to verify.
+        assert_eq!(
+            challenge_message("srv_ABC123", "nonceXYZ"),
+            b"storm-challenge:v1:srv_ABC123:nonceXYZ".to_vec()
+        );
+        assert_eq!(
+            relay_auth_message("srv_ABC123", "nonceXYZ"),
+            b"storm-relay-auth:v1:srv_ABC123:nonceXYZ".to_vec()
+        );
+    }
+
+    #[test]
+    fn relay_auth_refuses_a_nonce_that_would_forge_field_boundaries() {
+        let dir = tempdir::TempDir::new("storm-identity-relay-nonce").unwrap();
+        let id = fresh(dir.path());
+
+        assert!(id.sign_relay_auth("0123456789abcdef0123").is_ok());
+        assert!(
+            id.sign_relay_auth("0123456789abcdef:x").is_err(),
+            "a colon must be refused on the relay path exactly as on the challenge path"
+        );
+        assert!(
+            id.sign_relay_auth("0123456789abcdef\"x").is_err(),
+            "a quote must be refused on the relay path"
+        );
+        assert!(
+            id.sign_relay_auth("short").is_err(),
+            "a too-short nonce must be refused on the relay path"
+        );
+        assert!(
+            id.sign_relay_auth(&"x".repeat(129)).is_err(),
+            "a too-long nonce must be refused on the relay path"
         );
     }
 
