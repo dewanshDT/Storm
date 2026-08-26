@@ -12,10 +12,11 @@ import 'package:flutter/services.dart' show TextInputFormatter;
 import 'icons.dart';
 import 'tokens.dart';
 
-/// Synced, syncing, or offline.
+/// Synced, syncing, offline, or untrusted.
 ///
 /// One dot, one meaning, everywhere it appears — green is synced and nothing
-/// else, grey is offline and inactive, amber is work in progress.
+/// else, grey is offline and inactive, amber is work in progress, and red is
+/// a server that answered without proving who it is.
 class StatusDot extends StatelessWidget {
   const StatusDot({super.key, required this.status, this.size = 8, this.ring});
 
@@ -38,6 +39,7 @@ class StatusDot extends StatelessWidget {
           DotStatus.synced => t.green,
           DotStatus.syncing => t.amber,
           DotStatus.offline => t.text3,
+          DotStatus.untrusted => t.danger,
         },
         border: ring == null
             ? null
@@ -53,7 +55,7 @@ class StatusDot extends StatelessWidget {
 /// re-derive per preset — and the accent test measures this exact pairing.
 const kTileInk = Color(0xFF1A1626);
 
-enum DotStatus { synced, syncing, offline }
+enum DotStatus { synced, syncing, offline, untrusted }
 
 /// The one place the engine's three flags become a dot, so the vault bubble,
 /// the vault card and the popover cannot disagree about what "synced" is.
@@ -61,7 +63,12 @@ DotStatus dotStatusFor({
   required bool online,
   required bool syncing,
   required int pending,
+  bool identityFailed = false,
 }) {
+  // Outranks offline: a server that failed the challenge is reachable, and
+  // reporting that as "offline" would tell the user to check their wifi when
+  // the actual answer is that something is answering for their server.
+  if (identityFailed) return DotStatus.untrusted;
   if (!online) return DotStatus.offline;
   if (syncing || pending > 0) return DotStatus.syncing;
   return DotStatus.synced;
