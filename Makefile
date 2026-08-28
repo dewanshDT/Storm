@@ -37,8 +37,19 @@ help:
 
 # ---- checks ---------------------------------------------------------
 
-## check: lint and run both unit suites
-check: lint test
+## check: formatting, lint, and both unit suites
+check: fmt-check lint test
+
+## fmt-check: is everything formatted? CI fails on this and `make check` did not
+#
+# `make fmt` rewrites, so running it tells you nothing about whether the tree
+# was already clean — and CI runs `cargo fmt --check` and
+# `dart format --set-exit-if-changed`. That gap has cost a red PR whose local
+# `make check` was green, with nothing local saying why. It runs first because
+# it is the cheapest of the three and the most annoying to discover last.
+fmt-check:
+	cd $(SERVER) && cargo fmt --check
+	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
 ## lint: clippy + dart analyze, both must be clean
 lint:
