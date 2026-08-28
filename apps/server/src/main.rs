@@ -239,6 +239,15 @@ struct ServeArgs {
     /// a decision rather than a side effect of upgrading.
     #[arg(long)]
     mcp: bool,
+    // Deliberately no `--relay` here, however much it looks like `--mcp`'s
+    // sibling. `Registry::relays` is a setting the app can also change at
+    // runtime, and a flag would seed it before `state/vaults.json` exists —
+    // exactly the two-authorities bug `--vault-root` already taught us:
+    // a root chosen in the app was recorded, then ignored on the next boot,
+    // then erased by the next save. A setting that does not survive a
+    // restart is not a setting. If relays ever need a boot-time override,
+    // it needs the same reconcile-with-the-stored-value treatment `--mcp`
+    // gets above, not a bare flag.
 }
 
 /// Rewrite a legacy flat-flag invocation into a subcommand.
@@ -1018,6 +1027,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         writable = mcp_writable,
         allowed_hosts = ?mcp::allowed_hosts(&args.host, args.port),
         "MCP endpoint at /mcp (read-only tools, same bearer token)"
+    );
+    // Observability only — no tunnel client exists yet, so `registered` is
+    // always 0 today. Not a second authority: nothing here is read back.
+    tracing::info!(
+        configured = vault_set.registry.relays.len(),
+        registered = vault_set.registry.registered_relays.snapshot().len(),
+        "relay configuration"
     );
 
     // The A10 migration switch, read from the registry rather than assumed.

@@ -329,6 +329,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/registration", put(put_registration))
+        .route("/v1/config/relays", put(put_relays))
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
         // mint a key" true without a special case — a key never reaches here.
@@ -1793,6 +1794,10 @@ struct ConfigResponse {
     mcp_writable: bool,
     /// Whether anyone with a device credential may create an account (A13).
     allow_registration: bool,
+    /// The **configured** relay URLs (SRP v1 §4.4) — not the registered set.
+    /// `GET /v1/server` reports what is actually live; this is what an
+    /// operator or the app set and expects to survive a restart.
+    relays: Vec<String>,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -1804,6 +1809,7 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
         allow_registration: vaults.registry.allow_registration,
+        relays: vaults.registry.relays.clone(),
     }))
 }
 
@@ -1854,6 +1860,44 @@ async fn put_mcp(
         "mcp_enabled": body.enabled,
         "mcp_writable": body.enabled && body.writable,
     })))
+}
+
+#[derive(Deserialize)]
+struct RelaysBody {
+    relays: Vec<String>,
+}
+
+/// PUT /v1/config/relays — sets the **configured** relay list (SRP v1 §4.4).
+///
+/// Its own route for the same reason `/v1/config/mcp` has one: a settings
+/// toggle should not have to send a `vault_root` it does not want to touch.
+///
+/// **Does not register anything.** `Registry::set_relays` only ever writes
+/// `Registry::relays`; whether a relay is actually live is decided elsewhere,
+/// by a tunnel client this server does not have yet, and reported separately
+/// by `GET /v1/server`. Setting this list is a promise to *try*, not proof of
+/// a connection.
+///
+/// `set_relays` is all-or-nothing and returns `anyhow::Error` on a bad URL —
+/// mapped to `400` explicitly here rather than via `ApiError`'s blanket
+/// `From<anyhow::Error>`, which would answer `500` for what is really the
+/// caller's mistake. The whole point of rejecting the entire list on one bad
+/// URL is that the operator finds out, with a message that says which URL and
+/// why, rather than losing a relay silently.
+async fn put_relays(
+    State(state): State<Shared>,
+    Json(body): Json<RelaysBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut vaults = state.vaults.write().await;
+    vaults
+        .registry
+        .set_relays(&body.relays)
+        .map_err(|e| bad_request(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+
+    Ok(Json(
+        serde_json::json!({ "relays": vaults.registry.relays }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -4980,5 +5024,223 @@ mod tests {
             Some("text/event-stream"),
             "a real handshake must not be answered with an SSE body"
         );
+    }
+
+    // ---- relay configuration (PUT /v1/config/relays) ----------------------
+
+    fn put_json_with_auth(
+        path: &str,
+        body: serde_json::Value,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        put_json(path, body, Some(auth))
+    }
+
+    #[tokio::test]
+    async fn config_reports_an_empty_relay_list_on_a_fresh_server() {
+        let dir = tempdir::TempDir::new("storm-relays-config-fresh").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["relays"],
+            serde_json::json!([]),
+            "no relay was ever configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_response_is_unchanged_apart_from_the_new_field() {
+        // Additive means every key that existed keeps existing, and nothing
+        // moved. Asserted explicitly so a future edit cannot reshape this
+        // response silently.
+        let dir = tempdir::TempDir::new("storm-relays-config-shape").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["vault_root"],
+            state
+                .vaults
+                .read()
+                .await
+                .registry
+                .root
+                .display()
+                .to_string()
+        );
+        assert_eq!(body["state_dir"], state.state_dir.display().to_string());
+        assert_eq!(body["vault_count"], 0);
+        assert_eq!(body["mcp_enabled"], false);
+        assert_eq!(body["mcp_writable"], false);
+        assert_eq!(body["allow_registration"], false);
+        assert_eq!(body["relays"], serde_json::json!([]));
+        assert_eq!(
+            body.as_object().unwrap().len(),
+            7,
+            "a new key showed up that this test does not know about"
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_relays_persists_across_a_registry_reload() {
+        let dir = tempdir::TempDir::new("storm-relays-persist").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com", "wss://relay.two.example"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["relays"],
+            serde_json::json!(["wss://relay.example.com", "wss://relay.two.example"])
+        );
+
+        // Config reflects it immediately, without a restart.
+        let (_, config) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            config["relays"],
+            serde_json::json!(["wss://relay.example.com", "wss://relay.two.example"])
+        );
+
+        // And it survives a fresh load from disk, not just the in-memory copy.
+        let reloaded =
+            Registry::load(&state.state_dir, &state.vaults.read().await.registry.root).unwrap();
+        assert_eq!(
+            reloaded.relays,
+            vec![
+                "wss://relay.example.com".to_string(),
+                "wss://relay.two.example".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_relay_url_is_a_400_and_changes_nothing() {
+        // All-or-nothing is the property under test: both the status and that
+        // the previously stored list survived intact.
+        let dir = tempdir::TempDir::new("storm-relays-bad-url").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com", "not-a-relay-url"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a bad URL is the caller's mistake, not a server failure"
+        );
+        assert!(
+            body["error"].as_str().unwrap().contains("not-a-relay-url"),
+            "the message must say which URL was rejected: {body}"
+        );
+
+        let (_, config) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            config["relays"],
+            serde_json::json!(["wss://relay.example.com"]),
+            "the previously stored list must survive a rejected update"
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_relays_does_not_register_them() {
+        // The distinction the whole design rests on: configuring is not
+        // registering. `GET /v1/server` must keep answering an empty set,
+        // because nothing here is a tunnel client succeeding at a connection.
+        let dir = tempdir::TempDir::new("storm-relays-not-registered").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, server) = send(&app, get("/v1/server")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            server["relays"],
+            serde_json::json!([]),
+            "a configured relay must not appear on the wire until something registers it"
+        );
+    }
+
+    #[tokio::test]
+    async fn putting_relays_refuses_an_unauthenticated_caller() {
+        let dir = tempdir::TempDir::new("storm-relays-unauth").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let _ = seed_owner(&state).await;
+
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com"]}),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Nothing was stored.
+        let vaults = state.vaults.read().await;
+        assert!(vaults.registry.relays.is_empty());
     }
 }
