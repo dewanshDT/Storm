@@ -1069,6 +1069,51 @@ session token in a query string lands in proxy logs and browser history, and
 this decision only restores the behaviour that was intended, not the one that
 is right.
 
+**58. The published wire spec described a protocol where the relay
+authenticates clients.** *(2026-08-28)*
+
+`docs/srp-v1.md` §4 said *"a device registers with the relay"* and *"the client
+generates or loads its device keypair (Ed25519, the same pair pinned at
+pairing)"*. There is no such keypair — pairing pins the **server's** public key
+and hands the device a shared secret. The section described client
+authentication at the relay, which is exactly what **R12** forbids and what
+pass 0 retired Q13 over. Five more wire details were wrong in ways that would
+have compiled: the signed message omitted `server_id` and its separators, §4.1's
+allowlist/TOFU/account-owned binding table was absent, §6 had no registration
+messages at all, `stream_id` was client-allocated rather than relay-assigned,
+and §3 invented uniform binary framing where control is JSON in text frames.
+
+§3–§6 are regenerated from the accepted design, with an errata note kept at the
+top of the file.
+
+**Three things worth keeping, and none of them is "check specs more
+carefully".**
+
+*A transcription is not a copy.* The spec was written from the design note by
+an agent that had read it, and the result is **internally consistent** — it
+reads like a protocol, just not this one. That is precisely why a read-through
+does not catch it: there is no seam to notice, no contradiction on the page.
+The error is only visible against the source.
+
+*Review finds what it went looking for.* I reviewed that file and recorded it
+as reviewed. What I actually did was check the two things I had in mind —
+Cloudflare mentions (R7) and whether `Last-Event-ID` was left open — plus the
+non-goals, where I found and fixed two real contradictions. Finding something
+is what made it feel reviewed. **The sections that turned out correct are
+exactly the ones I wrote or touched; every section I did not read against the
+design was wrong.** A review with a checklist covers the checklist.
+
+*The first implementer is the first reviewer.* This was caught by the agent
+building the relay against the file, on its first read, before writing code —
+which is the argument for **R7** stated in miniature. A protocol with no
+implementation is a protocol nobody has checked, and the same is true of a
+spec: `docs/srp-v1.md` sat committed and cited for two days, and every note
+pointing at it was pointing at the wrong protocol.
+
+*Revisit if:* nothing here. The corrective is procedural and already applied —
+the spec now carries its own errata, and the vault's *Relay Review Log* records
+this as pass 7.
+
 ---
 
 ## Data model
