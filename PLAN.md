@@ -1167,6 +1167,62 @@ different mechanism, so it is recorded rather than half-fixed.
 *Revisit if:* an attachment mechanism appears that can carry a header, or the
 credential in an attachment URL is shown to leak somewhere that matters.
 
+**60. `storm-relay` exists, and building it found the spec's own security rule
+was half-written.** *(2026-08-30)*
+
+Phase 3's first slice: a standalone crate that accepts server registrations and
+authenticates them. Registration only — client trunks, streams, routing and
+`relay_peer_ip` are absent rather than stubbed, and the error enum defines only
+the two codes the crate can honestly send.
+
+**The finding.** A relay-auth message is
+`storm-relay-auth:v1:<server_id>:<nonce>` — two colon-delimited fields in one
+signed string. The spec was emphatic that a nonce may contain no `:`, *"because
+a nonce carrying `:` could make the signed bytes parse as a different
+`(server_id, nonce)` split"*. It then said nothing whatever about `server_id`,
+which is the other half of that split:
+
+```
+relay_auth_message("a:b", "c")  ==  relay_auth_message("a", "b:c")
+```
+
+Byte-identical. **A signature over one is a signature over the other**, and the
+rule that named the hole did not close it.
+
+On the server this was safe by accident — `server_id` is self-generated and
+could never carry a colon. **On the relay it arrives from the wire**, chosen by
+whoever is registering, which is exactly where it is reachable. The rule now
+lives in `identity.rs` beside `validate_nonce` as the shared definition rather
+than in the relay alone, because two implementations agreeing by coincidence is
+what this class of bug is made of.
+
+*The lesson is about the shape of the reasoning, not the omission.* The spec
+did not fail to think about delimiter injection — it thought about it
+carefully, wrote the argument down, and applied the conclusion to one of the
+two fields the argument covers. **A correct rationale stopping one field short
+is far harder to notice than a missing rationale**, because the paragraph reads
+as complete: it states the threat, states a rule, and moves on.
+
+> Where a security rule exists because of a *structural* property — a
+> delimiter, an encoding, an ambiguity — check the rule covers every field that
+> has that property, not the one that prompted it.
+
+Three more gaps the same implementation exposed, each of which would have
+produced conformant, non-interoperable code whose only symptom is
+`auth_failed`: no server-facing path was named (now `/register`), no encoding
+was stated for `pubkey`/`sig` (base64url unpadded), and "single-use" permitted
+re-arming a spent nonce by re-issuing it.
+
+**This is the second time implementing against `docs/srp-v1.md` has corrected
+it** — decision 58 was the first. Both corrections came from writing code, not
+from reading, which is R7's argument holding at the level of the document as
+well as the protocol.
+
+*Revisit if:* nothing here. The remaining relay work is listed in the vault; the
+one deliberate gap carried forward is that **TOFU bindings are in memory**, so
+a relay restart re-opens the first-use window for any server that has not yet
+reconnected. An allowlist is unaffected.
+
 ---
 
 ## Data model
