@@ -182,17 +182,43 @@ mistakable for one proving identity to a client; distinct domains make that
 structurally impossible rather than merely unlikely. Any future signed context
 in this protocol MUST mint its own domain rather than reusing one.
 
-**The nonce MUST satisfy the same validation rule as the client-facing
-challenge**: 16–128 printable ASCII characters, containing neither `:` nor `"`.
-Domain separation only holds if a nonce cannot contain the characters that
-delimit the message's own fields — a nonce carrying `:` could make the signed
-bytes parse as a different `(server_id, nonce)` split than intended. An
-implementation MUST validate a nonce **on receipt**, not only at generation: it
-cannot assume the only nonces it ever sees are its own.
+**Both interpolated fields MUST be validated, not just the nonce.**
+`server_id` and `nonce` are two colon-delimited fields in one signed string, so
+constraining only one leaves the split ambiguous: `("a:b", "c")` and
+`("a", "b:c")` produce **byte-identical** messages, and a signature over one is
+a signature over the other.
+
+| Field | Rule |
+|---|---|
+| `nonce` | 16–128 printable ASCII, containing neither `:` nor `"` |
+| `server_id` | 1–128 characters, ASCII alphanumeric plus `_` and `-` |
+
+`server_id`'s charset is what Storm's id generator already produces (`srv_`
+plus Crockford base32); it is stated here as a **contract** rather than left as
+a coincidence of the current implementation.
+
+**Where each rule binds.** A relay generates the nonce and receives the
+`server_id`; an origin server receives the nonce and supplies its own
+`server_id`. So each party validates **what it receives as well as what it
+emits** — the relay must not accept a `server_id` carrying `:`, and a server
+must not sign a nonce carrying one. Validating only at generation assumes the
+only values you ever see are your own, and on the relay the `server_id` is
+chosen by whoever is registering.
 
 The server reuses its **existing** Ed25519 identity. Relay registration is one
 more thing that key proves possession of; there is no new key material, and no
 client keypair is involved anywhere in this exchange.
+
+### 4.0 Where a server connects
+
+A server opens its trunk at **`ws(s)://<relay-host>/register`**. This is a wire
+commitment: the origin's tunnel client and the relay must agree on it exactly,
+and it is distinct from the client-facing `/connect/<server_id>` of §4.3.
+
+`pubkey` and `sig` are **base64url without padding**, matching every other key
+and signature Storm puts on a wire. An implementation using hex or standard
+base64 would be conformant to a spec that failed to say this, and completely
+non-interoperable — with `auth_failed` as the only symptom.
 
 ### 4.1 Binding `server_id` to a pubkey
 
@@ -212,6 +238,12 @@ closed at the relay too:
 
 A relay account governs quota, billing and claim ownership **only**. It is
 explicitly **not** a Storm identity (**R1**).
+
+**A spent nonce stays spent until it expires.** "Single-use" alone permits an
+implementation that forgets a nonce on use and re-arms it if the same value is
+issued again — which silently undoes single-use. A relay MUST keep a spent
+marker for the remainder of the TTL, and MUST NOT resurrect a spent nonce by
+re-issuing it.
 
 The binding MUST be checked at `REGISTER_SERVER` time, **before** a challenge
 is issued — there is no reason to spend a nonce on a registration that cannot
@@ -257,9 +289,14 @@ client is away from the LAN — has no path back to a working address. The
 client refreshes from it whenever the server is reachable **by any path at
 all**, including a relay it already knows.
 
-`public_address` is `wss://<relay-host>/connect/<server_id>` — **derived, not
-allocated**. Any client holding a `server_id` can construct it, and the relay
-hands out no opaque identifier.
+`public_address` is `<scheme>://<relay-host>/connect/<server_id>` — **derived,
+not allocated**. Any client holding a `server_id` can construct it, and the
+relay hands out no opaque identifier.
+
+**The scheme is deployment configuration, not part of the derivation.** `wss`
+for anything reachable off the machine; a relay running plaintext for local
+development advertises `ws`, and hard-coding `wss` here would mean no client
+could dial it.
 
 ## 5. Client trunk and stream lifecycle
 
@@ -415,6 +452,13 @@ Codes are **strings**, not numbers.
 | `trunk_superseded` | Replaced by a newer registration; drain window elapsed. |
 | `rate_limited` | An abuse-control limit was hit. |
 | `stream_closed` | Operation on a dead `stream_id`. |
+
+**There is deliberately no code for a relay-side fault.** Every code above is
+peer-attributable, so a relay that cannot proceed for its own reasons — a
+failed nonce generator, a broken config — has nothing honest to send. It SHOULD
+send `protocol_error`, which misattributes blame but leaks the least, and log
+the real cause locally. Introducing an `internal_error` code would tell an
+unauthenticated caller when it has found a way to break the relay.
 
 **`protocol_error` MUST carry minimal detail**, and `auth_failed` MUST NOT say
 *which* check failed. A malformed-frame scanner should not be told which part

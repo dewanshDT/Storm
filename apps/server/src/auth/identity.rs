@@ -105,6 +105,10 @@ impl ServerIdentity {
     /// applies and the same guard belongs here rather than upstream.
     #[allow(dead_code)] // Called by relay registration, landing in a parallel change.
     pub fn sign_relay_auth(&self, nonce: &str) -> std::result::Result<String, &'static str> {
+        // Both fields, not just the nonce. They are two colon-delimited parts
+        // of one signed string, so constraining one leaves the split
+        // ambiguous — see [`validate_server_id`].
+        validate_server_id(&self.server_id)?;
         validate_nonce(nonce)?;
         Ok(self.sign_domain(&relay_auth_message(&self.server_id, nonce)))
     }
@@ -332,6 +336,36 @@ fn default_server_name() -> String {
         Some(name) => name.chars().take(64).collect(),
         None => "Storm".to_string(),
     }
+}
+
+/// What a `server_id` is allowed to be, wherever it enters a signed message.
+///
+/// **The nonce rule alone does not close the hole it describes.** A relay-auth
+/// message is `storm-relay-auth:v1:<server_id>:<nonce>`, so `server_id` and
+/// `nonce` are two colon-delimited fields in one string, and constraining only
+/// one of them leaves the split ambiguous: `("a:b", "c")` and `("a", "b:c")`
+/// produce **identical bytes**. A signature over one is a signature over the
+/// other.
+///
+/// On this side `server_id` is self-generated and could never contain a colon,
+/// so the guard is belt-and-braces here. **On the relay it arrives from the
+/// wire**, chosen by whoever is registering — which is exactly where the
+/// ambiguity would be exploitable, and why the rule lives here as the shared
+/// definition rather than only in the relay that needs it.
+///
+/// The charset is what `random_id` already produces (`srv_` + Crockford
+/// base32); it is stated as a contract rather than left as a coincidence.
+pub fn validate_server_id(server_id: &str) -> std::result::Result<(), &'static str> {
+    if server_id.is_empty() || server_id.len() > 128 {
+        return Err("server_id must be 1–128 characters");
+    }
+    if !server_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err("server_id must be ASCII alphanumeric, '_' or '-'");
+    }
+    Ok(())
 }
 
 /// What a challenge nonce is allowed to be.
@@ -634,6 +668,34 @@ mod tests {
                 .is_err(),
             "a relay-auth signature must not verify as a challenge signature"
         );
+    }
+
+    #[test]
+    fn a_colon_in_either_field_makes_the_split_ambiguous() {
+        // The reason `server_id` needs a rule and not just the nonce: these
+        // are the *same bytes*, so a signature over one is a signature over
+        // the other. On the relay `server_id` comes from the wire, which is
+        // where that would be exploitable.
+        assert_eq!(
+            relay_auth_message("a:b", "c"),
+            relay_auth_message("a", "b:c"),
+            "two colon-delimited fields, one string — constraining one is not enough"
+        );
+
+        // So both are constrained.
+        assert!(validate_server_id("a:b").is_err());
+        assert!(validate_nonce("0123456789abc:ef").is_err());
+    }
+
+    #[test]
+    fn a_real_server_id_satisfies_its_own_rule() {
+        // `random_id` is what mints these, so the charset is a contract rather
+        // than a coincidence — if that generator changes, this fails.
+        assert!(validate_server_id(&random_id("srv_")).is_ok());
+        assert!(validate_server_id("").is_err());
+        assert!(validate_server_id(&"x".repeat(129)).is_err());
+        assert!(validate_server_id("has space").is_err());
+        assert!(validate_server_id("has\"quote").is_err());
     }
 
     #[test]
