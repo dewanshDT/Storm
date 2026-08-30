@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/attachment_strip.dart';
@@ -52,7 +53,9 @@ void main() {
       });
 
       engine = SyncEngine(
-        api: StormApi(baseUrl: 'http://test', token: 't', client: client),
+        connection: StormConnection.direct(
+          api: StormApi(baseUrl: 'http://test', token: 't', client: client),
+        ),
         cache: cache,
         vaultId: FakeServer.primaryVault,
       );

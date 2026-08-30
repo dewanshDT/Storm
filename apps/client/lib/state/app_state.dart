@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/auth_api.dart';
 import '../api/models.dart';
-import '../api/server_verifier.dart';
+import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import 'secret_store.dart';
@@ -657,13 +657,35 @@ final settingsProvider = AsyncNotifierProvider<SettingsNotifier, Settings>(
 ///
 /// One client per *server*. The vault is a parameter of each call, so this
 /// does not rebuild on a vault switch — [syncEngineProvider] does.
-final apiProvider = Provider<StormApi?>((ref) {
+/// How the server is reached. One per *server*, rebuilt when settings change.
+///
+/// A plain `Provider`, deliberately: the connection resolves underneath rather
+/// than above, so nothing here has to become a `Future` and no consumer has to
+/// learn about readiness. It is also **not** a `ChangeNotifierProvider` — one
+/// would loop, since watching it means `connect()` → notify → rebuild → a new
+/// engine → `start()` → `connect()`.
+final connectionProvider = Provider<StormConnection?>((ref) {
   final settings = ref.watch(settingsProvider).value;
   if (settings == null || !settings.isConfigured) return null;
 
-  final api = StormApi(baseUrl: settings.baseUrl, token: settings.bearerToken);
-  ref.onDispose(api.dispose);
-  return api;
+  final connection = StormConnection(
+    localAddress: settings.baseUrl,
+    token: settings.bearerToken,
+    // The *pinned* identity, never anything a response just supplied — a
+    // challenge verified against a key from the same answer proves nothing.
+    serverId: settings.serverId,
+    publicKeyB64: settings.serverPublicKey,
+  );
+  ref.onDispose(connection.api.dispose);
+  return connection;
+});
+
+/// The API client, for callers that still take one directly.
+///
+/// Derived from the connection rather than built beside it, so there is one
+/// answer to "where is the server" and it lives behind the seam.
+final apiProvider = Provider<StormApi?>((ref) {
+  return ref.watch(connectionProvider)?.api;
 });
 
 /// The vault the note-level providers are serving, or `''` when none is open
@@ -788,28 +810,20 @@ final cacheProvider = Provider<CacheDb>((ref) {
 /// *instance* rather than the notifications must `ref.read` it, or it gets
 /// torn down and rebuilt several times a second.
 final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
-  final api = ref.watch(apiProvider);
+  final connection = ref.watch(connectionProvider);
   final vaultId = ref.watch(activeVaultProvider);
-  final settings = ref.watch(settingsProvider).value;
   final engine = SyncEngine(
-    api: api ?? StormApi(baseUrl: '', token: ''),
+    connection:
+        connection ??
+        StormConnection.direct(
+          api: StormApi(baseUrl: '', token: ''),
+        ),
     cache: ref.watch(cacheProvider),
     vaultId: vaultId,
-    // Built from the *pinned* key, not from anything the server just said —
-    // a challenge verified against a key the same response supplied would
-    // prove nothing at all.
-    verifier:
-        (api == null || settings == null || settings.serverPublicKey.isEmpty)
-        ? null
-        : ServerVerifier(
-            authApi: AuthApi(baseUrl: settings.baseUrl),
-            serverId: settings.serverId,
-            publicKeyB64: settings.serverPublicKey,
-          ),
   );
   // No vault open means nothing to sync — the dashboard reads the vault list
   // and the recents endpoint, neither of which needs an engine.
-  if (api != null && vaultId.isNotEmpty) engine.start();
+  if (connection != null && vaultId.isNotEmpty) engine.start();
   // No `ref.onDispose(engine.dispose)`: ChangeNotifierProvider already
   // disposes what it holds, and disposing twice trips ChangeNotifier's
   // "used after being disposed" assert.

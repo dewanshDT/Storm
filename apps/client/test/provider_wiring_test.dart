@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/state/note_session.dart';
@@ -44,8 +45,17 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         cacheProvider.overrideWithValue(cache),
-        apiProvider.overrideWithValue(
-          StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+        // The connection is what gets configured now, not the api — `api` is
+        // derived from it, so overriding the api alone would leave the engine
+        // watching a real connection that dials nowhere.
+        connectionProvider.overrideWithValue(
+          StormConnection.direct(
+            api: StormApi(
+              baseUrl: 'http://test',
+              token: 't',
+              client: server.client,
+            ),
+          ),
         ),
         // The engine takes its vault from settings, so these have to say
         // which one is open or every cache key would be blank.

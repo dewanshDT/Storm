@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api/models.dart';
 import '../api/server_verifier.dart';
+import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 
@@ -52,26 +53,28 @@ class SaveOutcome {
 /// a real request distinguishes that from working.
 class SyncEngine extends ChangeNotifier {
   SyncEngine({
-    required this.api,
+    required this.connection,
     required this.cache,
     required this.vaultId,
-    this.verifier,
   });
 
-  final StormApi api;
-  final CacheDb cache;
-
-  /// Re-proves the server's identity on every connect, or `null` to skip the
-  /// check entirely (an unpaired install, and the tests that are not about
-  /// identity).
+  /// How the server is reached, and the only object that knows.
   ///
-  /// The engine is the only place this can live, because it is the only
-  /// object that owns *both* ends of the connection lifecycle — [start] for a
-  /// cold start and a vault switch, and [_scheduleReconnect] for everything
-  /// else. Verifying in `start` alone would leave every reconnect unchecked,
-  /// and a reconnect is exactly when the transport may have changed underneath
-  /// us.
-  final ServerVerifier? verifier;
+  /// The engine is where this has to live, because it is the only thing owning
+  /// *both* ends of the connection lifecycle — [start] for a cold start and a
+  /// vault switch, and [_scheduleReconnect] for everything else. Connecting in
+  /// `start` alone would leave every reconnect on an unchecked transport, and
+  /// a reconnect is exactly when the path may have changed underneath us.
+  final StormConnection connection;
+
+  /// The API client for whatever transport currently wins.
+  ///
+  /// A getter, so every `api.x()` below follows a re-race without knowing one
+  /// happened. That is the seam doing its job: nothing here distinguishes a
+  /// direct dial from a relayed one.
+  StormApi get api => connection.api;
+
+  final CacheDb cache;
 
   /// The vault this engine serves.
   ///
@@ -145,10 +148,9 @@ class SyncEngine extends ChangeNotifier {
   /// impostor stops everything and stays stopped until a later check passes,
   /// which is what makes this a gate rather than an indicator.
   Future<bool> _proveServer() async {
-    final verifier = this.verifier;
-    if (verifier == null || _disposed) return true;
+    if (_disposed) return false;
 
-    final proof = await verifier.check();
+    final proof = await connection.connect();
     if (_disposed) return false;
 
     switch (proof) {
@@ -720,12 +722,10 @@ class SyncEngine extends ChangeNotifier {
     _wsSub?.cancel();
     _ws?.sink.close();
 
-    final url = api.baseUrl.replaceFirst(RegExp(r'^http'), 'ws');
     // The full credential, not the bare token: a WebSocket handshake carries
     // no headers, and the server's query fallback matches on the scheme.
-    final uri = Uri.parse(
-      '$url/v1/stream?token=${Uri.encodeComponent(api.credential)}',
-    );
+    // Where the feed *lives* is the connection's business, not the engine's.
+    final uri = connection.streamUri(api.credential);
 
     try {
       final channel = WebSocketChannel.connect(uri);
@@ -778,6 +778,7 @@ class SyncEngine extends ChangeNotifier {
       // now be in it. A check that only ran at startup would never see any of
       // them. `_proveServer` reschedules on failure, so a refusal here is not
       // the end of retrying.
+      connection.reset();
       if (!await _proveServer()) return;
       _openSocket();
       unawaited(sync());

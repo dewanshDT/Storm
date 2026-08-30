@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:storm/api/auth_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/api/ed25519_verify.dart';
 import 'package:storm/api/server_verifier.dart';
 import 'package:storm/api/storm_api.dart';
@@ -146,10 +147,16 @@ void main() {
     var challenges = 0;
 
     SyncEngine engineWith(ServerVerifier? verifier) => SyncEngine(
-      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      connection: StormConnection.direct(
+        api: StormApi(
+          baseUrl: 'http://test',
+          token: 't',
+          client: server.client,
+        ),
+        verifier: verifier,
+      ),
       cache: cache,
       vaultId: FakeServer.primaryVault,
-      verifier: verifier,
     );
 
     ServerVerifier verifierThat(

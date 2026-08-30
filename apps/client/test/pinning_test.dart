@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/sync/sync_engine.dart';
@@ -29,7 +30,13 @@ void main() {
       version: 1,
     );
     engine = SyncEngine(
-      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      connection: StormConnection.direct(
+        api: StormApi(
+          baseUrl: 'http://test',
+          token: 't',
+          client: server.client,
+        ),
+      ),
       cache: cache,
       vaultId: FakeServer.primaryVault,
     );
