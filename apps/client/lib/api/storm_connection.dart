@@ -190,9 +190,11 @@ class StormConnection {
   /// This is the knowledge the seam exists to hold: `SyncEngine` used to build
   /// it by string-replacing `http` with `ws` on the API's base URL, which is a
   /// transport detail it had no business knowing.
-  Uri streamUri(String credential) {
+  /// Takes a **ticket**, not the session credential. Both would authenticate,
+  /// and only one is safe to put in a URL — see `StormApi.wsTicket`.
+  Uri streamUri(String ticket) {
     final ws = _active.baseUrl.replaceFirst(RegExp(r'^http'), 'ws');
-    return Uri.parse('$ws/v1/stream?token=${Uri.encodeComponent(credential)}');
+    return Uri.parse('$ws/v1/stream?ticket=${Uri.encodeComponent(ticket)}');
   }
 
   StormApi _apiFor(ConnectionCandidate c) =>

@@ -138,7 +138,7 @@ class SyncEngine extends ChangeNotifier {
     notifyListeners();
     if (!await _proveServer()) return;
     await sync();
-    _openSocket();
+    await _openSocket();
   }
 
   /// Runs the connect-time identity check, and reports whether to proceed.
@@ -717,15 +717,30 @@ class SyncEngine extends ChangeNotifier {
   /// The socket only signals *that* something changed; the authoritative list
   /// still comes from `GET /v1/sync?since=`. That way a dropped or missed
   /// frame costs nothing — the next pull catches up regardless.
-  void _openSocket() {
+  Future<void> _openSocket() async {
     if (_disposed || _impostor) return;
     _wsSub?.cancel();
     _ws?.sink.close();
 
-    // The full credential, not the bare token: a WebSocket handshake carries
-    // no headers, and the server's query fallback matches on the scheme.
+    // A handshake carries no headers, so the credential has to ride in the
+    // URL — and a URL is logged by proxies and kept in history. So it is a
+    // **ticket**: one use, sixty seconds, minted over a normal authenticated
+    // request that does carry a header. The session token itself never
+    // appears in a URL.
+    final String ticket;
+    try {
+      ticket = await api.wsTicket();
+    } catch (_) {
+      // No ticket, no socket. Treated as a socket failure rather than an
+      // error, because it is one from the feed's point of view — and the
+      // reconnect timer is already the thing that retries it.
+      _scheduleReconnect();
+      return;
+    }
+    if (_disposed) return;
+
     // Where the feed *lives* is the connection's business, not the engine's.
-    final uri = connection.streamUri(api.credential);
+    final uri = connection.streamUri(ticket);
 
     try {
       final channel = WebSocketChannel.connect(uri);
@@ -780,7 +795,7 @@ class SyncEngine extends ChangeNotifier {
       // the end of retrying.
       connection.reset();
       if (!await _proveServer()) return;
-      _openSocket();
+      await _openSocket();
       unawaited(sync());
     });
   }

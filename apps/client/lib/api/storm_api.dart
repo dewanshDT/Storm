@@ -388,6 +388,19 @@ class StormApi {
   Uri attachmentUrl(String vaultId, String path) =>
       _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': credential});
 
+  /// A single-use, 60-second credential for the change-feed handshake.
+  ///
+  /// A WebSocket handshake carries no headers, so *something* has to ride in
+  /// the URL — and a URL lands in proxy logs, browser history and referrers.
+  /// A session token there is good for thirty days; this is good for one use
+  /// and one minute, which is the whole reason the endpoint exists.
+  Future<String> wsTicket() async {
+    final json = _decode(
+      await _client.post(_uri('/v1/auth/ws-ticket'), headers: _headers),
+    );
+    return json['ticket'] as String;
+  }
+
   Future<List<TagCount>> tags(String vaultId) async {
     final json = _decode(
       await _client.get(_uri(_v(vaultId, '/tags')), headers: _headers),

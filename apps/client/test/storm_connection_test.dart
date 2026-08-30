@@ -365,11 +365,16 @@ void main() {
       );
       await c.connect();
 
-      final uri = c.streamUri('Bearer abc');
+      final uri = c.streamUri('stt_abc');
       expect(uri.scheme, 'wss');
       expect(uri.host, 'mine.example');
       expect(uri.path, endsWith('/v1/stream'));
-      expect(uri.queryParameters['token'], 'Bearer abc');
+      expect(uri.queryParameters['ticket'], 'stt_abc');
+      // The session token must never reach a URL — that is what the ticket is
+      // for, and asserting the ticket alone would not notice it being there
+      // as well.
+      expect(uri.queryParameters['token'], isNull);
+      expect(uri.toString(), isNot(contains('Bearer')));
     });
 
     test('a pinned connection sends nothing extra on connect', () async {

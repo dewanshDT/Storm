@@ -1453,15 +1453,51 @@ async fn require_auth(
             // so it was the only credential the raw form ever fit. Nothing
             // failed loudly; the WebSocket change feed just stopped
             // authenticating and fell back to reconnect-driven polling.
-            request
-                .uri()
-                .query()
-                .and_then(|q| {
-                    q.split('&')
-                        .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
-                })
-                .map(|raw| percent_decode(&raw))
+            query_param(request.uri(), "token")
         });
+
+    // --- `?ticket=` — a WebSocket handshake's own credential ---
+    //
+    // Its own parameter rather than another shape inside `?token=`, because a
+    // ticket names no scheme and guessing at an unschemed value is precisely
+    // the ambiguity decision 57 was about. Distinct name, unambiguous parse.
+    //
+    // This exists so a **thirty-day session token does not travel in a URL**,
+    // where it lands in proxy logs, browser history and referrers. A ticket
+    // lives sixty seconds and dies on first use, so the exposure is bounded
+    // to a window in which it has already been spent.
+    if let Some(raw) = query_param(request.uri(), "ticket") {
+        let now = crate::index::now_rfc3339();
+        let mut auth_db = state.auth_db.lock().await;
+        return match crate::auth::sessions::consume_ws_ticket(&mut auth_db, &raw, &now) {
+            Ok(authenticated) => {
+                drop(auth_db);
+                if tier != RequiredTier::Session {
+                    // A ticket buys the session tier and nothing else. It is
+                    // minted *from* a session, so it can carry no more.
+                    return tier_error("ticket_not_accepted_here", StatusCode::UNAUTHORIZED);
+                }
+                request.extensions_mut().insert(Actor::Session {
+                    user_id: authenticated.user.id.clone(),
+                    role: authenticated.user.role,
+                });
+                request
+                    .extensions_mut()
+                    .insert(SessionAuth { authenticated });
+                next.run(request).await
+            }
+            // Answered generically on purpose: unknown, expired, already used
+            // and revoked-session are one message, so a caller holding a
+            // captured ticket learns nothing about why it failed.
+            Err(crate::auth::sessions::SessionError::Refused(_)) => {
+                unauthorized("invalid or missing token")
+            }
+            Err(crate::auth::sessions::SessionError::Internal(e)) => {
+                tracing::error!(error = %e, "ws ticket authentication failed");
+                internal_error()
+            }
+        };
+    }
 
     let Some(credential) = presented else {
         return unauthorized("invalid or missing token");
@@ -1607,6 +1643,19 @@ async fn require_auth(
     }
 
     unauthorized("invalid or missing token")
+}
+
+/// One percent-decoded query parameter, or `None`.
+///
+/// Both credential paths go through this so they cannot drift on decoding —
+/// the last time only one of them decoded, query authentication was dead for
+/// six days (decision 57).
+fn query_param(uri: &axum::http::Uri, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    uri.query()?
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(&prefix))
+        .map(percent_decode)
 }
 
 /// Percent-decodes a query-string value, with `+` meaning a space.
