@@ -1114,6 +1114,59 @@ pointing at it was pointing at the wrong protocol.
 the spec now carries its own errata, and the vault's *Relay Review Log* records
 this as pass 7.
 
+**59. The ws-ticket had no expiry, and the comment above it said it did.**
+*(2026-08-30)*
+
+Decision 57 restored query-string authentication to the behaviour that was
+*intended* — a thirty-day session token in a URL — and recorded that the right
+answer was `POST /v1/auth/ws-ticket`, which mints a sixty-second single-use
+credential and which **nothing consumed**. Wiring it up found that the
+mechanism did not do the one thing it exists for.
+
+`consume_ws_ticket` had no callers. Its lookup filtered on `used IS NULL`
+alone, while the comment directly above it read *"Returns (ticket_id,
+session_id) for an unused, **unexpired** ticket"*. The function then checked
+the **session's** expiry — thirty days — and never the ticket's. So a ticket
+would have authenticated for a month, in a URL, which is the single place it
+must not. `purge_expired_ws_tickets` ran only *during* a successful consume, so
+nothing swept it either.
+
+There were **no tests for ws tickets at all** — fifteen mentions in the file,
+every one of them implementation. That is how a missing expiry survived being
+written, reviewed and shipped.
+
+Three things worth keeping:
+
+*A comment is not a check, and an unexecuted one drifts freely.* The comment
+described the intended behaviour and was written at the same time as the query
+that failed to implement it. Nothing ever ran the pair together, so nothing
+could disagree with it. **This is the third instance of the same shape in nine
+days**: the `remote` column whose writer ignored it (56), query auth that no
+credential could satisfy (57), and now this. Each was code that existed,
+compiled, read correctly, and had never been called.
+
+*The obvious fix would have been a second bug.* Adding `AND expires > ?` to the
+SQL is the natural move and it is wrong here — `now_rfc3339()` emits however
+many fractional digits an instant needs, so `…:44.1Z` sorts *before*
+`…:44.05Z`. This file's own rule, stated at the top, is that timestamps are
+parsed and never compared as strings. The check is in Rust.
+`purge_expired_ws_tickets` still does the string comparison; it is best-effort
+cleanup rather than a gate, and it is noted rather than silently left.
+
+*The duplication was the tell.* `consume_ws_ticket` reimplemented two of the
+four rules in `check` — the helper whose doc comment says it exists "so
+[`authenticate`] and [`refresh`] cannot drift apart on them." A third caller
+had drifted, in the direction the comment predicted, because it copied the
+rules instead of calling them.
+
+**Still exposed, deliberately:** `attachmentUrl` puts the session credential in
+a query string, because an `Image.network` cannot make a round trip before
+rendering. Narrower than a WebSocket's exposure and closing it needs a
+different mechanism, so it is recorded rather than half-fixed.
+
+*Revisit if:* an attachment mechanism appears that can carry a header, or the
+credential in an attachment URL is shown to leak somewhere that matters.
+
 ---
 
 ## Data model
