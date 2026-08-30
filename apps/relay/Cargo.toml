@@ -1,0 +1,42 @@
+[package]
+name = "storm-relay"
+version = "0.1.0"
+edition = "2024"
+description = "Storm Relay Protocol v1 — a reverse proxy routed by server_id"
+license = "MIT"
+repository = "https://github.com/dewanshDT/Storm"
+
+# Deliberately standalone, exactly like apps/server: there is no root Cargo
+# workspace. The relay MUST NOT become mandatory (R6), and a workspace that
+# built the two crates together would be the first step towards shipping them
+# as one thing.
+
+[dependencies]
+anyhow = "1.0.104"
+# `ws` only — the relay's entire surface is a WebSocket upgrade.
+axum = { version = "0.8.9", features = ["ws"] }
+clap = { version = "4.6.5", features = ["derive", "env"] }
+# base64url, no padding: the encoding apps/server already uses for public keys
+# and signatures. Matching the crate as well as the alphabet keeps the two
+# sides from disagreeing about padding.
+data-encoding = "2.11.1"
+ed25519-dalek = "3.0.0"
+rand = "0.10.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "sync",
+    "signal",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+# A real WebSocket client. The handshake is a wire protocol, so the tests drive
+# it over a socket rather than by calling the state machine directly.
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3"

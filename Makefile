@@ -9,6 +9,7 @@
 # recipe therefore uses explicit `\` continuations so it runs in one shell.
 
 SERVER := apps/server
+RELAY  := apps/relay
 CLIENT := apps/client
 WWW    := apps/www
 
@@ -37,7 +38,7 @@ help:
 
 # ---- checks ---------------------------------------------------------
 
-## check: formatting, lint, and both unit suites
+## check: formatting, lint, and every unit suite
 check: fmt-check lint test
 
 ## fmt-check: is everything formatted? CI fails on this and `make check` did not
@@ -49,19 +50,28 @@ check: fmt-check lint test
 # it is the cheapest of the three and the most annoying to discover last.
 fmt-check:
 	cd $(SERVER) && cargo fmt --check
+	cd $(RELAY) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
-## lint: clippy + dart analyze, both must be clean
+## lint: clippy + dart analyze, all must be clean
 lint:
 	cd $(SERVER) && cargo clippy --all-targets -- -D warnings
+	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
-## test: both unit suites (no server needed)
-test: test-server test-client
+## test: every unit suite (no server needed)
+test: test-server test-relay test-client
 
 ## test-server: Rust unit tests
 test-server:
 	cd $(SERVER) && cargo test
+
+## test-relay: storm-relay unit + registration tests
+#
+# Its own crate, so its own target: `apps/relay` is standalone (there is no
+# workspace) and a crate outside `make check` is one CI compiles first.
+test-relay:
+	cd $(RELAY) && cargo test
 
 ## test-client: Dart unit tests
 test-client:
@@ -147,9 +157,10 @@ test-live:
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
 		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
 
-## fmt: format both codebases
+## fmt: format every codebase
 fmt:
 	cd $(SERVER) && cargo fmt
+	cd $(RELAY) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
 # ---- running --------------------------------------------------------
