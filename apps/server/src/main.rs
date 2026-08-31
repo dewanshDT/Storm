@@ -17,6 +17,7 @@ mod db;
 mod frontmatter;
 mod index;
 mod install;
+mod kit;
 mod mcp;
 mod merge;
 mod ops;
@@ -568,6 +569,10 @@ struct PreparedVaults {
     root: PathBuf,
     state_dir: PathBuf,
     registry: Registry,
+    /// No registry file existed when this ran. Recorded here because it can
+    /// only be observed *before* the registry loads, and the serve path needs
+    /// it afterwards to decide whether to seed the `kit` vault.
+    first_run: bool,
 }
 
 fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
@@ -583,6 +588,10 @@ fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
         .state
         .canonicalize()
         .with_context(|| format!("resolving state directory {}", args.state.display()))?;
+
+    // Observed before the load, because loading is what creates the file this
+    // asks about.
+    let first_run = kit::is_first_run(&state_dir);
 
     let mut registry = Registry::load(&state_dir, &root).context("reading the vault registry")?;
 
@@ -619,6 +628,7 @@ fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
         root,
         state_dir,
         registry,
+        first_run,
     })
 }
 
@@ -984,9 +994,23 @@ fn run_pair(args: PairArgs) -> Result<()> {
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
-    let registry = prepared.registry;
+    let mut registry = prepared.registry;
     let state_dir = prepared.state_dir;
     let root = prepared.root;
+
+    // The `kit` vault carries the agent tooling every Storm server is expected
+    // to have, so a first boot creates it rather than leaving it as a setup
+    // step. Only on a first boot: deleting it afterwards is a decision, and
+    // restoring it on every start would override that decision silently.
+    if prepared.first_run {
+        match kit::seed(&mut registry, &index::now_rfc3339()) {
+            Ok(true) => tracing::info!(vault = kit::VAULT_NAME, "seeded the agent kit vault"),
+            Ok(false) => {}
+            // A server that cannot write one vault should still serve the
+            // others. Loud, not fatal.
+            Err(e) => tracing::warn!(error = %e, "could not seed the kit vault"),
+        }
+    }
 
     registry.save(&state_dir).context("saving the registry")?;
     let mut vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;

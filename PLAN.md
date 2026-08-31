@@ -1396,6 +1396,21 @@ should not, and the checklist's §5 says verify rather than assume).
 
 **Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. Track B (Rust relay abuse controls + trunk_superseded 30s drain + 45s heartbeat) not started.
 
+**64. The `kit` vault is seeded by the server on first run**
+Storm is meant to be driven by coding agents, and an agent needs to be told how
+a project is laid out and what each role may read and write. That guidance is
+itself notes, so it belongs in a vault — `kit`, created and filled on a server's
+first boot from templates embedded out of `kit/vault/` at compile time. Making
+it core rather than an optional setup step is the whole point: every Storm
+server has one, so an adapter can assume it exists.
+Seeding keys off **the registry file being absent**, not off `kit` being
+missing. Someone who deletes the vault has said something, and restoring it on
+every start would override that silently. It is also non-fatal — a server that
+cannot write one vault still serves the others, loudly.
+*Revisit if:* the role set grows enough that shipping it in the binary is the
+wrong distribution (a fetch-on-demand catalogue would be the alternative), or if
+users want the templates without the vault.
+
 ---
 
 ## Data model
