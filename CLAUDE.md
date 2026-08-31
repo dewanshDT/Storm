@@ -42,8 +42,10 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | Path | What |
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
+| `apps/relay/` | `storm-relay` — the SRP v1 relay. Standalone crate; **no workspace** (R6). |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
+| `docs/srp-v1.md` | The relay wire spec, normative. `docs/srp-vectors.json` is its shared test vectors. |
 | `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
@@ -248,6 +250,60 @@ From M19 slice 2 (users and passwords):
   without echo, or read `--password-stdin`.
 - **`security_events` never contains a secret** — not a password, not a hash,
   not a token. A test asserts it for every administrative act.
+
+From the relay (SRP v1 — **`docs/srp-v1.md` is the normative wire spec and
+lives in this repo**; the design rationale stays in the personal vault under
+`Storm/Remote/`, and ADRs R1–R13 in *Storm Remote Decisions*):
+
+- **The relay is never an authority (R5) and authenticates no clients (R12).**
+  It has no user database, no vault data and no authorization. A client
+  presents it no credential; the client's credential rides *inside* the
+  tunnelled request and is checked by the origin server. A change that would
+  have `apps/relay` know what a Storm *user* is, is wrong. Adding client
+  authentication is the mistake that made the first draft of the spec wrong.
+- **The relay must never become mandatory (R6).** Hence `apps/relay` does not
+  depend on `apps/server`, and there is deliberately **no root Cargo
+  workspace** joining them — a workspace is how "optional" quietly becomes
+  "linked in".
+- **A tunnelled request is the same request (R13).** It is dispatched
+  **in process, through the same `Router`**, so it runs the same
+  `require_auth`, the same tier routers and the same `ops.rs` calls as a LAN
+  request. There is no loopback TCP hop and no bypass: if a handler cannot
+  serve a relayed request, the *handler* is what changes.
+- **`relay_peer_ip` travels out of band and forwarding headers are stripped.**
+  `HTTP_REQUEST_HEAD.headers` is client-supplied end to end — the relay
+  forwards it verbatim — so a client could otherwise set headers that other
+  code treats as *proxy-set* facts. `web_bootstrap_nonce` refuses to mint a
+  nonce when one is present, which a client that could set them would turn
+  into a remote off-switch. The peer address comes from the accepted socket,
+  never from a header.
+- **A shutdown may cancel the phases before registration, never the serving
+  phase.** Connect and registration have announced nothing, so dropping them
+  costs nothing. `serve_trunk` owes the relay a `DEREGISTER` — cancelling it
+  leaves the relay holding the `server_id` until a heartbeat timeout, which is
+  the outage `DEREGISTER` exists to prevent.
+- **The wire format is re-derived in three places and `docs/srp-vectors.json`
+  is what makes them agree.** `relay_auth_message`, `validate_nonce`,
+  `validate_server_id` and the base64url rules exist in `apps/server`,
+  `apps/relay` and `apps/client`, which cannot depend on one another. Nothing
+  in any build makes them agree, and drift surfaces at runtime as
+  `auth_failed` — identical to a genuine attack, an expired nonce and a
+  refused binding. All three test suites read the one vector file; regenerate
+  it with `tools/srp-vectors/generate.py`, and treat a changed vector as a
+  protocol change.
+- **base64url, unpadded, and decoders must *reject* the alternatives.** One key
+  has one spelling. `dart:convert`'s `base64Url` decoder accepts the standard
+  `+/` alphabet and accepts padding; `data_encoding`'s `BASE64URL_NOPAD` does
+  not. §4.1 binds a `server_id` to a pubkey permanently with no way back, so
+  two sides disagreeing about whether a spelling is valid disagree about
+  whether a key has *changed*.
+- **Keys are compared as decoded bytes, never as strings**, for the same
+  reason.
+- **The two signing domains must never coincide.**
+  `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
+  relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.
+  Both fields are validated, not just the nonce — they are two colon-delimited
+  halves of one signed string, so a colon in *either* re-splits it.
 
 ## Style
 
