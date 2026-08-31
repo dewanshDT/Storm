@@ -1223,6 +1223,75 @@ one deliberate gap carried forward is that **TOFU bindings are in memory**, so
 a relay restart re-opens the first-use window for any server that has not yet
 reconnected. An allowlist is unaffected.
 
+
+**61. A request now travels client → relay → server and back, and making three
+copies of one wire format prove they agree found a fourth spelling of a key.**
+*(2026-08-31)*
+
+Phase 3 complete on `staging`. `storm-relay` grew its client half — `HELLO`/
+`READY`, `OPEN_STREAM`/`STREAM_READY`, `STREAM_OPEN`/`STREAM_ACK`, stream
+routing and multiplexing, `relay_peer_ip` from the accepted socket — and
+`apps/server` grew `src/relay/`, the tunnel client that registers over WSS and
+dispatches tunnelled requests **in process, through the same `Router`**. No
+loopback hop, no second logic path (R13). `relay_peer_ip` reaches the login
+limiter as `CallerKey::Ip`, which is the seam decision 56 left open.
+
+**`docs/srp-vectors.json`.** `relay_auth_message`, `validate_nonce`,
+`validate_server_id` and the base64url rules exist in three places that cannot
+depend on one another — `apps/server` is a binary crate with no library to link
+against, and it must stay that way, because the relay must never become
+mandatory (R6). Nothing in any build made them agree, and drift does not fail a
+compile: it surfaces at runtime as `auth_failed`, which is also what a genuine
+attack, an expired nonce and a refused binding all look like. That is the worst
+failure signature a mismatch could have. All three test suites now read one
+vector file, and the signatures in it come from an independent RFC 8032
+implementation, so the positive cases cross-check rather than having one library
+agree with itself.
+
+**The finding.** `dart:convert`'s `base64Url` decoder also accepts the standard
+`+/` alphabet, and accepts padding. `data_encoding`'s `BASE64URL_NOPAD`, which
+both Rust crates use, refuses both. The same 32-byte key therefore had **three
+valid spellings on the client and one everywhere else** — and §4.1 binds a
+`server_id` to a pubkey permanently, with no way back from a refused binding.
+Two implementations disagreeing about whether a spelling is valid disagree about
+whether a key has *changed*. The spec now states the rule, `decodeBase64UrlNoPad`
+enforces it, and reverting the check fails two vector tests by name.
+
+*This is the third finding of its shape*: decisions 57, 60 and now 61 are all
+one side of a wire being lenient, or strict, in a way the other side was not.
+The first two were caught by writing a second implementation. This one was
+caught by making the implementations testify against a common artifact, which is
+cheaper and repeatable.
+
+> A wire format re-derived in N places has N−1 opportunities to disagree, and a
+> library default is as likely a cause as a misreading. Shared vectors turn that
+> from a runtime symptom into a build failure.
+
+**Two defects were fixed while integrating**, both in code that had never
+compiled and so had never run:
+
+- **A clean shutdown could not send `DEREGISTER`.** The supervisor raced its own
+  reconnect loop against `serve_trunk`, so shutdown cancelled the future that
+  owed the relay a goodbye — leaving the relay holding the `server_id` until a
+  heartbeat timeout, which is the outage `DEREGISTER` exists to prevent. The
+  rule is now explicit: **shutdown may cancel the phases before registration,
+  never the serving phase.** The former have announced nothing; the latter owes
+  a `DEREGISTER`.
+- **`connect_async` had no deadline.** A relay that completes the TCP handshake
+  and then says nothing left the supervisor pending for ever — never retrying,
+  never backing off, never returning. Unreachable and silent must cost the same.
+
+And a test-harness race: the fake relay emits its "registered" event as it
+*sends* `REGISTERED`, necessarily before the client has received it, so three
+tests read the advertised set at a moment it could not yet be populated. They
+wait for the state now, with a deadline, so a registration that never lands
+still fails — on the timeout rather than on a misleading empty set.
+
+*Revisit if:* nothing here. Carried forward: **TOFU bindings are still in
+memory** (decision 60), `trunk_superseded`'s 30 s drain and the 45 s heartbeat
+deadline are unimplemented on the relay, and `attachmentUrl` still puts a
+credential in a query string. Next is phase 4 — the same relay on a VPS.
+
 ---
 
 ## Data model

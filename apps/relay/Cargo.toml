@@ -21,6 +21,10 @@ clap = { version = "4.6.5", features = ["derive", "env"] }
 # sides from disagreeing about padding.
 data-encoding = "2.11.1"
 ed25519-dalek = "3.0.0"
+# `StreamExt::split`. Each trunk's socket is written by tasks other than the one
+# reading it — every client task writes the server trunk, and the server trunk's
+# reader writes every client — so the write half has to be separable.
+futures-util = "0.3"
 rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

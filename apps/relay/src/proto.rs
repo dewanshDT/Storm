@@ -1,9 +1,9 @@
-//! SRP v1 control messages: the version envelope, the registration types, and
-//! the two error codes registration can produce.
+//! SRP v1 control messages: the version envelope, the registration types, the
+//! client-trunk and stream types, and the binary body-frame header.
 //!
-//! Only the messages §4 needs are here. Client trunks (`HELLO`/`READY`),
-//! `OPEN_STREAM`, the HTTP head messages and the binary body frames are the
-//! next slice and are deliberately absent rather than stubbed.
+//! §6's catalog is the reference. The two messages the relay forwards rather
+//! than originates — `HTTP_REQUEST_HEAD` and `HTTP_RESPONSE_HEAD` — have no
+//! typed struct here on purpose: see [`relayed`].
 
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +70,11 @@ pub struct ChallengeResponse {
     pub sig: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Hello {
+    pub server_id: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Challenge {
     pub nonce: String,
@@ -83,20 +88,61 @@ pub struct Registered {
 }
 
 #[derive(Debug, Serialize)]
+pub struct Ready {
+    pub client_trunk_id: String,
+}
+
+/// `attempt_id` is echoed as whatever JSON the client sent.
+///
+/// §6 types every other field and leaves this one open, and the relay has no
+/// business narrowing it: it is client-generated, echoed exactly once so the
+/// client can correlate concurrent opens, and **never routed on** (§5.1). It is
+/// size-bounded on the way in rather than type-checked, because a bound is the
+/// only property the relay actually needs from it.
+#[derive(Debug, Serialize)]
+pub struct StreamReady {
+    pub attempt_id: serde_json::Value,
+    pub stream_id: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StreamOpen {
+    pub stream_id: u32,
+}
+
+/// `CLOSE` with no `stream_id` ends the whole trunk (§5.4). The field is
+/// skipped rather than serialized as `null` so the two cases are distinct on
+/// the wire and not merely distinguishable by a reader that treats `null` as
+/// absent.
+#[derive(Debug, Serialize)]
+pub struct Close {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub code: &'static str,
     pub message: &'static str,
+    /// Present when the failure belongs to one stream rather than the trunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<u32>,
 }
 
-/// The subset of §6's codes registration can emit.
+/// The §6 codes this relay can actually emit.
 ///
-/// The other seven codes belong to stream routing and are not defined here:
-/// an enum listing codes this slice can never produce would read as a promise
-/// the crate does not keep.
+/// `trunk_superseded` is absent because the 30 s drain it belongs to is not
+/// built (§4.2). An enum listing a code the crate never produces would read as
+/// a promise it does not keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     ProtocolError,
     AuthFailed,
+    ServerUnreachable,
+    ServerTimeout,
+    TrunkLost,
+    RateLimited,
+    StreamClosed,
 }
 
 impl ErrorCode {
@@ -104,6 +150,11 @@ impl ErrorCode {
         match self {
             Self::ProtocolError => "protocol_error",
             Self::AuthFailed => "auth_failed",
+            Self::ServerUnreachable => "server_unreachable",
+            Self::ServerTimeout => "server_timeout",
+            Self::TrunkLost => "trunk_lost",
+            Self::RateLimited => "rate_limited",
+            Self::StreamClosed => "stream_closed",
         }
     }
 
@@ -119,6 +170,11 @@ impl ErrorCode {
         match self {
             Self::ProtocolError => "protocol error",
             Self::AuthFailed => "authentication failed",
+            Self::ServerUnreachable => "server unreachable",
+            Self::ServerTimeout => "server timeout",
+            Self::TrunkLost => "trunk lost",
+            Self::RateLimited => "rate limited",
+            Self::StreamClosed => "stream closed",
         }
     }
 
@@ -126,6 +182,15 @@ impl ErrorCode {
         ErrorBody {
             code: self.code(),
             message: self.message(),
+            stream_id: None,
+        }
+    }
+
+    pub fn body_on_stream(self, stream_id: u32) -> ErrorBody {
+        ErrorBody {
+            code: self.code(),
+            message: self.message(),
+            stream_id: Some(stream_id),
         }
     }
 }
@@ -175,12 +240,95 @@ pub fn registered(trunk_id: String, public_address: String) -> String {
     .to_json()
 }
 
+pub fn ready(client_trunk_id: String) -> String {
+    Control::new("READY", Ready { client_trunk_id }).to_json()
+}
+
+pub fn stream_ready(attempt_id: serde_json::Value, stream_id: u32) -> String {
+    Control::new(
+        "STREAM_READY",
+        StreamReady {
+            attempt_id,
+            stream_id,
+        },
+    )
+    .to_json()
+}
+
+pub fn stream_open(stream_id: u32) -> String {
+    Control::new("STREAM_OPEN", StreamOpen { stream_id }).to_json()
+}
+
+pub fn close_stream(stream_id: u32) -> String {
+    Control::new(
+        "CLOSE",
+        Close {
+            stream_id: Some(stream_id),
+        },
+    )
+    .to_json()
+}
+
+/// Re-emits a message the relay forwards rather than originates.
+///
+/// `HTTP_REQUEST_HEAD` and `HTTP_RESPONSE_HEAD` deliberately have no typed
+/// struct. Deserializing into one and re-serializing would **silently drop any
+/// field the relay does not know about**, which for a head message means
+/// dropping part of a proxied HTTP exchange — and the relay's whole job is to
+/// move that exchange unaltered (§5.2). Passing the body map through keeps
+/// every field the peer sent; the relay only ever reads `stream_id` out of it
+/// and, on the server-ward request hop, writes `relay_peer_ip` into it.
+pub fn relayed(ty: &'static str, body: serde_json::Map<String, serde_json::Value>) -> String {
+    Control::new(ty, serde_json::Value::Object(body)).to_json()
+}
+
 pub fn error(code: ErrorCode) -> String {
     Control::new("ERROR", code.body()).to_json()
 }
 
+pub fn error_on_stream(code: ErrorCode, stream_id: u32) -> String {
+    Control::new("ERROR", code.body_on_stream(stream_id)).to_json()
+}
+
 pub fn pong() -> String {
     Control::new("PONG", serde_json::Map::new()).to_json()
+}
+
+/// `type(1) | stream_id(4, big-endian) | payload` (§3).
+pub const BODY_HEADER_LEN: usize = 5;
+/// `HTTP_REQUEST_BODY_CHUNK` — client → relay → server.
+pub const BODY_REQUEST: u8 = 0x01;
+/// `HTTP_RESPONSE_BODY_CHUNK` — server → relay → client. Also carries the
+/// change feed, which is an ordinary streamed response and not a third type.
+pub const BODY_RESPONSE: u8 = 0x02;
+
+/// Reads a binary frame's header, leaving the payload untouched.
+///
+/// Deliberately returns no payload slice: the relay forwards the original
+/// bytes, so nothing downstream has any reason to look past the header. It
+/// MUST NOT inspect a body (§1).
+pub fn parse_body_header(bytes: &[u8]) -> Result<(u8, u32), ErrorCode> {
+    if bytes.len() < BODY_HEADER_LEN {
+        return Err(ErrorCode::ProtocolError);
+    }
+    let kind = bytes[0];
+    // "There are exactly two body types, and there MUST NOT be a third" (§3).
+    if kind != BODY_REQUEST && kind != BODY_RESPONSE {
+        return Err(ErrorCode::ProtocolError);
+    }
+    let stream_id = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+    Ok((kind, stream_id))
+}
+
+/// Reads a `stream_id` out of a control message's body.
+///
+/// Rejects anything that is not an in-range `u32`: a `stream_id` is a routing
+/// key, and a value the relay cannot represent is a frame it cannot route.
+pub fn stream_id_of(body: &serde_json::Map<String, serde_json::Value>) -> Result<u32, ErrorCode> {
+    body.get("stream_id")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|id| u32::try_from(id).ok())
+        .ok_or(ErrorCode::ProtocolError)
 }
 
 #[cfg(test)]
@@ -251,5 +399,89 @@ mod tests {
     fn an_error_message_is_fixed_by_its_code() {
         assert_eq!(ErrorCode::AuthFailed.message(), "authentication failed");
         assert_eq!(ErrorCode::ProtocolError.message(), "protocol error");
+    }
+
+    #[test]
+    fn an_error_carries_a_stream_id_only_when_it_belongs_to_one_stream() {
+        let trunk: serde_json::Value = serde_json::from_str(&error(ErrorCode::TrunkLost)).unwrap();
+        // Absent, not null: a client distinguishing "this stream failed" from
+        // "the trunk failed" must not have to treat null as a third case.
+        assert!(trunk.get("stream_id").is_none(), "{trunk}");
+
+        let stream: serde_json::Value =
+            serde_json::from_str(&error_on_stream(ErrorCode::ServerTimeout, 7)).unwrap();
+        assert_eq!(stream["stream_id"], 7, "{stream}");
+        assert_eq!(stream["code"], "server_timeout", "{stream}");
+    }
+
+    #[test]
+    fn there_are_exactly_two_body_types() {
+        assert_eq!(
+            parse_body_header(&[BODY_REQUEST, 0, 0, 0, 1]).unwrap(),
+            (BODY_REQUEST, 1)
+        );
+        // Big-endian, and the full u32 range.
+        assert_eq!(
+            parse_body_header(&[BODY_RESPONSE, 0xFF, 0xFF, 0xFF, 0xFF])
+                .unwrap()
+                .1,
+            u32::MAX
+        );
+        // §3: "there MUST NOT be a third". A relay that forwarded an unknown
+        // type would be carrying a payload neither side has agreed on.
+        assert_eq!(
+            parse_body_header(&[0x03, 0, 0, 0, 1]).unwrap_err(),
+            ErrorCode::ProtocolError
+        );
+        // Shorter than the header itself: there is no `stream_id` to route on.
+        assert_eq!(
+            parse_body_header(&[BODY_REQUEST, 0, 0, 0]).unwrap_err(),
+            ErrorCode::ProtocolError
+        );
+        assert_eq!(
+            parse_body_header(&[]).unwrap_err(),
+            ErrorCode::ProtocolError
+        );
+        // A header with no payload is legal — an empty chunk, not a bad frame.
+        assert!(parse_body_header(&[BODY_RESPONSE, 0, 0, 0, 9]).is_ok());
+    }
+
+    #[test]
+    fn a_stream_id_outside_u32_is_not_routable() {
+        let ok = Frame::parse(r#"{"v":1,"type":"CLOSE","stream_id":7}"#).unwrap();
+        assert_eq!(stream_id_of(&ok.body).unwrap(), 7);
+
+        for body in [
+            r#"{"v":1,"type":"CLOSE"}"#,
+            r#"{"v":1,"type":"CLOSE","stream_id":null}"#,
+            r#"{"v":1,"type":"CLOSE","stream_id":"7"}"#,
+            r#"{"v":1,"type":"CLOSE","stream_id":-1}"#,
+            r#"{"v":1,"type":"CLOSE","stream_id":4294967296}"#,
+        ] {
+            let frame = Frame::parse(body).unwrap();
+            assert_eq!(
+                stream_id_of(&frame.body).unwrap_err(),
+                ErrorCode::ProtocolError,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relayed_head_keeps_every_field_it_was_given() {
+        // The reason `HTTP_REQUEST_HEAD` has no typed struct: a field the relay
+        // does not know about is still part of the proxied exchange, and
+        // dropping it silently would corrupt the request rather than fail it.
+        let frame = Frame::parse(
+            r#"{"v":1,"type":"HTTP_REQUEST_HEAD","stream_id":3,"method":"GET",
+                "path":"/v1/notes","headers":{"a":"b"},"future_field":[1,2]}"#,
+        )
+        .unwrap();
+        let json = relayed("HTTP_REQUEST_HEAD", frame.body);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["v"], 1);
+        assert_eq!(value["type"], "HTTP_REQUEST_HEAD");
+        assert_eq!(value["headers"]["a"], "b");
+        assert_eq!(value["future_field"], serde_json::json!([1, 2]));
     }
 }

@@ -1680,6 +1680,7 @@ dependencies = [
  "data-encoding",
  "diffy",
  "ed25519-dalek",
+ "futures-util",
  "notify",
  "qrcode",
  "rand 0.10.2",

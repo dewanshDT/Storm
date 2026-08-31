@@ -14,13 +14,15 @@
 //! slice rather than half-done.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use rand::Rng;
 
 use crate::auth::PublicKey;
 use crate::config::Allowlist;
+use crate::proto::{self, ErrorCode};
+use crate::trunk::Tx;
 
 /// What the relay knows about one live server trunk.
 ///
@@ -34,6 +36,241 @@ pub struct Registration {
     /// Monotonic, because this is a liveness measure and a clock step
     /// backwards must not make a dead trunk look freshly alive.
     pub last_seen: Instant,
+    /// Everything a client needs to route onto this trunk. Behind an `Arc`
+    /// because a client trunk holds it for its whole life, while
+    /// `Registration` itself is cloned out of the table on every lookup.
+    pub trunk: Arc<ServerTrunk>,
+}
+
+/// A live server trunk's routing state: the socket to write to, the streams
+/// multiplexed onto it, and the client trunks bound to it.
+///
+/// **A client binds to this object, not to the `server_id`.** Streams are
+/// scoped per server trunk (§3), so following a supersession to whatever trunk
+/// currently answers for the id would carry a `stream_id` across a boundary it
+/// is not defined over — the new trunk has never heard of it.
+#[derive(Debug)]
+pub struct ServerTrunk {
+    tx: Tx,
+    streams: Mutex<StreamTable>,
+    /// `client_trunk_id` → how to reach that client. Kept so a dying trunk can
+    /// tell every one of them, including clients that hold no open stream and
+    /// would otherwise wait for a timeout on a destination that is gone.
+    clients: Mutex<HashMap<String, Tx>>,
+}
+
+/// One multiplexed stream.
+///
+/// `client` is the whole security property in this file. A `stream_id` maps to
+/// exactly one client trunk, so a response can only ever be handed to the
+/// client that opened the stream — see [`ServerTrunk::client_for`].
+#[derive(Debug, Clone)]
+struct Stream {
+    client_trunk_id: String,
+    client: Tx,
+    /// `STREAM_OPEN` sent, `STREAM_ACK` not yet seen. This is what the in-flight
+    /// cap counts (§5.1).
+    acked: bool,
+}
+
+#[derive(Debug, Default)]
+struct StreamTable {
+    open: HashMap<u32, Stream>,
+    /// Monotonic, never reused. `u32` rather than `u16` so id-reuse safety
+    /// never has to be reasoned about on a long-lived trunk (§3) — so when it
+    /// does run out, the trunk refuses new streams instead of wrapping.
+    next_id: u32,
+}
+
+/// Why an `OPEN_STREAM` was refused. Both map to `rate_limited`: the client
+/// hit a bound, and which bound is the relay's business.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenRefused {
+    TooManyInFlight,
+    IdsExhausted,
+}
+
+impl ServerTrunk {
+    pub fn new(tx: Tx) -> Self {
+        Self {
+            tx,
+            streams: Mutex::new(StreamTable {
+                open: HashMap::new(),
+                // Ids start at 1 so a zero `stream_id` — a field that was
+                // defaulted rather than set — is never a live stream.
+                next_id: 1,
+            }),
+            clients: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The socket toward the origin server.
+    pub fn tx(&self) -> Tx {
+        self.tx.clone()
+    }
+
+    pub fn attach_client(&self, client_trunk_id: &str, tx: Tx) {
+        self.clients
+            .lock()
+            .expect("clients mutex")
+            .insert(client_trunk_id.to_string(), tx);
+    }
+
+    pub fn detach_client(&self, client_trunk_id: &str) {
+        self.clients
+            .lock()
+            .expect("clients mutex")
+            .remove(client_trunk_id);
+    }
+
+    /// Allocates a `stream_id` and records who owns it.
+    ///
+    /// **Relay-assigned, never client-asserted** (§3): `OPEN_STREAM` carries no
+    /// `stream_id` at all, so there is no value here for a client to influence.
+    pub fn open_stream(
+        &self,
+        client_trunk_id: &str,
+        client: Tx,
+        max_in_flight: usize,
+    ) -> Result<u32, OpenRefused> {
+        let mut table = self.streams.lock().expect("streams mutex");
+
+        // Counted per client trunk, not per server trunk: a cap shared across
+        // clients would let one client's un-acked opens deny service to every
+        // other client on the same server.
+        let in_flight = table
+            .open
+            .values()
+            .filter(|stream| !stream.acked && stream.client_trunk_id == client_trunk_id)
+            .count();
+        if in_flight >= max_in_flight {
+            return Err(OpenRefused::TooManyInFlight);
+        }
+
+        let stream_id = table.next_id;
+        let Some(next) = stream_id.checked_add(1) else {
+            return Err(OpenRefused::IdsExhausted);
+        };
+        table.next_id = next;
+        table.open.insert(
+            stream_id,
+            Stream {
+                client_trunk_id: client_trunk_id.to_string(),
+                client,
+                acked: false,
+            },
+        );
+        Ok(stream_id)
+    }
+
+    /// Marks a stream acknowledged. `false` if it is not open — a `STREAM_ACK`
+    /// for a stream that already timed out, or for an id the relay never
+    /// issued.
+    pub fn ack_stream(&self, stream_id: u32) -> bool {
+        let mut table = self.streams.lock().expect("streams mutex");
+        match table.open.get_mut(&stream_id) {
+            Some(stream) => {
+                stream.acked = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn is_awaiting_ack(&self, stream_id: u32) -> bool {
+        self.streams
+            .lock()
+            .expect("streams mutex")
+            .open
+            .get(&stream_id)
+            .is_some_and(|stream| !stream.acked)
+    }
+
+    /// The client a server-ward frame for `stream_id` belongs to.
+    ///
+    /// The one lookup that decides who receives a response. It answers with the
+    /// stream's recorded owner and nothing else, which is what makes cross-talk
+    /// unrepresentable rather than merely unlikely.
+    pub fn client_for(&self, stream_id: u32) -> Option<Tx> {
+        self.streams
+            .lock()
+            .expect("streams mutex")
+            .open
+            .get(&stream_id)
+            .map(|stream| stream.client.clone())
+    }
+
+    /// Whether `client_trunk_id` owns `stream_id`.
+    ///
+    /// A client naming another client's live stream and a client naming a dead
+    /// one are **the same answer on purpose**. Distinguishing them would turn
+    /// this into an oracle for which ids are currently in use by somebody else.
+    pub fn client_owns(&self, stream_id: u32, client_trunk_id: &str) -> bool {
+        self.streams
+            .lock()
+            .expect("streams mutex")
+            .open
+            .get(&stream_id)
+            .is_some_and(|stream| stream.client_trunk_id == client_trunk_id)
+    }
+
+    pub fn close_stream(&self, stream_id: u32) {
+        self.streams
+            .lock()
+            .expect("streams mutex")
+            .open
+            .remove(&stream_id);
+    }
+
+    /// Drops every stream a client trunk owned, returning their ids so the
+    /// caller can free them on the server side too (§5.4).
+    pub fn close_streams_of(&self, client_trunk_id: &str) -> Vec<u32> {
+        let mut table = self.streams.lock().expect("streams mutex");
+        let doomed: Vec<u32> = table
+            .open
+            .iter()
+            .filter(|(_, stream)| stream.client_trunk_id == client_trunk_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &doomed {
+            table.open.remove(id);
+        }
+        doomed
+    }
+
+    /// Tears the trunk down and tells every client bound to it.
+    ///
+    /// Each open stream gets its own `ERROR{trunk_lost, stream_id}` so a client
+    /// can fail exactly the requests that were in flight. A client with no open
+    /// stream still gets one trunk-level `ERROR{trunk_lost}`: its destination is
+    /// gone, and leaving it holding an apparently healthy trunk would mean it
+    /// only finds out when its next request times out.
+    ///
+    /// Synchronous and best-effort throughout — this runs on a teardown path
+    /// where a peer that is already gone is not an error worth handling.
+    pub fn shut_down(&self) {
+        let streams = std::mem::take(&mut self.streams.lock().expect("streams mutex").open);
+        let clients = std::mem::take(&mut *self.clients.lock().expect("clients mutex"));
+
+        let mut told: HashMap<&str, ()> = HashMap::new();
+        for (stream_id, stream) in &streams {
+            let _ = stream
+                .client
+                .try_send_json(proto::error_on_stream(ErrorCode::TrunkLost, *stream_id));
+            told.insert(stream.client_trunk_id.as_str(), ());
+        }
+        for (client_trunk_id, tx) in &clients {
+            if !told.contains_key(client_trunk_id.as_str()) {
+                let _ = tx.try_send_json(proto::error(ErrorCode::TrunkLost));
+            }
+            tx.close();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn open_stream_count(&self) -> usize {
+        self.streams.lock().expect("streams mutex").open.len()
+    }
 }
 
 /// Whether a successful signature should record a new trust-on-first-use pair.
@@ -380,12 +617,71 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_id_maps_to_exactly_one_client_trunk() {
+        // The property the whole design rests on, asserted at the table rather
+        // than only over a socket: whatever a frame claims, a stream resolves to
+        // the client that opened it and to nobody else.
+        let trunk = ServerTrunk::new(Tx::detached(4).0);
+        let (alice, _alice_rx) = Tx::detached(4);
+        let (bob, _bob_rx) = Tx::detached(4);
+
+        let alice_stream = trunk.open_stream("ctk_alice", alice, 8).unwrap();
+        let bob_stream = trunk.open_stream("ctk_bob", bob, 8).unwrap();
+        assert_ne!(alice_stream, bob_stream);
+
+        assert!(trunk.client_owns(alice_stream, "ctk_alice"));
+        assert!(!trunk.client_owns(alice_stream, "ctk_bob"));
+        // Same answer as an id that was never issued: a client must not be able
+        // to tell "someone else's stream" from "no such stream".
+        assert!(!trunk.client_owns(9999, "ctk_bob"));
+    }
+
+    #[test]
+    fn the_in_flight_cap_is_counted_per_client_and_released_by_an_ack() {
+        let trunk = ServerTrunk::new(Tx::detached(4).0);
+        let (alice, _alice_rx) = Tx::detached(4);
+        let (bob, _bob_rx) = Tx::detached(4);
+
+        let first = trunk.open_stream("ctk_alice", alice.clone(), 2).unwrap();
+        trunk.open_stream("ctk_alice", alice.clone(), 2).unwrap();
+        assert_eq!(
+            trunk.open_stream("ctk_alice", alice.clone(), 2),
+            Err(OpenRefused::TooManyInFlight)
+        );
+
+        // Bob is unaffected: a shared cap would hand any anonymous client a way
+        // to deny service to every other client on the same server.
+        assert!(trunk.open_stream("ctk_bob", bob, 2).is_ok());
+
+        // The cap counts *un-acked* opens, so an ack frees a slot rather than
+        // permanently capping the trunk.
+        assert!(trunk.ack_stream(first));
+        assert!(trunk.open_stream("ctk_alice", alice, 2).is_ok());
+    }
+
+    #[test]
+    fn a_closed_stream_id_is_never_reissued() {
+        // Ids are monotonic, not recycled. Reuse would mean a late response for
+        // a stream that has closed could be delivered to whoever holds the id
+        // now — the cross-talk bug, arriving by a different route.
+        let trunk = ServerTrunk::new(Tx::detached(4).0);
+        let (client, _rx) = Tx::detached(4);
+
+        let first = trunk.open_stream("ctk_a", client.clone(), 8).unwrap();
+        trunk.close_stream(first);
+        let second = trunk.open_stream("ctk_a", client, 8).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(trunk.open_stream_count(), 1);
+    }
+
+    #[test]
     fn a_superseded_trunks_cleanup_does_not_evict_its_replacement() {
         let registrations = Registrations::default();
         let make = |trunk_id: &str| Registration {
             trunk_id: trunk_id.to_string(),
             connected_at: SystemTime::now(),
             last_seen: Instant::now(),
+            trunk: Arc::new(ServerTrunk::new(Tx::detached(1).0)),
         };
 
         registrations.install("srv_A", make("trk_old"));

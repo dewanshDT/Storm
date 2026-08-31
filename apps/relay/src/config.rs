@@ -25,6 +25,24 @@ pub const DEFAULT_CHALLENGE_TTL: Duration = Duration::from_secs(30);
 /// shortens one silently shortens the other.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a `HELLO` waits for a server trunk to appear (§5).
+///
+/// Covers a server mid-restart. Its own knob, not a share of the handshake
+/// timeout, because it is the one interval a test needs to shorten without
+/// also shortening how long a client may take to send its first frame.
+pub const DEFAULT_HELLO_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a `STREAM_OPEN` waits for `STREAM_ACK` (§5.1).
+///
+/// **Time to first byte, not time to completion.** It bounds only the gap
+/// before the origin acknowledges the stream; once acknowledged, a response may
+/// take as long as it likes and produce no bytes at all — the change feed is an
+/// ordinary streamed response that stays open indefinitely and quietly (§5.3).
+pub const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Un-acked `STREAM_OPEN`s one client trunk may hold (§5.1).
+pub const DEFAULT_MAX_IN_FLIGHT_STREAMS: usize = 20;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -38,6 +56,9 @@ pub struct Config {
     pub allowlist: Option<Allowlist>,
     pub challenge_ttl: Duration,
     pub handshake_timeout: Duration,
+    pub hello_wait: Duration,
+    pub stream_ack_timeout: Duration,
+    pub max_in_flight_streams: usize,
 }
 
 impl Config {
@@ -48,6 +69,9 @@ impl Config {
             allowlist: None,
             challenge_ttl: DEFAULT_CHALLENGE_TTL,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            hello_wait: DEFAULT_HELLO_WAIT,
+            stream_ack_timeout: DEFAULT_STREAM_ACK_TIMEOUT,
+            max_in_flight_streams: DEFAULT_MAX_IN_FLIGHT_STREAMS,
         }
     }
 

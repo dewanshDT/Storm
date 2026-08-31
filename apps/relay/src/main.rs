@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use storm_relay::{Allowlist, Config, REGISTER_PATH, Relay};
+use storm_relay::{Allowlist, CONNECT_PATH, Config, REGISTER_PATH, Relay};
 
 #[derive(Parser, Debug)]
 #[command(name = "storm-relay", version, about = "Storm Relay Protocol v1 relay")]
@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
         %bound,
         %public_base,
         register_path = REGISTER_PATH,
+        connect_path = CONNECT_PATH,
         "storm-relay listening"
     );
 

@@ -1086,7 +1086,11 @@ pub const WEB_BOOTSTRAP_PER_MINUTE: i64 = 12;
 pub const WEB_BOOTSTRAP_MAX_OUTSTANDING: i64 = 256;
 
 /// Headers whose presence means the peer address belongs to a proxy.
-const FORWARDING_HEADERS: [&str; 4] = [
+///
+/// Also stripped from every relayed request before dispatch: they are
+/// client-supplied over the tunnel, and `web_bootstrap_nonce` below treats
+/// their presence as a fact about the *network*. See `relay/dispatch.rs`.
+pub(crate) const FORWARDING_HEADERS: [&str; 4] = [
     "x-forwarded-for",
     "x-forwarded-host",
     "x-real-ip",
@@ -2674,8 +2678,13 @@ async fn push_changes<S: ChangeSink>(mut sink: S, mut rx: broadcast::Receiver<Ch
     }
 }
 
+// `pub(crate)` so `relay::tests` can build a *real* router and real
+// credentials rather than restating forty lines of `AppState`. The relay's
+// whole claim is that a tunnelled request reaches the same router a LAN
+// request does, and a second, parallel construction of that router is exactly
+// the thing that would let the claim quietly stop being true.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tower::ServiceExt;
 
@@ -2705,7 +2714,9 @@ mod tests {
 
     /// As [`test_router`], but hands back the state too — for the tests that
     /// have to look at what a request *persisted*, not only what it answered.
-    fn test_router_with_state(dir: &FsPath) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+    pub(crate) fn test_router_with_state(
+        dir: &FsPath,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         test_router_with_policy(dir, Arc::new(crate::auth::authz::AllowAuthenticated))
     }
 
@@ -2720,7 +2731,7 @@ mod tests {
     /// chosen by the caller — the rate-limit tests want a burst they can
     /// exhaust in two requests rather than thirty, because every attempt that
     /// reaches the handler pays a real Argon2id verify.
-    fn test_router_with_limiter(
+    pub(crate) fn test_router_with_limiter(
         dir: &FsPath,
         limiter: crate::auth::ratelimit::LoginLimiter,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
@@ -2891,7 +2902,7 @@ mod tests {
     /// are about the switch, not about login, and a real Argon2id hash at the
     /// measured parameters would cost 192 MiB and ~170 ms apiece to prove
     /// nothing they assert.
-    async fn seed_owner(state: &Shared) -> String {
+    pub(crate) async fn seed_owner(state: &Shared) -> String {
         let mut auth_db = state.auth_db.lock().await;
         crate::auth::users::create_user(
             &mut auth_db,
@@ -2909,7 +2920,7 @@ mod tests {
 
     /// A session token for `user_id`, minted directly rather than through
     /// `login`, for the same reason [`seed_owner`] fakes the hash.
-    async fn session_token(state: &Shared, user_id: &str) -> String {
+    pub(crate) async fn session_token(state: &Shared, user_id: &str) -> String {
         let mut auth_db = state.auth_db.lock().await;
         let device =
             crate::auth::devices::create_synthetic(&mut auth_db, "test", "2026-08-17T00:00:00Z")
@@ -3463,7 +3474,7 @@ mod tests {
     ///
     /// Goes through the real pairing code rather than inserting a row, so a
     /// change to how a device credential is minted breaks these tests too.
-    async fn pair_a_device(state: &Shared) -> String {
+    pub(crate) async fn pair_a_device(state: &Shared) -> String {
         let now = crate::index::now_rfc3339();
         let mut auth_db = state.auth_db.lock().await;
         let (nonce, _) = crate::auth::pairing::create(
@@ -4053,7 +4064,7 @@ mod tests {
     /// Argon2id verifies instead of thirty. The global bucket is left roomy —
     /// each test here is about the per-caller half, and a global trip would
     /// mask it.
-    fn throttling_limiter() -> crate::auth::ratelimit::LoginLimiter {
+    pub(crate) fn throttling_limiter() -> crate::auth::ratelimit::LoginLimiter {
         use crate::auth::ratelimit::{Limits, LoginLimiter, tests::TEST_LIMITS};
         LoginLimiter::with_limits(TEST_LIMITS, Limits::per_minute(1_000.0, 1_000.0))
     }

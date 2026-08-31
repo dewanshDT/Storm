@@ -13,42 +13,37 @@
 //! or `stk_` key rides *inside* the tunnelled HTTP request and is checked by
 //! the origin server exactly as on the LAN. Nothing in this file may grow a
 //! notion of a Storm user — the relay is never an authority (R5).
+//!
+//! Once registered, the trunk is also the **server→client** half of routing:
+//! `STREAM_ACK`, `HTTP_RESPONSE_HEAD` and `0x02` body chunks arrive here and are
+//! handed to the one client trunk that owns their `stream_id`.
 
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::WebSocket;
 
 use crate::Relay;
 use crate::auth::{PublicKey, validate_nonce, validate_server_id};
 use crate::proto::{self, ChallengeResponse, ErrorCode, Frame, RegisterServer};
-use crate::state::{Binding, Registration, new_trunk_id};
-
-/// How a connection stopped being useful.
-///
-/// `Disconnected` is separate from the two error codes because there is
-/// nobody left to tell: sending an `ERROR` down a closed socket is how a
-/// handler ends up logging a spurious failure for an ordinary hang-up.
-#[derive(Debug, Clone, Copy)]
-enum Fault {
-    Code(ErrorCode),
-    Disconnected,
-}
-
-impl From<ErrorCode> for Fault {
-    fn from(code: ErrorCode) -> Self {
-        Self::Code(code)
-    }
-}
+use crate::state::{Binding, Registration, ServerTrunk, new_trunk_id};
+use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// Serves one server trunk from upgrade to close.
-pub async fn serve(mut socket: WebSocket, relay: Arc<Relay>) {
+pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
+    // Split before the handshake even though the handshake is strictly
+    // sequential: the registration must be installed with a usable send handle
+    // *before* `REGISTERED` goes out, or a client that raced in behind it would
+    // find a trunk it cannot write to.
+    let (mut rx, tx) = trunk::split(socket, trunk::SERVER_WARD_QUEUE);
+    let server_trunk = Arc::new(ServerTrunk::new(tx.clone()));
+
     // A half-finished handshake must not hold a socket open indefinitely: the
     // relay authenticates nobody at the door, so anyone who can connect can
     // start one. Bounded separately from the nonce TTL — see `config`.
     let outcome = match tokio::time::timeout(
         relay.config.handshake_timeout,
-        handshake(&mut socket, &relay),
+        handshake(&mut rx, &tx, &relay, &server_trunk),
     )
     .await
     {
@@ -61,7 +56,7 @@ pub async fn serve(mut socket: WebSocket, relay: Arc<Relay>) {
 
     let session = match outcome {
         Ok(session) => session,
-        Err(fault) => return close(socket, fault).await,
+        Err(fault) => return trunk::close(&tx, fault).await,
     };
 
     tracing::info!(
@@ -70,29 +65,39 @@ pub async fn serve(mut socket: WebSocket, relay: Arc<Relay>) {
         "server trunk registered"
     );
 
-    let fault = trunk_loop(&mut socket, &relay, &session).await;
+    let fault = trunk_loop(&mut rx, &tx, &relay, &session).await;
 
     // Only ever releases a registration this trunk still owns. A superseded
     // trunk reaching here must not evict the trunk that replaced it.
     relay
         .registrations
         .release(&session.server_id, &session.trunk_id);
+    // Streams do not survive trunk loss (§5.4): every client holding one is
+    // told `trunk_lost` rather than left waiting for a response that can no
+    // longer arrive.
+    session.trunk.shut_down();
     tracing::info!(
         server_id = %session.server_id,
         trunk_id = %session.trunk_id,
         "server trunk closed"
     );
 
-    close(socket, fault).await;
+    trunk::close(&tx, fault).await;
 }
 
 struct Session {
     server_id: String,
     trunk_id: String,
+    trunk: Arc<ServerTrunk>,
 }
 
-async fn handshake(socket: &mut WebSocket, relay: &Relay) -> Result<Session, Fault> {
-    let frame = recv_control(socket).await?;
+async fn handshake(
+    rx: &mut Rx,
+    tx: &Tx,
+    relay: &Relay,
+    server_trunk: &Arc<ServerTrunk>,
+) -> Result<Session, Fault> {
+    let frame = trunk::recv_control(rx).await?;
     if frame.ty() != "REGISTER_SERVER" {
         return Err(ErrorCode::ProtocolError.into());
     }
@@ -142,9 +147,9 @@ async fn handshake(socket: &mut WebSocket, relay: &Relay) -> Result<Session, Fau
     relay
         .challenges
         .issue(&nonce, relay.config.challenge_ttl, Instant::now());
-    send(socket, proto::challenge(nonce.clone())).await?;
+    tx.send_json(proto::challenge(nonce.clone())).await?;
 
-    let frame = recv_control(socket).await?;
+    let frame = trunk::recv_control(rx).await?;
     if frame.ty() != "CHALLENGE_RESPONSE" {
         return Err(ErrorCode::ProtocolError.into());
     }
@@ -200,6 +205,7 @@ async fn handshake(socket: &mut WebSocket, relay: &Relay) -> Result<Session, Fau
             trunk_id: trunk_id.clone(),
             connected_at: SystemTime::now(),
             last_seen: now,
+            trunk: server_trunk.clone(),
         },
     ) {
         // §4.2 supersession: whoever completed the challenge already holds the
@@ -214,81 +220,154 @@ async fn handshake(socket: &mut WebSocket, relay: &Relay) -> Result<Session, Fau
         );
     }
 
-    send(
-        socket,
-        proto::registered(
-            trunk_id.clone(),
-            relay.config.public_address(&register.server_id),
-        ),
-    )
+    tx.send_json(proto::registered(
+        trunk_id.clone(),
+        relay.config.public_address(&register.server_id),
+    ))
     .await?;
 
     Ok(Session {
         server_id: register.server_id,
         trunk_id,
+        trunk: server_trunk.clone(),
     })
 }
 
-/// Holds the trunk open after registration.
+/// Holds the trunk open after registration, and routes everything the origin
+/// sends back toward the client that asked for it.
 ///
-/// Answers `PING` and honours `DEREGISTER`. It does **not** route anything:
-/// client trunks, `OPEN_STREAM` and the HTTP messages are the next slice, so
-/// any other control type is a protocol error rather than a silent no-op.
-async fn trunk_loop(socket: &mut WebSocket, relay: &Relay, session: &Session) -> Fault {
+/// Every route here goes through the stream table's recorded owner. **The relay
+/// never reads a destination out of the frame it is forwarding** — a
+/// `stream_id` names a stream, and the stream names its client. That is what
+/// keeps one client's response from reaching another.
+async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> Fault {
     loop {
-        let frame = match recv_control(socket).await {
-            Ok(frame) => frame,
+        let incoming = match trunk::recv(rx).await {
+            Ok(incoming) => incoming,
             Err(fault) => return fault,
         };
         relay
             .registrations
             .touch(&session.server_id, &session.trunk_id, Instant::now());
 
-        match frame.ty() {
-            "PING" => {
-                if let Err(fault) = send(socket, proto::pong()).await {
-                    return fault;
-                }
-            }
-            // A server SHOULD send this before closing, so the relay frees the
-            // `server_id` immediately rather than making clients wait out a
-            // timeout for a deliberate restart (§4.2).
-            "DEREGISTER" => return Fault::Disconnected,
-            "PONG" => {}
-            _ => return Fault::Code(ErrorCode::ProtocolError),
-        }
-    }
-}
-
-/// Reads the next control frame, skipping transport-level ping/pong.
-///
-/// A binary frame is a body chunk (§3) and has no meaning on a trunk with no
-/// open streams, so it is a protocol error here rather than something ignored.
-async fn recv_control(socket: &mut WebSocket) -> Result<Frame, Fault> {
-    loop {
-        let Some(message) = socket.recv().await else {
-            return Err(Fault::Disconnected);
+        let outcome = match incoming {
+            Incoming::Control(frame) => match frame.ty() {
+                "PING" => tx.send_json(proto::pong()).await,
+                // A server SHOULD send this before closing, so the relay frees
+                // the `server_id` immediately rather than making clients wait
+                // out a timeout for a deliberate restart (§4.2).
+                "DEREGISTER" => return Fault::Disconnected,
+                "PONG" => Ok(()),
+                "STREAM_ACK" => stream_ack(session, frame),
+                "HTTP_RESPONSE_HEAD" => forward_response_head(session, frame),
+                "CLOSE" => match server_close(session, frame) {
+                    Ok(true) => return Fault::Disconnected,
+                    Ok(false) => Ok(()),
+                    Err(fault) => Err(fault),
+                },
+                _ => Err(ErrorCode::ProtocolError.into()),
+            },
+            Incoming::Body {
+                kind,
+                stream_id,
+                raw,
+            } => forward_response_body(session, kind, stream_id, raw),
         };
-        match message {
-            Ok(Message::Text(text)) => return Frame::parse(text.as_str()).map_err(Fault::Code),
-            Ok(Message::Binary(_)) => return Err(ErrorCode::ProtocolError.into()),
-            Ok(Message::Ping(_) | Message::Pong(_)) => continue,
-            Ok(Message::Close(_)) | Err(_) => return Err(Fault::Disconnected),
+
+        if let Err(fault) = outcome {
+            return fault;
         }
     }
 }
 
-async fn send(socket: &mut WebSocket, json: String) -> Result<(), Fault> {
-    socket
-        .send(Message::Text(json.into()))
-        .await
-        .map_err(|_| Fault::Disconnected)
+fn stream_ack(session: &Session, frame: Frame) -> Result<(), Fault> {
+    let stream_id = proto::stream_id_of(&frame.body)?;
+    if !session.trunk.ack_stream(stream_id) {
+        // The stream timed out and was already torn down, or the origin
+        // acknowledged an id the relay never issued. Neither is worth killing
+        // a trunk that is carrying other healthy streams over.
+        tracing::debug!(stream_id, "STREAM_ACK for a stream that is not open");
+    }
+    Ok(())
 }
 
-/// Reports the fault, if there is still anyone to report it to, and closes.
-async fn close(mut socket: WebSocket, fault: Fault) {
-    if let Fault::Code(code) = fault {
-        let _ = socket.send(Message::Text(proto::error(code).into())).await;
+fn forward_response_head(session: &Session, frame: Frame) -> Result<(), Fault> {
+    let stream_id = proto::stream_id_of(&frame.body)?;
+    // Sent on as soon as status and headers are known (§5.2). Nothing waits
+    // here for a body, which is what lets the change feed answer immediately
+    // and then stay open and silent for hours.
+    deliver(
+        session,
+        stream_id,
+        proto::relayed("HTTP_RESPONSE_HEAD", frame.body),
+    )
+}
+
+fn forward_response_body(
+    session: &Session,
+    kind: u8,
+    stream_id: u32,
+    raw: Vec<u8>,
+) -> Result<(), Fault> {
+    // `0x01` is the request direction; the origin sending one is speaking the
+    // client's half of the protocol.
+    if kind != proto::BODY_RESPONSE {
+        return Err(ErrorCode::ProtocolError.into());
     }
-    let _ = socket.send(Message::Close(None)).await;
+    let Some(client) = session.trunk.client_for(stream_id) else {
+        tracing::debug!(stream_id, "dropping a body chunk for a closed stream");
+        return Ok(());
+    };
+    // Forwarded chunk by chunk as the origin produces them, never accumulated
+    // (§5.2) — buffering a response whole would break streaming *and* let one
+    // large download hold the relay's memory.
+    if client.try_send_raw(raw).is_err() {
+        drop_backlogged_client(session, stream_id);
+    }
+    Ok(())
+}
+
+fn deliver(session: &Session, stream_id: u32, json: String) -> Result<(), Fault> {
+    let Some(client) = session.trunk.client_for(stream_id) else {
+        // The client hung up, or the stream timed out. Dropped, not faulted:
+        // the trunk is shared, and one dead stream must not disturb the others.
+        tracing::debug!(stream_id, "dropping a frame for a closed stream");
+        return Ok(());
+    };
+    if client.try_send_json(json).is_err() {
+        drop_backlogged_client(session, stream_id);
+    }
+    Ok(())
+}
+
+/// A client that has stopped draining its socket loses its stream.
+///
+/// Never `.await` toward a client from this task: it is the *shared* reader for
+/// one origin, so waiting on any single client would stall the responses of
+/// every other client on that server. Dropping the stream is the bounded
+/// alternative — the cost lands on the client that caused it.
+fn drop_backlogged_client(session: &Session, stream_id: u32) {
+    tracing::info!(stream_id, "client cannot keep up; dropping its stream");
+    session.trunk.close_stream(stream_id);
+    let _ = session
+        .trunk
+        .tx()
+        .try_send_json(proto::close_stream(stream_id));
+}
+
+/// `CLOSE` from the origin. Returns whether the whole trunk is going away.
+fn server_close(session: &Session, frame: Frame) -> Result<bool, Fault> {
+    let Some(value) = frame.body.get("stream_id") else {
+        return Ok(true);
+    };
+    if value.is_null() {
+        return Err(ErrorCode::ProtocolError.into());
+    }
+    let stream_id = proto::stream_id_of(&frame.body)?;
+    let closing = session.trunk.client_for(stream_id);
+    session.trunk.close_stream(stream_id);
+    if let Some(client) = closing {
+        let _ = client.try_send_json(proto::close_stream(stream_id));
+    }
+    Ok(false)
 }

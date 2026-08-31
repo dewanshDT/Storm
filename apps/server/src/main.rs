@@ -22,6 +22,7 @@ mod merge;
 mod ops;
 mod parse;
 mod registry;
+mod relay;
 mod vault;
 mod watcher;
 
@@ -1057,6 +1058,14 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // rather than the next restart (A13).
     let vault_set_allow_registration = vault_set.registry.allow_registration;
 
+    // Taken before the registry moves into `AppState`. The configured list is
+    // a snapshot: relays added through `PUT /v1/config/relays` are picked up on
+    // the next restart, not live. `registered_relays` is a shared handle, so
+    // what the supervisors record below is what `/v1/server` reports.
+    let configured_relays = vault_set.registry.relays.clone();
+    let registered_relays = vault_set.registry.registered_relays.clone();
+    let tunnel_identity = identity.clone();
+
     // Bootstrap pairing: when no users exist, create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
     let bootstrap_nonce = {
@@ -1219,6 +1228,26 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
 
+    // **The tunnel serves the same `app` the listener does**, cloned rather
+    // than rebuilt: same routes, same auth layers, same web fallback. A second
+    // router assembled for relayed traffic is how the two would drift, and R13
+    // is precisely the claim that they cannot.
+    //
+    // Spawned before `serve` and never awaited on the request path — a relay
+    // that is unreachable, slow or hung costs a background task and nothing
+    // else. `bind_host` is `args.host`, matching what `mcp::allowed_hosts` was
+    // built from above.
+    let tunnels = relay::Tunnels::spawn(
+        &configured_relays,
+        tunnel_identity,
+        app.clone(),
+        registered_relays,
+        &addr,
+    );
+    if !configured_relays.is_empty() {
+        tracing::info!(relays = configured_relays.len(), "connecting to relays");
+    }
+
     tracing::info!("storm-server listening on http://{addr}");
     // `into_make_service_with_connect_info` is what makes the peer address
     // available to handlers. `/v1/pair/local` refuses anything that is not
@@ -1227,8 +1256,19 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    // Graceful shutdown exists so the tunnels below get a chance to run.
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down");
+    })
     .await
     .context("serving")?;
+
+    // `DEREGISTER`, and wait for it to go out. Without this the relay holds the
+    // `server_id` until a heartbeat timeout and every client trying to reach
+    // this server waits that out — a restart would look like an outage for as
+    // long as the timeout lasts.
+    tunnels.shutdown().await;
     Ok(())
 }
 
