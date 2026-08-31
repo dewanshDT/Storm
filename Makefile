@@ -232,7 +232,6 @@ deploy: build-server web
 		sudo install -m755 /tmp/storm-backup.sh /usr/bin/storm-backup.sh; \
 		sudo mkdir -p $(REMOTE_DIR)/web; \
 		sudo rsync -a --delete /tmp/storm-web/ $(REMOTE_DIR)/web/; \
-		sudo chown -R storm:storm $(REMOTE_DIR); \
 		rm -rf /tmp/storm-server /tmp/storm-web /tmp/storm-backup.sh; \
 		sudo systemctl restart storm-server; \
 		sleep 1; \

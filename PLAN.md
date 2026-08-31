@@ -17,6 +17,32 @@
 > where the two disagree, this file is current. See **Decision log** for what
 > changed and why.
 
+### Where development state lives, and which surface wins
+
+Storm's working state is split across three surfaces on purpose. **Read all
+three before starting; update every one your change touches, in that change.**
+
+| Surface | Authoritative for | Read it via |
+|---|---|---|
+| **`PLAN.md`** (this file) | **Decisions and milestone evidence.** The decision log is settled history. | the repo |
+| **`Storm/Active Work`** | **The in-flight queue** — what is open right now and who is blocked on what. | Storm MCP, personal vault |
+| **`Storm/Global Todo`** | **The aggregate view** — every milestone, program phase, backlog and parking-lot item in one checklist. | Storm MCP, personal vault |
+
+Design packs live in the vault too, not in `docs/`: start at
+**`Storm/Remote Connectivity`** for auth and the relay, **`Storm/Agent Runtime`**
+for the runtime. `docs/storm-*.md` are per-milestone briefs and are **not**
+maintained after their milestone ships — where one disagrees with this file or
+the vault, it is the stale one.
+
+**When they disagree, escalate rather than guess.** This file wins on *why a
+choice was made*; the vault wins on *what is open now*. A conflict between them
+is a defect in whichever was not updated in the same change as the work — say
+so rather than quietly picking one.
+
+**`STORM_WORKFLOW.md` is the mandatory lifecycle** (decision 53) — READ → PLAN
+→ IMPLEMENT → VERIFY → UPDATE STORM → VERIFY STORM → REPORT. Phase 5 is not
+optional: *implemented + tests pass* is not complete.
+
 ---
 
 ## Context
@@ -57,9 +83,31 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 
-Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
+### Programs (multi-release, mirrored from `Storm/Global Todo`)
+
+Milestones are single releases; these span several. **`Storm/Global Todo` is
+the tracking surface** — this table mirrors it, and a phase changing state must
+change both.
+
+| | Phase | State | Where the work is specified |
+|---|---|---|---|
+| **Remote 1** | Auth foundation | **done, deployed** | shipped v0.2.6 / v0.2.7 · M19 above · decisions 52, 52a–c, 54 |
+| **Remote 2** | Transport boundary — the `StormConnection` seam | **current** | `Storm/Relay Protocol` · `TODO — Storm Relay` §0, §2, §4 |
+| **Remote 3** | Minimal relay, all on one machine | not started | `TODO — Storm Relay` §1–§4 |
+| **Remote 4** | Self-hosted relay on a VPS | not started | `TODO — Storm Relay` §6 — built **first**, it is what proves provider independence (R7) |
+| **Remote 5** | Storm-hosted relay (Cloudflare) | not started | `TODO — Storm Relay` §7 · answers Q14 and Q15 |
+| **Authz** | RBAC / FGA — A9's second half | not started, **not blocked by the relay** | Q19–Q25 in `Storm/Auth Authorization Review (A9)` |
+| **Agent Runtime** | Phases 0–4 | proposed, unbuilt | `Storm/Agent Runtime` · adopts the transport, never co-develops it (R11) |
+
+**Remote 2 is gated by two prerequisites**, both independent of the tunnel and
+both listed in `TODO — Storm Relay` §0: challenge-on-connect in the client, and
+login-path rate limiting on the server. See decision 55 and **Blockers**.
+
+Last updated: 2026-08-20. M0–M19 deployed. VM runs `storm-server` **0.2.7**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
-`/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
+`/usr/share/storm/web`), **with authentication live** — verified 2026-08-20,
+the MCP endpoint reports `serverInfo.version 0.2.7` and answers an `stk_` key.
+Android keystore still optional. **M16** Astro site
 (`apps/www`) redesigned onto SlowFlow earth tokens with Storm-own product
 positioning (no competitor framing), MCP-forward homepage, and real apt
 install CTAs. CI builds on PR/main. Deploy remains Cloudflare static (no
@@ -70,11 +118,12 @@ server/MCP/sync changes. **M18** adds desktop-first keyboard shortcuts
 (Shortcuts/Actions/Intent), platform-aware Meta vs Control, in-note find,
 and wide-layout sidebar collapse — phone touch layout unchanged. Shipped in
 **v0.2.4** (M18 is client-only; the server release is a version stamp).
-**M19** starts authentication (decisions 52 / 52a). Six slices — five server,
-one client — are complete and **merged to main** (PRs #10, #11, #13–#16,
-2026-08-17). Nothing is deployed: the VM still runs 0.2.2-1 with the shared
-token, and `legacy_token_enabled` defaults on, so merging changed nothing for
-any live client. **Slice 1:** the server mints and keeps its own cryptographic identity,
+**M19** is authentication (decisions 52 / 52a), and it is **done and
+deployed**. Sixteen slices plus A14 (MCP keys) and the A10 cutover shipped as
+**v0.2.6** and **v0.2.7**; prod runs 0.2.7 and the shared token no longer
+exists anywhere (decision 54). The paragraphs below describe each slice as
+built — where one of them says "not deployed", read it as a note from the time
+it was written, superseded by this sentence. **Slice 1:** the server mints and keeps its own cryptographic identity,
 `state/auth.db` exists with the full designed schema, backups carry it, and
 `GET /v1/server` / `POST /v1/server/challenge` answer unauthenticated. **Slice
 2:** local user accounts with Argon2id passwords at the parameters measured on the
@@ -86,7 +135,7 @@ three-tier HTTP middleware in `api.rs` — device tier for pairing and login, se
 tier for vault ops and auth management, the shared bearer token retired. **Slice
 5:** QR-based pairing — `POST /v1/pair`, `POST /v1/pairings`, bootstrap QR at
 boot, `storm://pair` URI scheme. **`storm-server pair`** regenerates the
-bootstrap QR from the CLI. Not deployed.
+bootstrap QR from the CLI.
 
 **Slice 6:** the Flutter client pairs — a first-run `PairingScreen` that takes a
 `storm://pair` URI, verifies the server's Ed25519 identity, claims the nonce,
@@ -115,8 +164,11 @@ authentication path could not have worked against a real server before it.**
 
 **Next, in order:** ~~the client half of the device tier → a pass against the
 VM~~ (slices 13–16) → ~~**A14, MCP keys**~~ (done) → ~~the cutover~~ (done,
-2026-08-20 — brought forward ahead of the authorization release, see below) →
-the **authorization release**.
+2026-08-20) → **two tracks that do not block each other**: the
+**authorization release** (A9's second half — roles, `vault_grants`, Q19–Q25),
+and the **relay**, whose wire protocol is now designed and code-reviewed
+(decision 55). The relay's own §0 prerequisites — challenge-on-connect and
+login-path rate limiting — come first and are independent of the tunnel.
 
 Slice 12 reordered this. The RBAC policy was next while the assumption held
 that the authentication path worked and only lacked a permission model; it did
@@ -966,6 +1018,111 @@ because it had no user for one to belong to.
 *Revisit if:* Storm is ever distributed to operators who do not have shell
 access to the machine — the bootstrap path (A8) is the only way in, and it
 assumes a console.
+
+**55. The relay is a reverse proxy of the existing wire protocol, and it
+authenticates no clients.** *(2026-08-20, design only — nothing built)*
+
+The Storm Relay Protocol (SRP) v1 is designed and has been reviewed against the
+code **five times**. Two ADRs come out of it, **R12** and **R13** in *Storm
+Remote Decisions*.
+
+**The spec is in the personal vault, not in `docs/`.** Pull the note that
+matches the job rather than reading the pack:
+
+| Note | Pull it when |
+|---|---|
+| *Storm Relay Protocol* | Writing the relay or the tunnel client — the wire spec |
+| *Relay Server Integration* | Writing the server-side half; its checklist table is the authoritative list of `storm-server` changes |
+| *Relay Security* | Trust, impersonation, abuse limits |
+| *Relay Review Log* | "Why is it this way" / "was that already tried" |
+| *TODO — Storm Relay* | The checklist — every item cites the section that specifies it |
+
+**Q10–Q13, Q16 and Q17 are all resolved.** Only **Q14** (abuse-control numbers)
+and **Q15** (relay log retention) remain open, and both belong to the hosted
+relay in Remote 5 — nothing in Remote 2–4 waits on an unanswered question.
+
+**R12 — reachability is not authentication.** Storm servers are *intentionally*
+discoverable through the relay. Server discovery, `server_id` visibility and
+the ability to request a tunnel are **not** security boundaries: reach →
+authenticate → authorize, with three owners, and the relay owns only the first.
+It performs **no client authentication at all** — a client's device credential,
+session token or `stk_` key rides inside the tunnelled request and is checked
+by `require_auth` on the server, exactly as on the LAN. Client auth at the
+relay was evaluated and rejected on its merits: it would require the relay to
+know Storm users (violating R5) and would not work anyway, since a legitimate
+user can flood a relay as well as a stranger. **The relay is a substitute for a
+public IP and an open port** — if Storm would be safe with a port forward, it is
+safe behind a relay, and safer, because the relay carries only Storm protocol.
+
+This retires the old Q13 rather than answering it: the question asserted that
+the relay "cannot let anyone open a tunnel to any `server_id`", which was never
+argued and contradicted R5 in the same sentence.
+
+**R13 — one auth path.** A tunnelled request is reconstructed as a real
+`http::Request` and dispatched **in-process** to the same `axum::Router`, so it
+travels the same middleware, the same `ops.rs` calls and the same error mapping
+as a LAN request. This is decision 37's rule one layer up.
+
+**What the review actually cost, and the reason both ADRs are phrased as
+prohibitions.** Five passes, and *four of them fixed something the previous
+pass's fix had introduced*:
+
+- The registration handshake was **forgeable** — a challenge verified against
+  the pubkey the caller just sent proves possession of that key and binds
+  nothing to the `server_id`. Closed by an allowlist, TOFU on a self-hosted
+  relay, or an account-owned claim on a public one.
+- Working around a WebSocket that cannot be tunnelled (`WebSocketUpgrade` needs
+  a real `hyper::upgrade::OnUpgrade`, which `oneshot` cannot produce) by
+  subscribing to `state.events` directly **removed authentication from the
+  change feed** — `/v1/stream` is session-tier, and the bypass skipped
+  `require_auth` entirely. *Of any bypass, ask what else was on the path you
+  just left.*
+- The replacement — a non-upgrade streaming mode on `/v1/stream` — hit the
+  **mandatory-extractor trap for the fourth time in this codebase**.
+  `Option<WebSocketUpgrade>` does not compile on axum 0.8; `pair_handler`'s
+  `ConnectInfo` has the same shape. *A refusal that arrives as an extractor
+  rejection is not a refusal*, and this is now a standing hazard of any handler
+  that assumes a real socket.
+- The SSE encoding chosen to fix *that* used `id: <seq>` as its resume cursor —
+  and **`change_log.seq` is per vault** while `/v1/stream` is cross-vault, so
+  two vaults both emit seq 1, 2, 3. A bare id resumes to the wrong position
+  **silently**, which is precisely the failure the M9/M10 per-vault-cursor
+  invariant is written about, reintroduced one layer up. Now
+  `id: <vault_id>:<seq>`. *Before inventing a resume token, find what the
+  project already uses for that job and what it is scoped to.*
+
+**Three things the design decided that read like details and are not.**
+`GET /v1/server` gains the live registered-relay list — that *is* Q11's answer,
+and without it a paired client can never learn the server moved relays, because
+a pairing payload is frozen at issuance. The SSE `id` is composite, above.
+And `relay_peer_ip` is set **and** rejected **at the relay**, never the server:
+the server has no client trunk, so the relay is the only party that sees the
+client hop, and without both halves the field is `X-Forwarded-For` under a new
+name.
+
+**Two findings are prerequisites rather than relay work.** The client verifies
+the server's identity **once, at pairing**, and never again — which is exactly
+the defence that lets the relay stay untrusted. And `login()` runs a full
+Argon2id verify for a username that does not exist (deliberately, so timing
+does not leak which accounts are real), so a junk username can never trigger a
+lockout — behind a **global** semaphore of 2. A per-caller rate limit cannot
+bound a globally bounded resource, so the fix is per-caller **and** a global
+ceiling.
+
+**A8 and A13 were re-examined and both survive**, evaluated by exposed
+capability rather than by reachability. A device credential reads no notes and
+creates no users, so web bootstrap does not become a failure when the server is
+reachable — it makes enumeration cheaper and raises the value of rate limits
+already present. Registration is different but not because of the relay: a
+Member reaches every vault only because authorization is still
+`AllowAuthenticated`, which is already broken on the LAN. **The relay must not
+compensate for a missing policy layer** — that is how a transport becomes an
+access control gate.
+
+*Revisit if:* a relay deployment appears where the operator must restrict which
+*clients* may transit. Even then the answer is a relay-level policy that is
+explicitly not Storm identity, and it must not become a second place where
+Storm users are known.
 
 ---
 
@@ -2211,7 +2368,8 @@ plausible caller today — see the login-screen gap noted above — so
 ship untested.
 
 **All six slices merged to main on 2026-08-17** (PRs #10, #11, #13–#16), in
-stack order. Nothing is deployed.
+stack order. *(Not deployed at the time of writing; the whole of M19 shipped
+in v0.2.6 / v0.2.7 on 2026-08-20 and prod runs it.)*
 
 **Two formatter failures that `make check` cannot see.** Both had been red in CI
 for days while `make check` reported clean, and getting the stack green meant
@@ -2673,11 +2831,16 @@ and `storm-server.prev` / `run.sh.prev` sit beside the live ones.
 - *Sudo on the VM.* `apt install` / `storm-server up` need a password; packaging
   shortens the manual step rather than discharging it. Clean apt install is
   **done** (M15): packaged unit, state under `/srv/storm`, vaults on NAS.
-- *The shared token is still `testtoken`* — confirmed 2026-08-13, a request
-  carrying it returns 200 from `/v1/vaults` on the VM, despite `postinst` and
-  `up` generating a real one. Rotating means updating every device at the same
-  moment, which is the whole problem; decision 52's per-device sessions are the
-  real fix. LAN-only today, so a known risk rather than an exposure.
+- *~~The shared token is still `testtoken`~~* — **discharged 2026-08-20 by the
+  A10 cutover (decision 54).** It is not rotated, it is gone: no env var, no
+  flag, no `Bearer` branch. `no_shared_token_opens_anything` loops plausible
+  bare strings over the REST surface and `/mcp` and asserts `401`.
+- *Two things gate the relay release*, both server- or client-side and neither
+  dependent on the tunnel: **challenge-on-connect in the client** (the server's
+  key is pinned at pairing and never re-verified, so a relay would be fully
+  trusted), and **login-path rate limiting** (a junk username costs a full
+  Argon2id verify and can never trigger a lockout, behind a *global* semaphore
+  of 2 — roughly 11 verifies/sec for the whole server). See decision 55.
 
 Both former build blockers are discharged as of 2026-08-05:
 

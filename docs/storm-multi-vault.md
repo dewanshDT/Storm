@@ -210,7 +210,7 @@ The server settings screen carries the storage root with a Change action, the va
 ## 6. Non-goals for this pass
 
 - Cross-vault search, tags and backlinks. Each vault has its own FTS index; a merged search is a separate feature.
-- Per-vault tokens or per-vault access control. One shared bearer token still covers the whole server, and it is still LAN-only.
+- Per-vault access control. *(Updated 2026-08-20: the shared token is gone — M19 gives every caller its own credential, decision 54 — but **any account that can log in still reaches every vault**. The shipped policy is `AllowAuthenticated` and `vault_grants` is never read; per-vault access is the authorization release. Still LAN-only, still no TLS.)*
 - Two vaults live at once — split panes, or dragging a note between vaults. The routed active-vault design of §4.2 is what would need revisiting first.
 - Moving a note between vaults.
 - Deleting a vault's files from the app. Removing a vault unregisters it.

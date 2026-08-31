@@ -24,8 +24,8 @@ sudo storm-server status
 root by `apt-repo.yml`. Manual key + `sources.list` steps are in
 [release-secrets.md](release-secrets.md) if you prefer not to pipe to shell.
 
-`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600, with a
-generated token), and `systemctl enable --now storm-server`. The web client
+`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600 — it
+holds paths, **not** a token), and `systemctl enable --now storm-server`. The web client
 lives at `/usr/share/storm/web` and upgrades with the package.
 
 ## Updating (packaged)
@@ -66,19 +66,20 @@ On the server, once:
 ```sh
 sudo useradd --system --home /srv/storm --shell /usr/sbin/nologin storm
 sudo mkdir -p /srv/storm/{vaults,state,backups} /etc/storm
-sudo chown -R storm:storm /srv/storm
+sudo chown -R storm:storm /srv/storm   # or match your drop-in's User= if different
 
 sudo cp deploy/storm-server.service /lib/systemd/system/
 sudo cp deploy/storm-backup.service deploy/storm-backup.timer /lib/systemd/system/
 sudo cp deploy/storm.env.example /etc/storm/storm.env
-sudo chmod 600 /etc/storm/storm.env      # it holds the token
+sudo chmod 600 /etc/storm/storm.env      # paths only — no secrets live here
 sudoedit /etc/storm/storm.env            # set the paths and the backup path
 sudo systemctl enable --now storm-server storm-backup.timer
 ```
 
-Generate a token with `openssl rand -hex 32`. It lives in the env file rather
-than on the command line because process arguments are readable by every local
-user through `/proc`.
+**There is no token to generate.** Authentication is per-device pairing plus
+sessions, and the credentials live in `state/auth.db`, never in a config file.
+Get the first device in with `sudo storm-server pair` on the host, which prints
+a single-use QR while the user table is empty.
 
 Then from your machine:
 
@@ -183,9 +184,9 @@ The first account created is always an owner, and the last active owner cannot
 be deleted, disabled or demoted — promote a second owner first if you need to
 retire the first. `storm-server user --help` lists the rest.
 
-Nothing authenticates against these accounts yet: the shared bearer token is
-still what clients send. Creating them now is safe and is what the sessions
-slice will build on.
+These accounts **are** the authentication. A client pairs to get a device
+credential, then signs in as one of them to get a session; there is no other
+way in. `storm-server passwd <username>` on the host is the recovery path.
 
 ## Backups
 
@@ -235,7 +236,7 @@ sudo rsync -a --delete /path/to/backup/vaults/ /srv/storm/vaults/
 sudo rsync -a --delete /path/to/backup/index/ /srv/storm/state/
 sudo find /srv/storm/state -name 'index.db-wal' -delete
 sudo find /srv/storm/state -name 'index.db-shm' -delete
-sudo chown -R storm:storm /srv/storm
+sudo chown -R storm:storm /srv/storm   # or match your drop-in's User= if different
 sudo systemctl start storm-server
 ```
 
@@ -264,15 +265,23 @@ with a **new** identity.
 
 ## Security
 
-v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a
-home network and nowhere else. Before this is reachable from the internet it
-needs TLS and per-device tokens — see decision 4 in `PLAN.md`. Do not
-port-forward it as it stands.
+v1 is **LAN-only, with no TLS**. Per-device credentials landed in M19 — every
+caller now holds a credential of its own, individually revocable and
+attributable to a person — but the transport is still plain HTTP, so passwords
+and session tokens cross the network in the clear. That is defensible on a home
+network and nowhere else. **Do not port-forward it as it stands**; the relay
+(decision 55) is the designed answer and is not built.
 
-The unit runs as a dedicated `storm` user with `ProtectSystem=strict` and
-write access to `/srv/storm` only. That bounds where the storage root can go:
-a root outside `/srv/storm` fails validation as unwritable, so moving it
-elsewhere means widening `ReadWritePaths` in the unit first.
+The unit defaults to a dedicated `storm` user, but the drop-in at
+`/etc/systemd/system/storm-server.service.d/data-root.conf` can override this
+(e.g. `User=dewansh` for NFS layouts). The `up` command auto-detects the state
+dir owner and writes the correct `User=` into the drop-in. Write access is
+bounded to `/srv/storm` — a root outside it fails validation as unwritable, so
+moving it elsewhere means widening `ReadWritePaths` in the unit first.
 
-One token covers the whole server and every vault on it. There is no per-vault
-access control — a second vault is organisation, not isolation.
+**Any account that can log in reaches every vault.** Roles exist and are
+enforced against each other, but the shipped access policy is
+`AllowAuthenticated` — per-vault access control arrives with the authorization
+release. A second vault is organisation, not isolation, and a second *account*
+is not a boundary yet either. Registration is off by default for exactly this
+reason.

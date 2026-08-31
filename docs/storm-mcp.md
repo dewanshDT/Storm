@@ -143,10 +143,11 @@ Tier 1 — pin a version and expect to bump it, don't chase `main`.
   differently, which is its own bug class. If trash is worth having, it's a
   Storm feature decided once, for every client — a separate design brief, not
   a side effect of this one.
-- **Vault-scoped tokens.** Decision 4 stands: one shared bearer token,
-  LAN-only, and that line holds for MCP too. Per-client/per-vault scopes are
-  real value, gated behind the same TLS work already named as a prerequisite
-  before this server is reachable beyond the LAN — not before.
+- **Vault-scoped tokens.** *(Updated: per-client credentials arrived with A14
+  — every MCP client now holds its own revocable `stk_` key. Per-**vault**
+  scoping is still absent and is deliberately deferred to the authorization
+  release, which has to answer the same question for users; answering it twice
+  is how two definitions diverge.)*
 - **Embeddings / semantic search.** FTS5 is fast and sufficient at the current
   vault size. Revisit only if lexical search actually falls short in
   practice, not preemptively.
@@ -169,11 +170,18 @@ same reasoning that put colour and property types there in the first place.
 
 ## Security
 
-Single shared bearer token (decision 4) — MCP clients authenticate with it
-exactly like the Flutter client and REST API do. No new auth model. If/when
-the server is ever reachable beyond the LAN, TLS and per-device token
-rotation land first, per the existing decision — MCP doesn't get a shortcut
-around that just because it's convenient.
+> **Superseded 2026-08-20 by M19 and decision 54.** There is no shared bearer
+> token. MCP authenticates with an **`stk_` MCP key** (A14) minted by a
+> signed-in user, or with a session token; a key reaches `/mcp` and nothing
+> else, and resolves to `Actor::Key { key_id, user_id, role }`. `RequiredTier::Mcp`
+> is its own tier for exactly that reason. The paragraph below is what the M13
+> brief said at the time.
+
+~~Single shared bearer token (decision 4) — MCP clients authenticate with it
+exactly like the Flutter client and REST API do. No new auth model.~~ If/when
+the server is ever reachable beyond the LAN, TLS lands first — MCP doesn't get
+a shortcut around that just because it's convenient, and decision 55's relay
+gives it no second transport either (R10).
 
 ## Open questions
 

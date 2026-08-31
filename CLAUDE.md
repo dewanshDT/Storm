@@ -61,6 +61,22 @@ the on-device numbers that say where the limits are.
 Read `docs/storm-multi-vault.md` before touching vault resolution, the registry,
 the watcher, or the client's cache schema.
 
+**The remote/auth/relay design lives in the personal vault, not in `docs/`.**
+Reach it over Storm MCP, starting at *Storm Remote Connectivity*. For relay
+work specifically, pull the note that matches the job rather than reading the
+whole pack:
+
+| Note | Pull it when |
+|---|---|
+| *Storm Relay Protocol* | Writing the relay or the tunnel client — the SRP v1 wire spec |
+| *Relay Server Integration* | Writing the server-side half. **Read this before touching `api.rs` for the relay** — its checklist table is the authoritative list of `storm-server` changes, and four of them fail in ways that look like something else |
+| *Relay Security* | Anything about trust, impersonation or abuse limits |
+| *Relay Review Log* | "Why is it this way", or "was that already tried" |
+| *TODO — Storm Relay* | The checklist; every item cites the section that specifies it |
+
+`PLAN.md` decision 55 is the summary; **R12** and **R13** in *Storm Remote
+Decisions* are the ADRs. The relay is designed and **nothing is built**.
+
 ## Commands
 
 Use the Makefile — it encodes the cross-toolchain steps, and `test-live` starts
@@ -214,10 +230,19 @@ and *Storm Auth Protocol*; ADRs A1–A11 in *Storm Remote Decisions*):
 - **Passwords and tokens will hash differently on purpose.** Argon2id for
   low-entropy secrets, blake3 for 256-bit random ones. This is not an
   inconsistency to tidy up in either direction.
-- **Auth work is additive until the middleware slice.** `require_token` and the
-  shared token stay exactly as they are, so `apps/server/tests/e2e.py`'s 81
-  checks pass unmodified — that unchanged pass is the evidence. New coverage
-  goes in `tests/auth_e2e.py`.
+- **There is no shared token, and `e2e.py` is still 81/81.** The A10 cutover
+  (decision 54) removed `STORM_TOKEN` entirely — no env var, no flag, no
+  `Bearer` branch. Every integration suite now *earns* a credential where all
+  of them were handed one, which is what revealed that **none of them had been
+  exercising authentication at all**; they exercised a constant compare. The
+  unchanged 81 is still the evidence that the vault surface did not move. New
+  auth coverage goes in `tests/auth_e2e.py`.
+- **A refusal that arrives as an extractor rejection is not a refusal.** This
+  codebase has now produced that bug four times — once per auth tier, and again
+  in the relay design review. `ConnectInfo` on `pair_handler` and
+  `WebSocketUpgrade` on `stream` are both mandatory extractors that assume a
+  real socket. **Any request path that does not come from one must be checked
+  against every extractor on the route before it is written.**
 
 From M19 slice 2 (users and passwords):
 

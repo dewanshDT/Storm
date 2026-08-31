@@ -72,7 +72,7 @@ vaults (`VAULT_ROOT`), not at a single vault:
 
 ```sh
 make dry-run VAULT_ROOT=~/vaults-copy   # report only — writes nothing
-make server  VAULT_ROOT=~/vaults-copy   # http://127.0.0.1:8484, token: testtoken
+make server  VAULT_ROOT=~/vaults-copy   # http://127.0.0.1:8484 — pair to get in
 make client                             # or: make web / make serve-web
 make www-dev                            # marketing site locally
 ```
@@ -97,10 +97,12 @@ default. See [`apps/server/README.md`](apps/server/README.md).
 
 ## Status
 
-M0–M15 are done and deployed. M16 (marketing site) is live at
-[storm.dewansh.space](https://storm.dewansh.space). v1 is intended for a
-trusted network with a shared bearer token — TLS and per-device tokens before
-exposing it more widely.
+M0–M19 are done and deployed. M16 (marketing site) is live at
+[storm.dewansh.space](https://storm.dewansh.space). **M19 is authentication**:
+a server has a cryptographic identity, accounts are local to it, devices pair
+by QR, and machines use minted `stk_` MCP keys. There is no shared token —
+`storm-server pair` on the host is what gets the first device in. v1 is still
+LAN-only and has no TLS; the relay that changes that is designed and unbuilt.
 
 See [`PLAN.md`](PLAN.md) for milestone status, the decision log, and open
 items. License: [MIT](LICENSE).
