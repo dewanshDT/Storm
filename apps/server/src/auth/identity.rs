@@ -124,6 +124,28 @@ impl ServerIdentity {
     }
 }
 
+#[cfg(test)]
+impl ServerIdentity {
+    /// Builds an identity from fixed bytes instead of the RNG.
+    ///
+    /// Ed25519 signing is deterministic, so a fixed seed produces a fixed
+    /// signature — which is what lets `vectors_test` check this side's whole
+    /// signing path (message, signature, encoding) against a vector produced by
+    /// an unrelated implementation, rather than only checking the message.
+    ///
+    /// `cfg(test)` and `pub(super)`: a seeded identity is a *known* private
+    /// key, and nothing outside this module's tests has any business making
+    /// one.
+    pub(super) fn from_seed(server_id: &str, seed: [u8; 32]) -> Self {
+        Self {
+            server_id: server_id.to_string(),
+            name: "seeded".to_string(),
+            key_id: "key_seeded".to_string(),
+            signing: SigningKey::from_bytes(&seed),
+        }
+    }
+}
+
 /// The exact bytes a challenge signature covers.
 ///
 /// The client rebuilds this from the `server_id` it read out of the QR and the

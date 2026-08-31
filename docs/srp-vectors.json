@@ -1,0 +1,370 @@
+{
+  "version": 1,
+  "generated_by": "tools/gen-srp-vectors (RFC 8032 reference implementation)",
+  "about": "Shared test vectors for SRP v1's signed bytes. apps/server, apps/relay and apps/client each re-derive these functions in a different language and cannot depend on one another; nothing in any build makes them agree. Every implementation reads this file, so drift fails a test instead of surfacing as auth_failed at runtime, which is what a genuine attack also looks like. Changing this file is a protocol change.",
+  "encoding": "Every binary field is base64url with no padding, matching the wire. message_utf8 is the same bytes as message_b64, given readably; an implementation may check either.",
+  "domains": {
+    "relay_auth": "storm-relay-auth:v1:",
+    "client_challenge": "storm-challenge:v1:",
+    "note": "The two prefixes must never coincide. A signature proving the right to register at a relay must be structurally impossible to replay as one proving identity to a client."
+  },
+  "keys": {
+    "test_public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+    "note": "Derived from the seed 00..1f. The matching private key is public by design — it signs test messages only."
+  },
+  "relay_auth_message": [
+    {
+      "name": "ascii",
+      "server_id": "srv_ABC",
+      "nonce": "nonce-0123456789",
+      "message_utf8": "storm-relay-auth:v1:srv_ABC:nonce-0123456789",
+      "message_b64": "c3Rvcm0tcmVsYXktYXV0aDp2MTpzcnZfQUJDOm5vbmNlLTAxMjM0NTY3ODk"
+    },
+    {
+      "name": "realistic",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_utf8": "storm-relay-auth:v1:srv_01ARZ3NDEKTSV4RRFFQ69G5FAV:hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_b64": "c3Rvcm0tcmVsYXktYXV0aDp2MTpzcnZfMDFBUlozTkRFS1RTVjRSUkZGUTY5RzVGQVY6aGJwTloxV0dpRkI4a1F2SjdSWHQyQQ"
+    },
+    {
+      "name": "min_length_nonce",
+      "server_id": "s",
+      "nonce": "aaaaaaaaaaaaaaaa",
+      "message_utf8": "storm-relay-auth:v1:s:aaaaaaaaaaaaaaaa",
+      "message_b64": "c3Rvcm0tcmVsYXktYXV0aDp2MTpzOmFhYWFhYWFhYWFhYWFhYWE"
+    },
+    {
+      "name": "max_length_nonce",
+      "server_id": "s",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_utf8": "storm-relay-auth:v1:s:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_b64": "c3Rvcm0tcmVsYXktYXV0aDp2MTpzOmFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh"
+    },
+    {
+      "name": "max_length_server_id",
+      "server_id": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_utf8": "storm-relay-auth:v1:ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss:hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_b64": "c3Rvcm0tcmVsYXktYXV0aDp2MTpzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NzczpoYnBOWjFXR2lGQjhrUXZKN1JYdDJB"
+    },
+    {
+      "name": "server_id_with_dash_and_underscore",
+      "server_id": "srv_a-b_c",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_utf8": "storm-relay-auth:v1:srv_a-b_c:hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_b64": "c3Rvcm0tcmVsYXktYXV0aDp2MTpzcnZfYS1iX2M6aGJwTloxV0dpRkI4a1F2SjdSWHQyQQ"
+    }
+  ],
+  "client_challenge_message": [
+    {
+      "name": "ascii",
+      "server_id": "srv_ABC",
+      "nonce": "nonce-0123456789",
+      "message_utf8": "storm-challenge:v1:srv_ABC:nonce-0123456789",
+      "message_b64": "c3Rvcm0tY2hhbGxlbmdlOnYxOnNydl9BQkM6bm9uY2UtMDEyMzQ1Njc4OQ"
+    },
+    {
+      "name": "realistic",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_utf8": "storm-challenge:v1:srv_01ARZ3NDEKTSV4RRFFQ69G5FAV:hbpNZ1WGiFB8kQvJ7RXt2A",
+      "message_b64": "c3Rvcm0tY2hhbGxlbmdlOnYxOnNydl8wMUFSWjNOREVLVFNWNFJSRkZRNjlHNUZBVjpoYnBOWjFXR2lGQjhrUXZKN1JYdDJB"
+    }
+  ],
+  "delimiter_confusion": {
+    "about": "The message is colon-delimited, so a colon inside EITHER field re-splits it. Both pairs below produce identical signed bytes: one signature would cover two different (server_id, nonce) readings. Validating only the nonce leaves the server_id half open — that was PLAN.md decision 60. An implementation is correct here only if it rejects both pairs before signing or verifying.",
+    "colliding_pairs": [
+      {
+        "a": {
+          "server_id": "srv_a",
+          "nonce": "b:cccccccccccccccc"
+        },
+        "b": {
+          "server_id": "srv_a:b",
+          "nonce": "cccccccccccccccc"
+        },
+        "shared_message_utf8": "storm-relay-auth:v1:srv_a:b:cccccccccccccccc",
+        "both_must_be_rejected": true
+      }
+    ]
+  },
+  "validate_nonce": [
+    {
+      "name": "typical",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "valid": true
+    },
+    {
+      "name": "min_length",
+      "nonce": "aaaaaaaaaaaaaaaa",
+      "valid": true
+    },
+    {
+      "name": "one_below_min",
+      "nonce": "aaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "max_length",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": true
+    },
+    {
+      "name": "one_above_max",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "empty",
+      "nonce": "",
+      "valid": false
+    },
+    {
+      "name": "contains_colon",
+      "nonce": "aaaaaaaa:aaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "contains_quote",
+      "nonce": "aaaaaaaa\"aaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "contains_space",
+      "nonce": "aaaaaaaa aaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "contains_newline",
+      "nonce": "aaaaaaaa\naaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "contains_tab",
+      "nonce": "aaaaaaaa\taaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "non_ascii",
+      "nonce": "aaaaaaaaéaaaaaaaa",
+      "valid": false
+    },
+    {
+      "name": "punctuation_is_allowed",
+      "nonce": "a-b_c.d~e!f@g#h$i%",
+      "valid": true
+    }
+  ],
+  "validate_server_id": [
+    {
+      "name": "typical",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "valid": true
+    },
+    {
+      "name": "dash_and_underscore",
+      "server_id": "srv_a-b_c",
+      "valid": true
+    },
+    {
+      "name": "single_char",
+      "server_id": "s",
+      "valid": true
+    },
+    {
+      "name": "max_length",
+      "server_id": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "valid": true
+    },
+    {
+      "name": "one_above_max",
+      "server_id": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "valid": false
+    },
+    {
+      "name": "empty",
+      "server_id": "",
+      "valid": false
+    },
+    {
+      "name": "contains_colon",
+      "server_id": "srv:a",
+      "valid": false
+    },
+    {
+      "name": "contains_slash",
+      "server_id": "srv/a",
+      "valid": false
+    },
+    {
+      "name": "contains_dot",
+      "server_id": "srv.a",
+      "valid": false
+    },
+    {
+      "name": "contains_percent",
+      "server_id": "srv%2Fa",
+      "valid": false
+    },
+    {
+      "name": "contains_space",
+      "server_id": "srv a",
+      "valid": false
+    },
+    {
+      "name": "non_ascii",
+      "server_id": "srv_é",
+      "valid": false
+    }
+  ],
+  "verify_relay_auth": [
+    {
+      "name": "valid",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "OU7LRfFl4IPerFNs3TzPl7kT1YJChFNxaPJDTBuLprbLkU7Oyq7g-VvFM5EmXu_C7HoHH6hKAOjMSLRqGaC8Dw",
+      "verifies": true
+    },
+    {
+      "name": "signature_over_the_client_challenge_domain",
+      "why": "Domain separation, asserted rather than assumed. Same key, same server_id, same nonce — only the prefix differs, and it must not verify as a relay registration.",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR-DWw0AW0OKKiJD_LfQApqzc-igVh1HtSBDCLg73BC_MUpmMd-QXqDoO7GGfoOToVL5WX-wTgOTMUBoYDw",
+      "verifies": false
+    },
+    {
+      "name": "signature_over_a_different_server_id",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "yPiWwlCplI9uPEOBtxItAGcQZLWBh4MON8uCZv6masOS4I38OJCsXkQEH9zvN2M_fshv2iW-yhWCX_Uf5VMMBQ",
+      "verifies": false
+    },
+    {
+      "name": "signature_over_a_different_nonce",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaa",
+      "signature_b64": "OU7LRfFl4IPerFNs3TzPl7kT1YJChFNxaPJDTBuLprbLkU7Oyq7g-VvFM5EmXu_C7HoHH6hKAOjMSLRqGaC8Dw",
+      "verifies": false
+    },
+    {
+      "name": "signature_truncated",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "OU7LRfFl4IPerFNs3TzPl7kT1YJChFNxaPJDTBuLprbLkU7Oyq7g-VvFM5EmXu_C7HoHH6hKAOjMSLRqGaC8",
+      "verifies": false
+    },
+    {
+      "name": "signature_not_base64url",
+      "why": "Standard-alphabet base64 must not be accepted for a base64url field.",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "OU7LRfFl4IPerFNs3TzPl7kT1YJChFNxaPJDTBuLprbLkU7Oyq7g+VvFM5EmXu/C7HoHH6hKAOjMSLRqGaC8Dw",
+      "verifies": false
+    }
+  ],
+  "verify_client_challenge": [
+    {
+      "name": "valid",
+      "why": "The client's half of the same commitment. apps/client re-derives challengeMessage in Dart, where base64Url.decode accepts the standard alphabet as well — so the strict cases below are the ones that catch a lenient decoder.",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR-DWw0AW0OKKiJD_LfQApqzc-igVh1HtSBDCLg73BC_MUpmMd-QXqDoO7GGfoOToVL5WX-wTgOTMUBoYDw",
+      "verifies": true
+    },
+    {
+      "name": "signature_over_the_relay_auth_domain",
+      "why": "The mirror of the relay-side domain-separation case.",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "OU7LRfFl4IPerFNs3TzPl7kT1YJChFNxaPJDTBuLprbLkU7Oyq7g-VvFM5EmXu_C7HoHH6hKAOjMSLRqGaC8Dw",
+      "verifies": false
+    },
+    {
+      "name": "signature_over_a_different_server_id",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_OTHER",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR-DWw0AW0OKKiJD_LfQApqzc-igVh1HtSBDCLg73BC_MUpmMd-QXqDoO7GGfoOToVL5WX-wTgOTMUBoYDw",
+      "verifies": false
+    },
+    {
+      "name": "public_key_in_the_standard_alphabet",
+      "why": "base64url only. A decoder that also accepts '+/' gives one key two spellings, which is what SRP v1 3.1 forbids.",
+      "public_key_b64": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR-DWw0AW0OKKiJD_LfQApqzc-igVh1HtSBDCLg73BC_MUpmMd-QXqDoO7GGfoOToVL5WX-wTgOTMUBoYDw",
+      "verifies": false
+    },
+    {
+      "name": "signature_in_the_standard_alphabet",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR+DWw0AW0OKKiJD/LfQApqzc+igVh1HtSBDCLg73BC/MUpmMd+QXqDoO7GGfoOToVL5WX+wTgOTMUBoYDw",
+      "verifies": false
+    },
+    {
+      "name": "public_key_padded",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR-DWw0AW0OKKiJD_LfQApqzc-igVh1HtSBDCLg73BC_MUpmMd-QXqDoO7GGfoOToVL5WX-wTgOTMUBoYDw",
+      "verifies": false
+    },
+    {
+      "name": "public_key_wrong_length",
+      "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMQ",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "nonce": "hbpNZ1WGiFB8kQvJ7RXt2A",
+      "signature_b64": "O5EyR-DWw0AW0OKKiJD_LfQApqzc-igVh1HtSBDCLg73BC_MUpmMd-QXqDoO7GGfoOToVL5WX-wTgOTMUBoYDw",
+      "verifies": false
+    }
+  ],
+  "public_key_parsing": {
+    "about": "A key is compared and stored as decoded bytes, never as the encoded string: padded and unpadded encodings of the same key are different strings, and a string comparison would read that as a key change and refuse a legitimate re-registration for ever (SRP v1 4.1 has no way back).",
+    "cases": [
+      {
+        "name": "unpadded",
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "accepted": true
+      },
+      {
+        "name": "padded",
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+        "accepted": false,
+        "why": "The wire form is unpadded; accepting both invites two spellings of one key."
+      },
+      {
+        "name": "standard_alphabet",
+        "public_key_b64": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "accepted": false
+      },
+      {
+        "name": "too_short",
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMQ",
+        "accepted": false
+      },
+      {
+        "name": "too_long",
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbgA",
+        "accepted": false
+      },
+      {
+        "name": "empty",
+        "public_key_b64": "",
+        "accepted": false
+      }
+    ]
+  }
+}

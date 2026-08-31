@@ -35,6 +35,14 @@ pub mod sessions;
 pub mod token;
 pub mod users;
 
+/// The shared SRP v1 test vectors, checked against [`identity`]'s signed bytes.
+///
+/// Its own module rather than another `mod tests` inside `identity.rs`: the
+/// vectors are a cross-crate wire commitment, and a reader looking for what
+/// enforces agreement with `apps/relay` should find a file named after it.
+#[cfg(test)]
+mod vectors_test;
+
 pub use db::{AUTH_DB_FILE, AuthDb};
 pub use identity::{IDENTITY_DIR, ServerIdentity};
 pub use password::Hasher;

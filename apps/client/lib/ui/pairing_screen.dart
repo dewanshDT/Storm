@@ -10,8 +10,6 @@
 /// 6. Done — saved to Settings, router redirects to the dashboard.
 library;
 
-import 'dart:math';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +18,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
 import '../api/ed25519_verify.dart';
+import '../api/server_verifier.dart';
 import '../state/app_state.dart';
 import 'scan_pairing_screen.dart';
 import 'tokens.dart';
@@ -133,7 +132,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       }
 
       // 2. Challenge — send a random nonce, verify the Ed25519 signature.
-      final challengeNonce = _randomNonce();
+      final challengeNonce = randomNonce();
       final answer = await authApi.challenge(challengeNonce);
       final valid = await verifyChallenge(
         publicKeyB64: uri.publicKey,
@@ -578,14 +577,6 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   }
 
   // ---- helpers ----
-
-  /// A random 16-character nonce for the challenge step.
-  static String _randomNonce() {
-    const chars =
-        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    final rng = Random.secure();
-    return List.generate(16, (_) => chars[rng.nextInt(chars.length)]).join();
-  }
 
   static String _platformName() {
     switch (defaultTargetPlatform) {

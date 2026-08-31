@@ -220,6 +220,16 @@ and signature Storm puts on a wire. An implementation using hex or standard
 base64 would be conformant to a spec that failed to say this, and completely
 non-interoperable — with `auth_failed` as the only symptom.
 
+**A decoder MUST reject padding and the standard `+/` alphabet, not merely
+avoid emitting them.** One key has one spelling. Lenient decoding sounds
+harmless — the bytes are the same either way — but §4.1 binds a `server_id` to
+a pubkey *for ever*, so two implementations that disagree about whether a
+spelling is valid disagree about whether a key has changed, and there is no way
+back from a refused binding. The hazard is not hypothetical: a decoder that
+accepts both alphabets is the default in at least one standard library, so this
+is a rule an implementation has to opt into. `docs/srp-vectors.json` carries the
+cases.
+
 ### 4.1 Binding `server_id` to a pubkey
 
 **The challenge alone binds nothing.** It proves the caller holds the private
