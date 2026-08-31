@@ -8,7 +8,15 @@
 //! **Only on a true first run**, keyed off the registry file being absent
 //! rather than off `kit` being missing. Someone who deletes the vault has said
 //! something; recreating it every boot would be arguing with them. Once seeded
-//! the copy is theirs — nothing here ever rewrites an existing file.
+//! the copy is theirs — the [`seed`] early return, not any per-file check, is
+//! what protects it.
+//!
+//! **Known limitation.** Because the gate is the registry file, a seed that
+//! fails partway leaves an incomplete vault that no later boot repairs — it is
+//! indistinguishable from a vault the user pruned deliberately. Rare (it needs
+//! a write to fail mid-run) and non-corrupting, and the warning the serve path
+//! logs says how to retry. Distinguishing the two cases would need a "seeded"
+//! marker in the registry, which is not worth a schema field for this.
 //!
 //! Templates are embedded at compile time, so the canonical copy is the one
 //! people read on GitHub and there is no runtime path to get wrong. Adding a
@@ -77,12 +85,6 @@ pub fn seed(registry: &mut Registry, now: &str) -> Result<bool> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        // Never overwrite. `create` refuses a directory that already exists, so
-        // in practice these are all new — but a partially seeded vault from an
-        // interrupted first run should be completed, not rewritten.
-        if path.exists() {
-            continue;
         }
         std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     }

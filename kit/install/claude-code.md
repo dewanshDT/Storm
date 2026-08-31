@@ -79,8 +79,22 @@ Note the **`tools:` line is the enforcement**. `storm-coder` gets
 so "writes nothing in the vault" is a capability boundary, not just an
 instruction. Do the same for `storm-reviewer`.
 
+> **Do not drop the `tools:` line.** Omitting it does not mean "no tools" — a
+> subagent with no `tools:` field **inherits every tool the main agent has**,
+> including the vault write tools. The allowlist is the only thing standing
+> between a coder and `update_note`, and its absence fails open and silently.
+
+`disallowedTools:` is the denylist counterpart if you would rather grant broadly
+and subtract. It accepts the same MCP patterns — `mcp__storm__update_note` for
+one tool, `mcp__storm__*` for a whole server. Either works; an allowlist is the
+safer default because a newly added Storm tool is excluded by default rather
+than included by default.
+
 `storm-researcher` needs `WebSearch` and `WebFetch` added, and still no vault
 write tools — it *proposes* spec edits rather than applying them.
+
+`model:` is available per agent (`sonnet`, `opus`, `haiku`, `fable`, a full
+model id, or `inherit`) if you want a cheaper model on the mechanical roles.
 
 ## Parallel work
 
@@ -91,5 +105,8 @@ fan-out safe.
 
 ## Caveat
 
-Subagents **cannot ask the user questions**. That is why architect and lead are
-skills rather than agents: both interview. Do not convert them.
+Subagents **cannot ask the user questions** — `AskUserQuestion` is stripped
+from a subagent's tool pool by design, even if you list it in `tools:`. That is
+why architect and lead are skills rather than agents: both interview. Converting
+either into a subagent does not degrade it, it breaks it, and the failure is
+silent — the agent simply proceeds on an assumption instead of asking.
