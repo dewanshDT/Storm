@@ -19,7 +19,7 @@
 //! handed to the one client trunk that owns their `stream_id`.
 
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::extract::ws::WebSocket;
 
@@ -89,6 +89,28 @@ struct Session {
     server_id: String,
     trunk_id: String,
     trunk: Arc<ServerTrunk>,
+    /// When the last PONG was received. Used for the heartbeat deadline.
+    last_pong: std::sync::Mutex<Instant>,
+}
+
+impl Session {
+    fn new(server_id: String, trunk_id: String, trunk: Arc<ServerTrunk>) -> Self {
+        Self {
+            server_id,
+            trunk_id,
+            trunk,
+            last_pong: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    fn record_pong(&self) {
+        *self.last_pong.lock().expect("last_pong mutex") = Instant::now();
+    }
+
+    fn check_heartbeat_deadline(&self, deadline: Duration) -> bool {
+        let last_pong = *self.last_pong.lock().expect("last_pong mutex");
+        Instant::now().duration_since(last_pong) > deadline
+    }
 }
 
 async fn handshake(
@@ -209,14 +231,15 @@ async fn handshake(
         },
     ) {
         // §4.2 supersession: whoever completed the challenge already holds the
-        // private key, so this is a reconnect rather than a hijack. The graceful
-        // 30 s drain and `ERROR{trunk_superseded}` belong to stream routing,
-        // which this slice does not have.
+        // private key, so this is a reconnect rather than a hijack. Start the
+        // 30 s drain on the old trunk.
+        displaced.trunk.start_drain(relay.config.supersession_drain);
         tracing::info!(
             server_id = %register.server_id,
             displaced = %displaced.trunk_id,
             replacement = %trunk_id,
-            "superseded an existing server trunk"
+            drain_secs = relay.config.supersession_drain.as_secs(),
+            "superseded an existing server trunk; drain started"
         );
     }
 
@@ -226,11 +249,11 @@ async fn handshake(
     ))
     .await?;
 
-    Ok(Session {
-        server_id: register.server_id,
+    Ok(Session::new(
+        register.server_id,
         trunk_id,
-        trunk: server_trunk.clone(),
-    })
+        server_trunk.clone(),
+    ))
 }
 
 /// Holds the trunk open after registration, and routes everything the origin
@@ -242,6 +265,17 @@ async fn handshake(
 /// keeps one client's response from reaching another.
 async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> Fault {
     loop {
+        // Check heartbeat deadline (§4.2): if the server hasn't sent a PONG
+        // within the deadline, close the trunk.
+        if session.check_heartbeat_deadline(relay.config.heartbeat_deadline) {
+            tracing::info!(
+                server_id = %session.server_id,
+                trunk_id = %session.trunk_id,
+                "heartbeat deadline exceeded; closing trunk"
+            );
+            return Fault::Disconnected;
+        }
+
         let incoming = match trunk::recv(rx).await {
             Ok(incoming) => incoming,
             Err(fault) => return fault,
@@ -257,7 +291,10 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
                 // the `server_id` immediately rather than making clients wait
                 // out a timeout for a deliberate restart (§4.2).
                 "DEREGISTER" => return Fault::Disconnected,
-                "PONG" => Ok(()),
+                "PONG" => {
+                    session.record_pong();
+                    Ok(())
+                }
                 "STREAM_ACK" => stream_ack(session, frame),
                 "HTTP_RESPONSE_HEAD" => forward_response_head(session, frame),
                 "CLOSE" => match server_close(session, frame) {

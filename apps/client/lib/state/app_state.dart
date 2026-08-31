@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -6,6 +8,7 @@ import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/auth_api.dart';
+import '../api/auth_models.dart';
 import '../api/models.dart';
 import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
@@ -47,6 +50,7 @@ class Settings {
     this.accessTokenExpiresAt = '',
     this.userId = '',
     this.serverId = '',
+    this.relays = const <RelayAdvert>[],
   });
 
   final String baseUrl;
@@ -116,6 +120,14 @@ class Settings {
 
   /// Server id from pairing — proves the device belongs to this server.
   final String serverId;
+
+  /// The relay set this server last registered with (D3).
+  ///
+  /// Persisted beside `serverId`/`serverPublicKey` because they are the pinned
+  /// identity this list belongs with, and rewritable whenever `GET /v1/server`
+  /// answers by any path — a server that changes relays while a device is away
+  /// must give a stranded device a way home (that payload alone can't).
+  final List<RelayAdvert> relays;
 
   /// The device has completed pairing (has device credentials).
   bool get isPaired => deviceId.isNotEmpty;
@@ -209,6 +221,7 @@ class Settings {
     String? accessTokenExpiresAt,
     String? userId,
     String? serverId,
+    List<RelayAdvert>? relays,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     theme: theme ?? this.theme,
@@ -226,6 +239,7 @@ class Settings {
     accessTokenExpiresAt: accessTokenExpiresAt ?? this.accessTokenExpiresAt,
     userId: userId ?? this.userId,
     serverId: serverId ?? this.serverId,
+    relays: relays ?? this.relays,
   );
 }
 
@@ -247,6 +261,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kAccessExpires = 'storm.accessTokenExpiresAt';
   static const _kUserId = 'storm.userId';
   static const _kServerId = 'storm.serverId';
+  static const _kRelays = 'storm.relays';
 
   /// Holds the credentials, and knows how to get them out of prefs. Injectable
   /// so tests can drive a fake keychain.
@@ -282,6 +297,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       accessTokenExpiresAt: prefs.getString(_kAccessExpires) ?? '',
       userId: prefs.getString(_kUserId) ?? '',
       serverId: prefs.getString(_kServerId) ?? '',
+      relays: _decodeRelays(prefs.getString(_kRelays)),
     );
   }
 
@@ -298,6 +314,37 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     final wasDark = prefs.getBool(_kDark);
     if (wasDark == null) return StormPreset.stormDark;
     return wasDark ? StormPreset.stormDark : StormPreset.stormLight;
+  }
+
+  /// The relay set as a JSON string for prefs, or `''` when empty.
+  static String _encodeRelays(List<RelayAdvert> relays) {
+    if (relays.isEmpty) return '';
+    return jsonEncode([
+      for (final r in relays) {'url': r.url, 'public_address': r.publicAddress},
+    ]);
+  }
+
+  /// Parses a relay set back out of prefs. Anything unparseable is dropped
+  /// whole — the set is advisory (a candidate to race, never a requirement),
+  /// so a corrupt row costs reachability, not correctness.
+  static List<RelayAdvert> _decodeRelays(String? raw) {
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final list = jsonDecode(raw);
+      if (list is! List) return const [];
+      return list
+          .whereType<Map>()
+          .map(
+            (e) => RelayAdvert(
+              url: e['url'] as String? ?? '',
+              publicAddress: e['public_address'] as String? ?? '',
+            ),
+          )
+          .where((r) => r.url.isNotEmpty && r.publicAddress.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
   Future<void> save(Settings next) async {
@@ -320,6 +367,9 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setString(_kAccessExpires, cleaned.accessTokenExpiresAt);
     await prefs.setString(_kUserId, cleaned.userId);
     await prefs.setString(_kServerId, cleaned.serverId);
+    // A JSON list, not one key per relay — compare the whole set. The server is
+    // the only writer, so a single string is safe from cross-field races.
+    await prefs.setString(_kRelays, _encodeRelays(cleaned.relays));
 
     // The four credentials, to the keychain. Last, so a failure here cannot
     // leave the non-secret half of a save unwritten.
@@ -668,6 +718,7 @@ final connectionProvider = Provider<StormConnection?>((ref) {
   final settings = ref.watch(settingsProvider).value;
   if (settings == null || !settings.isConfigured) return null;
 
+  final settingsNotifier = ref.read(settingsProvider.notifier);
   final connection = StormConnection(
     localAddress: settings.baseUrl,
     token: settings.bearerToken,
@@ -675,10 +726,35 @@ final connectionProvider = Provider<StormConnection?>((ref) {
     // challenge verified against a key from the same answer proves nothing.
     serverId: settings.serverId,
     publicKeyB64: settings.serverPublicKey,
+    // D3: the persisted relay set, so a restarted device knows the relays its
+    // server last registered with instead of having to relearn them cold.
+    relays: settings.relays,
+    onRelaysChanged: (relays) {
+      // Mirror the server's answer back into Settings for persistence. The
+      // server is the only writer, so this is a one-way copy — but guard
+      // against rewriting the identical set, which would wake every watcher.
+      final current = ref.read(settingsProvider).value;
+      if (current == null || _relaysEqual(current.relays, relays)) return;
+      settingsNotifier.save(current.copyWith(relays: relays));
+    },
   );
   ref.onDispose(connection.api.dispose);
   return connection;
 });
+
+/// Two relay sets are equal when every advert (url *and* public address)
+/// matches — a set is a list of (where, how) pairs, so either half differing
+/// is a real change.
+bool _relaysEqual(List<RelayAdvert> a, List<RelayAdvert> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].url != b[i].url || a[i].publicAddress != b[i].publicAddress) {
+      return false;
+    }
+  }
+  return true;
+}
 
 /// The API client, for callers that still take one directly.
 ///

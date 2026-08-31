@@ -173,6 +173,7 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
             identityFailed: engine.serverIdentityFailed,
             syncing: engine.isSyncing,
             pending: engine.pendingCount,
+            tier: engine.connectionTier,
           );
 
           return StormPopover(

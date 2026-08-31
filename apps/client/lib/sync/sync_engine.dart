@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api/models.dart';
@@ -126,10 +128,21 @@ class SyncEngine extends ChangeNotifier {
 
   WebSocketChannel? _ws;
   StreamSubscription? _wsSub;
+  StreamSubscription? _sseSub;
   Timer? _reconnect;
   Timer? _pullDebounce;
   int _backoffSeconds = 1;
   bool _disposed = false;
+
+  /// The active connection's tier (direct, self-hosted relay, public relay).
+  /// Used by the UI to show direct-vs-relayed.
+  CandidateTier get connectionTier => connection.active.tier;
+
+  /// Whether the active connection is relayed (vs direct LAN).
+  bool get isRelayed => connection.isRelayed;
+
+  /// The connection status from the seam (idle, connecting, connected, unproven, offline).
+  ConnectionStatus get connectionStatus => connection.status;
 
   // ---- lifecycle -----------------------------------------------------
 
@@ -189,6 +202,7 @@ class SyncEngine extends ChangeNotifier {
     _reconnect?.cancel();
     _wsSub?.cancel();
     _ws?.sink.close();
+    _sseSub?.cancel();
     _changes.close();
     super.dispose();
   }
@@ -710,17 +724,20 @@ class SyncEngine extends ChangeNotifier {
     return true;
   }
 
-  // ---- websocket -----------------------------------------------------
+  // ---- change feed -----------------------------------------------------
 
-  /// Opens the change stream so other devices' edits arrive promptly.
+  /// Opens the change feed so other devices' edits arrive promptly.
   ///
-  /// The socket only signals *that* something changed; the authoritative list
-  /// still comes from `GET /v1/sync?since=`. That way a dropped or missed
-  /// frame costs nothing — the next pull catches up regardless.
+  /// Uses WebSocket on direct connections, SSE on relayed connections (the
+  /// relay tunnels HTTP, not WebSocket upgrades). The feed only signals
+  /// *that* something changed; the authoritative list still comes from
+  /// `GET /v1/sync?since=`. A dropped or missed frame costs nothing — the
+  /// next pull catches up regardless.
   Future<void> _openSocket() async {
     if (_disposed || _impostor) return;
     _wsSub?.cancel();
     _ws?.sink.close();
+    _sseSub?.cancel();
 
     // A handshake carries no headers, so the credential has to ride in the
     // URL — and a URL is logged by proxies and kept in history. So it is a
@@ -731,7 +748,7 @@ class SyncEngine extends ChangeNotifier {
     try {
       ticket = await api.wsTicket();
     } catch (_) {
-      // No ticket, no socket. Treated as a socket failure rather than an
+      // No ticket, no socket. Treated as a feed failure rather than an
       // error, because it is one from the feed's point of view — and the
       // reconnect timer is already the thing that retries it.
       _scheduleReconnect();
@@ -739,7 +756,15 @@ class SyncEngine extends ChangeNotifier {
     }
     if (_disposed) return;
 
-    // Where the feed *lives* is the connection's business, not the engine's.
+    if (connection.isRelayed) {
+      await _openSseStream(ticket);
+    } else {
+      await _openWebSocket(ticket);
+    }
+  }
+
+  /// Opens a WebSocket change feed (direct LAN connection).
+  Future<void> _openWebSocket(String ticket) async {
     final uri = connection.streamUri(ticket);
 
     try {
@@ -771,7 +796,54 @@ class SyncEngine extends ChangeNotifier {
     }
   }
 
-  /// Simulates the change socket closing, for tests.
+  /// Opens an SSE change feed (relayed connection).
+  Future<void> _openSseStream(String ticket) async {
+    final uri = connection.sseUri(ticket);
+    final client = connection.transportClient;
+
+    try {
+      final request = http.Request('GET', uri);
+      request.headers.addAll(connection.authHeaders);
+      // Accept SSE
+      request.headers['Accept'] = 'text/event-stream';
+
+      final streamed = await client.send(request);
+
+      if (streamed.statusCode != 200) {
+        _scheduleReconnect();
+        return;
+      }
+
+      _sseSub = streamed.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            _handleSseLine,
+            onError: (_) => _scheduleReconnect(),
+            onDone: _scheduleReconnect,
+            cancelOnError: true,
+          );
+    } catch (_) {
+      _scheduleReconnect();
+    }
+  }
+
+  /// Handles one line from the SSE stream.
+  void _handleSseLine(String line) {
+    // SSE format: lines of "field: value", blank line ends an event.
+    // We only care about "event: change" and "event: resync".
+    if (line.startsWith('event:')) {
+      final event = line.substring(6).trim();
+      if (event == 'change' || event == 'resync') {
+        _setOnline(true);
+        _backoffSeconds = 1;
+        _pullDebounce?.cancel();
+        _pullDebounce = Timer(const Duration(milliseconds: 300), sync);
+      }
+    }
+  }
+
+  /// Simulates the change feed closing, for tests.
   @visibleForTesting
   void debugSimulateSocketDrop() => _scheduleReconnect();
 

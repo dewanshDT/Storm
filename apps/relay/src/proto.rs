@@ -130,10 +130,6 @@ pub struct ErrorBody {
 }
 
 /// The §6 codes this relay can actually emit.
-///
-/// `trunk_superseded` is absent because the 30 s drain it belongs to is not
-/// built (§4.2). An enum listing a code the crate never produces would read as
-/// a promise it does not keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     ProtocolError,
@@ -143,6 +139,7 @@ pub enum ErrorCode {
     TrunkLost,
     RateLimited,
     StreamClosed,
+    TrunkSuperseded,
 }
 
 impl ErrorCode {
@@ -155,6 +152,7 @@ impl ErrorCode {
             Self::TrunkLost => "trunk_lost",
             Self::RateLimited => "rate_limited",
             Self::StreamClosed => "stream_closed",
+            Self::TrunkSuperseded => "trunk_superseded",
         }
     }
 
@@ -175,6 +173,7 @@ impl ErrorCode {
             Self::TrunkLost => "trunk lost",
             Self::RateLimited => "rate limited",
             Self::StreamClosed => "stream closed",
+            Self::TrunkSuperseded => "trunk superseded",
         }
     }
 

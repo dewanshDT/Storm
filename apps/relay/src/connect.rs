@@ -55,7 +55,7 @@ pub async fn serve(
     // the door, so anyone who can connect can start one and leave it hanging.
     let opened = match tokio::time::timeout(
         relay.config.handshake_timeout,
-        hello(&mut rx, &tx, &relay, &path_server_id),
+        hello(&mut rx, &tx, &relay, &path_server_id, peer.ip()),
     )
     .await
     {
@@ -110,7 +110,14 @@ async fn hello(
     tx: &Tx,
     relay: &Relay,
     path_server_id: &str,
+    peer_ip: std::net::IpAddr,
 ) -> Result<Session, Fault> {
+    // Rate limit HELLO attempts per source IP.
+    if !relay.check_hello_rate_limit(peer_ip) {
+        tracing::info!(peer_ip = %peer_ip, "rate limiting HELLO");
+        return Err(ErrorCode::RateLimited.into());
+    }
+
     // The path segment reaches the signed relay-auth message and the derived
     // `public_address` in exactly the charset `validate_server_id` allows, so a
     // value outside it cannot have come from a real registration.
@@ -226,6 +233,7 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
         &session.client_trunk_id,
         tx.clone(),
         relay.config.max_in_flight_streams,
+        relay.config.max_total_streams,
     ) {
         Ok(stream_id) => stream_id,
         Err(refused) => {

@@ -43,6 +43,45 @@ pub const DEFAULT_STREAM_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Un-acked `STREAM_OPEN`s one client trunk may hold (§5.1).
 pub const DEFAULT_MAX_IN_FLIGHT_STREAMS: usize = 20;
 
+/// Maximum concurrent streams across **all** client trunks on a server trunk.
+///
+/// Separate from `max_in_flight_streams` (per-client): this bounds total
+/// memory and file descriptors the relay holds for one server.
+pub const DEFAULT_MAX_TOTAL_STREAMS: usize = 1000;
+
+/// `HELLO` rate limit: how many HELLOs one source IP may attempt per window.
+///
+/// A client that opens many trunks to different servers (or the same one
+/// repeatedly) costs a socket and a handshake slot. The limit is per IP,
+/// not per `server_id`, because the IP is what the relay can observe.
+pub const DEFAULT_HELLO_RATE_LIMIT: usize = 10;
+
+/// Time window for the HELLO rate limit.
+pub const DEFAULT_HELLO_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Maximum bytes a single client trunk may have in-flight (un-acked body chunks)
+/// before the relay drops its slowest stream.
+///
+/// Bounds memory when a client opens a stream but stops reading responses.
+/// Applied at the client-trunk level: one slow reader must not hold memory
+/// for every other client on the same server.
+pub const DEFAULT_MAX_CLIENT_BUFFER_BYTES: usize = 1_000_000; // 1 MiB
+
+/// How long a superseded server trunk gets to drain before forced close (§4.2).
+///
+/// During this window the old trunk still accepts responses from the origin,
+/// but new client trunks are bound to the new trunk. After the window, all
+/// remaining streams on the old trunk get `ERROR{trunk_superseded}`.
+pub const DEFAULT_SUPERSESSION_DRAIN: Duration = Duration::from_secs(30);
+
+/// Heartbeat deadline: how long the relay waits for a PONG before closing the
+/// server trunk (§4.2).
+///
+/// A server that does not PONG within this window is considered dead.
+/// The 45s value gives 3x the 15s heartbeat interval for clock drift and
+/// brief GC pauses.
+pub const DEFAULT_HEARTBEAT_DEADLINE: Duration = Duration::from_secs(45);
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
@@ -59,6 +98,18 @@ pub struct Config {
     pub hello_wait: Duration,
     pub stream_ack_timeout: Duration,
     pub max_in_flight_streams: usize,
+    /// Maximum concurrent streams across **all** client trunks on a server trunk.
+    pub max_total_streams: usize,
+    /// `HELLO` rate limit: how many HELLOs one source IP may attempt per window.
+    pub hello_rate_limit: usize,
+    /// Time window for the HELLO rate limit.
+    pub hello_rate_window: Duration,
+    /// Maximum bytes a single client trunk may have in-flight.
+    pub max_client_buffer_bytes: usize,
+    /// How long a superseded server trunk gets to drain before forced close.
+    pub supersession_drain: Duration,
+    /// Heartbeat deadline: how long the relay waits for a PONG before closing.
+    pub heartbeat_deadline: Duration,
 }
 
 impl Config {
@@ -72,6 +123,12 @@ impl Config {
             hello_wait: DEFAULT_HELLO_WAIT,
             stream_ack_timeout: DEFAULT_STREAM_ACK_TIMEOUT,
             max_in_flight_streams: DEFAULT_MAX_IN_FLIGHT_STREAMS,
+            max_total_streams: DEFAULT_MAX_TOTAL_STREAMS,
+            hello_rate_limit: DEFAULT_HELLO_RATE_LIMIT,
+            hello_rate_window: DEFAULT_HELLO_RATE_WINDOW,
+            max_client_buffer_bytes: DEFAULT_MAX_CLIENT_BUFFER_BYTES,
+            supersession_drain: DEFAULT_SUPERSESSION_DRAIN,
+            heartbeat_deadline: DEFAULT_HEARTBEAT_DEADLINE,
         }
     }
 

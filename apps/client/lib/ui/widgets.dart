@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter/services.dart' show TextInputFormatter;
 
+import '../api/storm_connection.dart';
 import 'icons.dart';
 import 'tokens.dart';
 
@@ -40,6 +41,7 @@ class StatusDot extends StatelessWidget {
           DotStatus.syncing => t.amber,
           DotStatus.offline => t.text3,
           DotStatus.untrusted => t.danger,
+          DotStatus.relayed => t.accent,
         },
         border: ring == null
             ? null
@@ -55,15 +57,20 @@ class StatusDot extends StatelessWidget {
 /// re-derive per preset — and the accent test measures this exact pairing.
 const kTileInk = Color(0xFF1A1626);
 
-enum DotStatus { synced, syncing, offline, untrusted }
+enum DotStatus { synced, syncing, offline, untrusted, relayed }
 
 /// The one place the engine's three flags become a dot, so the vault bubble,
 /// the vault card and the popover cannot disagree about what "synced" is.
+///
+/// Takes an optional [tier] to distinguish direct vs relayed connections.
+/// When [tier] is not `CandidateTier.direct`, returns [DotStatus.relayed]
+/// instead of [DotStatus.synced] so the UI can show the transport difference.
 DotStatus dotStatusFor({
   required bool online,
   required bool syncing,
   required int pending,
   bool identityFailed = false,
+  CandidateTier? tier,
 }) {
   // Outranks offline: a server that failed the challenge is reachable, and
   // reporting that as "offline" would tell the user to check their wifi when
@@ -71,6 +78,7 @@ DotStatus dotStatusFor({
   if (identityFailed) return DotStatus.untrusted;
   if (!online) return DotStatus.offline;
   if (syncing || pending > 0) return DotStatus.syncing;
+  if (tier != null && tier != CandidateTier.direct) return DotStatus.relayed;
   return DotStatus.synced;
 }
 

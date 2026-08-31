@@ -22,6 +22,9 @@ class StormApi {
   final String token;
   final http.Client _client;
 
+  /// The underlying HTTP client (for streaming/SSE).
+  http.Client get client => _client;
+
   /// The credential exactly as the server expects it, scheme included.
   ///
   /// The query-string paths below send *this*, not the bare token. The

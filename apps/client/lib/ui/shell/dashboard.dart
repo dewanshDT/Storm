@@ -218,6 +218,7 @@ class _VaultCard extends ConsumerWidget {
               online: engine.isOnline,
               syncing: engine.isSyncing,
               pending: engine.pendingCount,
+              tier: engine.connectionTier,
             )
           : DotStatus.offline,
       onTap: muted

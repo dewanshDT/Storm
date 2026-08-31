@@ -1394,6 +1394,8 @@ deliberately unresolved and should be settled by a measurement rather than in
 advance; or if MCP over the tunnel needs more than a client swap (R10 says it
 should not, and the checklist's §5 says verify rather than assume).
 
+**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. Track B (Rust relay abuse controls + trunk_superseded 30s drain + 45s heartbeat) not started.
+
 ---
 
 ## Data model

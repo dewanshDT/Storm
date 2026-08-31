@@ -16,6 +16,8 @@ import 'package:http/http.dart' as http;
 
 import 'auth_api.dart';
 import 'auth_models.dart';
+import 'relay/srp_http_client.dart';
+import 'relay/srp_trunk.dart';
 import 'server_verifier.dart';
 import 'storm_api.dart';
 
@@ -88,6 +90,7 @@ class StormConnection {
     this.buildApi,
     this.buildAuthApi,
     this.buildVerifier,
+    this.onRelaysChanged,
     this.publicRelayDelay = const Duration(seconds: 2),
   }) : _relays = List.of(relays) {
     _active = _candidates().first;
@@ -113,6 +116,7 @@ class StormConnection {
        buildAuthApi = null,
        buildVerifier = null,
        publicRelayDelay = Duration.zero,
+       onRelaysChanged = null,
        _pinnedApi = api,
        _pinnedAuthApi = authApi,
        _pinnedVerifier = verifier {
@@ -148,6 +152,11 @@ class StormConnection {
   final AuthApi Function(ConnectionCandidate)? buildAuthApi;
   final ServerVerifier Function(AuthApi)? buildVerifier;
 
+  /// Fired when the relay set changes (D3). The owner persists it so the set
+  /// survives a restart — the server is the only writer, so this is a
+  /// one-way mirror, not a merge.
+  final void Function(List<RelayAdvert> relays)? onRelaysChanged;
+
   /// Mutable, unlike everything above: this is state the server tells us, not
   /// configuration we were given.
   List<RelayAdvert> _relays;
@@ -155,6 +164,17 @@ class StormConnection {
   StormApi? _pinnedApi;
   AuthApi? _pinnedAuthApi;
   ServerVerifier? _pinnedVerifier;
+
+  /// The active SRP trunk, if any. Owned here — it is born when a relayed
+  /// candidate is adopted and dies with [reset] — because its lifetime is the
+  /// connection's (D2 consequence): reconnect re-races, so there is no trunk
+  /// to migrate.
+  ///
+  /// Keyed by relay URL rather than candidate because `_candidates()` builds a
+  /// fresh object per call: the race dials several relays at once and each must
+  /// keep its own trunk, but the *set of URLs* is stable within a session.
+  final Map<String, SrpTrunk> _trunks = {};
+  String? _activeRelayUrl;
 
   late ConnectionCandidate _active;
   StormApi? _cachedApi;
@@ -166,6 +186,12 @@ class StormConnection {
   /// The candidate currently in use. Above the seam nothing reads this except
   /// to *display* it — behaviour must never branch on it.
   ConnectionCandidate get active => _active;
+
+  /// Replaces the relay set, mirroring it out to the owner (D3).
+  void _setRelays(List<RelayAdvert> relays) {
+    _relays = List.of(relays);
+    onRelaysChanged?.call(List.unmodifiable(_relays));
+  }
 
   /// The relay set as last learned from the server.
   List<RelayAdvert> get relays => List.unmodifiable(_relays);
@@ -197,12 +223,76 @@ class StormConnection {
     return Uri.parse('$ws/v1/stream?ticket=${Uri.encodeComponent(ticket)}');
   }
 
+  /// SSE endpoint for the change feed on a relayed connection.
+  ///
+  /// The relay tunnels HTTP, not WebSocket upgrades, so the feed comes over
+  /// SSE at the same path. Uses the active candidate's base URL (the relay's
+  /// origin) directly — no `ws`/`wss` conversion.
+  Uri sseUri(String ticket) {
+    return Uri.parse(
+      '${_active.baseUrl}/v1/stream?ticket=${Uri.encodeComponent(ticket)}',
+    );
+  }
+
+  /// Whether the active transport is relayed (vs direct LAN).
+  bool get isRelayed => _active.relayUrl != null;
+
+  /// The transport client for the active candidate (for SSE and other
+  /// streaming uses that need direct client access).
+  http.Client get transportClient {
+    final pinned = _pinnedApi;
+    if (pinned != null) return pinned.client;
+    if (_cachedApi != null && _cachedApiFor == _active) {
+      return _cachedApi!.client;
+    }
+    return _apiFor(_active).client;
+  }
+
+  /// Auth headers for the active candidate.
+  Map<String, String> get authHeaders => {
+    'Authorization': 'Bearer $token',
+    'Content-Type': 'application/json',
+  };
+
   StormApi _apiFor(ConnectionCandidate c) =>
       buildApi?.call(c) ??
-      StormApi(baseUrl: c.baseUrl, token: token, client: client);
+      StormApi(
+        baseUrl: c.baseUrl,
+        token: token,
+        client: c.relayUrl != null ? _relayClient(c) : client,
+      );
 
   AuthApi _authApiFor(ConnectionCandidate c) =>
-      buildAuthApi?.call(c) ?? AuthApi(baseUrl: c.baseUrl, client: client);
+      buildAuthApi?.call(c) ??
+      AuthApi(
+        baseUrl: c.baseUrl,
+        client: c.relayUrl != null ? _relayClient(c) : client,
+      );
+
+  /// A tunnel transport for a relayed candidate. Each relay URL keeps its own
+  /// trunk (`_trunks`), so concurrently probing multiple relays does not tear
+  /// down a peer's in-flight open. The one the race crowns is retained; the
+  /// rest are released by [connect] once a winner is known.
+  http.Client _relayClient(ConnectionCandidate c) {
+    final url = c.relayUrl!;
+    final trunk = _trunks.putIfAbsent(
+      url,
+      () => SrpTrunk(url: Uri.parse(url), serverId: serverId),
+    );
+    return SrpHttpClient(trunk);
+  }
+
+  /// Releases every trunk except the one behind [winner] — the losers of the
+  /// race served their purpose (proving reachability) and must not keep a
+  /// heartbeat and a slot on the relay idle.
+  void _releaseWinlessTrunks(String? winnerUrl) {
+    for (final entry in _trunks.entries.toList()) {
+      if (entry.key != winnerUrl) {
+        _trunks.remove(entry.key);
+        entry.value.dispose();
+      }
+    }
+  }
 
   ServerVerifier _verifierFor(AuthApi a) =>
       _pinnedVerifier ??
@@ -222,8 +312,17 @@ class StormConnection {
       out.add(
         ConnectionCandidate(
           tier: _tierOf(relay.url),
-          baseUrl: relay.publicAddress.replaceFirst(RegExp(r'^ws'), 'http'),
-          relayUrl: relay.url,
+          // `baseUrl` is only ever used to build REST paths, which the tunnel
+          // carries as method + path — so the origin is nominal. It must be the
+          // relay's *origin*, never `publicAddress`: that field is the WebSocket
+          // connect endpoint (`wss://…/connect/<id>`) and handing it to an
+          // http.Client would build `/connect/<id>/v1/…` paths the server
+          // cannot route (per §4.3 it expects a `HELLO`, not an HTTP request).
+          baseUrl: relay.url
+              .replaceFirst(RegExp(r'^wss'), 'https')
+              .replaceFirst(RegExp(r'^ws'), 'http'),
+          // The actual dial target: the per-id WebSocket connect endpoint.
+          relayUrl: relay.publicAddress,
         ),
       );
     }
@@ -290,11 +389,17 @@ class StormConnection {
 
     _adopt(winner.candidate);
 
+    // The race dialled a trunk for every relayed candidate; only the winner's
+    // survives. The rest are released now, not at reset, so a multi-relay race
+    // leaves exactly one trunk alive.
+    _activeRelayUrl = winner.candidate.relayUrl;
+    _releaseWinlessTrunks(_activeRelayUrl);
+
     // The probe already fetched it, so the relay set refreshes as a side
     // effect of connecting rather than needing a trip of its own. This is
     // what stops a client being stranded when its server changes relays while
     // it is away: the pairing payload is frozen at issuance and this is not.
-    if (winner.info != null) _relays = List.of(winner.info!.relays);
+    if (winner.info != null) _setRelays(winner.info!.relays);
 
     // **Reachability is not trust.** The race chose a transport; only the
     // challenge decides whether we are connected to the server.
@@ -316,6 +421,11 @@ class StormConnection {
     _status = ConnectionStatus.idle;
     _cachedApi = null;
     _cachedApiFor = null;
+    for (final t in _trunks.values) {
+      t.dispose();
+    }
+    _trunks.clear();
+    _activeRelayUrl = null;
     _active = _candidates().first;
   }
 

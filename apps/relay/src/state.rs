@@ -132,8 +132,14 @@ impl ServerTrunk {
         client_trunk_id: &str,
         client: Tx,
         max_in_flight: usize,
+        max_total: usize,
     ) -> Result<u32, OpenRefused> {
         let mut table = self.streams.lock().expect("streams mutex");
+
+        // Global cap: total concurrent streams across all clients on this trunk.
+        if table.open.len() >= max_total {
+            return Err(OpenRefused::TooManyInFlight);
+        }
 
         // Counted per client trunk, not per server trunk: a cap shared across
         // clients would let one client's un-acked opens deny service to every
@@ -265,6 +271,40 @@ impl ServerTrunk {
             }
             tx.close();
         }
+    }
+
+    /// Starts the supersession drain: after `drain` time, all remaining streams
+    /// on this trunk get `ERROR{trunk_superseded}` and the trunk shuts down.
+    ///
+    /// Called when a new trunk supersedes this one. The old trunk continues to
+    /// accept responses for existing streams during the drain window, but new
+    /// client trunks are bound to the new trunk. After the window, remaining
+    /// streams are forcibly closed.
+    pub fn start_drain(self: Arc<Self>, drain: std::time::Duration) {
+        let trunk = self;
+        tokio::spawn(async move {
+            tokio::time::sleep(drain).await;
+            // After the drain window, close all remaining streams with
+            // trunk_superseded rather than trunk_lost — this tells clients
+            // the trunk was superseded, not just lost.
+            let streams = std::mem::take(&mut trunk.streams.lock().expect("streams mutex").open);
+            let clients = std::mem::take(&mut *trunk.clients.lock().expect("clients mutex"));
+
+            let mut told: HashMap<&str, ()> = HashMap::new();
+            for (stream_id, stream) in &streams {
+                let _ = stream.client.try_send_json(proto::error_on_stream(
+                    ErrorCode::TrunkSuperseded,
+                    *stream_id,
+                ));
+                told.insert(stream.client_trunk_id.as_str(), ());
+            }
+            for (client_trunk_id, tx) in &clients {
+                if !told.contains_key(client_trunk_id.as_str()) {
+                    let _ = tx.try_send_json(proto::error(ErrorCode::TrunkSuperseded));
+                }
+                tx.close();
+            }
+        });
     }
 
     #[cfg(test)]
@@ -625,8 +665,8 @@ mod tests {
         let (alice, _alice_rx) = Tx::detached(4);
         let (bob, _bob_rx) = Tx::detached(4);
 
-        let alice_stream = trunk.open_stream("ctk_alice", alice, 8).unwrap();
-        let bob_stream = trunk.open_stream("ctk_bob", bob, 8).unwrap();
+        let alice_stream = trunk.open_stream("ctk_alice", alice, 8, 1000).unwrap();
+        let bob_stream = trunk.open_stream("ctk_bob", bob, 8, 1000).unwrap();
         assert_ne!(alice_stream, bob_stream);
 
         assert!(trunk.client_owns(alice_stream, "ctk_alice"));
@@ -642,21 +682,25 @@ mod tests {
         let (alice, _alice_rx) = Tx::detached(4);
         let (bob, _bob_rx) = Tx::detached(4);
 
-        let first = trunk.open_stream("ctk_alice", alice.clone(), 2).unwrap();
-        trunk.open_stream("ctk_alice", alice.clone(), 2).unwrap();
+        let first = trunk
+            .open_stream("ctk_alice", alice.clone(), 2, 1000)
+            .unwrap();
+        trunk
+            .open_stream("ctk_alice", alice.clone(), 2, 1000)
+            .unwrap();
         assert_eq!(
-            trunk.open_stream("ctk_alice", alice.clone(), 2),
+            trunk.open_stream("ctk_alice", alice.clone(), 2, 1000),
             Err(OpenRefused::TooManyInFlight)
         );
 
         // Bob is unaffected: a shared cap would hand any anonymous client a way
         // to deny service to every other client on the same server.
-        assert!(trunk.open_stream("ctk_bob", bob, 2).is_ok());
+        assert!(trunk.open_stream("ctk_bob", bob, 2, 1000).is_ok());
 
         // The cap counts *un-acked* opens, so an ack frees a slot rather than
         // permanently capping the trunk.
         assert!(trunk.ack_stream(first));
-        assert!(trunk.open_stream("ctk_alice", alice, 2).is_ok());
+        assert!(trunk.open_stream("ctk_alice", alice, 2, 1000).is_ok());
     }
 
     #[test]
@@ -667,9 +711,9 @@ mod tests {
         let trunk = ServerTrunk::new(Tx::detached(4).0);
         let (client, _rx) = Tx::detached(4);
 
-        let first = trunk.open_stream("ctk_a", client.clone(), 8).unwrap();
+        let first = trunk.open_stream("ctk_a", client.clone(), 8, 1000).unwrap();
         trunk.close_stream(first);
-        let second = trunk.open_stream("ctk_a", client, 8).unwrap();
+        let second = trunk.open_stream("ctk_a", client, 8, 1000).unwrap();
         assert_ne!(first, second);
         assert_eq!(trunk.open_stream_count(), 1);
     }

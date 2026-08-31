@@ -41,6 +41,7 @@ pub mod auth;
 pub mod config;
 pub mod connect;
 pub mod proto;
+pub mod rate_limit;
 pub mod register;
 pub mod state;
 pub mod trunk;
@@ -74,6 +75,8 @@ pub struct Relay {
     pub bindings: state::Bindings,
     pub challenges: state::Challenges,
     pub registrations: state::Registrations,
+    /// Rate limiter for HELLO attempts per source IP.
+    hello_rate_limiter: rate_limit::RateLimiter,
     nonce_source: NonceSource,
 }
 
@@ -83,17 +86,26 @@ impl Relay {
     }
 
     pub fn with_nonce_source(config: Config, nonce_source: NonceSource) -> Self {
+        let hello_rate_limiter =
+            rate_limit::RateLimiter::new(config.hello_rate_limit, config.hello_rate_window);
         Self {
             config,
             bindings: state::Bindings::default(),
             challenges: state::Challenges::default(),
             registrations: state::Registrations::default(),
+            hello_rate_limiter,
             nonce_source,
         }
     }
 
     pub fn mint_nonce(&self) -> String {
         (self.nonce_source)()
+    }
+
+    /// Checks the HELLO rate limit for a source IP.
+    /// Returns `true` if allowed, `false` if rate limited.
+    pub fn check_hello_rate_limit(&self, ip: std::net::IpAddr) -> bool {
+        self.hello_rate_limiter.try_take(ip)
     }
 }
 
