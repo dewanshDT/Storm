@@ -1326,6 +1326,74 @@ a benefit. The opposite is the live risk: `staging` running so far ahead that
 merging it is a release nobody can review in one sitting. **25 commits is
 already at the edge of that.**
 
+**63. The Dart SRP client's architecture, and the discovery that
+`Image.network` can never work over a tunnel.** *(2026-08-31)*
+
+Phase 3 left a gap the phase numbering hides: the relay works, the server's
+tunnel client works, and **no user can benefit from either**, because there is
+no Dart SRP implementation at all. `grep` for `HELLO`, `OPEN_STREAM` or
+`HTTP_REQUEST_HEAD` across `apps/client/` returns nothing. Four decisions, with
+the full design in the vault's *Storm Relay Dart Client*.
+
+**D1 — the tunnel is an `http.Client`, not a new API layer.**
+`SrpHttpClient extends http.BaseClient`. `StormApi` already takes an injectable
+client, so wiring is one argument and no call site changes. This is R13 restated
+in Dart: the relay introduces no application protocol, so the client must not
+grow one either — a parallel `RelayApi` would be decision 37's `ops.rs` mistake
+one layer up. `StreamedResponse` also carries SSE for free.
+
+**D2 — one trunk, multiplexed.** REST and the change feed share it. One failure
+domain, one `HELLO` against the relay's per-IP limit, one reconnect state
+machine. A second trunk for the feed buys isolation that the per-stream cap
+already provides more cheaply.
+
+**D3 — the relay set is persisted and refreshed on any success.** In `Settings`
+beside `serverId` and `serverPublicKey`, seeded from the pairing payload. §4.3
+requires both carriers. **No TTL**: a stale entry costs part of one connection
+race, while having none costs reachability entirely — and staleness
+self-corrects on the first success where unreachability does not.
+
+**D4 — attachments go through a custom `ImageProvider`.**
+
+**The finding.** This began as a narrower question — `attachmentUrl` puts the
+credential in a query string, and through a relay that URL is read in plaintext
+by the relay operator, which is worse than the LAN case that put it on the
+backlog. Checking how the four call sites actually fetch turned up something
+larger:
+
+> **`Image.network` fetches through the platform HTTP stack, bypassing the
+> injected `http.Client` entirely.**
+
+So a relayed attachment URL would be a plain HTTPS GET against the relay's
+`/connect/<server_id>` — which is a **WebSocket upgrade endpoint expecting
+`HELLO`**. There is no value of `attachmentUrl` that makes it work. The problem
+was never only the credential; it was that the widget is not on the transport
+at all.
+
+A `StormImageProvider` fetching bytes through the injected client fixes three
+things at once: attachments route over the tunnel, the credential leaves the URL
+on *both* paths, and **the web client is fixed too** — the header change I first
+proposed would have worked on mobile and desktop and silently not on web, where
+`Image.network`'s headers are ignored.
+
+*The lesson is about where a seam stops.* The `StormConnection` seam was
+described as complete, with "wiring real relays later is configuration". That
+was true of everything routed *through* `StormApi` and false of four widgets
+that quietly route around it. **A transport seam only covers the callers that
+actually pass through it**, and the ones that don't are invisible precisely
+because they work fine today.
+
+Two more of that shape were already in the same file and are recorded in the
+vault note: `_candidates()` string-munges `wss://…/connect/<id>` into
+`https://…` and hands it to an `http.Client` as a base URL, and
+`connectionProvider` passes no relays at all — which is why neither has ever
+failed. **A path that is never exercised cannot report that it is wrong.**
+
+*Revisit if:* the tunnel's framing turns out to need its own isolate, which is
+deliberately unresolved and should be settled by a measurement rather than in
+advance; or if MCP over the tunnel needs more than a client swap (R10 says it
+should not, and the checklist's §5 says verify rather than assume).
+
 ---
 
 ## Data model

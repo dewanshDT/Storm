@@ -75,6 +75,7 @@ Practical consequences worth knowing before you start:
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `docs/srp-v1.md` | The relay wire spec, normative. `docs/srp-vectors.json` is its shared test vectors. |
+| *Storm Relay Dart Client* (vault) | The client half's accepted architecture. Read before writing any Dart SRP code. |
 | `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
