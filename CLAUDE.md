@@ -37,6 +37,35 @@ summary still says "proposed" long after it shipped is a note that lied.
 `docs/prd.md` is the original brief and is **not** maintained.
 Where it and `PLAN.md` disagree, `PLAN.md` is current.
 
+## Branches: `staging` is where development lands
+
+**`staging` is the development trunk. `main` is the release branch.**
+
+- **Open every PR against `staging`.** Feature branches branch from `staging`
+  and merge back into it. This is true for agents and humans alike, and it is
+  true regardless of how small the change is.
+- **Never open a PR against `main`, never push to `main`, never merge to
+  `main`** — not as a shortcut for a one-line fix, not because `staging` looks
+  behind. `main` moves only when a release is being cut.
+- **A merge to `main` *is* the release decision**, and it is the operator's to
+  make, never an agent's. `main` reflects what is deployed or deployable; if
+  `main` moved, something shipped. Ask; do not infer that a green branch wants
+  merging.
+- **`staging` is not a staging *server*.** Nothing on it is deployed. Prod
+  serves what came off `main`, so "it works on `staging`" says nothing about
+  what users are running — and the gap can be many commits wide. State the
+  branch whenever you report status.
+
+Practical consequences worth knowing before you start:
+
+- **Branch from `staging`, not `main`**, or your PR will carry every commit
+  that is on `staging` and not yet released, and its diff will be unreviewable.
+- **`PLAN.md`'s decision log is numbered, and `staging` may already carry
+  entries `main` has never seen.** Read `PLAN.md` **on `staging`** before
+  choosing a number. A gap is harmless; a duplicate is not.
+- When a release does happen, `main` gets the merge and the tag together — see
+  `PLAN.md`'s release entries for how versioning works.
+
 ## Layout
 
 | Path | What |

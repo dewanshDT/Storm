@@ -1292,6 +1292,40 @@ memory** (decision 60), `trunk_superseded`'s 30 s drain and the 45 s heartbeat
 deadline are unimplemented on the relay, and `attachmentUrl` still puts a
 credential in a query string. Next is phase 4 — the same relay on a VPS.
 
+**62. `staging` is the development trunk; `main` is the release branch.**
+*(2026-08-31)*
+
+Every PR targets `staging`. `main` moves only when a release is being cut, and
+**the merge to `main` is the release decision** — the operator's to make, never
+an agent's.
+
+This was already how the work was flowing and was written down nowhere. That
+gap had a cost: `staging` accumulated **25 commits and decisions 56–61** while
+every tool default, and the harness banner in an agent's own session, still said
+*"main — you will usually use this for PRs."* An agent following the default
+would have opened a release PR for a mid-slice relay.
+
+The rule also fixes what "done" means when reporting. `staging` is **not** a
+staging *server*; nothing on it is deployed. Prod serves what came off `main`,
+so a green `staging` says nothing about what users are running, and the gap can
+be many commits wide. **State the branch when reporting status** — "the relay
+works" and "the relay is released" have been many days apart.
+
+Two consequences worth knowing before starting a change:
+
+- **Branch from `staging`, not `main`.** Branching from `main` makes a PR carry
+  every unreleased commit, and its diff unreviewable.
+- **Read `PLAN.md` on `staging` before numbering a decision.** `staging` may
+  already carry entries `main` has never seen — this branch runs 56–62 while
+  `main` ends at 54, and decision 55 lives on a third branch entirely. A
+  numbering gap is harmless; a duplicate is not.
+
+*Revisit if:* releases become frequent enough that the two branches stay within
+a commit or two of each other, at which point the split is bookkeeping without
+a benefit. The opposite is the live risk: `staging` running so far ahead that
+merging it is a release nobody can review in one sitting. **25 commits is
+already at the edge of that.**
+
 ---
 
 ## Data model
