@@ -320,9 +320,21 @@ Client → Relay:  OPEN_STREAM { attempt_id }
 Relay → Client:  STREAM_READY { attempt_id, stream_id }
 
 Relay → Server:  STREAM_OPEN { stream_id }
-                 // relay waits up to 5s for the server to ACK. No ACK →
+Server → Relay:  STREAM_ACK  { stream_id }
+                 // relay waits up to 5s. No ACK →
                  // ERROR{server_timeout, stream_id}, no retry.
 ```
+
+**`STREAM_ACK` is the acknowledgement, and it is a distinct message.** Earlier
+revisions required the server to "ACK `STREAM_OPEN`" and named nothing that
+does — an origin server and a relay written independently would each have
+invented one, which is the interop failure this document exists to prevent.
+
+The ACK says only *this trunk has accepted this `stream_id`*. It does not mean
+the request has been dispatched or that a response is coming; those are
+`HTTP_RESPONSE_HEAD` and the time-to-first-byte rule in §5.2. A server MUST
+refuse a `stream_id` it already has open, with `ERROR{stream_closed}`, rather
+than acknowledging it twice.
 
 `attempt_id` is client-generated and echoed back **only** so the client can
 correlate concurrent opens before it learns the relay-assigned `stream_id`. It
@@ -431,6 +443,7 @@ Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
 | `OPEN_STREAM` | client→relay | `attempt_id` |
 | `STREAM_READY` | relay→client | `attempt_id`, `stream_id` |
 | `STREAM_OPEN` | relay→server | `stream_id` |
+| `STREAM_ACK` | server→relay | `stream_id` — the trunk has accepted it (§5.1) |
 | `HTTP_REQUEST_HEAD` | client→relay→server | `stream_id`, `method`, `path`, `headers`; **relay sets `relay_peer_ip` on the server-ward hop** (§5.2) |
 | `HTTP_RESPONSE_HEAD` | server→relay→client | `stream_id`, `status`, `headers` |
 | *(binary `0x01` / `0x02`)* | either | `stream_id`, bytes |
