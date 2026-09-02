@@ -1436,6 +1436,30 @@ it catches — the honest alternative is generating the install copy from
 
 ---
 
+**66. `result_large_err` is allowed crate-wide, and CI floats on `stable` for
+Rust while it pins Flutter.**
+`cargo clippy --all-targets -- -D warnings` went red on 2026-08-31 over
+`result_large_err`: axum handlers return `Response` as their error type, which
+is how a handler answers with a status and a body rather than a 500, and clippy
+counts those bytes. **PR #34 was merged past it**, so `staging` carried a
+failing gate and every PR after it inherited one.
+Allowed rather than boxed. `Box<Response>` would put an already-heap-backed
+body behind a second allocation in every handler, to shrink a value that never
+outlives one request.
+**The part worth keeping is where it came from.** It fires on x86_64-linux and
+not on aarch64-darwin, *on the same 1.98.0* — a clean
+`cargo clean -p storm-server && cargo clippy --all-targets` with CI's exact
+toolchain passes on the dev machine. So it arrived through
+`dtolnay/rust-toolchain@stable` moving under the job, and it could be neither
+reproduced nor fixed-and-verified locally. **A gate that only one machine in
+the world can run is a gate that gets merged past**, which is exactly what
+happened. Flutter is already pinned at 3.44.8 for this reason; Rust is not.
+*Revisit if:* pinning the Rust toolchain is taken up — that is the other real
+answer here and it stays open. A pin needs an owner for the bump, or it becomes
+an ageing compiler nobody dares move.
+
+---
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
