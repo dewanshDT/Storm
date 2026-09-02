@@ -46,12 +46,16 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
 ## Sections
 
 1. **01 · Foundation** — One source of truth. Storage-root tree; `state/` sibling.
-2. **02 · AI access** — 12 MCP tools (named); static conceptual demo.
+2. **02 · AI access** — 12 MCP tools (named); static conceptual demo. Off by
+   default, write tools need writable mode, and an agent authenticates with an
+   MCP key minted in the app (`stk_…`, `/mcp` only).
 3. **03 · Architecture** — Flutter clients ↔ Rust server ↔ Markdown vaults; MCP.
 4. **04 · Storage** — Ordinary `.md` files.
 5. **05 · Client** — macOS · Android · Web only (no fake screenshots).
 6. **06 · Synchronization** — Synced / Offline / Conflict status language.
-7. **07 · Installation** — Links into `/install` (install + update + connect).
+7. **07 · Installation** — Links into `/install`. Four steps: install, get a
+   client, **sign in** (pair the device, create the owner account — no shared
+   password, no cloud account), update later.
 8. **08 · Documentation** — Repo deep links only (no docs portal).
 
 ## Design notes

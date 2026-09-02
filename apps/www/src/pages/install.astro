@@ -13,6 +13,13 @@ const upCustom = `sudo storm-server up \\
   --data-root /srv/storm \\
   --vault-root /path/to/vaults \\
   --state /srv/storm/state`;
+
+const pair = `sudo -u storm storm-server pair \\
+  --state /srv/storm/state --qr`;
+
+const accounts = `sudo -u storm storm-server user add <name> --state /srv/storm/state
+sudo -u storm storm-server user list --state /srv/storm/state
+sudo -u storm storm-server passwd <name> --state /srv/storm/state`;
 ---
 
 <BaseLayout
@@ -60,13 +67,52 @@ const upCustom = `sudo storm-server up \\
     <h2>Start the server</h2>
     <p class="support">
       <code>up</code> creates the <code>storm</code> user when it can, writes
-      <code>/etc/storm/storm.env</code> (mode 600, with a generated token), and
-      enables the systemd unit. Default data root is <code>/srv/storm</code>.
-      The web client is then at
-      <code>http://&lt;host&gt;:{release.webPort}</code> — point every client at
-      that URL and the token from <code>storm.env</code>.
+      <code>/etc/storm/storm.env</code> (mode 600), and enables the systemd
+      unit. Default data root is <code>/srv/storm</code>. The web client is then
+      at <code>http://&lt;host&gt;:{release.webPort}</code>.
+    </p>
+    <p class="support">
+      <strong>There is no token in that file.</strong> Storm has no shared
+      password and no cloud account — credentials are per device and live in
+      <code>state/auth.db</code>, never in a config file. Getting the first
+      device in is the next step.
     </p>
     <CodeBlock code={up} label="up" />
+  </section>
+
+  <section class="section wrap-narrow" id="first-login">
+    <h2>First login</h2>
+    <p class="support">
+      The first account on a server is always an <strong>owner</strong>.
+      Everything after it — more devices, more accounts, MCP keys — happens from
+      a client that is already signed in.
+    </p>
+
+    <h3>From a browser</h3>
+    <p class="support">
+      Open <code>http://&lt;host&gt;:{release.webPort}</code> on the same
+      network. The page pairs itself with the server that served it, then asks
+      you to create that first account. Nothing to run on the host.
+    </p>
+
+    <h3>From the macOS or Android app</h3>
+    <p class="support">
+      Print a single-use pairing code on the host and scan it in Storm.
+      <code>pair</code> works only while the server has no accounts — after
+      that, add a device from a client that is already signed in.
+    </p>
+    <CodeBlock code={pair} label="pair" />
+
+    <h3>On the host</h3>
+    <p class="support">
+      Accounts are managed on the box too, which is the recovery path for a
+      forgotten password. <strong>Run these as <code>storm</code>, not as
+      root</strong> — <code>auth.db</code> is created on first use, so a
+      root-owned database is one the service cannot write, and the symptom
+      arrives much later as a login that fails with nothing useful in the
+      journal.
+    </p>
+    <CodeBlock code={accounts} label="accounts" />
   </section>
 
   <section class="section wrap-narrow">
@@ -96,8 +142,10 @@ const upCustom = `sudo storm-server up \\
     <h2>MCP</h2>
     <p class="support">
       After the server is up, enable MCP from the client under Server → AI
-      access, or via the config API. Details and the twelve tools are documented
-      in
+      access, or via the config API — it is off by default, and write tools need
+      writable mode. An MCP client authenticates with a <em>key</em> you mint in
+      the app, shown once and revocable; it is accepted on <code>/mcp</code> and
+      nowhere else. Details and the twelve tools are documented in
       <a
         href="https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md"
         target="_blank"
@@ -112,6 +160,18 @@ const upCustom = `sudo storm-server up \\
     font-family: var(--font-mono);
     font-size: 0.92em;
     color: var(--text);
+  }
+
+  .section h3 {
+    margin: calc(var(--sp) * 5) 0 calc(var(--sp) * 1.5);
+    font-family: var(--font-sans);
+    font-size: var(--fs-md);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .section h3:first-of-type {
+    margin-top: calc(var(--sp) * 2);
   }
 
   .support em {

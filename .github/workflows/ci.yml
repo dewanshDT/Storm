@@ -78,7 +78,11 @@ jobs:
       run:
         working-directory: apps/www
     steps:
+      # Tags, because check-claims.sh compares the site's release tag against
+      # the newest one. A shallow checkout has none and the check goes quiet.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -86,3 +90,5 @@ jobs:
           cache-dependency-path: apps/www/package-lock.json
       - run: npm ci
       - run: npm run build
+      # A green build says the site compiles, not that it is true.
+      - run: ./scripts/check-claims.sh
