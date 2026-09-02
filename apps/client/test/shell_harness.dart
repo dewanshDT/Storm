@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/models.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/router.dart';
@@ -58,12 +59,17 @@ ProviderContainer shellContainer({bool configured = true, Settings? settings}) {
   final container = ProviderContainer(
     overrides: [
       cacheProvider.overrideWithValue(cache),
-      apiProvider.overrideWithValue(configured ? api : null),
+      // `apiProvider` derives from this, so overriding the connection covers
+      // both — and an unconfigured install is one with no connection at all,
+      // which is what `null` says.
+      connectionProvider.overrideWithValue(
+        configured ? StormConnection.direct(api: api) : null,
+      ),
       // The engine follows the active vault exactly as it does in the app, so
       // a test that switches vaults exercises the real teardown.
       syncEngineProvider.overrideWith(
         (ref) => SyncEngine(
-          api: api,
+          connection: StormConnection.direct(api: api),
           cache: cache,
           vaultId: ref.watch(activeVaultProvider),
         ),

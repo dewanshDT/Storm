@@ -21,9 +21,12 @@
 //! so the REST envelopes stay exactly where they were and the wire format is
 //! untouched. `tests/e2e.py` is what proves that.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use serde::Serialize;
 
-use crate::api::{ApiError, ApiResult, Shared, bad_request, not_found, vault_of};
+use crate::api::{ApiError, ApiResult, Shared, bad_request, conflict, not_found, vault_of};
 use crate::auth::authz::{Access, Actor};
 use crate::db::{NoteRow, RecentRow, SearchHit};
 
@@ -471,6 +474,206 @@ pub async fn recents(state: &Shared, actor: &Actor, limit: i64) -> ApiResult<Vec
     Ok(all)
 }
 
+// ---- scripts (kit vault) ------------------------------------------------
+//
+// Canonical, agent-run tooling gets exactly one home in Storm: the **kit
+// vault**, found by its directory name, addressed by `name` under a `scripts/`
+// root. Everything here is scoped to that vault and to a text-only extension
+// allowlist — an agent gets no second way to write files anywhere else.
+// Scripts are stored as attachments (they are non-markdown files), so the
+// indexes, hashes and cross-device sync already work; what this section adds is
+// the intent: only scripts, only in kit, only with an allowed extension.
+
+/// The vault script tools are scoped to — the one whose directory is `kit`.
+const KIT_VAULT_DIR: &str = "kit";
+
+/// Scripts live under this folder inside the kit vault.
+const SCRIPTS_ROOT: &str = "scripts";
+
+/// Extensions agents may write. Text-only, and deliberately **not** `.md`:
+/// markdown is the notes domain, and the allowlist is what keeps a tool from
+/// dropping an executable no one meant to run.
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    "ts", "js", "mjs", "cjs", "json", "sh", "py", "yaml", "yml", "toml", "csv",
+];
+
+/// One canonical script in the kit vault.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptInfo {
+    /// Address for the other script tools, relative to the `scripts/` root.
+    pub name: String,
+    /// Vault-relative path (`scripts/<name>`), for callers that keep paths.
+    pub path: String,
+    pub size: i64,
+    pub modified: String,
+}
+
+/// The result of storing a script.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptStored {
+    pub name: String,
+    pub path: String,
+    pub size: i64,
+}
+
+/// A script and its text. Every allowed extension is a text format, so the
+/// content never needs base64 — binary blobs cannot be written here.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptContent {
+    pub name: String,
+    pub path: String,
+    pub size: i64,
+    pub content: String,
+}
+
+/// The kit vault's id, or 404 when it is not registered.
+///
+/// Found by directory name rather than a hardcoded id, so a fresh server whose
+/// registry is built by adopting the `kit/` folder resolves it the same way as
+/// one that has it persisted.
+async fn kit_vault_id(state: &Shared) -> ApiResult<String> {
+    let vaults = state.vaults.read().await;
+    vaults
+        .registry
+        .by_dir(KIT_VAULT_DIR)
+        .map(|entry| entry.id.clone())
+        .ok_or_else(|| not_found("no vault named “kit”"))
+}
+
+/// The kit vault's open handle — the one place the script tools ask whether the
+/// caller may touch kit, so no tool can forget to.
+async fn kit_handle(
+    state: &Shared,
+    actor: &Actor,
+    access: Access,
+) -> ApiResult<Arc<crate::api::VaultHandle>> {
+    let id = kit_vault_id(state).await?;
+    vault_of(state, actor, access, &id).await
+}
+
+/// Validates a script name and returns its vault-relative path under the
+/// scripts root. One translation, shared by every script tool, so reads and
+/// writes cannot disagree about what a name means.
+fn script_path(name: &str) -> Result<String, ApiError> {
+    if name.is_empty() || name.starts_with('/') || name.ends_with('/') {
+        return Err(bad_request(
+            "script name must be non-empty and cannot start or end with '/'",
+        ));
+    }
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some(ext) if SCRIPT_EXTENSIONS.contains(&ext) => Ok(format!("{SCRIPTS_ROOT}/{name}")),
+        _ => Err(bad_request(format!(
+            "extension not allowed ('.{}'); scripts may only be: {}",
+            extension.unwrap_or_default(),
+            SCRIPT_EXTENSIONS.join(", ")
+        ))),
+    }
+}
+
+/// Scripts currently in the kit vault. Filtered by the scripts root **and** the
+/// allowlist, so an attachment that happens to live in kit but is not a script
+/// — an image, say — stays invisible here.
+pub async fn list_scripts(
+    state: &Shared,
+    actor: &Actor,
+    prefix: Option<&str>,
+) -> ApiResult<Vec<ScriptInfo>> {
+    let handle = kit_handle(state, actor, Access::Read).await?;
+    let ix = handle.indexer.lock().await;
+    let prefix = prefix.unwrap_or("");
+    let mut out = Vec::new();
+    for row in ix.db.list_attachments()? {
+        let Some(name) = row.path.strip_prefix(&format!("{SCRIPTS_ROOT}/")) else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !SCRIPT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        out.push(ScriptInfo {
+            name: name.to_string(),
+            path: row.path.clone(),
+            size: row.size,
+            modified: row.modified,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// One script's full text.
+pub async fn get_script(state: &Shared, actor: &Actor, name: &str) -> ApiResult<ScriptContent> {
+    let rel = script_path(name)?;
+    let handle = kit_handle(state, actor, Access::Read).await?;
+    let ix = handle.indexer.lock().await;
+    let bytes = ix
+        .vault
+        .read_bytes(&rel)
+        .map_err(|_| not_found("no such script"))?;
+    let content = String::from_utf8(bytes).map_err(|_| bad_request("script is not valid UTF-8"))?;
+    Ok(ScriptContent {
+        name: name.to_string(),
+        path: rel,
+        size: content.len() as i64,
+        content,
+    })
+}
+
+/// Stores a new script. Refuses a name that already exists, so a re-run cannot
+/// silently clobber canonical tooling — change one with [`update_script`].
+pub async fn create_script(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    content: &str,
+) -> ApiResult<ScriptStored> {
+    let rel = script_path(name)?;
+    let handle = kit_handle(state, actor, Access::Write).await?;
+    let mut ix = handle.indexer.lock().await;
+    if ix.vault.exists(&rel) {
+        return Err(conflict(format!("script “{name}” already exists")));
+    }
+    ix.put_attachment(&rel, content.as_bytes())
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ScriptStored {
+        name: name.to_string(),
+        path: rel,
+        size: content.len() as i64,
+    })
+}
+
+/// Replaces an existing script's text. The mirror of [`create_script`]: fails
+/// on a name that does not exist, which keeps the two from being interchangeable.
+pub async fn update_script(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    content: &str,
+) -> ApiResult<ScriptStored> {
+    let rel = script_path(name)?;
+    let handle = kit_handle(state, actor, Access::Write).await?;
+    let mut ix = handle.indexer.lock().await;
+    if !ix.vault.exists(&rel) {
+        return Err(not_found("no such script"));
+    }
+    ix.put_attachment(&rel, content.as_bytes())
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ScriptStored {
+        name: name.to_string(),
+        path: rel,
+        size: content.len() as i64,
+    })
+}
+
 // ---- server identity ---------------------------------------------------
 
 /// What a client needs to pin this server: who it is, and which key to check.
@@ -486,16 +689,66 @@ pub struct ServerInfo {
     pub algorithm: String,
     /// base64url, no padding.
     pub public_key: String,
+    /// The relays this server is **currently registered with** (SRP v1 §4.4).
+    ///
+    /// Appended after the existing fields, and only ever appended: an older
+    /// client parses this response by name and must not break on a key it does
+    /// not know, so the shape above stays exactly where it was.
+    ///
+    /// Empty on every server today — nothing registers with a relay yet. That
+    /// is the honest answer, not a placeholder: an empty list means "no relay
+    /// path to me", which is true.
+    pub relays: Vec<RelayAdvert>,
 }
 
+/// One reachable relay path, as a client should read it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RelayAdvert {
+    /// The relay's own base URL. Identity, so a client can match this entry
+    /// against one it already knows from its pairing payload instead of
+    /// treating a refreshed list as a set of strangers.
+    pub url: String,
+    /// `wss://<relay-host>/connect/<server_id>` — **derived, not allocated**.
+    /// Sent because it is what the client dials, not because it is stored;
+    /// any client holding the `server_id` above can rebuild it byte for byte.
+    pub public_address: String,
+}
+
+/// Who this server is, and how to reach it right now.
+///
+/// **Why the relay set is here.** A client learns its server's addresses from
+/// the pairing payload, and that payload is frozen at the moment the QR was
+/// issued. A server that later changes relays while a client is off the LAN
+/// would strand that client for good. This endpoint is the live carrier: it is
+/// the `none` tier, it is already on the identity-challenge path, and a client
+/// refreshes from it whenever the server is reachable by *any* path at all —
+/// including a relay it already knows.
+///
+/// **Registered, never merely configured.** The set comes from
+/// `registered_relays`, not from `Registry::relays`. A relay the server failed
+/// to register with is a dead path, and a client races its candidates on a
+/// ~2 s budget — one dead entry costs part of that budget on every reconnect.
 pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
     let identity = &state.identity;
+    let registered = {
+        let vaults = state.vaults.read().await;
+        vaults.registry.registered_relays.snapshot()
+    };
+    let relays = registered
+        .into_iter()
+        .map(|url| RelayAdvert {
+            public_address: crate::registry::public_address(&url, &identity.server_id),
+            url,
+        })
+        .collect();
+
     Ok(ServerInfo {
         server_id: identity.server_id.clone(),
         name: identity.name.clone(),
         key_id: identity.key_id.clone(),
         algorithm: crate::auth::identity::ALGORITHM.to_string(),
         public_key: identity.public_key_b64(),
+        relays,
     })
 }
 
@@ -685,5 +938,196 @@ mod tests {
         assert_eq!(sanitize_fts_query("NEAR(a b)"), "\"NEAR(a\" \"b)\"");
         assert_eq!(sanitize_fts_query("  "), "");
         assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"hi\"");
+    }
+
+    // ---- scripts: the extension allowlist ------------------------------
+
+    #[test]
+    fn a_script_name_maps_into_the_scripts_root() {
+        assert_eq!(
+            must(script_path("psi-item-import/run.spec.ts")),
+            "scripts/psi-item-import/run.spec.ts"
+        );
+        assert_eq!(must(script_path("say-hello.sh")), "scripts/say-hello.sh");
+    }
+
+    #[test]
+    fn the_extension_allowlist_is_case_insensitive() {
+        assert_eq!(
+            must(script_path("Demo/Seed.JSON")),
+            "scripts/Demo/Seed.JSON"
+        );
+    }
+
+    #[test]
+    fn names_outside_the_allowlist_are_refused() {
+        // Markdown belongs to the notes tools, executables belong to no one.
+        for name in [
+            "notes/README.md",
+            "tool.bat",
+            "virus.exe",
+            "no-extension",
+            "dir/",
+            "/absolute.ts",
+            "",
+        ] {
+            let err = script_path(name).unwrap_err();
+            assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST, "{name}");
+        }
+    }
+
+    // ---- GET /v1/server: the live relay set -----------------------------
+
+    use crate::api::{AppState, VaultSet};
+    use crate::registry::Registry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// `ApiError` has no `Debug` impl — deliberately, it is an HTTP response —
+    /// so `.unwrap()` is unavailable on an `ApiResult`.
+    fn must<T>(result: ApiResult<T>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(ApiError(status, message)) => panic!("{status}: {message}"),
+        }
+    }
+
+    /// Enough state to answer `/v1/server`, which is decided entirely from the
+    /// identity and the registry — no vault is opened on this path.
+    fn server_state(dir: &std::path::Path) -> Shared {
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let root = dir.join("vaults");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut auth_db = crate::auth::AuthDb::open(&state_dir).unwrap();
+        let identity = Arc::new(
+            crate::auth::identity::load_or_create(&mut auth_db, &state_dir, "2026-08-26T00:00:00Z")
+                .unwrap(),
+        );
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let (root_changed, _) = tokio::sync::broadcast::channel(2);
+        let registry = Registry::load(&state_dir, &root).unwrap();
+
+        Arc::new(AppState {
+            vaults: tokio::sync::RwLock::new(VaultSet {
+                registry,
+                open: HashMap::new(),
+            }),
+            events,
+            state_dir,
+            identity,
+            root_changed,
+            mcp_enabled: std::sync::atomic::AtomicBool::new(false),
+            mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            allow_registration: std::sync::atomic::AtomicBool::new(false),
+            bootstrap_nonce: None,
+            listen_addr: "127.0.0.1:8484".into(),
+            vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
+            hasher: crate::auth::Hasher::new(),
+            login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn server_info_carries_an_empty_relay_set_on_a_fresh_server() {
+        let dir = tempdir::TempDir::new("storm-ops-relays").unwrap();
+        let state = server_state(dir.path());
+
+        let info = must(server_info(&state).await);
+        let json = serde_json::to_value(&info).unwrap();
+
+        // The field is live, not absent: a client that finds no `relays` key
+        // cannot tell "this server has no relay path" from "this server is too
+        // old to say", and would keep dialling a stale pairing payload.
+        assert_eq!(
+            json["relays"],
+            serde_json::json!([]),
+            "no tunnel client exists yet, so nothing is registered — and that is the honest answer"
+        );
+
+        // The rest of the response is unchanged, asserted key by key so a
+        // future edit cannot quietly reshape what pairing depends on.
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "algorithm".to_string(),
+                "key_id".to_string(),
+                "name".to_string(),
+                "public_key".to_string(),
+                "relays".to_string(),
+                "server_id".to_string(),
+            ],
+            "the addition is additive — nothing was added but `relays`, nothing removed"
+        );
+        assert_eq!(json["server_id"], state.identity.server_id.as_str());
+        assert_eq!(json["name"], state.identity.name.as_str());
+        assert_eq!(json["key_id"], state.identity.key_id.as_str());
+        assert_eq!(json["algorithm"], crate::auth::identity::ALGORITHM);
+        assert_eq!(json["public_key"], state.identity.public_key_b64().as_str());
+    }
+
+    #[tokio::test]
+    async fn server_info_advertises_registered_relays_never_configured_ones() {
+        // The distinction the field exists for. A relay the server failed to
+        // register with is a dead path; the client races its candidates on a
+        // ~2 s budget, so advertising one costs part of that budget on every
+        // single reconnect.
+        let dir = tempdir::TempDir::new("storm-ops-relays2").unwrap();
+        let state = server_state(dir.path());
+
+        {
+            let mut vaults = state.vaults.write().await;
+            vaults
+                .registry
+                .set_relays(&[
+                    "wss://relay.example.com".to_string(),
+                    "wss://relay.two.example".to_string(),
+                ])
+                .unwrap();
+        }
+
+        let info = must(server_info(&state).await);
+        assert!(
+            info.relays.is_empty(),
+            "configured but unregistered relays must not reach the wire"
+        );
+
+        // Now one of them registers.
+        {
+            let vaults = state.vaults.read().await;
+            vaults
+                .registry
+                .registered_relays
+                .mark_registered("wss://relay.two.example")
+                .unwrap();
+        }
+
+        let info = must(server_info(&state).await);
+        assert_eq!(info.relays.len(), 1, "only the one that registered");
+        assert_eq!(info.relays[0].url, "wss://relay.two.example");
+        assert_eq!(
+            info.relays[0].public_address,
+            format!(
+                "wss://relay.two.example/connect/{}",
+                state.identity.server_id
+            ),
+            "derived from the server_id in the same response, never allocated"
+        );
+
+        // And when registration lapses it leaves again, without the
+        // configuration changing at all.
+        {
+            let vaults = state.vaults.read().await;
+            vaults
+                .registry
+                .registered_relays
+                .mark_unregistered("wss://relay.two.example");
+            assert_eq!(vaults.registry.relays.len(), 2, "still configured");
+        }
+        assert!(must(server_info(&state).await).relays.is_empty());
     }
 }

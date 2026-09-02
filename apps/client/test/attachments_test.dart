@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/attachment_strip.dart';
@@ -52,7 +53,9 @@ void main() {
       });
 
       engine = SyncEngine(
-        api: StormApi(baseUrl: 'http://test', token: 't', client: client),
+        connection: StormConnection.direct(
+          api: StormApi(baseUrl: 'http://test', token: 't', client: client),
+        ),
         cache: cache,
         vaultId: FakeServer.primaryVault,
       );
@@ -159,7 +162,7 @@ Some text.
   });
 
   group('attachment URLs', () {
-    test('carry the token, since image widgets cannot set headers', () {
+    test('carry the credential, since image widgets cannot set headers', () {
       final api = StormApi(baseUrl: 'http://host:8484', token: 'secret');
       final url = api.attachmentUrl(
         FakeServer.primaryVault,
@@ -170,7 +173,10 @@ Some text.
         url.path,
         '/v1/vaults/${FakeServer.primaryVault}/attachments/attachments/x.png',
       );
-      expect(url.queryParameters['token'], 'secret');
+      // The scheme has to be there. This asserted the bare token until
+      // 2026-08-26, which is exactly the value the server's query fallback
+      // refuses — so the test passed while the URL authenticated nothing.
+      expect(url.queryParameters['token'], 'Bearer secret');
       api.dispose();
     });
   });

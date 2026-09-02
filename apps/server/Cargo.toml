@@ -20,6 +20,10 @@ data-encoding = "2.11.1"
 qrcode = { version = "0.14", default-features = false }
 diffy = "0.5.1"
 ed25519-dalek = "3.0.0"
+# `SinkExt`/`StreamExt` for the relay trunk's WebSocket and for streaming a
+# response body out as it is produced. Already in the tree under
+# tokio-tungstenite; named directly because `relay/client.rs` uses it directly.
+futures-util = { version = "0.3", default-features = false }
 notify = "8.2.0"
 rand = "0.10.2"
 rmcp = { version = "=3.1.2", features = ["server", "transport-streamable-http-server", "macros"] }
@@ -31,6 +35,17 @@ serde_json = "1.0.151"
 thiserror = "2.0.19"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
 tokio = { version = "1.53.1", features = ["full"] }
+# `ReceiverStream` only — the adapter that turns the SSE feed's channel into
+# the `Stream` `Body::from_stream` wants. Already in the tree via tokio-util.
+tokio-stream = "0.1.19"
+# The relay trunk's WebSocket client (`relay/client.rs`), and the fake relay
+# the tunnel tests drive. Was a dev-dependency when only a test needed it.
+#
+# **No TLS feature**, so this build dials `ws://` only. Adding one means
+# choosing a TLS stack and carrying it; until then a configured `wss://` relay
+# fails at connect with an explicit log line rather than a confusing handshake
+# error. See the tunnel client's `run_once`.
+tokio-tungstenite = "0.29.0"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["fs", "cors", "trace", "set-header"] }
 tracing = "0.1.44"

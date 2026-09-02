@@ -967,6 +967,450 @@ because it had no user for one to belong to.
 access to the machine — the bootstrap path (A8) is the only way in, and it
 assumes a console.
 
+**56. The relay's §0 prerequisites ship together, and the rate-limit numbers
+are a decision rather than a measurement.** *(2026-08-26, branch
+`worktree-relay-phase0`)*
+
+Two defences gate the first line of relay code, and neither depends on the
+tunnel. Both are now built.
+
+*Login-path rate limiting.* `login()` runs a full Argon2id verify for a
+username that does not exist — deliberately, so response time cannot enumerate
+accounts — which means a junk username can never trip the per-user lockout. The
+KDF's semaphore is global (2 permits, ~174 ms), so the whole server sustains
+~11 verifies/sec. Web bootstrap hands a device credential to anything that can
+fetch the app, so the full chain is: fetch app → pair → flood with random
+usernames → login is dead for everyone. Two hand-rolled token buckets, no new
+crate: **per-caller 30/min burst 30**, **global 60/min burst 60**. Per-caller
+is generous because a relay collapses a household behind one NAT address;
+global is strict because N addresses each under their own limit still saturate
+a globally bounded resource, and it is the half that actually protects the
+permits. Charged before the permit, refunded on success.
+
+**The numbers are chosen, not measured.** *Revisit if:* a real deployment sees
+legitimate users throttled (raise per-caller), or the global ceiling is reached
+by anything but an attack (it is ~9% of the Argon2 ceiling, so that would mean
+the derivation is wrong).
+
+*Challenge-on-connect.* The client re-proves the server's identity on every
+connect, including every reconnect, against the key pinned at pairing. It is
+the property that lets the relay stay untrusted infrastructure, and it was the
+one part of the relay's trust model that was designed but never running.
+
+Three findings worth keeping, each of which cost a cycle:
+
+- **`Option<ConnectInfo<SocketAddr>>` does not compile on axum 0.8.** There is
+  no blanket `Option<E>` impl; `E` must implement `OptionalFromRequestParts`
+  and `ConnectInfo` does not, so the obvious signature fails the `Handler`
+  bound with an error naming neither. This is the same shape as
+  `Option<WebSocketUpgrade>` on `stream`, already recorded — the checklist item
+  saying `pair_handler` should become `Option<ConnectInfo<..>>` is therefore
+  **not implementable as written** and needs a hand-written extractor.
+- **A sixth `Option<&str>` argument is a silent wrong column.** Adding `remote`
+  to `record_event` meant threading a `None` through twenty call sites with
+  three interchangeable optional slots; the first cut put it in the `device_id`
+  position everywhere and wrote every device id into `remote`. It compiled and
+  the suite passed. `record_event` keeps five arguments and
+  `record_event_from` takes the sixth.
+- **A rate limiter cannot be tested by a debug build sending requests one at a
+  time.** Each attempt costs a whole Argon2id verify (seconds unoptimised), so
+  the bucket refills faster than requests arrive and the limiter correctly
+  allows all of them. The router tests inject their own limits; the e2e suite
+  fires a concurrent burst, which is what a flood actually looks like.
+
+*Revisit if:* nothing here — these are properties of the tools, not choices.
+
+**57. Query-string authentication was dead, and the symptom had been filed as a
+flaky test.** *(2026-08-26, branch `staging`)*
+
+A WebSocket handshake carries no headers and neither does an `<img>` request,
+so `require_auth` also accepts the credential as `?token=`. Two independent
+faults meant that path could not authenticate anyone:
+
+- the server **never percent-decoded** the query value, so a conforming client
+  sending `token=Bearer%20abc` was matched raw against `"Bearer "` and missed;
+- both client call sites — the change-feed socket and `attachmentUrl` — sent
+  the **bare** token, which names no scheme and matches neither
+  `"Bearer "` nor `"StormDevice "`.
+
+Neither was noticed because the shared token contained no space and was
+compared whole. It was the only credential the raw, scheme-less form ever fit,
+so **removing it (decision 54) took query authentication with it, silently.**
+There was no test on the path at all, which is the A10 lesson recurring in the
+same release it was written about: *a credential every test is handed is a
+credential no test checks.* The one client test that did touch it asserted the
+bare token — it encoded the bug and passed while the URL it checked
+authenticated nothing.
+
+**The finding worth keeping is about the symptom, not the cause.** This was
+visible for six days as `two_client_sync_test.dart` scenario 2 — WebSocket push
+reaching the other client's cache — recorded in the vault as a timing flake
+that "failed once under CI load, passed on re-run". It was never a flake. The
+socket 401s, `_scheduleReconnect` fires, and the pull that follows does the work
+the push should have done; the test passes or fails on whether a 1s-to-60s
+backoff beats its own timeout. Every user has been on reconnect-driven polling
+rather than push since v0.2.6.
+
+> **A flaky test is a diagnosis, and it is the easiest one to reach for.**
+> Nothing else in the system reports a degraded-but-working path, so the only
+> place the breakage could surface was a test that sometimes lost a race —
+> and "flaky" is exactly the label that stops anyone looking further.
+
+The fix: the server decodes, and both clients send `api.credential` — one
+accessor shared by the header path and both query paths, so they cannot drift
+apart again. A server test pins both halves (bare refused, scheme-prefixed
+accepted), because the contract had none.
+
+*Revisit if:* the credential stops travelling in a URL.
+`POST /v1/auth/ws-ticket` exists for exactly that reason and mints a 60-second
+single-use ticket, but **nothing consumes it** — `consume_ws_ticket` has no
+callers. Wiring it up is the real answer and is now the recorded follow-up; a
+session token in a query string lands in proxy logs and browser history, and
+this decision only restores the behaviour that was intended, not the one that
+is right.
+
+**58. The published wire spec described a protocol where the relay
+authenticates clients.** *(2026-08-28)*
+
+`docs/srp-v1.md` §4 said *"a device registers with the relay"* and *"the client
+generates or loads its device keypair (Ed25519, the same pair pinned at
+pairing)"*. There is no such keypair — pairing pins the **server's** public key
+and hands the device a shared secret. The section described client
+authentication at the relay, which is exactly what **R12** forbids and what
+pass 0 retired Q13 over. Five more wire details were wrong in ways that would
+have compiled: the signed message omitted `server_id` and its separators, §4.1's
+allowlist/TOFU/account-owned binding table was absent, §6 had no registration
+messages at all, `stream_id` was client-allocated rather than relay-assigned,
+and §3 invented uniform binary framing where control is JSON in text frames.
+
+§3–§6 are regenerated from the accepted design, with an errata note kept at the
+top of the file.
+
+**Three things worth keeping, and none of them is "check specs more
+carefully".**
+
+*A transcription is not a copy.* The spec was written from the design note by
+an agent that had read it, and the result is **internally consistent** — it
+reads like a protocol, just not this one. That is precisely why a read-through
+does not catch it: there is no seam to notice, no contradiction on the page.
+The error is only visible against the source.
+
+*Review finds what it went looking for.* I reviewed that file and recorded it
+as reviewed. What I actually did was check the two things I had in mind —
+Cloudflare mentions (R7) and whether `Last-Event-ID` was left open — plus the
+non-goals, where I found and fixed two real contradictions. Finding something
+is what made it feel reviewed. **The sections that turned out correct are
+exactly the ones I wrote or touched; every section I did not read against the
+design was wrong.** A review with a checklist covers the checklist.
+
+*The first implementer is the first reviewer.* This was caught by the agent
+building the relay against the file, on its first read, before writing code —
+which is the argument for **R7** stated in miniature. A protocol with no
+implementation is a protocol nobody has checked, and the same is true of a
+spec: `docs/srp-v1.md` sat committed and cited for two days, and every note
+pointing at it was pointing at the wrong protocol.
+
+*Revisit if:* nothing here. The corrective is procedural and already applied —
+the spec now carries its own errata, and the vault's *Relay Review Log* records
+this as pass 7.
+
+**59. The ws-ticket had no expiry, and the comment above it said it did.**
+*(2026-08-30)*
+
+Decision 57 restored query-string authentication to the behaviour that was
+*intended* — a thirty-day session token in a URL — and recorded that the right
+answer was `POST /v1/auth/ws-ticket`, which mints a sixty-second single-use
+credential and which **nothing consumed**. Wiring it up found that the
+mechanism did not do the one thing it exists for.
+
+`consume_ws_ticket` had no callers. Its lookup filtered on `used IS NULL`
+alone, while the comment directly above it read *"Returns (ticket_id,
+session_id) for an unused, **unexpired** ticket"*. The function then checked
+the **session's** expiry — thirty days — and never the ticket's. So a ticket
+would have authenticated for a month, in a URL, which is the single place it
+must not. `purge_expired_ws_tickets` ran only *during* a successful consume, so
+nothing swept it either.
+
+There were **no tests for ws tickets at all** — fifteen mentions in the file,
+every one of them implementation. That is how a missing expiry survived being
+written, reviewed and shipped.
+
+Three things worth keeping:
+
+*A comment is not a check, and an unexecuted one drifts freely.* The comment
+described the intended behaviour and was written at the same time as the query
+that failed to implement it. Nothing ever ran the pair together, so nothing
+could disagree with it. **This is the third instance of the same shape in nine
+days**: the `remote` column whose writer ignored it (56), query auth that no
+credential could satisfy (57), and now this. Each was code that existed,
+compiled, read correctly, and had never been called.
+
+*The obvious fix would have been a second bug.* Adding `AND expires > ?` to the
+SQL is the natural move and it is wrong here — `now_rfc3339()` emits however
+many fractional digits an instant needs, so `…:44.1Z` sorts *before*
+`…:44.05Z`. This file's own rule, stated at the top, is that timestamps are
+parsed and never compared as strings. The check is in Rust.
+`purge_expired_ws_tickets` still does the string comparison; it is best-effort
+cleanup rather than a gate, and it is noted rather than silently left.
+
+*The duplication was the tell.* `consume_ws_ticket` reimplemented two of the
+four rules in `check` — the helper whose doc comment says it exists "so
+[`authenticate`] and [`refresh`] cannot drift apart on them." A third caller
+had drifted, in the direction the comment predicted, because it copied the
+rules instead of calling them.
+
+**Still exposed, deliberately:** `attachmentUrl` puts the session credential in
+a query string, because an `Image.network` cannot make a round trip before
+rendering. Narrower than a WebSocket's exposure and closing it needs a
+different mechanism, so it is recorded rather than half-fixed.
+
+*Revisit if:* an attachment mechanism appears that can carry a header, or the
+credential in an attachment URL is shown to leak somewhere that matters.
+
+**60. `storm-relay` exists, and building it found the spec's own security rule
+was half-written.** *(2026-08-30)*
+
+Phase 3's first slice: a standalone crate that accepts server registrations and
+authenticates them. Registration only — client trunks, streams, routing and
+`relay_peer_ip` are absent rather than stubbed, and the error enum defines only
+the two codes the crate can honestly send.
+
+**The finding.** A relay-auth message is
+`storm-relay-auth:v1:<server_id>:<nonce>` — two colon-delimited fields in one
+signed string. The spec was emphatic that a nonce may contain no `:`, *"because
+a nonce carrying `:` could make the signed bytes parse as a different
+`(server_id, nonce)` split"*. It then said nothing whatever about `server_id`,
+which is the other half of that split:
+
+```
+relay_auth_message("a:b", "c")  ==  relay_auth_message("a", "b:c")
+```
+
+Byte-identical. **A signature over one is a signature over the other**, and the
+rule that named the hole did not close it.
+
+On the server this was safe by accident — `server_id` is self-generated and
+could never carry a colon. **On the relay it arrives from the wire**, chosen by
+whoever is registering, which is exactly where it is reachable. The rule now
+lives in `identity.rs` beside `validate_nonce` as the shared definition rather
+than in the relay alone, because two implementations agreeing by coincidence is
+what this class of bug is made of.
+
+*The lesson is about the shape of the reasoning, not the omission.* The spec
+did not fail to think about delimiter injection — it thought about it
+carefully, wrote the argument down, and applied the conclusion to one of the
+two fields the argument covers. **A correct rationale stopping one field short
+is far harder to notice than a missing rationale**, because the paragraph reads
+as complete: it states the threat, states a rule, and moves on.
+
+> Where a security rule exists because of a *structural* property — a
+> delimiter, an encoding, an ambiguity — check the rule covers every field that
+> has that property, not the one that prompted it.
+
+Three more gaps the same implementation exposed, each of which would have
+produced conformant, non-interoperable code whose only symptom is
+`auth_failed`: no server-facing path was named (now `/register`), no encoding
+was stated for `pubkey`/`sig` (base64url unpadded), and "single-use" permitted
+re-arming a spent nonce by re-issuing it.
+
+**This is the second time implementing against `docs/srp-v1.md` has corrected
+it** — decision 58 was the first. Both corrections came from writing code, not
+from reading, which is R7's argument holding at the level of the document as
+well as the protocol.
+
+*Revisit if:* nothing here. The remaining relay work is listed in the vault; the
+one deliberate gap carried forward is that **TOFU bindings are in memory**, so
+a relay restart re-opens the first-use window for any server that has not yet
+reconnected. An allowlist is unaffected.
+
+
+**61. A request now travels client → relay → server and back, and making three
+copies of one wire format prove they agree found a fourth spelling of a key.**
+*(2026-08-31)*
+
+Phase 3 complete on `staging`. `storm-relay` grew its client half — `HELLO`/
+`READY`, `OPEN_STREAM`/`STREAM_READY`, `STREAM_OPEN`/`STREAM_ACK`, stream
+routing and multiplexing, `relay_peer_ip` from the accepted socket — and
+`apps/server` grew `src/relay/`, the tunnel client that registers over WSS and
+dispatches tunnelled requests **in process, through the same `Router`**. No
+loopback hop, no second logic path (R13). `relay_peer_ip` reaches the login
+limiter as `CallerKey::Ip`, which is the seam decision 56 left open.
+
+**`docs/srp-vectors.json`.** `relay_auth_message`, `validate_nonce`,
+`validate_server_id` and the base64url rules exist in three places that cannot
+depend on one another — `apps/server` is a binary crate with no library to link
+against, and it must stay that way, because the relay must never become
+mandatory (R6). Nothing in any build made them agree, and drift does not fail a
+compile: it surfaces at runtime as `auth_failed`, which is also what a genuine
+attack, an expired nonce and a refused binding all look like. That is the worst
+failure signature a mismatch could have. All three test suites now read one
+vector file, and the signatures in it come from an independent RFC 8032
+implementation, so the positive cases cross-check rather than having one library
+agree with itself.
+
+**The finding.** `dart:convert`'s `base64Url` decoder also accepts the standard
+`+/` alphabet, and accepts padding. `data_encoding`'s `BASE64URL_NOPAD`, which
+both Rust crates use, refuses both. The same 32-byte key therefore had **three
+valid spellings on the client and one everywhere else** — and §4.1 binds a
+`server_id` to a pubkey permanently, with no way back from a refused binding.
+Two implementations disagreeing about whether a spelling is valid disagree about
+whether a key has *changed*. The spec now states the rule, `decodeBase64UrlNoPad`
+enforces it, and reverting the check fails two vector tests by name.
+
+*This is the third finding of its shape*: decisions 57, 60 and now 61 are all
+one side of a wire being lenient, or strict, in a way the other side was not.
+The first two were caught by writing a second implementation. This one was
+caught by making the implementations testify against a common artifact, which is
+cheaper and repeatable.
+
+> A wire format re-derived in N places has N−1 opportunities to disagree, and a
+> library default is as likely a cause as a misreading. Shared vectors turn that
+> from a runtime symptom into a build failure.
+
+**Two defects were fixed while integrating**, both in code that had never
+compiled and so had never run:
+
+- **A clean shutdown could not send `DEREGISTER`.** The supervisor raced its own
+  reconnect loop against `serve_trunk`, so shutdown cancelled the future that
+  owed the relay a goodbye — leaving the relay holding the `server_id` until a
+  heartbeat timeout, which is the outage `DEREGISTER` exists to prevent. The
+  rule is now explicit: **shutdown may cancel the phases before registration,
+  never the serving phase.** The former have announced nothing; the latter owes
+  a `DEREGISTER`.
+- **`connect_async` had no deadline.** A relay that completes the TCP handshake
+  and then says nothing left the supervisor pending for ever — never retrying,
+  never backing off, never returning. Unreachable and silent must cost the same.
+
+And a test-harness race: the fake relay emits its "registered" event as it
+*sends* `REGISTERED`, necessarily before the client has received it, so three
+tests read the advertised set at a moment it could not yet be populated. They
+wait for the state now, with a deadline, so a registration that never lands
+still fails — on the timeout rather than on a misleading empty set.
+
+*Revisit if:* nothing here. Carried forward: **TOFU bindings are still in
+memory** (decision 60), `trunk_superseded`'s 30 s drain and the 45 s heartbeat
+deadline are unimplemented on the relay, and `attachmentUrl` still puts a
+credential in a query string. Next is phase 4 — the same relay on a VPS.
+
+**62. `staging` is the development trunk; `main` is the release branch.**
+*(2026-08-31)*
+
+Every PR targets `staging`. `main` moves only when a release is being cut, and
+**the merge to `main` is the release decision** — the operator's to make, never
+an agent's.
+
+This was already how the work was flowing and was written down nowhere. That
+gap had a cost: `staging` accumulated **25 commits and decisions 56–61** while
+every tool default, and the harness banner in an agent's own session, still said
+*"main — you will usually use this for PRs."* An agent following the default
+would have opened a release PR for a mid-slice relay.
+
+The rule also fixes what "done" means when reporting. `staging` is **not** a
+staging *server*; nothing on it is deployed. Prod serves what came off `main`,
+so a green `staging` says nothing about what users are running, and the gap can
+be many commits wide. **State the branch when reporting status** — "the relay
+works" and "the relay is released" have been many days apart.
+
+Two consequences worth knowing before starting a change:
+
+- **Branch from `staging`, not `main`.** Branching from `main` makes a PR carry
+  every unreleased commit, and its diff unreviewable.
+- **Read `PLAN.md` on `staging` before numbering a decision.** `staging` may
+  already carry entries `main` has never seen — this branch runs 56–62 while
+  `main` ends at 54, and decision 55 lives on a third branch entirely. A
+  numbering gap is harmless; a duplicate is not.
+
+*Revisit if:* releases become frequent enough that the two branches stay within
+a commit or two of each other, at which point the split is bookkeeping without
+a benefit. The opposite is the live risk: `staging` running so far ahead that
+merging it is a release nobody can review in one sitting. **25 commits is
+already at the edge of that.**
+
+**63. The Dart SRP client's architecture, and the discovery that
+`Image.network` can never work over a tunnel.** *(2026-08-31)*
+
+Phase 3 left a gap the phase numbering hides: the relay works, the server's
+tunnel client works, and **no user can benefit from either**, because there is
+no Dart SRP implementation at all. `grep` for `HELLO`, `OPEN_STREAM` or
+`HTTP_REQUEST_HEAD` across `apps/client/` returns nothing. Four decisions, with
+the full design in the vault's *Storm Relay Dart Client*.
+
+**D1 — the tunnel is an `http.Client`, not a new API layer.**
+`SrpHttpClient extends http.BaseClient`. `StormApi` already takes an injectable
+client, so wiring is one argument and no call site changes. This is R13 restated
+in Dart: the relay introduces no application protocol, so the client must not
+grow one either — a parallel `RelayApi` would be decision 37's `ops.rs` mistake
+one layer up. `StreamedResponse` also carries SSE for free.
+
+**D2 — one trunk, multiplexed.** REST and the change feed share it. One failure
+domain, one `HELLO` against the relay's per-IP limit, one reconnect state
+machine. A second trunk for the feed buys isolation that the per-stream cap
+already provides more cheaply.
+
+**D3 — the relay set is persisted and refreshed on any success.** In `Settings`
+beside `serverId` and `serverPublicKey`, seeded from the pairing payload. §4.3
+requires both carriers. **No TTL**: a stale entry costs part of one connection
+race, while having none costs reachability entirely — and staleness
+self-corrects on the first success where unreachability does not.
+
+**D4 — attachments go through a custom `ImageProvider`.**
+
+**The finding.** This began as a narrower question — `attachmentUrl` puts the
+credential in a query string, and through a relay that URL is read in plaintext
+by the relay operator, which is worse than the LAN case that put it on the
+backlog. Checking how the four call sites actually fetch turned up something
+larger:
+
+> **`Image.network` fetches through the platform HTTP stack, bypassing the
+> injected `http.Client` entirely.**
+
+So a relayed attachment URL would be a plain HTTPS GET against the relay's
+`/connect/<server_id>` — which is a **WebSocket upgrade endpoint expecting
+`HELLO`**. There is no value of `attachmentUrl` that makes it work. The problem
+was never only the credential; it was that the widget is not on the transport
+at all.
+
+A `StormImageProvider` fetching bytes through the injected client fixes three
+things at once: attachments route over the tunnel, the credential leaves the URL
+on *both* paths, and **the web client is fixed too** — the header change I first
+proposed would have worked on mobile and desktop and silently not on web, where
+`Image.network`'s headers are ignored.
+
+*The lesson is about where a seam stops.* The `StormConnection` seam was
+described as complete, with "wiring real relays later is configuration". That
+was true of everything routed *through* `StormApi` and false of four widgets
+that quietly route around it. **A transport seam only covers the callers that
+actually pass through it**, and the ones that don't are invisible precisely
+because they work fine today.
+
+Two more of that shape were already in the same file and are recorded in the
+vault note: `_candidates()` string-munges `wss://…/connect/<id>` into
+`https://…` and hands it to an `http.Client` as a base URL, and
+`connectionProvider` passes no relays at all — which is why neither has ever
+failed. **A path that is never exercised cannot report that it is wrong.**
+
+*Revisit if:* the tunnel's framing turns out to need its own isolate, which is
+deliberately unresolved and should be settled by a measurement rather than in
+advance; or if MCP over the tunnel needs more than a client swap (R10 says it
+should not, and the checklist's §5 says verify rather than assume).
+
+**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. Track B (Rust relay abuse controls + trunk_superseded 30s drain + 45s heartbeat) not started.
+
+**64. The `kit` vault is seeded by the server on first run**
+Storm is meant to be driven by coding agents, and an agent needs to be told how
+a project is laid out and what each role may read and write. That guidance is
+itself notes, so it belongs in a vault — `kit`, created and filled on a server's
+first boot from templates embedded out of `kit/vault/` at compile time. Making
+it core rather than an optional setup step is the whole point: every Storm
+server has one, so an adapter can assume it exists.
+Seeding keys off **the registry file being absent**, not off `kit` being
+missing. Someone who deletes the vault has said something, and restoring it on
+every start would override that silently. It is also non-fatal — a server that
+cannot write one vault still serves the others, loudly.
+*Revisit if:* the role set grows enough that shipping it in the binary is the
+wrong distribution (a fetch-on-demand catalogue would be the alternative), or if
+users want the templates without the vault.
+
 ---
 
 ## Data model

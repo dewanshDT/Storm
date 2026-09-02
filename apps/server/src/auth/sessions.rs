@@ -42,6 +42,10 @@ pub const WS_TICKET_LIFETIME_SECS: i64 = 60;
 pub const EVENT_LOGIN_OK: &str = "login_ok";
 pub const EVENT_LOGIN_FAIL: &str = "login_fail";
 pub const EVENT_LOGIN_LOCKED: &str = "login_locked";
+/// Refused by the login rate limiter before any credential check. Distinct
+/// from `login_locked` (a per-user lockout) because the remedy and the
+/// culprit differ: this one is about *who is calling*, not which account.
+pub const EVENT_LOGIN_THROTTLED: &str = "login_throttled";
 pub const EVENT_SESSION_CREATED: &str = "session_created";
 pub const EVENT_SESSION_REFRESHED: &str = "session_refreshed";
 pub const EVENT_SESSION_REVOKED: &str = "session_revoked";
@@ -388,21 +392,25 @@ impl AuthDb {
         Ok(())
     }
 
-    #[allow(dead_code)] // Used only by `consume_ws_ticket`, which awaits the WS upgrade handler.
-    fn ws_ticket_by_access_hash(&self, hash: &[u8]) -> Result<Option<(String, String)>> {
-        // Returns (ticket_id, session_id) for an unused, unexpired ticket.
+    /// `(ticket_id, session_id, expires)` for an **unused** ticket.
+    ///
+    /// Expiry is deliberately *not* a SQL predicate. `now_rfc3339()` emits
+    /// however many fractional digits an instant needs, so `…:44.1Z` and
+    /// `…:44.05Z` sort the wrong way round as text — the rule this whole file
+    /// keeps: **timestamps are parsed, never compared as strings.** The caller
+    /// parses `expires`, which is the only comparison that is correct.
+    fn ws_ticket_by_access_hash(&self, hash: &[u8]) -> Result<Option<(String, String, String)>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, session_id FROM ws_tickets
+                "SELECT id, session_id, expires FROM ws_tickets
                  WHERE access_hash = ?1 AND used IS NULL",
                 params![hash],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?)
     }
 
-    #[allow(dead_code)] // Used only by `consume_ws_ticket`.
     fn mark_ws_ticket_used(&self, id: &str, now: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE ws_tickets SET used = ?2 WHERE id = ?1",
@@ -801,34 +809,47 @@ pub fn create_ws_ticket(db: &mut AuthDb, session_id: &str, now: &str) -> Result<
 
 /// Validates a WebSocket ticket, consuming it if valid.
 ///
-/// Returns the session id the ticket was bound to, or an error.
-#[allow(dead_code)] // Awaits the WS upgrade handler.
-pub fn consume_ws_ticket(db: &mut AuthDb, ticket: &str, now: &str) -> Result<String, SessionError> {
-    let hash = token::hash(ticket);
+/// Returns the same [`Authenticated`] a session token would, because the
+/// caller needs a user and a device, not a session id — and because building
+/// one here by hand is how this function came to check two of
+/// [`check`]'s four rules and miss the others.
+///
+/// **The ticket's own 60-second expiry is checked here**, and it used to be
+/// checked nowhere. The lookup filtered on `used IS NULL` alone while its
+/// comment claimed "unused, unexpired", and this function checked only the
+/// *session's* expiry — thirty days. A ticket travels in a URL, where it lands
+/// in proxy logs and browser history; sixty seconds is the entire reason it
+/// exists, and it had none. Nothing caught it because nothing called this.
+pub fn consume_ws_ticket(
+    db: &mut AuthDb,
+    ticket: &str,
+    now: &str,
+) -> Result<Authenticated, SessionError> {
     let at = parse_time(now)?;
 
-    let (ticket_id, session_id) = db
-        .ws_ticket_by_access_hash(&hash)?
+    let (ticket_id, session_id, expires) = db
+        .ws_ticket_by_access_hash(&token::hash(ticket))?
         .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
 
-    // Check expiry.
-    let session = db
-        .session_by_id(&session_id)?
-        .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
-    if session.is_revoked() {
-        return Err(SessionError::Refused(AuthFailure::Revoked));
-    }
-    if parse_time(&session.expires).is_ok_and(|exp| at > exp) {
+    if parse_time(&expires)? <= at {
         return Err(SessionError::Refused(AuthFailure::Expired));
     }
 
-    // Mark used (single-use).
-    db.mark_ws_ticket_used(&ticket_id, now)?;
+    let session = db
+        .session_by_id(&session_id)?
+        .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
 
-    // Purge old tickets to keep the table small.
+    // The shared gate, so a ticket and a session token cannot disagree about
+    // what "usable" means — which is exactly what this function was doing.
+    let authenticated = check(db, &session, now, at)?;
+
+    // Single-use. Marked *after* the session checks, so a ticket presented
+    // against a revoked session is not silently burned on the way to being
+    // refused.
+    db.mark_ws_ticket_used(&ticket_id, now)?;
     let _ = db.purge_expired_ws_tickets(now)?;
 
-    Ok(session_id)
+    Ok(authenticated)
 }
 
 /// The response from `POST /v1/auth/ws-ticket`.
@@ -867,6 +888,11 @@ mod tests {
 
     fn later(minutes: i64) -> String {
         format_time(parse_time(NOW).unwrap() + Duration::minutes(minutes))
+    }
+
+    /// Seconds matter for ws tickets, which live for sixty of them.
+    fn secs_later(secs: i64) -> String {
+        format_time(parse_time(NOW).unwrap() + Duration::seconds(secs))
     }
 
     fn days_later(days: i64) -> String {
@@ -1099,6 +1125,100 @@ mod tests {
     }
 
     // ---- login -----------------------------------------------------------
+
+    // ---- WebSocket tickets ------------------------------------------------
+    //
+    // There were none of these, which is how the ticket's own expiry came to
+    // be enforced nowhere while its lookup's comment claimed otherwise.
+
+    /// A session to mint tickets against.
+    async fn ticketed() -> (AuthDb, User, IssuedSession) {
+        let (mut db, hasher, user, device) = fixture().await;
+        let issued = login(
+            &mut db,
+            &hasher,
+            "dewansh",
+            PASSWORD.to_string(),
+            &device.id,
+            NOW,
+        )
+        .await
+        .unwrap();
+        (db, user, issued)
+    }
+
+    #[tokio::test]
+    async fn a_fresh_ticket_authenticates_as_its_session() {
+        let (mut db, user, issued) = ticketed().await;
+        let t = create_ws_ticket(&mut db, &issued.session_id, NOW).unwrap();
+
+        let authed = consume_ws_ticket(&mut db, &t.ticket, NOW).unwrap();
+        assert_eq!(authed.user.id, user.id);
+        assert_eq!(authed.session.id, issued.session_id);
+    }
+
+    #[tokio::test]
+    async fn an_expired_ticket_is_refused() {
+        // **The regression test.** The lookup filtered on `used IS NULL`
+        // alone, and the consume path checked only the *session's* expiry —
+        // thirty days — so a ticket stayed valid for a month in a URL. Sixty
+        // seconds is the entire reason a ticket exists.
+        let (mut db, _, issued) = ticketed().await;
+        let t = create_ws_ticket(&mut db, &issued.session_id, NOW).unwrap();
+        assert_eq!(t.expires_in, WS_TICKET_LIFETIME_SECS);
+
+        let just_inside = consume_ws_ticket(&mut db, &t.ticket, &secs_later(30));
+        assert!(just_inside.is_ok(), "30s is inside the window");
+
+        let t2 = create_ws_ticket(&mut db, &issued.session_id, NOW).unwrap();
+        let past = consume_ws_ticket(&mut db, &t2.ticket, &secs_later(61));
+        assert!(
+            matches!(past, Err(SessionError::Refused(AuthFailure::Expired))),
+            "a ticket past its 60s must not authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_is_single_use() {
+        let (mut db, _, issued) = ticketed().await;
+        let t = create_ws_ticket(&mut db, &issued.session_id, NOW).unwrap();
+
+        assert!(consume_ws_ticket(&mut db, &t.ticket, NOW).is_ok());
+        assert!(
+            consume_ws_ticket(&mut db, &t.ticket, NOW).is_err(),
+            "replaying a spent ticket must fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_for_a_revoked_session_is_refused() {
+        // The session gate is shared with `authenticate` via `check`, so a
+        // ticket cannot outlive a logout. The ticket is marked used only
+        // *after* that gate, so a refusal does not silently spend it.
+        let (mut db, _, issued) = ticketed().await;
+        let t = create_ws_ticket(&mut db, &issued.session_id, NOW).unwrap();
+        revoke(&mut db, &issued.session_id, "logout", NOW).unwrap();
+
+        let refused = consume_ws_ticket(&mut db, &t.ticket, NOW);
+        assert!(matches!(
+            refused,
+            Err(SessionError::Refused(AuthFailure::Revoked))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_invented_ticket_is_refused() {
+        let (mut db, _, _) = ticketed().await;
+        assert!(consume_ws_ticket(&mut db, "stt_nonsense", NOW).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_session_token_is_not_a_ticket() {
+        // Different credential, different table. Passing one where the other
+        // belongs must fail rather than quietly work.
+        let (mut db, _, issued) = ticketed().await;
+        assert!(consume_ws_ticket(&mut db, &issued.access_token, NOW).is_err());
+    }
 
     #[tokio::test]
     async fn a_correct_password_logs_in() {

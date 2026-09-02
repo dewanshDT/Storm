@@ -144,7 +144,14 @@ class FakeServer {
     return list;
   }
 
+  /// How many requests have reached this server.
+  ///
+  /// For the tests that assert a request was *not* sent — "the engine stayed
+  /// silent" cannot be shown by inspecting a response that never came.
+  int requests = 0;
+
   http.Client get client => MockClient((request) async {
+    requests++;
     if (unreachable) {
       throw http.ClientException('Connection refused');
     }

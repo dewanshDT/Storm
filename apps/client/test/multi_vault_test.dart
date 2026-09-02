@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart' show Value;
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -424,7 +425,13 @@ void offlineConflation() {
     addTearDown(cache.close);
     final server = FakeServer();
     final engine = SyncEngine(
-      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      connection: StormConnection.direct(
+        api: StormApi(
+          baseUrl: 'http://test',
+          token: 't',
+          client: server.client,
+        ),
+      ),
       cache: cache,
       vaultId: FakeServer.primaryVault,
     );
@@ -460,7 +467,13 @@ void offlineConflation() {
       version: 1,
     );
     final engine = SyncEngine(
-      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      connection: StormConnection.direct(
+        api: StormApi(
+          baseUrl: 'http://test',
+          token: 't',
+          client: server.client,
+        ),
+      ),
       cache: cache,
       vaultId: FakeServer.primaryVault,
     );
@@ -492,7 +505,13 @@ void offlineConflation() {
     server.pushChange('n1', 'updated', 2);
 
     final engine = SyncEngine(
-      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      connection: StormConnection.direct(
+        api: StormApi(
+          baseUrl: 'http://test',
+          token: 't',
+          client: server.client,
+        ),
+      ),
       cache: cache,
       vaultId: FakeServer.primaryVault,
     );

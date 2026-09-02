@@ -3,6 +3,27 @@
 /// Same philosophy as `models.dart`: these mirror the server's JSON exactly.
 library;
 
+/// One relay the server is **registered with** — not merely configured.
+///
+/// The server drops relays it failed to register with before answering, so
+/// every entry here is a path worth dialling. A configured-but-dead one would
+/// spend the connection race's whole budget going nowhere.
+class RelayAdvert {
+  const RelayAdvert({required this.url, required this.publicAddress});
+
+  /// The relay itself, e.g. `wss://relay.example.com`.
+  final String url;
+
+  /// Where *this* server answers on it —
+  /// `wss://<relay-host>/connect/<server_id>`. Derived, never allocated.
+  final String publicAddress;
+
+  factory RelayAdvert.fromJson(Map<String, dynamic> j) => RelayAdvert(
+    url: j['url'] as String,
+    publicAddress: j['public_address'] as String,
+  );
+}
+
 /// Server identity, from `GET /v1/server`.
 class ServerInfo {
   const ServerInfo({
@@ -10,6 +31,7 @@ class ServerInfo {
     required this.keyId,
     required this.algorithm,
     required this.publicKey,
+    this.relays = const [],
   });
 
   final String serverId;
@@ -17,11 +39,22 @@ class ServerInfo {
   final String algorithm;
   final String publicKey;
 
+  /// The live registered-relay set. Empty on a server with no tunnel client,
+  /// and **absent entirely** on one predating the field — hence the default
+  /// rather than a required key, since this endpoint is the one thing a
+  /// stranded client can still reach.
+  final List<RelayAdvert> relays;
+
   factory ServerInfo.fromJson(Map<String, dynamic> j) => ServerInfo(
     serverId: j['server_id'] as String,
     keyId: j['key_id'] as String,
     algorithm: j['algorithm'] as String,
     publicKey: j['public_key'] as String,
+    relays:
+        (j['relays'] as List?)
+            ?.map((r) => RelayAdvert.fromJson(r as Map<String, dynamic>))
+            .toList() ??
+        const [],
   );
 }
 

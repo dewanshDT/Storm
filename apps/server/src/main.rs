@@ -11,17 +11,33 @@
 //! defensible while it stays on the LAN — exposing this beyond it needs TLS
 //! and per-device tokens first.
 
+// An axum handler that can fail returns `Response` as its error type — that is
+// the framework's shape, not a choice this crate makes, and it is how a handler
+// answers with a status and a body instead of a 500. clippy counts those bytes
+// and asks for `Box<Response>`, which would move an already-heap-backed body
+// behind a second allocation in every handler to shrink a value that never
+// outlives one request.
+//
+// **It fires on x86_64-linux and not on aarch64-darwin**, on the same 1.98.0.
+// So it arrived through `dtolnay/rust-toolchain@stable` moving under CI — the
+// `server (rust)` job went red on 2026-08-31 and PR #34 was merged past it —
+// and it cannot be reproduced, or a fix verified, on a Mac. A lint nobody can
+// run locally is not a gate; it is a tax on whoever pushes next.
+#![allow(clippy::result_large_err)]
+
 mod api;
 mod auth;
 mod db;
 mod frontmatter;
 mod index;
 mod install;
+mod kit;
 mod mcp;
 mod merge;
 mod ops;
 mod parse;
 mod registry;
+mod relay;
 mod vault;
 mod watcher;
 
@@ -239,6 +255,15 @@ struct ServeArgs {
     /// a decision rather than a side effect of upgrading.
     #[arg(long)]
     mcp: bool,
+    // Deliberately no `--relay` here, however much it looks like `--mcp`'s
+    // sibling. `Registry::relays` is a setting the app can also change at
+    // runtime, and a flag would seed it before `state/vaults.json` exists —
+    // exactly the two-authorities bug `--vault-root` already taught us:
+    // a root chosen in the app was recorded, then ignored on the next boot,
+    // then erased by the next save. A setting that does not survive a
+    // restart is not a setting. If relays ever need a boot-time override,
+    // it needs the same reconcile-with-the-stored-value treatment `--mcp`
+    // gets above, not a bare flag.
 }
 
 /// Rewrite a legacy flat-flag invocation into a subcommand.
@@ -558,6 +583,10 @@ struct PreparedVaults {
     root: PathBuf,
     state_dir: PathBuf,
     registry: Registry,
+    /// No registry file existed when this ran. Recorded here because it can
+    /// only be observed *before* the registry loads, and the serve path needs
+    /// it afterwards to decide whether to seed the `kit` vault.
+    first_run: bool,
 }
 
 fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
@@ -573,6 +602,10 @@ fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
         .state
         .canonicalize()
         .with_context(|| format!("resolving state directory {}", args.state.display()))?;
+
+    // Observed before the load, because loading is what creates the file this
+    // asks about.
+    let first_run = kit::is_first_run(&state_dir);
 
     let mut registry = Registry::load(&state_dir, &root).context("reading the vault registry")?;
 
@@ -609,6 +642,7 @@ fn prepare_vaults(args: &VaultArgs) -> Result<PreparedVaults> {
         root,
         state_dir,
         registry,
+        first_run,
     })
 }
 
@@ -974,9 +1008,23 @@ fn run_pair(args: PairArgs) -> Result<()> {
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
-    let registry = prepared.registry;
+    let mut registry = prepared.registry;
     let state_dir = prepared.state_dir;
     let root = prepared.root;
+
+    // The `kit` vault carries the agent tooling every Storm server is expected
+    // to have, so a first boot creates it rather than leaving it as a setup
+    // step. Only on a first boot: deleting it afterwards is a decision, and
+    // restoring it on every start would override that decision silently.
+    if prepared.first_run {
+        match kit::seed(&mut registry, &index::now_rfc3339()) {
+            Ok(true) => tracing::info!(vault = kit::VAULT_NAME, "seeded the agent kit vault"),
+            Ok(false) => {}
+            // A server that cannot write one vault should still serve the
+            // others. Loud, not fatal.
+            Err(e) => tracing::warn!(error = %e, "could not seed the kit vault"),
+        }
+    }
 
     registry.save(&state_dir).context("saving the registry")?;
     let mut vault_set = api::open_vaults(&registry, &state_dir).context("opening vaults")?;
@@ -1019,6 +1067,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         allowed_hosts = ?mcp::allowed_hosts(&args.host, args.port),
         "MCP endpoint at /mcp (read-only tools, same bearer token)"
     );
+    // Observability only — no tunnel client exists yet, so `registered` is
+    // always 0 today. Not a second authority: nothing here is read back.
+    tracing::info!(
+        configured = vault_set.registry.relays.len(),
+        registered = vault_set.registry.registered_relays.snapshot().len(),
+        "relay configuration"
+    );
 
     // The A10 migration switch, read from the registry rather than assumed.
     // Absent from an older registry it loads as `true`, because that registry
@@ -1040,6 +1095,14 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // Mirrored out of the registry so a change applies to the next request
     // rather than the next restart (A13).
     let vault_set_allow_registration = vault_set.registry.allow_registration;
+
+    // Taken before the registry moves into `AppState`. The configured list is
+    // a snapshot: relays added through `PUT /v1/config/relays` are picked up on
+    // the next restart, not live. `registered_relays` is a shared handle, so
+    // what the supervisors record below is what `/v1/server` reports.
+    let configured_relays = vault_set.registry.relays.clone();
+    let registered_relays = vault_set.registry.registered_relays.clone();
+    let tunnel_identity = identity.clone();
 
     // Bootstrap pairing: when no users exist, create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
@@ -1091,6 +1154,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         // One hasher for the process, so the semaphore actually bounds
         // anything. See the field's documentation in `api.rs`.
         hasher: auth::Hasher::new(),
+        // Same: one limiter for the process, or the limits do not exist.
+        login_limiter: auth::ratelimit::LoginLimiter::new(),
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -1201,6 +1266,26 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .await
         .with_context(|| format!("binding {addr}"))?;
 
+    // **The tunnel serves the same `app` the listener does**, cloned rather
+    // than rebuilt: same routes, same auth layers, same web fallback. A second
+    // router assembled for relayed traffic is how the two would drift, and R13
+    // is precisely the claim that they cannot.
+    //
+    // Spawned before `serve` and never awaited on the request path — a relay
+    // that is unreachable, slow or hung costs a background task and nothing
+    // else. `bind_host` is `args.host`, matching what `mcp::allowed_hosts` was
+    // built from above.
+    let tunnels = relay::Tunnels::spawn(
+        &configured_relays,
+        tunnel_identity,
+        app.clone(),
+        registered_relays,
+        &addr,
+    );
+    if !configured_relays.is_empty() {
+        tracing::info!(relays = configured_relays.len(), "connecting to relays");
+    }
+
     tracing::info!("storm-server listening on http://{addr}");
     // `into_make_service_with_connect_info` is what makes the peer address
     // available to handlers. `/v1/pair/local` refuses anything that is not
@@ -1209,8 +1294,19 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    // Graceful shutdown exists so the tunnels below get a chance to run.
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down");
+    })
     .await
     .context("serving")?;
+
+    // `DEREGISTER`, and wait for it to go out. Without this the relay holds the
+    // `server_id` until a heartbeat timeout and every client trying to reach
+    // this server waits that out — a restart would look like an outage for as
+    // long as the timeout lasts.
+    tunnels.shutdown().await;
     Ok(())
 }
 

@@ -2,6 +2,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/note_session.dart';
 import 'package:storm/sync/sync_engine.dart';
@@ -23,7 +24,13 @@ void main() {
     cache = CacheDb(NativeDatabase.memory());
     server = FakeServer();
     engine = SyncEngine(
-      api: StormApi(baseUrl: 'http://test', token: 't', client: server.client),
+      connection: StormConnection.direct(
+        api: StormApi(
+          baseUrl: 'http://test',
+          token: 't',
+          client: server.client,
+        ),
+      ),
       cache: cache,
       vaultId: FakeServer.primaryVault,
     );

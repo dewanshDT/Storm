@@ -42,8 +42,10 @@ class _VaultBubbleState extends ConsumerState<VaultBubble> {
 
     final status = dotStatusFor(
       online: engine.isOnline,
+      identityFailed: engine.serverIdentityFailed,
       syncing: engine.isSyncing,
       pending: engine.pendingCount,
+      tier: engine.connectionTier,
     );
 
     return Stack(
@@ -87,8 +89,10 @@ class _VaultBubbleState extends ConsumerState<VaultBubble> {
           final vaults = ref.watch(vaultsProvider).value ?? const [];
           final status = dotStatusFor(
             online: engine.isOnline,
+            identityFailed: engine.serverIdentityFailed,
             syncing: engine.isSyncing,
             pending: engine.pendingCount,
+            tier: engine.connectionTier,
           );
 
           return StormPopover(
@@ -188,6 +192,13 @@ String _syncLine(DotStatus status, int pending, DateTime? lastSynced) =>
         pending > 0
             ? 'Offline · $pending edit${pending == 1 ? '' : 's'} queued'
             : 'Offline · showing your cached copy',
+      // Not "offline": the server answered. It just could not prove it was
+      // the server, so nothing is being sent to it.
+      DotStatus.untrusted => 'Server identity failed · not syncing',
+      DotStatus.relayed =>
+        pending > 0
+            ? 'Relayed · sending $pending edit${pending == 1 ? '' : 's'}…'
+            : 'Relayed · synced ${relativeTime(lastSynced)}',
     };
 
 String hostOf(String url) =>

@@ -47,7 +47,9 @@ EXPECTED_TOOLS = {
     "get_note_history",
     "get_note_version",
     "get_related_notes",
+    "get_script",
     "get_vault",
+    "list_scripts",
     "list_tags",
     "list_vaults",
     "recent_notes",
@@ -55,7 +57,13 @@ EXPECTED_TOOLS = {
 }
 
 # Only served when the server is in read-write mode.
-WRITE_TOOLS = {"create_note", "update_note", "delete_note"}
+WRITE_TOOLS = {
+    "create_note",
+    "update_note",
+    "delete_note",
+    "create_script",
+    "update_script",
+}
 
 ok = 0
 fail = 0
@@ -94,6 +102,18 @@ def rest(method, path, body=None):
             return e.code, json.loads(raw or b"{}")
         except json.JSONDecodeError:
             return e.code, {"error": raw.decode(errors="replace")}
+
+
+def rest_raw(method, path, data):
+    """A raw-body REST call (attachment PUT), for the script fixtures."""
+    req = urllib.request.Request(f"{BASE}{path}", data=data, method=method)
+    req.add_header("Authorization", SESSION)
+    req.add_header("Content-Type", "text/plain")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
 
 
 def rpc(method, params=None, token=None, bearer=True):
@@ -196,6 +216,22 @@ check(
 print("== fixtures ==")
 _, vaults_body = rest("GET", "/v1/vaults")
 vault = vaults_body["vaults"][0]["id"]
+# The script tools are scoped to the **kit** vault (the one whose directory is
+# `kit`), and only there. Ensure it exists before touching any script read.
+kit = next((v["id"] for v in vaults_body["vaults"] if v["dir"] == "kit"), None)
+if kit is None:
+    _, created = rest("POST", "/v1/vaults", {"name": "kit"})
+    kit = created.get("id")
+check("a kit vault exists for the script tools", bool(kit), vaults_body)
+# A script the reads below can see, written the way a client would — a raw
+# attachment PUT, which lands in the same attachment store the MCP script tools
+# read.
+status, _ = rest_raw(
+    "PUT",
+    f"/v1/vaults/{kit}/attachments/scripts/demo/say-hello.sh",
+    b"#!/usr/bin/env sh\necho hello\n",
+)
+check("fixture script seeded via attachment PUT", status == 200, status)
 # A description to read back, written the way a client would — through the API,
 # into the config note the design already uses.
 rest(
@@ -271,6 +307,29 @@ result, raw = call("recent_notes")
 sc = structured(result)
 check("recent_notes includes the opened note", any(r["note_id"] == note_id for r in sc.get("recents", [])), sc)
 check("recent_notes names the vault it came from", all("vault_name" in r for r in sc.get("recents", [])), sc)
+
+print("== scripts ==")
+result, raw = call("list_scripts")
+sc = structured(result)
+scripts = sc.get("scripts", [])
+check("list_scripts lists the seeded script", any(s["name"] == "demo/say-hello.sh" for s in scripts), sc)
+check("script names stay vault-relative", all(not s["name"].startswith("/") for s in scripts), sc)
+
+result, raw = call("list_scripts", {"prefix": "demo/"})
+sc = structured(result)
+names = [s["name"] for s in sc.get("scripts", [])]
+check("list_scripts filters by prefix", names and all(n.startswith("demo/") for n in names), sc)
+
+result, raw = call("get_script", {"name": "demo/say-hello.sh"})
+sc = structured(result)
+check("get_script returns the text", sc.get("content", "").startswith("#!/usr/bin/env sh"), sc)
+check("get_script reports a size", sc.get("size", 0) > 0, sc)
+check("get_script returns the scripts/ path", sc.get("path") == "scripts/demo/say-hello.sh", sc)
+
+result, raw = call("get_script", {"name": "no/such-script.sh"})
+check("an unknown script is a tool error", (result or {}).get("isError") is True, raw)
+result, raw = call("get_script", {"name": "notes/README.md"})
+check("a markdown name is refused by the allowlist", (result or {}).get("isError") is True, raw)
 
 print("== history ==")
 result, raw = call("get_note_history", {"vault": vault, "note_id": note_id})
@@ -424,6 +483,45 @@ check("delete_note removes it", "seq" in structured(result), structured(result))
 check("the note existed to delete", bool(written_id), "create_note returned no id")
 result, _ = call("get_note", {"vault": vault, "note_id": written_id})
 check("and it is gone", (result or {}).get("isError") is True, result)
+
+print("== scripts writable ==")
+result, raw = call(
+    "create_script",
+    {"name": "demo/run.spec.ts", "content": "const x = 1;\n"},
+)
+sc = structured(result)
+check("create_script stores under scripts/", sc.get("path") == "scripts/demo/run.spec.ts", sc)
+check("create_script reports the size", sc.get("size") == len("const x = 1;\n"), sc)
+
+result, raw = call("create_script", {"name": "demo/run.spec.ts", "content": "const y = 2;\n"})
+check("create_script refuses an existing name", (result or {}).get("isError") is True, raw)
+
+result, raw = call(
+    "update_script",
+    {"name": "demo/run.spec.ts", "content": "const z = 3;\n"},
+)
+check("update_script replaces the content", structured(result).get("size", 0) == len("const z = 3;\n"), raw)
+result, _ = call("get_script", {"name": "demo/run.spec.ts"})
+check("and the new text is readable back", "const z = 3;" in structured(result).get("content", ""), structured(result))
+
+result, raw = call("update_script", {"name": "demo/missing.ts", "content": "x\n"})
+check("update_script on a missing script is a tool error", (result or {}).get("isError") is True, raw)
+
+# The allowlist and path safety are the security boundary of the script surface.
+for bad in ["tool.bat", "evil.exe", "notes/notes.md", "demo/../../escape.sh", "/absolute.ts"]:
+    result, raw = call("create_script", {"name": bad, "content": "x\n"})
+    check(f"disallowed script name {bad!r} is refused", (result or {}).get("isError") is True, raw)
+
+# One store, two surfaces: the script written over MCP is a plain attachment
+# over REST, in the same vault.
+result, _ = call("get_script", {"name": "demo/run.spec.ts"})
+check("the script exists in the kit vault", (result or {}).get("isError") is not True, result)
+status, body = rest("GET", f"/v1/vaults/{kit}/attachments")
+check(
+    "and shows up as an attachment over REST",
+    any(a["path"] == "scripts/demo/run.spec.ts" for a in body.get("attachments", [])),
+    body,
+)
 
 print("== writes cannot outlive the endpoint ==")
 rest("PUT", "/v1/config/mcp", {"enabled": False, "writable": True})

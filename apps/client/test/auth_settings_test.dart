@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:storm/api/auth_models.dart';
 import 'package:storm/state/app_state.dart';
 
 /// The auth half of [Settings] — device credentials, session tokens, and the
@@ -105,6 +106,37 @@ void main() {
       expect(fresh.isPaired, isFalse);
       expect(fresh.hasSession, isFalse);
       expect(fresh.isConfigured, isFalse);
+    });
+
+    test('the relay set (D3) survives a save and reload', () async {
+      const relays = [
+        RelayAdvert(
+          url: 'wss://relay.example.com',
+          publicAddress: 'wss://relay.example.com/connect/srv-1',
+        ),
+        RelayAdvert(
+          url: 'wss://mine.example',
+          publicAddress: 'wss://mine.example/connect/srv-1',
+        ),
+      ];
+      final notifier = await notifierOver({});
+      await notifier.save(paired.copyWith(relays: relays));
+
+      final reloaded = await reload();
+      expect(reloaded.relays.length, 2);
+      expect(reloaded.relays[0].url, 'wss://relay.example.com');
+      expect(
+        reloaded.relays[0].publicAddress,
+        'wss://relay.example.com/connect/srv-1',
+      );
+      expect(reloaded.relays[1].url, 'wss://mine.example');
+    });
+
+    test('a corrupt stored relay set loads as empty, not an error', () async {
+      final notifier = await notifierOver({'storm.relays': 'not-json'});
+      await notifier.save(paired);
+      final reloaded = await reload();
+      expect(reloaded.relays, isEmpty);
     });
   });
 

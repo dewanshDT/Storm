@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api/models.dart';
+import '../api/server_verifier.dart';
+import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 
@@ -50,9 +54,28 @@ class SaveOutcome {
 /// homelab unreachable — VPN down, server restarting, wrong subnet — and only
 /// a real request distinguishes that from working.
 class SyncEngine extends ChangeNotifier {
-  SyncEngine({required this.api, required this.cache, required this.vaultId});
+  SyncEngine({
+    required this.connection,
+    required this.cache,
+    required this.vaultId,
+  });
 
-  final StormApi api;
+  /// How the server is reached, and the only object that knows.
+  ///
+  /// The engine is where this has to live, because it is the only thing owning
+  /// *both* ends of the connection lifecycle — [start] for a cold start and a
+  /// vault switch, and [_scheduleReconnect] for everything else. Connecting in
+  /// `start` alone would leave every reconnect on an unchecked transport, and
+  /// a reconnect is exactly when the path may have changed underneath us.
+  final StormConnection connection;
+
+  /// The API client for whatever transport currently wins.
+  ///
+  /// A getter, so every `api.x()` below follows a re-race without knowing one
+  /// happened. That is the seam doing its job: nothing here distinguishes a
+  /// direct dial from a relayed one.
+  StormApi get api => connection.api;
+
   final CacheDb cache;
 
   /// The vault this engine serves.
@@ -65,6 +88,25 @@ class SyncEngine extends ChangeNotifier {
 
   bool _online = true;
   bool get isOnline => _online;
+
+  /// Set when the server answered a challenge and could not prove it holds the
+  /// key we pinned at pairing.
+  ///
+  /// **Deliberately not folded into [isOnline].** That flag means "requests to
+  /// this server succeed", is inferred from real request outcomes, and a
+  /// dropped socket explicitly does not clear it. "Reachable, but not who it
+  /// claims to be" is a third state: the traffic is arriving somewhere, and
+  /// that somewhere is the problem. Collapsing the two would report an
+  /// interception as a wifi hiccup.
+  bool _impostor = false;
+  bool get serverIdentityFailed => _impostor;
+
+  /// Whether a request may go out at all.
+  ///
+  /// An unverified server gets nothing — not a note body, not a save. The
+  /// point of the check is to avoid handing plaintext to whatever is
+  /// answering, so "block sync" has to mean every request, not just the pull.
+  bool get _mayReachServer => _online && !_impostor;
 
   int _pending = 0;
   int get pendingCount => _pending;
@@ -86,18 +128,71 @@ class SyncEngine extends ChangeNotifier {
 
   WebSocketChannel? _ws;
   StreamSubscription? _wsSub;
+  StreamSubscription? _sseSub;
   Timer? _reconnect;
   Timer? _pullDebounce;
   int _backoffSeconds = 1;
   bool _disposed = false;
+
+  /// The active connection's tier (direct, self-hosted relay, public relay).
+  /// Used by the UI to show direct-vs-relayed.
+  CandidateTier get connectionTier => connection.active.tier;
+
+  /// Whether the active connection is relayed (vs direct LAN).
+  bool get isRelayed => connection.isRelayed;
+
+  /// The connection status from the seam (idle, connecting, connected, unproven, offline).
+  ConnectionStatus get connectionStatus => connection.status;
 
   // ---- lifecycle -----------------------------------------------------
 
   Future<void> start() async {
     _pending = await cache.pendingCount(vaultId);
     notifyListeners();
+    if (!await _proveServer()) return;
     await sync();
-    _openSocket();
+    await _openSocket();
+  }
+
+  /// Runs the connect-time identity check, and reports whether to proceed.
+  ///
+  /// An unreachable server is ordinary offline — the reconnect timer will try
+  /// again, and nothing about identity has been learned either way. An
+  /// impostor stops everything and stays stopped until a later check passes,
+  /// which is what makes this a gate rather than an indicator.
+  Future<bool> _proveServer() async {
+    if (_disposed) return false;
+
+    final proof = await connection.connect();
+    if (_disposed) return false;
+
+    switch (proof) {
+      case ServerProof.verified:
+        // A server that proves itself clears a previous failure: the relay may
+        // have been swapped out, or the interception may have stopped.
+        _setImpostor(false);
+        return true;
+      case ServerProof.impostor:
+        _setImpostor(true);
+        _scheduleReconnect();
+        return false;
+      case ServerProof.unreachable:
+        _setOnline(false);
+        _scheduleReconnect();
+        return false;
+    }
+  }
+
+  /// What a refused write says. Same sentence the pairing screen uses when
+  /// the challenge fails there, because it is the same event: something is
+  /// answering for the server and cannot prove it is the server.
+  static const _impostorMessage =
+      'Server failed the cryptographic challenge. Connection may be intercepted.';
+
+  void _setImpostor(bool value) {
+    if (_impostor == value) return;
+    _impostor = value;
+    notifyListeners();
   }
 
   @override
@@ -107,6 +202,7 @@ class SyncEngine extends ChangeNotifier {
     _reconnect?.cancel();
     _wsSub?.cancel();
     _ws?.sink.close();
+    _sseSub?.cancel();
     _changes.close();
     super.dispose();
   }
@@ -128,7 +224,7 @@ class SyncEngine extends ChangeNotifier {
   Future<CachedNote?> openNote(String id) async {
     final cached = await cache.note(vaultId, id);
 
-    if (!_online) return cached;
+    if (!_mayReachServer) return cached;
 
     try {
       final fresh = await api.note(vaultId, id);
@@ -163,7 +259,7 @@ class SyncEngine extends ChangeNotifier {
   /// The offline tree only lists notes that happen to be cached, which is
   /// honest: those are the ones that can actually be opened.
   Future<List<NoteMeta>> tree() async {
-    if (_online) {
+    if (_mayReachServer) {
       try {
         final vault = await api.tree(vaultId);
         _folders = vault.folders;
@@ -200,7 +296,7 @@ class SyncEngine extends ChangeNotifier {
     required int baseVersion,
     required String content,
   }) async {
-    if (!_online) return _queue(id, baseVersion, content);
+    if (!_mayReachServer) return _queue(id, baseVersion, content);
 
     try {
       final result = await api.saveNote(
@@ -275,6 +371,10 @@ class SyncEngine extends ChangeNotifier {
     required String path,
     String content = '',
   }) async {
+    // An unproven server must not be handed note content, and unlike a
+    // save there is no outbox to fall back on — creating offline is
+    // already refused, so this refuses the same way.
+    if (_impostor) return (meta: null, error: _impostorMessage);
     final WriteResult result;
     try {
       result = await api.createNote(
@@ -392,6 +492,7 @@ class SyncEngine extends ChangeNotifier {
     required String fileName,
     required List<int> bytes,
   }) async {
+    if (_impostor) return (path: null, error: _impostorMessage);
     final safe = _safeAttachmentName(fileName);
     final path = 'attachments/$safe';
     try {
@@ -433,7 +534,7 @@ class SyncEngine extends ChangeNotifier {
   Future<void> setPinned(String id, bool pinned) async {
     // Fetch first: `setPinned` is an UPDATE, so pinning a note that has never
     // been opened would otherwise touch no row at all.
-    if (pinned && _online) {
+    if (pinned && _mayReachServer) {
       try {
         await _store(await api.note(vaultId, id));
       } catch (_) {
@@ -451,7 +552,10 @@ class SyncEngine extends ChangeNotifier {
 
   /// Drains the outbox, then pulls changes. Safe to call at any time.
   Future<void> sync() async {
-    if (_syncing || _disposed) return;
+    // An unproven server gets no requests at all — not the outbox, not the
+    // pull. Offline is deliberately *not* checked here: a sync attempt is how
+    // the client discovers it is back.
+    if (_syncing || _disposed || _impostor) return;
     _syncing = true;
     notifyListeners();
     try {
@@ -620,22 +724,48 @@ class SyncEngine extends ChangeNotifier {
     return true;
   }
 
-  // ---- websocket -----------------------------------------------------
+  // ---- change feed -----------------------------------------------------
 
-  /// Opens the change stream so other devices' edits arrive promptly.
+  /// Opens the change feed so other devices' edits arrive promptly.
   ///
-  /// The socket only signals *that* something changed; the authoritative list
-  /// still comes from `GET /v1/sync?since=`. That way a dropped or missed
-  /// frame costs nothing — the next pull catches up regardless.
-  void _openSocket() {
-    if (_disposed) return;
+  /// Uses WebSocket on direct connections, SSE on relayed connections (the
+  /// relay tunnels HTTP, not WebSocket upgrades). The feed only signals
+  /// *that* something changed; the authoritative list still comes from
+  /// `GET /v1/sync?since=`. A dropped or missed frame costs nothing — the
+  /// next pull catches up regardless.
+  Future<void> _openSocket() async {
+    if (_disposed || _impostor) return;
     _wsSub?.cancel();
     _ws?.sink.close();
+    _sseSub?.cancel();
 
-    final url = api.baseUrl.replaceFirst(RegExp(r'^http'), 'ws');
-    final uri = Uri.parse(
-      '$url/v1/stream?token=${Uri.encodeComponent(api.token)}',
-    );
+    // A handshake carries no headers, so the credential has to ride in the
+    // URL — and a URL is logged by proxies and kept in history. So it is a
+    // **ticket**: one use, sixty seconds, minted over a normal authenticated
+    // request that does carry a header. The session token itself never
+    // appears in a URL.
+    final String ticket;
+    try {
+      ticket = await api.wsTicket();
+    } catch (_) {
+      // No ticket, no socket. Treated as a feed failure rather than an
+      // error, because it is one from the feed's point of view — and the
+      // reconnect timer is already the thing that retries it.
+      _scheduleReconnect();
+      return;
+    }
+    if (_disposed) return;
+
+    if (connection.isRelayed) {
+      await _openSseStream(ticket);
+    } else {
+      await _openWebSocket(ticket);
+    }
+  }
+
+  /// Opens a WebSocket change feed (direct LAN connection).
+  Future<void> _openWebSocket(String ticket) async {
+    final uri = connection.streamUri(ticket);
 
     try {
       final channel = WebSocketChannel.connect(uri);
@@ -666,7 +796,54 @@ class SyncEngine extends ChangeNotifier {
     }
   }
 
-  /// Simulates the change socket closing, for tests.
+  /// Opens an SSE change feed (relayed connection).
+  Future<void> _openSseStream(String ticket) async {
+    final uri = connection.sseUri(ticket);
+    final client = connection.transportClient;
+
+    try {
+      final request = http.Request('GET', uri);
+      request.headers.addAll(connection.authHeaders);
+      // Accept SSE
+      request.headers['Accept'] = 'text/event-stream';
+
+      final streamed = await client.send(request);
+
+      if (streamed.statusCode != 200) {
+        _scheduleReconnect();
+        return;
+      }
+
+      _sseSub = streamed.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            _handleSseLine,
+            onError: (_) => _scheduleReconnect(),
+            onDone: _scheduleReconnect,
+            cancelOnError: true,
+          );
+    } catch (_) {
+      _scheduleReconnect();
+    }
+  }
+
+  /// Handles one line from the SSE stream.
+  void _handleSseLine(String line) {
+    // SSE format: lines of "field: value", blank line ends an event.
+    // We only care about "event: change" and "event: resync".
+    if (line.startsWith('event:')) {
+      final event = line.substring(6).trim();
+      if (event == 'change' || event == 'resync') {
+        _setOnline(true);
+        _backoffSeconds = 1;
+        _pullDebounce?.cancel();
+        _pullDebounce = Timer(const Duration(milliseconds: 300), sync);
+      }
+    }
+  }
+
+  /// Simulates the change feed closing, for tests.
   @visibleForTesting
   void debugSimulateSocketDrop() => _scheduleReconnect();
 
@@ -678,11 +855,19 @@ class SyncEngine extends ChangeNotifier {
     // though every request was succeeding. Sockets close routinely — app
     // backgrounding, wifi handover, a server restart.
     _reconnect?.cancel();
-    _reconnect = Timer(Duration(seconds: _backoffSeconds), () {
+    _reconnect = Timer(Duration(seconds: _backoffSeconds), () async {
       // Capped exponential backoff: a server that is down for an hour
       // shouldn't be probed every second.
       _backoffSeconds = (_backoffSeconds * 2).clamp(1, 60);
-      _openSocket();
+      // Re-prove identity *before* reopening anything. This is the branch that
+      // fires on wifi handover, server restart, and waking from sleep — the
+      // moments when the path to the server may have changed and a relay may
+      // now be in it. A check that only ran at startup would never see any of
+      // them. `_proveServer` reschedules on failure, so a refusal here is not
+      // the end of retrying.
+      connection.reset();
+      if (!await _proveServer()) return;
+      await _openSocket();
       unawaited(sync());
     });
   }

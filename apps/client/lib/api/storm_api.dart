@@ -22,8 +22,19 @@ class StormApi {
   final String token;
   final http.Client _client;
 
+  /// The underlying HTTP client (for streaming/SSE).
+  http.Client get client => _client;
+
+  /// The credential exactly as the server expects it, scheme included.
+  ///
+  /// The query-string paths below send *this*, not the bare token. The
+  /// server's query fallback takes the same string the header would carry and
+  /// matches on the scheme, so a bare token authenticates nothing — it used to
+  /// work only because the shared token was compared whole, and that is gone.
+  String get credential => 'Bearer $token';
+
   Map<String, String> get _headers => {
-    'Authorization': 'Bearer $token',
+    'Authorization': credential,
     'Content-Type': 'application/json',
   };
 
@@ -375,10 +386,23 @@ class StormApi {
 
   /// A URL an `Image.network` can fetch directly.
   ///
-  /// The token rides in the query string because Flutter's image widgets
+  /// The credential rides in the query string because Flutter's image widgets
   /// can't set headers on the request they make.
   Uri attachmentUrl(String vaultId, String path) =>
-      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': token});
+      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': credential});
+
+  /// A single-use, 60-second credential for the change-feed handshake.
+  ///
+  /// A WebSocket handshake carries no headers, so *something* has to ride in
+  /// the URL — and a URL lands in proxy logs, browser history and referrers.
+  /// A session token there is good for thirty days; this is good for one use
+  /// and one minute, which is the whole reason the endpoint exists.
+  Future<String> wsTicket() async {
+    final json = _decode(
+      await _client.post(_uri('/v1/auth/ws-ticket'), headers: _headers),
+    );
+    return json['ticket'] as String;
+  }
 
   Future<List<TagCount>> tags(String vaultId) async {
     final json = _decode(

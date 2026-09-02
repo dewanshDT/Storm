@@ -4,6 +4,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/models.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/note_session.dart';
@@ -250,7 +251,9 @@ class _Client {
   _Client(String baseUrl, String token, this.vaultId)
     : cache = CacheDb(NativeDatabase.memory()) {
     engine = SyncEngine(
-      api: StormApi(baseUrl: baseUrl, token: token),
+      connection: StormConnection.direct(
+        api: StormApi(baseUrl: baseUrl, token: token),
+      ),
       cache: cache,
       vaultId: vaultId,
     );
@@ -265,7 +268,9 @@ class _Client {
   /// Replaces the engine's transport, as reconnecting would.
   void reconnect(String baseUrl, String token) {
     final replacement = SyncEngine(
-      api: StormApi(baseUrl: baseUrl, token: token),
+      connection: StormConnection.direct(
+        api: StormApi(baseUrl: baseUrl, token: token),
+      ),
       cache: cache,
       vaultId: vaultId,
     );

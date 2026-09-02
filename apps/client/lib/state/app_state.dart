@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -6,7 +8,9 @@ import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/auth_api.dart';
+import '../api/auth_models.dart';
 import '../api/models.dart';
+import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
 import 'secret_store.dart';
@@ -46,6 +50,7 @@ class Settings {
     this.accessTokenExpiresAt = '',
     this.userId = '',
     this.serverId = '',
+    this.relays = const <RelayAdvert>[],
   });
 
   final String baseUrl;
@@ -90,10 +95,13 @@ class Settings {
   /// Device secret for the StormDevice header (shared secret from pairing).
   final String deviceSecret;
 
-  /// The server's key id — used for future challenge verification.
+  /// The server's key id, as pinned at pairing.
   final String serverKeyId;
 
-  /// The server's public key (Ed25519, base64url) — for challenge verification.
+  /// The server's public key (Ed25519, base64url), pinned at pairing.
+  ///
+  /// Checked on **every** connect, not only at pairing — [ServerVerifier] is
+  /// what makes a relay safe to route through without trusting it.
   final String serverPublicKey;
 
   // ── Auth: session ──────────────────────────────────────────────────────
@@ -112,6 +120,14 @@ class Settings {
 
   /// Server id from pairing — proves the device belongs to this server.
   final String serverId;
+
+  /// The relay set this server last registered with (D3).
+  ///
+  /// Persisted beside `serverId`/`serverPublicKey` because they are the pinned
+  /// identity this list belongs with, and rewritable whenever `GET /v1/server`
+  /// answers by any path — a server that changes relays while a device is away
+  /// must give a stranded device a way home (that payload alone can't).
+  final List<RelayAdvert> relays;
 
   /// The device has completed pairing (has device credentials).
   bool get isPaired => deviceId.isNotEmpty;
@@ -205,6 +221,7 @@ class Settings {
     String? accessTokenExpiresAt,
     String? userId,
     String? serverId,
+    List<RelayAdvert>? relays,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     theme: theme ?? this.theme,
@@ -222,6 +239,7 @@ class Settings {
     accessTokenExpiresAt: accessTokenExpiresAt ?? this.accessTokenExpiresAt,
     userId: userId ?? this.userId,
     serverId: serverId ?? this.serverId,
+    relays: relays ?? this.relays,
   );
 }
 
@@ -243,6 +261,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kAccessExpires = 'storm.accessTokenExpiresAt';
   static const _kUserId = 'storm.userId';
   static const _kServerId = 'storm.serverId';
+  static const _kRelays = 'storm.relays';
 
   /// Holds the credentials, and knows how to get them out of prefs. Injectable
   /// so tests can drive a fake keychain.
@@ -278,6 +297,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       accessTokenExpiresAt: prefs.getString(_kAccessExpires) ?? '',
       userId: prefs.getString(_kUserId) ?? '',
       serverId: prefs.getString(_kServerId) ?? '',
+      relays: _decodeRelays(prefs.getString(_kRelays)),
     );
   }
 
@@ -294,6 +314,37 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     final wasDark = prefs.getBool(_kDark);
     if (wasDark == null) return StormPreset.stormDark;
     return wasDark ? StormPreset.stormDark : StormPreset.stormLight;
+  }
+
+  /// The relay set as a JSON string for prefs, or `''` when empty.
+  static String _encodeRelays(List<RelayAdvert> relays) {
+    if (relays.isEmpty) return '';
+    return jsonEncode([
+      for (final r in relays) {'url': r.url, 'public_address': r.publicAddress},
+    ]);
+  }
+
+  /// Parses a relay set back out of prefs. Anything unparseable is dropped
+  /// whole — the set is advisory (a candidate to race, never a requirement),
+  /// so a corrupt row costs reachability, not correctness.
+  static List<RelayAdvert> _decodeRelays(String? raw) {
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final list = jsonDecode(raw);
+      if (list is! List) return const [];
+      return list
+          .whereType<Map>()
+          .map(
+            (e) => RelayAdvert(
+              url: e['url'] as String? ?? '',
+              publicAddress: e['public_address'] as String? ?? '',
+            ),
+          )
+          .where((r) => r.url.isNotEmpty && r.publicAddress.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
   Future<void> save(Settings next) async {
@@ -316,6 +367,9 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     await prefs.setString(_kAccessExpires, cleaned.accessTokenExpiresAt);
     await prefs.setString(_kUserId, cleaned.userId);
     await prefs.setString(_kServerId, cleaned.serverId);
+    // A JSON list, not one key per relay — compare the whole set. The server is
+    // the only writer, so a single string is safe from cross-field races.
+    await prefs.setString(_kRelays, _encodeRelays(cleaned.relays));
 
     // The four credentials, to the keychain. Last, so a failure here cannot
     // leave the non-secret half of a save unwritten.
@@ -653,13 +707,61 @@ final settingsProvider = AsyncNotifierProvider<SettingsNotifier, Settings>(
 ///
 /// One client per *server*. The vault is a parameter of each call, so this
 /// does not rebuild on a vault switch — [syncEngineProvider] does.
-final apiProvider = Provider<StormApi?>((ref) {
+/// How the server is reached. One per *server*, rebuilt when settings change.
+///
+/// A plain `Provider`, deliberately: the connection resolves underneath rather
+/// than above, so nothing here has to become a `Future` and no consumer has to
+/// learn about readiness. It is also **not** a `ChangeNotifierProvider` — one
+/// would loop, since watching it means `connect()` → notify → rebuild → a new
+/// engine → `start()` → `connect()`.
+final connectionProvider = Provider<StormConnection?>((ref) {
   final settings = ref.watch(settingsProvider).value;
   if (settings == null || !settings.isConfigured) return null;
 
-  final api = StormApi(baseUrl: settings.baseUrl, token: settings.bearerToken);
-  ref.onDispose(api.dispose);
-  return api;
+  final settingsNotifier = ref.read(settingsProvider.notifier);
+  final connection = StormConnection(
+    localAddress: settings.baseUrl,
+    token: settings.bearerToken,
+    // The *pinned* identity, never anything a response just supplied — a
+    // challenge verified against a key from the same answer proves nothing.
+    serverId: settings.serverId,
+    publicKeyB64: settings.serverPublicKey,
+    // D3: the persisted relay set, so a restarted device knows the relays its
+    // server last registered with instead of having to relearn them cold.
+    relays: settings.relays,
+    onRelaysChanged: (relays) {
+      // Mirror the server's answer back into Settings for persistence. The
+      // server is the only writer, so this is a one-way copy — but guard
+      // against rewriting the identical set, which would wake every watcher.
+      final current = ref.read(settingsProvider).value;
+      if (current == null || _relaysEqual(current.relays, relays)) return;
+      settingsNotifier.save(current.copyWith(relays: relays));
+    },
+  );
+  ref.onDispose(connection.api.dispose);
+  return connection;
+});
+
+/// Two relay sets are equal when every advert (url *and* public address)
+/// matches — a set is a list of (where, how) pairs, so either half differing
+/// is a real change.
+bool _relaysEqual(List<RelayAdvert> a, List<RelayAdvert> b) {
+  if (identical(a, b)) return true;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].url != b[i].url || a[i].publicAddress != b[i].publicAddress) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// The API client, for callers that still take one directly.
+///
+/// Derived from the connection rather than built beside it, so there is one
+/// answer to "where is the server" and it lives behind the seam.
+final apiProvider = Provider<StormApi?>((ref) {
+  return ref.watch(connectionProvider)?.api;
 });
 
 /// The vault the note-level providers are serving, or `''` when none is open
@@ -784,16 +886,20 @@ final cacheProvider = Provider<CacheDb>((ref) {
 /// *instance* rather than the notifications must `ref.read` it, or it gets
 /// torn down and rebuilt several times a second.
 final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
-  final api = ref.watch(apiProvider);
+  final connection = ref.watch(connectionProvider);
   final vaultId = ref.watch(activeVaultProvider);
   final engine = SyncEngine(
-    api: api ?? StormApi(baseUrl: '', token: ''),
+    connection:
+        connection ??
+        StormConnection.direct(
+          api: StormApi(baseUrl: '', token: ''),
+        ),
     cache: ref.watch(cacheProvider),
     vaultId: vaultId,
   );
   // No vault open means nothing to sync — the dashboard reads the vault list
   // and the recents endpoint, neither of which needs an engine.
-  if (api != null && vaultId.isNotEmpty) engine.start();
+  if (connection != null && vaultId.isNotEmpty) engine.start();
   // No `ref.onDispose(engine.dispose)`: ChangeNotifierProvider already
   // disposes what it holds, and disposing twice trips ChangeNotifier's
   // "used after being disposed" assert.

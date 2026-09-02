@@ -4,11 +4,14 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
 
 import '../../state/app_state.dart';
+import '../../api/storm_connection.dart';
 import '../states.dart';
 import '../tokens.dart';
 import '../widgets.dart';
+import '../storm_image_provider.dart';
 import 'storm_markdown_style.dart';
 
 /// Scheme used for `[[wikilink]]` targets rendered as ordinary Markdown links.
@@ -50,7 +53,7 @@ class StormMarkdownView extends ConsumerWidget {
     }
 
     final settings = ref.watch(settingsProvider).value ?? const Settings();
-    final api = ref.watch(apiProvider);
+    final connection = ref.watch(connectionProvider);
     final vaultId = ref.watch(activeVaultProvider);
     final fontSize = settings.fontSize;
     final checkboxSize = stormMarkdownCheckboxSize(fontSize);
@@ -101,9 +104,8 @@ class StormMarkdownView extends ConsumerWidget {
         imageBuilder: (uri, title, alt) => _MarkdownImage(
           uri: uri,
           alt: alt,
-          attachmentUrl: api == null || vaultId.isEmpty
-              ? null
-              : (path) => api.attachmentUrl(vaultId, path),
+          connection: connection,
+          vaultId: vaultId,
         ),
         onTapLink: (text, href, title) =>
             _onTapLink(context, text: text, href: href),
@@ -179,37 +181,52 @@ class _MarkdownImage extends StatelessWidget {
   const _MarkdownImage({
     required this.uri,
     required this.alt,
-    required this.attachmentUrl,
+    required this.connection,
+    required this.vaultId,
   });
 
   final Uri uri;
   final String? alt;
-  final Uri Function(String path)? attachmentUrl;
+  final StormConnection? connection;
+  final String vaultId;
 
   static const _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'};
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final url = _resolveUrl();
-    if (url == null) {
+    final resolved = _resolveUri();
+    if (resolved == null || connection == null) {
       return _ImageFallback(
         message: alt?.isNotEmpty == true ? alt! : 'Missing image',
       );
     }
+
+    final client = connection!.transportClient;
+    final headers = connection!.authHeaders;
+    final provider = StormImageProvider(
+      uri: resolved,
+      client: client,
+      headers: headers,
+    );
 
     return Padding(
       padding: EdgeInsets.symmetric(vertical: t.sp),
       child: GestureDetector(
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute<void>(
-            builder: (_) => _ImageViewer(url: url, title: alt ?? uri.path),
+            builder: (_) => _ImageViewer(
+              uri: resolved,
+              client: client,
+              headers: headers,
+              title: alt ?? uri.path,
+            ),
           ),
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(t.rControl),
-          child: Image.network(
-            url.toString(),
+          child: Image(
+            image: provider as ImageProvider<Object>,
             fit: BoxFit.contain,
             loadingBuilder: (context, child, progress) {
               if (progress == null) return child;
@@ -236,7 +253,7 @@ class _MarkdownImage extends StatelessWidget {
     );
   }
 
-  Uri? _resolveUrl() {
+  Uri? _resolveUri() {
     if (uri.scheme == 'http' || uri.scheme == 'https') return uri;
 
     // Vault-relative attachment path, the form the editor inserts on upload.
@@ -244,7 +261,18 @@ class _MarkdownImage extends StatelessWidget {
     if (path.isEmpty) return null;
     final ext = path.contains('.') ? path.split('.').last.toLowerCase() : '';
     if (ext.isNotEmpty && !_imageExtensions.contains(ext)) return null;
-    return attachmentUrl?.call(path);
+
+    // Build the attachment URL using the connection's active transport
+    if (connection == null) return null;
+    if (connection!.active.relayUrl != null) {
+      return Uri.parse(
+        '${connection!.active.baseUrl}/v1/vaults/$vaultId/attachments/$path',
+      );
+    } else {
+      return Uri.parse(
+        '${connection!.localAddress}/v1/vaults/$vaultId/attachments/$path',
+      );
+    }
   }
 }
 
@@ -285,22 +313,34 @@ class _ImageFallback extends StatelessWidget {
 }
 
 class _ImageViewer extends StatelessWidget {
-  const _ImageViewer({required this.url, required this.title});
+  const _ImageViewer({
+    required this.uri,
+    required this.client,
+    required this.headers,
+    required this.title,
+  });
 
-  final Uri url;
+  final Uri uri;
+  final http.Client client;
+  final Map<String, String> headers;
   final String title;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final provider = StormImageProvider(
+      uri: uri,
+      client: client,
+      headers: headers,
+    );
     return Scaffold(
       appBar: AppBar(title: Text(title, overflow: TextOverflow.ellipsis)),
       backgroundColor: const Color(0xFF000000),
       body: Center(
         child: InteractiveViewer(
           maxScale: 6,
-          child: Image.network(
-            url.toString(),
+          child: Image(
+            image: provider as ImageProvider<Object>,
             errorBuilder: (c, _, _) => Padding(
               padding: EdgeInsets.all(t.cardPad),
               child: Text(

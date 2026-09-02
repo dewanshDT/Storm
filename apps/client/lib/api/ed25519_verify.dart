@@ -8,6 +8,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 
@@ -34,14 +35,11 @@ Future<bool> verifyChallenge({
   required String nonce,
 }) async {
   try {
-    // The server sends base64url without padding; dart:convert expects padding.
-    final paddedPk = _addPadding(publicKeyB64);
-    final publicKeyBytes = base64Url.decode(paddedPk);
-    if (publicKeyBytes.length != 32) return false;
+    final publicKeyBytes = decodeBase64UrlNoPad(publicKeyB64);
+    if (publicKeyBytes == null || publicKeyBytes.length != 32) return false;
 
-    final paddedSig = _addPadding(signatureB64);
-    final signatureBytes = base64Url.decode(paddedSig);
-    if (signatureBytes.length != 64) return false;
+    final signatureBytes = decodeBase64UrlNoPad(signatureB64);
+    if (signatureBytes == null || signatureBytes.length != 64) return false;
 
     final message = utf8.encode(challengeMessage(serverId, nonce));
 
@@ -58,9 +56,37 @@ Future<bool> verifyChallenge({
   }
 }
 
-/// Adds `=` padding to a base64url string so dart:convert can decode it.
-String _addPadding(String s) {
+/// Decodes a base64url-no-pad field, strictly. Returns `null` if it is not one.
+///
+/// The strictness is the point, and it is a wire rule rather than fussiness:
+/// **one key has one spelling.** `dart:convert`'s `base64Url` decoder also
+/// accepts the standard `+/` alphabet and accepts padding, while the Rust side
+/// (`data_encoding`'s `BASE64URL_NOPAD`, used by both `apps/server` and
+/// `apps/relay`) refuses both. Left lenient, the same 32 bytes would have three
+/// valid spellings on the client and one everywhere else — so a value the relay
+/// rejects outright would verify here, and the two implementations would
+/// disagree about whether a key had changed.
+///
+/// `docs/srp-vectors.json` pins this, and `test/srp_vectors_test.dart` is what
+/// caught it: the padded and standard-alphabet cases passed before this
+/// function existed.
+Uint8List? decodeBase64UrlNoPad(String s) {
+  if (s.isEmpty) return null;
+  for (final c in s.codeUnits) {
+    final isUnreserved =
+        (c >= 0x41 && c <= 0x5A) || // A-Z
+        (c >= 0x61 && c <= 0x7A) || // a-z
+        (c >= 0x30 && c <= 0x39) || // 0-9
+        c == 0x2D || // -
+        c == 0x5F; // _
+    if (!isUnreserved) return null;
+  }
+  // A base64 group is 2, 3 or 4 characters; a remainder of 1 encodes nothing.
   final mod = s.length % 4;
-  if (mod == 0) return s;
-  return s + '=' * (4 - mod);
+  if (mod == 1) return null;
+  try {
+    return base64Url.decode(mod == 0 ? s : s + '=' * (4 - mod));
+  } catch (_) {
+    return null;
+  }
 }

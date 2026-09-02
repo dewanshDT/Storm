@@ -37,3 +37,9 @@ build/
 .idea/
 .vscode/
 .DS_Store
+
+# Python bytecode from the integration suites. One .pyc was tracked, so every
+# `make test-live` left the tree dirty and every `git status` had a line in it
+# that meant nothing.
+__pycache__/
+*.pyc

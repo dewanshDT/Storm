@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{
-        ConnectInfo, Extension, Path, Query, State,
+        Extension, FromRequestParts, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
@@ -116,6 +116,15 @@ pub struct AppState {
     ///
     /// Lives here so there is exactly one, for the process's whole life.
     pub hasher: crate::auth::Hasher,
+    /// **The one login rate limiter for the whole process.**
+    ///
+    /// Same discipline as [`AppState::hasher`], for the same reason: a
+    /// per-handler limiter would be decorative in exactly the way a
+    /// per-handler `Hasher::new()` was — each request would mint a fresh pair
+    /// of full buckets and no limit would exist across requests. See
+    /// [`crate::auth::ratelimit`] for the two-bucket shape and why the global
+    /// ceiling is strict while the per-caller one is generous.
+    pub login_limiter: crate::auth::ratelimit::LoginLimiter,
 }
 
 pub type Shared = Arc<AppState>;
@@ -320,6 +329,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/registration", put(put_registration))
+        .route("/v1/config/relays", put(put_relays))
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
         // mint a key" true without a special case — a key never reaches here.
@@ -717,6 +727,42 @@ pub struct FirstUserRequest {
     password: String,
 }
 
+/// The socket peer, where this request has one.
+///
+/// A hand-written extractor rather than `Option<ConnectInfo<SocketAddr>>`,
+/// which **does not compile on axum 0.8**: there is no blanket `Option<E>`
+/// impl, `E` has to implement `OptionalFromRequestParts`, and `ConnectInfo`
+/// does not — so the obvious signature fails the `Handler` bound with an error
+/// that names neither `ConnectInfo` nor the missing trait. Same shape as
+/// `Option<WebSocketUpgrade>`, which the relay design already had to work
+/// around on `stream`.
+///
+/// The property that matters is that this **never rejects**. `main.rs` serves
+/// with `into_make_service_with_connect_info`, so a real socket always carries
+/// the extension; the relay's in-process dispatch reconstructs an
+/// `http::Request` and calls the router as a tower service, so it never does.
+/// A required extractor would turn every relayed login into an extractor
+/// rejection — a refusal that never reaches the handler and reads as a
+/// malformed request rather than a rate limit. `pair_handler` has the bare
+/// form and will need this same treatment when the tunnel lands.
+struct MaybePeer(Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(MaybePeer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|c| c.0),
+        ))
+    }
+}
+
 /// POST /v1/auth/login — exchange username/password for a token pair.
 ///
 /// The caller must present a `StormDevice` header (device tier). The device
@@ -724,6 +770,7 @@ pub struct FirstUserRequest {
 /// caller receives access + refresh tokens bound to this device.
 async fn login_handler(
     State(state): State<Shared>,
+    MaybePeer(peer): MaybePeer,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<crate::auth::sessions::IssuedSession>, Response> {
@@ -734,6 +781,40 @@ async fn login_handler(
     let device_id = extract_device_id(&headers).ok_or_else(|| {
         ApiError(StatusCode::UNAUTHORIZED, "device header required".into()).into_response()
     })?;
+
+    // Charge the budget *before* acquiring the Argon2 permit: the point is to
+    // stop a flood from ever reaching the KDF. A successful login refunds,
+    // because a server under attack must still let real users in — see
+    // `ratelimit.rs`. The socket peer is the only identity used here;
+    // `X-Forwarded-For` is client-forgeable and never a security input.
+    use crate::auth::ratelimit::CallerKey;
+    let caller = peer
+        .map(|c| CallerKey::Ip(c.ip()))
+        .unwrap_or(CallerKey::Unattributed);
+    if let Err(retry_after_secs) = state.login_limiter.check(&caller) {
+        let remote = match &caller {
+            CallerKey::Ip(ip) => Some(ip.to_string()),
+            CallerKey::Unattributed => None,
+        };
+        let auth_db = state.auth_db.lock().await;
+        // Never a secret: the submitted username is quoted verbatim because a
+        // flood of junk names is exactly what the operator needs to see.
+        if let Err(e) = auth_db.record_event_from(
+            crate::auth::sessions::EVENT_LOGIN_THROTTLED,
+            None,
+            Some(&device_id),
+            remote.as_deref(),
+            &now,
+            &format!(
+                r#"{{"username":{:?},"retry_after_secs":{}}}"#,
+                body.username, retry_after_secs
+            ),
+        ) {
+            tracing::warn!(error = %e, "could not record login_throttled event");
+        }
+        drop(auth_db);
+        return Err(rate_limited(retry_after_secs));
+    }
 
     let hasher = &state.hasher;
     let mut auth_db = state.auth_db.lock().await;
@@ -747,7 +828,10 @@ async fn login_handler(
     )
     .await
     {
-        Ok(issued) => Ok(Json(issued)),
+        Ok(issued) => {
+            state.login_limiter.refund(&caller);
+            Ok(Json(issued))
+        }
         // Rate limiting is the one refusal that is not a 401, because the
         // client's remedy is "wait", not "try different credentials" — and it
         // cannot say *how long* to wait without the number. Hence a `Response`
@@ -1002,7 +1086,11 @@ pub const WEB_BOOTSTRAP_PER_MINUTE: i64 = 12;
 pub const WEB_BOOTSTRAP_MAX_OUTSTANDING: i64 = 256;
 
 /// Headers whose presence means the peer address belongs to a proxy.
-const FORWARDING_HEADERS: [&str; 4] = [
+///
+/// Also stripped from every relayed request before dispatch: they are
+/// client-supplied over the tunnel, and `web_bootstrap_nonce` below treats
+/// their presence as a fact about the *network*. See `relay/dispatch.rs`.
+pub(crate) const FORWARDING_HEADERS: [&str; 4] = [
     "x-forwarded-for",
     "x-forwarded-host",
     "x-real-ip",
@@ -1177,13 +1265,28 @@ pub async fn serve_web_index_without_bootstrap(index: std::path::PathBuf) -> Res
 /// This is a `none`-tier endpoint: the nonce itself is the trust anchor. The
 /// client has already verified the server's identity via the challenge step
 /// before reaching here.
+/// The peer is [`MaybePeer`] rather than a bare `ConnectInfo` because
+/// `/v1/pair` is the *first* route a remote client touches, and over the relay
+/// it arrives by in-process dispatch with no socket behind it. A required
+/// extractor would reject before this handler ran, so the client would meet a
+/// malformed-request error where a pairing answer belongs.
+///
+/// The refusal that falls out of `None` is the correct one, and it is worth
+/// stating because it looks like a gap: a **web-bootstrap** nonce is
+/// peer-bound at issuance, so it is refused over a relayed connection — it was
+/// bound to a browser that reached the server directly. An **unbound QR**
+/// nonce still works, which is the whole point of a QR. Neither behaviour is
+/// new; `consume` has always taken `Option`.
+///
+/// Do **not** substitute a synthesized address here. A fabricated peer either
+/// always fails the binding check or, worse, sometimes coincidentally passes.
 async fn pair_handler(
     State(state): State<Shared>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    MaybePeer(peer): MaybePeer,
     Json(body): Json<PairRequest>,
 ) -> ApiResult<Json<crate::auth::pairing::ConsumeResult>> {
     let now = crate::index::now_rfc3339();
-    let peer_ip = peer.ip().to_string();
+    let peer_ip = peer.map(|p| p.ip().to_string());
     let mut auth_db = state.auth_db.lock().await;
     // The peer is passed for every purpose; only a nonce that recorded one
     // (web bootstrap) is checked against it. A QR nonce stays unbound, because
@@ -1194,7 +1297,7 @@ async fn pair_handler(
         &body.name,
         body.platform.as_deref(),
         body.version.as_deref(),
-        Some(&peer_ip),
+        peer_ip.as_deref(),
         &now,
     )
     .map_err(|e| {
@@ -1340,13 +1443,65 @@ async fn require_auth(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
         .or_else(|| {
-            // Browsers can't set headers on a WebSocket handshake, so the token
-            // may also arrive as a query parameter.
-            request.uri().query().and_then(|q| {
-                q.split('&')
-                    .find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
-            })
+            // Browsers can't set headers on a WebSocket handshake, and image
+            // widgets can't set them on a GET, so the credential may also
+            // arrive as a query parameter. It is the *same* string the header
+            // would carry, scheme included.
+            //
+            // **Percent-decoded, which it was not.** Every credential Storm
+            // has left contains a space (`Bearer …`, `StormDevice …`), so a
+            // conforming client sends `token=Bearer%20…` — and comparing that
+            // raw against `"Bearer "` matches nothing. This path therefore
+            // could not authenticate anyone at all once the shared token was
+            // removed: that value was compared whole and had no space in it,
+            // so it was the only credential the raw form ever fit. Nothing
+            // failed loudly; the WebSocket change feed just stopped
+            // authenticating and fell back to reconnect-driven polling.
+            query_param(request.uri(), "token")
         });
+
+    // --- `?ticket=` — a WebSocket handshake's own credential ---
+    //
+    // Its own parameter rather than another shape inside `?token=`, because a
+    // ticket names no scheme and guessing at an unschemed value is precisely
+    // the ambiguity decision 57 was about. Distinct name, unambiguous parse.
+    //
+    // This exists so a **thirty-day session token does not travel in a URL**,
+    // where it lands in proxy logs, browser history and referrers. A ticket
+    // lives sixty seconds and dies on first use, so the exposure is bounded
+    // to a window in which it has already been spent.
+    if let Some(raw) = query_param(request.uri(), "ticket") {
+        let now = crate::index::now_rfc3339();
+        let mut auth_db = state.auth_db.lock().await;
+        return match crate::auth::sessions::consume_ws_ticket(&mut auth_db, &raw, &now) {
+            Ok(authenticated) => {
+                drop(auth_db);
+                if tier != RequiredTier::Session {
+                    // A ticket buys the session tier and nothing else. It is
+                    // minted *from* a session, so it can carry no more.
+                    return tier_error("ticket_not_accepted_here", StatusCode::UNAUTHORIZED);
+                }
+                request.extensions_mut().insert(Actor::Session {
+                    user_id: authenticated.user.id.clone(),
+                    role: authenticated.user.role,
+                });
+                request
+                    .extensions_mut()
+                    .insert(SessionAuth { authenticated });
+                next.run(request).await
+            }
+            // Answered generically on purpose: unknown, expired, already used
+            // and revoked-session are one message, so a caller holding a
+            // captured ticket learns nothing about why it failed.
+            Err(crate::auth::sessions::SessionError::Refused(_)) => {
+                unauthorized("invalid or missing token")
+            }
+            Err(crate::auth::sessions::SessionError::Internal(e)) => {
+                tracing::error!(error = %e, "ws ticket authentication failed");
+                internal_error()
+            }
+        };
+    }
 
     let Some(credential) = presented else {
         return unauthorized("invalid or missing token");
@@ -1494,6 +1649,59 @@ async fn require_auth(
     unauthorized("invalid or missing token")
 }
 
+/// One percent-decoded query parameter, or `None`.
+///
+/// Both credential paths go through this so they cannot drift on decoding —
+/// the last time only one of them decoded, query authentication was dead for
+/// six days (decision 57).
+fn query_param(uri: &axum::http::Uri, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    uri.query()?
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(&prefix))
+        .map(percent_decode)
+}
+
+/// Percent-decodes a query-string value, with `+` meaning a space.
+///
+/// Hand-rolled rather than pulling a crate for it: this decodes exactly one
+/// short credential on one code path, and the alternative — routing the
+/// request through `Query` — would mean parsing and allocating the whole query
+/// map on every authenticated request to save nine lines.
+///
+/// Invalid escapes are passed through as written rather than rejected. A
+/// malformed credential fails the scheme match a moment later anyway, and
+/// there is nothing to gain by distinguishing "not a credential" from "not
+/// even valid encoding" for an unauthenticated caller.
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                Ok(byte) => {
+                    out.push(byte);
+                    i += 3;
+                }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Parses `StormDevice <id>:<secret>` → `(id, secret)`.
 fn parse_device_credential(rest: &str) -> Result<(&str, &str), ()> {
     let (id, secret) = rest.split_once(':').ok_or(())?;
@@ -1639,6 +1847,10 @@ struct ConfigResponse {
     mcp_writable: bool,
     /// Whether anyone with a device credential may create an account (A13).
     allow_registration: bool,
+    /// The **configured** relay URLs (SRP v1 §4.4) — not the registered set.
+    /// `GET /v1/server` reports what is actually live; this is what an
+    /// operator or the app set and expects to survive a restart.
+    relays: Vec<String>,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -1650,6 +1862,7 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
         allow_registration: vaults.registry.allow_registration,
+        relays: vaults.registry.relays.clone(),
     }))
 }
 
@@ -1700,6 +1913,44 @@ async fn put_mcp(
         "mcp_enabled": body.enabled,
         "mcp_writable": body.enabled && body.writable,
     })))
+}
+
+#[derive(Deserialize)]
+struct RelaysBody {
+    relays: Vec<String>,
+}
+
+/// PUT /v1/config/relays — sets the **configured** relay list (SRP v1 §4.4).
+///
+/// Its own route for the same reason `/v1/config/mcp` has one: a settings
+/// toggle should not have to send a `vault_root` it does not want to touch.
+///
+/// **Does not register anything.** `Registry::set_relays` only ever writes
+/// `Registry::relays`; whether a relay is actually live is decided elsewhere,
+/// by a tunnel client this server does not have yet, and reported separately
+/// by `GET /v1/server`. Setting this list is a promise to *try*, not proof of
+/// a connection.
+///
+/// `set_relays` is all-or-nothing and returns `anyhow::Error` on a bad URL —
+/// mapped to `400` explicitly here rather than via `ApiError`'s blanket
+/// `From<anyhow::Error>`, which would answer `500` for what is really the
+/// caller's mistake. The whole point of rejecting the entire list on one bad
+/// URL is that the operator finds out, with a message that says which URL and
+/// why, rather than losing a relay silently.
+async fn put_relays(
+    State(state): State<Shared>,
+    Json(body): Json<RelaysBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut vaults = state.vaults.write().await;
+    vaults
+        .registry
+        .set_relays(&body.relays)
+        .map_err(|e| bad_request(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+
+    Ok(Json(
+        serde_json::json!({ "relays": vaults.registry.relays }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2210,43 +2461,230 @@ fn content_type_for(path: &str) -> &'static str {
     }
 }
 
-// ---- websocket ---------------------------------------------------------
+// ---- change feed (WebSocket + SSE) --------------------------------------
 
-async fn stream(State(state): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| push_changes(socket, state))
+/// The literal a lagging WebSocket client has always been sent.
+///
+/// A constant so the "must not change" invariant below has something a test
+/// can compare against; these bytes are the wire format, not an implementation
+/// detail.
+const WS_RESYNC: &str = r#"{"kind":"resync"}"#;
+
+/// The SSE form of the same thing (`docs/srp-v1.md` §5.3). Empty `data:`.
+const SSE_RESYNC: &str = "event: resync\ndata:\n\n";
+
+/// The peer is gone; stop the feed.
+struct Gone;
+
+/// Where a change goes once the feed has one.
+///
+/// Two transports carry the *same* feed. A LAN client upgrades to a WebSocket;
+/// a relayed client cannot, because a tunnelled request is dispatched
+/// in-process and `WebSocketUpgrade` needs a `hyper::upgrade::OnUpgrade` that
+/// only a real hyper connection produces. So `/v1/stream` grew a second
+/// response mode rather than a second code path — one loop, two framings.
+///
+/// **It takes a `Change`, not rendered text.** SSE has to put `vault_id` and
+/// `seq` into its `id:` line, so a `send_text(String)` shape could not build
+/// its own frame; each implementation decides its own framing instead.
+///
+/// `impl Future + Send` rather than a bare `async fn` in the trait: the loop is
+/// spawned, so its future has to be `Send`, and that is not inferable through
+/// an `async fn` declaration.
+trait ChangeSink: Send + 'static {
+    fn change(&mut self, change: &Change) -> impl Future<Output = Result<(), Gone>> + Send;
+    fn resync(&mut self) -> impl Future<Output = Result<(), Gone>> + Send;
+}
+
+/// The WebSocket framing, unchanged since the feed existed.
+struct WsSink(WebSocket);
+
+impl ChangeSink for WsSink {
+    async fn change(&mut self, change: &Change) -> Result<(), Gone> {
+        // **Byte-for-byte what this socket has always sent**: a bare
+        // `serde_json` `Change` in a text frame, no envelope and no event
+        // name. A shipped Flutter client parses exactly this, and
+        // `apps/client/test_live/two_client_sync_test.dart` gates releases on
+        // it. SSE framing belongs to the other sink and must never leak here.
+        let Ok(text) = serde_json::to_string(change) else {
+            // Unserializable is skipped, not fatal — as before.
+            return Ok(());
+        };
+        self.0
+            .send(Message::Text(text.into()))
+            .await
+            .map_err(|_| Gone)
+    }
+
+    async fn resync(&mut self) -> Result<(), Gone> {
+        // A failed resync is ignored rather than ending the feed, which is what
+        // this branch has always done: the next change's send is what discovers
+        // a dead socket.
+        let _ = self.0.send(Message::Text(WS_RESYNC.into())).await;
+        Ok(())
+    }
+}
+
+/// The SSE framing (`docs/srp-v1.md` §5.3), written into the response body's
+/// channel.
+struct SseSink(tokio::sync::mpsc::Sender<Result<String, std::convert::Infallible>>);
+
+impl ChangeSink for SseSink {
+    async fn change(&mut self, change: &Change) -> Result<(), Gone> {
+        let Ok(json) = serde_json::to_string(change) else {
+            return Ok(());
+        };
+        // **`id:` is `<vault_id>:<seq>`, never the bare `seq`.** `change_log`
+        // lives in each vault's own `index.db` and `seq` is that database's
+        // `last_insert_rowid()`, so seq is per vault (M9/M10) while this feed is
+        // cross-vault: two vaults both emit 1, 2, 3. A bare id would collide and
+        // land a `Last-Event-ID` resume at the wrong position with nothing
+        // anywhere reporting an error.
+        let frame = format!(
+            "event: change\nid: {}:{}\ndata: {json}\n\n",
+            change.vault_id, change.seq
+        );
+        self.0.send(Ok(frame)).await.map_err(|_| Gone)
+    }
+
+    async fn resync(&mut self) -> Result<(), Gone> {
+        self.0.send(Ok(SSE_RESYNC.into())).await.map_err(|_| Gone)
+    }
+}
+
+/// The change feed.
+///
+/// Answers a WebSocket upgrade when one is asked for, and an ordinary
+/// `text/event-stream` response when one is not — the shape a relay can carry,
+/// since a tunnelled request is dispatched in-process and never has an
+/// `OnUpgrade` to hand the upgrade extractor.
+///
+/// **The branch is chosen here, by hand, and that is not a style choice.**
+/// There is no `Option<WebSocketUpgrade>`: `WebSocketUpgrade` implements
+/// `FromRequestParts` and *not* `OptionalFromRequestParts`, so writing
+/// `Option<WebSocketUpgrade>` in this signature fails as an unsatisfied
+/// `Handler` bound that names neither type. The handler therefore takes the
+/// whole request, decides, and calls the extractor itself on the upgrade branch.
+///
+/// Note what did *not* change: this is an ordinary session-tier request behind
+/// `require_auth`. Subscribing to `state.events` anywhere else — in a tunnel
+/// client, say — would hand every vault's change feed to a caller that
+/// presented no credential at all.
+async fn stream(State(state): State<Shared>, request: axum::extract::Request) -> Response {
+    let (mut parts, _body) = request.into_parts();
+
+    // Subscribed before either branch answers, so nothing is missed between the
+    // response going out and the feed task starting.
+    let rx = state.events.subscribe();
+
+    if wants_websocket(&parts) {
+        return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+            Ok(ws) => ws.on_upgrade(move |socket| push_changes(WsSink(socket), rx)),
+            Err(rejection) => rejection.into_response(),
+        };
+    }
+
+    sse_response(&parts.headers, rx)
+}
+
+/// Does this request ask to become a WebSocket, as HTTP means it?
+///
+/// `Connection` is a comma-separated token list — browsers and proxies send
+/// `keep-alive, Upgrade` — and both it and `Upgrade: websocket` are
+/// case-insensitive, so comparing either header whole would miss real
+/// handshakes and answer them with an SSE body they cannot read.
+fn wants_websocket(parts: &axum::http::request::Parts) -> bool {
+    // Above HTTP/1.1 there is no `Upgrade` header at all: a WebSocket is an
+    // extended CONNECT. Mirrors what `WebSocketUpgrade` itself checks, so this
+    // branch and the extractor it calls agree on what an upgrade is.
+    if parts.version > axum::http::Version::HTTP_11 {
+        return parts.method == axum::http::Method::CONNECT;
+    }
+
+    header_has_token(&parts.headers, header::CONNECTION, "upgrade")
+        && header_has_token(&parts.headers, header::UPGRADE, "websocket")
+}
+
+fn header_has_token(headers: &HeaderMap, name: header::HeaderName, token: &str) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|candidate| candidate.trim().eq_ignore_ascii_case(token))
+}
+
+/// The non-upgrade response mode: the same feed as `text/event-stream`.
+fn sse_response(headers: &HeaderMap, rx: broadcast::Receiver<Change>) -> Response {
+    // **`Last-Event-ID` is ignored deliberately.** Whether the origin replays
+    // from it is unresolved (`docs/srp-v1.md` §5.3) — replay implies buffering,
+    // which the no-relay-storage rule bars — and an EventSource sends the header
+    // by itself on every reconnect, so accepting one in silence would read as
+    // support for a semantics nobody has chosen. Logged so a resume attempt is
+    // at least visible; not honoured.
+    if let Some(id) = headers.get("last-event-id") {
+        tracing::debug!(
+            last_event_id = ?id,
+            "ignoring Last-Event-ID: whether the origin replays is undecided (srp-v1 §5.3)"
+        );
+    }
+
+    // Bounded, so a client that stops reading cannot grow this without limit.
+    // Backpressure here stalls the feed task, `broadcast` turns that into
+    // `Lagged`, and the client is told to resync — the same recovery a slow
+    // WebSocket gets.
+    let (tx, body_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(push_changes(SseSink(tx), rx));
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        // No keep-alive comments and no inactivity timeout: a quiet vault is a
+        // normal vault, and a feed that hung up on silence would be
+        // indistinguishable from a broken one.
+        axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx)),
+    )
+        .into_response()
 }
 
 /// Pushes change events so other devices update without polling.
 ///
-/// Events carry only metadata; the client decides what to fetch. That keeps
-/// the socket cheap and means a missed message is recoverable by falling back
-/// to `GET /v1/sync?since=`.
-async fn push_changes(mut socket: WebSocket, state: Shared) {
-    let mut rx = state.events.subscribe();
+/// Events carry only metadata; the client decides what to fetch. That keeps the
+/// feed cheap and means a missed message is recoverable by falling back to
+/// `GET /v1/sync?since=`.
+///
+/// Takes the receiver rather than subscribing itself, so the caller can
+/// subscribe before it answers — a subscription taken after the response is
+/// written would miss every change in between.
+async fn push_changes<S: ChangeSink>(mut sink: S, mut rx: broadcast::Receiver<Change>) {
     loop {
         match rx.recv().await {
             Ok(change) => {
-                let Ok(text) = serde_json::to_string(&change) else {
-                    continue;
-                };
-                if socket.send(Message::Text(text.into())).await.is_err() {
+                if sink.change(&change).await.is_err() {
                     break;
                 }
             }
-            // A slow client that fell behind is told to resync rather than
-            // being silently left with a gap.
+            // A slow client that fell behind is told to resync rather than being
+            // silently left with a gap.
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let _ = socket
-                    .send(Message::Text(r#"{"kind":"resync"}"#.into()))
-                    .await;
+                if sink.resync().await.is_err() {
+                    break;
+                }
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
 }
 
+// `pub(crate)` so `relay::tests` can build a *real* router and real
+// credentials rather than restating forty lines of `AppState`. The relay's
+// whole claim is that a tunnelled request reaches the same router a LAN
+// request does, and a second, parallel construction of that router is exactly
+// the thing that would let the claim quietly stop being true.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tower::ServiceExt;
 
@@ -2276,13 +2714,38 @@ mod tests {
 
     /// As [`test_router`], but hands back the state too — for the tests that
     /// have to look at what a request *persisted*, not only what it answered.
-    fn test_router_with_state(dir: &FsPath) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+    pub(crate) fn test_router_with_state(
+        dir: &FsPath,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         test_router_with_policy(dir, Arc::new(crate::auth::authz::AllowAuthenticated))
     }
 
     fn test_router_with_policy(
         dir: &FsPath,
         policy: Arc<dyn crate::auth::authz::VaultPolicy>,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_full(dir, policy, crate::auth::ratelimit::LoginLimiter::new())
+    }
+
+    /// As [`test_router_with_state`], but with the login limiter's numbers
+    /// chosen by the caller — the rate-limit tests want a burst they can
+    /// exhaust in two requests rather than thirty, because every attempt that
+    /// reaches the handler pays a real Argon2id verify.
+    pub(crate) fn test_router_with_limiter(
+        dir: &FsPath,
+        limiter: crate::auth::ratelimit::LoginLimiter,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_full(
+            dir,
+            Arc::new(crate::auth::authz::AllowAuthenticated),
+            limiter,
+        )
+    }
+
+    fn test_router_full(
+        dir: &FsPath,
+        policy: Arc<dyn crate::auth::authz::VaultPolicy>,
+        login_limiter: crate::auth::ratelimit::LoginLimiter,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -2314,6 +2777,7 @@ mod tests {
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),
+            login_limiter,
         });
         (
             router(
@@ -2364,6 +2828,56 @@ mod tests {
             .unwrap()
     }
 
+    /// A request carrying its credential in the query string and no header —
+    /// what a browser WebSocket handshake and an `<img>` tag are limited to.
+    fn get_with_query_token(path: &str, token: &str) -> axum::http::Request<axum::body::Body> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        axum::http::Request::builder()
+            .uri(format!("{path}{sep}token={}", urlencoding_for_test(token)))
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    /// Percent-encodes just enough for a credential: the space in `Bearer x`.
+    fn urlencoding_for_test(s: &str) -> String {
+        s.replace(' ', "%20")
+    }
+
+    #[tokio::test]
+    async fn a_query_credential_must_name_its_scheme() {
+        // The query fallback exists because a browser can set no headers on a
+        // WebSocket handshake, and an image widget none on a GET. It takes the
+        // *same* credential string the header would carry — scheme and all.
+        //
+        // Pinning both halves, because neither was covered and the bare form
+        // silently stopped working when the shared token was removed: until
+        // then `credential` was compared whole against STORM_TOKEN, so a bare
+        // value matched. Nothing failed loudly; the change feed just quietly
+        // never authenticated again.
+        let dir = tempdir::TempDir::new("storm-query-cred").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (bare, _) = send(&app, get_with_query_token("/v1/vaults", &token)).await;
+        assert_eq!(
+            bare,
+            StatusCode::UNAUTHORIZED,
+            "a bare token in the query names no scheme and must not authenticate"
+        );
+
+        let (scheme, _) = send(
+            &app,
+            get_with_query_token("/v1/vaults", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            scheme,
+            StatusCode::OK,
+            "the same credential the header would carry must work in the query"
+        );
+    }
+
     fn put_json(
         path: &str,
         body: serde_json::Value,
@@ -2388,7 +2902,7 @@ mod tests {
     /// are about the switch, not about login, and a real Argon2id hash at the
     /// measured parameters would cost 192 MiB and ~170 ms apiece to prove
     /// nothing they assert.
-    async fn seed_owner(state: &Shared) -> String {
+    pub(crate) async fn seed_owner(state: &Shared) -> String {
         let mut auth_db = state.auth_db.lock().await;
         crate::auth::users::create_user(
             &mut auth_db,
@@ -2406,7 +2920,7 @@ mod tests {
 
     /// A session token for `user_id`, minted directly rather than through
     /// `login`, for the same reason [`seed_owner`] fakes the hash.
-    async fn session_token(state: &Shared, user_id: &str) -> String {
+    pub(crate) async fn session_token(state: &Shared, user_id: &str) -> String {
         let mut auth_db = state.auth_db.lock().await;
         let device =
             crate::auth::devices::create_synthetic(&mut auth_db, "test", "2026-08-17T00:00:00Z")
@@ -2960,7 +3474,7 @@ mod tests {
     ///
     /// Goes through the real pairing code rather than inserting a row, so a
     /// change to how a device credential is minted breaks these tests too.
-    async fn pair_a_device(state: &Shared) -> String {
+    pub(crate) async fn pair_a_device(state: &Shared) -> String {
         let now = crate::index::now_rfc3339();
         let mut auth_db = state.auth_db.lock().await;
         let (nonce, _) = crate::auth::pairing::create(
@@ -3289,16 +3803,73 @@ mod tests {
     }
 
     fn pair_from(nonce: &str, peer: &str) -> axum::http::Request<axum::body::Body> {
-        let mut req = post_json(
-            "/v1/pair",
-            serde_json::json!({"n": nonce, "name": "browser", "platform": "web"}),
-        );
+        let mut req = pair_without_peer(nonce);
         req.extensions_mut().insert(axum::extract::ConnectInfo(
             format!("{peer}:54321")
                 .parse::<std::net::SocketAddr>()
                 .unwrap(),
         ));
         req
+    }
+
+    /// A pairing request with no `ConnectInfo` extension — what the relay's
+    /// in-process dispatch produces, since there is no socket behind it.
+    fn pair_without_peer(nonce: &str) -> axum::http::Request<axum::body::Body> {
+        post_json(
+            "/v1/pair",
+            serde_json::json!({"n": nonce, "name": "browser", "platform": "web"}),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_unbound_nonce_pairs_with_no_connect_info_at_all() {
+        // The extractor trap, on the first route a remote client touches. A
+        // bare `ConnectInfo` rejects before the handler runs, so a relayed
+        // pairing would fail as a malformed request rather than answering.
+        // A QR nonce is unbound precisely so it can be carried elsewhere, so
+        // "elsewhere" including a tunnel has to work.
+        let dir = tempdir::TempDir::new("storm-pair-nopeer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        // `AddDevice` with no peer is the QR case: unbound on purpose.
+        let nonce = {
+            let mut auth_db = state.auth_db.lock().await;
+            let (nonce, _) = crate::auth::pairing::create(
+                &mut auth_db,
+                crate::auth::pairing::PairingPurpose::AddDevice,
+                None,
+                None,
+                &crate::index::now_rfc3339(),
+            )
+            .unwrap();
+            nonce
+        };
+
+        let (status, body) = send(&app, pair_without_peer(&nonce)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an unbound nonce must pair with no socket behind the request: {body:?}"
+        );
+        assert!(body["device_id"].as_str().unwrap().starts_with("dev_"));
+    }
+
+    #[tokio::test]
+    async fn a_peer_bound_nonce_is_refused_when_there_is_no_peer() {
+        // Not a gap — the correct refusal. A web-bootstrap nonce is bound to
+        // the browser that fetched the page directly; there is nothing for it
+        // to match against over a tunnel, and inventing a peer would sometimes
+        // coincidentally pass.
+        let dir = tempdir::TempDir::new("storm-pair-bound-nopeer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+
+        let nonce = web_nonce(&state, "192.168.1.20").await;
+        let (status, _) = send(&app, pair_without_peer(&nonce)).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a bound nonce with no peer is wrong_peer, not a crash and not a pass"
+        );
     }
 
     #[tokio::test]
@@ -3442,6 +4013,129 @@ mod tests {
             status,
             StatusCode::UNAUTHORIZED,
             "login must still demand a StormDevice credential"
+        );
+    }
+
+    // ---- login rate limiting ----------------------------------------------
+
+    /// A login request, optionally carrying a `ConnectInfo` extension the way
+    /// the real service does (`into_make_service_with_connect_info`). Tests
+    /// that omit it exercise exactly what the relay's in-process dispatch
+    /// produces: no socket.
+    fn login_from(
+        device: &str,
+        username: &str,
+        peer: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut req = post_json_with_auth(
+            "/v1/auth/login",
+            serde_json::json!({"username": username, "password": "a-long-enough-password"}),
+            device,
+        );
+        if let Some(peer) = peer {
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                format!("{peer}:54321")
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ));
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn login_without_a_connect_info_extension_still_reaches_the_handler() {
+        // The extractor trap, as a regression test. A bare `ConnectInfo`
+        // extractor rejects before the handler runs and the client sees a
+        // 500-shaped error; the relay's in-process dispatch sends requests
+        // with no socket, so this must keep working — bounded by the
+        // `Unattributed` bucket, not refused outright.
+        let dir = tempdir::TempDir::new("storm-login-nopeer").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
+
+        let (status, _) = send(&app, login_from(&device, "nobody", None)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the handler must run and answer 401 for unknown credentials, not fail extraction"
+        );
+    }
+    /// A limiter whose per-caller burst is two, so these tests spend two
+    /// Argon2id verifies instead of thirty. The global bucket is left roomy —
+    /// each test here is about the per-caller half, and a global trip would
+    /// mask it.
+    pub(crate) fn throttling_limiter() -> crate::auth::ratelimit::LoginLimiter {
+        use crate::auth::ratelimit::{Limits, LoginLimiter, tests::TEST_LIMITS};
+        LoginLimiter::with_limits(TEST_LIMITS, Limits::per_minute(1_000.0, 1_000.0))
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_logins_from_one_caller_is_throttled_while_another_is_not() {
+        // The per-caller bucket trips first: one address flooding cannot lock
+        // anybody else out, which is the whole point of splitting the buckets.
+        // Junk usernames deliberately — they never trip the per-user lockout,
+        // which is why the limiter exists at all.
+        let dir = tempdir::TempDir::new("storm-login-burst").unwrap();
+        let (app, _, state) = test_router_with_limiter(dir.path(), throttling_limiter());
+        let device = pair_a_device(&state).await;
+
+        for _ in 0..crate::auth::ratelimit::tests::TEST_BURST {
+            let (status, _) = send(&app, login_from(&device, "nobody", Some("10.0.0.1"))).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "the burst itself fits the budget and reaches the credential check"
+            );
+        }
+
+        // The next attempt from the flooded address is a 429 with Retry-After,
+        // reusing the per-user-lockout shape rather than inventing a second one.
+        let response = app
+            .clone()
+            .oneshot(login_from(&device, "nobody", Some("10.0.0.1")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("Retry-After header")
+            .to_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        assert!(retry_after >= 1);
+
+        // ...while a different address still gets a credential check (401),
+        // not a throttle (429).
+        let (status, _) = send(&app, login_from(&device, "nobody", Some("10.0.0.2"))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "another caller must not pay for the flood"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_throttled_login_is_recorded_with_its_remote_address() {
+        let dir = tempdir::TempDir::new("storm-login-audit").unwrap();
+        let (app, _, state) = test_router_with_limiter(dir.path(), throttling_limiter());
+        let device = pair_a_device(&state).await;
+
+        for _ in 0..=crate::auth::ratelimit::tests::TEST_BURST {
+            send(&app, login_from(&device, "nobody", Some("10.9.9.9"))).await;
+        }
+
+        let auth_db = state.auth_db.lock().await;
+        let kind = crate::auth::sessions::EVENT_LOGIN_THROTTLED;
+        assert!(
+            auth_db.event_count(kind).unwrap() >= 1,
+            "a throttle refusal leaves an audit trail"
+        );
+        assert_eq!(
+            auth_db.latest_event_remote(kind).unwrap().as_deref(),
+            Some("10.9.9.9"),
+            "the offending address is auditable"
         );
     }
 
@@ -4089,5 +4783,524 @@ mod tests {
                 "and still say which key acted, for the audit trail"
             );
         }
+    }
+
+    // ---- change feed: WebSocket and SSE ---------------------------------
+
+    fn a_change(vault: &str, seq: i64) -> Change {
+        Change {
+            seq,
+            vault_id: vault.into(),
+            note_id: "note-1".into(),
+            kind: "updated".into(),
+            version: 1,
+            at: "2026-08-26T00:00:00Z".into(),
+        }
+    }
+
+    /// A session-tier credential, which is what `/v1/stream` needs.
+    async fn stream_credential(state: &Shared) -> String {
+        let user = seed_owner(state).await;
+        format!("Bearer {}", session_token(state, &user).await)
+    }
+
+    /// A receiver that has already fallen behind, so the next `recv` is
+    /// `Lagged`.
+    ///
+    /// Deterministic on purpose: racing a real slow consumer to make it lag is
+    /// exactly the kind of test that passes locally and fails in CI.
+    fn a_lagged_receiver() -> broadcast::Receiver<Change> {
+        let (tx, rx) = broadcast::channel(2);
+        for seq in 1..=5 {
+            tx.send(a_change("vault-a", seq)).unwrap();
+        }
+        drop(tx); // so the loop ends rather than waiting forever
+        rx
+    }
+
+    /// Records what the shared loop asked a sink to deliver, without framing.
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl ChangeSink for RecordingSink {
+        async fn change(&mut self, change: &Change) -> Result<(), Gone> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("change {}:{}", change.vault_id, change.seq));
+            Ok(())
+        }
+
+        async fn resync(&mut self) -> Result<(), Gone> {
+            self.0.lock().unwrap().push("resync".into());
+            Ok(())
+        }
+    }
+
+    /// Reads an endless body until `want` complete SSE events have arrived.
+    ///
+    /// `axum::body::to_bytes` cannot be used here at all: the change feed has
+    /// no end, so reading to completion hangs rather than failing.
+    async fn read_events(body: axum::body::Body, want: usize) -> String {
+        let mut stream = Box::pin(body.into_data_stream());
+        let mut text = String::new();
+        while text.matches("\n\n").count() < want {
+            let chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio_stream::StreamExt::next(&mut stream),
+            )
+            .await
+            .expect("the feed sent nothing before the timeout")
+            .expect("the feed ended, which it must not do")
+            .unwrap();
+            text.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn the_feed_loop_sends_changes_and_turns_lagging_into_a_resync() {
+        let seen = RecordingSink::default();
+        push_changes(seen.clone(), a_lagged_receiver()).await;
+
+        // The two retained changes, and the gap before them reported rather
+        // than dropped: a client silently missing changes has stopped syncing
+        // with nothing anywhere saying so.
+        assert_eq!(
+            *seen.0.lock().unwrap(),
+            vec!["resync", "change vault-a:4", "change vault-a:5"]
+        );
+    }
+
+    #[test]
+    fn a_lagging_websocket_client_is_sent_the_same_literal_it_always_was() {
+        // Not a tautology: these bytes are the wire format a shipped Flutter
+        // client parses, so editing `WS_RESYNC` has to fail here rather than in
+        // the field.
+        assert_eq!(WS_RESYNC, r#"{"kind":"resync"}"#);
+    }
+
+    /// The WebSocket branch, over a real socket.
+    ///
+    /// `oneshot` cannot reach it: `WebSocketUpgrade` needs a
+    /// `hyper::upgrade::OnUpgrade` in the request extensions and only a real
+    /// hyper connection produces one — which is the whole reason `/v1/stream`
+    /// grew a second response mode. So this binds an ephemeral port and speaks
+    /// the handshake for real.
+    #[tokio::test]
+    async fn the_websocket_branch_still_sends_a_bare_change_as_a_text_frame() {
+        use tokio_tungstenite::tungstenite::{Message as WsMessage, client::IntoClientRequest};
+
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut request = format!("ws://{addr}/v1/stream")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", credential.parse().unwrap());
+        let (mut socket, handshake) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(handshake.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+        let change = a_change("vault-a", 3);
+        state.events.send(change.clone()).unwrap();
+
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio_stream::StreamExt::next(&mut socket),
+        )
+        .await
+        .expect("the socket sent nothing before the timeout")
+        .expect("the socket closed")
+        .unwrap();
+
+        // **The invariant, asserted rather than assumed.** A raw `serde_json`
+        // `Change` in a text frame: no event name, no envelope, nothing of the
+        // SSE framing. `apps/client/test_live/two_client_sync_test.dart` and a
+        // shipped client both parse exactly this.
+        let WsMessage::Text(text) = frame else {
+            panic!("the change feed must send text frames");
+        };
+        assert_eq!(text.as_str(), serde_json::to_string(&change).unwrap());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_stream_request_without_an_upgrade_answers_event_stream() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let response = app
+            .oneshot(get_with_auth("/v1/stream", &credential))
+            .await
+            .unwrap();
+
+        // Not a rejection, and not a 426: the relay dispatches this request
+        // in-process, where an upgrade is impossible.
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sse_body_frames_a_change_as_one_event() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let response = app
+            .oneshot(get_with_auth("/v1/stream", &credential))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Safe to send only because the handler subscribes before it answers.
+        let change = a_change("vault-a", 7);
+        state.events.send(change.clone()).unwrap();
+
+        let json = serde_json::to_string(&change).unwrap();
+        assert_eq!(
+            read_events(response.into_body(), 1).await,
+            format!("event: change\nid: vault-a:7\ndata: {json}\n\n")
+        );
+    }
+
+    /// The regression test for the M9/M10 invariant.
+    ///
+    /// `change_log.seq` comes from each vault's own `index.db`, so every vault
+    /// counts 1, 2, 3 while this feed is cross-vault. A bare `id: <seq>` would
+    /// make these two events indistinguishable and land a `Last-Event-ID`
+    /// resume at the wrong position — silently, which is the failure the
+    /// composite id exists to prevent.
+    #[tokio::test]
+    async fn two_vaults_at_the_same_seq_get_distinct_event_ids() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let response = app
+            .oneshot(get_with_auth("/v1/stream", &credential))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        state.events.send(a_change("vault-a", 1)).unwrap();
+        state.events.send(a_change("vault-b", 1)).unwrap();
+
+        let body = read_events(response.into_body(), 2).await;
+        let ids: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("id:"))
+            .collect();
+        assert_eq!(ids, vec!["id: vault-a:1", "id: vault-b:1"]);
+        assert_ne!(ids[0], ids[1], "a bare seq would have collided here");
+    }
+
+    #[tokio::test]
+    async fn a_lagging_sse_client_is_sent_a_resync_event() {
+        let (tx, mut frames) = tokio::sync::mpsc::channel(8);
+        push_changes(SseSink(tx), a_lagged_receiver()).await;
+
+        assert_eq!(
+            frames.recv().await.unwrap().unwrap(),
+            "event: resync\ndata:\n\n"
+        );
+    }
+
+    /// The load-bearing one: `/v1/stream` is session tier, and the SSE mode did
+    /// not move it out from behind `require_auth`.
+    ///
+    /// The rejected design had the tunnel client subscribe to `state.events`
+    /// in-process instead of calling the handler, which would have handed every
+    /// vault's change feed to anyone who could open a trunk. This is what says
+    /// that bypass was not reintroduced.
+    #[tokio::test]
+    async fn the_change_feed_refuses_an_unauthenticated_caller() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, _) = test_router_with_state(dir.path());
+
+        let plain = app.clone().oneshot(get("/v1/stream")).await.unwrap();
+        assert_eq!(plain.status(), StatusCode::UNAUTHORIZED);
+
+        // And the upgrade branch too — the credential is checked before either
+        // branch is chosen, so neither can be the way in.
+        let upgrade = axum::http::Request::builder()
+            .uri("/v1/stream")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "WebSocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let refused = app.oneshot(upgrade).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// `Connection` is a token list and both headers are case-insensitive, so
+    /// the real-world handshake must not be mistaken for a plain GET.
+    #[tokio::test]
+    async fn an_upgrade_is_detected_by_token_not_by_whole_header() {
+        let dir = tempdir::TempDir::new("storm").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let credential = stream_credential(&state).await;
+
+        let request = axum::http::Request::builder()
+            .uri("/v1/stream")
+            .header("authorization", &credential)
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "WebSocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        // `oneshot` puts no `OnUpgrade` in the extensions, so the handshake
+        // cannot complete — but reaching that refusal is the proof the request
+        // took the upgrade branch instead of being answered with SSE.
+        assert_ne!(response.status(), StatusCode::OK);
+        assert_ne!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "a real handshake must not be answered with an SSE body"
+        );
+    }
+
+    // ---- relay configuration (PUT /v1/config/relays) ----------------------
+
+    fn put_json_with_auth(
+        path: &str,
+        body: serde_json::Value,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        put_json(path, body, Some(auth))
+    }
+
+    #[tokio::test]
+    async fn config_reports_an_empty_relay_list_on_a_fresh_server() {
+        let dir = tempdir::TempDir::new("storm-relays-config-fresh").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["relays"],
+            serde_json::json!([]),
+            "no relay was ever configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_response_is_unchanged_apart_from_the_new_field() {
+        // Additive means every key that existed keeps existing, and nothing
+        // moved. Asserted explicitly so a future edit cannot reshape this
+        // response silently.
+        let dir = tempdir::TempDir::new("storm-relays-config-shape").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["vault_root"],
+            state
+                .vaults
+                .read()
+                .await
+                .registry
+                .root
+                .display()
+                .to_string()
+        );
+        assert_eq!(body["state_dir"], state.state_dir.display().to_string());
+        assert_eq!(body["vault_count"], 0);
+        assert_eq!(body["mcp_enabled"], false);
+        assert_eq!(body["mcp_writable"], false);
+        assert_eq!(body["allow_registration"], false);
+        assert_eq!(body["relays"], serde_json::json!([]));
+        assert_eq!(
+            body.as_object().unwrap().len(),
+            7,
+            "a new key showed up that this test does not know about"
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_relays_persists_across_a_registry_reload() {
+        let dir = tempdir::TempDir::new("storm-relays-persist").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com", "wss://relay.two.example"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["relays"],
+            serde_json::json!(["wss://relay.example.com", "wss://relay.two.example"])
+        );
+
+        // Config reflects it immediately, without a restart.
+        let (_, config) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            config["relays"],
+            serde_json::json!(["wss://relay.example.com", "wss://relay.two.example"])
+        );
+
+        // And it survives a fresh load from disk, not just the in-memory copy.
+        let reloaded =
+            Registry::load(&state.state_dir, &state.vaults.read().await.registry.root).unwrap();
+        assert_eq!(
+            reloaded.relays,
+            vec![
+                "wss://relay.example.com".to_string(),
+                "wss://relay.two.example".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_relay_url_is_a_400_and_changes_nothing() {
+        // All-or-nothing is the property under test: both the status and that
+        // the previously stored list survived intact.
+        let dir = tempdir::TempDir::new("storm-relays-bad-url").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com", "not-a-relay-url"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a bad URL is the caller's mistake, not a server failure"
+        );
+        assert!(
+            body["error"].as_str().unwrap().contains("not-a-relay-url"),
+            "the message must say which URL was rejected: {body}"
+        );
+
+        let (_, config) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            config["relays"],
+            serde_json::json!(["wss://relay.example.com"]),
+            "the previously stored list must survive a rejected update"
+        );
+    }
+
+    #[tokio::test]
+    async fn setting_relays_does_not_register_them() {
+        // The distinction the whole design rests on: configuring is not
+        // registering. `GET /v1/server` must keep answering an empty set,
+        // because nothing here is a tunnel client succeeding at a connection.
+        let dir = tempdir::TempDir::new("storm-relays-not-registered").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, server) = send(&app, get("/v1/server")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            server["relays"],
+            serde_json::json!([]),
+            "a configured relay must not appear on the wire until something registers it"
+        );
+    }
+
+    #[tokio::test]
+    async fn putting_relays_refuses_an_unauthenticated_caller() {
+        let dir = tempdir::TempDir::new("storm-relays-unauth").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let _ = seed_owner(&state).await;
+
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com"]}),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Nothing was stored.
+        let vaults = state.vaults.read().await;
+        assert!(vaults.registry.relays.is_empty());
     }
 }

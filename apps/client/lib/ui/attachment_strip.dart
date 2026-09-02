@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 
 import '../state/app_state.dart';
+import '../ui/storm_image_provider.dart';
 import 'breakpoints.dart';
 import 'tokens.dart';
 
@@ -41,13 +43,15 @@ class AttachmentStrip extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final api = ref.watch(apiProvider);
+    final connection = ref.watch(connectionProvider);
     final vaultId = ref.watch(activeVaultProvider);
-    if (api == null) return const SizedBox.shrink();
+    if (connection == null) return const SizedBox.shrink();
 
     final paths = imagePaths(body);
     if (paths.isEmpty) return const SizedBox.shrink();
 
+    final client = connection.transportClient;
+    final headers = connection.authHeaders;
     final t = context.tokens;
     final side = t.sp * (context.isExpanded ? 11 : 9.5);
 
@@ -60,18 +64,34 @@ class AttachmentStrip extends ConsumerWidget {
           for (final path in paths)
             Builder(
               builder: (c) {
-                final url = api.attachmentUrl(vaultId, path);
+                final uri = connection.active.relayUrl != null
+                    ? Uri.parse(
+                        '${connection.active.baseUrl}/v1/vaults/$vaultId/attachments/$path',
+                      )
+                    : Uri.parse(
+                        '${connection.localAddress}/v1/vaults/$vaultId/attachments/$path',
+                      );
+                final provider = StormImageProvider(
+                  uri: uri,
+                  client: client,
+                  headers: headers,
+                );
                 return InkWell(
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
-                      builder: (_) => _Viewer(url: url, title: path),
+                      builder: (_) => _Viewer(
+                        uri: uri,
+                        client: client,
+                        headers: headers,
+                        title: path,
+                      ),
                     ),
                   ),
                   borderRadius: BorderRadius.circular(t.rControl),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(t.rControl),
-                    child: Image.network(
-                      url.toString(),
+                    child: Image(
+                      image: provider as ImageProvider<Object>,
                       width: side,
                       height: side,
                       fit: BoxFit.cover,
@@ -98,14 +118,26 @@ class AttachmentStrip extends ConsumerWidget {
 }
 
 class _Viewer extends StatelessWidget {
-  const _Viewer({required this.url, required this.title});
+  const _Viewer({
+    required this.uri,
+    required this.client,
+    required this.headers,
+    required this.title,
+  });
 
-  final Uri url;
+  final Uri uri;
+  final http.Client client;
+  final Map<String, String> headers;
   final String title;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final provider = StormImageProvider(
+      uri: uri,
+      client: client,
+      headers: headers,
+    );
     return Scaffold(
       appBar: AppBar(title: Text(title, overflow: TextOverflow.ellipsis)),
       // A viewer is the one surface that should not be themed: a picture is
@@ -114,8 +146,8 @@ class _Viewer extends StatelessWidget {
       body: Center(
         child: InteractiveViewer(
           maxScale: 6,
-          child: Image.network(
-            url.toString(),
+          child: Image(
+            image: provider as ImageProvider<Object>,
             errorBuilder: (c, _, _) => Padding(
               padding: EdgeInsets.all(t.cardPad),
               child: Text(

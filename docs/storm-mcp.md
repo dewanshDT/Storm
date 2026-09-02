@@ -1,8 +1,9 @@
 # Storm MCP — design brief (v0.1)
 
-> **Status: Phase 1 built.** M13 in `PLAN.md`, decisions 37–39. Nine read tools
-> at `/mcp`, behind `--mcp` (off by default) and the existing bearer token.
-> Phase 2 (writes) is unbuilt, as the runway below describes.
+> **Status: Phase 1 + writes built.** M13 in `PLAN.md`, decisions 37–39. Eleven
+> read tools and five write tools at `/mcp`, behind `--mcp` (off by default) and
+> the existing bearer token. In addition to notes, the kit vault's canonical
+> scripts are readable and writable through four `*_script` tools.
 >
 > Three corrections this brief earned during implementation, kept here so the
 > next reader doesn't re-derive them:
@@ -125,6 +126,15 @@ Tier 1 — pin a version and expect to bump it, don't chase `main`.
 | `list_tags` | Existing tag index, already groups hierarchical tags |
 | `recent_notes` / `recent_changes` | `GET /v1/recents` — cross-vault, already server-side (decision 23) |
 | `get_note_history` / `get_note_version` | `note_versions` table — already the merge base, already populated |
+| `list_scripts` / `get_script` | The **kit vault** (directory `kit`), stored under its `scripts/` root as attachments — read via the existing attachment store |
+
+Scripts are the one place an address is a name, not a `vault + note_id`: they
+are scoped to exactly one vault — the kit vault — so an agent cannot aim them
+anywhere else. `name` is relative to `scripts/`, may carry a folder prefix
+(e.g. `psi-item-import/run.spec.ts`), and must end in an allowlisted text
+extension: `ts`, `js`, `mjs`, `cjs`, `json`, `sh`, `py`, `yaml`, `yml`, `toml`,
+`csv`. `.md` is deliberately *not* allowed — markdown belongs to the notes
+tools.
 
 ### Write (Phase 2, gated on the runway above)
 
@@ -134,6 +144,7 @@ Tier 1 — pin a version and expect to bump it, don't chase `main`.
 | `update_note` / `append_to_note` | The **same** `PUT` route Flutter calls, carrying `expected_version` → the existing `base_version` + diff3 merge. A version mismatch returns the same `merged`/`conflict` shape the client already handles — MCP tools surface that as a structured error the calling agent can react to (re-read, retry), not a silent overwrite |
 | `tag_note` | Existing tag-edit path (through the properties writer, decision 27/30 — never a direct frontmatter serialize) |
 | `move_note` | Existing move/rename handling — UUID-tracked, so this is a metadata update, not a file operation from the model's perspective |
+| `create_script` / `update_script` | Same kit-vault attachment store as the reads; `create_script` refuses an existing name (use `update_script` to change one), and both take the full text. One store, two surfaces — a script written over MCP is an ordinary attachment over REST |
 
 ### Explicitly not in this design
 
@@ -157,6 +168,11 @@ Tier 1 — pin a version and expect to bump it, don't chase `main`.
 - **Filesystem paths never reach the model.** Tools address notes by
   `vault + note_id`, matching how the REST API already works — nothing new
   needed here, just a rule to hold to when writing the tool schemas.
+- **No generic file/attachment tool, and scripts only in kit.** The kit-vault
+  script tools are deliberately narrow: they cannot write markdown and cannot
+  target any vault but kit. That thread is what keeps the MCP write surface to
+  "notes, plus scripts in one vault" instead of a second way to drop files
+  anywhere.
 
 ## Vault descriptions
 

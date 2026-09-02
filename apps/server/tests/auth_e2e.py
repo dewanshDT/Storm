@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -218,8 +219,20 @@ check("public_key is 32 base64url bytes", len(public_key) == 32, info.get("publi
 
 check(
     "exposes exactly the identity fields and nothing else",
-    set(info) == {"server_id", "name", "key_id", "algorithm", "public_key"},
+    set(info) == {"server_id", "name", "key_id", "algorithm", "public_key", "relays"},
     sorted(info),
+)
+
+# `relays` is how a client whose server moved relays finds its way home: the
+# pairing payload is frozen at issuance, so this endpoint is the only live
+# source. It advertises the set the server is *registered* with, never the set
+# it has configured — a relay it failed to register with is a dead path, and
+# the client's connection race would spend its whole budget dialling it.
+check("carries a relay set", isinstance(info.get("relays"), list), info.get("relays"))
+check(
+    "which is empty on a server with no tunnel client",
+    info.get("relays") == [],
+    info.get("relays"),
 )
 
 # The two endpoints are unauthenticated, not "authenticated by anything". A
@@ -582,6 +595,90 @@ if locked:
         body,
     )
     check("the lockout is a 429, never a 401", body.get("error") == "rate_limited", body)
+
+print("--- login rate limiting (after the lockout: it spends the bucket) ---")
+
+# The throttle and the per-user lockout answer with the *same* 429 shape, so a
+# test using a real username could not say which one refused it. Every attempt
+# below uses a username that does not exist: no account means no lockout is
+# possible, so a 429 here can only be the rate limiter.
+#
+# That is also the case the limiter exists for. A junk username still pays for
+# a full Argon2id verify — deliberately, so response time cannot enumerate
+# accounts — and can never trigger a lockout, which is what makes it the
+# cheapest way to take the login path down.
+#
+# **The burst has to be concurrent.** Sent one at a time, each attempt costs a
+# whole Argon2id verify (seconds, in the debug build `make test-live` uses) and
+# the bucket refills faster than the requests arrive — so the limiter correctly
+# allows every one of them and the suite proves nothing. A real flood does not
+# wait for its own responses, and neither does this.
+#
+# Runs last for the same reason the lockout does: it leaves the caller's bucket
+# empty for a couple of minutes.
+FLOOD = 45
+
+flood_results = []
+flood_lock = threading.Lock()
+
+
+def one_junk_login(n):
+    try:
+        result = call_full(
+            "POST",
+            "/v1/auth/login",
+            {"username": f"no-such-user-{n}", "password": "not-the-password"},
+            auth=DEVICE,
+        )
+    except Exception as e:  # a dropped connection is a result to report, not a crash
+        result = (None, {"error": str(e)}, {})
+    with flood_lock:
+        flood_results.append(result)
+
+
+flood = [threading.Thread(target=one_junk_login, args=(n,)) for n in range(FLOOD)]
+for thread in flood:
+    thread.start()
+for thread in flood:
+    thread.join()
+
+seen = sorted({str(status) for status, _, _ in flood_results})
+statuses = [status for status, _, _ in flood_results]
+throttled = next(
+    ((body, headers) for status, body, headers in flood_results if status == 429),
+    None,
+)
+
+check(f"a concurrent flood of {FLOOD} junk logins is throttled", throttled is not None, seen)
+check("the flood is throttled rather than refused outright", 401 in statuses, seen)
+if throttled:
+    body, headers = throttled
+    retry_header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
+    check(
+        "the throttle carries a Retry-After header",
+        retry_header is not None,
+        sorted(headers),
+    )
+    check(
+        "the throttle's Retry-After parses as seconds",
+        retry_header is not None and retry_header.isdigit() and int(retry_header) > 0,
+        retry_header,
+    )
+    check(
+        "the throttle reuses the rate_limited body",
+        body.get("error") == "rate_limited",
+        body,
+    )
+    check(
+        "and the body says how long to wait",
+        isinstance(body.get("retry_after"), int) and body["retry_after"] > 0,
+        body,
+    )
+
+# What this suite cannot cover, stated rather than silently skipped: every
+# request here comes from one address, so the *global* ceiling and the
+# per-caller isolation ("another address is unaffected") are exercised only by
+# the Rust tests in `auth/ratelimit.rs` and `api.rs`, which can name the caller.
 
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

@@ -4,6 +4,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/models.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/state/note_session.dart';
@@ -79,7 +80,11 @@ void main() {
   setUp(() {
     api = StormApi(baseUrl: baseUrl, token: token);
     cache = CacheDb(NativeDatabase.memory());
-    engine = SyncEngine(api: api, cache: cache, vaultId: vaultId);
+    engine = SyncEngine(
+      connection: StormConnection.direct(api: api),
+      cache: cache,
+      vaultId: vaultId,
+    );
   });
 
   tearDown(() async {

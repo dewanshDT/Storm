@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/editor/markdown_theme.dart';
 import 'package:storm/editor/storm_markdown_controller.dart';
@@ -57,7 +58,7 @@ void main() {
         // and `testWidgets` fails any test that leaves a timer pending.
         syncEngineProvider.overrideWith(
           (ref) => SyncEngine(
-            api: api,
+            connection: StormConnection.direct(api: api),
             cache: cache,
             vaultId: FakeServer.primaryVault,
           ),
