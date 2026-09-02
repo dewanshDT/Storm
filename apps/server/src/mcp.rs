@@ -610,9 +610,7 @@ impl Storm {
         &self,
         Parameters(ScriptContentParams { name, content }): Parameters<ScriptContentParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(
-            crate::ops::create_script(&self.state, self.actor()?, &name, &content).await,
-        )
+        respond_object(crate::ops::create_script(&self.state, self.actor()?, &name, &content).await)
     }
 
     #[tool(
@@ -622,9 +620,7 @@ impl Storm {
         &self,
         Parameters(ScriptContentParams { name, content }): Parameters<ScriptContentParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(
-            crate::ops::update_script(&self.state, self.actor()?, &name, &content).await,
-        )
+        respond_object(crate::ops::update_script(&self.state, self.actor()?, &name, &content).await)
     }
 }
 

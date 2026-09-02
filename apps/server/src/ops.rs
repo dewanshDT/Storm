@@ -611,11 +611,7 @@ pub async fn list_scripts(
 }
 
 /// One script's full text.
-pub async fn get_script(
-    state: &Shared,
-    actor: &Actor,
-    name: &str,
-) -> ApiResult<ScriptContent> {
+pub async fn get_script(state: &Shared, actor: &Actor, name: &str) -> ApiResult<ScriptContent> {
     let rel = script_path(name)?;
     let handle = kit_handle(state, actor, Access::Read).await?;
     let ix = handle.indexer.lock().await;
@@ -623,8 +619,7 @@ pub async fn get_script(
         .vault
         .read_bytes(&rel)
         .map_err(|_| not_found("no such script"))?;
-    let content = String::from_utf8(bytes)
-        .map_err(|_| bad_request("script is not valid UTF-8"))?;
+    let content = String::from_utf8(bytes).map_err(|_| bad_request("script is not valid UTF-8"))?;
     Ok(ScriptContent {
         name: name.to_string(),
         path: rel,
