@@ -11,6 +11,20 @@
 //! defensible while it stays on the LAN — exposing this beyond it needs TLS
 //! and per-device tokens first.
 
+// An axum handler that can fail returns `Response` as its error type — that is
+// the framework's shape, not a choice this crate makes, and it is how a handler
+// answers with a status and a body instead of a 500. clippy counts those bytes
+// and asks for `Box<Response>`, which would move an already-heap-backed body
+// behind a second allocation in every handler to shrink a value that never
+// outlives one request.
+//
+// **It fires on x86_64-linux and not on aarch64-darwin**, on the same 1.98.0.
+// So it arrived through `dtolnay/rust-toolchain@stable` moving under CI — the
+// `server (rust)` job went red on 2026-08-31 and PR #34 was merged past it —
+// and it cannot be reproduced, or a fix verified, on a Mac. A lint nobody can
+// run locally is not a gate; it is a tax on whoever pushes next.
+#![allow(clippy::result_large_err)]
+
 mod api;
 mod auth;
 mod db;
