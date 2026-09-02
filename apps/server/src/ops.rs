@@ -21,9 +21,12 @@
 //! so the REST envelopes stay exactly where they were and the wire format is
 //! untouched. `tests/e2e.py` is what proves that.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use serde::Serialize;
 
-use crate::api::{ApiError, ApiResult, Shared, bad_request, not_found, vault_of};
+use crate::api::{ApiError, ApiResult, Shared, bad_request, conflict, not_found, vault_of};
 use crate::auth::authz::{Access, Actor};
 use crate::db::{NoteRow, RecentRow, SearchHit};
 
@@ -471,6 +474,211 @@ pub async fn recents(state: &Shared, actor: &Actor, limit: i64) -> ApiResult<Vec
     Ok(all)
 }
 
+// ---- scripts (kit vault) ------------------------------------------------
+//
+// Canonical, agent-run tooling gets exactly one home in Storm: the **kit
+// vault**, found by its directory name, addressed by `name` under a `scripts/`
+// root. Everything here is scoped to that vault and to a text-only extension
+// allowlist — an agent gets no second way to write files anywhere else.
+// Scripts are stored as attachments (they are non-markdown files), so the
+// indexes, hashes and cross-device sync already work; what this section adds is
+// the intent: only scripts, only in kit, only with an allowed extension.
+
+/// The vault script tools are scoped to — the one whose directory is `kit`.
+const KIT_VAULT_DIR: &str = "kit";
+
+/// Scripts live under this folder inside the kit vault.
+const SCRIPTS_ROOT: &str = "scripts";
+
+/// Extensions agents may write. Text-only, and deliberately **not** `.md`:
+/// markdown is the notes domain, and the allowlist is what keeps a tool from
+/// dropping an executable no one meant to run.
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    "ts", "js", "mjs", "cjs", "json", "sh", "py", "yaml", "yml", "toml", "csv",
+];
+
+/// One canonical script in the kit vault.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptInfo {
+    /// Address for the other script tools, relative to the `scripts/` root.
+    pub name: String,
+    /// Vault-relative path (`scripts/<name>`), for callers that keep paths.
+    pub path: String,
+    pub size: i64,
+    pub modified: String,
+}
+
+/// The result of storing a script.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptStored {
+    pub name: String,
+    pub path: String,
+    pub size: i64,
+}
+
+/// A script and its text. Every allowed extension is a text format, so the
+/// content never needs base64 — binary blobs cannot be written here.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScriptContent {
+    pub name: String,
+    pub path: String,
+    pub size: i64,
+    pub content: String,
+}
+
+/// The kit vault's id, or 404 when it is not registered.
+///
+/// Found by directory name rather than a hardcoded id, so a fresh server whose
+/// registry is built by adopting the `kit/` folder resolves it the same way as
+/// one that has it persisted.
+async fn kit_vault_id(state: &Shared) -> ApiResult<String> {
+    let vaults = state.vaults.read().await;
+    vaults
+        .registry
+        .by_dir(KIT_VAULT_DIR)
+        .map(|entry| entry.id.clone())
+        .ok_or_else(|| not_found("no vault named “kit”"))
+}
+
+/// The kit vault's open handle — the one place the script tools ask whether the
+/// caller may touch kit, so no tool can forget to.
+async fn kit_handle(
+    state: &Shared,
+    actor: &Actor,
+    access: Access,
+) -> ApiResult<Arc<crate::api::VaultHandle>> {
+    let id = kit_vault_id(state).await?;
+    vault_of(state, actor, access, &id).await
+}
+
+/// Validates a script name and returns its vault-relative path under the
+/// scripts root. One translation, shared by every script tool, so reads and
+/// writes cannot disagree about what a name means.
+fn script_path(name: &str) -> Result<String, ApiError> {
+    if name.is_empty() || name.starts_with('/') || name.ends_with('/') {
+        return Err(bad_request(
+            "script name must be non-empty and cannot start or end with '/'",
+        ));
+    }
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some(ext) if SCRIPT_EXTENSIONS.contains(&ext) => Ok(format!("{SCRIPTS_ROOT}/{name}")),
+        _ => Err(bad_request(format!(
+            "extension not allowed ('.{}'); scripts may only be: {}",
+            extension.unwrap_or_default(),
+            SCRIPT_EXTENSIONS.join(", ")
+        ))),
+    }
+}
+
+/// Scripts currently in the kit vault. Filtered by the scripts root **and** the
+/// allowlist, so an attachment that happens to live in kit but is not a script
+/// — an image, say — stays invisible here.
+pub async fn list_scripts(
+    state: &Shared,
+    actor: &Actor,
+    prefix: Option<&str>,
+) -> ApiResult<Vec<ScriptInfo>> {
+    let handle = kit_handle(state, actor, Access::Read).await?;
+    let ix = handle.indexer.lock().await;
+    let prefix = prefix.unwrap_or("");
+    let mut out = Vec::new();
+    for row in ix.db.list_attachments()? {
+        let Some(name) = row.path.strip_prefix(&format!("{SCRIPTS_ROOT}/")) else {
+            continue;
+        };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
+        if !SCRIPT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        out.push(ScriptInfo {
+            name: name.to_string(),
+            path: row.path.clone(),
+            size: row.size,
+            modified: row.modified,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// One script's full text.
+pub async fn get_script(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+) -> ApiResult<ScriptContent> {
+    let rel = script_path(name)?;
+    let handle = kit_handle(state, actor, Access::Read).await?;
+    let ix = handle.indexer.lock().await;
+    let bytes = ix
+        .vault
+        .read_bytes(&rel)
+        .map_err(|_| not_found("no such script"))?;
+    let content = String::from_utf8(bytes)
+        .map_err(|_| bad_request("script is not valid UTF-8"))?;
+    Ok(ScriptContent {
+        name: name.to_string(),
+        path: rel,
+        size: content.len() as i64,
+        content,
+    })
+}
+
+/// Stores a new script. Refuses a name that already exists, so a re-run cannot
+/// silently clobber canonical tooling — change one with [`update_script`].
+pub async fn create_script(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    content: &str,
+) -> ApiResult<ScriptStored> {
+    let rel = script_path(name)?;
+    let handle = kit_handle(state, actor, Access::Write).await?;
+    let mut ix = handle.indexer.lock().await;
+    if ix.vault.exists(&rel) {
+        return Err(conflict(format!("script “{name}” already exists")));
+    }
+    ix.put_attachment(&rel, content.as_bytes())
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ScriptStored {
+        name: name.to_string(),
+        path: rel,
+        size: content.len() as i64,
+    })
+}
+
+/// Replaces an existing script's text. The mirror of [`create_script`]: fails
+/// on a name that does not exist, which keeps the two from being interchangeable.
+pub async fn update_script(
+    state: &Shared,
+    actor: &Actor,
+    name: &str,
+    content: &str,
+) -> ApiResult<ScriptStored> {
+    let rel = script_path(name)?;
+    let handle = kit_handle(state, actor, Access::Write).await?;
+    let mut ix = handle.indexer.lock().await;
+    if !ix.vault.exists(&rel) {
+        return Err(not_found("no such script"));
+    }
+    ix.put_attachment(&rel, content.as_bytes())
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(ScriptStored {
+        name: name.to_string(),
+        path: rel,
+        size: content.len() as i64,
+    })
+}
+
 // ---- server identity ---------------------------------------------------
 
 /// What a client needs to pin this server: who it is, and which key to check.
@@ -735,6 +943,42 @@ mod tests {
         assert_eq!(sanitize_fts_query("NEAR(a b)"), "\"NEAR(a\" \"b)\"");
         assert_eq!(sanitize_fts_query("  "), "");
         assert_eq!(sanitize_fts_query("say \"hi\""), "\"say\" \"hi\"");
+    }
+
+    // ---- scripts: the extension allowlist ------------------------------
+
+    #[test]
+    fn a_script_name_maps_into_the_scripts_root() {
+        assert_eq!(
+            must(script_path("psi-item-import/run.spec.ts")),
+            "scripts/psi-item-import/run.spec.ts"
+        );
+        assert_eq!(must(script_path("say-hello.sh")), "scripts/say-hello.sh");
+    }
+
+    #[test]
+    fn the_extension_allowlist_is_case_insensitive() {
+        assert_eq!(
+            must(script_path("Demo/Seed.JSON")),
+            "scripts/Demo/Seed.JSON"
+        );
+    }
+
+    #[test]
+    fn names_outside_the_allowlist_are_refused() {
+        // Markdown belongs to the notes tools, executables belong to no one.
+        for name in [
+            "notes/README.md",
+            "tool.bat",
+            "virus.exe",
+            "no-extension",
+            "dir/",
+            "/absolute.ts",
+            "",
+        ] {
+            let err = script_path(name).unwrap_err();
+            assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST, "{name}");
+        }
     }
 
     // ---- GET /v1/server: the live relay set -----------------------------

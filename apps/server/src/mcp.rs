@@ -16,6 +16,12 @@
 //! contract the REST API already has. Responses do carry the vault-relative
 //! path, which is structure a caller needs, but an absolute filesystem path
 //! must never appear in one; `mcp_e2e.py` asserts it.
+//!
+//! Scripts are the one exception to "a vault id" and they deliberately are:
+//! canonical, agent-run tooling lives in exactly one place — the **kit vault** —
+//! so the script tools take a plain `name` under that vault's `scripts/` root
+//! and there is no way to aim them elsewhere. One surface to write code, with a
+//! text-only extension allowlist, instead of a second generic file tool.
 
 use std::sync::Arc;
 
@@ -45,7 +51,13 @@ pub struct McpOptions {
 /// is a write is not possible: `every_write_tool_is_listed` fails if the router
 /// grows one that is missing from this list, and it would otherwise be served
 /// to a read-only client.
-pub const WRITE_TOOLS: &[&str] = &["create_note", "update_note", "delete_note"];
+pub const WRITE_TOOLS: &[&str] = &[
+    "create_note",
+    "update_note",
+    "delete_note",
+    "create_script",
+    "update_script",
+];
 
 /// Which `Host` headers the MCP endpoint should accept.
 ///
@@ -230,6 +242,33 @@ pub struct UpdateParams {
     /// it, so a note changed on a phone in the meantime is reconciled rather
     /// than overwritten.
     pub base_version: i64,
+}
+
+/// A canonical script in the kit vault, addressed by name.
+///
+/// Scripts live under the kit vault's `scripts/` root; the name is relative to
+/// it and may carry a folder prefix (e.g. `psi-item-import/run.spec.ts`). Only
+/// text extensions are allowed: `ts`, `js`, `mjs`, `cjs`, `json`, `sh`, `py`,
+/// `yaml`, `yml`, `toml`, `csv`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScriptParams {
+    pub name: String,
+}
+
+/// A script and the text to store it. One shape for create and update; they
+/// differ only in what they do about an existing name.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScriptContentParams {
+    pub name: String,
+    /// The script's full text.
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListScriptsParams {
+    /// Only scripts whose name starts with this — `psi-item-import/` lists one
+    /// topic's scripts.
+    pub prefix: Option<String>,
 }
 
 // ---- the handler -------------------------------------------------------
@@ -471,6 +510,35 @@ impl Storm {
         )
     }
 
+    // ---- scripts (kit vault) ------------------------------------------
+    //
+    // Canonical, agent-run tooling lives in the **kit vault** and only there:
+    // these tools take a script name, never a vault id, so they cannot be aimed
+    // at anything else. Reads below; writes in the write section.
+
+    #[tool(
+        description = "The kit vault's canonical scripts: names, sizes, modified times, Sorted. Optionally filter to one topic with prefix (e.g. 'psi-item-import/')."
+    )]
+    async fn list_scripts(
+        &self,
+        Parameters(ListScriptsParams { prefix }): Parameters<ListScriptsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond(
+            crate::ops::list_scripts(&self.state, self.actor()?, prefix.as_deref()).await,
+            Some("scripts"),
+        )
+    }
+
+    #[tool(
+        description = "Fetch one canonical script from the kit vault by name (relative to its 'scripts/' root): its full text, size and vault-relative path."
+    )]
+    async fn get_script(
+        &self,
+        Parameters(ScriptParams { name }): Parameters<ScriptParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::get_script(&self.state, self.actor()?, &name).await)
+    }
+
     // ---- writes --------------------------------------------------------
     //
     // Present only when the server is in read-write mode; see `tools()`.
@@ -534,6 +602,30 @@ impl Storm {
             Some("seq"),
         )
     }
+
+    #[tool(
+        description = "Create a canonical script in the kit vault — the one place agents may store runnable code. name is relative to the vault's 'scripts/' root and must end in an allowed extension; content is the full text. Fails if the name is already taken; use update_script to change one. Scripts cannot be stored in any other vault."
+    )]
+    async fn create_script(
+        &self,
+        Parameters(ScriptContentParams { name, content }): Parameters<ScriptContentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(
+            crate::ops::create_script(&self.state, self.actor()?, &name, &content).await,
+        )
+    }
+
+    #[tool(
+        description = "Replace an existing script in the kit vault. name must end in an allowed extension; content is the full text. Fails if no such script exists — use create_script to add one."
+    )]
+    async fn update_script(
+        &self,
+        Parameters(ScriptContentParams { name, content }): Parameters<ScriptContentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(
+            crate::ops::update_script(&self.state, self.actor()?, &name, &content).await,
+        )
+    }
 }
 
 #[tool_handler(router = self.tools())]
@@ -562,12 +654,15 @@ impl ServerHandler for Storm {
                  also create, update and delete notes: always read a note before updating it \
                  and send back its base_version, so a change made on another device is \
                  merged rather than overwritten. There is no trash — a deleted note is gone \
-                 from the vault immediately."
+                 from the vault immediately. Canonical scripts live in the kit vault: \
+                 list_scripts, then get_script to read one, and create_script or \
+                 update_script to store one there — nowhere else."
             } else {
                 "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
                  addressed by vault id and note id — never by file path. Start with \
-                 list_vaults, then search to find notes and get_note to read one. These \
-                 tools are read-only: this server does not allow changes."
+                 list_vaults, then search to find notes and get_note to read one. Canonical \
+                 scripts in the kit vault are readable with list_scripts and get_script. \
+                 These tools are read-only: this server does not allow changes."
             }
             .into(),
         );
