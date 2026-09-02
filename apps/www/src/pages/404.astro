@@ -1,0 +1,35 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+
+<BaseLayout
+  title="Not found"
+  description="That page does not exist on the Storm site."
+>
+  <header class="page-hero wrap-narrow">
+    <p class="eyebrow">404</p>
+    <h1>That page is not here.</h1>
+    <p class="lede">
+      The link may be old, or the page may never have existed. Everything the
+      site has is one of these.
+    </p>
+  </header>
+
+  <section class="section wrap-narrow">
+    <p class="cta-row">
+      <a class="btn btn-primary" href="/">Home</a>
+      <a class="btn btn-ghost" href="/install">Install</a>
+      <a class="btn btn-ghost" href="/clients">Clients</a>
+      <a class="btn btn-ghost" href="/how-it-works">How it works</a>
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 1.5);
+    margin: 0;
+  }
+</style>

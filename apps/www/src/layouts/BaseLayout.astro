@@ -14,6 +14,12 @@ const {
   description,
   ogImage = "/brand/storm_icon_full.png",
 } = Astro.props;
+
+// og:image and og:url must be absolute — a relative path is silently ignored by
+// every scraper, so the card renders with no image and nothing says why.
+// `site` in astro.config.mjs is what makes these resolvable at build time.
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImageUrl = new URL(ogImage, Astro.site);
 const pageTitle =
   title === "Storm" || title.startsWith("Storm ") || title.startsWith("Storm—") || title.startsWith("Storm —")
     ? title
@@ -27,10 +33,13 @@ const pageTitle =
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
     <meta name="theme-color" content="#d4cbb8" />
+    <link rel="canonical" href={canonical} />
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={description} />
-    <meta property="og:image" content={ogImage} />
+    <meta property="og:image" content={ogImageUrl} />
+    <meta property="og:url" content={canonical} />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Storm" />
     <meta name="twitter:card" content="summary" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />

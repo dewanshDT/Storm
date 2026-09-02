@@ -326,6 +326,14 @@ www:
 www-dev:
 	cd $(WWW) && npm install && npm run dev
 
+## www-check: is the site still telling the truth? (release tag + stale claims)
+#
+# Separate from `www` because a build check cannot see this: the pages compiled
+# fine for thirteen days while they told people to copy a token that no longer
+# existed. Needs tags in the checkout.
+www-check:
+	$(WWW)/scripts/check-claims.sh
+
 ## clean: remove build output and local dev data
 clean:
 	cd $(SERVER) && cargo clean
@@ -334,6 +342,6 @@ clean:
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-client test-live fmt \
-        dry-run server client web serve-web www www-dev codegen clean \
+        dry-run server client web serve-web www www-dev www-check codegen clean \
         deploy-web deploy-web-check \
         build-server deploy deploy-check

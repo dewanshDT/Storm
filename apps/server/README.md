@@ -52,9 +52,10 @@ cargo run --release -- serve \
 ```
 
 There is no shared token. The first device gets in with `storm-server pair`,
-which prints a single-use pairing QR while the user table is empty; after that,
-authentication is per-device pairing plus sessions, and MCP clients use keys
-minted from the app. Set `STORM_VAULT_ROOT`
+which prints a single-use pairing **URI** while the user table is empty — add
+`--qr` to also draw it as a scannable block, which is what a phone needs. After
+that, authentication is per-device pairing plus sessions, and MCP clients use
+keys minted from the app. Set `STORM_VAULT_ROOT`
 in the environment to keep it stable.
 
 **v1 is LAN-only.** A single shared bearer token with no TLS is only defensible

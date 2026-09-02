@@ -5,7 +5,7 @@
  * Apt install lives on GitHub Pages (decision 49) — not on the marketing host.
  */
 export const release = {
-  tag: "v0.2.3",
+  tag: "v0.2.7",
   get version() {
     return this.tag.replace(/^v/, "");
   },
@@ -76,7 +76,7 @@ sudo storm-server status`;
       platform: "Web",
       meta: "Served by Storm Server",
       blurb: "Bundled with the server. Open your Storm server URL in a browser.",
-      note: `Default port ${this.webPort} after storm-server up.`,
+      note: `Default port ${this.webPort} after storm-server up. On first open it pairs itself with the server and asks you to create the owner account.`,
       file,
       url: `${this.assetBase}/${file}`,
       detect: "web" as const,

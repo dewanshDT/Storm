@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://storm.dewansh.space/sitemap-index.xml
