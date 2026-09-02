@@ -2419,8 +2419,15 @@ pre-cutover world for thirteen days after `STORM_TOKEN` was deleted. Fixed on
 - `docs/www/` mirrored in the same change.
 - Site infrastructure the redesign never got: absolute `og:image` (a relative
   one is silently dropped by every scraper, so the cards were blank), `og:url`,
-  `rel=canonical`, `@astrojs/sitemap`, `robots.txt`, a `404` page, and astro
-  7.2.0 → 7.2.10.
+  `rel=canonical`, `@astrojs/sitemap`, `robots.txt`, and a `404` page.
+- **The astro patch bump was reverted, and the reason is a repo hazard.**
+  `npm install` on macOS prunes two hoisted entries (`@emnapi/core`,
+  `@emnapi/runtime`) that a Linux tree needs, and CI's `npm ci` then refuses
+  the lockfile as out of sync. It cannot be regenerated correctly on a Mac —
+  `--os=linux`, `--cpu=wasm32` and `--package-lock-only` all still prune them.
+  So the lockfile change is now the sitemap subtree and nothing else: **6
+  packages added, none removed, no version changed**, with the two entries
+  restored verbatim. `apps/www/README.md` carries the warning.
 - **`make www-check`** — the content gate, in the `www` CI job.
 
 **Still open:**

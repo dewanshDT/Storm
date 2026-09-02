@@ -56,6 +56,23 @@ will:
 It runs in the `www` CI job, which is why that job checks out with
 `fetch-depth: 0`.
 
+## The lockfile cannot be regenerated on a Mac
+
+`npm install` on macOS **prunes two hoisted entries a Linux tree needs** —
+`@emnapi/core` and `@emnapi/runtime`, reached through `@img/sharp-wasm32` and
+`@napi-rs/wasm-runtime`. Nothing on darwin requires them at the top level, so
+npm drops them; CI then fails at `npm ci` with *"can only install packages when
+your package.json and package-lock.json are in sync — Missing:
+@emnapi/runtime"*, which names the symptom and not the cause.
+
+**`--os=linux`, `--cpu=wasm32` and `--package-lock-only` do not help** — all
+three still prune. The options are: regenerate on Linux (a container is
+enough), or restore the two entries by hand from the last lockfile CI accepted.
+
+So: **keep dependency changes here small and check the diff against the last
+green lockfile**, package by package, not by line count. A change that should
+add one subtree and instead rewrites the tree is the warning sign.
+
 Or:
 
 ```sh
