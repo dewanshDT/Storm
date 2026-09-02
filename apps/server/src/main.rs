@@ -975,21 +975,52 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &addr,
     );
 
+    // Whether a block actually reached the terminal, which is not the same
+    // question as whether one was asked for: rendering can fail, and then a
+    // "scan the code above" would be pointing at an error message.
+    let mut drew_qr = false;
     if args.qr {
         // The URI is still printed below. A terminal can be too narrow for the
         // block, the colours can be inverted, and pasting has to keep working
         // when it is — so the QR is an addition, never a replacement.
         match render_qr(&qr.to_uri()) {
-            Ok(block) => println!("\n{block}"),
+            Ok(block) => {
+                println!("\n{block}");
+                drew_qr = true;
+            }
             Err(e) => eprintln!("could not render the QR ({e}); the URI follows"),
         }
     }
 
-    println!("\n  Pairing URI — scan the code above, or paste this into Storm:\n");
-    println!("    {}\n", qr.to_uri());
-    println!("  Expires: {}", session.expires);
-    println!("  Session: {}\n", session.id);
+    print!(
+        "{}",
+        pair_summary(&qr.to_uri(), &session.expires, &session.id, drew_qr)
+    );
     Ok(())
+}
+
+/// What `pair` prints once the session exists.
+///
+/// Split out of [`run_pair`] so it can be tested: the default run draws no QR
+/// (`--qr` is opt-in), and the summary said "scan the code above" regardless —
+/// so the one command whose whole job is getting a phone connected read, by
+/// default, as a command that had failed to draw something.
+fn pair_summary(uri: &str, expires: &str, session_id: &str, drew_qr: bool) -> String {
+    let mut out = String::new();
+    if drew_qr {
+        out.push_str("\n  Pairing URI — scan the code above, or paste this into Storm:\n\n");
+    } else {
+        out.push_str("\n  Pairing URI — paste this into Storm:\n\n");
+    }
+    out.push_str(&format!("    {uri}\n\n"));
+    out.push_str(&format!("  Expires: {expires}\n"));
+    out.push_str(&format!("  Session: {session_id}\n"));
+    if !drew_qr {
+        // Named here rather than in the docs alone, because this is the moment
+        // someone is looking for a code to point a phone at.
+        out.push_str("\n  Re-run with --qr to print a scannable code.\n");
+    }
+    out
 }
 
 async fn run_serve(args: ServeArgs) -> Result<()> {
@@ -1437,6 +1468,27 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const URI: &str = "storm://pair?v=1&sid=srv_x&pk=k&n=n&exp=e&addr=host:8484";
+
+    #[test]
+    fn the_default_run_does_not_tell_you_to_scan_a_code_it_did_not_draw() {
+        // `--qr` is opt-in, so this is what `storm-server pair` prints, and it
+        // used to say "scan the code above" with nothing above it.
+        let out = pair_summary(URI, "2026-09-02T06:46:22Z", "pair_abc", false);
+        assert!(!out.contains("scan the code above"), "{out}");
+        assert!(out.contains("paste this into Storm"), "{out}");
+        assert!(out.contains("--qr"), "{out}");
+        assert!(out.contains(URI), "{out}");
+    }
+
+    #[test]
+    fn a_drawn_code_is_the_only_thing_that_earns_the_scan_line() {
+        let out = pair_summary(URI, "2026-09-02T06:46:22Z", "pair_abc", true);
+        assert!(out.contains("scan the code above"), "{out}");
+        // No point advertising the flag to someone who already passed it.
+        assert!(!out.contains("--qr"), "{out}");
+    }
 
     #[tokio::test]
     async fn a_stored_password_that_does_not_verify_is_caught() {

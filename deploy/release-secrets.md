@@ -100,8 +100,9 @@ sudo storm-server up \
 
 # 4. Pair each client again — the shared token is gone, so a device that
 #    predates the cutover has no credential the server will accept.
-#    `storm-server pair` on the host prints a single-use QR while the user
-#    table is empty; after that, add devices from a signed-in client.
+#    `storm-server pair --qr` on the host prints a single-use pairing code
+#    while the user table is empty (without `--qr` it prints the URI only);
+#    after that, add devices from a signed-in client.
 ```
 
 `up` runs as the state-dir owner when vaults are on NFS — do not force
