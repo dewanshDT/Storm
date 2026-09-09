@@ -2,14 +2,15 @@
 key: readme
 kind: index
 status: active
-summary: What the kit vault is for — reusable, agent-facing tooling kept separate from content vaults. Lists the layout spec and the five agent roles, and states what does not belong here.
+summary: What the kit vault is for — reusable, agent-facing tooling kept separate from content vaults. Lists the layout spec, the agent roles, the skills folder, and the rule that a note's folder decides whether it installs globally or into one project.
 tags: [kit, index]
 ---
 
 # kit
 
-**Reusable, agent-facing tooling.** Patterns, procedures and role definitions
-that apply across every project.
+**Reusable, agent-facing tooling.** Patterns, procedures, role definitions and
+keyword-triggered skills. This is the **shared source of truth** — every agent
+host reads these notes rather than keeping a private copy.
 
 Kept separate from your content vaults so that tooling does not clutter real
 notes, and searching for content does not turn up machinery.
@@ -47,12 +48,53 @@ Two rules hold the set together:
 - **Coders and reviewers write nothing in the vault.** They return results; the
   lead records them.
 
+## The skills
+
+`skills/` holds **keyword-triggered procedures** — the repeatable workflow that
+is not tied to one role. Same idea as a host's own skill format, but stored
+here so every host resolves one source of truth.
+
+One note per skill. Filename lowercase and hyphenated, matching the `name` the
+host will use, so there is a single handle across systems. Frontmatter carries
+`key: skill.<name>`, `kind: skill`, and `domain: <area>`.
+
+## Scope: global, or one project
+
+**A note's folder decides where its adapter installs.** That is the whole rule.
+
+```text
+agents/                  every project        →  the host's global path
+skills/                  every project        →  the host's global path
+projects/<name>/agents/  that project only    →  that repo's local path
+projects/<name>/skills/  that project only    →  that repo's local path
+```
+
+So a role every project needs lives in `agents/` and installs to
+`~/.claude/agents/` or `~/.config/opencode/agents/`. A role only one codebase
+needs lives in `projects/<name>/agents/` and installs to that repo's
+`.claude/agents/` or `.opencode/agents/`, where it loads for that project and
+nowhere else.
+
+Two consequences worth stating plainly:
+
+- **Put it in `projects/<name>/` when it names something only that project
+  has** — its schemas, its vendors, its deploy targets. A global folder is for
+  what survives moving to a different codebase.
+- **The vault is the source of truth for both.** Project-scoped tooling is
+  still versioned, synced and editable from anywhere; only its install path
+  and its blast radius are narrower.
+
+An installer that ignores `projects/` still produces a working global setup.
+One that reads it produces the setup that project actually wants.
+
 ## What does not belong here
 
 - **Projects.** Those go in a content vault. `kit` describes *how* a project is
   laid out; it never holds one.
-- **Anything project-specific.** A project's own rules live in its
-  `CONVENTIONS.md`.
+- **A project's own rules and content.** Those live with the project, in its
+  `CONVENTIONS.md` and its content vault. Project-scoped *tooling* is the
+  exception and has a home here — `projects/<name>/` — but the project itself
+  never does.
 - **Personal notes.** Different vault, different purpose.
 
 ## How agents reach this

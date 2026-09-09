@@ -55,8 +55,10 @@ Your Storm server creates and seeds a `kit` vault on first start, so the notes
 are already there. Then:
 
 1. Configure Storm as an MCP server in your agent.
-2. Find your ids: `list_vaults` → the vault named `kit`, then `search` it for
-   the agent note ids.
+2. Find your ids: `list_vaults` → the vault named `kit`, then `get_vault` for
+   its folders and `search` for the note ids. Install an adapter for every note
+   under `agents/` and `skills/`, plus `projects/<name>/` for the project you
+   are in — not just the five below.
 3. Follow the guide for your host:
 
    - [`install/claude-code.md`](install/claude-code.md)
@@ -97,5 +99,17 @@ kit/
 └── install/           per-host adapter instructions
 ```
 
-`vault/` is the canonical source. Once seeded, **your copy is yours** — edit
-it, extend it, delete what you do not use. The server will not overwrite it.
+What ships here is the **baseline seed** — the five roles every Storm project
+needs. Your vault grows past it: more roles, a `skills/` folder, and
+`projects/<name>/` folders for tooling only one codebase wants. None of that
+comes back here. The vault is the source of truth; this directory is only what
+a brand-new server starts life with.
+
+That is why the install guides **enumerate the vault** rather than working from
+the table above. An installer that hardcodes five roles installs five roles
+forever; one that reads `agents/`, `skills/` and `projects/<name>/` installs
+whatever you actually have.
+
+`vault/` is the canonical source **for a first boot only**. Once seeded, **your
+copy is yours** — edit it, extend it, delete what you do not use. The server
+will not overwrite it, and nothing syncs your changes back into this repo.

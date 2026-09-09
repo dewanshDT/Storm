@@ -12,8 +12,36 @@ context and can be spawned in parallel.
 | Storm Researcher | subagent | agent | `~/.claude/agents/storm-researcher.md` |
 | Storm Reviewer | subagent | agent | `~/.claude/agents/storm-reviewer.md` |
 
-Use `.claude/` inside a project instead of `~/.claude/` to scope them to one
-repo.
+**That table is the baseline, not the list.** Install an adapter for every note
+your vault holds, not only these five — see *What to install* below.
+
+## What to install
+
+Enumerate the vault; do not work from a hardcoded list:
+
+```
+mcp__storm__get_vault(vault: <kit id>)      → its folders
+mcp__storm__search(vault: <kit id>, …)      → the note ids in each
+```
+
+Then map **folder to scope** — the folder a note lives in decides where its
+adapter goes:
+
+| Vault folder | Installs to | Loads for |
+|---|---|---|
+| `agents/` | `~/.claude/agents/<name>.md` | every project |
+| `skills/` | `~/.claude/skills/<name>/SKILL.md` | every project |
+| `projects/<p>/agents/` | `<repo>/.claude/agents/<name>.md` | that repo only |
+| `projects/<p>/skills/` | `<repo>/.claude/skills/<name>/SKILL.md` | that repo only |
+
+A note's `runs:` field decides the *form* — `main-loop` becomes a skill,
+`subagent` becomes an agent. Its folder decides the *reach*. The two are
+independent: a project-scoped main-loop role is a skill in `<repo>/.claude/`.
+
+Install the project-scoped set only when you are working in that project. If
+you cannot tell which project a `projects/<name>/` folder refers to, **ask**
+rather than installing it globally — a project role loaded everywhere is worse
+than one loaded nowhere, because it fires on codebases it knows nothing about.
 
 ## Prerequisite
 
@@ -21,6 +49,7 @@ The Storm MCP server must be configured, and you need your `kit` vault id:
 
 ```
 mcp__storm__list_vaults        → find the vault named "kit"
+mcp__storm__get_vault(vault: <kit id>)                      → folders
 mcp__storm__search(vault: <kit id>, query: "Storm Coder")   → note ids
 ```
 
@@ -102,6 +131,27 @@ The lead spawns coders with the Agent tool; several can run at once when their
 tasks touch different areas and neither depends on the other. The lead writes
 every result itself, serially — that single-writer rule is what makes the
 fan-out safe.
+
+## Skill notes → skills
+
+A note in `skills/` is not a role; it is a procedure with trigger words. It
+becomes `~/.claude/skills/<name>/SKILL.md` — the directory name **is** the
+skill name, and must match the note's `key: skill.<name>`:
+
+```markdown
+---
+name: <name>
+description: <the note's summary, plus the words that should trigger it>
+---
+
+Fetch the procedure and follow it. Do not work from this file.
+
+    mcp__storm__get_note(vault: "<KIT_VAULT_ID>", note_id: "<SKILL_NOTE_ID>")
+```
+
+The `description:` is the only part that matters for *discovery* — it is what
+Claude Code matches a request against, so it must carry the trigger words, not
+just a title. A loader with a vague description is a skill that never fires.
 
 ## Caveat
 

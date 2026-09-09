@@ -29,6 +29,9 @@ Fetch and read, in this order:
 1. `README` in the `kit` vault — what the vault is and what the roles are
 2. `Project Architecture Guidelines` — the layout spec every role operates on
 
+Then call `get_vault` for the vault's **folders**, and enumerate what is
+actually in them. Do not assume the contents; vaults grow past the seed.
+
 Record the note ids as you go; you need them in step 4.
 
 ## 3. Identify the host
@@ -45,9 +48,10 @@ Which agent am I running you in?
 If you are not certain which host you are in, **ask** rather than guessing —
 installing to the wrong paths leaves files that never load and no error.
 
-## 4. Install the five roles
+## 4. Install what the vault holds
 
-From the guide for your host, create the adapter for each role:
+From the guide for your host, create an adapter for **every note you found in
+step 2** — not a fixed list. A seeded vault starts with five roles:
 
 ```text
 Storm Architect     main loop
@@ -57,12 +61,31 @@ Storm Researcher    subagent
 Storm Reviewer      subagent
 ```
 
-Three rules for every adapter:
+A vault that has been used for a while holds more: further roles, a `skills/`
+folder of keyword-triggered procedures, and `projects/<name>/` folders holding
+tooling only one codebase wants.
+
+**A note's folder decides its reach**, and the host guide gives the exact paths:
+
+| Vault folder | Reach |
+|---|---|
+| `agents/`, `skills/` | installs globally — loads for every project |
+| `projects/<name>/…` | installs into that repo — loads there and nowhere else |
+
+Install a `projects/<name>/` set only when you are working in that project. If
+you cannot tell which codebase a `projects/<name>/` folder refers to, **ask me**
+instead of installing it globally — a project role loaded everywhere fires on
+codebases it knows nothing about.
+
+Four rules for every adapter:
 
 - **Keep it thin.** It fetches the role note and follows it. It does not
   summarise the role — the moment it does, you have two definitions drifting.
 - **Substitute the real ids.** Every `<KIT_VAULT_ID>` and `<..._NOTE_ID>`
   placeholder becomes an actual uuid from step 2.
+- **Install it at the right scope.** A note under `projects/<name>/` goes in
+  that repo's local config, never the global one. Getting this wrong is silent:
+  the adapter loads fine, just everywhere.
 - **Enforce the write surface where the host can.** Coder and reviewer must not
   hold vault-write tools. On Claude Code, omit them from `tools:`. On opencode,
   deny them in `permissions:`. On Cursor it is instruction-only — say so in
@@ -77,6 +100,7 @@ Then tell me:
 
 - which host you detected, and how
 - the files you created, with paths
+- **which are global and which are scoped to this project**, and why
 - the vault and note ids you wired in
 - **which roles are enforced vs instruction-only on this host**
 - anything you could not do, and what I need to do myself
