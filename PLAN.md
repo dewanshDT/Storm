@@ -1403,7 +1403,7 @@ deliberately unresolved and should be settled by a measurement rather than in
 advance; or if MCP over the tunnel needs more than a client swap (R10 says it
 should not, and the checklist's §5 says verify rather than assume).
 
-**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. ~~Track B not started~~: Track B landed in the same commit (686a2d1), which this line contradicted. **Its real scope (review of 2026-09-02):** the HELLO per-IP rate limit, the per-trunk stream cap, the `trunk_superseded` 30 s drain and the 45 s heartbeat deadline are all wired. `max_client_buffer_bytes`, however, is declared and never read, `RateLimiter::prune_stale` has no production caller, and the drain and the deadline have no test. Shipped in v0.2.8 in that state. The follow-up slice is recorded below as it lands.
+**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. ~~Track B not started~~: Track B landed in the same commit (686a2d1), which this line contradicted. **Its real scope (review of 2026-09-02):** the HELLO per-IP rate limit, the per-trunk stream cap, the `trunk_superseded` 30 s drain and the 45 s heartbeat deadline are all wired. `max_client_buffer_bytes`, however, is declared and never read, `RateLimiter::prune_stale` has no production caller, and the drain and the deadline have no test. Shipped in v0.2.8 in that state. Closed by decision 67, which also found the heartbeat deadline closing every healthy trunk.
 
 **64. The `kit` vault is seeded by the server on first run**
 Storm is meant to be driven by coding agents, and an agent needs to be told how
@@ -1466,6 +1466,79 @@ happened. Flutter is already pinned at 3.44.8 for this reason; Rust is not.
 *Revisit if:* pinning the Rust toolchain is taken up — that is the other real
 answer here and it stays open. A pin needs an owner for the bump, or it becomes
 an ageing compiler nobody dares move.
+
+---
+
+**67. The relay's liveness was untested, and the untested half was broken.**
+*(2026-09-25, `fix/relay-debt`)*
+
+The 2026-09-02 review found the heartbeat deadline and the supersession drain
+"implemented but untested", `max_client_buffer_bytes` declared and never read,
+and `RateLimiter::prune_stale` with no caller. v0.2.8 shipped all four as they
+were. Writing the tests found that "untested" was hiding "broken":
+
+- **The heartbeat deadline closed every healthy trunk.** It measured time since
+  the last `PONG`. But `apps/server` heartbeats by *sending* `PING` every 15 s,
+  which the relay answers, and the relay never pings. So a server never has a
+  reason to send `PONG`: `last_pong` stayed at registration time, and the first
+  frame after 45 s closed the trunk. **Every relayed session would have dropped
+  about once a minute**, from the first minute of phase 4. It was also inverted
+  for the one case it exists for: checked *between* reads, it could never fire
+  for a silent server, because the read never returns. Now it is a timeout on
+  the read itself, and **any frame is proof of life**.
+- **The drain never closed the superseded socket.** Clients were told
+  `trunk_superseded`, but the trunk itself lived on until the server or the
+  (broken) heartbeat ended it.
+- **`max_client_buffer_bytes` is enforced**, as a queued-and-unwritten byte
+  budget on each client trunk's queue: charged on queue, refunded after the
+  socket write. A frame that would exceed it drops its stream, the same
+  response a full frame queue already gave. **An empty queue always admits one
+  frame**, because an attachment reaches the relay as one frame the size of the
+  file; otherwise a budget smaller than the largest attachment could never
+  deliver it. **The default is 32 MiB, not the 1 MiB declared.** 1 MiB would
+  drop the second of two images opened together on a slow link. 32 MiB replaces
+  an unbounded worst case (256 frames of up to 16 MiB each) with a ceiling.
+  Decided, not measured, so it belongs to Q14.
+- **`prune_stale` runs from `try_take`, once per window.** Pruning is lossless:
+  a bucket idle for a full window has refilled to `limit`, which is exactly the
+  fresh bucket that would replace it.
+
+Relay tests 84 → 99. The four behavioural tests each fail against the v0.2.8
+`src/` and pass against the fix. The fifth (a reading client receives 25× the
+budget) guards the refund.
+
+**The lesson is the same one `docs/srp-vectors.json` taught about the wire
+format, one layer up.** The server's heartbeat and the relay's deadline were
+each written against the spec's "`PING`/`PONG` every 15 s", which does not say
+who pings. Each side's reading was self-consistent, and nothing made the two
+meet. **A protocol behaviour implemented on two sides needs a test that puts
+both directions on one wire.** For the heartbeat, that test is
+`a_server_that_heartbeats_outlives_the_deadline`, written the way `apps/server`
+actually heartbeats.
+
+Found and deliberately **not** fixed here:
+
+- **SRP has no per-stream flow control.** The relay cannot slow an origin down
+  for one client without stalling every client sharing that trunk. So a
+  response larger than the backlog budget, going to a client slower than the
+  origin, is dropped. The budget decides where that happens; only a protocol
+  change (credit-based windows) removes it. Decide this before a hosted relay.
+- **An attachment over 16 MiB cannot cross the relay.** The origin sends it as
+  one frame, and the relay's WebSocket reader caps a frame at 16 MiB.
+- **The Dart client treats every trunk-level `ERROR` as fatal**
+  (`srp_trunk.dart`). The relay refuses an `OPEN_STREAM` over the in-flight cap
+  with a trunk-level `rate_limited`, so a client that hits the cap also loses
+  its other in-flight streams. The spec needs to say whether that refusal is
+  stream- or trunk-scoped.
+- **A draining trunk still accepts `OPEN_STREAM`** from the clients already
+  bound to it. Bounded by the 30 s window, and refusing it runs into the point
+  above.
+- **The `HELLO` limit is per address**, so an IPv6 /64 gets a fresh bucket per
+  address. Pruning bounds the memory, not the limit's effectiveness.
+
+*Revisit if:* the budget drops real traffic in phase 4. Measure first, then
+choose between a larger number and the flow-control change. Do not remove the
+empty-queue admission; without it, large attachments stop working.
 
 ---
 

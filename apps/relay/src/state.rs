@@ -255,6 +255,36 @@ impl ServerTrunk {
     /// Synchronous and best-effort throughout — this runs on a teardown path
     /// where a peer that is already gone is not an error worth handling.
     pub fn shut_down(&self) {
+        self.fail_everyone(ErrorCode::TrunkLost);
+    }
+
+    /// Starts the supersession drain (§4.2): streams already open get `drain`
+    /// to finish, then anything still open gets `ERROR{trunk_superseded}` and
+    /// the superseded trunk's socket is closed.
+    ///
+    /// New client trunks are already bound to the replacement by the time this
+    /// runs, because the registration was swapped before it was called. Clients
+    /// bound here keep receiving responses until the window closes.
+    ///
+    /// Closing the socket is part of the drain, not a courtesy. Without it the
+    /// old trunk outlives its window. Usually the server has already dropped
+    /// it, but a half-open socket would then sit until the heartbeat deadline.
+    pub fn start_drain(self: Arc<Self>, drain: std::time::Duration) {
+        let trunk = self;
+        tokio::spawn(async move {
+            tokio::time::sleep(drain).await;
+            // `trunk_superseded`, not `trunk_lost`: the server is alive and has
+            // a trunk, so a client should reconnect at once rather than treat
+            // the server as down.
+            trunk.fail_everyone(ErrorCode::TrunkSuperseded);
+            trunk.tx.close();
+        });
+    }
+
+    /// Tells every client on this trunk that it is over, once each, and
+    /// forgets them all: an `ERROR` per open stream, and one trunk-level
+    /// `ERROR` for a client that held none.
+    fn fail_everyone(&self, code: ErrorCode) {
         let streams = std::mem::take(&mut self.streams.lock().expect("streams mutex").open);
         let clients = std::mem::take(&mut *self.clients.lock().expect("clients mutex"));
 
@@ -262,49 +292,15 @@ impl ServerTrunk {
         for (stream_id, stream) in &streams {
             let _ = stream
                 .client
-                .try_send_json(proto::error_on_stream(ErrorCode::TrunkLost, *stream_id));
+                .try_send_json(proto::error_on_stream(code, *stream_id));
             told.insert(stream.client_trunk_id.as_str(), ());
         }
         for (client_trunk_id, tx) in &clients {
             if !told.contains_key(client_trunk_id.as_str()) {
-                let _ = tx.try_send_json(proto::error(ErrorCode::TrunkLost));
+                let _ = tx.try_send_json(proto::error(code));
             }
             tx.close();
         }
-    }
-
-    /// Starts the supersession drain: after `drain` time, all remaining streams
-    /// on this trunk get `ERROR{trunk_superseded}` and the trunk shuts down.
-    ///
-    /// Called when a new trunk supersedes this one. The old trunk continues to
-    /// accept responses for existing streams during the drain window, but new
-    /// client trunks are bound to the new trunk. After the window, remaining
-    /// streams are forcibly closed.
-    pub fn start_drain(self: Arc<Self>, drain: std::time::Duration) {
-        let trunk = self;
-        tokio::spawn(async move {
-            tokio::time::sleep(drain).await;
-            // After the drain window, close all remaining streams with
-            // trunk_superseded rather than trunk_lost — this tells clients
-            // the trunk was superseded, not just lost.
-            let streams = std::mem::take(&mut trunk.streams.lock().expect("streams mutex").open);
-            let clients = std::mem::take(&mut *trunk.clients.lock().expect("clients mutex"));
-
-            let mut told: HashMap<&str, ()> = HashMap::new();
-            for (stream_id, stream) in &streams {
-                let _ = stream.client.try_send_json(proto::error_on_stream(
-                    ErrorCode::TrunkSuperseded,
-                    *stream_id,
-                ));
-                told.insert(stream.client_trunk_id.as_str(), ());
-            }
-            for (client_trunk_id, tx) in &clients {
-                if !told.contains_key(client_trunk_id.as_str()) {
-                    let _ = tx.try_send_json(proto::error(ErrorCode::TrunkSuperseded));
-                }
-                tx.close();
-            }
-        });
     }
 
     #[cfg(test)]

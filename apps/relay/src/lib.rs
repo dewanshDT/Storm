@@ -25,8 +25,13 @@
 //! (`connect`), and the tables that map a `stream_id` to exactly one client
 //! trunk (`state`).
 //!
-//! Not here: `trunk_superseded`'s 30 s drain, the 45 s heartbeat deadline, and
-//! the §6 bandwidth cap.
+//! Trunk liveness (§4.2): the 45 s heartbeat deadline (`register`) and the
+//! 30 s supersession drain (`state`). The abuse controls: the per-IP `HELLO`
+//! limit (`rate_limit`), the in-flight and total stream caps (`state`), and
+//! the per-client-trunk byte budget (`trunk`).
+//!
+//! Not here: the §6 bandwidth cap, and persistence. TOFU bindings live in
+//! memory, so a restart re-opens the first-use window (see `state`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

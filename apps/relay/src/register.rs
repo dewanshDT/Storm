@@ -19,7 +19,7 @@
 //! handed to the one client trunk that owns their `stream_id`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use axum::extract::ws::WebSocket;
 
@@ -35,7 +35,10 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
     // sequential: the registration must be installed with a usable send handle
     // *before* `REGISTERED` goes out, or a client that raced in behind it would
     // find a trunk it cannot write to.
-    let (mut rx, tx) = trunk::split(socket, trunk::SERVER_WARD_QUEUE);
+    // No byte budget server-ward: client readers write it with the blocking
+    // send, so a slow origin makes its own clients wait rather than making the
+    // relay hold more.
+    let (mut rx, tx) = trunk::split(socket, trunk::SERVER_WARD_QUEUE, usize::MAX);
     let server_trunk = Arc::new(ServerTrunk::new(tx.clone()));
 
     // A half-finished handshake must not hold a socket open indefinitely: the
@@ -89,28 +92,6 @@ struct Session {
     server_id: String,
     trunk_id: String,
     trunk: Arc<ServerTrunk>,
-    /// When the last PONG was received. Used for the heartbeat deadline.
-    last_pong: std::sync::Mutex<Instant>,
-}
-
-impl Session {
-    fn new(server_id: String, trunk_id: String, trunk: Arc<ServerTrunk>) -> Self {
-        Self {
-            server_id,
-            trunk_id,
-            trunk,
-            last_pong: std::sync::Mutex::new(Instant::now()),
-        }
-    }
-
-    fn record_pong(&self) {
-        *self.last_pong.lock().expect("last_pong mutex") = Instant::now();
-    }
-
-    fn check_heartbeat_deadline(&self, deadline: Duration) -> bool {
-        let last_pong = *self.last_pong.lock().expect("last_pong mutex");
-        Instant::now().duration_since(last_pong) > deadline
-    }
 }
 
 async fn handshake(
@@ -249,11 +230,11 @@ async fn handshake(
     ))
     .await?;
 
-    Ok(Session::new(
-        register.server_id,
+    Ok(Session {
+        server_id: register.server_id,
         trunk_id,
-        server_trunk.clone(),
-    ))
+        trunk: server_trunk.clone(),
+    })
 }
 
 /// Holds the trunk open after registration, and routes everything the origin
@@ -265,21 +246,31 @@ async fn handshake(
 /// keeps one client's response from reaching another.
 async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> Fault {
     loop {
-        // Check heartbeat deadline (§4.2): if the server hasn't sent a PONG
-        // within the deadline, close the trunk.
-        if session.check_heartbeat_deadline(relay.config.heartbeat_deadline) {
-            tracing::info!(
-                server_id = %session.server_id,
-                trunk_id = %session.trunk_id,
-                "heartbeat deadline exceeded; closing trunk"
-            );
-            return Fault::Disconnected;
-        }
-
-        let incoming = match trunk::recv(rx).await {
-            Ok(incoming) => incoming,
-            Err(fault) => return fault,
-        };
+        // The heartbeat deadline (§4.2) is a timeout on the read itself, and any
+        // frame resets it. Both halves of that were wrong once:
+        //
+        // - Checked *between* reads, a deadline never fires for the one server
+        //   it exists for — a silent one — because the read it waits behind
+        //   never returns.
+        // - Measured from the last `PONG`, it closes every healthy trunk 45 s
+        //   after registering: the server heartbeats by sending `PING`, the
+        //   relay never pings, and so no `PONG` ever arrives.
+        //
+        // `recv` is cancel-safe (it only polls `StreamExt::next`), so timing it
+        // out loses no frame.
+        let incoming =
+            match tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)).await {
+                Ok(Ok(incoming)) => incoming,
+                Ok(Err(fault)) => return fault,
+                Err(_) => {
+                    tracing::info!(
+                        server_id = %session.server_id,
+                        trunk_id = %session.trunk_id,
+                        "heartbeat deadline exceeded; closing trunk"
+                    );
+                    return Fault::Disconnected;
+                }
+            };
         relay
             .registrations
             .touch(&session.server_id, &session.trunk_id, Instant::now());
@@ -291,10 +282,8 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
                 // the `server_id` immediately rather than making clients wait
                 // out a timeout for a deliberate restart (§4.2).
                 "DEREGISTER" => return Fault::Disconnected,
-                "PONG" => {
-                    session.record_pong();
-                    Ok(())
-                }
+                // Liveness is any frame (see above), so a `PONG` is only that.
+                "PONG" => Ok(()),
                 "STREAM_ACK" => stream_ack(session, frame),
                 "HTTP_RESPONSE_HEAD" => forward_response_head(session, frame),
                 "CLOSE" => match server_close(session, frame) {

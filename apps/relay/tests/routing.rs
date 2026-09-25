@@ -895,3 +895,172 @@ async fn a_server_side_close_reaches_the_owning_client_only() {
     assert_eq!(closed["stream_id"], alice_stream, "{closed}");
     assert!(bob.is_silent_for(FAST).await, "a CLOSE crossed trunks");
 }
+
+// ------------------------------------------------------------------- liveness
+//
+// The heartbeat deadline, the supersession drain and the byte budget shipped
+// in v0.2.8 with no test between them. Writing these found the heartbeat
+// deadline closing every *healthy* trunk: see the first test.
+
+fn response_head(stream_id: u32) -> Value {
+    json!({
+        "v": 1, "type": "HTTP_RESPONSE_HEAD",
+        "stream_id": stream_id, "status": 200, "headers": {},
+    })
+}
+
+#[tokio::test]
+async fn a_server_that_heartbeats_outlives_the_deadline() {
+    // The regression. The server heartbeats by *sending* `PING`, and the relay
+    // never pings, so a deadline measured from the last `PONG` expired 45 s
+    // after every registration, and the next `PING` closed a healthy trunk.
+    let mut config = config();
+    config.heartbeat_deadline = Duration::from_millis(300);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+
+    // Well past three deadlines, heartbeating the way `apps/server` does.
+    for _ in 0..10 {
+        server.send(json!({ "v": 1, "type": "PING" })).await;
+        let pong = server.recv().await;
+        assert_eq!(pong["type"], "PONG", "{pong}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(harness.relay.registrations.len(), 1);
+    // And it still routes.
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+}
+
+#[tokio::test]
+async fn a_silent_server_is_dropped_at_the_deadline_and_its_clients_told() {
+    // The half-open socket the deadline exists for: the process is gone, the
+    // connection is not closed, and nothing arrives. A check that ran only
+    // after a read returned could never fire for it.
+    let mut config = config();
+    config.heartbeat_deadline = Duration::from_millis(300);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // `server` stays open and says nothing from here on.
+    let reply = tokio::time::timeout(Duration::from_secs(3), client.recv())
+        .await
+        .expect("the deadline never fired for a silent server");
+    assert_error(&reply, "trunk_lost");
+    assert_eq!(reply["stream_id"], stream_id, "{reply}");
+    assert!(harness.relay.registrations.is_empty());
+    drop(server);
+}
+
+#[tokio::test]
+async fn a_superseded_trunk_drains_then_closes_its_streams_and_its_socket() {
+    let mut config = config();
+    config.supersession_drain = Duration::from_millis(300);
+    let harness = Harness::start(config).await;
+
+    let mut old = harness.server().await;
+    let mut alice = harness.client().await;
+    let alice_stream = alice.open_stream("a1").await;
+    old.expect_stream_open_and_ack().await;
+
+    // The same server reconnects: same id, same key.
+    let mut new = harness.server().await;
+
+    // A client arriving now is bound to the replacement.
+    let mut bob = harness.client().await;
+    let bob_stream = bob.open_stream("b1").await;
+    assert_eq!(new.expect_stream_open_and_ack().await, bob_stream);
+
+    // Inside the window the old trunk still answers what it already owed.
+    old.send(response_head(alice_stream)).await;
+    let head = alice.recv().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["stream_id"], alice_stream, "{head}");
+
+    // After it, what is still open is superseded, named per stream.
+    let reply = tokio::time::timeout(Duration::from_secs(3), alice.recv())
+        .await
+        .expect("the drain never ended");
+    assert_error(&reply, "trunk_superseded");
+    assert_eq!(reply["stream_id"], alice_stream, "{reply}");
+
+    // And the superseded socket is closed rather than left to the heartbeat.
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match old.socket.next().await {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the superseded trunk outlived its drain");
+
+    // The replacement is untouched by any of it.
+    assert!(bob.is_silent_for(FAST).await);
+    assert_eq!(harness.relay.registrations.len(), 1);
+}
+
+#[tokio::test]
+async fn a_client_that_stops_reading_loses_its_stream_at_the_byte_budget() {
+    // 128 frames is well inside the 256-frame queue, so before the budget was
+    // enforced this client could hold 32 MiB and nothing would ever drop it.
+    // The frame count was the only bound, and a frame can be 16 MiB.
+    let mut config = config();
+    config.max_client_buffer_bytes = 256 * 1024;
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // The client never reads again. Enough bytes to fill the loopback socket
+    // buffers first, which absorb several MiB before the relay's queue grows.
+    server.send(response_head(stream_id)).await;
+    let chunk = vec![0u8; 256 * 1024];
+    for _ in 0..128 {
+        server.send_body(0x02, stream_id, &chunk).await;
+    }
+
+    let closed = tokio::time::timeout(Duration::from_secs(10), server.recv())
+        .await
+        .expect("a client that stopped reading was never dropped");
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], stream_id, "{closed}");
+    drop(client);
+}
+
+#[tokio::test]
+async fn a_client_that_keeps_reading_receives_many_times_the_budget() {
+    // The budget measures backlog, not throughput: bytes are refunded as the
+    // socket takes them. Without the refund, this stream would be dropped
+    // after the first 64 KiB it ever received.
+    let mut config = config();
+    config.max_client_buffer_bytes = 64 * 1024;
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+    server.send(response_head(stream_id)).await;
+    assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+
+    const CHUNKS: usize = 50;
+    let chunk = vec![7u8; 32 * 1024];
+    let mut received = 0;
+    for _ in 0..CHUNKS {
+        server.send_body(0x02, stream_id, &chunk).await;
+        match client.next_frame().await {
+            Frame::Body { payload, .. } => received += payload.len(),
+            Frame::Text(value) => panic!("expected a body chunk, got {value}"),
+        }
+    }
+    assert_eq!(received, CHUNKS * chunk.len());
+    // 1.6 MiB through a 64 KiB budget, and the origin was never told to stop.
+    assert!(server.is_silent_for(FAST).await);
+}
