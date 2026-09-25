@@ -57,6 +57,15 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 
+**Release state (2026-09-25).** The latest release is **v0.2.8** (PR #37,
+2026-09-02): all of `staging` at that point, meaning relay phases 2–3, the Dart
+SRP client, kit vault seeding and the scoped script tools (decisions 56–64).
+`main` and `staging` were identical after that merge. **Prod runs 0.2.8.**
+The operator confirmed it on 2026-09-25. The upgrade itself was never recorded
+here, which is how these notes came to say 0.2.7 for three weeks: a deploy
+belongs in this file on the day it happens. "Deployed" still does not mean
+the relay is reachable. No public relay instance exists; that is phase 4.
+
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
 `/usr/share/storm/web`). Android keystore still optional. **M16** Astro site
@@ -1394,7 +1403,7 @@ deliberately unresolved and should be settled by a measurement rather than in
 advance; or if MCP over the tunnel needs more than a client swap (R10 says it
 should not, and the checklist's §5 says verify rather than assume).
 
-**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. Track B (Rust relay abuse controls + trunk_superseded 30s drain + 45s heartbeat) not started.
+**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. ~~Track B not started~~: Track B landed in the same commit (686a2d1), which this line contradicted. **Its real scope (review of 2026-09-02):** the HELLO per-IP rate limit, the per-trunk stream cap, the `trunk_superseded` 30 s drain and the 45 s heartbeat deadline are all wired. `max_client_buffer_bytes`, however, is declared and never read, `RateLimiter::prune_stale` has no production caller, and the drain and the deadline have no test. Shipped in v0.2.8 in that state. The follow-up slice is recorded below as it lands.
 
 **64. The `kit` vault is seeded by the server on first run**
 Storm is meant to be driven by coding agents, and an agent needs to be told how
@@ -3283,9 +3292,11 @@ Use a pattern that cannot match the invoking shell.
   and the `storm-server user` / `passwd` commands, with no network surface until
   pairing (decision 52c). **Built after the above was written:** sessions,
   three-tier middleware, pairing, `storm-server pair` — all server-side auth
-  phase 1 complete. **Next:** Flutter client auth integration. A9 (vault-level
-  grants) ships between client and relay. Relay work does not start until auth is
-  done.
+  phase 1 complete. *(Superseded, kept for history.)* Auth phase 1 shipped in
+  v0.2.6/0.2.7. Relay phases 2–3 (decisions 56–63) shipped in v0.2.8. **Next:**
+  the relay hardening debt, then TOFU persistence, which gates phase 4 (the
+  relay on a VPS). The authorization release (A9's second half) runs
+  alongside.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.
