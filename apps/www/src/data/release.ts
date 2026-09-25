@@ -5,7 +5,7 @@
  * Apt install lives on GitHub Pages (decision 49) — not on the marketing host.
  */
 export const release = {
-  tag: "v0.2.7",
+  tag: "v0.2.8",
   get version() {
     return this.tag.replace(/^v/, "");
   },
