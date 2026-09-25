@@ -83,7 +83,7 @@ const description =
 └── projects/
     └── storm.md
 
-state/          ← indexes &amp; registry (sibling, never inside vaults)</code></pre>
+state/          ← indexes · registry · auth.db (never inside vaults)</code></pre>
       </div>
     </div>
   </section>
@@ -98,6 +98,11 @@ state/          ← indexes &amp; registry (sibling, never inside vaults)</code>
         search, read, create, and modify knowledge while the underlying source
         remains your Markdown vault. MCP is off by default; write tools require
         writable mode.
+      </p>
+      <p class="support">
+        An agent authenticates with a key you mint in the app — shown once,
+        revocable, and accepted on <code>/mcp</code> and nowhere else. Your
+        password and your devices’ sessions never go into a config file.
       </p>
 
       <div class="mcp-stats">
@@ -310,12 +315,12 @@ Archive/</code></pre>
         <li>
           <span class="step-num mono">03</span>
           <div>
-            <strong>Connect</strong>
+            <strong>Sign in</strong>
             <p>
-              Point the client at your Storm server and the token from
-              <code>/etc/storm/storm.env</code>.
+              Pair the device with your server and create the first account —
+              it is the owner. No shared password, no cloud account.
             </p>
-            <a href="/install#start">Connection guide →</a>
+            <a href="/install#first-login">First login →</a>
           </div>
         </li>
         <li>

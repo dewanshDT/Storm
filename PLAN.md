@@ -52,7 +52,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
-| M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
+| M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · post-M19 truth pass + `www-check` (65) · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
@@ -1413,6 +1413,53 @@ users want the templates without the vault.
 
 ---
 
+**65. The marketing site's claims are checked, not just its build.**
+The A10 cutover deleted `STORM_TOKEN` on 2026-08-20 and swept the READMEs.
+`apps/www` was not swept, so for the next thirteen days `/install` told every
+visitor to point their client at "the token from `/etc/storm/storm.env`" — a
+file that now says, in bold, that there is no token in it — and `/how-it-works`
+advertised "no accounts product" for a release whose headline feature is
+accounts. **CI was green the entire time**, because the `www` job builds the
+site and a wrong sentence compiles.
+So the site gets a check that can fail on content: `scripts/check-claims.sh`
+(`make www-check`, and a step in the `www` job) refuses the phrasings that
+describe the retired credential, and refuses a `release.ts` `tag` older than the
+newest `v*` tag — the version drift being the same defect in a second form, four
+releases wide, because nothing bumps that file automatically.
+**The general shape is worth naming: a documentation surface outside the code
+does not fail with the code.** Every other consumer of `STORM_TOKEN` broke
+loudly at the cutover. The site kept working and kept being wrong, which is the
+worse failure, and the only defence is a check that reads prose.
+*Revisit if:* the banned-phrase list starts costing more in false positives than
+it catches — the honest alternative is generating the install copy from
+`deploy/` rather than mirroring it by hand.
+
+---
+
+**66. `result_large_err` is allowed crate-wide, and CI floats on `stable` for
+Rust while it pins Flutter.**
+`cargo clippy --all-targets -- -D warnings` went red on 2026-08-31 over
+`result_large_err`: axum handlers return `Response` as their error type, which
+is how a handler answers with a status and a body rather than a 500, and clippy
+counts those bytes. **PR #34 was merged past it**, so `staging` carried a
+failing gate and every PR after it inherited one.
+Allowed rather than boxed. `Box<Response>` would put an already-heap-backed
+body behind a second allocation in every handler, to shrink a value that never
+outlives one request.
+**The part worth keeping is where it came from.** It fires on x86_64-linux and
+not on aarch64-darwin, *on the same 1.98.0* — a clean
+`cargo clean -p storm-server && cargo clippy --all-targets` with CI's exact
+toolchain passes on the dev machine. So it arrived through
+`dtolnay/rust-toolchain@stable` moving under the job, and it could be neither
+reproduced nor fixed-and-verified locally. **A gate that only one machine in
+the world can run is a gate that gets merged past**, which is exactly what
+happened. Flutter is already pinned at 3.44.8 for this reason; Rust is not.
+*Revisit if:* pinning the Rust toolchain is taken up — that is the other real
+answer here and it stays open. A pin needs an owner for the bump, or it becomes
+an ageing compiler nobody dares move.
+
+---
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
@@ -2375,10 +2422,48 @@ in `apps/www`. **Not** a documentation portal; depth stays on GitHub /
 - `make www` / `make www-dev`; CI job `www` in `ci.yml` (build check only).
 - Page copy in vault [[Storm Website]] notes and `docs/www/`.
 
+**The auth truth pass (2026-09-02, decision 65):** the site described the
+pre-cutover world for thirteen days after `STORM_TOKEN` was deleted. Fixed on
+`fix/www-auth-truth`:
+
+- `/install` no longer promises a generated token, and gained a **First login**
+  section — browser bootstrap, `storm-server pair --qr` on the host, and
+  `user add` / `passwd` as the recovery path, with the run-as-`storm` warning
+  that `deploy/README.md` carries.
+- `/` step 03 is **Sign in** (pair the device, create the owner account), not
+  "point the client at the token".
+- `/how-it-works` says accounts are local and yours — owner account, per-device
+  pairing, sessions, revocable MCP keys, all in `state/auth.db` — instead of
+  "no accounts product". `auth.db` is in the architecture sketch, since it is
+  the one part of `state/` that cannot be rebuilt by rescanning.
+- MCP copy names the `stk_` key (minted in the app, `/mcp` only) rather than
+  implying the shared bearer token.
+- `release.ts` bumped v0.2.3 → **v0.2.7**; every download link was four releases
+  stale.
+- `docs/www/` mirrored in the same change.
+- Site infrastructure the redesign never got: absolute `og:image` (a relative
+  one is silently dropped by every scraper, so the cards were blank), `og:url`,
+  `rel=canonical`, `@astrojs/sitemap`, `robots.txt`, and a `404` page.
+- **The astro patch bump was reverted, and the reason is a repo hazard.**
+  `npm install` on macOS prunes two hoisted entries (`@emnapi/core`,
+  `@emnapi/runtime`) that a Linux tree needs, and CI's `npm ci` then refuses
+  the lockfile as out of sync. It cannot be regenerated correctly on a Mac —
+  `--os=linux`, `--cpu=wasm32` and `--package-lock-only` all still prune them.
+  So the lockfile change is now the sitemap subtree and nothing else: **6
+  packages added, none removed, no version changed**, with the two entries
+  restored verbatim. `apps/www/README.md` carries the warning.
+- **`make www-check`** — the content gate, in the `www` CI job.
+
 **Still open:**
 
 - Optional: real running-app screenshot for the Client section (prototype PNGs
   stay design reference only — not shipped as product photos).
+- **Confirm the Cloudflare hostname / dashboard connection.** Still the one
+  thing between this site and being live; `astro.config.mjs` has committed to
+  `https://storm.dewansh.space`, and the sitemap and canonical URLs now derive
+  from it.
+- The relay stays off the site until it is released — it works on `staging`,
+  is undeployed, and phase 4 is blocked on TOFU persistence.
 
 **Hosting (decision 49):** Cloudflare static deploy at `https://storm.dewansh.space`
 (apart from apt Pages). **Never** deploy to `https://dewanshdt.github.io/Storm/`
@@ -3178,9 +3263,10 @@ Use a pattern that cannot match the invoking shell.
   `feat/m18-keyboard-shortcuts`; overlay / palette deferred.
 - **M17 Markdown Read Mode** — client implementation on
   `feat/markdown-read-mode`; visual pass + ship still open.
-- **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
-  confirm Cloudflare hostname / dashboard connection; optional real app
-  screenshot for Client section. No GitHub deploy workflow.
+- **M16 marketing site** — SlowFlow redesign landed in `apps/www`, and the
+  post-M19 truth pass with it (decision 65). Remaining: confirm Cloudflare
+  hostname / dashboard connection; optional real app screenshot for Client
+  section. No GitHub deploy workflow.
 - **Remote connectivity + authentication** — architecture accepted
   2026-08-13; **auth phase 1 has started** (decision 52, and M19 above).
   Server-local users, a cryptographic server identity, QR pairing, and an
