@@ -1,11 +1,21 @@
 #!/bin/sh
 set -e
 
-if [ -d /run/systemd/system ]; then
-    systemctl stop storm-server 2>/dev/null || true
-    systemctl disable storm-server 2>/dev/null || true
-    systemctl stop storm-backup.timer 2>/dev/null || true
-    systemctl disable storm-backup.timer 2>/dev/null || true
-fi
+# Only when the package is actually going away. dpkg also runs prerm with
+# `upgrade` (and `failed-upgrade`), and this script used to ignore $1: every
+# `apt upgrade` stopped and *disabled* storm-server and the backup timer, so the
+# server did not come back at the next reboot and nightly backups silently
+# stopped (decision 70). On upgrade the old binary keeps serving until the
+# documented `systemctl restart` swaps it.
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop storm-server 2>/dev/null || true
+            systemctl disable storm-server 2>/dev/null || true
+            systemctl stop storm-backup.timer 2>/dev/null || true
+            systemctl disable storm-backup.timer 2>/dev/null || true
+        fi
+        ;;
+esac
 
 exit 0
