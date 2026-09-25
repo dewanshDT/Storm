@@ -18,8 +18,9 @@ use storm_relay::{Allowlist, CONNECT_PATH, Config, REGISTER_PATH, Relay};
 #[derive(Parser, Debug)]
 #[command(name = "storm-relay", version, about = "Storm Relay Protocol v1 relay")]
 struct Args {
-    /// Address to listen on.
-    #[arg(long, env = "STORM_RELAY_BIND", default_value = "127.0.0.1:8484")]
+    /// Address to listen on. 8486, not 8484: storm-server owns 8484, and the
+    /// two run on one machine while a relay is being built and tested.
+    #[arg(long, env = "STORM_RELAY_BIND", default_value = "127.0.0.1:8486")]
     bind: SocketAddr,
 
     /// Scheme, host and port clients should dial, without a trailing slash —

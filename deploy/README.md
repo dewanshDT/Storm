@@ -262,6 +262,58 @@ directory. You lose version history, so the first sync from a device that
 edited offline may conflict rather than merge cleanly, and the server comes up
 with a **new** identity.
 
+## Relay (optional)
+
+`storm-relay` lets clients reach a server from outside its network
+(`docs/srp-v1.md`). It is a **separate package** in the same apt repository,
+and nothing needs it: `storm-server` does not depend on it and works the same
+without one. It holds no vault data and authenticates no clients (R5, R12);
+a client's credential rides inside the tunnel to the origin.
+
+```sh
+sudo apt install storm-relay
+sudoedit /etc/storm-relay/storm-relay.env   # set STORM_RELAY_PUBLIC_BASE
+sudo systemctl enable --now storm-relay
+journalctl -u storm-relay -f
+```
+
+The package does not start the relay, because a relay with the wrong public
+address hands every server a URL that goes nowhere. It runs as its own
+`storm-relay` user, never `storm`, so it cannot read a vault on a shared box,
+and it listens on `127.0.0.1:8486` (storm-server owns 8484).
+
+**Binding server keys.** Set exactly one of these in the env file; setting
+both stops the relay.
+
+- `STORM_RELAY_BINDINGS` (the default): trust-on-first-use, persisted to
+  `/var/lib/storm-relay/bindings`. The first key to register a `server_id` owns
+  it. Safe only where you control who can reach the relay.
+- `STORM_RELAY_ALLOWLIST`: only listed keys register. **Use this on a public
+  address.** Same format as the bindings file, so a bindings file you trust can
+  be copied over as the allowlist.
+
+`/var/lib/storm-relay` is the relay's only state, and it **cannot be rebuilt**.
+Lose the bindings file and every `server_id` is open to whoever registers
+next. Back it up. Purging the package deliberately leaves it in place.
+
+**Not yet safe on a public address.** The relay speaks plain `ws://`, and it
+takes each client's address from the socket rather than from a header, because
+headers are forgeable. Behind a TLS reverse proxy, every client therefore
+arrives from the proxy's address. That makes the per-IP `HELLO` limit one
+bucket for everybody, and gives the origin's login limiter one `relay_peer_ip`
+for every relayed client. Plain `ws://` on a public port avoids that and
+instead puts session tokens on the wire in cleartext. Neither is acceptable;
+the fix (TLS in the relay itself, or PROXY-protocol support) is open in
+`PLAN.md` decision 70. Until then, run it on a LAN or over a VPN, where
+neither problem applies.
+
+**Pointing a server at it.** There is no app screen for this yet. As an
+owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`,
+then **restart storm-server**: the server opens its tunnels once, at boot, from
+the configured list, and a change takes effect only on the next start.
+`GET /v1/server` lists the relays it has actually registered with, which is the
+check that it worked. Clients learn the relay from the server when they pair.
+
 ## Security
 
 v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a

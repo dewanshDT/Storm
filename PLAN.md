@@ -1614,6 +1614,66 @@ so that is not close.
 
 ---
 
+**70. The relay is packaged, and a public relay is blocked on how it learns a
+client's address.** *(2026-09-25, `feat/relay-packaging`)*
+
+Phase 4, step 1. 69 found that no release had ever built `apps/relay`.
+
+- **Its own package, `storm-relay`, in the same apt repository.** `apt-repo.yml`
+  already takes every `.deb` in a release, so a `relay` job in `release.yml`
+  (musl binary plus `.deb`, version stamped from the tag, like the server's) is
+  the whole distribution change. Neither package depends on the other (R6).
+- **`deploy/storm-relay.service`**: its own `storm-relay` user, never `storm`,
+  so a relay sharing a box cannot read a vault. `StateDirectory=storm-relay`
+  owns `/var/lib/storm-relay`, and the env file defaults `--bindings` into it,
+  so **a packaged relay is never TOFU-in-memory by accident**. The unit carries
+  no flags, since the relay reads `STORM_RELAY_*` itself. The same hardening as
+  storm-server.
+- **Installed, not started.** A relay with no `STORM_RELAY_PUBLIC_BASE` would
+  hand every server a `public_address` that goes nowhere. An upgrade restarts a
+  relay that was running.
+- **Purge keeps `/var/lib/storm-relay`.** The bindings file cannot be rebuilt,
+  and deleting it opens every `server_id` to the next registration.
+- **Default port 8486, not 8484.** 8484 is storm-server's, and phase 4 is built
+  with both on one machine first. The old default collided with it.
+
+Verified: `cargo deb` builds a package with the binary, the unit, the env file
+as a conffile and all three maintainer scripts; `systemd-analyze verify` is
+clean; the env file drives the binary exactly as the unit loads it, and both
+binding modes set through the environment are refused.
+
+**The open problem: a public relay cannot see its clients.** The relay speaks
+plain `ws://`, and takes a client's address from the accepted socket because a
+header is forgeable (§5.2). Behind a TLS reverse proxy every client arrives
+from the proxy, so the per-IP `HELLO` limit becomes one global bucket, and the
+origin's login limiter gets a single `relay_peer_ip` for every relayed client:
+one noisy client locks out everyone. Plain `ws://` on a public port avoids that
+and puts session tokens on the wire in cleartext. **Phase 4 step 2 needs one of
+these:** TLS in the relay itself (rustls, with the certificate as files), or
+PROXY-protocol support from a trusted local proxy. Either keeps the address a
+fact about a connection rather than a claim in a header. Until then the relay
+is for a LAN or a VPN, and `deploy/README.md` says so.
+
+Found on the way, recorded rather than fixed here:
+
+- **storm-server's `prerm` disables the unit on every upgrade.** It ignores
+  `$1`, and dpkg runs `prerm upgrade`, so after `apt upgrade` storm-server is
+  no longer enabled at boot. The documented `systemctl restart` hides that
+  until the next reboot. The relay's `prerm` acts only on `remove`.
+- **storm-server's `StartLimitIntervalSec` has never applied.** It sits under
+  `[Service]`, where systemd ignores it (found by `systemd-analyze verify`), so
+  the "don't spin" comment above it has not been true since M6. The relay's
+  unit puts it under `[Unit]`.
+- **A server connects to relays only at boot.** `PUT /v1/config/relays` stores
+  the list, and nothing reconnects until the next start, and no client screen
+  sets it. The doc comment on `put_relays` still says the server has no tunnel
+  client "yet".
+
+*Revisit if:* the relay grows state beyond the bindings file, which would
+change what "purge keeps it" protects.
+
+---
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

@@ -11,6 +11,29 @@ repository = "https://github.com/dewanshDT/Storm"
 # built the two crates together would be the first step towards shipping them
 # as one thing.
 
+[package.metadata.deb]
+# Its own package, published to the same apt repository as storm-server by
+# apt-repo.yml, which takes every .deb in a release. Neither depends on the
+# other, and must not (R6).
+name = "storm-relay"
+maintainer = "Dewansh Singh Thakur <dewansh.dt@gmail.com>"
+copyright = "2026 Dewansh Singh Thakur"
+extended-description = """\
+Storm Relay Protocol v1 relay: a reverse proxy routed by server_id that lets \
+Storm clients reach a storm-server from outside its network. Optional. \
+Holds no user data and authenticates no clients."""
+section = "net"
+priority = "optional"
+depends = "$auto"
+maintainer-scripts = "debian/"
+conf-files = ["/etc/storm-relay/storm-relay.env"]
+assets = [
+    ["target/release/storm-relay", "usr/bin/", "755"],
+    ["../../deploy/storm-relay.service", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-relay.env.example", "etc/storm-relay/storm-relay.env", "644"],
+    ["../../LICENSE", "usr/share/doc/storm-relay/", "644"],
+]
+
 [dependencies]
 anyhow = "1.0.104"
 # `ws` only — the relay's entire surface is a WebSocket upgrade.

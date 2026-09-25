@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+# A system user of its own, not `storm`: the relay and the server are separate
+# programs that may share a box, and the relay must not be able to read a vault.
+if ! id storm-relay >/dev/null 2>&1; then
+    useradd --system --home /var/lib/storm-relay --shell /usr/sbin/nologin storm-relay || true
+fi
+
+mkdir -p /etc/storm-relay
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    # On upgrade, pick up the new binary if the operator had it running. A
+    # fresh install stays stopped until the env file names a public address.
+    if [ "$1" = "configure" ] && [ -n "$2" ] && systemctl is-active --quiet storm-relay; then
+        systemctl restart storm-relay || true
+    fi
+fi
+
+if [ -z "$2" ]; then
+    echo "storm-relay installed but not started. Set STORM_RELAY_PUBLIC_BASE in"
+    echo "  /etc/storm-relay/storm-relay.env, then: sudo systemctl enable --now storm-relay"
+fi
+
+exit 0

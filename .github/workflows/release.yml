@@ -114,6 +114,57 @@ jobs:
           # so the publish job does not guess path depth.
           path: apps/server/dist/*
 
+  # Its own job and its own package (R6): the relay is optional, and a
+  # storm-server release must never need it. Until decision 70 no release built
+  # it at all, so relay source sat in tags that shipped no relay.
+  relay:
+    name: relay (musl + deb)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/relay
+      - name: Install musl tools, zig, cargo-deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          curl -sL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+            | sudo tar -xJ -C /opt
+          echo /opt/zig-linux-x86_64-0.13.0 >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild cargo-deb --locked
+      - name: Stamp Cargo version from tag
+        working-directory: apps/relay
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          grep '^version' Cargo.toml
+      - name: Build musl binary
+        working-directory: apps/relay
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo zigbuild --release --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/storm-relay \
+            "dist/storm-relay-${GITHUB_REF_NAME#v}-x86_64-linux"
+      - name: Build .deb
+        working-directory: apps/relay
+        run: |
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-musl/release/storm-relay target/release/
+          cargo deb --no-build
+          cp target/debian/*.deb dist/
+          ls -la dist/
+      - name: Upload relay artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay
+          path: apps/relay/dist/*
+
   android:
     name: android (apk)
     needs: check
@@ -214,7 +265,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, android, macos, web]
+    needs: [server, relay, android, macos, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -248,6 +299,10 @@ jobs:
           \`\`\`
 
           The \`.deb\` ships the web client at \`/usr/share/storm/web\`.
+
+          **Relay (optional):** \`storm-relay_${VERSION}-1_amd64.deb\` is a
+          separate package for reaching a server from outside its network.
+          Nothing needs it. Setup is in \`deploy/README.md\` under "Relay".
 
           **macOS:** the zip is ad-hoc signed and not notarized. Gatekeeper will
           quarantine a downloaded copy (arm64 only on \`macos-latest\`).
