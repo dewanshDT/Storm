@@ -8,11 +8,23 @@ use std::time::{Duration, Instant};
 /// Used to limit `HELLO` attempts from a single IP. The bucket refills at a
 /// steady rate (`limit` tokens per `window`), so a burst up to `limit` is
 /// allowed, then the rate is enforced.
+///
+/// **It prunes itself.** Every distinct source address gets a bucket, so a
+/// map nobody pruned would grow by one entry per address for the life of the
+/// process, which on a public address is a memory leak an anonymous caller
+/// drives. `prune_stale` existed from the start with no caller outside its own
+/// test. Now `try_take` runs it at most once per window.
 #[derive(Debug)]
 pub struct RateLimiter {
     limit: usize,
     window: Duration,
-    buckets: Mutex<HashMap<IpAddr, Bucket>>,
+    inner: Mutex<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    buckets: HashMap<IpAddr, Bucket>,
+    last_prune: Instant,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -26,22 +38,38 @@ impl RateLimiter {
         Self {
             limit,
             window,
-            buckets: Mutex::new(HashMap::new()),
+            inner: Mutex::new(Inner {
+                buckets: HashMap::new(),
+                last_prune: Instant::now(),
+            }),
         }
     }
 
     /// Tries to take one token. Returns `true` if allowed, `false` if rate limited.
     pub fn try_take(&self, ip: IpAddr) -> bool {
-        let mut buckets = self.buckets.lock().expect("rate limiter mutex");
-        let now = Instant::now();
+        self.try_take_at(ip, Instant::now())
+    }
 
-        let bucket = buckets.entry(ip).or_insert_with(|| Bucket {
+    /// [`try_take`](Self::try_take) at a given instant, so a test can move time
+    /// forward instead of sleeping through two windows.
+    fn try_take_at(&self, ip: IpAddr, now: Instant) -> bool {
+        let mut inner = self.inner.lock().expect("rate limiter mutex");
+
+        // Amortised: one O(n) sweep per window, never one per call.
+        if now.saturating_duration_since(inner.last_prune) >= self.window {
+            Self::prune(&mut inner.buckets, self.window, now);
+            inner.last_prune = now;
+        }
+
+        let bucket = inner.buckets.entry(ip).or_insert_with(|| Bucket {
             tokens: self.limit as f64,
             last_refill: now,
         });
 
         // Refill tokens based on elapsed time.
-        let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
         let refill_rate = self.limit as f64 / self.window.as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(self.limit as f64);
         bucket.last_refill = now;
@@ -55,11 +83,25 @@ impl RateLimiter {
     }
 
     /// Removes entries that have not been used for `2 * window`.
-    /// Call periodically (e.g., on each check) to prevent unbounded growth.
+    ///
+    /// Pruning is **lossless**, which is why it can run whenever it likes. A
+    /// bucket untouched for a full window has refilled to `limit`, which is
+    /// exactly the fresh bucket that would replace it, so forgetting one never
+    /// lets through a caller who would otherwise have been refused. The second
+    /// window is margin, not correctness.
     pub fn prune_stale(&self, now: Instant) {
-        let mut buckets = self.buckets.lock().expect("rate limiter mutex");
-        let stale_after = self.window * 2;
-        buckets.retain(|_, bucket| now.duration_since(bucket.last_refill) < stale_after);
+        let mut inner = self.inner.lock().expect("rate limiter mutex");
+        Self::prune(&mut inner.buckets, self.window, now);
+    }
+
+    fn prune(buckets: &mut HashMap<IpAddr, Bucket>, window: Duration, now: Instant) {
+        let stale_after = window * 2;
+        buckets.retain(|_, bucket| now.saturating_duration_since(bucket.last_refill) < stale_after);
+    }
+
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.inner.lock().expect("rate limiter mutex").buckets.len()
     }
 }
 
@@ -120,17 +162,49 @@ mod tests {
 
         let now = Instant::now();
         limiter.prune_stale(now); // not stale yet
-        {
-            let buckets = limiter.buckets.lock().unwrap();
-            assert!(buckets.contains_key(&ip));
-        }
+        assert_eq!(limiter.tracked(), 1);
 
         // Advance time beyond 2 * window
         let future = now + Duration::from_millis(150);
         limiter.prune_stale(future);
-        {
-            let buckets = limiter.buckets.lock().unwrap();
-            assert!(!buckets.contains_key(&ip));
+        assert_eq!(limiter.tracked(), 0);
+    }
+
+    #[test]
+    fn the_map_is_pruned_by_ordinary_use_not_only_when_asked() {
+        // The regression: `prune_stale` had no production caller, so every
+        // source address ever seen stayed in the map for good.
+        let window = Duration::from_secs(60);
+        let limiter = RateLimiter::new(10, window);
+        let start = Instant::now();
+        for n in 0..=255u8 {
+            limiter.try_take_at(IpAddr::V4(Ipv4Addr::new(10, 0, 0, n)), start);
         }
+        assert_eq!(limiter.tracked(), 256);
+
+        // Three windows later, one ordinary call from a new address.
+        let later = start + window * 3;
+        assert!(limiter.try_take_at(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), later));
+        assert_eq!(limiter.tracked(), 1);
+    }
+
+    #[test]
+    fn pruning_forgets_nobody_who_was_still_limited() {
+        // An exhausted bucket from within the last window must survive a
+        // sweep, or pruning would be a way to reset your own limit.
+        let window = Duration::from_secs(60);
+        let limiter = RateLimiter::new(2, window);
+        let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let start = Instant::now();
+        assert!(limiter.try_take_at(ip, start));
+        assert!(limiter.try_take_at(ip, start));
+        assert!(!limiter.try_take_at(ip, start));
+
+        // A sweep runs on this call (a window has passed since construction),
+        // yet the bucket was used moments ago and is still limited.
+        let just_after = start + window + Duration::from_millis(1);
+        let other = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+        limiter.try_take_at(other, just_after);
+        assert_eq!(limiter.tracked(), 2);
     }
 }

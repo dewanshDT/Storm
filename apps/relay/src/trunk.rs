@@ -10,6 +10,9 @@
 //! The two send methods are not interchangeable and the difference is the whole
 //! reason this file exists — see [`Tx::try_send_json`].
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt, stream::SplitStream};
 use tokio::sync::mpsc;
@@ -24,8 +27,64 @@ pub type Rx = SplitStream<WebSocket>;
 /// Client-ward is the larger of the two because overrunning it kills the client
 /// trunk (see [`Tx::try_send_json`]), while overrunning the server-ward queue
 /// only makes one client wait.
+///
+/// **A count is not a memory bound.** A frame can be anything up to the
+/// WebSocket reader's 16 MiB frame limit, and an attachment is one frame the
+/// size of the file, so 256 queued frames could be 4 GiB. The client-ward queue
+/// also carries a byte budget (`max_client_buffer_bytes`); these counts stay
+/// only as the channel's capacity.
 pub const SERVER_WARD_QUEUE: usize = 64;
 pub const CLIENT_WARD_QUEUE: usize = 256;
+
+/// Bytes queued toward one peer and not yet written to its socket.
+///
+/// Charged when a frame is queued, refunded by the writer task once the frame
+/// has been written. So it measures what the relay is actually holding for a
+/// peer that has stopped reading, not what has passed through it.
+#[derive(Debug)]
+struct Budget {
+    queued: AtomicUsize,
+    limit: usize,
+}
+
+impl Budget {
+    /// Reserves `len` bytes if they fit.
+    ///
+    /// **An empty queue admits any one frame**, however large. A response body
+    /// is usually a single frame the size of the whole resource, so without
+    /// this a budget smaller than the largest attachment could never deliver
+    /// it, even to a client that is reading as fast as it can. The budget
+    /// bounds the backlog, not the size of one frame; the frame-size limit
+    /// bounds that.
+    fn try_reserve(&self, len: usize) -> bool {
+        self.queued
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                (queued == 0 || queued.saturating_add(len) <= self.limit)
+                    .then(|| queued.saturating_add(len))
+            })
+            .is_ok()
+    }
+
+    /// Counts `len` bytes unconditionally. For the blocking path, which is
+    /// bounded by waiting rather than by refusing.
+    fn charge(&self, len: usize) {
+        self.queued.fetch_add(len, Ordering::AcqRel);
+    }
+
+    fn refund(&self, len: usize) {
+        self.queued.fetch_sub(len, Ordering::AcqRel);
+    }
+}
+
+/// What a queued frame costs against a [`Budget`]. Control frames other than
+/// text are free: `Close` in particular must never be refused for want of room.
+fn cost(message: &Message) -> usize {
+    match message {
+        Message::Text(text) => text.len(),
+        Message::Binary(bytes) => bytes.len(),
+        _ => 0,
+    }
+}
 
 /// How a connection stopped being useful.
 ///
@@ -54,6 +113,7 @@ pub struct Backlogged;
 #[derive(Debug, Clone)]
 pub struct Tx {
     inner: mpsc::Sender<Message>,
+    budget: Arc<Budget>,
 }
 
 impl Tx {
@@ -71,10 +131,12 @@ impl Tx {
     }
 
     async fn send(&self, message: Message) -> Result<(), Fault> {
-        self.inner
-            .send(message)
-            .await
-            .map_err(|_| Fault::Disconnected)
+        let len = cost(&message);
+        self.budget.charge(len);
+        self.inner.send(message).await.map_err(|_| {
+            self.budget.refund(len);
+            Fault::Disconnected
+        })
     }
 
     /// Never blocks; reports a peer that has fallen too far behind.
@@ -94,9 +156,17 @@ impl Tx {
     }
 
     fn try_send(&self, message: Message) -> Result<(), Backlogged> {
-        // A closed channel and a full one are both "this peer is not getting
-        // it"; the caller's response to either is to stop routing to it.
-        self.inner.try_send(message).map_err(|_| Backlogged)
+        // Over budget, a closed channel and a full one are all "this peer is
+        // not getting it"; the caller's response to each is to stop routing to
+        // it.
+        let len = cost(&message);
+        if !self.budget.try_reserve(len) {
+            return Err(Backlogged);
+        }
+        self.inner.try_send(message).map_err(|_| {
+            self.budget.refund(len);
+            Backlogged
+        })
     }
 
     /// Best-effort close. Used on teardown paths where there is nothing useful
@@ -109,8 +179,17 @@ impl Tx {
     /// exercise the routing tables without a WebSocket behind them.
     #[cfg(test)]
     pub fn detached(queue: usize) -> (Self, mpsc::Receiver<Message>) {
+        Self::detached_with_budget(queue, usize::MAX)
+    }
+
+    #[cfg(test)]
+    fn detached_with_budget(queue: usize, limit: usize) -> (Self, mpsc::Receiver<Message>) {
         let (tx, rx) = mpsc::channel(queue);
-        (Self { inner: tx }, rx)
+        let budget = Arc::new(Budget {
+            queued: AtomicUsize::new(0),
+            limit,
+        });
+        (Self { inner: tx, budget }, rx)
     }
 }
 
@@ -119,18 +198,32 @@ impl Tx {
 /// The writer drains in order, so an `ERROR` queued immediately before a
 /// `Close` is still delivered — which is what makes "tell the client why, then
 /// hang up" work at all.
-pub fn split(socket: WebSocket, queue: usize) -> (Rx, Tx) {
+///
+/// `byte_limit` caps what [`Tx::try_send_json`] / [`Tx::try_send_raw`] will
+/// queue. Pass `usize::MAX` for a peer that is only ever written with the
+/// blocking sends, where waiting is the bound.
+pub fn split(socket: WebSocket, queue: usize, byte_limit: usize) -> (Rx, Tx) {
     let (mut sink, stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(queue);
+    let budget = Arc::new(Budget {
+        queued: AtomicUsize::new(0),
+        limit: byte_limit,
+    });
+    let writer_budget = budget.clone();
     tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            if sink.send(message).await.is_err() {
+            let len = cost(&message);
+            let sent = sink.send(message).await;
+            // Refunded after the write, not on dequeue: until the socket has
+            // taken the frame, the relay is still holding its bytes.
+            writer_budget.refund(len);
+            if sent.is_err() {
                 break;
             }
         }
         let _ = sink.close().await;
     });
-    (stream, Tx { inner: tx })
+    (stream, Tx { inner: tx, budget })
 }
 
 /// One frame, classified.
@@ -192,4 +285,47 @@ pub async fn close(tx: &Tx, fault: Fault) {
         let _ = tx.send_json(proto::error(code)).await;
     }
     tx.close();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_queue_admits_one_frame_larger_than_the_whole_budget() {
+        // An attachment is one frame the size of the file. A budget that
+        // refused it outright could never deliver it to anyone.
+        let (tx, _rx) = Tx::detached_with_budget(8, 100);
+        assert!(tx.try_send_raw(vec![0; 1000]).is_ok());
+        // ...but nothing queues behind it.
+        assert!(tx.try_send_raw(vec![0; 1]).is_err());
+    }
+
+    #[test]
+    fn frames_queue_until_the_next_would_pass_the_budget() {
+        let (tx, _rx) = Tx::detached_with_budget(8, 100);
+        assert!(tx.try_send_raw(vec![0; 60]).is_ok());
+        assert!(tx.try_send_raw(vec![0; 40]).is_ok());
+        assert!(tx.try_send_raw(vec![0; 1]).is_err());
+    }
+
+    #[test]
+    fn a_refused_frame_costs_nothing() {
+        // A refusal that still charged the budget would leak it, and the peer
+        // would be backlogged for ever after one refusal.
+        let (tx, _rx) = Tx::detached_with_budget(1, 100);
+        assert!(tx.try_send_raw(vec![0; 10]).is_ok());
+        // Channel full: refused, and the 10 bytes must not be charged.
+        assert!(tx.try_send_raw(vec![0; 10]).is_err());
+        assert_eq!(tx.budget.queued.load(Ordering::Acquire), 10);
+    }
+
+    #[test]
+    fn close_is_never_refused_for_want_of_room() {
+        let (tx, mut rx) = Tx::detached_with_budget(8, 10);
+        assert!(tx.try_send_raw(vec![0; 10]).is_ok());
+        tx.close();
+        let _ = rx.try_recv().unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Message::Close(None)));
+    }
 }
