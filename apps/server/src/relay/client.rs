@@ -710,4 +710,38 @@ mod tests {
             assert!(!is_bodyless(method), "{method}");
         }
     }
+
+    /// This build can dial `wss://` (decision 71). Before it, `connect_async`
+    /// refused every `wss://` URL with `TlsFeatureNotEnabled`, so a TLS relay
+    /// was unreachable from every server.
+    ///
+    /// **Something must be listening.** `connect_async` opens the TCP
+    /// connection *before* it decides whether it can do TLS, so against a
+    /// closed port both builds fail identically with an IO error, and the first
+    /// version of this test passed with the feature removed. Here the TCP
+    /// connect succeeds and the peer hangs up, so a build without TLS fails
+    /// with `TlsFeatureNotEnabled` and a build with it fails in the handshake.
+    #[tokio::test]
+    async fn a_wss_relay_is_dialled_rather_than_refused_for_want_of_tls() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                drop(socket);
+            }
+        });
+        let err = tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/register"))
+            .await
+            .expect_err("the peer hangs up before any handshake");
+        assert!(
+            !matches!(
+                err,
+                tokio_tungstenite::tungstenite::Error::Url(
+                    tokio_tungstenite::tungstenite::error::UrlError::TlsFeatureNotEnabled
+                )
+            ),
+            "{err}"
+        );
+    }
 }

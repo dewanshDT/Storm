@@ -1433,6 +1433,14 @@ fn advertised_host(bind_host: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Before anything can open a TLS connection. The relay tunnel dials
+    // `wss://` through tungstenite, which builds its rustls config from the
+    // process-default provider. Installed explicitly rather than left to crate
+    // features, because a second provider arriving through some future
+    // dependency would make that default ambiguous, and rustls panics on the
+    // first handshake when it is. `Err` only means one is already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
