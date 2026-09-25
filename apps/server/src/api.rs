@@ -2920,12 +2920,16 @@ pub(crate) mod tests {
 
     /// A session token for `user_id`, minted directly rather than through
     /// `login`, for the same reason [`seed_owner`] fakes the hash.
+    ///
+    /// Issued **now**, never at a fixed date. The middleware checks expiry
+    /// against the real clock, so a token stamped `2026-08-17` expired 30 days
+    /// later, and on 2026-09-16 every test using this helper started failing
+    /// with `session_expired` on code nobody had touched.
     pub(crate) async fn session_token(state: &Shared, user_id: &str) -> String {
+        let now = crate::index::now_rfc3339();
         let mut auth_db = state.auth_db.lock().await;
-        let device =
-            crate::auth::devices::create_synthetic(&mut auth_db, "test", "2026-08-17T00:00:00Z")
-                .unwrap();
-        crate::auth::sessions::create(&mut auth_db, user_id, &device.id, "2026-08-17T00:00:00Z")
+        let device = crate::auth::devices::create_synthetic(&mut auth_db, "test", &now).unwrap();
+        crate::auth::sessions::create(&mut auth_db, user_id, &device.id, &now)
             .unwrap()
             .access_token
     }
