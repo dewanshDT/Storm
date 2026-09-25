@@ -43,7 +43,7 @@ macOS · Android · Web
    ┌──────┴──────┐
    ▼             ▼
 vaults/*.md   state/
-plain md      indexes · registry
+plain md      indexes · registry · auth.db
                      ▲
                      │ MCP
               AI applications
@@ -60,7 +60,10 @@ plain md      indexes · registry
 - **Conflicts stay in the file.** Markers in the note — not a hidden sibling.
 - **Offline is normal.** Creates and edits queue and replay. Search is
   server-side.
-- **No accounts product.** One person, several devices, one token.
+- **Accounts are local and yours.** An owner account, per-device pairing,
+  sessions, and revocable MCP keys — all in `state/auth.db` on your server. No
+  cloud account, no third-party identity provider. One person with several
+  devices is the default, not the limit.
 
 Full invariant list for agents: [[Storm Invariants]].
 

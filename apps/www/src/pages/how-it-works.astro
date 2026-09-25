@@ -32,7 +32,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
    ┌──────┴──────┐
    ▼             ▼
 vaults/*.md   state/
-plain md      indexes · registry
+plain md      indexes · registry · auth.db
                      ▲
                      │ MCP
               AI applications`}</code></pre>
@@ -63,8 +63,11 @@ plain md      indexes · registry
         device and replay when the server returns. Search remains server-side.
       </li>
       <li>
-        <strong>No accounts product.</strong> One person, several devices, one
-        token on the network you control.
+        <strong>Accounts are local and yours.</strong> An owner account,
+        per-device pairing, sessions, and revocable keys for MCP clients — all
+        in <code>state/auth.db</code> on your server. No cloud account, no
+        third-party identity provider, no credential that leaves the network you
+        control. One person with several devices is the default, not the limit.
       </li>
     </ul>
   </section>
