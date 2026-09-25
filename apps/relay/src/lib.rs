@@ -30,8 +30,10 @@
 //! limit (`rate_limit`), the in-flight and total stream caps (`state`), and
 //! the per-client-trunk byte budget (`trunk`).
 //!
-//! Not here: the §6 bandwidth cap, and persistence. TOFU bindings live in
-//! memory, so a restart re-opens the first-use window (see `state`).
+//! TOFU bindings persist to a file when given one (`--bindings`); otherwise
+//! they live in memory and a restart re-opens the first-use window (`state`).
+//!
+//! Not here: the §6 bandwidth cap.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -101,6 +103,14 @@ impl Relay {
             hello_rate_limiter,
             nonce_source,
         }
+    }
+
+    /// Replaces the binding store, for a relay whose TOFU bindings live in a
+    /// file ([`state::Bindings::load`]). Construction stays infallible; loading
+    /// the file is the caller's step and the caller's error.
+    pub fn with_bindings(mut self, bindings: state::Bindings) -> Self {
+        self.bindings = bindings;
+        self
     }
 
     pub fn mint_nonce(&self) -> String {

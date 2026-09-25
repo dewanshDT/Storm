@@ -329,6 +329,11 @@ lives in this repo**; the design rationale stays in the personal vault under
   whether a key has *changed*.
 - **Keys are compared as decoded bytes, never as strings**, for the same
   reason.
+- **A TOFU binding is on disk before `REGISTERED` goes out** (decision 69).
+  With `--bindings`, `record` writes atomically under the lock and un-records
+  the pair if the write fails. Announcing a binding a restart could forget
+  re-opens the first-use window, and §4.1 makes a squatted `server_id`
+  permanent. A corrupt bindings file stops the relay rather than starting empty.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.

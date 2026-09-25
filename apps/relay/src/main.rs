@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use storm_relay::state::Bindings;
 use storm_relay::{Allowlist, CONNECT_PATH, Config, REGISTER_PATH, Relay};
 
 #[derive(Parser, Debug)]
@@ -38,6 +39,14 @@ struct Args {
     /// `server_id` and refuses every later one.
     #[arg(long, env = "STORM_RELAY_ALLOWLIST")]
     allowlist: Option<PathBuf>,
+
+    /// Where trust-on-first-use bindings are kept, so a restart does not
+    /// re-open the first-use window. Same format as the allowlist, written by
+    /// the relay, and a binding is on disk before its server is told it is
+    /// registered. Created if missing; a file that does not parse stops the
+    /// relay. Meaningless with --allowlist, which switches TOFU off.
+    #[arg(long, env = "STORM_RELAY_BINDINGS", conflicts_with = "allowlist")]
+    bindings: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -66,17 +75,27 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    let bindings = match &args.bindings {
+        Some(path) => Some(Bindings::load(path)?),
+        None => None,
+    };
+
     let mut config = Config::new(args.bind, &public_base);
-    match &allowlist {
-        Some(list) => tracing::info!(
+    match (&allowlist, &bindings) {
+        (Some(list), _) => tracing::info!(
             entries = list.len(),
             "allowlist loaded; trust-on-first-use is off"
         ),
-        // Worth saying out loud. TOFU is in-memory, so a restart re-opens the
+        (None, Some(bound)) => tracing::info!(
+            entries = bound.len(),
+            "trust-on-first-use, with bindings persisted to --bindings"
+        ),
+        // Worth saying out loud. Without a file a restart re-opens the
         // first-use window for every server that has not yet reconnected.
-        None => tracing::warn!(
-            "no allowlist: binding by trust-on-first-use, held in memory only. \
-             A restart re-opens the first-use window."
+        (None, None) => tracing::warn!(
+            "no allowlist and no --bindings: trust-on-first-use held in memory \
+             only. A restart re-opens the first-use window; do not run a public \
+             relay this way."
         ),
     }
     config.allowlist = allowlist;
@@ -93,5 +112,9 @@ async fn main() -> Result<()> {
         "storm-relay listening"
     );
 
-    storm_relay::serve(listener, Arc::new(Relay::new(config))).await
+    let mut relay = Relay::new(config);
+    if let Some(bindings) = bindings {
+        relay = relay.with_bindings(bindings);
+    }
+    storm_relay::serve(listener, Arc::new(relay)).await
 }

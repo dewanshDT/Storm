@@ -26,7 +26,7 @@ use axum::extract::ws::WebSocket;
 use crate::Relay;
 use crate::auth::{PublicKey, validate_nonce, validate_server_id};
 use crate::proto::{self, ChallengeResponse, ErrorCode, Frame, RegisterServer};
-use crate::state::{Binding, Registration, ServerTrunk, new_trunk_id};
+use crate::state::{Binding, RecordError, Registration, ServerTrunk, new_trunk_id};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// Serves one server trunk from upgrade to close.
@@ -186,12 +186,26 @@ async fn handshake(
         relay
             .bindings
             .record(&register.server_id, pubkey)
-            .map_err(|_| {
-                tracing::info!(
-                    server_id = %register.server_id,
-                    "lost the race to record a first-use binding"
-                );
-                ErrorCode::AuthFailed
+            .map_err(|e| match e {
+                RecordError::Refused => {
+                    tracing::info!(
+                        server_id = %register.server_id,
+                        "lost the race to record a first-use binding"
+                    );
+                    ErrorCode::AuthFailed
+                }
+                // The relay's fault, not the peer's. `protocol_error` is what
+                // §6 says to send when there is no honest code, and the
+                // registration fails rather than succeeding on a binding a
+                // restart could forget.
+                RecordError::Unpersisted(why) => {
+                    tracing::error!(
+                        server_id = %register.server_id,
+                        error = %why,
+                        "could not persist a first-use binding; refusing the registration"
+                    );
+                    ErrorCode::ProtocolError
+                }
             })?;
         tracing::info!(
             server_id = %register.server_id,

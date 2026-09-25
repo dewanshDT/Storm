@@ -1567,6 +1567,42 @@ that is an R6 question first.
 
 ---
 
+**69. TOFU bindings persist, and a binding is on disk before it is announced.**
+*(2026-09-25, `feat/relay-tofu-persist`)*
+
+The gate on phase 4. TOFU bindings lived in memory, so every relay restart
+re-opened the first-use window for every server that had not reconnected yet,
+and §4.1 makes a squatted `server_id` permanent. `--bindings <path>` closes it.
+
+- **The file uses the allowlist's format, and loading goes through
+  `Allowlist::parse`.** One format, one validator, and a bindings file an
+  operator has come to trust can be promoted to `--allowlist` unchanged.
+- **Durable before `REGISTERED`.** `record` writes a temp file, fsyncs it,
+  renames it over the old one, and fsyncs the directory, all while holding the
+  bindings lock. A write that fails un-records the pair, and the registration
+  is refused with `protocol_error` (the relay's fault, and §6 has no honest
+  code for that). **A binding the relay announced but could lose on restart is
+  exactly the window this exists to close**, so failing closed is the point.
+- **A corrupt file stops the relay; a missing one starts empty.** Starting
+  empty on a parse error would open every `server_id` at once.
+- **Opt-in, and `--allowlist` conflicts with it** (an allowlist switches TOFU
+  off). Without either flag the relay starts, and says loudly that a public
+  relay must not run that way. Not the default, because the relay has no state
+  directory to put a default path in, and inventing one would be a second
+  thing to back up that nobody chose.
+
+Relay tests 99 → 104. Each of the four new tests fails when `record` skips
+the write, checked by mutation, since the tests cannot compile against the old
+API.
+
+*Revisit if:* a hosted relay needs account-owned claims (§4.1's third row),
+which is a different store, not this file grown; or if a relay ever holds
+bindings for so many servers that rewriting the whole file per first
+registration costs something. Each server registers for the first time once,
+so that is not close.
+
+---
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

@@ -167,6 +167,12 @@ impl Allowlist {
         self.entries.len()
     }
 
+    /// The parsed entries, for reuse as a TOFU bindings file (see
+    /// `state::Bindings::load`), which shares this format and its validation.
+    pub(crate) fn into_entries(self) -> HashMap<String, PublicKey> {
+        self.entries
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
