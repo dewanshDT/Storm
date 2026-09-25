@@ -1403,7 +1403,7 @@ deliberately unresolved and should be settled by a measurement rather than in
 advance; or if MCP over the tunnel needs more than a client swap (R10 says it
 should not, and the checklist's §5 says verify rather than assume).
 
-**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. ~~Track B not started~~: Track B landed in the same commit (686a2d1), which this line contradicted. **Its real scope (review of 2026-09-02):** the HELLO per-IP rate limit, the per-trunk stream cap, the `trunk_superseded` 30 s drain and the 45 s heartbeat deadline are all wired. `max_client_buffer_bytes`, however, is declared and never read, `RateLimiter::prune_stale` has no production caller, and the drain and the deadline have no test. Shipped in v0.2.8 in that state. Closed by decision 67, which also found the heartbeat deadline closing every healthy trunk.
+**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. ~~Track B not started~~: Track B landed in the same commit (686a2d1), which this line contradicted. **Its real scope (review of 2026-09-02):** the HELLO per-IP rate limit, the per-trunk stream cap, the `trunk_superseded` 30 s drain and the 45 s heartbeat deadline are all wired. `max_client_buffer_bytes`, however, is declared and never read, `RateLimiter::prune_stale` has no production caller, and the drain and the deadline have no test. In the v0.2.8 tag's source in that state, though never in a binary: `release.yml` does not build `apps/relay` (see 69). Closed by decision 67, which also found the heartbeat deadline closing every healthy trunk.
 
 **64. The `kit` vault is seeded by the server on first run**
 Storm is meant to be driven by coding agents, and an agent needs to be told how
@@ -1474,8 +1474,9 @@ an ageing compiler nobody dares move.
 
 The 2026-09-02 review found the heartbeat deadline and the supersession drain
 "implemented but untested", `max_client_buffer_bytes` declared and never read,
-and `RateLimiter::prune_stale` with no caller. v0.2.8 shipped all four as they
-were. Writing the tests found that "untested" was hiding "broken":
+and `RateLimiter::prune_stale` with no caller. All four were in the v0.2.8
+tag's source. *(Corrected in 69: `release.yml` builds no relay binary, so none
+of this ever ran outside a developer's machine.)* Writing the tests found that "untested" was hiding "broken":
 
 - **The heartbeat deadline closed every healthy trunk.** It measured time since
   the last `PONG`. But `apps/server` heartbeats by *sending* `PING` every 15 s,
@@ -1564,6 +1565,52 @@ the gate is. The two drifted here for 25 days without anyone noticing.
 
 *Revisit if:* never, as long as the crate exists. If it moves into a workspace,
 that is an R6 question first.
+
+---
+
+**69. TOFU bindings persist, and a binding is on disk before it is announced.**
+*(2026-09-25, `feat/relay-tofu-persist`)*
+
+The gate on phase 4. TOFU bindings lived in memory, so every relay restart
+re-opened the first-use window for every server that had not reconnected yet,
+and §4.1 makes a squatted `server_id` permanent. `--bindings <path>` closes it.
+
+- **The file uses the allowlist's format, and loading goes through
+  `Allowlist::parse`.** One format, one validator, and a bindings file an
+  operator has come to trust can be promoted to `--allowlist` unchanged.
+- **Durable before `REGISTERED`.** `record` writes a temp file, fsyncs it,
+  renames it over the old one, and fsyncs the directory, all while holding the
+  bindings lock. A write that fails un-records the pair, and the registration
+  is refused with `protocol_error` (the relay's fault, and §6 has no honest
+  code for that). **A binding the relay announced but could lose on restart is
+  exactly the window this exists to close**, so failing closed is the point.
+- **A corrupt file stops the relay; a missing one starts empty.** Starting
+  empty on a parse error would open every `server_id` at once.
+- **Opt-in, and `--allowlist` conflicts with it** (an allowlist switches TOFU
+  off). Without either flag the relay starts, and says loudly that a public
+  relay must not run that way. Not the default, because the relay has no state
+  directory to put a default path in, and inventing one would be a second
+  thing to back up that nobody chose.
+
+Relay tests 99 → 104. Each of the four new tests fails when `record` skips
+the write, checked by mutation, since the tests cannot compile against the old
+API.
+
+**Found while writing this up: the relay has never been released.**
+`release.yml` builds `storm-server`, the clients and the web bundle, and
+nothing from `apps/relay`, and `deploy/` has no unit for it. So "shipped in
+v0.2.8" (said of the relay in 67, and in the vault notes) meant *in the tag's
+source*, not *in a binary anyone ran*. The heartbeat bug 67 fixed never ran
+anywhere. **Phase 4 therefore starts with packaging**: a `storm-relay` release
+artifact, a systemd unit and a `deploy/` section, with `--bindings` pointing
+into a state directory that unit owns. That is also where a default bindings
+path can finally live.
+
+*Revisit if:* a hosted relay needs account-owned claims (§4.1's third row),
+which is a different store, not this file grown; or if a relay ever holds
+bindings for so many servers that rewriting the whole file per first
+registration costs something. Each server registers for the first time once,
+so that is not close.
 
 ---
 
