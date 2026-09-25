@@ -60,10 +60,11 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 **Release state (2026-09-25).** The latest release is **v0.2.8** (PR #37,
 2026-09-02): all of `staging` at that point, meaning relay phases 2–3, the Dart
 SRP client, kit vault seeding and the scoped script tools (decisions 56–64).
-`main` and `staging` were identical after that merge. **Whether the VM was
-upgraded to 0.2.8 is unrecorded.** The last verified prod version is 0.2.7, so
-confirm `serverInfo.version` before calling the relay "deployed". The relay
-has no public instance in any case; that is phase 4.
+`main` and `staging` were identical after that merge. **Prod runs 0.2.8.**
+The operator confirmed it on 2026-09-25. The upgrade itself was never recorded
+here, which is how these notes came to say 0.2.7 for three weeks: a deploy
+belongs in this file on the day it happens. "Deployed" still does not mean
+the relay is reachable. No public relay instance exists; that is phase 4.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
