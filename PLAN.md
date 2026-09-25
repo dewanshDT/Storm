@@ -1542,6 +1542,31 @@ empty-queue admission; without it, large attachments stop working.
 
 ---
 
+**68. `apps/relay` gets a CI job; it never had one.** *(2026-09-25)*
+
+`ci.yml` ran fmt, clippy and tests for `apps/server`, `apps/client` and
+`apps/www`, and nothing for `apps/relay`. From its first commit (decision 60)
+the relay's only gate was a local `make check`. Several of its PRs merged
+with "CI green" while no machine outside the author's had compiled the crate.
+That includes the v0.2.8 relay work decision 67 found broken, and #39 itself.
+"`apps/relay` was in the gate from its first commit" was true of the Makefile
+and false of CI, and only CI is a gate.
+
+A separate `relay (rust)` job: fmt, clippy `-D warnings`, test. It is not a
+step in `server`, because the two crates are deliberately not a workspace
+(R6), and one job building both would be the first step towards treating them
+as one thing. `cargo test` includes `tests/vectors.rs`, so the relay's third of
+the `docs/srp-vectors.json` agreement is now actually enforced.
+
+**The shape to keep:** a new crate or app needs its CI job in the same change
+that adds it. The Makefile is where the local convenience lives; CI is where
+the gate is. The two drifted here for 25 days without anyone noticing.
+
+*Revisit if:* never, as long as the crate exists. If it moves into a workspace,
+that is an R6 question first.
+
+---
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
