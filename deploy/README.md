@@ -296,16 +296,47 @@ both stops the relay.
 Lose the bindings file and every `server_id` is open to whoever registers
 next. Back it up. Purging the package deliberately leaves it in place.
 
-**Not yet safe on a public address.** The relay speaks plain `ws://`, and it
-takes each client's address from the socket rather than from a header, because
-headers are forgeable. Behind a TLS reverse proxy, every client therefore
-arrives from the proxy's address. That makes the per-IP `HELLO` limit one
-bucket for everybody, and gives the origin's login limiter one `relay_peer_ip`
-for every relayed client. Plain `ws://` on a public port avoids that and
-instead puts session tokens on the wire in cleartext. Neither is acceptable;
-the fix (TLS in the relay itself, or PROXY-protocol support) is open in
-`PLAN.md` decision 70. Until then, run it on a LAN or over a VPN, where
-neither problem applies.
+**On a public address, the relay terminates TLS itself** (decision 71). Do not
+put Caddy or nginx in front of it. The relay takes each client's address from
+the socket, never from a header, because a header is something the client
+wrote. Behind a proxy every client would be the proxy: one `HELLO` rate limit
+shared by everybody, and one `relay_peer_ip` for the origin's login limiter,
+so one noisy client locks everyone out.
+
+With certbot, standalone for the first certificate and a deploy hook for every
+renewal:
+
+```sh
+sudo certbot certonly --standalone -d relay.example.com
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/storm-relay >/dev/null <<'HOOK'
+#!/bin/sh
+# certbot's own files are root-only. Copy them where the relay can read them.
+install -d -m 0750 -g storm-relay /etc/storm-relay/tls
+install -m 0640 -g storm-relay "$RENEWED_LINEAGE/fullchain.pem" /etc/storm-relay/tls/
+install -m 0640 -g storm-relay "$RENEWED_LINEAGE/privkey.pem" /etc/storm-relay/tls/
+systemctl reload storm-relay 2>/dev/null || true
+HOOK
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/storm-relay
+sudo RENEWED_LINEAGE=/etc/letsencrypt/live/relay.example.com \
+    /etc/letsencrypt/renewal-hooks/deploy/storm-relay
+```
+
+Then in `/etc/storm-relay/storm-relay.env`:
+
+```sh
+STORM_RELAY_BIND=0.0.0.0:443
+STORM_RELAY_PUBLIC_BASE=wss://relay.example.com
+STORM_RELAY_TLS_CERT=/etc/storm-relay/tls/fullchain.pem
+STORM_RELAY_TLS_KEY=/etc/storm-relay/tls/privkey.pem
+# and an allowlist rather than TOFU, as above
+```
+
+`systemctl reload storm-relay` swaps the certificate without dropping a trunk;
+a reload that fails (a half-written file, a key that does not match) keeps the
+old one and says so in the journal. The relay refuses to start with `--tls-cert`
+and a `ws://` public base, and warns about a `wss://` base without
+`--tls-cert`. **storm-server trusts the public web PKI only**, so the relay
+needs a real certificate; a self-signed one will not register.
 
 **Pointing a server at it.** There is no app screen for this yet. As an
 owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`,

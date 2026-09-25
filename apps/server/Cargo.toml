@@ -45,7 +45,16 @@ tokio-stream = "0.1.19"
 # choosing a TLS stack and carrying it; until then a configured `wss://` relay
 # fails at connect with an explicit log line rather than a confusing handshake
 # error. See the tunnel client's `run_once`.
-tokio-tungstenite = "0.29.0"
+# `rustls-tls-webpki-roots`: the tunnel client must be able to dial a `wss://`
+# relay, and until decision 71 this build could not (client.rs logged "no TLS
+# support" and gave up). Bundled Mozilla roots rather than the host's store,
+# because the release binary is static musl and must not care what the box has
+# in /etc/ssl.
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
+# Named only to pick the crypto provider: `ring`, never rustls's default
+# `aws-lc-rs`, which needs cmake and a C toolchain the musl/zig release build
+# does not have. main.rs installs it as the process default as well.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["fs", "cors", "trace", "set-header"] }
 tracing = "0.1.44"
