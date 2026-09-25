@@ -49,6 +49,7 @@ ed25519-dalek = "3.0.0"
 # reader writes every client — so the write half has to be separable.
 futures-util = "0.3"
 rand = "0.10.2"
+rustls-pki-types = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = [
@@ -59,6 +60,7 @@ tokio = { version = "1.53.1", features = [
     "sync",
     "signal",
 ] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
@@ -67,3 +69,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # it over a socket rather than by calling the state machine directly.
 tokio-tungstenite = "0.29.0"
 futures-util = "0.3"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }

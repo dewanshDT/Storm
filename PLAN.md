@@ -1652,7 +1652,7 @@ and puts session tokens on the wire in cleartext. **Phase 4 step 2 needs one of
 these:** TLS in the relay itself (rustls, with the certificate as files), or
 PROXY-protocol support from a trusted local proxy. Either keeps the address a
 fact about a connection rather than a claim in a header. Until then the relay
-is for a LAN or a VPN, and `deploy/README.md` says so.
+is for a LAN or a VPN, and `deploy/README.md` says so. *(Settled by decision 71: TLS in the relay.)*
 
 Found on the way, recorded rather than fixed here:
 
@@ -1671,6 +1671,71 @@ Found on the way, recorded rather than fixed here:
 
 *Revisit if:* the relay grows state beyond the bindings file, which would
 change what "purge keeps it" protects.
+
+---
+
+**71. A public relay terminates TLS itself, and storm-server can finally dial
+`wss://`.** *(2026-09-25, `feat/relay-tls`; operator's choice between the two
+options 70 named)*
+
+**The choice.** Relay-side TLS over PROXY protocol, because the relay stays one
+binary with one trust boundary: the address is a fact about the socket it
+accepted, as §5.2 needs, with no second process to configure and no header to
+trust. The cost is certificate handling, which is two files and a reload.
+
+- **`--tls-cert` / `--tls-key`** (`STORM_RELAY_TLS_*`), each requiring the
+  other. rustls with **`ring`**, not the default `aws-lc-rs`, because the
+  release builds static musl with zig and aws-lc needs cmake and a C toolchain
+  it does not have. ALPN offers `http/1.1` only, since a WebSocket upgrade
+  cannot happen over `h2`.
+- **A handshake never blocks an accept.** axum calls `Listener::accept` in one
+  loop, so a handshake inside it would let a client that connects and says
+  nothing stall every connection behind it. Each handshake gets its own task,
+  a 10 s deadline and a slot out of 1024; past that, new sockets are dropped
+  unhandshaken.
+- **`SIGHUP` reloads the certificate in place** (`ExecReload`), so a renewal
+  drops no trunk and makes no server re-register. A reload that fails keeps
+  the old pair. Loading refuses a key that does not match its certificate,
+  which would otherwise start a relay that fails every handshake.
+- **`PeerAddr`**, a newtype, replaces `ConnectInfo<SocketAddr>`: axum only
+  provides the latter for its own `TcpListener`, and the orphan rule forbids
+  providing it for ours. Both listeners supply it from the TCP peer.
+- **Scheme sanity at start:** `--tls-cert` with a `ws://` public base refuses
+  to start; a `wss://` base without `--tls-cert` warns. The default base now
+  follows TLS (`wss://` with it, `ws://` without) instead of always `wss://`.
+- **The unit** gains `ExecReload` and `CAP_NET_BIND_SERVICE` as both the
+  ambient and the bounding set, which allows port 443 and drops every other
+  capability.
+
+**The server half.** `storm-server`'s `tokio-tungstenite` had **no TLS
+feature**, so every `wss://` relay was refused before a byte was sent.
+`client.rs` even logged it. So no server could ever have used a public relay.
+It now has `rustls-tls-webpki-roots` (bundled Mozilla roots, since the musl
+binary must not depend on the host's store), and `main` installs `ring` as the
+process-default provider **before anything can dial**, because tungstenite
+builds its client config from that default, and rustls panics on the first
+handshake if a second provider ever makes the default ambiguous.
+
+Evidence: relay tests 104 → 112. `tests/tls.rs` covers registering over
+`wss://`; `relay_peer_ip` over TLS being the client's socket; a stalled
+handshake not blocking the next connection; a stalled handshake cut off at its
+deadline; plaintext refused; a reload swapping the certificate; a failed reload
+keeping the old one; and a mismatched key refused at load. Two mutations were
+caught by exactly the test written for each: an inline handshake fails the
+stall test, and a no-op reload fails the swap test. Server tests 420 → 421.
+**The new server test first passed with the TLS feature removed**, because
+`connect_async` opens TCP before it checks for TLS, so a closed port fails
+identically either way. It now dials a listener that hangs up, and it was
+checked to fail without the feature. A musl `cargo zigbuild` of both crates,
+the release toolchain, was run locally.
+
+Not tested end to end: a storm-server registering with a TLS relay. The server
+trusts only the public web PKI, so that needs a real certificate on a real
+host, which is phase 4 step 3.
+
+*Revisit if:* certificate automation should live in the relay (ACME built in),
+or a hosted relay needs SNI across many names, which `CertStore` does not
+attempt.
 
 ---
 
