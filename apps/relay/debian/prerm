@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Only on removal. dpkg also runs prerm with `upgrade`, and disabling there
+# would leave an upgraded relay that no longer starts at boot.
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop storm-relay 2>/dev/null || true
+            systemctl disable storm-relay 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

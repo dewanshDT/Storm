@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Purge removes configuration, never /var/lib/storm-relay: the bindings file
+# is the one thing a relay cannot rebuild, and deleting it would open every
+# server_id to the next registration. An operator who wants it gone can say so
+# with rm.
+if [ "$1" = "purge" ]; then
+    rm -f /etc/storm-relay/storm-relay.env
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+fi
+
+exit 0

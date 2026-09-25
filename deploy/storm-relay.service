@@ -1,0 +1,59 @@
+# Storm relay (SRP v1). Optional: storm-server neither needs nor depends on it
+# (R6), and the two packages never reference each other.
+#
+# The package installs this unit but does not enable it. A relay with the
+# wrong public address hands clients a URL that goes nowhere, so first:
+#   sudoedit /etc/storm-relay/storm-relay.env      # set STORM_RELAY_PUBLIC_BASE
+#   sudo systemctl enable --now storm-relay
+#
+# storm-relay reads STORM_RELAY_* from the environment itself, so ExecStart
+# carries no flags and the env file is the whole configuration.
+
+[Unit]
+Description=Storm relay (SRP v1)
+Documentation=https://github.com/dewanshDT/Storm/blob/main/docs/srp-v1.md
+After=network-online.target
+Wants=network-online.target
+# A corrupt bindings file stops the relay on purpose (decision 69); restarting
+# it in a tight loop would only bury that in the journal. These are [Unit] keys:
+# under [Service] systemd ignores StartLimitIntervalSec without failing.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=storm-relay
+Group=storm-relay
+EnvironmentFile=/etc/storm-relay/storm-relay.env
+ExecStart=/usr/bin/storm-relay
+
+# /var/lib/storm-relay, created and owned by the unit. It holds the TOFU
+# bindings file (decision 69), which is the relay's only state and cannot be
+# rebuilt: lose it and every server_id is open to whoever registers first.
+# Back it up with the box.
+StateDirectory=storm-relay
+StateDirectoryMode=0700
+
+Restart=on-failure
+RestartSec=3
+
+# The relay holds no user data and needs nothing but its state directory.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Each client trunk may hold up to 32 MiB of backlog (decision 67), so this is
+# the ceiling on how many slow clients one relay tolerates at once.
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
