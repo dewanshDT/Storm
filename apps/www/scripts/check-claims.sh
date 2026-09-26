@@ -27,9 +27,18 @@ newest_tag=$(git tag --list 'v*' --sort=-version:refname | head -1)
 if [ -z "$newest_tag" ]; then
 	echo "check-claims: no v* tags in this checkout; skipping the version check"
 elif [ "$site_tag" != "$newest_tag" ]; then
-	echo "check-claims: src/data/release.ts says $site_tag, newest tag is $newest_tag" >&2
-	echo "  Every download link on /clients points at $site_tag. Bump \`tag\`." >&2
-	status=1
+	# Older is the failure this exists for: links to a stale release. Newer is
+	# the release being cut. The site has to name the tag *before* the tag
+	# exists, or the tagged commit ships a site pointing at the last release;
+	# an equality check made every release PR red (decision 72).
+	older=$(printf '%s\n%s\n' "$site_tag" "$newest_tag" | sort -V | head -1)
+	if [ "$older" = "$site_tag" ]; then
+		echo "check-claims: src/data/release.ts says $site_tag, newest tag is $newest_tag" >&2
+		echo "  Every download link on /clients points at $site_tag. Bump \`tag\`." >&2
+		status=1
+	else
+		echo "check-claims: release.ts names $site_tag, not tagged yet (newest is $newest_tag); a release in progress"
+	fi
 fi
 
 # --- 2. claims that outlived the thing they describe -------------------------

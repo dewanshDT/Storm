@@ -57,14 +57,14 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 
-**Release state (2026-09-25).** The latest release is **v0.2.8** (PR #37,
-2026-09-02): all of `staging` at that point, meaning relay phases 2–3, the Dart
-SRP client, kit vault seeding and the scoped script tools (decisions 56–64).
-`main` and `staging` were identical after that merge. **Prod runs 0.2.8.**
-The operator confirmed it on 2026-09-25. The upgrade itself was never recorded
-here, which is how these notes came to say 0.2.7 for three weeks: a deploy
-belongs in this file on the day it happens. "Deployed" still does not mean
-the relay is reachable. No public relay instance exists; that is phase 4.
+**Release state (2026-09-26).** Cutting **v0.2.9**: all of `staging`, meaning
+decisions 65–71 plus the server packaging fix (#46). It is **the relay's first
+release** (a `storm-relay` `.deb` in the same apt repo; 70), the first
+storm-server that can dial a `wss://` relay (71), and the first whose upgrade
+does not disable storm-server and its backup timer (70, #46). Prod still runs
+**0.2.8** until the operator upgrades the VM, and that upgrade is also the one
+that repairs the disabled units. **No relay is deployed anywhere**; that is
+phase 4 step 3. v0.2.8 (PR #37, 2026-09-02) carried decisions 56–64.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -1745,6 +1745,39 @@ host, which is phase 4 step 3.
 *Revisit if:* certificate automation should live in the relay (ACME built in),
 or a hosted relay needs SNI across many names, which `CertStore` does not
 attempt.
+
+---
+
+**72. How a release is cut, now that `staging` is the trunk.** *(2026-09-26,
+v0.2.9)*
+
+Written down because the vault's *Storm Releases* note predated decision 62 and
+described what a release builds, not how one is cut, and because v0.2.9 hit a
+check that made every release PR red.
+
+1. Everything for the release is merged into `staging`, green.
+2. A prep PR into `staging` bumps `apps/www/src/data/release.ts` to the new
+   tag and updates **Release state** above.
+3. A `release/vX.Y.Z` branch **at `staging`'s head**, PR into `main`. It adds
+   nothing of its own, so after the merge `main` is exactly `staging` plus one
+   merge commit.
+4. Merge it, then tag **the merge commit** `vX.Y.Z` and push the tag.
+   `release.yml` runs `make check` and `make test-live`, builds every artifact
+   (45) and publishes the GitHub Release, then `apt-repo.yml` publishes every
+   `.deb`. The version comes from the tag (46).
+5. Check that the release has every artifact and that the apt index lists each
+   package at the new version. Then the operator upgrades the VM, and **the
+   deploy is recorded here that day**.
+
+`www-check` compared `release.ts` to the newest tag **for equality**, so a
+release PR that bumped it failed (the tag did not exist yet), and one that
+did not bump it shipped a tagged commit whose site linked the previous
+release. Now it fails only when `release.ts` is **older** than the newest
+tag. A newer, not-yet-tagged value passes with a note.
+
+*Revisit if:* a release ever needs its own commits (version files, a
+changelog). Put them in the prep PR on `staging`, never on the release branch,
+or `main` and `staging` diverge.
 
 ---
 
