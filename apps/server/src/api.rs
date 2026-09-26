@@ -63,6 +63,9 @@ pub struct AppState {
     /// Notifies the watcher that the root moved, so it can be respawned
     /// against the new one. Sends the new root.
     pub root_changed: broadcast::Sender<PathBuf>,
+    /// The configured relay list, sent on every save so the tunnels follow it
+    /// without a restart (decision 74). `relay::manage` is the receiver.
+    pub relays_changed: tokio::sync::watch::Sender<Vec<String>>,
     /// Whether `/mcp` answers. Mirrors `Registry::mcp_enabled`, which is the
     /// persisted copy; this one exists so the gate can read it without taking
     /// the vault lock on every request.
@@ -1925,11 +1928,12 @@ struct RelaysBody {
 /// Its own route for the same reason `/v1/config/mcp` has one: a settings
 /// toggle should not have to send a `vault_root` it does not want to touch.
 ///
-/// **Does not register anything.** `Registry::set_relays` only ever writes
-/// `Registry::relays`; whether a relay is actually live is decided elsewhere,
-/// by a tunnel client this server does not have yet, and reported separately
-/// by `GET /v1/server`. Setting this list is a promise to *try*, not proof of
-/// a connection.
+/// **Does not register anything itself.** It saves the list and hands it to
+/// the tunnel client (`relay::manage`), which connects to added relays and
+/// sends `DEREGISTER` to removed ones in the background, without a restart
+/// (decision 74). Whether a relay is actually live is reported separately by
+/// `GET /v1/server`: this response is a promise to *try*, not proof of a
+/// connection, and it returns before any connection is attempted.
 ///
 /// `set_relays` is all-or-nothing and returns `anyhow::Error` on a bad URL —
 /// mapped to `400` explicitly here rather than via `ApiError`'s blanket
@@ -1947,6 +1951,11 @@ async fn put_relays(
         .set_relays(&body.relays)
         .map_err(|e| bad_request(e.to_string()))?;
     vaults.registry.save(&state.state_dir)?;
+    // After the save, so a list the tunnels act on is one a restart would also
+    // read. `send_replace`: it must not fail for want of a receiver.
+    state
+        .relays_changed
+        .send_replace(vaults.registry.relays.clone());
 
     Ok(Json(
         serde_json::json!({ "relays": vaults.registry.relays }),
@@ -2769,6 +2778,7 @@ pub(crate) mod tests {
             state_dir,
             identity: identity.clone(),
             root_changed,
+            relays_changed: tokio::sync::watch::channel(Vec::new()).0,
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
@@ -5253,6 +5263,37 @@ pub(crate) mod tests {
             config["relays"],
             serde_json::json!(["wss://relay.example.com"]),
             "the previously stored list must survive a rejected update"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_relays_hands_the_list_to_the_tunnels() {
+        // Decision 74: the tunnels follow a save without a restart. This is
+        // the half of that wiring that lives in the handler.
+        let dir = tempdir::TempDir::new("storm-relays-handed-over").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let mut changes = state.relays_changed.subscribe();
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+
+        let (status, _) = send(
+            &app,
+            put_json_with_auth(
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example.com/"]}),
+                &format!("Bearer {token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            changes.has_changed().unwrap(),
+            "the saved list never reached the tunnels"
+        );
+        // The normalised form, exactly as a restart would read it back.
+        assert_eq!(
+            *changes.borrow_and_update(),
+            vec!["wss://relay.example.com".to_string()]
         );
     }
 
