@@ -1784,6 +1784,48 @@ or `main` and `staging` diverge.
 
 ---
 
+**73. Prod did not survive a reboot, and the server now waits for its
+storage.** *(2026-09-26, found on the VM's own journal)*
+
+"Whenever the VM restarts Storm breaks until `systemctl restart`" had two
+causes, both read off prod (0.2.8, booted 2026-09-21):
+
+- **The unit was disabled** (70's `prerm` bug): `storm-server` and
+  `storm-backup.timer` both `disabled`, five upgrades since August, and at the
+  2026-09-21 boot nothing started the server — the first start was the
+  operator's `systemctl restart`, 20 s after boot. **The backup timer had not
+  run since 2026-08-20**: one backup in `/srv/storm/backups`, a minute before
+  the 0.2.7 upgrade that disabled it. v0.2.9's `postinst` re-enables both.
+- **Nothing waited for the NFS vault root.** The unit had only
+  `After=network-online.target`, which does not wait for fstab's network
+  mounts. That boot the mount failed outright (`nas.lan` did not resolve; the
+  operator switched fstab to the IP at 14:58), and every start failed with
+  `226/NAMESPACE`, because systemd refuses to spawn a process whose
+  `ReadWritePaths` entry does not exist — 73 failures before the manual fix.
+
+The fix, in two layers:
+
+- The packaged unit gains **`After=remote-fs.target`**, ordering only, so every
+  install waits for fstab network mounts on upgrade, without re-running `up`.
+- `storm-server up`'s drop-in gains **`[Unit] RequiresMountsFor=`** listing
+  exactly its `ReadWritePaths`: systemd pulls in those mounts and waits, and a
+  mount that fails fails the start once, as a dependency, instead of a
+  `226/NAMESPACE` loop. A test pins the section (under `[Service]`, systemd
+  ignores the key with a warning, as it did `StartLimitIntervalSec`) and that
+  the two path lists match. Existing installs get it by re-running `up`, or
+  with a one-line drop-in.
+
+**Why this matters more from 0.2.9 on:** 70 moved `StartLimitIntervalSec` into
+`[Unit]`, so the restart limit (5 starts in 60 s) now applies. On 0.2.8 it was
+ignored, and a mount that came up late was eventually caught by the endless
+3 s retries; on 0.2.9 without this fix, the server gives up after about 15 s.
+
+*Revisit if:* a layout mounts storage by an automount unit
+(`x-systemd.automount`), where the path exists before the filesystem does and
+ordering behaves differently.
+
+---
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
