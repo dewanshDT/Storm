@@ -572,6 +572,94 @@ async fn deregister_is_sent_on_clean_shutdown() {
     assert!(saw_deregister, "clean shutdown must send DEREGISTER");
 }
 
+/// Waits for the relay to see a `DEREGISTER`, skipping heartbeats and the rest.
+async fn saw_deregister(relay: &mut FakeRelay) -> bool {
+    while let Ok(event) = tokio::time::timeout(Duration::from_secs(3), relay.events.recv()).await {
+        match event {
+            Some(Event::Text(value)) if value["type"] == "DEREGISTER" => return true,
+            Some(_) => continue,
+            None => return false,
+        }
+    }
+    false
+}
+
+#[tokio::test]
+async fn relays_are_added_and_removed_without_a_restart() {
+    // Decision 74. Before it, `PUT /v1/config/relays` stored the list and
+    // nothing connected until the server restarted.
+    let dir = tempdir::TempDir::new("storm-relay-reconcile").unwrap();
+    let identity = test_identity(dir.path());
+    let mut a = FakeRelay::start(Behaviour::Normal).await;
+    let mut b = FakeRelay::start(Behaviour::Normal).await;
+    let registered = RegisteredRelays::default();
+    let mut tunnels = super::Tunnels::spawn(
+        &[],
+        identity,
+        echo_router(),
+        registered.clone(),
+        "127.0.0.1:8484",
+    );
+
+    tunnels.reconcile(std::slice::from_ref(&a.url)).await;
+    let _ = a.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    // Adding a second relay must not touch the first one's trunk.
+    tunnels.reconcile(&[a.url.clone(), b.url.clone()]).await;
+    let _ = b.await_registration().await;
+    await_advertised(&registered, 2).await;
+    assert_eq!(
+        a.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an unchanged relay was reconnected"
+    );
+
+    // Removing one sends it a DEREGISTER and stops advertising it; the other
+    // stays up.
+    tunnels.reconcile(std::slice::from_ref(&b.url)).await;
+    assert!(
+        saw_deregister(&mut a).await,
+        "a removed relay must get DEREGISTER"
+    );
+    await_advertised(&registered, 1).await;
+    assert_eq!(registered.snapshot(), vec![b.url.clone()]);
+
+    tunnels.shutdown().await;
+    assert!(saw_deregister(&mut b).await);
+}
+
+#[tokio::test]
+async fn a_saved_relay_list_reaches_the_tunnels_through_manage() {
+    // The wiring `put_relays` relies on: a value sent on the channel is
+    // applied, and stopping the manager still deregisters cleanly.
+    let dir = tempdir::TempDir::new("storm-relay-manage").unwrap();
+    let identity = test_identity(dir.path());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let registered = RegisteredRelays::default();
+    let tunnels = super::Tunnels::spawn(
+        &[],
+        identity,
+        echo_router(),
+        registered.clone(),
+        "127.0.0.1:8484",
+    );
+    let (changes, rx) = tokio::sync::watch::channel(Vec::new());
+    let (stop, stop_rx) = tokio::sync::oneshot::channel();
+    let manager = tokio::spawn(super::manage(tunnels, rx, stop_rx));
+
+    changes.send_replace(vec![relay.url.clone()]);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(10), manager)
+        .await
+        .expect("the manager did not stop")
+        .unwrap();
+    assert!(saw_deregister(&mut relay).await);
+}
+
 // ---------------------------------------------------------------------------
 // Tunnelled requests
 // ---------------------------------------------------------------------------

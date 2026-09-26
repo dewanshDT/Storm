@@ -1679,7 +1679,8 @@ Found on the way, recorded rather than fixed here:
 - **A server connects to relays only at boot.** `PUT /v1/config/relays` stores
   the list, and nothing reconnects until the next start, and no client screen
   sets it. The doc comment on `put_relays` still says the server has no tunnel
-  client "yet".
+  client "yet". *(The restart half is closed by decision 74; there is still
+  no client screen.)*
 
 *Revisit if:* the relay grows state beyond the bindings file, which would
 change what "purge keeps it" protects.
@@ -1781,6 +1782,40 @@ tag. A newer, not-yet-tagged value passes with a note.
 *Revisit if:* a release ever needs its own commits (version files, a
 changelog). Put them in the prep PR on `staging`, never on the release branch,
 or `main` and `staging` diverge.
+
+---
+
+**74. A saved relay list takes effect without a restart.** *(2026-09-26,
+`feat/relays-live-reconfigure`; 73 is on PR #50)*
+
+`PUT /v1/config/relays` stored the list and nothing acted on it until the next
+boot (found in 70). Now:
+
+- **`Tunnels` keeps one supervisor per relay URL, each with its own shutdown
+  channel**, and `reconcile(list)` diffs the running set against the list:
+  removed relays are stopped together, each sending its `DEREGISTER` first;
+  added ones are started; **a relay in both lists is not touched**, so adding
+  a second relay or re-saving the same list never drops a working trunk.
+- **`put_relays` sends the saved, normalised list on a `watch` channel** in
+  `AppState` (after the save, so what the tunnels act on is what a restart
+  would read), and `relay::manage` owns the tunnels for the server's life,
+  applying each change to completion. `reconcile` runs in the `select!` arm's
+  body, never raced by it, so shutdown cannot cancel a `DEREGISTER` in flight,
+  which is the supervisor's own rule.
+- `PUT` still returns before any connection is attempted. `GET /v1/server`
+  remains the only answer to "is it connected".
+
+Evidence: three tests. Two drive real fake relays (add, add a second, remove
+the first: the first sees `DEREGISTER`, the second stays up, and the first
+was connected exactly once; and the same through `manage` and the channel),
+and one is the handler test, that a save reaches the channel normalised.
+Mutations: dropping the handler's `send` fails the handler test; making
+`reconcile` restart every relay fails the "an unchanged relay was
+reconnected" assertion. Server suite 424.
+
+*Revisit if:* relays gain per-relay settings (a pinned key, a priority), at
+which point "same URL" stops meaning "same relay" and the diff must compare
+more than the URL.
 
 ---
 

@@ -351,11 +351,12 @@ and a `ws://` public base, and warns about a `wss://` base without
 needs a real certificate; a self-signed one will not register.
 
 **Pointing a server at it.** There is no app screen for this yet. As an
-owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`,
-then **restart storm-server**: the server opens its tunnels once, at boot, from
-the configured list, and a change takes effect only on the next start.
-`GET /v1/server` lists the relays it has actually registered with, which is the
-check that it worked. Clients learn the relay from the server when they pair.
+owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`.
+The server connects to an added relay and disconnects from a removed one (with
+a `DEREGISTER`) right away, without a restart; relays in both lists are left
+alone (decision 74). `GET /v1/server` lists the relays it has actually
+registered with, which is the check that it worked; the `PUT` itself returns
+before any connection is attempted. Clients learn the relay from the server when they pair.
 
 ## Security
 
