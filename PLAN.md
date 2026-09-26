@@ -57,7 +57,10 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 
-**Release state (2026-09-26).** Cutting **v0.2.9**: all of `staging`, meaning
+**Release state (2026-09-26).** **v0.2.9 is released** (PR #48, tag on its
+merge commit `f046eaf`; every `release.yml` job green; the GitHub Release has
+all eight assets; the apt index lists `storm-server` and `storm-relay` at
+`0.2.9-1`). It is all of `staging`, meaning
 decisions 65–71 plus the server packaging fix (#46). It is **the relay's first
 release** (a `storm-relay` `.deb` in the same apt repo; 70), the first
 storm-server that can dial a `wss://` relay (71), and the first whose upgrade
