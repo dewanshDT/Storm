@@ -49,7 +49,14 @@ pub async fn serve(
     path_server_id: String,
     peer: SocketAddr,
 ) {
-    let (mut rx, tx) = trunk::split(socket, trunk::CLIENT_WARD_QUEUE);
+    // The byte budget applies here and only here: this is the queue the
+    // server trunk's shared reader fills without waiting, so it is the one a
+    // client that stops reading can make grow.
+    let (mut rx, tx) = trunk::split(
+        socket,
+        trunk::CLIENT_WARD_QUEUE,
+        relay.config.max_client_buffer_bytes,
+    );
 
     // Bounded like the server-side handshake: the relay authenticates nobody at
     // the door, so anyone who can connect can start one and leave it hanging.

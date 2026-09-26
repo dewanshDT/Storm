@@ -30,6 +30,30 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Its own job, not a step in `server`: the relay is a standalone crate with
+  # no workspace joining it to the server (R6), so it builds and caches on its
+  # own. It had no CI at all until decision 68, so its only gate was a local
+  # `make check`, and a green PR said nothing about it.
+  relay:
+    name: relay (rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/relay
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # Includes `tests/vectors.rs`, which reads `docs/srp-vectors.json`: the
+      # relay's share of the check that three wire implementations agree.
+      - run: cargo test
+
   client:
     name: client (flutter)
     runs-on: ubuntu-latest
@@ -78,7 +102,11 @@ jobs:
       run:
         working-directory: apps/www
     steps:
+      # Tags, because check-claims.sh compares the site's release tag against
+      # the newest one. A shallow checkout has none and the check goes quiet.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -86,3 +114,5 @@ jobs:
           cache-dependency-path: apps/www/package-lock.json
       - run: npm ci
       - run: npm run build
+      # A green build says the site compiles, not that it is true.
+      - run: ./scripts/check-claims.sh

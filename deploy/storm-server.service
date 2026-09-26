@@ -18,6 +18,11 @@ Description=Storm sync server
 Documentation=https://github.com/dewanshDT/Storm
 After=network-online.target
 Wants=network-online.target
+# A vault that fails to reconcile will fail fast and repeatedly; don't spin.
+# [Unit] keys: under [Service], where these sat until decision 70, systemd
+# ignores StartLimitIntervalSec with a warning, so the limit never applied.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=exec
@@ -36,9 +41,6 @@ ExecStart=/usr/bin/storm-server serve \
 
 Restart=on-failure
 RestartSec=3
-# A vault that fails to reconcile will fail fast and repeatedly; don't spin.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # The server needs its own data and nothing else.
 NoNewPrivileges=true

@@ -42,6 +42,18 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
+**Upgrades up to and including 0.2.8 disabled the service.** The package's
+`prerm` ignored whether it was being removed or upgraded, so each `apt upgrade`
+left `storm-server` and `storm-backup.timer` disabled. Both kept running until
+the next reboot, which the server did not survive, and the backups stopped.
+Check with `systemctl is-enabled storm-server storm-backup.timer`. The fix
+arrives with the first release after 0.2.8, and that upgrade re-enables both
+once, on any box `storm-server up` configured. Until then, after every upgrade:
+
+```sh
+sudo systemctl enable --now storm-server storm-backup.timer
+```
+
 Native clients (macOS zip, Android APK) are separate downloads from
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases) — upgrade those
 on each device when a new release lands.
@@ -261,6 +273,89 @@ the server against them and the scan rebuilds every index, re-registering each
 directory. You lose version history, so the first sync from a device that
 edited offline may conflict rather than merge cleanly, and the server comes up
 with a **new** identity.
+
+## Relay (optional)
+
+`storm-relay` lets clients reach a server from outside its network
+(`docs/srp-v1.md`). It is a **separate package** in the same apt repository,
+and nothing needs it: `storm-server` does not depend on it and works the same
+without one. It holds no vault data and authenticates no clients (R5, R12);
+a client's credential rides inside the tunnel to the origin.
+
+```sh
+sudo apt install storm-relay
+sudoedit /etc/storm-relay/storm-relay.env   # set STORM_RELAY_PUBLIC_BASE
+sudo systemctl enable --now storm-relay
+journalctl -u storm-relay -f
+```
+
+The package does not start the relay, because a relay with the wrong public
+address hands every server a URL that goes nowhere. It runs as its own
+`storm-relay` user, never `storm`, so it cannot read a vault on a shared box,
+and it listens on `127.0.0.1:8486` (storm-server owns 8484).
+
+**Binding server keys.** Set exactly one of these in the env file; setting
+both stops the relay.
+
+- `STORM_RELAY_BINDINGS` (the default): trust-on-first-use, persisted to
+  `/var/lib/storm-relay/bindings`. The first key to register a `server_id` owns
+  it. Safe only where you control who can reach the relay.
+- `STORM_RELAY_ALLOWLIST`: only listed keys register. **Use this on a public
+  address.** Same format as the bindings file, so a bindings file you trust can
+  be copied over as the allowlist.
+
+`/var/lib/storm-relay` is the relay's only state, and it **cannot be rebuilt**.
+Lose the bindings file and every `server_id` is open to whoever registers
+next. Back it up. Purging the package deliberately leaves it in place.
+
+**On a public address, the relay terminates TLS itself** (decision 71). Do not
+put Caddy or nginx in front of it. The relay takes each client's address from
+the socket, never from a header, because a header is something the client
+wrote. Behind a proxy every client would be the proxy: one `HELLO` rate limit
+shared by everybody, and one `relay_peer_ip` for the origin's login limiter,
+so one noisy client locks everyone out.
+
+With certbot, standalone for the first certificate and a deploy hook for every
+renewal:
+
+```sh
+sudo certbot certonly --standalone -d relay.example.com
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/storm-relay >/dev/null <<'HOOK'
+#!/bin/sh
+# certbot's own files are root-only. Copy them where the relay can read them.
+install -d -m 0750 -g storm-relay /etc/storm-relay/tls
+install -m 0640 -g storm-relay "$RENEWED_LINEAGE/fullchain.pem" /etc/storm-relay/tls/
+install -m 0640 -g storm-relay "$RENEWED_LINEAGE/privkey.pem" /etc/storm-relay/tls/
+systemctl reload storm-relay 2>/dev/null || true
+HOOK
+sudo chmod 755 /etc/letsencrypt/renewal-hooks/deploy/storm-relay
+sudo RENEWED_LINEAGE=/etc/letsencrypt/live/relay.example.com \
+    /etc/letsencrypt/renewal-hooks/deploy/storm-relay
+```
+
+Then in `/etc/storm-relay/storm-relay.env`:
+
+```sh
+STORM_RELAY_BIND=0.0.0.0:443
+STORM_RELAY_PUBLIC_BASE=wss://relay.example.com
+STORM_RELAY_TLS_CERT=/etc/storm-relay/tls/fullchain.pem
+STORM_RELAY_TLS_KEY=/etc/storm-relay/tls/privkey.pem
+# and an allowlist rather than TOFU, as above
+```
+
+`systemctl reload storm-relay` swaps the certificate without dropping a trunk;
+a reload that fails (a half-written file, a key that does not match) keeps the
+old one and says so in the journal. The relay refuses to start with `--tls-cert`
+and a `ws://` public base, and warns about a `wss://` base without
+`--tls-cert`. **storm-server trusts the public web PKI only**, so the relay
+needs a real certificate; a self-signed one will not register.
+
+**Pointing a server at it.** There is no app screen for this yet. As an
+owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`,
+then **restart storm-server**: the server opens its tunnels once, at boot, from
+the configured list, and a change takes effect only on the next start.
+`GET /v1/server` lists the relays it has actually registered with, which is the
+check that it worked. Clients learn the relay from the server when they pair.
 
 ## Security
 

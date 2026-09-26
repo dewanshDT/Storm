@@ -52,10 +52,19 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
-| M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · CF hostname still TBD |
+| M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · post-M19 truth pass + `www-check` (65) · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
+
+**Release state (2026-09-26).** Cutting **v0.2.9**: all of `staging`, meaning
+decisions 65–71 plus the server packaging fix (#46). It is **the relay's first
+release** (a `storm-relay` `.deb` in the same apt repo; 70), the first
+storm-server that can dial a `wss://` relay (71), and the first whose upgrade
+does not disable storm-server and its backup timer (70, #46). Prod still runs
+**0.2.8** until the operator upgrades the VM, and that upgrade is also the one
+that repairs the disabled units. **No relay is deployed anywhere**; that is
+phase 4 step 3. v0.2.8 (PR #37, 2026-09-02) carried decisions 56–64.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -1394,7 +1403,7 @@ deliberately unresolved and should be settled by a measurement rather than in
 advance; or if MCP over the tunnel needs more than a client swap (R10 says it
 should not, and the checklist's §5 says verify rather than assume).
 
-**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. Track B (Rust relay abuse controls + trunk_superseded 30s drain + 45s heartbeat) not started.
+**Build state (2026-08-31):** decision 63 steps 1–7 DONE. `SrpTrunk`/`SrpStream`/`SrpHttpClient` in `apps/client/lib/api/relay/` + unit tests (`test/srp_tunnel_test.dart`, 9 passing); `StormConnection` relay wiring (relayed candidates dial a trunk, one per relay, losers released on connect); D3 persistence (`Settings.relays` ↔ `storm.relays` pref, passed to `connectionProvider` and mirrored back via `onRelaysChanged`); SSE feed branch (`SyncEngine._openSocket` uses WebSocket on LAN, SSE when relayed via `StormConnection.sseUri`/`transportClient`/`authHeaders`); `StormImageProvider` (replaces 4 `Image.network` call sites in `attachment_strip.dart` ×2 and `storm_markdown_view.dart` ×2, fetching bytes through the injected transport client so attachments route over the tunnel and credentials leave the URL); offline-vs-relay distinction + direct-vs-relayed rendering (`SyncEngine.connectionTier`, `SyncEngine.isRelayed`, `DotStatus.relayed`, `dotStatusFor` tier param). `flutter analyze` clean, `dart format` applied. All Dart client work for §4 complete. ~~Track B not started~~: Track B landed in the same commit (686a2d1), which this line contradicted. **Its real scope (review of 2026-09-02):** the HELLO per-IP rate limit, the per-trunk stream cap, the `trunk_superseded` 30 s drain and the 45 s heartbeat deadline are all wired. `max_client_buffer_bytes`, however, is declared and never read, `RateLimiter::prune_stale` has no production caller, and the drain and the deadline have no test. In the v0.2.8 tag's source in that state, though never in a binary: `release.yml` does not build `apps/relay` (see 69). Closed by decision 67, which also found the heartbeat deadline closing every healthy trunk.
 
 **64. The `kit` vault is seeded by the server on first run**
 Storm is meant to be driven by coding agents, and an agent needs to be told how
@@ -1410,6 +1419,365 @@ cannot write one vault still serves the others, loudly.
 *Revisit if:* the role set grows enough that shipping it in the binary is the
 wrong distribution (a fetch-on-demand catalogue would be the alternative), or if
 users want the templates without the vault.
+
+---
+
+**65. The marketing site's claims are checked, not just its build.**
+The A10 cutover deleted `STORM_TOKEN` on 2026-08-20 and swept the READMEs.
+`apps/www` was not swept, so for the next thirteen days `/install` told every
+visitor to point their client at "the token from `/etc/storm/storm.env`" — a
+file that now says, in bold, that there is no token in it — and `/how-it-works`
+advertised "no accounts product" for a release whose headline feature is
+accounts. **CI was green the entire time**, because the `www` job builds the
+site and a wrong sentence compiles.
+So the site gets a check that can fail on content: `scripts/check-claims.sh`
+(`make www-check`, and a step in the `www` job) refuses the phrasings that
+describe the retired credential, and refuses a `release.ts` `tag` older than the
+newest `v*` tag — the version drift being the same defect in a second form, four
+releases wide, because nothing bumps that file automatically.
+**The general shape is worth naming: a documentation surface outside the code
+does not fail with the code.** Every other consumer of `STORM_TOKEN` broke
+loudly at the cutover. The site kept working and kept being wrong, which is the
+worse failure, and the only defence is a check that reads prose.
+*Revisit if:* the banned-phrase list starts costing more in false positives than
+it catches — the honest alternative is generating the install copy from
+`deploy/` rather than mirroring it by hand.
+
+---
+
+**66. `result_large_err` is allowed crate-wide, and CI floats on `stable` for
+Rust while it pins Flutter.**
+`cargo clippy --all-targets -- -D warnings` went red on 2026-08-31 over
+`result_large_err`: axum handlers return `Response` as their error type, which
+is how a handler answers with a status and a body rather than a 500, and clippy
+counts those bytes. **PR #34 was merged past it**, so `staging` carried a
+failing gate and every PR after it inherited one.
+Allowed rather than boxed. `Box<Response>` would put an already-heap-backed
+body behind a second allocation in every handler, to shrink a value that never
+outlives one request.
+**The part worth keeping is where it came from.** It fires on x86_64-linux and
+not on aarch64-darwin, *on the same 1.98.0* — a clean
+`cargo clean -p storm-server && cargo clippy --all-targets` with CI's exact
+toolchain passes on the dev machine. So it arrived through
+`dtolnay/rust-toolchain@stable` moving under the job, and it could be neither
+reproduced nor fixed-and-verified locally. **A gate that only one machine in
+the world can run is a gate that gets merged past**, which is exactly what
+happened. Flutter is already pinned at 3.44.8 for this reason; Rust is not.
+*Revisit if:* pinning the Rust toolchain is taken up — that is the other real
+answer here and it stays open. A pin needs an owner for the bump, or it becomes
+an ageing compiler nobody dares move.
+
+---
+
+**67. The relay's liveness was untested, and the untested half was broken.**
+*(2026-09-25, `fix/relay-debt`)*
+
+The 2026-09-02 review found the heartbeat deadline and the supersession drain
+"implemented but untested", `max_client_buffer_bytes` declared and never read,
+and `RateLimiter::prune_stale` with no caller. All four were in the v0.2.8
+tag's source. *(Corrected in 69: `release.yml` builds no relay binary, so none
+of this ever ran outside a developer's machine.)* Writing the tests found that "untested" was hiding "broken":
+
+- **The heartbeat deadline closed every healthy trunk.** It measured time since
+  the last `PONG`. But `apps/server` heartbeats by *sending* `PING` every 15 s,
+  which the relay answers, and the relay never pings. So a server never has a
+  reason to send `PONG`: `last_pong` stayed at registration time, and the first
+  frame after 45 s closed the trunk. **Every relayed session would have dropped
+  about once a minute**, from the first minute of phase 4. It was also inverted
+  for the one case it exists for: checked *between* reads, it could never fire
+  for a silent server, because the read never returns. Now it is a timeout on
+  the read itself, and **any frame is proof of life**.
+- **The drain never closed the superseded socket.** Clients were told
+  `trunk_superseded`, but the trunk itself lived on until the server or the
+  (broken) heartbeat ended it.
+- **`max_client_buffer_bytes` is enforced**, as a queued-and-unwritten byte
+  budget on each client trunk's queue: charged on queue, refunded after the
+  socket write. A frame that would exceed it drops its stream, the same
+  response a full frame queue already gave. **An empty queue always admits one
+  frame**, because an attachment reaches the relay as one frame the size of the
+  file; otherwise a budget smaller than the largest attachment could never
+  deliver it. **The default is 32 MiB, not the 1 MiB declared.** 1 MiB would
+  drop the second of two images opened together on a slow link. 32 MiB replaces
+  an unbounded worst case (256 frames of up to 16 MiB each) with a ceiling.
+  Decided, not measured, so it belongs to Q14.
+- **`prune_stale` runs from `try_take`, once per window.** Pruning is lossless:
+  a bucket idle for a full window has refilled to `limit`, which is exactly the
+  fresh bucket that would replace it.
+
+Relay tests 84 → 99. The four behavioural tests each fail against the v0.2.8
+`src/` and pass against the fix. The fifth (a reading client receives 25× the
+budget) guards the refund.
+
+**The lesson is the same one `docs/srp-vectors.json` taught about the wire
+format, one layer up.** The server's heartbeat and the relay's deadline were
+each written against the spec's "`PING`/`PONG` every 15 s", which does not say
+who pings. Each side's reading was self-consistent, and nothing made the two
+meet. **A protocol behaviour implemented on two sides needs a test that puts
+both directions on one wire.** For the heartbeat, that test is
+`a_server_that_heartbeats_outlives_the_deadline`, written the way `apps/server`
+actually heartbeats.
+
+Found and deliberately **not** fixed here:
+
+- **SRP has no per-stream flow control.** The relay cannot slow an origin down
+  for one client without stalling every client sharing that trunk. So a
+  response larger than the backlog budget, going to a client slower than the
+  origin, is dropped. The budget decides where that happens; only a protocol
+  change (credit-based windows) removes it. Decide this before a hosted relay.
+- **An attachment over 16 MiB cannot cross the relay.** The origin sends it as
+  one frame, and the relay's WebSocket reader caps a frame at 16 MiB.
+- **The Dart client treats every trunk-level `ERROR` as fatal**
+  (`srp_trunk.dart`). The relay refuses an `OPEN_STREAM` over the in-flight cap
+  with a trunk-level `rate_limited`, so a client that hits the cap also loses
+  its other in-flight streams. The spec needs to say whether that refusal is
+  stream- or trunk-scoped.
+- **A draining trunk still accepts `OPEN_STREAM`** from the clients already
+  bound to it. Bounded by the 30 s window, and refusing it runs into the point
+  above.
+- **The `HELLO` limit is per address**, so an IPv6 /64 gets a fresh bucket per
+  address. Pruning bounds the memory, not the limit's effectiveness.
+
+*Revisit if:* the budget drops real traffic in phase 4. Measure first, then
+choose between a larger number and the flow-control change. Do not remove the
+empty-queue admission; without it, large attachments stop working.
+
+---
+
+**68. `apps/relay` gets a CI job; it never had one.** *(2026-09-25)*
+
+`ci.yml` ran fmt, clippy and tests for `apps/server`, `apps/client` and
+`apps/www`, and nothing for `apps/relay`. From its first commit (decision 60)
+the relay's only gate was a local `make check`. Several of its PRs merged
+with "CI green" while no machine outside the author's had compiled the crate.
+That includes the v0.2.8 relay work decision 67 found broken, and #39 itself.
+"`apps/relay` was in the gate from its first commit" was true of the Makefile
+and false of CI, and only CI is a gate.
+
+A separate `relay (rust)` job: fmt, clippy `-D warnings`, test. It is not a
+step in `server`, because the two crates are deliberately not a workspace
+(R6), and one job building both would be the first step towards treating them
+as one thing. `cargo test` includes `tests/vectors.rs`, so the relay's third of
+the `docs/srp-vectors.json` agreement is now actually enforced.
+
+**The shape to keep:** a new crate or app needs its CI job in the same change
+that adds it. The Makefile is where the local convenience lives; CI is where
+the gate is. The two drifted here for 25 days without anyone noticing.
+
+*Revisit if:* never, as long as the crate exists. If it moves into a workspace,
+that is an R6 question first.
+
+---
+
+**69. TOFU bindings persist, and a binding is on disk before it is announced.**
+*(2026-09-25, `feat/relay-tofu-persist`)*
+
+The gate on phase 4. TOFU bindings lived in memory, so every relay restart
+re-opened the first-use window for every server that had not reconnected yet,
+and §4.1 makes a squatted `server_id` permanent. `--bindings <path>` closes it.
+
+- **The file uses the allowlist's format, and loading goes through
+  `Allowlist::parse`.** One format, one validator, and a bindings file an
+  operator has come to trust can be promoted to `--allowlist` unchanged.
+- **Durable before `REGISTERED`.** `record` writes a temp file, fsyncs it,
+  renames it over the old one, and fsyncs the directory, all while holding the
+  bindings lock. A write that fails un-records the pair, and the registration
+  is refused with `protocol_error` (the relay's fault, and §6 has no honest
+  code for that). **A binding the relay announced but could lose on restart is
+  exactly the window this exists to close**, so failing closed is the point.
+- **A corrupt file stops the relay; a missing one starts empty.** Starting
+  empty on a parse error would open every `server_id` at once.
+- **Opt-in, and `--allowlist` conflicts with it** (an allowlist switches TOFU
+  off). Without either flag the relay starts, and says loudly that a public
+  relay must not run that way. Not the default, because the relay has no state
+  directory to put a default path in, and inventing one would be a second
+  thing to back up that nobody chose.
+
+Relay tests 99 → 104. Each of the four new tests fails when `record` skips
+the write, checked by mutation, since the tests cannot compile against the old
+API.
+
+**Found while writing this up: the relay has never been released.**
+`release.yml` builds `storm-server`, the clients and the web bundle, and
+nothing from `apps/relay`, and `deploy/` has no unit for it. So "shipped in
+v0.2.8" (said of the relay in 67, and in the vault notes) meant *in the tag's
+source*, not *in a binary anyone ran*. The heartbeat bug 67 fixed never ran
+anywhere. **Phase 4 therefore starts with packaging**: a `storm-relay` release
+artifact, a systemd unit and a `deploy/` section, with `--bindings` pointing
+into a state directory that unit owns. That is also where a default bindings
+path can finally live.
+
+*Revisit if:* a hosted relay needs account-owned claims (§4.1's third row),
+which is a different store, not this file grown; or if a relay ever holds
+bindings for so many servers that rewriting the whole file per first
+registration costs something. Each server registers for the first time once,
+so that is not close.
+
+---
+
+**70. The relay is packaged, and a public relay is blocked on how it learns a
+client's address.** *(2026-09-25, `feat/relay-packaging`)*
+
+Phase 4, step 1. 69 found that no release had ever built `apps/relay`.
+
+- **Its own package, `storm-relay`, in the same apt repository.** `apt-repo.yml`
+  already takes every `.deb` in a release, so a `relay` job in `release.yml`
+  (musl binary plus `.deb`, version stamped from the tag, like the server's) is
+  the whole distribution change. Neither package depends on the other (R6).
+- **`deploy/storm-relay.service`**: its own `storm-relay` user, never `storm`,
+  so a relay sharing a box cannot read a vault. `StateDirectory=storm-relay`
+  owns `/var/lib/storm-relay`, and the env file defaults `--bindings` into it,
+  so **a packaged relay is never TOFU-in-memory by accident**. The unit carries
+  no flags, since the relay reads `STORM_RELAY_*` itself. The same hardening as
+  storm-server.
+- **Installed, not started.** A relay with no `STORM_RELAY_PUBLIC_BASE` would
+  hand every server a `public_address` that goes nowhere. An upgrade restarts a
+  relay that was running.
+- **Purge keeps `/var/lib/storm-relay`.** The bindings file cannot be rebuilt,
+  and deleting it opens every `server_id` to the next registration.
+- **Default port 8486, not 8484.** 8484 is storm-server's, and phase 4 is built
+  with both on one machine first. The old default collided with it.
+
+Verified: `cargo deb` builds a package with the binary, the unit, the env file
+as a conffile and all three maintainer scripts; `systemd-analyze verify` is
+clean; the env file drives the binary exactly as the unit loads it, and both
+binding modes set through the environment are refused.
+
+**The open problem: a public relay cannot see its clients.** The relay speaks
+plain `ws://`, and takes a client's address from the accepted socket because a
+header is forgeable (§5.2). Behind a TLS reverse proxy every client arrives
+from the proxy, so the per-IP `HELLO` limit becomes one global bucket, and the
+origin's login limiter gets a single `relay_peer_ip` for every relayed client:
+one noisy client locks out everyone. Plain `ws://` on a public port avoids that
+and puts session tokens on the wire in cleartext. **Phase 4 step 2 needs one of
+these:** TLS in the relay itself (rustls, with the certificate as files), or
+PROXY-protocol support from a trusted local proxy. Either keeps the address a
+fact about a connection rather than a claim in a header. Until then the relay
+is for a LAN or a VPN, and `deploy/README.md` says so. *(Settled by decision 71: TLS in the relay.)*
+
+Found on the way, recorded rather than fixed here:
+
+- **storm-server's `prerm` disables the unit on every upgrade.** It ignores
+  `$1`, and dpkg runs `prerm upgrade`, so after `apt upgrade` storm-server is
+  no longer enabled at boot. The documented `systemctl restart` hides that
+  until the next reboot. **It disables `storm-backup.timer` the same way, so
+  nightly backups stop after any upgrade.** The relay's `prerm` acts only on
+  `remove`. *Fixed in `fix/server-prerm-upgrade`: `prerm` acts only on
+  `remove`/`deconfigure` (with a test that runs the real script against a
+  recording `systemctl` and fails on the old one). Because dpkg runs the
+  **old** package's `prerm`, the upgrade to the fix still disables both once,
+  so `postinst` re-enables and starts them, one time, on an upgrade from
+  ≤ 0.2.8 where `up`'s drop-in exists. That re-enables a box someone had run
+  `storm-server down` on; it says so. `postinst` itself has no test, since it
+  creates users and writes under `/srv` and `/etc`.*
+- **storm-server's `StartLimitIntervalSec` has never applied.** It sits under
+  `[Service]`, where systemd ignores it (found by `systemd-analyze verify`), so
+  the "don't spin" comment above it has not been true since M6. The relay's
+  unit puts it under `[Unit]`. *Moved to `[Unit]` in the same fix.*
+- **A server connects to relays only at boot.** `PUT /v1/config/relays` stores
+  the list, and nothing reconnects until the next start, and no client screen
+  sets it. The doc comment on `put_relays` still says the server has no tunnel
+  client "yet".
+
+*Revisit if:* the relay grows state beyond the bindings file, which would
+change what "purge keeps it" protects.
+
+---
+
+**71. A public relay terminates TLS itself, and storm-server can finally dial
+`wss://`.** *(2026-09-25, `feat/relay-tls`; operator's choice between the two
+options 70 named)*
+
+**The choice.** Relay-side TLS over PROXY protocol, because the relay stays one
+binary with one trust boundary: the address is a fact about the socket it
+accepted, as §5.2 needs, with no second process to configure and no header to
+trust. The cost is certificate handling, which is two files and a reload.
+
+- **`--tls-cert` / `--tls-key`** (`STORM_RELAY_TLS_*`), each requiring the
+  other. rustls with **`ring`**, not the default `aws-lc-rs`, because the
+  release builds static musl with zig and aws-lc needs cmake and a C toolchain
+  it does not have. ALPN offers `http/1.1` only, since a WebSocket upgrade
+  cannot happen over `h2`.
+- **A handshake never blocks an accept.** axum calls `Listener::accept` in one
+  loop, so a handshake inside it would let a client that connects and says
+  nothing stall every connection behind it. Each handshake gets its own task,
+  a 10 s deadline and a slot out of 1024; past that, new sockets are dropped
+  unhandshaken.
+- **`SIGHUP` reloads the certificate in place** (`ExecReload`), so a renewal
+  drops no trunk and makes no server re-register. A reload that fails keeps
+  the old pair. Loading refuses a key that does not match its certificate,
+  which would otherwise start a relay that fails every handshake.
+- **`PeerAddr`**, a newtype, replaces `ConnectInfo<SocketAddr>`: axum only
+  provides the latter for its own `TcpListener`, and the orphan rule forbids
+  providing it for ours. Both listeners supply it from the TCP peer.
+- **Scheme sanity at start:** `--tls-cert` with a `ws://` public base refuses
+  to start; a `wss://` base without `--tls-cert` warns. The default base now
+  follows TLS (`wss://` with it, `ws://` without) instead of always `wss://`.
+- **The unit** gains `ExecReload` and `CAP_NET_BIND_SERVICE` as both the
+  ambient and the bounding set, which allows port 443 and drops every other
+  capability.
+
+**The server half.** `storm-server`'s `tokio-tungstenite` had **no TLS
+feature**, so every `wss://` relay was refused before a byte was sent.
+`client.rs` even logged it. So no server could ever have used a public relay.
+It now has `rustls-tls-webpki-roots` (bundled Mozilla roots, since the musl
+binary must not depend on the host's store), and `main` installs `ring` as the
+process-default provider **before anything can dial**, because tungstenite
+builds its client config from that default, and rustls panics on the first
+handshake if a second provider ever makes the default ambiguous.
+
+Evidence: relay tests 104 → 112. `tests/tls.rs` covers registering over
+`wss://`; `relay_peer_ip` over TLS being the client's socket; a stalled
+handshake not blocking the next connection; a stalled handshake cut off at its
+deadline; plaintext refused; a reload swapping the certificate; a failed reload
+keeping the old one; and a mismatched key refused at load. Two mutations were
+caught by exactly the test written for each: an inline handshake fails the
+stall test, and a no-op reload fails the swap test. Server tests 420 → 421.
+**The new server test first passed with the TLS feature removed**, because
+`connect_async` opens TCP before it checks for TLS, so a closed port fails
+identically either way. It now dials a listener that hangs up, and it was
+checked to fail without the feature. A musl `cargo zigbuild` of both crates,
+the release toolchain, was run locally.
+
+Not tested end to end: a storm-server registering with a TLS relay. The server
+trusts only the public web PKI, so that needs a real certificate on a real
+host, which is phase 4 step 3.
+
+*Revisit if:* certificate automation should live in the relay (ACME built in),
+or a hosted relay needs SNI across many names, which `CertStore` does not
+attempt.
+
+---
+
+**72. How a release is cut, now that `staging` is the trunk.** *(2026-09-26,
+v0.2.9)*
+
+Written down because the vault's *Storm Releases* note predated decision 62 and
+described what a release builds, not how one is cut, and because v0.2.9 hit a
+check that made every release PR red.
+
+1. Everything for the release is merged into `staging`, green.
+2. A prep PR into `staging` bumps `apps/www/src/data/release.ts` to the new
+   tag and updates **Release state** above.
+3. A `release/vX.Y.Z` branch **at `staging`'s head**, PR into `main`. It adds
+   nothing of its own, so after the merge `main` is exactly `staging` plus one
+   merge commit.
+4. Merge it, then tag **the merge commit** `vX.Y.Z` and push the tag.
+   `release.yml` runs `make check` and `make test-live`, builds every artifact
+   (45) and publishes the GitHub Release, then `apt-repo.yml` publishes every
+   `.deb`. The version comes from the tag (46).
+5. Check that the release has every artifact and that the apt index lists each
+   package at the new version. Then the operator upgrades the VM, and **the
+   deploy is recorded here that day**.
+
+`www-check` compared `release.ts` to the newest tag **for equality**, so a
+release PR that bumped it failed (the tag did not exist yet), and one that
+did not bump it shipped a tagged commit whose site linked the previous
+release. Now it fails only when `release.ts` is **older** than the newest
+tag. A newer, not-yet-tagged value passes with a note.
+
+*Revisit if:* a release ever needs its own commits (version files, a
+changelog). Put them in the prep PR on `staging`, never on the release branch,
+or `main` and `staging` diverge.
 
 ---
 
@@ -2375,10 +2743,48 @@ in `apps/www`. **Not** a documentation portal; depth stays on GitHub /
 - `make www` / `make www-dev`; CI job `www` in `ci.yml` (build check only).
 - Page copy in vault [[Storm Website]] notes and `docs/www/`.
 
+**The auth truth pass (2026-09-02, decision 65):** the site described the
+pre-cutover world for thirteen days after `STORM_TOKEN` was deleted. Fixed on
+`fix/www-auth-truth`:
+
+- `/install` no longer promises a generated token, and gained a **First login**
+  section — browser bootstrap, `storm-server pair --qr` on the host, and
+  `user add` / `passwd` as the recovery path, with the run-as-`storm` warning
+  that `deploy/README.md` carries.
+- `/` step 03 is **Sign in** (pair the device, create the owner account), not
+  "point the client at the token".
+- `/how-it-works` says accounts are local and yours — owner account, per-device
+  pairing, sessions, revocable MCP keys, all in `state/auth.db` — instead of
+  "no accounts product". `auth.db` is in the architecture sketch, since it is
+  the one part of `state/` that cannot be rebuilt by rescanning.
+- MCP copy names the `stk_` key (minted in the app, `/mcp` only) rather than
+  implying the shared bearer token.
+- `release.ts` bumped v0.2.3 → **v0.2.7**; every download link was four releases
+  stale.
+- `docs/www/` mirrored in the same change.
+- Site infrastructure the redesign never got: absolute `og:image` (a relative
+  one is silently dropped by every scraper, so the cards were blank), `og:url`,
+  `rel=canonical`, `@astrojs/sitemap`, `robots.txt`, and a `404` page.
+- **The astro patch bump was reverted, and the reason is a repo hazard.**
+  `npm install` on macOS prunes two hoisted entries (`@emnapi/core`,
+  `@emnapi/runtime`) that a Linux tree needs, and CI's `npm ci` then refuses
+  the lockfile as out of sync. It cannot be regenerated correctly on a Mac —
+  `--os=linux`, `--cpu=wasm32` and `--package-lock-only` all still prune them.
+  So the lockfile change is now the sitemap subtree and nothing else: **6
+  packages added, none removed, no version changed**, with the two entries
+  restored verbatim. `apps/www/README.md` carries the warning.
+- **`make www-check`** — the content gate, in the `www` CI job.
+
 **Still open:**
 
 - Optional: real running-app screenshot for the Client section (prototype PNGs
   stay design reference only — not shipped as product photos).
+- **Confirm the Cloudflare hostname / dashboard connection.** Still the one
+  thing between this site and being live; `astro.config.mjs` has committed to
+  `https://storm.dewansh.space`, and the sitemap and canonical URLs now derive
+  from it.
+- The relay stays off the site until it is released — it works on `staging`,
+  is undeployed, and phase 4 is blocked on TOFU persistence.
 
 **Hosting (decision 49):** Cloudflare static deploy at `https://storm.dewansh.space`
 (apart from apt Pages). **Never** deploy to `https://dewanshdt.github.io/Storm/`
@@ -3178,9 +3584,10 @@ Use a pattern that cannot match the invoking shell.
   `feat/m18-keyboard-shortcuts`; overlay / palette deferred.
 - **M17 Markdown Read Mode** — client implementation on
   `feat/markdown-read-mode`; visual pass + ship still open.
-- **M16 marketing site** — SlowFlow redesign landed in `apps/www`. Remaining:
-  confirm Cloudflare hostname / dashboard connection; optional real app
-  screenshot for Client section. No GitHub deploy workflow.
+- **M16 marketing site** — SlowFlow redesign landed in `apps/www`, and the
+  post-M19 truth pass with it (decision 65). Remaining: confirm Cloudflare
+  hostname / dashboard connection; optional real app screenshot for Client
+  section. No GitHub deploy workflow.
 - **Remote connectivity + authentication** — architecture accepted
   2026-08-13; **auth phase 1 has started** (decision 52, and M19 above).
   Server-local users, a cryptographic server identity, QR pairing, and an
@@ -3197,9 +3604,11 @@ Use a pattern that cannot match the invoking shell.
   and the `storm-server user` / `passwd` commands, with no network surface until
   pairing (decision 52c). **Built after the above was written:** sessions,
   three-tier middleware, pairing, `storm-server pair` — all server-side auth
-  phase 1 complete. **Next:** Flutter client auth integration. A9 (vault-level
-  grants) ships between client and relay. Relay work does not start until auth is
-  done.
+  phase 1 complete. *(Superseded, kept for history.)* Auth phase 1 shipped in
+  v0.2.6/0.2.7. Relay phases 2–3 (decisions 56–63) shipped in v0.2.8. **Next:**
+  the relay hardening debt, then TOFU persistence, which gates phase 4 (the
+  relay on a VPS). The authorization release (A9's second half) runs
+  alongside.
 - Encryption at rest — deferred, per PRD §10.
 - Read-only NAS export of `vault/` for grep and backup tooling. The watcher
   already makes this safe whenever it's wanted.

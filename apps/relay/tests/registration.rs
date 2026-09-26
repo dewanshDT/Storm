@@ -61,14 +61,20 @@ struct Harness {
 
 impl Harness {
     async fn start(config: Config, nonce_source: Option<NonceSource>) -> Self {
+        Self::serve(match nonce_source {
+            Some(source) => Relay::with_nonce_source(config, source),
+            None => Relay::new(config),
+        })
+        .await
+    }
+
+    /// Serves an already-built relay, for tests that construct it themselves.
+    async fn serve(relay: Relay) -> Self {
         // 127.0.0.1:0 — never the real 8484/8485, and never a fixed port, so
         // the suite can run in parallel with itself.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let relay = Arc::new(match nonce_source {
-            Some(source) => Relay::with_nonce_source(config, source),
-            None => Relay::new(config),
-        });
+        let relay = Arc::new(relay);
         let serving = relay.clone();
         tokio::spawn(async move {
             let _ = storm_relay::serve(listener, serving).await;
@@ -435,6 +441,63 @@ async fn tofu_binds_per_server_id() {
         open.push(conn);
     }
     assert_eq!(harness.relay.registrations.len(), 2);
+}
+
+#[tokio::test]
+async fn a_tofu_binding_survives_a_relay_restart() {
+    // The restart is the attack window: with bindings in memory only, the
+    // first registration after it wins the server_id for good, whoever sends
+    // it. Two relays over one file stand in for one relay restarting.
+    let dir = std::env::temp_dir().join(format!(
+        "storm-relay-it-{}",
+        storm_relay::state::new_nonce()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bindings");
+
+    let first = Harness::serve(
+        Relay::new(config()).with_bindings(storm_relay::state::Bindings::load(&path).unwrap()),
+    )
+    .await;
+    let mut owner = first.connect().await;
+    let nonce = owner.register(SERVER_ID, &pubkey_b64(1)).await;
+    assert_eq!(
+        owner
+            .respond(&sign(1, &relay_auth(SERVER_ID, &nonce)))
+            .await["type"],
+        "REGISTERED"
+    );
+    // Durable by the time the server hears REGISTERED, not merely soon after.
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains(&format!("{SERVER_ID} {}", pubkey_b64(1))),
+        "{on_disk}"
+    );
+
+    // "Restart": a new relay, loading the same file.
+    let restarted = Harness::serve(
+        Relay::new(config()).with_bindings(storm_relay::state::Bindings::load(&path).unwrap()),
+    )
+    .await;
+
+    // A squatter arriving first after the restart is refused before a nonce.
+    let mut squatter = restarted.connect().await;
+    squatter
+        .send(json!({
+            "v": 1, "type": "REGISTER_SERVER",
+            "server_id": SERVER_ID, "pubkey": pubkey_b64(2),
+        }))
+        .await;
+    assert_error(&squatter.recv().await, "auth_failed");
+
+    // And the owner still gets in.
+    let mut back = restarted.connect().await;
+    let nonce = back.register(SERVER_ID, &pubkey_b64(1)).await;
+    assert_eq!(
+        back.respond(&sign(1, &relay_auth(SERVER_ID, &nonce))).await["type"],
+        "REGISTERED"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ----------------------------------------------------- binding: allowlist

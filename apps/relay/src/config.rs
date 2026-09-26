@@ -59,13 +59,21 @@ pub const DEFAULT_HELLO_RATE_LIMIT: usize = 10;
 /// Time window for the HELLO rate limit.
 pub const DEFAULT_HELLO_RATE_WINDOW: Duration = Duration::from_secs(60);
 
-/// Maximum bytes a single client trunk may have in-flight (un-acked body chunks)
-/// before the relay drops its slowest stream.
+/// Bytes the relay will hold, queued and unwritten, for one client trunk.
 ///
-/// Bounds memory when a client opens a stream but stops reading responses.
-/// Applied at the client-trunk level: one slow reader must not hold memory
-/// for every other client on the same server.
-pub const DEFAULT_MAX_CLIENT_BUFFER_BYTES: usize = 1_000_000; // 1 MiB
+/// Bounds memory when a client opens streams and stops reading. A response
+/// frame that would take the backlog past this is refused and **its stream is
+/// dropped** (the origin gets `CLOSE`), exactly as for a full frame queue. Per
+/// client trunk, so one slow reader costs only itself.
+///
+/// **32 MiB, not the 1 MiB first declared.** An attachment reaches the relay as
+/// one frame the size of the file (the origin reads it whole), and SRP has no
+/// per-stream flow control, so the relay cannot slow the origin down for one
+/// client. A 1 MiB backlog would drop the second of two images opened together
+/// on a slow link. 32 MiB lets a normal page of attachments queue, while turning
+/// what was an unbounded backlog (256 frames of up to 16 MiB each) into a
+/// ceiling. Decided, not measured: part of Q14.
+pub const DEFAULT_MAX_CLIENT_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 
 /// How long a superseded server trunk gets to drain before forced close (§4.2).
 ///
@@ -74,12 +82,12 @@ pub const DEFAULT_MAX_CLIENT_BUFFER_BYTES: usize = 1_000_000; // 1 MiB
 /// remaining streams on the old trunk get `ERROR{trunk_superseded}`.
 pub const DEFAULT_SUPERSESSION_DRAIN: Duration = Duration::from_secs(30);
 
-/// Heartbeat deadline: how long the relay waits for a PONG before closing the
-/// server trunk (§4.2).
+/// Heartbeat deadline: how long a server trunk may go without sending **any**
+/// frame before the relay treats it as dead (§4.2).
 ///
-/// A server that does not PONG within this window is considered dead.
-/// The 45s value gives 3x the 15s heartbeat interval for clock drift and
-/// brief GC pauses.
+/// Any frame, not only `PONG`. The server heartbeats by *sending* `PING` every
+/// 15 s, which the relay answers, and the relay never pings, so a server has no
+/// reason ever to send `PONG`. 45 s is three missed heartbeats.
 pub const DEFAULT_HEARTBEAT_DEADLINE: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone)]
@@ -104,11 +112,12 @@ pub struct Config {
     pub hello_rate_limit: usize,
     /// Time window for the HELLO rate limit.
     pub hello_rate_window: Duration,
-    /// Maximum bytes a single client trunk may have in-flight.
+    /// Bytes queued and unwritten toward one client trunk before its streams
+    /// start being dropped. See [`DEFAULT_MAX_CLIENT_BUFFER_BYTES`].
     pub max_client_buffer_bytes: usize,
     /// How long a superseded server trunk gets to drain before forced close.
     pub supersession_drain: Duration,
-    /// Heartbeat deadline: how long the relay waits for a PONG before closing.
+    /// How long a server trunk may stay silent before it is treated as dead.
     pub heartbeat_deadline: Duration,
 }
 
@@ -156,6 +165,12 @@ impl Allowlist {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The parsed entries, for reuse as a TOFU bindings file (see
+    /// `state::Bindings::load`), which shares this format and its validation.
+    pub(crate) fn into_entries(self) -> HashMap<String, PublicKey> {
+        self.entries
     }
 
     pub fn is_empty(&self) -> bool {
