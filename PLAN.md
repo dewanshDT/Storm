@@ -1659,11 +1659,20 @@ Found on the way, recorded rather than fixed here:
 - **storm-server's `prerm` disables the unit on every upgrade.** It ignores
   `$1`, and dpkg runs `prerm upgrade`, so after `apt upgrade` storm-server is
   no longer enabled at boot. The documented `systemctl restart` hides that
-  until the next reboot. The relay's `prerm` acts only on `remove`.
+  until the next reboot. **It disables `storm-backup.timer` the same way, so
+  nightly backups stop after any upgrade.** The relay's `prerm` acts only on
+  `remove`. *Fixed in `fix/server-prerm-upgrade`: `prerm` acts only on
+  `remove`/`deconfigure` (with a test that runs the real script against a
+  recording `systemctl` and fails on the old one). Because dpkg runs the
+  **old** package's `prerm`, the upgrade to the fix still disables both once,
+  so `postinst` re-enables and starts them, one time, on an upgrade from
+  ≤ 0.2.8 where `up`'s drop-in exists. That re-enables a box someone had run
+  `storm-server down` on; it says so. `postinst` itself has no test, since it
+  creates users and writes under `/srv` and `/etc`.*
 - **storm-server's `StartLimitIntervalSec` has never applied.** It sits under
   `[Service]`, where systemd ignores it (found by `systemd-analyze verify`), so
   the "don't spin" comment above it has not been true since M6. The relay's
-  unit puts it under `[Unit]`.
+  unit puts it under `[Unit]`. *Moved to `[Unit]` in the same fix.*
 - **A server connects to relays only at boot.** `PUT /v1/config/relays` stores
   the list, and nothing reconnects until the next start, and no client screen
   sets it. The doc comment on `put_relays` still says the server has no tunnel

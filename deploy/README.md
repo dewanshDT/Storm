@@ -42,6 +42,18 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
+**Upgrades up to and including 0.2.8 disabled the service.** The package's
+`prerm` ignored whether it was being removed or upgraded, so each `apt upgrade`
+left `storm-server` and `storm-backup.timer` disabled. Both kept running until
+the next reboot, which the server did not survive, and the backups stopped.
+Check with `systemctl is-enabled storm-server storm-backup.timer`. The fix
+arrives with the first release after 0.2.8, and that upgrade re-enables both
+once, on any box `storm-server up` configured. Until then, after every upgrade:
+
+```sh
+sudo systemctl enable --now storm-server storm-backup.timer
+```
+
 Native clients (macOS zip, Android APK) are separate downloads from
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases) — upgrade those
 on each device when a new release lands.

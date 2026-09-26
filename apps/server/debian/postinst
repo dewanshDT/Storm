@@ -28,6 +28,25 @@ fi
 
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
+
+    # One-time repair, for an upgrade from a version whose prerm ignored $1
+    # (every release up to 0.2.8; decision 70). dpkg runs the *old* package's
+    # prerm on upgrade, so even the upgrade to this fixed version has just
+    # stopped and disabled storm-server and the backup timer. Put back what
+    # `storm-server up` set, on boxes `up` configured (it always writes this
+    # drop-in). The server is started too, since the old prerm stopped it.
+    # Not repeated on later upgrades: the fixed prerm no longer does the damage.
+    # An operator who had run `storm-server down` is re-enabled this once, and
+    # the postinst message says so.
+    if [ "$1" = "configure" ] && [ -n "$2" ] \
+        && dpkg --compare-versions "$2" le "0.2.8-1" \
+        && [ -f /etc/systemd/system/storm-server.service.d/data-root.conf ]; then
+        systemctl enable --now storm-server || true
+        systemctl enable --now storm-backup.timer 2>/dev/null || true
+        echo "storm-server: re-enabled storm-server and storm-backup.timer, which"
+        echo "  upgrades from $2 and earlier disabled. If you had run"
+        echo "  \`storm-server down\` on purpose, run it again."
+    fi
 fi
 
 echo "storm-server installed. Start it with: sudo storm-server up"
