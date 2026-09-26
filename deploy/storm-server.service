@@ -18,6 +18,13 @@ Description=Storm sync server
 Documentation=https://github.com/dewanshDT/Storm
 After=network-online.target
 Wants=network-online.target
+# Ordering only, and for every install whatever its layout (decision 73):
+# fstab's network mounts, such as an NFS vault root, finish before this starts.
+# network-online.target does not wait for them. Not Requires=, so a failed NAS
+# mount fails this through its own ReadWritePaths rather than through a target
+# every unrelated remote mount also feeds. `storm-server up` adds the exact
+# RequiresMountsFor= in its drop-in.
+After=remote-fs.target
 # A vault that fails to reconcile will fail fast and repeatedly; don't spin.
 # [Unit] keys: under [Service], where these sat until decision 70, systemd
 # ignores StartLimitIntervalSec with a warning, so the limit never applied.

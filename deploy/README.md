@@ -42,6 +42,20 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
+**A vault root on NFS (or any network mount) must be mounted before Storm
+starts** (decision 73). The unit orders itself after `remote-fs.target`, and
+`storm-server up` adds `RequiresMountsFor=` for its paths. An install set up by
+an older `up` gets the second by re-running `up` with the same flags, or with:
+
+```sh
+sudo systemctl edit storm-server     # add these two lines, then save:
+# [Unit]
+# RequiresMountsFor=/mnt/media/Docs/storm /srv/storm/state /srv/storm/backups
+```
+
+Name an NFS server by IP or a name that resolves before DNS is fully up: a
+`nas.lan` that fails to resolve at boot fails the mount outright.
+
 **Upgrades up to and including 0.2.8 disabled the service.** The package's
 `prerm` ignored whether it was being removed or upgraded, so each `apt upgrade`
 left `storm-server` and `storm-backup.timer` disabled. Both kept running until
