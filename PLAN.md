@@ -64,9 +64,12 @@ all eight assets; the apt index lists `storm-server` and `storm-relay` at
 decisions 65–71 plus the server packaging fix (#46). It is **the relay's first
 release** (a `storm-relay` `.deb` in the same apt repo; 70), the first
 storm-server that can dial a `wss://` relay (71), and the first whose upgrade
-does not disable storm-server and its backup timer (70, #46). Prod still runs
-**0.2.8** until the operator upgrades the VM, and that upgrade is also the one
-that repairs the disabled units. **No relay is deployed anywhere**; that is
+does not disable storm-server and its backup timer (70, #46). **Prod runs 0.2.9**
+(operator-deployed 2026-09-26, confirmed on the VM 2026-09-27: `0.2.9-1`,
+`storm-server` and `storm-backup.timer` both `enabled`, server active). Still
+open on prod: the `RequiresMountsFor=` drop-in (73) is not yet in place, and
+**the backup timer fails every run** (75), so the last backup is still
+2026-08-20. **No relay is deployed anywhere**; that is
 phase 4 step 3. v0.2.8 (PR #37, 2026-09-02) carried decisions 56–64.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
@@ -1823,6 +1826,40 @@ ignored, and a mount that came up late was eventually caught by the endless
 *Revisit if:* a layout mounts storage by an automount unit
 (`x-systemd.automount`), where the path exists before the filesystem does and
 ordering behaves differently.
+
+---
+
+**75. The packaged nightly backup had never run.** *(2026-09-27, prod's
+journal, after the 0.2.9 upgrade re-enabled the timer)*
+
+Once 0.2.9 re-enabled `storm-backup.timer` (73), it fired, and failed:
+`203/EXEC`, `/usr/local/bin/storm-backup.sh: No such file or directory`. The
+unit still named M6's hand-install path; the `.deb` has installed the script to
+`/usr/bin` since M15. So **no packaged install has ever taken a backup**, and
+prod's last one, 2026-08-20, was a manual run. Fixing the path alone would not
+have been enough:
+
+- **The script sourced `/etc/storm/storm.env` itself**, and that file is
+  `0600 root`, so as the service user it stopped at "cannot read". The unit
+  now has `EnvironmentFile=` (systemd reads it as root), and the script sources
+  the file only when run by hand with nothing already set.
+- **It ran as `storm`**, while `up` had given the layout to the state owner
+  (`dewansh` on prod) through a drop-in for the server unit only. `up` now
+  writes the same drop-in (user, `ReadWritePaths`, `RequiresMountsFor`) for
+  `storm-backup.service` too, and the unit waits for `remote-fs.target`.
+
+Evidence: `tests/packaging.rs` reads the real unit and `Cargo.toml` and
+asserts the unit runs the path the `.deb` installs to, and that it takes its
+environment from systemd; both fail on the old unit. The script was run as
+systemd would run it (values in the environment, the env file unreadable) and
+completed a verified backup, and by hand with nothing set it still refuses.
+
+**The lesson**: a timer that is disabled cannot fail, so the packaging bug in
+70 hid this one for a month. Re-enabling a unit is the moment to watch it
+run once.
+
+*Revisit if:* the env file ever holds a secret the backup must not see; then
+the backup gets its own env file.
 
 ---
 

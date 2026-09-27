@@ -14,6 +14,10 @@ use anyhow::{Context, Result, bail};
 const UNIT: &str = "storm-server";
 const ENV_PATH: &str = "/etc/storm/storm.env";
 const DROP_IN_DIR: &str = "/etc/systemd/system/storm-server.service.d";
+/// The backup unit gets the same drop-in (decision 75): the same user, the same
+/// paths, the same mounts. Without it the nightly backup ran as `storm` against
+/// a layout `up` had handed to another user, and could not write its output.
+const BACKUP_DROP_IN_DIR: &str = "/etc/systemd/system/storm-backup.service.d";
 const DEFAULT_DATA_ROOT: &str = "/srv/storm";
 const DEFAULT_WEB: &str = "/usr/share/storm/web";
 const DEFAULT_HOST: &str = "0.0.0.0";
@@ -197,10 +201,12 @@ fn write_service_drop_in(
     user: &str,
     group: &str,
 ) -> Result<()> {
-    fs::create_dir_all(DROP_IN_DIR).with_context(|| format!("creating {DROP_IN_DIR}"))?;
-    let path = Path::new(DROP_IN_DIR).join("data-root.conf");
     let body = drop_in_body(data_root, extra_paths, user, group);
-    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    for dir in [DROP_IN_DIR, BACKUP_DROP_IN_DIR] {
+        fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
+        let path = Path::new(dir).join("data-root.conf");
+        fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
+    }
     Ok(())
 }
 

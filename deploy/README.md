@@ -56,6 +56,27 @@ sudo systemctl edit storm-server     # add these two lines, then save:
 Name an NFS server by IP or a name that resolves before DNS is fully up: a
 `nas.lan` that fails to resolve at boot fails the mount outright.
 
+**Nightly backups never ran from the package before this fix** (decision 75):
+the unit named `/usr/local/bin/storm-backup.sh`, which the `.deb` does not
+install, and ran as `storm` without being able to read `/etc/storm/storm.env`.
+On an install set up by an older `up`, until the fixed package is installed,
+give it the right command, environment and user (use the paths and user from
+`/etc/systemd/system/storm-server.service.d/data-root.conf`):
+
+```sh
+sudo systemctl edit storm-backup     # add, then save:
+# [Unit]
+# RequiresMountsFor=/mnt/media/Docs/storm /srv/storm/state /srv/storm/backups
+# [Service]
+# ExecStart=
+# ExecStart=/usr/bin/storm-backup.sh
+# EnvironmentFile=/etc/storm/storm.env
+# User=dewansh
+# Group=dewansh
+# ReadWritePaths=/srv/storm /mnt/media/Docs/storm /srv/storm/state /srv/storm/backups
+sudo systemctl start storm-backup.service && journalctl -u storm-backup -n 12
+```
+
 **Upgrades up to and including 0.2.8 disabled the service.** The package's
 `prerm` ignored whether it was being removed or upgraded, so each `apt upgrade`
 left `storm-server` and `storm-backup.timer` disabled. Both kept running until
