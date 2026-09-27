@@ -343,6 +343,12 @@ lives in this repo**; the design rationale stays in the personal vault under
   Tungstenite's `wss://` client uses the process default, and rustls panics
   on the first handshake if two providers make it ambiguous. Never enable
   `aws-lc-rs`: the musl/zig release build cannot compile it.
+- **storm-server waits for its storage** (decision 73). The unit is
+  `After=remote-fs.target`, and `up`'s drop-in has `[Unit] RequiresMountsFor=`
+  matching its `ReadWritePaths`. systemd will not spawn a process whose
+  `ReadWritePaths` entry is missing, so an NFS vault root that mounts late
+  was a `226/NAMESPACE` loop, and with 0.2.9's live restart limit a dead
+  server. `[Unit]` keys under `[Service]` are ignored with only a warning.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.
