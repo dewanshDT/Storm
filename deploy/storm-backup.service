@@ -2,12 +2,22 @@
 Description=Storm nightly backup
 Documentation=https://github.com/dewanshDT/Storm
 After=storm-server.service
+# Waits for fstab network mounts, as storm-server does (decision 73): the vault
+# root it copies may be on NFS. `storm-server up` adds the exact
+# RequiresMountsFor= and the service user in a drop-in (decision 75).
+After=remote-fs.target
 
 [Service]
 Type=oneshot
 User=storm
 Group=storm
-ExecStart=/usr/local/bin/storm-backup.sh
+# Where the .deb installs it (apps/server/Cargo.toml). This said
+# /usr/local/bin from M6's hand install until decision 75, so the packaged
+# timer failed every night with 203/EXEC; tests/packaging.rs pins the two.
+ExecStart=/usr/bin/storm-backup.sh
+# systemd reads it as root. The file is 0600 root, so the script, running as
+# the service user, cannot, and used to stop at "cannot read" (decision 75).
+EnvironmentFile=/etc/storm/storm.env
 # The vault and the backup destination; nothing else.
 NoNewPrivileges=true
 PrivateTmp=true
