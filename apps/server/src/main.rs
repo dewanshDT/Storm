@@ -1127,11 +1127,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // rather than the next restart (A13).
     let vault_set_allow_registration = vault_set.registry.allow_registration;
 
-    // Taken before the registry moves into `AppState`. The configured list is
-    // a snapshot: relays added through `PUT /v1/config/relays` are picked up on
-    // the next restart, not live. `registered_relays` is a shared handle, so
-    // what the supervisors record below is what `/v1/server` reports.
+    // Taken before the registry moves into `AppState`. The boot list starts
+    // the tunnels; every later save of `PUT /v1/config/relays` arrives on
+    // `relays_changed` and is applied live by `relay::manage` (decision 74).
+    // `registered_relays` is a shared handle, so what the supervisors record
+    // below is what `/v1/server` reports.
     let configured_relays = vault_set.registry.relays.clone();
+    let (relays_changed, relays_rx) = tokio::sync::watch::channel(configured_relays.clone());
     let registered_relays = vault_set.registry.registered_relays.clone();
     let tunnel_identity = identity.clone();
 
@@ -1172,6 +1174,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         state_dir: state_dir.clone(),
         identity,
         root_changed,
+        relays_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
@@ -1316,6 +1319,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     if !configured_relays.is_empty() {
         tracing::info!(relays = configured_relays.len(), "connecting to relays");
     }
+    let (stop_tunnels, tunnels_stop) = tokio::sync::oneshot::channel();
+    let tunnels = tokio::spawn(relay::manage(tunnels, relays_rx, tunnels_stop));
 
     tracing::info!("storm-server listening on http://{addr}");
     // `into_make_service_with_connect_info` is what makes the peer address
@@ -1337,7 +1342,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // `server_id` until a heartbeat timeout and every client trying to reach
     // this server waits that out — a restart would look like an outage for as
     // long as the timeout lasts.
-    tunnels.shutdown().await;
+    let _ = stop_tunnels.send(());
+    let _ = tunnels.await;
     Ok(())
 }
 
