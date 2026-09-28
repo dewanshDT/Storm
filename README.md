@@ -32,6 +32,11 @@ state lives in a sibling `state/` directory — never inside the vaults.
 
 ## Screenshots
 
+The macOS client in the wide-screen layout: vault tree, a note in read mode,
+and its typed properties.
+
+<img src="docs/screenshots/desktop-wide.png" alt="The macOS client: sidebar with the vault's folder tree, the Global Todo note in read mode with rendered checklists, and the properties panel with tags and colour">
+
 The Android client, in the SlowFlow earth and Storm dark themes.
 
 <table>
