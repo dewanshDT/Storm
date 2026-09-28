@@ -13,9 +13,14 @@
 set -euo pipefail
 
 ENV_FILE="${STORM_ENV_FILE:-/etc/storm/storm.env}"
-[ -r "$ENV_FILE" ] || { echo "cannot read $ENV_FILE" >&2; exit 1; }
-# shellcheck disable=SC1090
-set -a; . "$ENV_FILE"; set +a
+# Under systemd the unit's EnvironmentFile= has already set these, and the
+# file itself is 0600 root, unreadable to the service user. Source it only when
+# this is run by hand and the values are not already here (decision 75).
+if [ -z "${STORM_VAULT_ROOT:-}" ]; then
+    [ -r "$ENV_FILE" ] || { echo "cannot read $ENV_FILE" >&2; exit 1; }
+    # shellcheck disable=SC1090
+    set -a; . "$ENV_FILE"; set +a
+fi
 
 : "${STORM_VAULT_ROOT:?}" "${STORM_STATE:?}" "${STORM_BACKUP_DEST:?}"
 KEEP_DAYS="${STORM_BACKUP_KEEP_DAYS:-30}"

@@ -42,6 +42,41 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
+**A vault root on NFS (or any network mount) must be mounted before Storm
+starts** (decision 73). The unit orders itself after `remote-fs.target`, and
+`storm-server up` adds `RequiresMountsFor=` for its paths. An install set up by
+an older `up` gets the second by re-running `up` with the same flags, or with:
+
+```sh
+sudo systemctl edit storm-server     # add these two lines, then save:
+# [Unit]
+# RequiresMountsFor=/mnt/media/Docs/storm /srv/storm/state /srv/storm/backups
+```
+
+Name an NFS server by IP or a name that resolves before DNS is fully up: a
+`nas.lan` that fails to resolve at boot fails the mount outright.
+
+**Nightly backups never ran from the package before this fix** (decision 75):
+the unit named `/usr/local/bin/storm-backup.sh`, which the `.deb` does not
+install, and ran as `storm` without being able to read `/etc/storm/storm.env`.
+On an install set up by an older `up`, until the fixed package is installed,
+give it the right command, environment and user (use the paths and user from
+`/etc/systemd/system/storm-server.service.d/data-root.conf`):
+
+```sh
+sudo systemctl edit storm-backup     # add, then save:
+# [Unit]
+# RequiresMountsFor=/mnt/media/Docs/storm /srv/storm/state /srv/storm/backups
+# [Service]
+# ExecStart=
+# ExecStart=/usr/bin/storm-backup.sh
+# EnvironmentFile=/etc/storm/storm.env
+# User=dewansh
+# Group=dewansh
+# ReadWritePaths=/srv/storm /mnt/media/Docs/storm /srv/storm/state /srv/storm/backups
+sudo systemctl start storm-backup.service && journalctl -u storm-backup -n 12
+```
+
 **Upgrades up to and including 0.2.8 disabled the service.** The package's
 `prerm` ignored whether it was being removed or upgraded, so each `apt upgrade`
 left `storm-server` and `storm-backup.timer` disabled. Both kept running until
@@ -351,11 +386,12 @@ and a `ws://` public base, and warns about a `wss://` base without
 needs a real certificate; a self-signed one will not register.
 
 **Pointing a server at it.** There is no app screen for this yet. As an
-owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`,
-then **restart storm-server**: the server opens its tunnels once, at boot, from
-the configured list, and a change takes effect only on the next start.
-`GET /v1/server` lists the relays it has actually registered with, which is the
-check that it worked. Clients learn the relay from the server when they pair.
+owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`.
+The server connects to an added relay and disconnects from a removed one (with
+a `DEREGISTER`) right away, without a restart; relays in both lists are left
+alone (decision 74). `GET /v1/server` lists the relays it has actually
+registered with, which is the check that it worked; the `PUT` itself returns
+before any connection is attempted. Clients learn the relay from the server when they pair.
 
 ## Security
 
