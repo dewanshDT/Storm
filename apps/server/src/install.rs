@@ -70,6 +70,15 @@ pub fn up(opts: UpOptions) -> Result<()> {
         // Best-effort: NFS and root_squash return EPERM — warn, don't abort.
         try_chown(dir, &run_user, &run_group);
     }
+    for dir in private_dirs(&data_root, &vaults, &state, &backups) {
+        if let Err(e) = tighten_private_dir(dir) {
+            eprintln!(
+                "warning: could not restrict {}: {e} — other local accounts may \
+                 be able to read it",
+                dir.display()
+            );
+        }
+    }
 
     fs::create_dir_all("/etc/storm").context("creating /etc/storm")?;
     write_env_file(
@@ -322,6 +331,54 @@ fn ensure_storm_user() -> Result<()> {
     Ok(())
 }
 
+/// Group-write and every bit for other accounts: what a Storm-private
+/// directory gives up (decision 76).
+const PRIVATE_MASK: u32 = 0o027;
+
+/// The directories `up` makes private — the ones only Storm uses.
+///
+/// A vault root outside the data root is left alone. On prod it is a NAS share
+/// other machines read and write, its modes are the NAS's to assign (its ACLs
+/// override the client's anyway), and tightening it from here would lock those
+/// machines out rather than protect anything.
+fn private_dirs<'a>(
+    data_root: &'a Path,
+    vaults: &'a Path,
+    state: &'a Path,
+    backups: &'a Path,
+) -> Vec<&'a Path> {
+    let mut dirs = vec![data_root, state, backups];
+    if vaults.starts_with(data_root) {
+        dirs.push(vaults);
+    }
+    dirs
+}
+
+/// Clears `PRIVATE_MASK` from a directory Storm owns, and reports whether
+/// anything changed.
+///
+/// It only ever *removes* bits, so a directory an operator made stricter (0700)
+/// stays as it is, and the owner keeps everything — which is why this is safe on
+/// a live install: the server and the backup run as the owner.
+pub fn tighten_private_dir(path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode() & 0o7777;
+        let tightened = mode & !PRIVATE_MASK;
+        if tightened == mode {
+            return Ok(false);
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(tightened))?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
 /// chown when possible; NFS / root_squash must not abort `up`.
 fn try_chown(path: &Path, user: &str, group: &str) {
     let spec = format!("{user}:{group}");
@@ -418,6 +475,61 @@ fn ureq_get_health(url: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    fn dir_with_mode(mode: u32) -> tempdir::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir::TempDir::new("storm-private").unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_state_dir_loses_other_access_and_group_write() {
+        // Prod's state directory was 0775: every local account could read
+        // auth.db (decision 76).
+        let dir = dir_with_mode(0o775);
+        assert!(tighten_private_dir(dir.path()).unwrap());
+        assert_eq!(mode_of(dir.path()), 0o750);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stricter_dir_is_left_as_the_operator_made_it() {
+        let dir = dir_with_mode(0o700);
+        assert!(!tighten_private_dir(dir.path()).unwrap());
+        assert_eq!(mode_of(dir.path()), 0o700);
+    }
+
+    #[test]
+    fn a_vault_root_on_a_share_is_never_made_private() {
+        // The prod layout: the vault root is a NAS share other machines use.
+        let dirs = private_dirs(
+            Path::new("/srv/storm"),
+            Path::new("/mnt/media/Docs/storm"),
+            Path::new("/srv/storm/state"),
+            Path::new("/srv/storm/backups"),
+        );
+        assert!(!dirs.contains(&Path::new("/mnt/media/Docs/storm")));
+        assert!(dirs.contains(&Path::new("/srv/storm/state")));
+
+        // The default layout keeps its vaults under the data root, so they are
+        // Storm's alone and are restricted with it.
+        let dirs = private_dirs(
+            Path::new("/srv/storm"),
+            Path::new("/srv/storm/vaults"),
+            Path::new("/srv/storm/state"),
+            Path::new("/srv/storm/backups"),
+        );
+        assert!(dirs.contains(&Path::new("/srv/storm/vaults")));
+    }
 
     #[test]
     fn the_drop_in_waits_for_every_path_it_opens() {

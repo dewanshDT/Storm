@@ -1043,6 +1043,23 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     let state_dir = prepared.state_dir;
     let root = prepared.root;
 
+    // `auth.db` holds the password hashes and cannot be rebuilt, so the state
+    // directory is kept from other accounts here as well as by the package and
+    // `up` (decision 76): an install made any other way gets it too. A failure
+    // is a warning, not a refusal to serve — the vault must stay reachable.
+    match install::tighten_private_dir(&state_dir) {
+        Ok(true) => tracing::info!(
+            state = %state_dir.display(),
+            "restricted the state directory to its owner and group"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            state = %state_dir.display(),
+            error = %e,
+            "could not restrict the state directory; other local accounts may read it"
+        ),
+    }
+
     // The `kit` vault carries the agent tooling every Storm server is expected
     // to have, so a first boot creates it rather than leaving it as a setup
     // step. Only on a first boot: deleting it afterwards is a decision, and

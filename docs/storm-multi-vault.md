@@ -38,6 +38,12 @@ A vault is identified by a **UUID**, not its directory name, for the same reason
 
 `state/` remains a sibling of the vault data, never inside it.
 
+**Both trees are private to the service user and its group** (`PLAN.md`
+decision 76): `/srv/storm` and `state/` are 0750 and the units set
+`UMask=0027`, so other local accounts cannot read a note or `state/auth.db`.
+A storage root outside the data root, such as an NFS share, is left to whoever
+owns it. Storm never changes its modes, because other machines write it.
+
 ## 3. Server
 
 ### 3.1 Registry (`src/registry.rs`, new)

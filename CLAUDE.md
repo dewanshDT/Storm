@@ -217,6 +217,16 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   recorded, ignored on the next boot, then erased by the next save — with every
   vault adopted under it left registered as `missing`. **A setting that does not
   survive a restart is not a setting.**
+- **Storm's data is its service user's and group's, never other accounts'**
+  (decision 76). Both units set `UMask=0027`, and `postinst`, `up` and `serve`
+  each restrict the directories Storm alone owns. Up to 0.2.9 every local
+  account could read every note and `state/auth.db`. Every layer only ever
+  *removes* group-write and other bits, so a directory an operator made
+  stricter keeps its mode. **A vault root outside the data root is never
+  chmod-ed:** it is a NAS share other machines write, and its modes are the
+  NAS's. A local account that needs the data joins the service user's group.
+  Agent Runtime's `storm-runtime` user must never join it, because this mode is
+  all that keeps a co-located runtime out of `auth.db` and the vaults.
 
 From M19 (auth phase 1 — design in the personal vault, *Storm Auth Data Model*
 and *Storm Auth Protocol*; ADRs A1–A11 in *Storm Remote Decisions*):

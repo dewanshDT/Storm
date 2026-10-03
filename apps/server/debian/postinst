@@ -16,6 +16,15 @@ mkdir -p /srv/storm/vaults /srv/storm/state /srv/storm/backups /etc/storm
 # apt upgrade makes serve fail with Permission denied on vaults.json.
 if [ ! -e /srv/storm/state/vaults.json ]; then
     chown -R storm:storm /srv/storm 2>/dev/null || true
+    chmod 0750 /srv/storm/vaults /srv/storm/state /srv/storm/backups 2>/dev/null || true
+fi
+# Every install, upgrades included: no access for other accounts to the default
+# root (decision 76). `mkdir -p` as root left it 0755, so every local account
+# could read every note and state/auth.db. Owner-agnostic and non-recursive —
+# the server and the backup run as the tree's owner, which keeps all its bits —
+# and never through a symlink, which could point at a share other machines use.
+if [ ! -L /srv/storm ]; then
+    chmod o-rwx /srv/storm 2>/dev/null || true
 fi
 
 if [ -f /etc/storm/storm.env ]; then

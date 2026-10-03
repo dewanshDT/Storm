@@ -1896,6 +1896,115 @@ run once.
 *Revisit if:* the env file ever holds a secret the backup must not see; then
 the backup gets its own env file.
 
+**76. Storm's data was readable by every local account, and is now its
+user's and group's.** *(2026-10-03, found while designing Agent Runtime V1;
+prod confirmed by the operator)*
+
+**The defect.** `postinst` creates `/srv/storm` with `mkdir -p` as root, so the
+tree is 0755. `storm-server.service` set no `UMask`, so systemd's default 0022
+applied to everything the server wrote. The result: **any local account could
+read every note, every index, `vaults.json`, and `state/auth.db`**, which holds
+the password hashes. Only `state/identity/` was protected, because A2 chmods
+it explicitly.
+
+**Evidence.**
+- Reproduced with the real server under systemd: as `nobody`, a note,
+  `auth.db` and `vaults.json` were all readable.
+- Prod, read by the operator:
+
+  | Path | Mode | Owner |
+  |---|---|---|
+  | `/srv/storm` | 755 | `dewansh:dewansh` |
+  | `/srv/storm/vaults` | 755 | `dewansh:dewansh` |
+  | `/srv/storm/state` | 775 | `dewansh:dewansh` |
+  | `/srv/storm/state/auth.db` | 644 | `dewansh:dewansh` |
+
+It became blocking because Agent Runtime V1 puts a second service account,
+`storm-runtime`, on the same machine (vault: *Agent Runtime/V1 Specification
+Freeze*, prerequisite P3).
+
+**The fix, in four layers:**
+
+1. **Both units set `UMask=0027`.** The backup unit too: its archives carry
+   `auth.db` and the identity keys (A4).
+2. **`postinst`** creates a fresh tree 0750. On every install, upgrades
+   included, it runs `chmod o-rwx /srv/storm`. That is owner-agnostic and
+   non-recursive, so the service user keeps every bit it has, and it never runs
+   through a symlink, which could point at a share other machines use.
+3. **`storm-server up`** restricts the data root, state and backups, and the
+   vault root only when it sits under the data root.
+4. **`serve`** tightens its own state directory at boot. An install made any
+   other way, or a tree loosened by hand, still keeps `auth.db` from other
+   accounts.
+
+Every layer only ever *removes* group-write and other bits, so a directory an
+operator made stricter keeps its mode.
+
+**What it deliberately does not touch: a vault root on a share.** Prod's vault
+root is NFS from the NAS, and other machines write it. A probe showed **the NAS
+assigns 664 whatever the client's umask**, so `UMask` neither harms the share
+nor protects it. Tightening it from the VM would lock those machines out. Its
+exposure to local accounts on the VM is a NAS-side decision, recorded in the
+vault's Global Todo.
+
+**Prod needs a one-time remediation**, because this release cannot reach an
+already-installed tree beyond the root's other bits. The commands are in
+`deploy/README.md`: chmod the root and `state/` 0750, a `find -xdev` that
+removes other-access from the local tree only, and `UMask=0027` drop-ins for
+both units until the fixed package is installed.
+
+**Verified (2026-10-03, codebox):**
+- **The checks.** `make check` under CI's Flutter 3.44.8 is clean and
+  reformats nothing, with one exception: `editor_save_loop_test`'s huge-note
+  case never completes on codebox. It is out of memory there (3.2 GB RSS on a
+  4 GB VM, CPU-bound), passes in 0.3 s on CI, and P3 changes no Dart.
+- **The live suites.** `make test-live`: `e2e.py` 81/81 unmodified, MCP 80/80,
+  auth 74/74, client integration 20/20.
+- **Prod-shaped, under systemd.** The installed binary ran the 0.2.9 unit and
+  a `data-root.conf` like prod's, as a non-`storm` owner, with the vault root
+  outside `/srv/storm` on a share that ignores the umask. The data was first
+  loosened to prod's exact modes, and `nobody` could read `auth.db` and
+  `vaults.json`. The remediation commands above were then applied verbatim:
+  - `e2e.py` 81/81 (unmodified), MCP 80/80, auth 74/74, and a backup run all
+    passed.
+  - Everything created was 640/750, identity 700/600, and nothing in the tree
+    was other-accessible. `nobody` was refused `auth.db`, `vaults.json` and
+    `ls /srv/storm`, the journal was clean, and the share's modes were
+    untouched.
+  - The two `e2e.py` storage-root checks first failed on the harness, not on
+    P3: the suite makes a sibling of `VAULT_ROOT`, which must be inside
+    `ReadWritePaths` and writable by the service user, as the unit already
+    documents.
+- **A fresh install** (`postinst` → `up --vault-root <share>`) gave a 0750
+  tree, the right drop-in, `UMask=0027`, `auth.db` 640, and `nobody` refused.
+
+**Prod (2026-10-03, verified over SSH after the operator ran the remediation):**
+- **The server:** running as `dewansh` with `UMask=0027` on both units,
+  health OK, all four vaults reconciled, MCP enabled.
+- **Modes:** `/srv/storm`, `state`, `vaults` and `backups` are 750;
+  `auth.db`, its WAL/SHM and `vaults.json` are 640; `identity` is 700. No
+  path in the local tree is other-accessible, and `nobody` is in no group
+  that could reach it.
+- **MCP:** a write and a read-back worked, and the index files it wrote came
+  out 640. The probe note was then deleted.
+- **The NFS vault root:** still 775, and the probe note on it came out 664.
+  That is the NAS's to fix, as recorded above.
+- **Logs:** no errors since the restart. The one WARN, stored root versus
+  the `--vault-root` flag, predates this change (585 earlier occurrences) and
+  is decision-shaped behaviour: the stored root wins.
+
+**A lesson from the run.** The first attempt was a pasted block of separate
+`sudo` lines. The first one stopped the server, then the password prompt
+swallowed the rest, including the `start`, and prod was down for 77 s. The
+README now gives one `sudo sh -c` that always ends by starting the server.
+A multi-step prod procedure that stops a service is given that way from now on.
+
+**Status:** verified on prod. Agent Runtime implementation waits only on the
+operator's confirmation.
+
+*Revisit if:* a deployment needs another local account to read the data tree.
+Grant that account group membership; never restore other-access.
+
 ---
 
 ## Data model

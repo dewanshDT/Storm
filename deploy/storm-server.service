@@ -62,6 +62,12 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+# Files the server creates are its user's and group's only (decision 76). With
+# systemd's default 0022 every index, vaults.json and auth.db — password hashes
+# — was readable by any local account; only state/identity/ was protected,
+# because it is chmod-ed explicitly. A vault root on a NAS keeps whatever modes
+# the NAS assigns: prod's applies its own ACLs and ignores this.
+UMask=0027
 # The storage root must stay inside this. `storm-server up --data-root` writes
 # a drop-in that replaces this line when the data lives elsewhere (e.g. under
 # /home). Moving the root through the app still needs this widened first, or
