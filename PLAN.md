@@ -56,6 +56,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
+| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decision 77 · slice 1 (provider contract + fake provider) on `feat/runtime-provider-contract` |
 
 **Release state (2026-09-26).** **v0.2.9 is released** (PR #48, tag on its
 merge commit `f046eaf`; every `release.yml` job green; the GitHub Release has
@@ -2004,6 +2005,77 @@ operator's confirmation.
 
 *Revisit if:* a deployment needs another local account to read the data tree.
 Grant that account group membership; never restore other-access.
+
+**77. Agent Runtime V1 is frozen, and it is built in seven slices, the
+provider contract first.** *(2026-10-03; operator's go after P3 was verified
+on prod)*
+
+**The spec.** *Agent Runtime/V1 Specification Freeze* in the personal vault,
+revision 4. It was approved 2026-10-03 and is frozen as of this entry. Its
+amendments AM1–AM21 are D12 in *Agent Runtime/Decisions*. The vault holds the
+spec; this entry records that it is frozen, how it is sliced and the decisions
+the code makes that the spec left open. Where they disagree, the freeze wins
+and this entry gets fixed.
+
+**In one paragraph.**
+- The Storm Server is the control plane: the Agent Manager, session records
+  in `state/agent/agent.db`, and the host registry in `state/auth.db`.
+- A **Runtime Host** (`storm-runtime`, its own crate, `.deb` and OS user) is
+  the execution plane. It dials the server, authenticates with an Ed25519 key
+  under a third signing domain `storm-host-auth:v1:`, and runs agents in
+  workspaces under its configured roots.
+- Clients talk only to the server, over REST + SSE, owner-only.
+- V1 providers are `claude-code` (default), `opencode` and `shell`, all of
+  kind `cli`, offering one `terminal` interaction that the runtime carries over
+  a PTY.
+- Direct network only. The relay is a design constraint, not V1 acceptance.
+
+**The slices**, in the freeze's §16 order. Each is its own PR to `staging`:
+1. **`apps/runtime` and the provider contract.** `Provider`,
+   `ProviderSession`, `TerminalChannel`, the §7.2 status vocabulary, the
+   offset-addressed scrollback, and the fake provider with an in-memory
+   terminal and no PTY. Plus the Makefile targets and a CI job.
+2. **The PTY carrier and the `cli` providers.** Availability resolution, and
+   ending a session as SIGHUP to the process group, then SIGKILL after 5 s.
+3. **Host identity and enrollment.** Server: `runtime_hosts`, enrollment and
+   host tokens, the `Host` tier. Runtime: `enroll`, the identity key and
+   `host.json`. Both: `docs/runtime-vectors.json`.
+4. **The host link and the Agent Manager.** `/v1/runtime/*`,
+   `state/agent/agent.db`, and reconciliation from `hello`. It ends with
+   `tests/agent_e2e.py` driving the fake provider end to end, which is AC-A1.
+5. **The client routes.** `/v1/agent/*`, owner-only on every route, the
+   terminal SSE stream and its `?offset=` resume.
+6. **The client UI.** The `xterm2` surface, hosts, launcher, terminal view,
+   tabs and the extra-keys row.
+7. **Packaging.** The `storm-runtime` `.deb` and its systemd unit (§5.8:
+   no `MemoryDenyWriteExecute`).
+
+Then the on-device acceptance criteria. Claude Code is verified before OpenCode
+is claimed (AC-P1).
+
+**Slice 1's decisions, where the spec was illustrative:**
+- **Output and endings go through a runtime-owned sink, `SessionEvents`.** The
+  provider never owns the scrollback. The runtime, which already owns the
+  carrier, owns where output lands. The same sink serves a PTY reader thread
+  and the fake.
+- **The contract is synchronous and has no dependencies.** PTY I/O is blocking
+  threads anyway. The async host link adapts at its edge, so no async runtime
+  leaks into every provider.
+- **The fake provider has its own kind, `fake`.** Kind says how a session
+  starts, and the fake starts in process. Labelling it `cli` would be a lie the
+  host would act on. AC-A1 runs it inside a real `storm-runtime`, so `fake` is
+  a wire value. A host offers it only when its config names it.
+- **The scrollback is a fixed-capacity ring addressed by absolute byte
+  offset.** A read below the floor returns an explicit `Gap`, the §11.2 `gap`
+  event, never silently fewer bytes.
+- **`apps/runtime` depends on nothing in `apps/server`, and there is still no
+  workspace** (the R6 reasoning, applied by the freeze §5.8). The host and the
+  server share only the wire format, and `docs/runtime-vectors.json` is what
+  keeps the two in agreement.
+
+*Revisit if:* the async host link (slice 4) cannot drive the synchronous
+contract without a thread per session, or a second interaction kind needs the
+provider rather than the runtime to own its carrier.
 
 ---
 
