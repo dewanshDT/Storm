@@ -41,7 +41,7 @@ fn crockford() -> &'static Encoding {
 ///
 /// Shared across the auth module (`srv_`, `usr_`, and later `dev_`/`ses_`) so
 /// every Storm id is minted from one alphabet with one amount of entropy.
-pub(super) fn random_id(prefix: &str) -> String {
+pub(crate) fn random_id(prefix: &str) -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     format!("{prefix}{}", crockford().encode(&bytes))

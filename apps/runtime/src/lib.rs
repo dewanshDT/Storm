@@ -33,10 +33,18 @@
 //!   `docs/runtime-vectors.json`.
 //! - [`client`]: enrollment and key authentication against the server, which
 //!   is verified against its pinned key before anything is sent.
+//!
+//! ## Slice 4 (decision 77c)
+//!
+//! - [`config`]: `runtime.toml`, provider env files, and workspace resolution.
+//! - [`host`]: `storm-runtime serve`. It runs the link, one uploader per
+//!   session, and the `sessions.json` restart table.
 
 pub mod cli;
 pub mod client;
+pub mod config;
 pub mod fake;
+pub mod host;
 pub mod identity;
 pub mod provider;
 mod pty;

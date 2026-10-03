@@ -133,6 +133,8 @@ pub struct AppState {
     /// misbehaving host retrying its link must not lock people out of logging
     /// in, and a login flood must not stop hosts reconnecting.
     pub host_limiter: crate::auth::ratelimit::LoginLimiter,
+    /// The Agent Manager: the only session authority (decision 77c).
+    pub agent: Arc<crate::agent::AgentManager>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -329,6 +331,14 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
     // here (decision 77b).
     let host_router = Router::new()
         .route("/v1/runtime/whoami", get(runtime_whoami))
+        .route("/v1/runtime/link", get(runtime_link))
+        .route("/v1/runtime/hello", post(runtime_hello))
+        .route("/v1/runtime/inventory", post(runtime_inventory))
+        .route(
+            "/v1/runtime/sessions/{id}/terminal/output",
+            post(runtime_output),
+        )
+        .route("/v1/runtime/sessions/{id}/status", post(runtime_status))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -405,6 +415,32 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route(
             "/v1/agent/hosts/{id}",
             patch(agent_rename_host).delete(agent_revoke_host),
+        )
+        .route(
+            "/v1/agent/hosts/{id}/workspaces",
+            get(agent_host_workspaces),
+        )
+        .route(
+            "/v1/agent/sessions",
+            get(agent_list_sessions).post(agent_launch),
+        )
+        .route(
+            "/v1/agent/sessions/{id}",
+            get(agent_get_session).delete(agent_dismiss_session),
+        )
+        .route("/v1/agent/sessions/{id}/end", post(agent_end_session))
+        .route(
+            "/v1/agent/sessions/{id}/terminal/stream",
+            get(agent_terminal_stream),
+        )
+        .route("/v1/agent/sessions/{id}/terminal/input", post(agent_input))
+        .route(
+            "/v1/agent/sessions/{id}/terminal/resize",
+            post(agent_resize),
+        )
+        .route(
+            "/v1/config/agent",
+            get(agent_get_config).put(agent_put_config),
         )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
@@ -1551,6 +1587,302 @@ async fn agent_revoke_host(
 ) -> ApiResult<StatusCode> {
     crate::ops::revoke_host(&state, &actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Agent Runtime: the host link and the agent routes (decision 77c) ------
+
+/// Marks the host offline when its link stream ends — dropped by the
+/// connection closing, or by a newer link or a revocation replacing it. The
+/// generation is what keeps an old stream's end from taking a newer link down.
+struct LinkGuard {
+    agent: Arc<crate::agent::AgentManager>,
+    host_id: String,
+    generation: u64,
+}
+
+impl Drop for LinkGuard {
+    fn drop(&mut self) {
+        self.agent.disconnect_host(&self.host_id, self.generation);
+    }
+}
+
+/// GET /v1/runtime/link — the server→host command stream (freeze §11.5).
+///
+/// SSE rather than a WebSocket, so it crosses the relay unchanged (SRP §3).
+/// Keepalives every 15 s are also how a dead connection is noticed: the write
+/// fails and the guard runs.
+async fn runtime_link(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::StreamExt;
+    let (generation, rx) = state.agent.connect_host(&auth.host.id);
+    let guard = LinkGuard {
+        agent: state.agent.clone(),
+        host_id: auth.host.id.clone(),
+        generation,
+    };
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(move |envelope| {
+        let _held = &guard;
+        Ok(Event::default().data(serde_json::to_string(&envelope).unwrap_or_default()))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+}
+
+async fn runtime_hello(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(hello): Json<crate::agent::Hello>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_hello(&state, &auth.host.id, hello).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_inventory(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(caps): Json<crate::agent::Capabilities>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_inventory(&state, &auth.host.id, caps)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct OutputBatch {
+    offset: u64,
+    /// Standard base64, padded (RFC 4648 §4), both directions (77c).
+    data: String,
+}
+
+async fn runtime_output(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(batch): Json<OutputBatch>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_output(&state, &auth.host.id, &id, batch.offset, &batch.data)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_status(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(report): Json<crate::agent::StatusReport>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_status(&state, &auth.host.id, &id, &report)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_host_workspaces(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crate::ops::WorkspaceView>>> {
+    Ok(Json(
+        crate::ops::host_workspaces(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_launch(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(req): Json<crate::agent::Launch>,
+) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+    Ok(Json(crate::ops::launch_session(&state, &actor, req).await?))
+}
+
+async fn agent_list_sessions(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::agent::store::SessionRecord>>> {
+    Ok(Json(crate::ops::list_sessions(&state, &actor).await?))
+}
+
+async fn agent_get_session(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+    Ok(Json(crate::ops::get_session(&state, &actor, &id).await?))
+}
+
+async fn agent_end_session(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::end_session(&state, &actor, &id).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn agent_dismiss_session(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::dismiss_session(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST …/terminal/input — raw bytes, at most 64 KiB, at most once.
+async fn agent_input(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<StatusCode> {
+    crate::ops::session_input(&state, &actor, &id, &body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ResizeRequest {
+    cols: u16,
+    rows: u16,
+    /// Whether this client just took focus. The PTY follows the most recently
+    /// active client either way (freeze §11.4); the flag is the client saying
+    /// "that is me now" without typing.
+    #[serde(default)]
+    #[allow(dead_code)]
+    focus: bool,
+}
+
+async fn agent_resize(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<ResizeRequest>,
+) -> ApiResult<StatusCode> {
+    crate::ops::session_resize(
+        &state,
+        &actor,
+        &id,
+        crate::agent::TerminalSize {
+            cols: req.cols,
+            rows: req.rows,
+        },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct StreamQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+struct TerminalStream {
+    agent: Arc<crate::agent::AgentManager>,
+    id: String,
+    cursor: u64,
+    last_status: Option<String>,
+    rx: tokio::sync::watch::Receiver<u64>,
+    done: bool,
+}
+
+/// GET …/terminal/stream?offset=N — the terminal as SSE (freeze §11.2).
+///
+/// Every stream starts with a `status` event. Output is `event: output` with
+/// `id:` the end offset and base64 `data:`; a range no longer retained is an
+/// explicit `event: gap`. Resume is by offset, never `Last-Event-ID`, so it
+/// is exact and crosses the relay (SRP §5.3). The stream ends once the session
+/// has ended and everything retained has been sent.
+async fn agent_terminal_stream(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Query(q): Query<StreamQuery>,
+) -> ApiResult<
+    axum::response::sse::Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    crate::ops::get_session(&state, &actor, &id).await?;
+    let start = TerminalStream {
+        agent: state.agent.clone(),
+        rx: state.agent.watch(&id),
+        id,
+        cursor: q.offset,
+        last_status: None,
+        done: false,
+    };
+    let stream = futures_util::stream::unfold(start, |mut st| async move {
+        loop {
+            if st.done {
+                return None;
+            }
+            // Mark the current version seen *before* reading, so a change
+            // landing between the read and the wait still wakes us.
+            st.rx.borrow_and_update();
+            let record = match st.agent.get(&st.id) {
+                Ok(r) => r,
+                Err(_) => return None,
+            };
+            let json = serde_json::to_string(&record).unwrap_or_default();
+            if st.last_status.as_ref() != Some(&json) {
+                st.last_status = Some(json.clone());
+                return Some((Ok(Event::default().event("status").data(json)), st));
+            }
+            match st.agent.read_output(&st.id, st.cursor, 32 * 1024) {
+                crate::agent::cache::Read::Data { from, bytes } => {
+                    st.cursor = from + bytes.len() as u64;
+                    let event = Event::default()
+                        .event("output")
+                        .id(st.cursor.to_string())
+                        .data(data_encoding::BASE64.encode(&bytes));
+                    return Some((Ok(event), st));
+                }
+                crate::agent::cache::Read::Gap { from, to } => {
+                    st.cursor = to;
+                    let event = Event::default()
+                        .event("gap")
+                        .data(serde_json::json!({ "from": from, "to": to }).to_string());
+                    return Some((Ok(event), st));
+                }
+                crate::agent::cache::Read::UpToDate | crate::agent::cache::Read::Ahead => {
+                    if record.is_ended() {
+                        return None;
+                    }
+                    match tokio::time::timeout(std::time::Duration::from_secs(15), st.rx.changed())
+                        .await
+                    {
+                        Ok(Ok(())) => continue,
+                        Ok(Err(_)) => return None,
+                        Err(_) => return Some((Ok(Event::default().comment("keepalive")), st)),
+                    }
+                }
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
+}
+
+async fn agent_get_config(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::ops::AgentConfigView>> {
+    Ok(Json(crate::ops::agent_config(&state, &actor).await?))
+}
+
+#[derive(Deserialize)]
+struct AgentConfigRequest {
+    default_provider: String,
+}
+
+async fn agent_put_config(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(req): Json<AgentConfigRequest>,
+) -> ApiResult<Json<crate::ops::AgentConfigView>> {
+    Ok(Json(
+        crate::ops::set_agent_config(&state, &actor, &req.default_provider).await?,
+    ))
 }
 
 /// Three credential tiers: `none` (unauthenticated), `device` (paired
@@ -3021,6 +3353,7 @@ pub(crate) mod tests {
         let (events, _) = broadcast::channel(8);
         let (root_changed, _) = broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
+        let agent = Arc::new(crate::agent::AgentManager::open(&state_dir).unwrap());
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -3041,6 +3374,7 @@ pub(crate) mod tests {
             hasher: crate::auth::Hasher::new(),
             login_limiter,
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            agent,
         });
         (
             router(
@@ -3262,7 +3596,7 @@ pub(crate) mod tests {
     }
 
     /// A second account, so two MCP requests can carry different identities.
-    async fn seed_member(state: &Shared, username: &str) -> String {
+    pub(crate) async fn seed_member(state: &Shared, username: &str) -> String {
         let mut auth_db = state.auth_db.lock().await;
         crate::auth::users::create_user(
             &mut auth_db,

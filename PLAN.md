@@ -2044,7 +2044,8 @@ and this entry gets fixed.
    `state/agent/agent.db`, and reconciliation from `hello`. It ends with
    `tests/agent_e2e.py` driving the fake provider end to end, which is AC-A1.
 5. **The client routes.** `/v1/agent/*`, owner-only on every route, the
-   terminal SSE stream and its `?offset=` resume.
+   terminal SSE stream and its `?offset=` resume. *(Merged into slice 4 by
+   77c.)*
 6. **The client UI.** The `xterm2` surface, hosts, launcher, terminal view,
    tabs and the extra-keys row.
 7. **Packaging.** The `storm-runtime` `.deb` and its systemd unit (§5.8:
@@ -2192,6 +2193,100 @@ never a key.
 
 The HTTP client is `reqwest` with rustls on `ring`. Never `aws-lc-rs`: the
 musl/zig release build cannot compile it.
+
+**77c. Slices 4 and 5 merge: the host link, the Agent Manager and the agent
+routes land together.** *(2026-10-03)*
+
+AC-A1 drives launch → input → output → end through the Agent Manager *and*
+the host link. That cannot be tested without the client routes, so they ship
+as one slice. The later slices renumber: **5** is the client UI and **6** is
+packaging.
+
+**The server** (`apps/server/src/agent/`):
+- **Session records** live in `state/agent/agent.db`, one row per `ags_`
+  session with the §7.1 fields. The default provider lives in
+  `state/agent/config.json`.
+- **At boot**, every session that has not ended becomes `unknown` (§13).
+- **Link state is in memory:** which hosts are online, each host's command
+  sender, its capabilities, and a per-session output cache. The cache is the
+  same offset-addressed ring as the host's. A link drop marks the host
+  `offline` and its sessions `unknown`. A link is identified by a generation
+  number, so an old stream closing never marks a newer one offline.
+- **The output cache only accepts bytes in order.** Overlap is skipped, a
+  jump forward starts the ring at the new offset, and an empty cache takes
+  whatever offset arrives first. After a server restart the cache is empty,
+  so `hello` answers each live session with `terminal.replay {from: 0}`. The
+  host re-sends its ring from its floor, in order, before anything new.
+- **`hello` reconciles** (§13):
+  - Sessions the host reports take its reported state.
+  - Its sessions that have not ended and that it does not report become
+    `failed (lost)`.
+  - Sessions a restarted host reports as dead become
+    `failed (host_restart)`.
+- **The client stream is pulled from the cache.** A per-session `watch`
+  counter wakes subscribers. A subscriber reads from its cursor:
+  - data is an `output` event whose `id:` is the end offset;
+  - a missing range is a `gap` event;
+  - a status change is a full `status` event.
+
+  Keepalives go out every 15 s.
+- **Launch:**
+  - The host must be online and must offer the workspace.
+  - The provider is the requested one, or the default. If the host does not
+    offer it, the server falls back through `claude-code`, `opencode`,
+    `shell`, records `provider_fallback`, and returns 422 when none is
+    available.
+  - `max_sessions` is enforced as a 429.
+  - The record starts as `creating`, then becomes `starting` when the
+    `start` command is sent.
+- **Input** is refused with 503 while the host is offline. It is
+  at-most-once and never queued.
+
+**The link:**
+- One SSE stream, server to host. Every event's `data:` is a JSON command
+  with a `cmd_seq`. The commands are `start`, `end`, `terminal.input`
+  (base64), `terminal.resize`, `terminal.replay` and `refresh`.
+- The host POSTs `hello`, `inventory`, output batches and status changes.
+- Commands lost while the link is down are not replayed.
+
+**The host** (`storm-runtime serve`):
+- `/etc/storm-runtime/runtime.toml` holds `workspace_roots`, `providers`
+  (the built-ins, or `kind = "cli"` with a command, args and `env_file`, or
+  `kind = "fake"`), `max_sessions` and `scrollback_bytes`.
+- **Output.** Each session has one uploader task. It posts its ring from its
+  last sent offset, coalescing up to about 20 ms or 64 KiB, and retries until
+  the link is back. `terminal.replay` rewinds its offset.
+- **Restarts.** `sessions.json` records the live sessions. A host that
+  restarts reports every entry as `failed (host_restart)` in its first
+  `hello`.
+- **Reconnecting** backs off from 1 s to 60 s, and re-authenticates when its
+  token is refused.
+- **Revocation.** When the key is refused, the host ends every session and
+  exits non-zero (§5.6).
+- **Workspaces** are the non-hidden subdirectories of each root. A name is
+  never a path, and symlinks that leave a root are refused. A root that is
+  inside, or contains, a Storm data root it can see (`/srv/storm` by default)
+  is refused at startup (D3).
+- **Terminal bytes** are standard padded base64 (RFC 4648 §4) in both
+  directions: in the host's output posts, in `terminal.input`, and in the
+  client stream's `output` events.
+- **Input is bounded on the host.** A PTY write polls for room in 256-byte
+  chunks within a 5 s deadline, in a per-session ordered writer task. A hung
+  agent cannot block the link or hold the session against `end`.
+
+**Verified** (`apps/server/tests/agent_e2e.py`, 54 checks, about 19 s; run by
+`make test-live`): a real server and a real host, with the fake and shell
+providers. It covers:
+- AC-A1, F1 and F7
+- R1: a server restart, after which scrollback is replayed from the host and
+  the agent is never interrupted
+- R2: a host restart, after which the session is `host_restart`
+- R3: revocation, after which the host exits 3 and cannot authenticate
+- S1, S2, S4 and S5
+- offset resume and the explicit gap
+
+AC-T2 is a relay unit test: the terminal stream served over the tunnel by the
+same handler, under the same auth and owner check.
 
 ---
 
