@@ -72,10 +72,12 @@ Practical consequences worth knowing before you start:
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/relay/` | `storm-relay` — the SRP v1 relay. Standalone crate; **no workspace** (R6). |
+| `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `docs/srp-v1.md` | The relay wire spec, normative. `docs/srp-vectors.json` is its shared test vectors. |
 | *Storm Relay Dart Client* (vault) | The client half's accepted architecture. Read before writing any Dart SRP code. |
+| *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then `PLAN.md` decision 77, before touching `apps/runtime` or `/v1/agent/*`. |
 | `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
@@ -364,6 +366,28 @@ lives in this repo**; the design rationale stays in the personal vault under
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.
   Both fields are validated, not just the nonce — they are two colon-delimited
   halves of one signed string, so a colon in *either* re-splits it.
+
+From M20 (Agent Runtime V1 — the spec is the vault's *Agent Runtime/V1
+Specification Freeze*; the slices and slice 1's decisions are `PLAN.md`
+decision 77):
+
+- **A Runtime Host is never an authority.** `storm-runtime` runs agents and
+  nothing else: it never learns who owns a session, holds no user data and
+  makes no authorization decision. The Agent Manager in storm-server is the
+  only session authority. A change that has `apps/runtime` know what a Storm
+  *user* is, is wrong.
+- **`apps/runtime` never depends on `apps/server`**, and there is still no
+  workspace. The two share a wire format, not code. Where they must agree on
+  bytes, a vector file in `docs/` read by both test suites is what makes them
+  agree, as `docs/srp-vectors.json` does for the relay.
+- **The provider contract is not the PTY** (AM20). A provider has a kind and
+  offers interactions; the runtime owns the carrier. A PTY type in
+  `src/provider.rs` is the regression, and the fake provider exists to prove
+  the contract works without one.
+- **Terminal output is addressed by absolute byte offset, and a reader that
+  fell behind gets an explicit gap.** Never a short read and never
+  `Last-Event-ID`: resume has to be exact, and it has to cross the relay
+  (SRP §5.3).
 
 ## Style
 

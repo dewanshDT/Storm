@@ -10,6 +10,7 @@
 
 SERVER := apps/server
 RELAY  := apps/relay
+RUNTIME := apps/runtime
 CLIENT := apps/client
 WWW    := apps/www
 
@@ -51,16 +52,18 @@ check: fmt-check lint test
 fmt-check:
 	cd $(SERVER) && cargo fmt --check
 	cd $(RELAY) && cargo fmt --check
+	cd $(RUNTIME) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
 ## lint: clippy + dart analyze, all must be clean
 lint:
 	cd $(SERVER) && cargo clippy --all-targets -- -D warnings
 	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
+	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-client
+test: test-server test-relay test-runtime test-client
 
 ## test-server: Rust unit tests
 test-server:
@@ -72,6 +75,13 @@ test-server:
 # workspace) and a crate outside `make check` is one CI compiles first.
 test-relay:
 	cd $(RELAY) && cargo test
+
+## test-runtime: storm-runtime unit + provider-contract tests
+#
+# Standalone like the relay: `apps/runtime` never depends on `apps/server`
+# (decision 77), so it is its own crate with its own target.
+test-runtime:
+	cd $(RUNTIME) && cargo test
 
 ## test-client: Dart unit tests
 test-client:
@@ -161,6 +171,7 @@ test-live:
 fmt:
 	cd $(SERVER) && cargo fmt
 	cd $(RELAY) && cargo fmt
+	cd $(RUNTIME) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
 # ---- running --------------------------------------------------------
