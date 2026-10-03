@@ -75,7 +75,12 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
 
   SessionController _controller(String id) => _controllers.putIfAbsent(id, () {
     final api = agentApi(ref)!;
-    return SessionController(api: api, sessionId: id)..start();
+    final open = ref.read(terminalStreamFactoryProvider);
+    return SessionController(
+      api: api,
+      sessionId: id,
+      open: open == null ? null : (offset) => open(id, offset),
+    )..start();
   });
 
   void _open(String id) {
@@ -195,9 +200,16 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
     );
 
     if (!wide) {
+      // On a phone the primary action is under the thumb, as on Hosts.
       return Scaffold(
-        appBar: AppBar(title: const Text('Agents'), actions: actions),
+        appBar: AppBar(title: const Text('Agents'), actions: [actions.first]),
         body: list,
+        floatingActionButton: FloatingActionButton.extended(
+          key: const Key('new-session-fab'),
+          onPressed: _launch,
+          icon: const Icon(LucideIcons.plus),
+          label: const Text('New session'),
+        ),
       );
     }
 
@@ -281,6 +293,17 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
 String _title(AgentSession? s) =>
     s == null ? 'Session' : '${providerLabel(s.provider)} in ${s.workspace}';
 
+/// How long ago, coarsely: a list is scanned, not read.
+String _ago(String iso) {
+  final at = DateTime.tryParse(iso);
+  if (at == null) return '';
+  final d = DateTime.now().toUtc().difference(at.toUtc());
+  if (d.inMinutes < 1) return 'just now';
+  if (d.inHours < 1) return '${d.inMinutes} min ago';
+  if (d.inDays < 1) return '${d.inHours} h ago';
+  return '${d.inDays} d ago';
+}
+
 ChipTone _tone(AgentSession? s) => switch (s?.status) {
   'running' => ChipTone.good,
   'starting' || 'creating' || 'unknown' => ChipTone.warn,
@@ -356,7 +379,7 @@ class _SessionList extends StatelessWidget {
                   borderRadius: BorderRadius.circular(t.rControl),
                 ),
                 title: Text(_title(s)),
-                subtitle: Text(hostName(s.hostId)),
+                subtitle: Text('${hostName(s.hostId)} · ${_ago(s.createdAt)}'),
                 trailing: StatusChip(label: s.statusLabel, tone: _tone(s)),
                 onTap: () => onOpen(s.id),
               ),
@@ -650,60 +673,98 @@ class _ExtraKeysState extends State<_ExtraKeys> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final term = widget.terminal;
-    Widget key(String label, VoidCallback onTap, {bool on = false, Key? k}) =>
-        Padding(
-          padding: EdgeInsets.symmetric(horizontal: t.sp * 0.25),
+    // Equal keys across the full width: eight 44 px targets fit a 360 px
+    // phone, so nothing scrolls out of view. Arrows and paste are icons,
+    // because the mono face draws the arrow glyphs at uneven sizes.
+    Widget key(
+      Widget label,
+      VoidCallback onTap, {
+      bool on = false,
+      Key? k,
+      String? tip,
+    }) => Expanded(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: t.sp * 0.2),
+        child: Tooltip(
+          message: tip ?? '',
           child: OutlinedButton(
             key: k,
             style: OutlinedButton.styleFrom(
-              minimumSize: const Size(44, 40),
-              padding: EdgeInsets.symmetric(horizontal: t.sp),
+              minimumSize: const Size(0, 44),
+              padding: EdgeInsets.zero,
               backgroundColor: on ? t.accentSoft : null,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(t.rControl),
               ),
             ),
             onPressed: onTap,
-            child: Text(
-              label,
-              style: TextStyle(fontFamily: StormTokens.monoFamily),
-            ),
+            child: label,
           ),
-        );
+        ),
+      ),
+    );
+    Text word(String w) => Text(
+      w,
+      style: TextStyle(
+        fontFamily: StormTokens.monoFamily,
+        fontSize: t.labelSize,
+      ),
+    );
+    const size = 16.0;
     return SafeArea(
       top: false,
       child: Container(
-        padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+        padding: EdgeInsets.symmetric(
+          vertical: t.sp * 0.5,
+          horizontal: t.sp * 0.3,
+        ),
         decoration: BoxDecoration(
           color: t.surface,
           border: Border(
             top: BorderSide(color: t.border, width: t.bw),
           ),
         ),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
-          child: Row(
-            children: [
-              key('Esc', term.escape, k: const Key('key-esc')),
-              key('Tab', term.tab, k: const Key('key-tab')),
-              key(
-                'Ctrl',
-                () => setState(() => term.stickyCtrl = !term.stickyCtrl),
-                on: term.stickyCtrl,
-                k: const Key('key-ctrl'),
-              ),
-              key('↑', term.up),
-              key('↓', term.down),
-              key('←', term.left),
-              key('→', term.right),
-              key('Paste', () async {
+        child: Row(
+          children: [
+            key(word('Esc'), term.escape, k: const Key('key-esc')),
+            key(word('Tab'), term.tab, k: const Key('key-tab')),
+            key(
+              word('Ctrl'),
+              () => setState(() => term.stickyCtrl = !term.stickyCtrl),
+              on: term.stickyCtrl,
+              k: const Key('key-ctrl'),
+            ),
+            key(
+              const Icon(LucideIcons.arrow_up, size: size),
+              term.up,
+              tip: 'Up',
+            ),
+            key(
+              const Icon(LucideIcons.arrow_down, size: size),
+              term.down,
+              tip: 'Down',
+            ),
+            key(
+              const Icon(LucideIcons.arrow_left, size: size),
+              term.left,
+              tip: 'Left',
+            ),
+            key(
+              const Icon(LucideIcons.arrow_right, size: size),
+              term.right,
+              tip: 'Right',
+            ),
+            key(
+              const Icon(LucideIcons.clipboard_paste, size: size),
+              () async {
                 final data = await Clipboard.getData(Clipboard.kTextPlain);
                 final text = data?.text;
                 if (text != null && text.isNotEmpty) term.paste(text);
-              }, k: const Key('key-paste')),
-            ],
-          ),
+              },
+              k: const Key('key-paste'),
+              tip: 'Paste',
+            ),
+          ],
         ),
       ),
     );
@@ -890,7 +951,11 @@ class _LauncherState extends ConsumerState<_Launcher> {
                       ChoiceChip(
                         key: Key('provider-${p.id}'),
                         label: Text(
-                          p.available ? p.label : '${p.label} (not installed)',
+                          !p.available
+                              ? '${p.label} (not installed)'
+                              : p.id == _default
+                              ? '${p.label} (default)'
+                              : p.label,
                         ),
                         selected: p.id == _provider,
                         onSelected: p.available
@@ -899,14 +964,6 @@ class _LauncherState extends ConsumerState<_Launcher> {
                       ),
                   ],
                 ),
-                if (_default != null && _provider == _default)
-                  Padding(
-                    padding: EdgeInsets.only(top: t.sp * 0.5),
-                    child: Text(
-                      'Your default provider.',
-                      style: TextStyle(fontSize: t.labelSize, color: t.text3),
-                    ),
-                  ),
                 SizedBox(height: t.sp * 2),
                 Text(
                   "Network: inherits ${host.name}'s policy",

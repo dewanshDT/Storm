@@ -2354,6 +2354,23 @@ does not reach the app.
   policy".
 - A fallback is announced in plain words.
 
+**The visual pass** (2026-10-04, at the operator's request). Every screen was
+rendered to PNG with the real fonts and icons at phone (400 px) and desktop
+(1400 px) width, in both themes, and checked by eye. That found:
+- the extra-keys row overflowing a phone;
+- status chips inheriting the mono face in lists only;
+- Revoke shown as an equal, accent-coloured button on every host card;
+- no host "last seen";
+- no thumb-reachable New session on a phone.
+
+All of it is fixed.
+
+**For the device pass (AC-Q5):** `xterm2` lays out a run of text as one
+paragraph. A glyph missing from IBM Plex Mono (Claude Code's `✻`, say) falls
+back to a font of another width and shifts the rest of that line. If it shows
+on a phone, the fix is a bundled terminal font with wide symbol coverage
+behind the surface boundary.
+
 **77e. Slice 6: `storm-runtime` ships as its own `.deb`, as its own user,
 with the §5.8 sandbox.** *(2026-10-03)*
 

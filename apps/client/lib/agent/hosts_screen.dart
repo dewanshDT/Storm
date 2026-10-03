@@ -278,11 +278,35 @@ class _HostTile extends StatelessWidget {
                   },
                   tone: host.online ? ChipTone.good : ChipTone.muted,
                 ),
+                // Rename and revoke are rare, and revoke is destructive: a
+                // menu, not two equal buttons on every card.
+                if (!revoked)
+                  PopupMenuButton<String>(
+                    key: Key('host-menu-${host.id}'),
+                    tooltip: 'Host actions',
+                    icon: const Icon(LucideIcons.ellipsis_vertical, size: 18),
+                    onSelected: (v) => v == 'rename' ? onRename() : onRevoke(),
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(
+                        value: 'rename',
+                        child: Text('Rename'),
+                      ),
+                      PopupMenuItem(
+                        value: 'revoke',
+                        child: Text(
+                          'Revoke',
+                          style: TextStyle(color: t.danger),
+                        ),
+                      ),
+                    ],
+                  ),
               ],
             ),
             SizedBox(height: t.sp * 0.5),
             Text(
-              providers,
+              host.online || host.lastSeen == null
+                  ? providers
+                  : '$providers. Last seen ${_when(host.lastSeen!)}.',
               style: TextStyle(fontSize: t.labelSize, color: t.text2),
             ),
             SizedBox(height: t.sp * 0.25),
@@ -291,19 +315,23 @@ class _HostTile extends StatelessWidget {
               "Network: inherits this host's policy",
               style: TextStyle(fontSize: t.labelSize, color: t.text3),
             ),
-            if (!revoked)
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(onPressed: onRename, child: const Text('Rename')),
-                  TextButton(onPressed: onRevoke, child: const Text('Revoke')),
-                ],
-              ),
           ],
         ),
       ),
     );
   }
+}
+
+/// A timestamp as a person reads it: the time today, the date otherwise.
+String _when(String iso) {
+  final at = DateTime.tryParse(iso)?.toLocal();
+  if (at == null) return iso;
+  final now = DateTime.now();
+  final hm =
+      '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+  return at.year == now.year && at.month == now.month && at.day == now.day
+      ? 'at $hm'
+      : 'on ${at.year}-${at.month.toString().padLeft(2, '0')}-${at.day.toString().padLeft(2, '0')}';
 }
 
 enum ChipTone { good, warn, bad, muted }
@@ -331,12 +359,17 @@ class StatusChip extends StatelessWidget {
         color: color.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(t.rControl),
       ),
+      // The family is set, not inherited: a chip inside a ListTile's trailing
+      // slot would otherwise pick up the mono label style, and the same
+      // component would look different on two screens.
       child: Text(
         label,
         style: TextStyle(
+          fontFamily: StormTokens.sansFamily,
           fontSize: t.labelSize,
           color: color,
           fontWeight: FontWeight.w600,
+          height: 1.2,
         ),
       ),
     );

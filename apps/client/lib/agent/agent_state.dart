@@ -4,6 +4,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../state/app_state.dart';
 import 'agent_api.dart';
+import 'terminal_events.dart';
+
+/// How a session's terminal stream is opened, when a test supplies one.
+final terminalStreamFactoryProvider =
+    Provider<Stream<TerminalEvent> Function(String sessionId, int offset)?>(
+      (ref) => null,
+    );
 
 /// How an [AgentApi] is built, when a test supplies one.
 final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) => null);
