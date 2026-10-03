@@ -26,9 +26,18 @@
 //! - [`cli`]: the `cli` providers (`claude-code`, `opencode`, `shell`) and
 //!   how their sessions end: the whole process group, never just the agent.
 //! - `pty`: the carrier the runtime builds around a `cli` launch description.
+//!
+//! ## Slice 3
+//!
+//! - [`identity`]: the host key, `host.json`, and the wire formats pinned by
+//!   `docs/runtime-vectors.json`.
+//! - [`client`]: enrollment and key authentication against the server, which
+//!   is verified against its pinned key before anything is sent.
 
 pub mod cli;
+pub mod client;
 pub mod fake;
+pub mod identity;
 pub mod provider;
 mod pty;
 pub mod scrollback;

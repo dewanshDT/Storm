@@ -926,6 +926,233 @@ pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiR
     Ok(())
 }
 
+// ---- Agent Runtime: Runtime Hosts (decision 77b) ---------------------------
+
+fn internal(e: impl std::fmt::Display) -> ApiError {
+    ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// **The one gate on every `/v1/agent/*` operation** (AM5): agent execution and
+/// host administration are the server owner's alone until the authorization
+/// release. Anyone else gets `403` — never an empty list, which would read as
+/// "no hosts" rather than "not yours to see".
+pub fn require_owner(actor: &Actor) -> ApiResult<()> {
+    if actor.role() == crate::auth::users::Role::Owner {
+        Ok(())
+    } else {
+        Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "agents are available to the server owner only".into(),
+        ))
+    }
+}
+
+/// A host as the owner's client sees it.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostView {
+    #[serde(flatten)]
+    pub host: crate::auth::hosts::Host,
+    /// `online`, `offline` or `revoked` (freeze §5.5). The host link, which
+    /// is what makes a host `online`, arrives in slice 4.
+    pub status: &'static str,
+    /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
+    /// client shows it, so the record says it.
+    pub egress: &'static str,
+}
+
+fn host_view(host: crate::auth::hosts::Host) -> HostView {
+    let status = if host.is_revoked() {
+        "revoked"
+    } else {
+        "offline"
+    };
+    HostView {
+        host,
+        status,
+        egress: "host",
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IssuedEnrollment {
+    /// The string the owner pastes into `storm-runtime enroll`. Shown once:
+    /// it carries the single-use token.
+    pub enrollment: String,
+    pub expires: String,
+}
+
+pub async fn issue_host_enrollment(
+    state: &Shared,
+    actor: &Actor,
+    server_url: &str,
+) -> ApiResult<IssuedEnrollment> {
+    require_owner(actor)?;
+    crate::auth::hosts::validate_server_url(server_url).map_err(bad_request)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let (enrollment, token) =
+        crate::auth::hosts::issue_enrollment(&mut auth_db, actor.user_id(), &now)
+            .map_err(internal)?;
+    Ok(IssuedEnrollment {
+        enrollment: crate::auth::hosts::enrollment_string(
+            server_url.trim_end_matches('/'),
+            &state.identity.server_id,
+            &state.identity.public_key_b64(),
+            &token,
+        ),
+        expires: enrollment.expires,
+    })
+}
+
+pub async fn list_hosts(state: &Shared, actor: &Actor) -> ApiResult<Vec<HostView>> {
+    require_owner(actor)?;
+    let auth_db = state.auth_db.lock().await;
+    Ok(auth_db
+        .list_hosts()
+        .map_err(internal)?
+        .into_iter()
+        .map(host_view)
+        .collect())
+}
+
+pub async fn rename_host(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    name: &str,
+) -> ApiResult<HostView> {
+    require_owner(actor)?;
+    crate::auth::hosts::validate_name(name).map_err(bad_request)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    crate::auth::hosts::rename(&mut auth_db, host_id, name, actor.user_id(), &now)
+        .map_err(internal)?
+        .map(host_view)
+        .ok_or_else(|| not_found("no such host"))
+}
+
+/// Revokes a host: its tokens die now, and it cannot authenticate again.
+pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiResult<()> {
+    require_owner(actor)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    if crate::auth::hosts::revoke(&mut auth_db, host_id, actor.user_id(), &now).map_err(internal)? {
+        Ok(())
+    } else {
+        Err(not_found("no such host"))
+    }
+}
+
+/// A host's refusal: **one generic answer to the host, a specific audit row**.
+/// Telling an unauthenticated caller whether a token was unknown, used or
+/// expired is free reconnaissance (the `keys` rule).
+fn host_refusal(
+    auth_db: &crate::auth::AuthDb,
+    error: crate::auth::hosts::HostError,
+    host_id: Option<&str>,
+    remote: Option<&str>,
+    now: &str,
+) -> ApiError {
+    use crate::auth::hosts::{HostError, HostFailure};
+    match error {
+        HostError::Refused(failure) => {
+            let detail = serde_json::json!({ "reason": failure.code(), "host_id": host_id });
+            let _ = auth_db.record_event_from(
+                crate::auth::hosts::EVENT_HOST_AUTH_REJECTED,
+                None,
+                None,
+                remote,
+                now,
+                &detail.to_string(),
+            );
+            if failure == HostFailure::Malformed {
+                bad_request("malformed request")
+            } else {
+                ApiError(axum::http::StatusCode::UNAUTHORIZED, "refused".into())
+            }
+        }
+        HostError::Internal(e) => internal(e),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrolledHost {
+    pub host_id: String,
+    pub server_id: String,
+}
+
+pub struct EnrollHost<'a> {
+    pub token: &'a str,
+    pub public_key: &'a str,
+    pub key_id: &'a str,
+    pub name: &'a str,
+    pub signature: &'a str,
+}
+
+pub async fn enroll_host(
+    state: &Shared,
+    req: EnrollHost<'_>,
+    remote: Option<&str>,
+) -> ApiResult<EnrolledHost> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let request = crate::auth::hosts::EnrollRequest {
+        token: req.token,
+        public_key: req.public_key,
+        key_id: req.key_id,
+        name: req.name,
+        signature: req.signature,
+    };
+    match crate::auth::hosts::enroll(&mut auth_db, &state.identity.server_id, &request, &now) {
+        Ok(host) => Ok(EnrolledHost {
+            host_id: host.id,
+            server_id: state.identity.server_id.clone(),
+        }),
+        Err(e) => Err(host_refusal(&auth_db, e, None, remote, &now)),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostChallenge {
+    pub nonce: String,
+    pub expires: String,
+}
+
+pub async fn host_challenge(
+    state: &Shared,
+    host_id: &str,
+    remote: Option<&str>,
+) -> ApiResult<HostChallenge> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    match crate::auth::hosts::issue_challenge(&mut auth_db, host_id, &now) {
+        Ok((nonce, expires)) => Ok(HostChallenge { nonce, expires }),
+        Err(e) => Err(host_refusal(&auth_db, e, Some(host_id), remote, &now)),
+    }
+}
+
+pub async fn host_authenticate(
+    state: &Shared,
+    host_id: &str,
+    nonce: &str,
+    signature: &str,
+    remote: Option<&str>,
+) -> ApiResult<crate::auth::hosts::IssuedHostToken> {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    match crate::auth::hosts::authenticate_key(
+        &mut auth_db,
+        &state.identity.server_id,
+        host_id,
+        nonce,
+        signature,
+        &now,
+    ) {
+        Ok(issued) => Ok(issued),
+        Err(e) => Err(host_refusal(&auth_db, e, Some(host_id), remote, &now)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,6 +1255,7 @@ mod tests {
             vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
             hasher: crate::auth::Hasher::new(),
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
         })
     }
 

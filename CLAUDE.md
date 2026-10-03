@@ -384,6 +384,22 @@ decision 77):
   offers interactions; the runtime owns the carrier. A PTY type in
   `src/provider.rs` is the regression, and the fake provider exists to prove
   the contract works without one.
+- **A host token reaches `/v1/runtime/*` and nothing else, and nothing else
+  reaches `/v1/runtime/*`** (decision 77b). `RequiredTier::Host` is a tier,
+  not a flag, for the reason `Mcp` is, and `require_auth` checks the `sht_`
+  prefix in both directions before looking anything up.
+- **`storm-host-auth:v1:` is a third signing domain, on a third key.** The
+  host signs it; the server never does. It must never coincide with
+  `storm-challenge:v1:` or `storm-relay-auth:v1:`. Enrollment signs four
+  fields (`…:<server_id>:<token_id>`) and connect signs five
+  (`…:<server_id>:<host_id>:<nonce>`), every field validated against the
+  colon. `docs/runtime-vectors.json`, regenerated with
+  `tools/runtime-vectors/generate.py`, is what keeps both crates in agreement.
+- **An enrollment string is parsed from the right.** Its `server_url` has
+  colons; nothing after it may.
+- **A host verifies its server before sending it anything** — a token, a
+  signature, an enrollment. Every connect re-runs the challenge against the
+  key pinned at enrollment.
 - **Terminal output is addressed by absolute byte offset, and a reader that
   fell behind gets an explicit gap.** Never a short read and never
   `Last-Event-ID`: resume has to be exact, and it has to cross the relay

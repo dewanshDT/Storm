@@ -1207,6 +1207,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         hasher: auth::Hasher::new(),
         // Same: one limiter for the process, or the limits do not exist.
         login_limiter: auth::ratelimit::LoginLimiter::new(),
+        host_limiter: auth::ratelimit::LoginLimiter::new(),
     });
 
     // One watcher over the whole root, attributing each event to a vault by

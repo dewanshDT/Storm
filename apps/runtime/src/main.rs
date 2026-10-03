@@ -1,0 +1,112 @@
+//! `storm-runtime` — a Storm Runtime Host (Agent Runtime V1; decision 77).
+
+use std::io::{BufRead, IsTerminal};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+
+/// The host's state: its key, `host.json` and later its session table. The
+/// systemd unit's `StateDirectory` (freeze §5.8).
+const DEFAULT_STATE: &str = "/var/lib/storm-runtime";
+
+#[derive(Parser)]
+#[command(name = "storm-runtime", version, about = "Storm Runtime Host")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Enroll this host with a Storm Server.
+    ///
+    /// Reads the enrollment string the app showed you from stdin, or prompts
+    /// for it without echo. **Never pass it as an argument**: it carries a
+    /// single-use secret, and arguments are visible to every user in `ps`.
+    Enroll {
+        #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
+        state: PathBuf,
+        /// How this host appears in the app. Defaults to the hostname.
+        #[arg(long)]
+        name: Option<String>,
+        /// Replace an existing enrollment.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Check this host's enrollment: verify the server, prove the key, and
+    /// ask the server who it thinks this host is.
+    Check {
+        #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
+        state: PathBuf,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // **Before anything opens a TLS connection.** rustls panics on the first
+    // handshake if it cannot tell which provider to use, and `ring` is the one
+    // the musl/zig release build can compile — never aws-lc-rs (decision 77b,
+    // the storm-server rule).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    match Cli::parse().command {
+        Command::Enroll { state, name, force } => {
+            let enrollment = read_enrollment()?;
+            let name = name.unwrap_or_else(default_name);
+            let config = storm_runtime::client::enroll(&state, &enrollment, &name, force).await?;
+            println!("Enrolled as {} ({}).", name, config.host_id);
+            println!("  server : {} ({})", config.server_url, config.server_id);
+            println!("  state  : {}", state.display());
+            Ok(())
+        }
+        Command::Check { state } => {
+            let config = storm_runtime::identity::HostConfig::load(&state)?;
+            let key = storm_runtime::identity::HostKey::load(&state, &config.key_id)?;
+            let client = storm_runtime::client::ServerClient::for_host(&config)?;
+            client.verify_server().await?;
+            let token = client.authenticate(&config.host_id, &key).await?;
+            let me: serde_json::Value = client
+                .http()
+                .get(format!("{}/v1/runtime/whoami", client.base()))
+                .bearer_auth(&token.token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            println!(
+                "OK: {} is enrolled at {} as {} (token valid until {}).",
+                me["name"].as_str().unwrap_or("?"),
+                config.server_url,
+                config.host_id,
+                token.expires
+            );
+            Ok(())
+        }
+    }
+}
+
+fn read_enrollment() -> Result<String> {
+    let line = if std::io::stdin().is_terminal() {
+        rpassword::prompt_password("Paste the enrollment string from the Storm app: ")
+            .context("reading the enrollment string")?
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("reading the enrollment string from stdin")?;
+        line
+    };
+    Ok(line.trim().to_string())
+}
+
+fn default_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .map(|s| s.trim().chars().take(64).collect::<String>())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "runtime-host".into())
+}

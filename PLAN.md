@@ -2122,6 +2122,77 @@ as given when it contains a `/`.
 Loading provider env files (`0600`, referenced by name) belongs to
 `runtime.toml` and arrives with the daemon in slice 4.
 
+**77b. Slice 3: hosts enroll with a two-part token and authenticate with a
+key, in a tier of their own.** *(2026-10-03)*
+
+**The wire formats.** `docs/runtime-vectors.json` pins every one of these,
+and both crates read it. `tools/runtime-vectors/generate.py` regenerates it,
+from a reference implementation independent of either crate.
+- **The enrollment token is `sen_<26 Crockford>.<43 base64url>`.** The first
+  part is public: it is the enrollment's record id, `hen_<26>`, and it is the
+  freeze's `<token_id>`, which the host derives without asking. The second
+  part is 256 secret bits. The server stores the blake3 of the whole token and
+  looks it up by that hash, like every other token. A public id inside the
+  token keeps the signed message free of secrets and of hashing. That matters
+  because the generator has no blake3, and the message must be reproducible by
+  an unrelated implementation.
+- **The enrollment string is
+  `storm-enroll:v1:<server_url>:<server_id>:<server_pubkey>:<token>`.** It is
+  parsed **from the right**: the URL contains colons, and none of the last
+  three fields can. `server_url` is supplied by the client that asks for the
+  enrollment. The server does not know how it is reached, and the owner's
+  client does.
+- **Signed messages** (both under the host's key, never the server's):
+  - Enrollment: `storm-host-auth:v1:<server_id>:<token_id>`.
+  - Connect: `storm-host-auth:v1:<server_id>:<host_id>:<nonce>`.
+
+  The two differ in field count, and every field is validated against the
+  delimiter rules, so neither message can be read as the other. Neither can
+  be read as `storm-challenge:v1:` or `storm-relay-auth:v1:`, which are signed
+  by a different key.
+
+**Credentials**, in `state/auth.db`, created additively in the
+`CREATE TABLE IF NOT EXISTS` batch, so `SCHEMA_VERSION` stays 5:
+- `runtime_hosts`: the host's id, name, public key, key id, who enrolled it
+  and when, `last_seen` and `revoked`.
+- `host_enrollments`: single use. They expire after 10 minutes.
+- `host_tokens`: they expire after 24 hours and are minted only by proving the
+  key.
+- `host_challenges`: single use, server-generated, expiring after 60 s.
+
+The token prefixes are `sen_` (enrollment) and `sht_` (host token). Both are
+blake3-hashed, never stored.
+
+**The `Host` tier** is a fifth `RequiredTier`:
+- It accepts `Bearer sht_…` on `/v1/runtime/*`, and nothing else does.
+- A session token, an `stk_` key or a device credential is refused there with
+  `401`. A host token is refused everywhere else.
+- `/v1/runtime/enroll`, `/auth/challenge` and `/auth` are none-tier, and are
+  rate-limited by a limiter of their own (not the login one, whose budget they
+  must not spend).
+
+**The owner check.** Every `/v1/agent/*` route requires the owner role.
+Anyone else gets `403`, never an empty list (AM5). A helper in `ops.rs`
+enforces it, so a route cannot forget it.
+
+**Revocation.** It sets `revoked` and revokes every live host token. The link
+closes when slice 4 exists. A revoked host is refused at authentication.
+
+**Security events.** `host_enrollment_issued`, `host_enrolled`,
+`host_renamed`, `host_revoked` and `host_auth_rejected`. Never a token,
+never a key.
+
+**The host side** (`storm-runtime enroll`):
+1. It reads the enrollment string from stdin, never from an argument.
+2. It verifies the server through `POST /v1/server/challenge`, against the
+   pinned key, before anything else.
+3. It generates an Ed25519 key, written `0600` in a `0700` `identity/`
+   directory, both created with those modes.
+4. It enrolls, then writes `host.json`.
+
+The HTTP client is `reqwest` with rustls on `ring`. Never `aws-lc-rs`: the
+musl/zig release build cannot compile it.
+
 ---
 
 ## Data model
