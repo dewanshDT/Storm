@@ -1,0 +1,35 @@
+#!/bin/sh
+set -e
+
+# A system user of its own (decision 77e). **Never added to the server's
+# group**: that group's 0750 storage root is what keeps a co-located runtime
+# out of the vaults and auth.db (P3, AC-S3). tests/packaging.rs checks that
+# nothing here grants it.
+if ! id storm-runtime >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/storm-runtime/home --no-create-home \
+        --shell /usr/sbin/nologin storm-runtime || true
+fi
+
+# Created with their modes, not chmod-ed afterwards (the A2 rule).
+install -d -m 0700 -o storm-runtime -g storm-runtime /var/lib/storm-runtime
+install -d -m 0700 -o storm-runtime -g storm-runtime /var/lib/storm-runtime/home
+install -d -m 0750 -o storm-runtime -g storm-runtime /var/lib/storm-runtime/workspaces
+mkdir -p /etc/storm-runtime
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    # On upgrade, pick up the new binary if it was running. A fresh install
+    # stays stopped: it has nothing to connect to until it is enrolled.
+    if [ "$1" = "configure" ] && [ -n "$2" ] && systemctl is-active --quiet storm-runtime; then
+        systemctl restart storm-runtime || true
+    fi
+fi
+
+if [ -z "$2" ]; then
+    echo "storm-runtime installed but not started. In the Storm app, open"
+    echo "  Settings > Agents > Hosts > Enroll a host, then run:"
+    echo "    sudo -u storm-runtime storm-runtime enroll"
+    echo "    sudo systemctl enable --now storm-runtime"
+fi
+
+exit 0

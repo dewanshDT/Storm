@@ -2389,6 +2389,26 @@ runs the old package's `prerm` on upgrade.
 - `RestartPreventExitStatus=3`: a revoked host stops rather than loops.
 - **A fresh install is not started.** It runs once enrolled.
 
+**Verified on codebox** with the real `postinst` and the real unit under
+systemd, against a real server:
+- `storm-runtime` is in its own group only, and its directories came out
+  `700`/`700`/`750`. It comes online offering all four providers.
+- **Shell:** a real PTY (`/dev/pts/N`) under `PrivateDevices`, as
+  `storm-runtime`, with the right `HOME`.
+- **Claude Code** started as `claude --permission-mode default` and drew its
+  first-run screen.
+- **OpenCode's TUI** drew. No `mprotect` failure, so the MDWE omission
+  holds.
+- Each session's process group was gone after End.
+- **AC-S3 analogue:** the runtime account is refused a `0750` data tree it
+  does not own.
+- **Revocation:** exit 3, `NRestarts=0`, and the unit stays stopped.
+- No token in the journal.
+
+**AC-P1 itself still needs the operator.** Claude Code and OpenCode must be
+logged in as `storm-runtime` before an agent can accept a prompt and edit a
+file.
+
 ---
 
 ## Data model

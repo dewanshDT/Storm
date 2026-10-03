@@ -1,0 +1,27 @@
+# /etc/storm-runtime/runtime.toml: the Storm Runtime Host's configuration
+# (freeze §5.7). Every value here is an operational default, not a limit.
+
+# Each subdirectory of a root is a workspace, named by its directory name. A
+# root outside /var/lib/storm-runtime also needs a ReadWritePaths drop-in on
+# the unit. A root inside, or around, a Storm data root is refused (D3).
+workspace_roots = ["/var/lib/storm-runtime/workspaces"]
+
+max_sessions = 8
+scrollback_bytes = 4194304
+
+# Omit [[providers]] entirely to offer the three built-ins: claude-code
+# (the default), opencode and shell. To choose, list them:
+#
+# [[providers]]
+# id = "claude-code"
+#
+# [[providers]]
+# id = "shell"
+# command = "/bin/bash"
+# args = ["-l"]
+#
+# Provider secrets go in an env file, mode 0600, never here:
+#
+# [[providers]]
+# id = "opencode"
+# env_file = "/etc/storm-runtime/opencode.env"
