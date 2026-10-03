@@ -397,6 +397,22 @@ decision 77):
   `tools/runtime-vectors/generate.py`, is what keeps both crates in agreement.
 - **An enrollment string is parsed from the right.** Its `server_url` has
   colons; nothing after it may.
+- **The Agent Manager is the only session authority** (decision 77c). A host
+  reports; the manager decides. A session that has ended never changes status
+  again, a host may post only for its own sessions, and at boot every session
+  that has not ended becomes `unknown` until its host's `hello` says
+  otherwise. Guessing `running` after a restart is the bug this prevents.
+- **The output cache accepts bytes in order only.** Overlap is skipped, a jump
+  forward restarts the ring, and an empty cache takes the first offset it is
+  given. That last rule is what lets `terminal.replay` refill it after a server
+  restart.
+- **A host link is identified by its generation.** An old stream closing must
+  never mark a newer link offline. Every lock in `agent/` is a
+  `std::sync::Mutex` that is never held across an `.await`.
+- **Input is at-most-once, and never blocks the link.** It is refused with 503
+  while the host is offline and never queued on the server. On the host, each
+  session has its own ordered writer, and every PTY write is bounded, so a hung
+  agent can never hold the session against the owner's `end`.
 - **A host verifies its server before sending it anything** — a token, a
   signature, an enrollment. Every connect re-runs the challenge against the
   key pinned at enrollment.

@@ -90,6 +90,7 @@ test-client:
 ## test-live: integration suites against a real server, started and torn down
 test-live:
 	@cd $(SERVER) && cargo build --quiet
+	@cd $(RUNTIME) && cargo build --quiet
 	@set -e; \
 	ROOT="$$PWD"; \
 	if curl -sf -o /dev/null http://127.0.0.1:$(PORT)/v1/health 2>/dev/null; then \
@@ -123,6 +124,10 @@ test-live:
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- mcp e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- agent runtime e2e (its own server and host; decision 77c) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 "$$ROOT/$(SERVER)/tests/agent_e2e.py"; \
 	echo "--- auth e2e + client device tier (each needs a virgin server) ---"; \
 	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
 	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \

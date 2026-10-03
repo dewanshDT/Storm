@@ -40,6 +40,9 @@ use crate::status::{EndReason, SessionEnd, SessionStatus};
 /// How long a process group gets between SIGHUP and SIGKILL (freeze §7.3).
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
+/// The longest one input write may wait for the agent to read.
+pub const INPUT_DEADLINE: Duration = Duration::from_secs(5);
+
 const INTERACTIONS: [InteractionKind; 1] = [InteractionKind::Terminal];
 
 /// A provider that runs a command on the host.
@@ -295,17 +298,43 @@ impl CliTerminal {
 }
 
 impl TerminalChannel for CliTerminal {
+    /// Writes in small chunks, each only once the terminal can take it, within
+    /// [`INPUT_DEADLINE`] overall.
+    ///
+    /// A PTY write blocks while the agent is not reading its input, and the
+    /// caller holds the session across this call. An unbounded write would let
+    /// a hung agent hold it forever, so that even the owner's `end` could not
+    /// get in. Input is at-most-once (freeze §11.3): a write that cannot land
+    /// in time fails with `TimedOut` rather than waiting.
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
         self.ensure_running()?;
-        self.writer.write_all(bytes).map_err(|e| {
-            // A write racing the agent's exit fails with EIO; to the caller it
-            // is the same thing as writing after the end.
-            if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) {
-                io::Error::new(io::ErrorKind::BrokenPipe, "the session has ended")
-            } else {
-                e
+        let deadline = std::time::Instant::now() + INPUT_DEADLINE;
+        for chunk in bytes.chunks(256) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let timeout = Timespec {
+                tv_sec: left.as_secs() as _,
+                tv_nsec: left.subsec_nanos() as _,
+            };
+            let mut fds = [PollFd::new(&self.writer, PollFlags::OUT)];
+            let ready = poll(&mut fds, Some(&timeout))?;
+            if ready == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the agent is not reading its input",
+                ));
             }
-        })
+            self.writer.write_all(chunk).map_err(|e| {
+                // A write racing the agent's exit fails with EIO; to the caller
+                // it is the same thing as writing after the end.
+                if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "the session has ended")
+                } else {
+                    e
+                }
+            })?;
+        }
+        Ok(())
     }
 
     fn resize(&mut self, size: TerminalSize) -> io::Result<()> {

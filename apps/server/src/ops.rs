@@ -952,23 +952,28 @@ pub fn require_owner(actor: &Actor) -> ApiResult<()> {
 pub struct HostView {
     #[serde(flatten)]
     pub host: crate::auth::hosts::Host,
-    /// `online`, `offline` or `revoked` (freeze §5.5). The host link, which
-    /// is what makes a host `online`, arrives in slice 4.
+    /// `online`, `offline` or `revoked` (freeze §5.5).
     pub status: &'static str,
+    /// What the host offers, while it is online.
+    pub capabilities: Option<crate::agent::Capabilities>,
     /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
     /// client shows it, so the record says it.
     pub egress: &'static str,
 }
 
-fn host_view(host: crate::auth::hosts::Host) -> HostView {
+fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
+    let live = state.agent.host_live(&host.id);
     let status = if host.is_revoked() {
         "revoked"
+    } else if live.online {
+        "online"
     } else {
         "offline"
     };
     HostView {
         host,
         status,
+        capabilities: live.capabilities,
         egress: "host",
     }
 }
@@ -1011,7 +1016,7 @@ pub async fn list_hosts(state: &Shared, actor: &Actor) -> ApiResult<Vec<HostView
         .list_hosts()
         .map_err(internal)?
         .into_iter()
-        .map(host_view)
+        .map(|h| host_view(state, h))
         .collect())
 }
 
@@ -1027,7 +1032,7 @@ pub async fn rename_host(
     let mut auth_db = state.auth_db.lock().await;
     crate::auth::hosts::rename(&mut auth_db, host_id, name, actor.user_id(), &now)
         .map_err(internal)?
-        .map(host_view)
+        .map(|h| host_view(state, h))
         .ok_or_else(|| not_found("no such host"))
 }
 
@@ -1036,11 +1041,16 @@ pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     require_owner(actor)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    if crate::auth::hosts::revoke(&mut auth_db, host_id, actor.user_id(), &now).map_err(internal)? {
-        Ok(())
-    } else {
-        Err(not_found("no such host"))
+    if !crate::auth::hosts::revoke(&mut auth_db, host_id, actor.user_id(), &now)
+        .map_err(internal)?
+    {
+        return Err(not_found("no such host"));
     }
+    drop(auth_db);
+    // Its link closes and its sessions fail now (freeze §5.6); the host ends
+    // them itself when it is next refused.
+    state.agent.revoke_host(host_id).map_err(internal)?;
+    Ok(())
 }
 
 /// A host's refusal: **one generic answer to the host, a specific audit row**.
@@ -1153,6 +1163,222 @@ pub async fn host_authenticate(
     }
 }
 
+// ---- Agent Runtime: sessions and the host link (decision 77c) ----------
+
+/// The Agent Manager's errors as HTTP. One place, so a route cannot answer
+/// "host offline" with anything but 503.
+fn agent_error(e: crate::agent::AgentError) -> ApiError {
+    use crate::agent::AgentError as E;
+    use axum::http::StatusCode as S;
+    match e {
+        E::NotFound(m) => not_found(m),
+        E::BadRequest(m) => bad_request(m),
+        E::Conflict(m) => conflict(m),
+        E::HostOffline => ApiError(S::SERVICE_UNAVAILABLE, "the host is offline".into()),
+        E::TooManySessions => ApiError(
+            S::TOO_MANY_REQUESTS,
+            "the host is running its maximum number of sessions".into(),
+        ),
+        E::NoProvider => ApiError(
+            S::UNPROCESSABLE_ENTITY,
+            "the host has no supported provider installed".into(),
+        ),
+        E::NotYours => ApiError(S::FORBIDDEN, "not a session on this host".into()),
+        E::Internal(e) => internal(e),
+    }
+}
+
+/// A host's workspaces, each with its live-session count (freeze §8).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceView {
+    pub name: String,
+    pub live_sessions: usize,
+}
+
+pub async fn host_workspaces(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+) -> ApiResult<Vec<WorkspaceView>> {
+    require_owner(actor)?;
+    state.agent.refresh(host_id);
+    let caps = state.agent.host_live(host_id).capabilities.ok_or_else(|| {
+        ApiError(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "the host is offline".into(),
+        )
+    })?;
+    let counts = state.agent.live_counts(host_id).map_err(agent_error)?;
+    Ok(caps
+        .workspaces
+        .into_iter()
+        .map(|name| WorkspaceView {
+            live_sessions: counts.get(&name).copied().unwrap_or(0),
+            name,
+        })
+        .collect())
+}
+
+pub async fn launch_session(
+    state: &Shared,
+    actor: &Actor,
+    req: crate::agent::Launch,
+) -> ApiResult<crate::agent::store::SessionRecord> {
+    require_owner(actor)?;
+    // The host must exist and be live in auth.db, not merely connected.
+    {
+        let auth_db = state.auth_db.lock().await;
+        match auth_db.host_by_id(&req.host_id).map_err(internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(not_found("no such host")),
+        }
+    }
+    state
+        .agent
+        .launch(actor.user_id(), req)
+        .map_err(agent_error)
+}
+
+pub async fn list_sessions(
+    state: &Shared,
+    actor: &Actor,
+) -> ApiResult<Vec<crate::agent::store::SessionRecord>> {
+    require_owner(actor)?;
+    state.agent.list().map_err(agent_error)
+}
+
+pub async fn get_session(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<crate::agent::store::SessionRecord> {
+    require_owner(actor)?;
+    state.agent.get(id).map_err(agent_error)
+}
+
+pub async fn end_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
+    require_owner(actor)?;
+    state.agent.end(id).map_err(agent_error)
+}
+
+pub async fn dismiss_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
+    require_owner(actor)?;
+    state.agent.dismiss(id).map_err(agent_error)
+}
+
+pub async fn session_input(state: &Shared, actor: &Actor, id: &str, bytes: &[u8]) -> ApiResult<()> {
+    require_owner(actor)?;
+    state.agent.input(id, bytes).map_err(agent_error)
+}
+
+pub async fn session_resize(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    size: crate::agent::TerminalSize,
+) -> ApiResult<()> {
+    require_owner(actor)?;
+    state.agent.resize(id, size).map_err(agent_error)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentConfigView {
+    pub default_provider: String,
+}
+
+pub async fn agent_config(state: &Shared, actor: &Actor) -> ApiResult<AgentConfigView> {
+    require_owner(actor)?;
+    Ok(AgentConfigView {
+        default_provider: state.agent.default_provider(),
+    })
+}
+
+/// Sets the global default provider (freeze §6). Audited.
+pub async fn set_agent_config(
+    state: &Shared,
+    actor: &Actor,
+    default_provider: &str,
+) -> ApiResult<AgentConfigView> {
+    require_owner(actor)?;
+    let valid = (1..=32).contains(&default_provider.len())
+        && !default_provider.starts_with('-')
+        && default_provider
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !valid {
+        return Err(bad_request(
+            "a provider id is 1–32 lowercase letters, digits and '-'",
+        ));
+    }
+    state
+        .agent
+        .set_default_provider(default_provider)
+        .map_err(internal)?;
+    let now = crate::index::now_rfc3339();
+    let auth_db = state.auth_db.lock().await;
+    let _ = auth_db.record_event(
+        "agent_default_provider_changed",
+        Some(actor.user_id()),
+        None,
+        &now,
+        &serde_json::json!({ "default_provider": default_provider }).to_string(),
+    );
+    Ok(AgentConfigView {
+        default_provider: default_provider.to_string(),
+    })
+}
+
+// What a host does on its link. No owner check: the `Host` tier is the
+// boundary, and the manager checks that a host posts only for its own sessions.
+
+pub async fn runtime_hello(
+    state: &Shared,
+    host_id: &str,
+    hello: crate::agent::Hello,
+) -> ApiResult<()> {
+    {
+        let auth_db = state.auth_db.lock().await;
+        let _ = auth_db.touch_host(host_id, &crate::index::now_rfc3339());
+    }
+    state.agent.hello(host_id, hello).map_err(agent_error)
+}
+
+pub fn runtime_inventory(
+    state: &Shared,
+    host_id: &str,
+    caps: crate::agent::Capabilities,
+) -> ApiResult<()> {
+    state.agent.inventory(host_id, caps).map_err(agent_error)
+}
+
+pub fn runtime_output(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    offset: u64,
+    data_b64: &str,
+) -> ApiResult<()> {
+    let bytes = data_encoding::BASE64
+        .decode(data_b64.as_bytes())
+        .map_err(|_| bad_request("data must be base64"))?;
+    state
+        .agent
+        .host_output(host_id, session, offset, &bytes)
+        .map_err(agent_error)
+}
+
+pub fn runtime_status(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    report: &crate::agent::StatusReport,
+) -> ApiResult<()> {
+    state
+        .agent
+        .host_status(host_id, session, report)
+        .map_err(agent_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1482,7 @@ mod tests {
             hasher: crate::auth::Hasher::new(),
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
         })
     }
 

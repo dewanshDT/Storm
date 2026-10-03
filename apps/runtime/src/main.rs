@@ -34,6 +34,13 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Run the host: connect to the server and run the agents it asks for.
+    Serve {
+        #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
+        state: PathBuf,
+        #[arg(long, env = "STORM_RUNTIME_CONFIG", default_value = storm_runtime::config::DEFAULT_CONFIG)]
+        config: PathBuf,
+    },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
     Check {
@@ -58,6 +65,24 @@ async fn main() -> Result<()> {
             println!("Enrolled as {} ({}).", name, config.host_id);
             println!("  server : {} ({})", config.server_url, config.server_id);
             println!("  state  : {}", state.display());
+            Ok(())
+        }
+        Command::Serve { state, config } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "info".into()),
+                )
+                .init();
+            let config = storm_runtime::config::RuntimeConfig::load(&config)?;
+            let host = storm_runtime::host::Host::new(&state, config)?;
+            if let Err(e) = host.run().await {
+                eprintln!("storm-runtime: {e:#}");
+                // A refused key is final: exit with a status the unit is told
+                // not to restart on, rather than looping against a server that
+                // has revoked this host (freeze §5.6).
+                std::process::exit(3);
+            }
             Ok(())
         }
         Command::Check { state } => {

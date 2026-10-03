@@ -2267,6 +2267,26 @@ packaging.
   never a path, and symlinks that leave a root are refused. A root that is
   inside, or contains, a Storm data root it can see (`/srv/storm` by default)
   is refused at startup (D3).
+- **Terminal bytes** are standard padded base64 (RFC 4648 §4) in both
+  directions: in the host's output posts, in `terminal.input`, and in the
+  client stream's `output` events.
+- **Input is bounded on the host.** A PTY write polls for room in 256-byte
+  chunks within a 5 s deadline, in a per-session ordered writer task. A hung
+  agent cannot block the link or hold the session against `end`.
+
+**Verified** (`apps/server/tests/agent_e2e.py`, 54 checks, about 19 s; run by
+`make test-live`): a real server and a real host, with the fake and shell
+providers. It covers:
+- AC-A1, F1 and F7
+- R1: a server restart, after which scrollback is replayed from the host and
+  the agent is never interrupted
+- R2: a host restart, after which the session is `host_restart`
+- R3: revocation, after which the host exits 3 and cannot authenticate
+- S1, S2, S4 and S5
+- offset resume and the explicit gap
+
+AC-T2 is a relay unit test: the terminal stream served over the tunnel by the
+same handler, under the same auth and owner check.
 
 ---
 

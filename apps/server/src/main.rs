@@ -25,6 +25,7 @@
 // run locally is not a gate; it is a tax on whoever pushes next.
 #![allow(clippy::result_large_err)]
 
+mod agent;
 mod api;
 mod auth;
 mod db;
@@ -1185,6 +1186,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         }
     };
 
+    // The Agent Manager (decision 77c). Opening it marks every session that
+    // had not ended `unknown` until its host reports in.
+    let agent = Arc::new(crate::agent::AgentManager::open(&state_dir)?);
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1208,6 +1213,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         // Same: one limiter for the process, or the limits do not exist.
         login_limiter: auth::ratelimit::LoginLimiter::new(),
         host_limiter: auth::ratelimit::LoginLimiter::new(),
+        agent,
     });
 
     // One watcher over the whole root, attributing each event to a vault by
