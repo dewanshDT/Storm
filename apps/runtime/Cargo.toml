@@ -15,3 +15,10 @@ repository = "https://github.com/dewanshDT/Storm"
 # blocking threads anyway, and an async runtime in the contract would leak into
 # every provider. The host link brings tokio in slice 4, at its own edge.
 [dependencies]
+# The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
+# the child's pre_exec stays async-signal-safe and the musl build needs no libc
+# shims.
+rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs"] }
+
+[dev-dependencies]
+rustix = { version = "1.1.5", features = ["process"] }

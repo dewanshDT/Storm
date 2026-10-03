@@ -2077,6 +2077,51 @@ is claimed (AC-P1).
 contract without a thread per session, or a second interaction kind needs the
 provider rather than the runtime to own its carrier.
 
+**77a. Slice 2: the PTY is ours, on `rustix`, and a session ends only when
+its whole process group does.** *(2026-10-03)*
+
+**The PTY carrier.** It is built directly:
+- `openpt`, `grantpt`, `unlockpt` and `ptsname` from `rustix`.
+- `std::process::Command` with the slave as stdio, plus one `pre_exec` that
+  calls `setsid` and takes the slave as the controlling terminal.
+
+We do not use `portable-pty`. Its `ExitStatus` reports a signal as a name,
+and V1 needs the number for `failed (signal N)`. We also need exact control of
+the process group: `setsid` makes the agent a group leader, so its pid is the
+group id and one `kill(-pgid)` reaches everything it spawned. The cost is the
+`pre_exec` block, the crate's only `unsafe`. It calls two raw syscalls, both
+async-signal-safe.
+
+**Ending a session** (freeze §7.3):
+- `stop` sends SIGHUP to the group, then SIGKILL to the group after the
+  grace, 5 s by default. It reports `stopped` whatever signal finished the
+  job, because the owner asked.
+- A session that exits by itself is `completed` with its exit code.
+- A signal the owner did not send makes it `failed (signal N)`.
+- When the agent exits, its group gets SIGHUP and, after the grace,
+  SIGKILL. That covers a background job that keeps the terminal open and
+  would otherwise hold the session open forever. Nothing the session spawned
+  outlives it.
+- `ended` is reported only after the output has drained, so no output
+  arrives after a session has ended.
+
+**The environment.** The host's own environment, with `TERM=xterm-256color`
+and `COLORTERM=truecolor` on top, then the provider's variables, and the
+workspace as the working directory (§9.2). The host needs `HOME` and `PATH`
+for the agents to work at all.
+
+**Providers:**
+- `claude-code` runs `claude --permission-mode default`. The flag is always
+  passed, so host CLI settings cannot start it in another mode (gate Q6).
+- `opencode` runs `opencode`.
+- `shell` runs `$SHELL -l`, falling back to `/bin/sh`.
+
+Availability means the command resolves to an executable file: on `PATH`, or
+as given when it contains a `/`.
+
+Loading provider env files (`0600`, referenced by name) belongs to
+`runtime.toml` and arrives with the daemon in slice 4.
+
 ---
 
 ## Data model

@@ -20,8 +20,16 @@
 //! - [`fake`]: a provider with an in-memory terminal and no PTY. It proves the
 //!   contract is not the PTY, and it lets every later layer be tested without
 //!   an agent binary (AC-A1).
+//!
+//! ## Slice 2
+//!
+//! - [`cli`]: the `cli` providers (`claude-code`, `opencode`, `shell`) and
+//!   how their sessions end: the whole process group, never just the agent.
+//! - `pty`: the carrier the runtime builds around a `cli` launch description.
 
+pub mod cli;
 pub mod fake;
 pub mod provider;
+mod pty;
 pub mod scrollback;
 pub mod status;
