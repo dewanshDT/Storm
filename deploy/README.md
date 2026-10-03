@@ -97,7 +97,7 @@ sudo sh -c '
 systemctl stop storm-server
 chmod 0750 /srv/storm /srv/storm/state
 # The local tree only. -xdev keeps find off any other filesystem, so a vault
-# root mounted under /srv/storm is never touched (its modes are the NAS-s).
+# root mounted under /srv/storm is never touched (the NAS sets its modes).
 # Symlinks are skipped, never followed.
 find /srv/storm -xdev ! -type l -exec chmod o-rwx {} +
 mkdir -p /etc/systemd/system/storm-server.service.d /etc/systemd/system/storm-backup.service.d
