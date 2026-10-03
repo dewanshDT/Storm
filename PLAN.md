@@ -56,7 +56,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
-| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decision 77 · slice 1 (provider contract + fake provider) on `feat/runtime-provider-contract` |
+| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decisions 77–77e merged to `staging` (#60–#65) · 78 (agents navigation) on `feat/agents-navigation` · on-device acceptance and release left |
 
 **Release state (2026-09-26).** **v0.2.9 is released** (PR #48, tag on its
 merge commit `f046eaf`; every `release.yml` job green; the GitHub Release has
@@ -2430,6 +2430,63 @@ independently. `docs/srp-v1.md` §5.3 gains AM4's note on the terminal stream.
 **AC-P1 itself still needs the operator.** Claude Code and OpenCode must be
 logged in as `storm-runtime` before an agent can accept a prompt and edit a
 file.
+
+**78. Agents are a space beside Notes, not a page inside settings.**
+*(2026-10-04, after the first hands-on test of V1 on the dev server)*
+
+**What was wrong.** The only way to the agent screens was Server settings →
+Agents, and only for an owner. An owner looking for "the agents" found
+nothing on the dashboard, nothing in the sidebar, and a settings section
+they had no reason to open. Sessions are something you *do*; settings is
+where you configure. The routes sat outside the dashboard's subtree, so
+Android back from them left the app (the bug decision 17 fixed for
+everything else). A member could still open `/agents` by URL and get an
+empty frame.
+
+**The model: two spaces, Notes and Agents, owner-only.** An account that is
+not an owner sees exactly the app it saw before (AC-S1).
+
+- **Phone (the default).** The dashboard is home for both spaces; there is no
+  mode switch. An **Agents band** sits directly above *Recently opened*,
+  always in the same place:
+  - live sessions as rows (provider in workspace, host, age), a tap opens the
+    terminal;
+  - idle, one quiet row that follows setup progress: *Set up a host* (no
+    hosts) · *<host> is offline* (none online) · *New session* (otherwise).
+  It never moves when a session ends: a home screen that reshuffles itself
+  when an agent finishes breaks muscle memory. There is **no "N live" stat**
+  in the masthead; it would be a second entry point for one intent.
+- **The Agents space on a phone.** The list, with *New session* as a pill at
+  the bottom (the nav bubble's grammar, replacing a Material FAB that was the
+  one off-system control). The launcher preselects the host this device used
+  last. The extra-keys row keeps the pill's slot while the keyboard is open,
+  as the formatting toolbar does in a note: never both, never neither.
+- **Wide (≥ 900px).** A **Notes | Agents** switch tops the sidebar, for
+  owners only. The Agents side is its **own shell** drawn like the vault
+  sidebar — sessions where the tree was, *New session* and *Hosts* at the
+  bottom — rather than a mode of `VaultSidebar`, because that sidebar lives
+  inside `VaultShell` behind `VaultGate` and needs a vault, and an agent has
+  none. The terminal and its tab strip fill the pane.
+- **Settings keeps configuration only:** hosts and the default provider.
+- **Freshness.** The band and the list reload on appear, on pull-to-refresh
+  and every 15 s while visible; an open session already has its own stream.
+  **Offline is a state, not an error** (the ground rule): agents cannot run
+  without the server, and the copy says that plainly instead of showing a
+  failure.
+- **Routes.** `/agents` and `/agents/hosts` become children of the dashboard
+  (same URLs). The router sends a non-owner on any `/agents` path back to the
+  dashboard. The server's 403 was always the boundary; this is usability.
+
+**Why "Notes" and not "Vaults".** The switch names what you do in each
+space; a vault is a container, and "Agents" is an activity.
+
+**Not in this pass:** a per-session deep link (`/agents/s/:id`) — tabs
+already reopen sessions — and keyboard shortcuts for the switch, which belong
+with the M18 set.
+
+**Revisit if** a non-owner role gains agent access (the band and switch are
+gated on the one owner check), or a third space appears, at which point the
+switch wants to become a real space picker rather than a two-way toggle.
 
 ---
 
