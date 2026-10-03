@@ -2288,6 +2288,72 @@ providers. It covers:
 AC-T2 is a relay unit test: the terminal stream served over the tunnel by the
 same handler, under the same auth and owner check.
 
+**77d. Slice 5: the client — one terminal surface, one stream per session,
+and entry points that exist only for the owner.** *(2026-10-03)*
+
+Designed against the existing M14 system (tokens, Lucide icons, the 900 px
+breakpoint) and the taste-skill's product rules: explicit loading, empty and
+error states; contrast; one accent and one radius scale; no decorative
+status dots, only a real status chip.
+
+**Entry points.**
+- **Owner check.** The client probes `GET /v1/config/agent`. A 200 shows the
+  *Agents* entry in Server settings and the shell; a 403 hides it. The
+  client never infers a role. The server's own check decides, so AC-S1's
+  "hidden for non-owners" cannot drift from the 403.
+- **Routes.** `/agents` holds the sessions and tabs; `/agents/hosts` holds
+  hosts, enrollment and the default provider.
+
+**The terminal surface.**
+- `lib/agent/terminal_surface.dart` is the only file that imports `xterm2`
+  (5.2.x, pinned), so it can be replaced or forked (gate Q5).
+- Output bytes go through a chunked UTF-8 decoder, because a stream event
+  can split a multibyte character.
+- The terminal's colours come from the tokens.
+
+**The stream** (`lib/agent/terminal_stream*.dart`).
+- On native, it is an `http` streamed GET with the bearer header.
+- On web, it is `EventSource` with a single-use `?ticket=`. A browser
+  cannot set a header on it, and `package:http`'s browser client buffers
+  whole responses.
+- Either way it resumes by `?offset=`, never `Last-Event-ID`. It reconnects
+  with backoff from the last offset it rendered.
+- A `gap` at the start of a view clears the terminal and renders from the
+  oldest retained byte (freeze §14).
+
+**Input.**
+- Keystrokes coalesce for about 15 ms and are sent as serial POSTs per
+  session, never retried (freeze §11.3).
+- A failure is shown inline: a `503` reads "the host is offline".
+
+**Resize.**
+- Resizes are debounced and carry `focus: true` when this client takes focus
+  (§11.4).
+- Every client renders at the size in the session's `status`.
+
+**Tabs.**
+- They are per device: `ags_` ids persisted in shared preferences and
+  reconciled with `GET /v1/agent/sessions` at launch, so a dismissed session
+  drops off.
+- At 900 px and wider there is a tab strip. Below it, one session fills the
+  screen with a switcher sheet. The phone layout stays the default.
+
+**Phone.** An extra-keys row: Esc, Tab, sticky Ctrl, the four arrows and
+Paste.
+
+**Desktop.** The M18 shortcuts are suppressed while the terminal has focus. A
+local `Shortcuts` maps every global activator to
+`DoNothingAndStopPropagationIntent`, so a key the terminal leaves unhandled
+does not reach the app.
+
+**Launch.**
+- The flow is host (online only), then workspace (warning when it already
+  has a live session), then provider (default preselected, uninstalled ones
+  disabled).
+- The launch sheet shows the network line: "Network: inherits <host>'s
+  policy".
+- A fallback is announced in plain words.
+
 ---
 
 ## Data model
