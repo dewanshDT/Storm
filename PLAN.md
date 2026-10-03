@@ -2354,6 +2354,66 @@ does not reach the app.
   policy".
 - A fallback is announced in plain words.
 
+**77e. Slice 6: `storm-runtime` ships as its own `.deb`, as its own user,
+with the §5.8 sandbox.** *(2026-10-03)*
+
+**The package.** It mirrors `storm-relay` (decision 70): a musl binary built
+with zig in its own release job, and `cargo deb --no-build`. Its maintainer
+scripts are written the #46 way: `prerm` acts on `remove` only, because dpkg
+runs the old package's `prerm` on upgrade.
+
+**The account.**
+- `postinst` creates a system user `storm-runtime`, whose home is
+  `/var/lib/storm-runtime/home`. That is what `sudo -u storm-runtime -H`
+  logs Claude Code into, and the unit's `HOME` matches it.
+- **It is never added to the server's group.** That group mode is what keeps
+  a co-located runtime out of the vaults and `auth.db` (P3, AC-S3).
+  `tests/packaging.rs` asserts that no script grants it.
+
+**Layout.**
+- `/var/lib/storm-runtime` (`0700`) holds the identity, `host.json` and
+  `sessions.json`.
+- `/var/lib/storm-runtime/workspaces` is the default workspace root, inside
+  the unit's writable paths.
+- Other roots need a `ReadWritePaths=` drop-in, which `deploy/README.md`
+  shows.
+- `/etc/storm-runtime/runtime.toml` is a conffile.
+
+**The unit** (freeze §5.8):
+- **Kept:** `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices` (the PTY
+  subsystem survives it, per gate Q6), `ProtectSystem=strict`,
+  `ProtectHome`, the kernel protections, `LockPersonality`,
+  `RestrictNamespaces`, and `RestrictAddressFamilies` with `AF_NETLINK`.
+- **`MemoryDenyWriteExecute` is never set:** OpenCode's TUI dies under it.
+- `UMask=0027`.
+- `RestartPreventExitStatus=3`: a revoked host stops rather than loops.
+- **A fresh install is not started.** It runs once enrolled.
+
+**Verified on codebox** with the real `postinst` and the real unit under
+systemd, against a real server:
+- `storm-runtime` is in its own group only, and its directories came out
+  `700`/`700`/`750`. It comes online offering all four providers.
+- **Shell:** a real PTY (`/dev/pts/N`) under `PrivateDevices`, as
+  `storm-runtime`, with the right `HOME`.
+- **Claude Code** started as `claude --permission-mode default` and drew its
+  first-run screen.
+- **OpenCode's TUI** drew. No `mprotect` failure, so the MDWE omission
+  holds.
+- Each session's process group was gone after End.
+- **AC-S3 analogue:** the runtime account is refused a `0750` data tree it
+  does not own.
+- **Revocation:** exit 3, `NRestarts=0`, and the unit stays stopped.
+- No token in the journal.
+
+**AC-F6** is in `agent_e2e.py`, now 61 checks: three concurrent sessions
+across two real hosts. The shared workspace reports two live sessions (the
+warning), input stays with its own session, and each session ends
+independently. `docs/srp-v1.md` §5.3 gains AM4's note on the terminal stream.
+
+**AC-P1 itself still needs the operator.** Claude Code and OpenCode must be
+logged in as `storm-runtime` before an agent can accept a prompt and edit a
+file.
+
 ---
 
 ## Data model

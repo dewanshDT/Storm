@@ -413,6 +413,11 @@ decision 77):
   while the host is offline and never queued on the server. On the host, each
   session has its own ordered writer, and every PTY write is bounded, so a hung
   agent can never hold the session against the owner's `end`.
+- **`storm-runtime` is its own account and never joins the server's group**
+  (decision 77e). The group mode of P3 is all that keeps a co-located runtime
+  out of the vaults. Its unit never sets `MemoryDenyWriteExecute`, because
+  OpenCode cannot start under it, and `RestartPreventExitStatus=3` keeps a
+  revoked host stopped. `apps/runtime/tests/packaging.rs` holds all three.
 - **A host verifies its server before sending it anything** — a token, a
   signature, an enrollment. Every connect re-runs the challenge against the
   key pinned at enrollment.

@@ -11,6 +11,29 @@ repository = "https://github.com/dewanshDT/Storm"
 # The host and the server share a wire format, not code; when the two need to
 # agree on bytes, docs/runtime-vectors.json is what makes them agree.
 
+[package.metadata.deb]
+# Its own package (decision 77e), published to the same apt repository by
+# apt-repo.yml. It does not depend on storm-server, nor storm-server on it: a
+# host may be a separate machine, and a server needs no host.
+name = "storm-runtime"
+maintainer = "Dewansh Singh Thakur <dewansh.dt@gmail.com>"
+copyright = "2026 Dewansh Singh Thakur"
+extended-description = """\
+Storm Runtime Host: runs agent sessions (Claude Code, OpenCode, a shell) in \
+workspaces on this machine for one Storm Server, which it dials out to. Holds \
+no user data and never learns who owns a session."""
+section = "devel"
+priority = "optional"
+depends = "$auto"
+maintainer-scripts = "debian/"
+conf-files = ["/etc/storm-runtime/runtime.toml"]
+assets = [
+    ["target/release/storm-runtime", "usr/bin/", "755"],
+    ["../../deploy/storm-runtime.service", "lib/systemd/system/", "644"],
+    ["../../deploy/runtime.toml.example", "etc/storm-runtime/runtime.toml", "644"],
+    ["../../LICENSE", "usr/share/doc/storm-runtime/", "644"],
+]
+
 # The provider contract has no dependencies at all (decision 77): PTY I/O is
 # blocking threads anyway, and an async runtime in the contract would leak into
 # every provider. The host link brings tokio in slice 4, at its own edge.

@@ -409,6 +409,47 @@ args = ["-i"]
         check("a host refuses a server that cannot prove the pinned key",
               checked.returncode != 0 and b"could not prove" in checked.stderr, checked.stderr)
 
+        print("\n=== AC-F6: three sessions across two hosts ===")
+        host2_state = os.path.join(WORK, "host2")
+        status, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)
+        enrolled = subprocess.run(
+            [RUNTIME_BIN, "enroll", "--state", host2_state, "--name", "second-host"],
+            input=(issued["enrollment"] + "\n").encode(), capture_output=True,
+        )
+        check("a second host enrolls", enrolled.returncode == 0, enrolled.stderr.decode())
+        host2_id = json.load(open(os.path.join(host2_state, "host.json")))["host_id"]
+        runtime2 = subprocess.Popen(
+            [RUNTIME_BIN, "serve", "--state", host2_state, "--config", os.path.join(WORK, "runtime.toml")],
+            stdout=open(RUNTIME_LOG, "a"), stderr=subprocess.STDOUT,
+        )
+        try:
+            def both_online():
+                _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
+                return all(any(h["id"] == i and h["status"] == "online" for h in hosts) for i in (host_id, host2_id))
+            wait(both_online, "both hosts online", timeout=60)
+            a = launch(owner, host_id, workspace="storm", provider="fake")[1]["id"]
+            b = launch(owner, host_id, workspace="storm", provider="fake")[1]["id"]
+            c = launch(owner, host2_id, workspace="site", provider="fake")[1]["id"]
+            for sid in (a, b, c):
+                running(owner, sid)
+            check("three sessions run at once, across two hosts", True)
+            _, wss = call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=owner)
+            shared = next(w for w in wss if w["name"] == "storm")
+            check("the shared workspace reports two live sessions (the warning)", shared["live_sessions"] == 2, wss)
+            for sid, word in ((a, "alpha"), (b, "bravo"), (c, "charlie")):
+                write(owner, sid, word)
+            for sid, word, others in ((a, "alpha", ("bravo", "charlie")), (b, "bravo", ("alpha", "charlie")), (c, "charlie", ("alpha", "bravo"))):
+                s = Stream(f"/v1/agent/sessions/{sid}/terminal/stream?offset=0", owner)
+                text, _, _ = s.until(lambda e, i, d, t: word in t)
+                s.close()
+                check(f"each session sees only its own input ({word})", not any(o in text for o in others), text)
+            for sid in (a, b, c):
+                call("POST", f"/v1/agent/sessions/{sid}/end", auth=owner)
+            wait(lambda: all(session(owner, sid)["status"] == "stopped" for sid in (a, b, c)), "all ended")
+            check("each ends on its own", True)
+        finally:
+            runtime2.kill()
+
         print("\n=== AC-R3: revocation ===")
         status, rec = launch(owner, host_id, provider="fake")
         doomed = rec["id"]

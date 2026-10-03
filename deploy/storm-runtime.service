@@ -1,0 +1,59 @@
+# Storm Runtime Host: runs agent sessions for one Storm Server (Agent Runtime
+# V1; PLAN.md decisions 77 and 77e).
+#
+# Enroll it before starting it. The app's Hosts screen shows a one-time string:
+#   sudo -u storm-runtime storm-runtime enroll
+#   sudo systemctl enable --now storm-runtime
+#
+# Workspace roots outside /var/lib/storm-runtime need a ReadWritePaths drop-in:
+#   sudo systemctl edit storm-runtime
+#   # [Service]
+#   # ReadWritePaths=/srv/work
+
+[Unit]
+Description=Storm Runtime Host
+Documentation=https://github.com/dewanshDT/Storm/blob/main/PLAN.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# Its own account. **Never in the server's group**: the storage root's 0750
+# mode is all that keeps a co-located runtime out of the vaults and auth.db
+# (P3, AC-S3).
+User=storm-runtime
+Group=storm-runtime
+# Where `sudo -u storm-runtime -H claude` logs an agent CLI in, so the agent
+# finds the same credentials when the runtime starts it.
+Environment=HOME=/var/lib/storm-runtime/home
+ExecStart=/usr/bin/storm-runtime serve --state /var/lib/storm-runtime --config /etc/storm-runtime/runtime.toml
+StateDirectory=storm-runtime
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=3
+# Exit 3 is the server refusing this host's key: it was revoked. Restarting
+# would only be refused again, every three seconds, forever (freeze §5.6).
+RestartPreventExitStatus=3
+UMask=0027
+
+# Freeze §5.8, verified by gate Q6.
+NoNewPrivileges=true
+PrivateTmp=true
+# The PTY subsystem survives PrivateDevices; agents need nothing else in /dev.
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# **No MemoryDenyWriteExecute.** OpenCode's TUI fails under it with
+# "tcc: error: mprotect failed" (gate Q6). It is deliberately absent, and
+# tests/packaging.rs keeps it absent.
+
+[Install]
+WantedBy=multi-user.target

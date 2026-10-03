@@ -165,6 +165,57 @@ jobs:
           name: relay
           path: apps/relay/dist/*
 
+  # The Runtime Host, its own job and package (decision 77e): a host may be a
+  # separate machine, and storm-server never needs it. The same musl/zig build
+  # as the relay, so ring compiles and aws-lc-rs never enters.
+  runtime:
+    name: runtime (musl + deb)
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - name: Install musl tools, zig, cargo-deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          curl -sL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+            | sudo tar -xJ -C /opt
+          echo /opt/zig-linux-x86_64-0.13.0 >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild cargo-deb --locked
+      - name: Stamp Cargo version from tag
+        working-directory: apps/runtime
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          grep '^version' Cargo.toml
+      - name: Build musl binary
+        working-directory: apps/runtime
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo zigbuild --release --target x86_64-unknown-linux-musl
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/storm-runtime \
+            "dist/storm-runtime-${GITHUB_REF_NAME#v}-x86_64-linux"
+      - name: Build .deb
+        working-directory: apps/runtime
+        run: |
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-musl/release/storm-runtime target/release/
+          cargo deb --no-build
+          cp target/debian/*.deb dist/
+          ls -la dist/
+      - name: Upload runtime artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime
+          path: apps/runtime/dist/*
+
   android:
     name: android (apk)
     needs: check
@@ -265,7 +316,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, relay, android, macos, web]
+    needs: [server, relay, runtime, android, macos, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -303,6 +354,10 @@ jobs:
           **Relay (optional):** \`storm-relay_${VERSION}-1_amd64.deb\` is a
           separate package for reaching a server from outside its network.
           Nothing needs it. Setup is in \`deploy/README.md\` under "Relay".
+
+          **Runtime Host (optional):** \`storm-runtime_${VERSION}-1_amd64.deb\`
+          runs agent sessions for a server, on the server's machine or another.
+          Setup is in \`deploy/README.md\` under "Runtime Hosts".
 
           **macOS:** the zip is ad-hoc signed and not notarized. Gatekeeper will
           quarantine a downloaded copy (arm64 only on \`macos-latest\`).
