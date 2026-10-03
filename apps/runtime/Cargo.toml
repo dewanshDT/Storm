@@ -1,0 +1,64 @@
+[package]
+name = "storm-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Storm Runtime Host — the execution plane that runs agent sessions"
+license = "MIT"
+repository = "https://github.com/dewanshDT/Storm"
+
+# Deliberately standalone, like apps/relay: there is no root Cargo workspace,
+# and this crate never depends on apps/server (freeze §5.8, the R6 reasoning).
+# The host and the server share a wire format, not code; when the two need to
+# agree on bytes, docs/runtime-vectors.json is what makes them agree.
+
+[package.metadata.deb]
+# Its own package (decision 77e), published to the same apt repository by
+# apt-repo.yml. It does not depend on storm-server, nor storm-server on it: a
+# host may be a separate machine, and a server needs no host.
+name = "storm-runtime"
+maintainer = "Dewansh Singh Thakur <dewansh.dt@gmail.com>"
+copyright = "2026 Dewansh Singh Thakur"
+extended-description = """\
+Storm Runtime Host: runs agent sessions (Claude Code, OpenCode, a shell) in \
+workspaces on this machine for one Storm Server, which it dials out to. Holds \
+no user data and never learns who owns a session."""
+section = "devel"
+priority = "optional"
+depends = "$auto"
+maintainer-scripts = "debian/"
+conf-files = ["/etc/storm-runtime/runtime.toml"]
+assets = [
+    ["target/release/storm-runtime", "usr/bin/", "755"],
+    ["../../deploy/storm-runtime.service", "lib/systemd/system/", "644"],
+    ["../../deploy/runtime.toml.example", "etc/storm-runtime/runtime.toml", "644"],
+    ["../../LICENSE", "usr/share/doc/storm-runtime/", "644"],
+]
+
+# The provider contract has no dependencies at all (decision 77): PTY I/O is
+# blocking threads anyway, and an async runtime in the contract would leak into
+# every provider. The host link brings tokio in slice 4, at its own edge.
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+data-encoding = "2.11.1"
+ed25519-dalek = "3.0.0"
+futures-util = "0.3.34"
+rand = "0.10.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+rpassword = "7.5.4"
+# The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
+# the child's pre_exec stays async-signal-safe and the musl build needs no libc
+# shims.
+rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net"] }
+toml = "1.1.6"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+rustix = { version = "1.1.5", features = ["process"] }
+tempfile = "3.27.0"

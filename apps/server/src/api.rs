@@ -128,6 +128,13 @@ pub struct AppState {
     /// [`crate::auth::ratelimit`] for the two-bucket shape and why the global
     /// ceiling is strict while the per-caller one is generous.
     pub login_limiter: crate::auth::ratelimit::LoginLimiter,
+    /// The rate limit on the unauthenticated host routes (`/v1/runtime/enroll`
+    /// and `/auth*`, decision 77b). **Its own budget, not the login one**: a
+    /// misbehaving host retrying its link must not lock people out of logging
+    /// in, and a login flood must not stop hosts reconnecting.
+    pub host_limiter: crate::auth::ratelimit::LoginLimiter,
+    /// The Agent Manager: the only session authority (decision 77c).
+    pub agent: Arc<crate::agent::AgentManager>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -308,7 +315,35 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/server", get(server_info))
         .route("/v1/server/challenge", post(server_challenge))
         .route("/v1/pair", post(pair_handler))
+        // A Runtime Host's way in (decision 77b). Unauthenticated by nature —
+        // the enrollment token and the host key *are* the credentials — and
+        // rate-limited by `host_limiter`.
+        .route("/v1/runtime/enroll", post(runtime_enroll))
+        .route("/v1/runtime/auth/challenge", post(runtime_challenge))
+        .route("/v1/runtime/auth", post(runtime_auth))
         .layer(Extension(RequiredTier::None));
+
+    // ---- host tier: `Bearer sht_…`, `/v1/runtime/*` only ------------------
+    //
+    // Its own tier, not a flag on another, for the reason `Mcp` is: the set of
+    // credentials that may reach it is disjoint from every other route's. A
+    // host token is refused everywhere else, and nothing else is accepted
+    // here (decision 77b).
+    let host_router = Router::new()
+        .route("/v1/runtime/whoami", get(runtime_whoami))
+        .route("/v1/runtime/link", get(runtime_link))
+        .route("/v1/runtime/hello", post(runtime_hello))
+        .route("/v1/runtime/inventory", post(runtime_inventory))
+        .route(
+            "/v1/runtime/sessions/{id}/terminal/output",
+            post(runtime_output),
+        )
+        .route("/v1/runtime/sessions/{id}/status", post(runtime_status))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
+        .layer(Extension(RequiredTier::Host));
 
     // ---- device tier: `StormDevice <id>:<secret>` -------------------------
     let device_router = Router::new()
@@ -374,6 +409,39 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/auth/devices/{id}", delete(revoke_device_handler))
         .route("/v1/auth/password", post(change_password_handler))
         .route("/v1/auth/ws-ticket", post(ws_ticket_handler))
+        // Agent Runtime host administration — owner only, checked in ops.
+        .route("/v1/agent/hosts", get(agent_list_hosts))
+        .route("/v1/agent/hosts/enrollments", post(agent_issue_enrollment))
+        .route(
+            "/v1/agent/hosts/{id}",
+            patch(agent_rename_host).delete(agent_revoke_host),
+        )
+        .route(
+            "/v1/agent/hosts/{id}/workspaces",
+            get(agent_host_workspaces),
+        )
+        .route(
+            "/v1/agent/sessions",
+            get(agent_list_sessions).post(agent_launch),
+        )
+        .route(
+            "/v1/agent/sessions/{id}",
+            get(agent_get_session).delete(agent_dismiss_session),
+        )
+        .route("/v1/agent/sessions/{id}/end", post(agent_end_session))
+        .route(
+            "/v1/agent/sessions/{id}/terminal/stream",
+            get(agent_terminal_stream),
+        )
+        .route("/v1/agent/sessions/{id}/terminal/input", post(agent_input))
+        .route(
+            "/v1/agent/sessions/{id}/terminal/resize",
+            post(agent_resize),
+        )
+        .route(
+            "/v1/config/agent",
+            get(agent_get_config).put(agent_put_config),
+        )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
@@ -404,6 +472,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
     // Merge all tiers: none is checked first, then device, then session, then
     // MCP. Each carries its own auth layer; merge does not leak them.
     none_router
+        .merge(host_router)
         .merge(device_router)
         .merge(session_router)
         .merge(mcp_with_auth)
@@ -1357,6 +1426,465 @@ pub struct IssuePairingRequest {
     purpose: Option<String>,
 }
 
+// ---- Agent Runtime: hosts (decision 77b) ----------------------------------
+
+fn peer_string(peer: Option<std::net::SocketAddr>) -> Option<String> {
+    peer.map(|p| p.ip().to_string())
+}
+
+/// Charges the host limiter for an unauthenticated host call, by socket peer
+/// (never a header). `Err` is the `429` to return.
+fn charge_host_limiter(state: &Shared, peer: Option<std::net::SocketAddr>) -> Result<(), Response> {
+    use crate::auth::ratelimit::CallerKey;
+    let caller = peer
+        .map(|c| CallerKey::Ip(c.ip()))
+        .unwrap_or(CallerKey::Unattributed);
+    state.host_limiter.check(&caller).map_err(|retry_after| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after.to_string())],
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response()
+    })
+}
+
+#[derive(Deserialize)]
+struct RuntimeEnrollRequest {
+    token: String,
+    public_key: String,
+    key_id: String,
+    name: String,
+    signature: String,
+}
+
+/// POST /v1/runtime/enroll — a host consumes its enrollment token.
+async fn runtime_enroll(
+    State(state): State<Shared>,
+    MaybePeer(peer): MaybePeer,
+    Json(body): Json<RuntimeEnrollRequest>,
+) -> Result<Json<crate::ops::EnrolledHost>, Response> {
+    charge_host_limiter(&state, peer)?;
+    let remote = peer_string(peer);
+    crate::ops::enroll_host(
+        &state,
+        crate::ops::EnrollHost {
+            token: &body.token,
+            public_key: &body.public_key,
+            key_id: &body.key_id,
+            name: &body.name,
+            signature: &body.signature,
+        },
+        remote.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(IntoResponse::into_response)
+}
+
+#[derive(Deserialize)]
+struct RuntimeChallengeRequest {
+    host_id: String,
+}
+
+/// POST /v1/runtime/auth/challenge — a single-use nonce for one connect.
+async fn runtime_challenge(
+    State(state): State<Shared>,
+    MaybePeer(peer): MaybePeer,
+    Json(body): Json<RuntimeChallengeRequest>,
+) -> Result<Json<crate::ops::HostChallenge>, Response> {
+    charge_host_limiter(&state, peer)?;
+    let remote = peer_string(peer);
+    crate::ops::host_challenge(&state, &body.host_id, remote.as_deref())
+        .await
+        .map(Json)
+        .map_err(IntoResponse::into_response)
+}
+
+#[derive(Deserialize)]
+struct RuntimeAuthRequest {
+    host_id: String,
+    nonce: String,
+    signature: String,
+}
+
+/// POST /v1/runtime/auth — prove the host key, get a host token.
+async fn runtime_auth(
+    State(state): State<Shared>,
+    MaybePeer(peer): MaybePeer,
+    Json(body): Json<RuntimeAuthRequest>,
+) -> Result<Json<crate::auth::hosts::IssuedHostToken>, Response> {
+    charge_host_limiter(&state, peer)?;
+    let remote = peer_string(peer);
+    let issued = crate::ops::host_authenticate(
+        &state,
+        &body.host_id,
+        &body.nonce,
+        &body.signature,
+        remote.as_deref(),
+    )
+    .await
+    .map_err(IntoResponse::into_response)?;
+    // A host that proved its key gets its budget back, so a healthy host
+    // reconnecting through a flaky network is never throttled out.
+    if let Some(p) = peer {
+        state
+            .host_limiter
+            .refund(&crate::auth::ratelimit::CallerKey::Ip(p.ip()));
+    }
+    Ok(Json(issued))
+}
+
+/// GET /v1/runtime/whoami — which host this token belongs to.
+async fn runtime_whoami(Extension(auth): Extension<HostAuth>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "host_id": auth.host.id, "name": auth.host.name }))
+}
+
+async fn agent_list_hosts(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::ops::HostView>>> {
+    Ok(Json(crate::ops::list_hosts(&state, &actor).await?))
+}
+
+#[derive(Deserialize)]
+struct IssueEnrollmentRequest {
+    /// How *this client* reaches the server. The server cannot know it — it
+    /// may be behind NAT, a name, a port forward — and the host must dial it.
+    server_url: String,
+}
+
+async fn agent_issue_enrollment(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<IssueEnrollmentRequest>,
+) -> ApiResult<Json<crate::ops::IssuedEnrollment>> {
+    Ok(Json(
+        crate::ops::issue_host_enrollment(&state, &actor, &body.server_url).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct RenameHostRequest {
+    name: String,
+}
+
+async fn agent_rename_host(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<RenameHostRequest>,
+) -> ApiResult<Json<crate::ops::HostView>> {
+    Ok(Json(
+        crate::ops::rename_host(&state, &actor, &id, &body.name).await?,
+    ))
+}
+
+async fn agent_revoke_host(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::revoke_host(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Agent Runtime: the host link and the agent routes (decision 77c) ------
+
+/// Marks the host offline when its link stream ends — dropped by the
+/// connection closing, or by a newer link or a revocation replacing it. The
+/// generation is what keeps an old stream's end from taking a newer link down.
+struct LinkGuard {
+    agent: Arc<crate::agent::AgentManager>,
+    host_id: String,
+    generation: u64,
+}
+
+impl Drop for LinkGuard {
+    fn drop(&mut self) {
+        self.agent.disconnect_host(&self.host_id, self.generation);
+    }
+}
+
+/// GET /v1/runtime/link — the server→host command stream (freeze §11.5).
+///
+/// SSE rather than a WebSocket, so it crosses the relay unchanged (SRP §3).
+/// Keepalives every 15 s are also how a dead connection is noticed: the write
+/// fails and the guard runs.
+async fn runtime_link(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::StreamExt;
+    let (generation, rx) = state.agent.connect_host(&auth.host.id);
+    let guard = LinkGuard {
+        agent: state.agent.clone(),
+        host_id: auth.host.id.clone(),
+        generation,
+    };
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(move |envelope| {
+        let _held = &guard;
+        Ok(Event::default().data(serde_json::to_string(&envelope).unwrap_or_default()))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+}
+
+async fn runtime_hello(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(hello): Json<crate::agent::Hello>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_hello(&state, &auth.host.id, hello).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_inventory(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(caps): Json<crate::agent::Capabilities>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_inventory(&state, &auth.host.id, caps)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct OutputBatch {
+    offset: u64,
+    /// Standard base64, padded (RFC 4648 §4), both directions (77c).
+    data: String,
+}
+
+async fn runtime_output(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(batch): Json<OutputBatch>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_output(&state, &auth.host.id, &id, batch.offset, &batch.data)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_status(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(report): Json<crate::agent::StatusReport>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_status(&state, &auth.host.id, &id, &report)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_host_workspaces(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crate::ops::WorkspaceView>>> {
+    Ok(Json(
+        crate::ops::host_workspaces(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_launch(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(req): Json<crate::agent::Launch>,
+) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+    Ok(Json(crate::ops::launch_session(&state, &actor, req).await?))
+}
+
+async fn agent_list_sessions(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::agent::store::SessionRecord>>> {
+    Ok(Json(crate::ops::list_sessions(&state, &actor).await?))
+}
+
+async fn agent_get_session(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+    Ok(Json(crate::ops::get_session(&state, &actor, &id).await?))
+}
+
+async fn agent_end_session(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::end_session(&state, &actor, &id).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn agent_dismiss_session(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::dismiss_session(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST …/terminal/input — raw bytes, at most 64 KiB, at most once.
+async fn agent_input(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult<StatusCode> {
+    crate::ops::session_input(&state, &actor, &id, &body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ResizeRequest {
+    cols: u16,
+    rows: u16,
+    /// Whether this client just took focus. The PTY follows the most recently
+    /// active client either way (freeze §11.4); the flag is the client saying
+    /// "that is me now" without typing.
+    #[serde(default)]
+    #[allow(dead_code)]
+    focus: bool,
+}
+
+async fn agent_resize(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<ResizeRequest>,
+) -> ApiResult<StatusCode> {
+    crate::ops::session_resize(
+        &state,
+        &actor,
+        &id,
+        crate::agent::TerminalSize {
+            cols: req.cols,
+            rows: req.rows,
+        },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct StreamQuery {
+    #[serde(default)]
+    offset: u64,
+}
+
+struct TerminalStream {
+    agent: Arc<crate::agent::AgentManager>,
+    id: String,
+    cursor: u64,
+    last_status: Option<String>,
+    rx: tokio::sync::watch::Receiver<u64>,
+    done: bool,
+}
+
+/// GET …/terminal/stream?offset=N — the terminal as SSE (freeze §11.2).
+///
+/// Every stream starts with a `status` event. Output is `event: output` with
+/// `id:` the end offset and base64 `data:`; a range no longer retained is an
+/// explicit `event: gap`. Resume is by offset, never `Last-Event-ID`, so it
+/// is exact and crosses the relay (SRP §5.3). The stream ends once the session
+/// has ended and everything retained has been sent.
+async fn agent_terminal_stream(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Query(q): Query<StreamQuery>,
+) -> ApiResult<
+    axum::response::sse::Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    crate::ops::get_session(&state, &actor, &id).await?;
+    let start = TerminalStream {
+        agent: state.agent.clone(),
+        rx: state.agent.watch(&id),
+        id,
+        cursor: q.offset,
+        last_status: None,
+        done: false,
+    };
+    let stream = futures_util::stream::unfold(start, |mut st| async move {
+        loop {
+            if st.done {
+                return None;
+            }
+            // Mark the current version seen *before* reading, so a change
+            // landing between the read and the wait still wakes us.
+            st.rx.borrow_and_update();
+            let record = match st.agent.get(&st.id) {
+                Ok(r) => r,
+                Err(_) => return None,
+            };
+            let json = serde_json::to_string(&record).unwrap_or_default();
+            if st.last_status.as_ref() != Some(&json) {
+                st.last_status = Some(json.clone());
+                return Some((Ok(Event::default().event("status").data(json)), st));
+            }
+            match st.agent.read_output(&st.id, st.cursor, 32 * 1024) {
+                crate::agent::cache::Read::Data { from, bytes } => {
+                    st.cursor = from + bytes.len() as u64;
+                    let event = Event::default()
+                        .event("output")
+                        .id(st.cursor.to_string())
+                        .data(data_encoding::BASE64.encode(&bytes));
+                    return Some((Ok(event), st));
+                }
+                crate::agent::cache::Read::Gap { from, to } => {
+                    st.cursor = to;
+                    let event = Event::default()
+                        .event("gap")
+                        .data(serde_json::json!({ "from": from, "to": to }).to_string());
+                    return Some((Ok(event), st));
+                }
+                crate::agent::cache::Read::UpToDate | crate::agent::cache::Read::Ahead => {
+                    if record.is_ended() {
+                        return None;
+                    }
+                    match tokio::time::timeout(std::time::Duration::from_secs(15), st.rx.changed())
+                        .await
+                    {
+                        Ok(Ok(())) => continue,
+                        Ok(Err(_)) => return None,
+                        Err(_) => return Some((Ok(Event::default().comment("keepalive")), st)),
+                    }
+                }
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
+}
+
+async fn agent_get_config(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::ops::AgentConfigView>> {
+    Ok(Json(crate::ops::agent_config(&state, &actor).await?))
+}
+
+#[derive(Deserialize)]
+struct AgentConfigRequest {
+    default_provider: String,
+}
+
+async fn agent_put_config(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(req): Json<AgentConfigRequest>,
+) -> ApiResult<Json<crate::ops::AgentConfigView>> {
+    Ok(Json(
+        crate::ops::set_agent_config(&state, &actor, &req.default_provider).await?,
+    ))
+}
+
 /// Three credential tiers: `none` (unauthenticated), `device` (paired
 /// installation), `session` (logged-in user). Set per-route via axum
 /// `Extension<RequiredTier>`.
@@ -1374,6 +1902,16 @@ pub enum RequiredTier {
     /// would put the exception in the middleware instead of on the route,
     /// which is where it would be forgotten.
     Mcp,
+    /// `/v1/runtime/*` (decision 77b): a Runtime Host's `sht_` token, and
+    /// nothing else. No user credential reaches here; no host token reaches
+    /// anywhere else.
+    Host,
+}
+
+/// A Runtime Host that proved its token. Set on `Host`-tier routes.
+#[derive(Clone)]
+pub struct HostAuth {
+    pub host: crate::auth::hosts::Host,
 }
 
 /// A device that has proven it is paired with this server.
@@ -1530,6 +2068,9 @@ async fn require_auth(
         if matches!(tier, RequiredTier::Session | RequiredTier::Mcp) {
             return tier_error("session_required", StatusCode::UNAUTHORIZED);
         }
+        if tier == RequiredTier::Host {
+            return tier_error("host_token_required", StatusCode::UNAUTHORIZED);
+        }
         // **The lock is released before the handler runs, and that is the whole
         // point of this block's shape.** `auth_db` is a `tokio::sync::Mutex`,
         // which is not reentrant, and every device-tier handler — login,
@@ -1569,6 +2110,49 @@ async fn require_auth(
 
     // --- Bearer token: MCP key or session ---
     if let Some(token) = credential.strip_prefix("Bearer ") {
+        // **Host tokens, by prefix, and the tier check is both ways round**
+        // (decision 77b): a host token on any other tier is refused, and any
+        // other bearer on the host tier is refused, before anything is looked
+        // up. Either refusal arriving later, as a missing extension, is the
+        // `500`-instead-of-`401` bug the device branch once had.
+        let is_host_token = token.starts_with(crate::auth::hosts::HOST_TOKEN_PREFIX);
+        if is_host_token != (tier == RequiredTier::Host) {
+            return tier_error(
+                if is_host_token {
+                    "host_token_not_accepted_here"
+                } else {
+                    "host_token_required"
+                },
+                StatusCode::UNAUTHORIZED,
+            );
+        }
+        if is_host_token {
+            // Scoped so the guard drops before the handler, which takes it.
+            let host = {
+                let mut auth_db = state.auth_db.lock().await;
+                let now = crate::index::now_rfc3339();
+                match crate::auth::hosts::authenticate_token(&mut auth_db, token, &now) {
+                    Ok(host) => host,
+                    Err(crate::auth::hosts::HostError::Refused(failure)) => {
+                        let _ = auth_db.record_event(
+                            crate::auth::hosts::EVENT_HOST_AUTH_REJECTED,
+                            None,
+                            None,
+                            &now,
+                            &format!(r#"{{"reason":"{}","via":"token"}}"#, failure.code()),
+                        );
+                        return unauthorized("invalid or missing token");
+                    }
+                    Err(crate::auth::hosts::HostError::Internal(e)) => {
+                        tracing::error!(error = %e, "host token authentication failed");
+                        return internal_error();
+                    }
+                }
+            };
+            request.extensions_mut().insert(HostAuth { host });
+            return next.run(request).await;
+        }
+
         // **MCP keys, checked first and by prefix** (A14.1). Keys share the
         // `Bearer` scheme because most MCP clients can send nothing else, so
         // the `stk_` prefix is the only thing separating them from session
@@ -2769,6 +3353,7 @@ pub(crate) mod tests {
         let (events, _) = broadcast::channel(8);
         let (root_changed, _) = broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
+        let agent = Arc::new(crate::agent::AgentManager::open(&state_dir).unwrap());
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -2788,6 +3373,8 @@ pub(crate) mod tests {
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),
             login_limiter,
+            host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            agent,
         });
         (
             router(
@@ -3009,7 +3596,7 @@ pub(crate) mod tests {
     }
 
     /// A second account, so two MCP requests can carry different identities.
-    async fn seed_member(state: &Shared, username: &str) -> String {
+    pub(crate) async fn seed_member(state: &Shared, username: &str) -> String {
         let mut auth_db = state.auth_db.lock().await;
         crate::auth::users::create_user(
             &mut auth_db,
@@ -5347,5 +5934,195 @@ pub(crate) mod tests {
         // Nothing was stored.
         let vaults = state.vaults.read().await;
         assert!(vaults.registry.relays.is_empty());
+    }
+
+    // ---- Agent Runtime: hosts (decision 77b) ------------------------------
+
+    fn patch_json_with_auth(
+        path: &str,
+        body: serde_json::Value,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("PATCH")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn delete_with_auth(path: &str, auth: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header("authorization", auth)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    /// Enrolls a host through the real routes and returns `(host_id, token)`.
+    async fn enroll_a_host(app: &Router, owner_bearer: &str) -> (String, String) {
+        use ed25519_dalek::Signer;
+        let (status, body) = send(
+            app,
+            post_json_with_auth(
+                "/v1/agent/hosts/enrollments",
+                serde_json::json!({"server_url": "http://127.0.0.1:8484"}),
+                owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let enrollment = body["enrollment"].as_str().unwrap().to_string();
+        // Parsed from the right, as decision 77b specifies: the URL has colons.
+        let mut parts = enrollment.rsplitn(4, ':');
+        let token = parts.next().unwrap().to_string();
+        let _pubkey = parts.next().unwrap();
+        let server_id = parts.next().unwrap().to_string();
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let token_id = crate::auth::hosts::enrollment_token_id(&token).unwrap();
+        let sig = data_encoding::BASE64URL_NOPAD.encode(
+            &key.sign(&crate::auth::hosts::enroll_message(&server_id, &token_id))
+                .to_bytes(),
+        );
+        let (status, body) = send(
+            app,
+            post_json(
+                "/v1/runtime/enroll",
+                serde_json::json!({
+                    "token": token,
+                    "public_key": data_encoding::BASE64URL_NOPAD.encode(key.verifying_key().as_bytes()),
+                    "key_id": "key_test",
+                    "name": "build-vm",
+                    "signature": sig,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let host_id = body["host_id"].as_str().unwrap().to_string();
+
+        let (status, body) = send(
+            app,
+            post_json(
+                "/v1/runtime/auth/challenge",
+                serde_json::json!({"host_id": host_id}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let nonce = body["nonce"].as_str().unwrap().to_string();
+        let sig = data_encoding::BASE64URL_NOPAD.encode(
+            &key.sign(&crate::auth::hosts::connect_message(
+                &server_id, &host_id, &nonce,
+            ))
+            .to_bytes(),
+        );
+        let (status, body) = send(
+            app,
+            post_json(
+                "/v1/runtime/auth",
+                serde_json::json!({"host_id": host_id, "nonce": nonce, "signature": sig}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        (host_id, body["token"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn a_host_enrolls_authenticates_and_stays_in_its_tier() {
+        let dir = tempdir::TempDir::new("storm-hosts-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+
+        let (host_id, token) = enroll_a_host(&app, &owner_bearer).await;
+        let host_bearer = format!("Bearer {token}");
+
+        let (status, body) = send(&app, get_with_auth("/v1/runtime/whoami", &host_bearer)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["host_id"], host_id);
+
+        // The tier, both ways round: a host token reaches nothing else, and no
+        // user credential reaches the runtime routes.
+        for path in ["/v1/vaults", "/v1/config", "/v1/agent/hosts"] {
+            let (status, _) = send(&app, get_with_auth(path, &host_bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let (status, _) = send(&app, get_with_auth("/v1/runtime/whoami", &owner_bearer)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let device = pair_a_device(&state).await;
+        let (status, _) = send(&app, get_with_auth("/v1/runtime/whoami", &device)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // The owner sees it, renames it, revokes it — and the token dies.
+        let (status, body) = send(&app, get_with_auth("/v1/agent/hosts", &owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body[0]["id"], host_id);
+        assert_eq!(body[0]["status"], "offline");
+        assert_eq!(body[0]["egress"], "host");
+        let path = format!("/v1/agent/hosts/{host_id}");
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(&path, serde_json::json!({"name": "renamed"}), &owner_bearer),
+        )
+        .await;
+        assert_eq!(
+            (status, body["name"].clone()),
+            (StatusCode::OK, "renamed".into())
+        );
+        let (status, _) = send(&app, delete_with_auth(&path, &owner_bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(&app, get_with_auth("/v1/runtime/whoami", &host_bearer)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn host_administration_is_the_owners_alone() {
+        // AM5: 403 on every route — never an empty list, which would read as
+        // "no hosts" rather than "not yours".
+        let dir = tempdir::TempDir::new("storm-hosts-owner").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host_id, _) = enroll_a_host(&app, &owner_bearer).await;
+
+        let member = seed_member(&state, "member").await;
+        let member_bearer = format!("Bearer {}", session_token(&state, &member).await);
+        let path = format!("/v1/agent/hosts/{host_id}");
+        let requests = [
+            get_with_auth("/v1/agent/hosts", &member_bearer),
+            post_json_with_auth(
+                "/v1/agent/hosts/enrollments",
+                serde_json::json!({"server_url": "http://x"}),
+                &member_bearer,
+            ),
+            patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &member_bearer),
+            delete_with_auth(&path, &member_bearer),
+        ];
+        for request in requests {
+            let uri = request.uri().to_string();
+            let (status, _) = send(&app, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_host_learns_nothing_about_why() {
+        let dir = tempdir::TempDir::new("storm-hosts-refusal").unwrap();
+        let (app, _, _) = test_router_with_state(dir.path());
+        let (status, body) = send(
+            &app,
+            post_json(
+                "/v1/runtime/auth/challenge",
+                serde_json::json!({"host_id": "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "refused");
     }
 }

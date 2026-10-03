@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+# Purge removes configuration, never /var/lib/storm-runtime: it holds the
+# host's identity and its workspaces — the operator's code. An operator who
+# wants them gone can say so with rm.
+if [ "$1" = "purge" ]; then
+    rm -f /etc/storm-runtime/runtime.toml
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+    fi
+fi
+
+exit 0

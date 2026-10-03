@@ -435,6 +435,52 @@ alone (decision 74). `GET /v1/server` lists the relays it has actually
 registered with, which is the check that it worked; the `PUT` itself returns
 before any connection is attempted. Clients learn the relay from the server when they pair.
 
+## Runtime Hosts (Agent Runtime)
+
+A Runtime Host is a machine that runs agents (Claude Code, OpenCode, a shell)
+for one Storm Server. It may be a separate VM or the server's own machine. It
+dials the server over the network, so the server needs no inbound route to
+it. V1 runs on a direct network; the relay does not carry it yet (decision 77).
+
+```sh
+sudo apt install storm-runtime
+# Workspaces are the directories under /var/lib/storm-runtime/workspaces.
+sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
+# In the app: Settings > Agents > Hosts > Enroll a host. Paste the string here:
+sudo -u storm-runtime storm-runtime enroll
+sudo systemctl enable --now storm-runtime
+sudo -u storm-runtime storm-runtime check        # proves the whole path
+```
+
+**Log the agent CLIs in as `storm-runtime`, once.** The unit's `HOME` is
+`/var/lib/storm-runtime/home`, so log in under that account's home:
+
+```sh
+sudo -u storm-runtime -H claude                 # then /login
+sudo -u storm-runtime -H opencode auth login
+```
+
+The CLIs must be on a system path (`/usr/local/bin`, `/usr/bin`). The unit's
+`ProtectHome` hides `/home`, so a CLI installed into a user's home is reported
+as not installed.
+
+**Workspaces elsewhere** need the unit widened, and listing them in
+`/etc/storm-runtime/runtime.toml`:
+
+```sh
+sudo systemctl edit storm-runtime
+# [Service]
+# ReadWritePaths=/srv/work
+```
+
+What the package guarantees (decision 77e):
+- **The account is its own.** `storm-runtime` is never in the server's group,
+  so on a shared machine it cannot read the vaults or `state/auth.db` (P3).
+- **The sandbox is §5.8's,** with one setting deliberately absent:
+  `MemoryDenyWriteExecute`, under which OpenCode cannot start.
+- **A revoked host exits 3, and the unit does not restart it.** Enroll it
+  again to bring it back.
+
 ## Security
 
 v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a

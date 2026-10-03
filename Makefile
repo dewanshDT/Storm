@@ -10,6 +10,7 @@
 
 SERVER := apps/server
 RELAY  := apps/relay
+RUNTIME := apps/runtime
 CLIENT := apps/client
 WWW    := apps/www
 
@@ -51,16 +52,18 @@ check: fmt-check lint test
 fmt-check:
 	cd $(SERVER) && cargo fmt --check
 	cd $(RELAY) && cargo fmt --check
+	cd $(RUNTIME) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
 ## lint: clippy + dart analyze, all must be clean
 lint:
 	cd $(SERVER) && cargo clippy --all-targets -- -D warnings
 	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
+	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-client
+test: test-server test-relay test-runtime test-client
 
 ## test-server: Rust unit tests
 test-server:
@@ -73,6 +76,13 @@ test-server:
 test-relay:
 	cd $(RELAY) && cargo test
 
+## test-runtime: storm-runtime unit + provider-contract tests
+#
+# Standalone like the relay: `apps/runtime` never depends on `apps/server`
+# (decision 77), so it is its own crate with its own target.
+test-runtime:
+	cd $(RUNTIME) && cargo test
+
 ## test-client: Dart unit tests
 test-client:
 	cd $(CLIENT) && flutter test
@@ -80,6 +90,7 @@ test-client:
 ## test-live: integration suites against a real server, started and torn down
 test-live:
 	@cd $(SERVER) && cargo build --quiet
+	@cd $(RUNTIME) && cargo build --quiet
 	@set -e; \
 	ROOT="$$PWD"; \
 	if curl -sf -o /dev/null http://127.0.0.1:$(PORT)/v1/health 2>/dev/null; then \
@@ -113,6 +124,10 @@ test-live:
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- mcp e2e ---"; \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- agent runtime e2e (its own server and host; decision 77c) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 "$$ROOT/$(SERVER)/tests/agent_e2e.py"; \
 	echo "--- auth e2e + client device tier (each needs a virgin server) ---"; \
 	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
 	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \
@@ -161,6 +176,7 @@ test-live:
 fmt:
 	cd $(SERVER) && cargo fmt
 	cd $(RELAY) && cargo fmt
+	cd $(RUNTIME) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
 # ---- running --------------------------------------------------------

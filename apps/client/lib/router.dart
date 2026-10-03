@@ -11,6 +11,8 @@ import 'ui/client_settings_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
+import 'agent/agents_screen.dart';
+import 'agent/hosts_screen.dart';
 import 'ui/mcp_keys_screen.dart';
 import 'ui/signup_screen.dart';
 import 'ui/starting_screen.dart';
@@ -55,6 +57,13 @@ abstract final class Routes {
   /// Manage the MCP keys this account holds (A14). Session tier, for the same
   /// reason: a key belongs to a user, and minting one is the user vouching.
   static const mcpKeys = '/settings/mcp-keys';
+
+  /// Agent sessions and their tabs (decision 77d). Owner only: the entry point
+  /// exists only when the server's owner check passes.
+  static const agents = '/agents';
+
+  /// Runtime Hosts, enrollment and the default provider.
+  static const agentHosts = '/agents/hosts';
 
   /// The same two screens, mounted inside the vault shell.
   ///
@@ -221,6 +230,8 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, _) => const AddDeviceScreen(),
       ),
       GoRoute(path: Routes.mcpKeys, builder: (_, _) => const McpKeysScreen()),
+      GoRoute(path: Routes.agents, builder: (_, _) => const AgentsScreen()),
+      GoRoute(path: Routes.agentHosts, builder: (_, _) => const HostsScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
       // builds a stack with the dashboard underneath rather than replacing it.

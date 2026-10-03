@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Only on removal. dpkg also runs prerm with `upgrade`, and stopping or
+# disabling there would leave an upgraded host that no longer runs (#46).
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop storm-runtime 2>/dev/null || true
+            systemctl disable storm-runtime 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

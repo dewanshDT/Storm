@@ -1126,3 +1126,114 @@ async fn a_relay_that_never_completes_its_handshake_does_not_block_startup() {
 
     tunnels.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
+    // AC-T2 (decision 77c). Relay connectivity is not V1 acceptance, but the
+    // protocol must stay relay-shaped: the terminal stream, dispatched in
+    // process through the tunnel, is served by the same handler under the
+    // same `require_auth` and the same owner check as on the LAN (R13).
+    let dir = tempdir::TempDir::new("storm-relay-agent").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+
+    // A session that has ended, with output, so the stream sends everything
+    // and closes — what lets the fake relay read the whole response.
+    let (_generation, _rx) = state.agent.connect_host("hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X");
+    state
+        .agent
+        .hello(
+            "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X",
+            serde_json::from_value(serde_json::json!({
+                "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                "workspaces": ["storm"],
+                "max_sessions": 4,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let owner = crate::api::tests::seed_owner(&state).await;
+    let record = state
+        .agent
+        .launch(
+            &owner,
+            serde_json::from_value(serde_json::json!({
+                "host_id": "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X",
+                "workspace": "storm",
+                "provider": "fake",
+                "terminal": {"cols": 80, "rows": 24},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let host = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+    state
+        .agent
+        .host_output(host, &record.id, 0, b"over the relay")
+        .unwrap();
+    state
+        .agent
+        .host_status(
+            host,
+            &record.id,
+            &serde_json::from_value(serde_json::json!({"status": "completed", "exit_code": 0}))
+                .unwrap(),
+        )
+        .unwrap();
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    let path = format!("/v1/agent/sessions/{}/terminal/stream?offset=0", record.id);
+
+    let anonymous = relay.request(1, TunnelRequest::get(&path)).await;
+    assert_eq!(
+        anonymous.status, 401,
+        "no credential, no stream — relayed or not"
+    );
+
+    let member = crate::api::tests::seed_member(&state, "member").await;
+    let member_token = crate::api::tests::session_token(&state, &member).await;
+    let refused = relay
+        .request(
+            2,
+            TunnelRequest::get(&path).header("authorization", &format!("Bearer {member_token}")),
+        )
+        .await;
+    assert_eq!(refused.status, 403, "the owner check holds over the relay");
+
+    let token = crate::api::tests::session_token(&state, &owner).await;
+    let streamed = relay
+        .request(
+            3,
+            TunnelRequest::get(&path).header("authorization", &format!("Bearer {token}")),
+        )
+        .await;
+    assert_eq!(streamed.status, 200);
+    assert!(
+        streamed.headers["content-type"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "{}",
+        streamed.headers
+    );
+    let body = String::from_utf8_lossy(&streamed.body);
+    assert!(body.starts_with("event: status"), "status first: {body}");
+    assert!(body.contains("event: output"), "{body}");
+    assert!(
+        body.contains(&data_encoding::BASE64.encode(b"over the relay")),
+        "{body}"
+    );
+
+    // And the host tier is the host tier over the relay too.
+    let whoami = relay
+        .request(
+            4,
+            TunnelRequest::get("/v1/runtime/whoami")
+                .header("authorization", &format!("Bearer {token}")),
+        )
+        .await;
+    assert_eq!(whoami.status, 401);
+
+    tunnels.shutdown().await;
+}

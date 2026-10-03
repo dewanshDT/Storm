@@ -56,6 +56,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
+| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decision 77 · slice 1 (provider contract + fake provider) on `feat/runtime-provider-contract` |
 
 **Release state (2026-09-26).** **v0.2.9 is released** (PR #48, tag on its
 merge commit `f046eaf`; every `release.yml` job green; the GitHub Release has
@@ -2004,6 +2005,431 @@ operator's confirmation.
 
 *Revisit if:* a deployment needs another local account to read the data tree.
 Grant that account group membership; never restore other-access.
+
+**77. Agent Runtime V1 is frozen, and it is built in seven slices, the
+provider contract first.** *(2026-10-03; operator's go after P3 was verified
+on prod)*
+
+**The spec.** *Agent Runtime/V1 Specification Freeze* in the personal vault,
+revision 4. It was approved 2026-10-03 and is frozen as of this entry. Its
+amendments AM1–AM21 are D12 in *Agent Runtime/Decisions*. The vault holds the
+spec; this entry records that it is frozen, how it is sliced and the decisions
+the code makes that the spec left open. Where they disagree, the freeze wins
+and this entry gets fixed.
+
+**In one paragraph.**
+- The Storm Server is the control plane: the Agent Manager, session records
+  in `state/agent/agent.db`, and the host registry in `state/auth.db`.
+- A **Runtime Host** (`storm-runtime`, its own crate, `.deb` and OS user) is
+  the execution plane. It dials the server, authenticates with an Ed25519 key
+  under a third signing domain `storm-host-auth:v1:`, and runs agents in
+  workspaces under its configured roots.
+- Clients talk only to the server, over REST + SSE, owner-only.
+- V1 providers are `claude-code` (default), `opencode` and `shell`, all of
+  kind `cli`, offering one `terminal` interaction that the runtime carries over
+  a PTY.
+- Direct network only. The relay is a design constraint, not V1 acceptance.
+
+**The slices**, in the freeze's §16 order. Each is its own PR to `staging`:
+1. **`apps/runtime` and the provider contract.** `Provider`,
+   `ProviderSession`, `TerminalChannel`, the §7.2 status vocabulary, the
+   offset-addressed scrollback, and the fake provider with an in-memory
+   terminal and no PTY. Plus the Makefile targets and a CI job.
+2. **The PTY carrier and the `cli` providers.** Availability resolution, and
+   ending a session as SIGHUP to the process group, then SIGKILL after 5 s.
+3. **Host identity and enrollment.** Server: `runtime_hosts`, enrollment and
+   host tokens, the `Host` tier. Runtime: `enroll`, the identity key and
+   `host.json`. Both: `docs/runtime-vectors.json`.
+4. **The host link and the Agent Manager.** `/v1/runtime/*`,
+   `state/agent/agent.db`, and reconciliation from `hello`. It ends with
+   `tests/agent_e2e.py` driving the fake provider end to end, which is AC-A1.
+5. **The client routes.** `/v1/agent/*`, owner-only on every route, the
+   terminal SSE stream and its `?offset=` resume. *(Merged into slice 4 by
+   77c.)*
+6. **The client UI.** The `xterm2` surface, hosts, launcher, terminal view,
+   tabs and the extra-keys row.
+7. **Packaging.** The `storm-runtime` `.deb` and its systemd unit (§5.8:
+   no `MemoryDenyWriteExecute`).
+
+Then the on-device acceptance criteria. Claude Code is verified before OpenCode
+is claimed (AC-P1).
+
+**Slice 1's decisions, where the spec was illustrative:**
+- **Output and endings go through a runtime-owned sink, `SessionEvents`.** The
+  provider never owns the scrollback. The runtime, which already owns the
+  carrier, owns where output lands. The same sink serves a PTY reader thread
+  and the fake.
+- **The contract is synchronous and has no dependencies.** PTY I/O is blocking
+  threads anyway. The async host link adapts at its edge, so no async runtime
+  leaks into every provider.
+- **The fake provider has its own kind, `fake`.** Kind says how a session
+  starts, and the fake starts in process. Labelling it `cli` would be a lie the
+  host would act on. AC-A1 runs it inside a real `storm-runtime`, so `fake` is
+  a wire value. A host offers it only when its config names it.
+- **The scrollback is a fixed-capacity ring addressed by absolute byte
+  offset.** A read below the floor returns an explicit `Gap`, the §11.2 `gap`
+  event, never silently fewer bytes.
+- **`apps/runtime` depends on nothing in `apps/server`, and there is still no
+  workspace** (the R6 reasoning, applied by the freeze §5.8). The host and the
+  server share only the wire format, and `docs/runtime-vectors.json` is what
+  keeps the two in agreement.
+
+*Revisit if:* the async host link (slice 4) cannot drive the synchronous
+contract without a thread per session, or a second interaction kind needs the
+provider rather than the runtime to own its carrier.
+
+**77a. Slice 2: the PTY is ours, on `rustix`, and a session ends only when
+its whole process group does.** *(2026-10-03)*
+
+**The PTY carrier.** It is built directly:
+- `openpt`, `grantpt`, `unlockpt` and `ptsname` from `rustix`.
+- `std::process::Command` with the slave as stdio, plus one `pre_exec` that
+  calls `setsid` and takes the slave as the controlling terminal.
+
+We do not use `portable-pty`. Its `ExitStatus` reports a signal as a name,
+and V1 needs the number for `failed (signal N)`. We also need exact control of
+the process group: `setsid` makes the agent a group leader, so its pid is the
+group id and one `kill(-pgid)` reaches everything it spawned. The cost is the
+`pre_exec` block, the crate's only `unsafe`. It calls two raw syscalls, both
+async-signal-safe.
+
+**Ending a session** (freeze §7.3):
+- `stop` sends SIGHUP to the group, then SIGKILL to the group after the
+  grace, 5 s by default. It reports `stopped` whatever signal finished the
+  job, because the owner asked.
+- A session that exits by itself is `completed` with its exit code.
+- A signal the owner did not send makes it `failed (signal N)`.
+- When the agent exits, its group gets SIGHUP and, after the grace,
+  SIGKILL. That covers a background job that keeps the terminal open and
+  would otherwise hold the session open forever. Nothing the session spawned
+  outlives it.
+- `ended` is reported only after the output has drained, so no output
+  arrives after a session has ended.
+
+**The environment.** The host's own environment, with `TERM=xterm-256color`
+and `COLORTERM=truecolor` on top, then the provider's variables, and the
+workspace as the working directory (§9.2). The host needs `HOME` and `PATH`
+for the agents to work at all.
+
+**Providers:**
+- `claude-code` runs `claude --permission-mode default`. The flag is always
+  passed, so host CLI settings cannot start it in another mode (gate Q6).
+- `opencode` runs `opencode`.
+- `shell` runs `$SHELL -l`, falling back to `/bin/sh`.
+
+Availability means the command resolves to an executable file: on `PATH`, or
+as given when it contains a `/`.
+
+Loading provider env files (`0600`, referenced by name) belongs to
+`runtime.toml` and arrives with the daemon in slice 4.
+
+**77b. Slice 3: hosts enroll with a two-part token and authenticate with a
+key, in a tier of their own.** *(2026-10-03)*
+
+**The wire formats.** `docs/runtime-vectors.json` pins every one of these,
+and both crates read it. `tools/runtime-vectors/generate.py` regenerates it,
+from a reference implementation independent of either crate.
+- **The enrollment token is `sen_<26 Crockford>.<43 base64url>`.** The first
+  part is public: it is the enrollment's record id, `hen_<26>`, and it is the
+  freeze's `<token_id>`, which the host derives without asking. The second
+  part is 256 secret bits. The server stores the blake3 of the whole token and
+  looks it up by that hash, like every other token. A public id inside the
+  token keeps the signed message free of secrets and of hashing. That matters
+  because the generator has no blake3, and the message must be reproducible by
+  an unrelated implementation.
+- **The enrollment string is
+  `storm-enroll:v1:<server_url>:<server_id>:<server_pubkey>:<token>`.** It is
+  parsed **from the right**: the URL contains colons, and none of the last
+  three fields can. `server_url` is supplied by the client that asks for the
+  enrollment. The server does not know how it is reached, and the owner's
+  client does.
+- **Signed messages** (both under the host's key, never the server's):
+  - Enrollment: `storm-host-auth:v1:<server_id>:<token_id>`.
+  - Connect: `storm-host-auth:v1:<server_id>:<host_id>:<nonce>`.
+
+  The two differ in field count, and every field is validated against the
+  delimiter rules, so neither message can be read as the other. Neither can
+  be read as `storm-challenge:v1:` or `storm-relay-auth:v1:`, which are signed
+  by a different key.
+
+**Credentials**, in `state/auth.db`, created additively in the
+`CREATE TABLE IF NOT EXISTS` batch, so `SCHEMA_VERSION` stays 5:
+- `runtime_hosts`: the host's id, name, public key, key id, who enrolled it
+  and when, `last_seen` and `revoked`.
+- `host_enrollments`: single use. They expire after 10 minutes.
+- `host_tokens`: they expire after 24 hours and are minted only by proving the
+  key.
+- `host_challenges`: single use, server-generated, expiring after 60 s.
+
+The token prefixes are `sen_` (enrollment) and `sht_` (host token). Both are
+blake3-hashed, never stored.
+
+**The `Host` tier** is a fifth `RequiredTier`:
+- It accepts `Bearer sht_…` on `/v1/runtime/*`, and nothing else does.
+- A session token, an `stk_` key or a device credential is refused there with
+  `401`. A host token is refused everywhere else.
+- `/v1/runtime/enroll`, `/auth/challenge` and `/auth` are none-tier, and are
+  rate-limited by a limiter of their own (not the login one, whose budget they
+  must not spend).
+
+**The owner check.** Every `/v1/agent/*` route requires the owner role.
+Anyone else gets `403`, never an empty list (AM5). A helper in `ops.rs`
+enforces it, so a route cannot forget it.
+
+**Revocation.** It sets `revoked` and revokes every live host token. The link
+closes when slice 4 exists. A revoked host is refused at authentication.
+
+**Security events.** `host_enrollment_issued`, `host_enrolled`,
+`host_renamed`, `host_revoked` and `host_auth_rejected`. Never a token,
+never a key.
+
+**The host side** (`storm-runtime enroll`):
+1. It reads the enrollment string from stdin, never from an argument.
+2. It verifies the server through `POST /v1/server/challenge`, against the
+   pinned key, before anything else.
+3. It generates an Ed25519 key, written `0600` in a `0700` `identity/`
+   directory, both created with those modes.
+4. It enrolls, then writes `host.json`.
+
+The HTTP client is `reqwest` with rustls on `ring`. Never `aws-lc-rs`: the
+musl/zig release build cannot compile it.
+
+**77c. Slices 4 and 5 merge: the host link, the Agent Manager and the agent
+routes land together.** *(2026-10-03)*
+
+AC-A1 drives launch → input → output → end through the Agent Manager *and*
+the host link. That cannot be tested without the client routes, so they ship
+as one slice. The later slices renumber: **5** is the client UI and **6** is
+packaging.
+
+**The server** (`apps/server/src/agent/`):
+- **Session records** live in `state/agent/agent.db`, one row per `ags_`
+  session with the §7.1 fields. The default provider lives in
+  `state/agent/config.json`.
+- **At boot**, every session that has not ended becomes `unknown` (§13).
+- **Link state is in memory:** which hosts are online, each host's command
+  sender, its capabilities, and a per-session output cache. The cache is the
+  same offset-addressed ring as the host's. A link drop marks the host
+  `offline` and its sessions `unknown`. A link is identified by a generation
+  number, so an old stream closing never marks a newer one offline.
+- **The output cache only accepts bytes in order.** Overlap is skipped, a
+  jump forward starts the ring at the new offset, and an empty cache takes
+  whatever offset arrives first. After a server restart the cache is empty,
+  so `hello` answers each live session with `terminal.replay {from: 0}`. The
+  host re-sends its ring from its floor, in order, before anything new.
+- **`hello` reconciles** (§13):
+  - Sessions the host reports take its reported state.
+  - Its sessions that have not ended and that it does not report become
+    `failed (lost)`.
+  - Sessions a restarted host reports as dead become
+    `failed (host_restart)`.
+- **The client stream is pulled from the cache.** A per-session `watch`
+  counter wakes subscribers. A subscriber reads from its cursor:
+  - data is an `output` event whose `id:` is the end offset;
+  - a missing range is a `gap` event;
+  - a status change is a full `status` event.
+
+  Keepalives go out every 15 s.
+- **Launch:**
+  - The host must be online and must offer the workspace.
+  - The provider is the requested one, or the default. If the host does not
+    offer it, the server falls back through `claude-code`, `opencode`,
+    `shell`, records `provider_fallback`, and returns 422 when none is
+    available.
+  - `max_sessions` is enforced as a 429.
+  - The record starts as `creating`, then becomes `starting` when the
+    `start` command is sent.
+- **Input** is refused with 503 while the host is offline. It is
+  at-most-once and never queued.
+
+**The link:**
+- One SSE stream, server to host. Every event's `data:` is a JSON command
+  with a `cmd_seq`. The commands are `start`, `end`, `terminal.input`
+  (base64), `terminal.resize`, `terminal.replay` and `refresh`.
+- The host POSTs `hello`, `inventory`, output batches and status changes.
+- Commands lost while the link is down are not replayed.
+
+**The host** (`storm-runtime serve`):
+- `/etc/storm-runtime/runtime.toml` holds `workspace_roots`, `providers`
+  (the built-ins, or `kind = "cli"` with a command, args and `env_file`, or
+  `kind = "fake"`), `max_sessions` and `scrollback_bytes`.
+- **Output.** Each session has one uploader task. It posts its ring from its
+  last sent offset, coalescing up to about 20 ms or 64 KiB, and retries until
+  the link is back. `terminal.replay` rewinds its offset.
+- **Restarts.** `sessions.json` records the live sessions. A host that
+  restarts reports every entry as `failed (host_restart)` in its first
+  `hello`.
+- **Reconnecting** backs off from 1 s to 60 s, and re-authenticates when its
+  token is refused.
+- **Revocation.** When the key is refused, the host ends every session and
+  exits non-zero (§5.6).
+- **Workspaces** are the non-hidden subdirectories of each root. A name is
+  never a path, and symlinks that leave a root are refused. A root that is
+  inside, or contains, a Storm data root it can see (`/srv/storm` by default)
+  is refused at startup (D3).
+- **Terminal bytes** are standard padded base64 (RFC 4648 §4) in both
+  directions: in the host's output posts, in `terminal.input`, and in the
+  client stream's `output` events.
+- **Input is bounded on the host.** A PTY write polls for room in 256-byte
+  chunks within a 5 s deadline, in a per-session ordered writer task. A hung
+  agent cannot block the link or hold the session against `end`.
+
+**Verified** (`apps/server/tests/agent_e2e.py`, 54 checks, about 19 s; run by
+`make test-live`): a real server and a real host, with the fake and shell
+providers. It covers:
+- AC-A1, F1 and F7
+- R1: a server restart, after which scrollback is replayed from the host and
+  the agent is never interrupted
+- R2: a host restart, after which the session is `host_restart`
+- R3: revocation, after which the host exits 3 and cannot authenticate
+- S1, S2, S4 and S5
+- offset resume and the explicit gap
+
+AC-T2 is a relay unit test: the terminal stream served over the tunnel by the
+same handler, under the same auth and owner check.
+
+**77d. Slice 5: the client — one terminal surface, one stream per session,
+and entry points that exist only for the owner.** *(2026-10-03)*
+
+Designed against the existing M14 system (tokens, Lucide icons, the 900 px
+breakpoint) and the taste-skill's product rules: explicit loading, empty and
+error states; contrast; one accent and one radius scale; no decorative
+status dots, only a real status chip.
+
+**Entry points.**
+- **Owner check.** The client probes `GET /v1/config/agent`. A 200 shows the
+  *Agents* entry in Server settings and the shell; a 403 hides it. The
+  client never infers a role. The server's own check decides, so AC-S1's
+  "hidden for non-owners" cannot drift from the 403.
+- **Routes.** `/agents` holds the sessions and tabs; `/agents/hosts` holds
+  hosts, enrollment and the default provider.
+
+**The terminal surface.**
+- `lib/agent/terminal_surface.dart` is the only file that imports `xterm2`
+  (5.2.x, pinned), so it can be replaced or forked (gate Q5).
+- Output bytes go through a chunked UTF-8 decoder, because a stream event
+  can split a multibyte character.
+- The terminal's colours come from the tokens.
+
+**The stream** (`lib/agent/terminal_stream*.dart`).
+- On native, it is an `http` streamed GET with the bearer header.
+- On web, it is `EventSource` with a single-use `?ticket=`. A browser
+  cannot set a header on it, and `package:http`'s browser client buffers
+  whole responses.
+- Either way it resumes by `?offset=`, never `Last-Event-ID`. It reconnects
+  with backoff from the last offset it rendered.
+- A `gap` at the start of a view clears the terminal and renders from the
+  oldest retained byte (freeze §14).
+
+**Input.**
+- Keystrokes coalesce for about 15 ms and are sent as serial POSTs per
+  session, never retried (freeze §11.3).
+- A failure is shown inline: a `503` reads "the host is offline".
+
+**Resize.**
+- Resizes are debounced and carry `focus: true` when this client takes focus
+  (§11.4).
+- Every client renders at the size in the session's `status`.
+
+**Tabs.**
+- They are per device: `ags_` ids persisted in shared preferences and
+  reconciled with `GET /v1/agent/sessions` at launch, so a dismissed session
+  drops off.
+- At 900 px and wider there is a tab strip. Below it, one session fills the
+  screen with a switcher sheet. The phone layout stays the default.
+
+**Phone.** An extra-keys row: Esc, Tab, sticky Ctrl, the four arrows and
+Paste.
+
+**Desktop.** The M18 shortcuts are suppressed while the terminal has focus. A
+local `Shortcuts` maps every global activator to
+`DoNothingAndStopPropagationIntent`, so a key the terminal leaves unhandled
+does not reach the app.
+
+**Launch.**
+- The flow is host (online only), then workspace (warning when it already
+  has a live session), then provider (default preselected, uninstalled ones
+  disabled).
+- The launch sheet shows the network line: "Network: inherits <host>'s
+  policy".
+- A fallback is announced in plain words.
+
+**The visual pass** (2026-10-04, at the operator's request). Every screen was
+rendered to PNG with the real fonts and icons at phone (400 px) and desktop
+(1400 px) width, in both themes, and checked by eye. That found:
+- the extra-keys row overflowing a phone;
+- status chips inheriting the mono face in lists only;
+- Revoke shown as an equal, accent-coloured button on every host card;
+- no host "last seen";
+- no thumb-reachable New session on a phone.
+
+All of it is fixed.
+
+**For the device pass (AC-Q5):** `xterm2` lays out a run of text as one
+paragraph. A glyph missing from IBM Plex Mono (Claude Code's `✻`, say) falls
+back to a font of another width and shifts the rest of that line. If it shows
+on a phone, the fix is a bundled terminal font with wide symbol coverage
+behind the surface boundary.
+
+**77e. Slice 6: `storm-runtime` ships as its own `.deb`, as its own user,
+with the §5.8 sandbox.** *(2026-10-03)*
+
+**The package.** It mirrors `storm-relay` (decision 70): a musl binary built
+with zig in its own release job, and `cargo deb --no-build`. Its maintainer
+scripts are written the #46 way: `prerm` acts on `remove` only, because dpkg
+runs the old package's `prerm` on upgrade.
+
+**The account.**
+- `postinst` creates a system user `storm-runtime`, whose home is
+  `/var/lib/storm-runtime/home`. That is what `sudo -u storm-runtime -H`
+  logs Claude Code into, and the unit's `HOME` matches it.
+- **It is never added to the server's group.** That group mode is what keeps
+  a co-located runtime out of the vaults and `auth.db` (P3, AC-S3).
+  `tests/packaging.rs` asserts that no script grants it.
+
+**Layout.**
+- `/var/lib/storm-runtime` (`0700`) holds the identity, `host.json` and
+  `sessions.json`.
+- `/var/lib/storm-runtime/workspaces` is the default workspace root, inside
+  the unit's writable paths.
+- Other roots need a `ReadWritePaths=` drop-in, which `deploy/README.md`
+  shows.
+- `/etc/storm-runtime/runtime.toml` is a conffile.
+
+**The unit** (freeze §5.8):
+- **Kept:** `NoNewPrivileges`, `PrivateTmp`, `PrivateDevices` (the PTY
+  subsystem survives it, per gate Q6), `ProtectSystem=strict`,
+  `ProtectHome`, the kernel protections, `LockPersonality`,
+  `RestrictNamespaces`, and `RestrictAddressFamilies` with `AF_NETLINK`.
+- **`MemoryDenyWriteExecute` is never set:** OpenCode's TUI dies under it.
+- `UMask=0027`.
+- `RestartPreventExitStatus=3`: a revoked host stops rather than loops.
+- **A fresh install is not started.** It runs once enrolled.
+
+**Verified on codebox** with the real `postinst` and the real unit under
+systemd, against a real server:
+- `storm-runtime` is in its own group only, and its directories came out
+  `700`/`700`/`750`. It comes online offering all four providers.
+- **Shell:** a real PTY (`/dev/pts/N`) under `PrivateDevices`, as
+  `storm-runtime`, with the right `HOME`.
+- **Claude Code** started as `claude --permission-mode default` and drew its
+  first-run screen.
+- **OpenCode's TUI** drew. No `mprotect` failure, so the MDWE omission
+  holds.
+- Each session's process group was gone after End.
+- **AC-S3 analogue:** the runtime account is refused a `0750` data tree it
+  does not own.
+- **Revocation:** exit 3, `NRestarts=0`, and the unit stays stopped.
+- No token in the journal.
+
+**AC-F6** is in `agent_e2e.py`, now 61 checks: three concurrent sessions
+across two real hosts. The shared workspace reports two live sessions (the
+warning), input stays with its own session, and each session ends
+independently. `docs/srp-v1.md` §5.3 gains AM4's note on the terminal stream.
+
+**AC-P1 itself still needs the operator.** Claude Code and OpenCode must be
+logged in as `storm-runtime` before an agent can accept a prompt and edit a
+file.
 
 ---
 
