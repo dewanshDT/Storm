@@ -58,7 +58,7 @@ impl Budget {
     /// bounds that.
     fn try_reserve(&self, len: usize) -> bool {
         self.queued
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                 (queued == 0 || queued.saturating_add(len) <= self.limit)
                     .then(|| queued.saturating_add(len))
             })
