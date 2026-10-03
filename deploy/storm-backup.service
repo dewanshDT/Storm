@@ -24,3 +24,6 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/srv/storm
+# The archives carry auth.db and the identity keys (A4), so they get the same
+# privacy as the state they copy (decision 76).
+UMask=0027
