@@ -84,22 +84,28 @@ unit set no `UMask`, so everything the server wrote came out world-readable.
 The fixed package sets `UMask=0027` in both units and removes other-access
 from `/srv/storm`, but only from the root directory: it cannot know what an
 operator's tree holds below it. An existing install needs this once; until the
-fixed package is installed, the drop-ins are what set the `UMask`:
+fixed package is installed, the drop-ins are what set the `UMask`.
+
+**Run it as one `sudo sh -c`, not as separate `sudo` lines.** On prod, a pasted
+block of separate lines stopped the server at the first password prompt, and
+the prompt swallowed the remaining lines, including the `start`. This form asks
+for the password once, and it ends by starting the server whatever happened
+before:
 
 ```sh
-sudo systemctl stop storm-server
-sudo chmod 0750 /srv/storm /srv/storm/state
+sudo sh -c '
+systemctl stop storm-server
+chmod 0750 /srv/storm /srv/storm/state
 # The local tree only. -xdev keeps find off any other filesystem, so a vault
-# root mounted under /srv/storm is never touched (its modes are the NAS's).
+# root mounted under /srv/storm is never touched (its modes are the NAS-s).
 # Symlinks are skipped, never followed.
-sudo find /srv/storm -xdev ! -type l -exec chmod o-rwx {} +
-sudo mkdir -p /etc/systemd/system/storm-server.service.d \
-              /etc/systemd/system/storm-backup.service.d
-printf '[Service]\nUMask=0027\n' | sudo tee \
-    /etc/systemd/system/storm-server.service.d/umask.conf \
-    /etc/systemd/system/storm-backup.service.d/umask.conf
-sudo systemctl daemon-reload
-sudo systemctl start storm-server
+find /srv/storm -xdev ! -type l -exec chmod o-rwx {} +
+mkdir -p /etc/systemd/system/storm-server.service.d /etc/systemd/system/storm-backup.service.d
+printf "[Service]\nUMask=0027\n" > /etc/systemd/system/storm-server.service.d/umask.conf
+cp /etc/systemd/system/storm-server.service.d/umask.conf /etc/systemd/system/storm-backup.service.d/umask.conf
+systemctl daemon-reload
+systemctl start storm-server
+'
 systemctl show -p UMask storm-server               # UMask=0027
 sudo -u nobody cat /srv/storm/state/auth.db        # Permission denied
 ```

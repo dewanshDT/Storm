@@ -1978,8 +1978,29 @@ both units until the fixed package is installed.
 - **A fresh install** (`postinst` → `up --vault-root <share>`) gave a 0750
   tree, the right drop-in, `UMask=0027`, `auth.db` 640, and `nobody` refused.
 
-**Status:** awaiting the operator's prod remediation and its verification.
-Agent Runtime code waits on that.
+**Prod (2026-10-03, verified over SSH after the operator ran the remediation):**
+- **The server:** running as `dewansh` with `UMask=0027` on both units,
+  health OK, all four vaults reconciled, MCP enabled.
+- **Modes:** `/srv/storm`, `state`, `vaults` and `backups` are 750;
+  `auth.db`, its WAL/SHM and `vaults.json` are 640; `identity` is 700. No
+  path in the local tree is other-accessible, and `nobody` is in no group
+  that could reach it.
+- **MCP:** a write and a read-back worked, and the index files it wrote came
+  out 640. The probe note was then deleted.
+- **The NFS vault root:** still 775, and the probe note on it came out 664.
+  That is the NAS's to fix, as recorded above.
+- **Logs:** no errors since the restart. The one WARN, stored root versus
+  the `--vault-root` flag, predates this change (585 earlier occurrences) and
+  is decision-shaped behaviour: the stored root wins.
+
+**A lesson from the run.** The first attempt was a pasted block of separate
+`sudo` lines. The first one stopped the server, then the password prompt
+swallowed the rest, including the `start`, and prod was down for 77 s. The
+README now gives one `sudo sh -c` that always ends by starting the server.
+A multi-step prod procedure that stops a service is given that way from now on.
+
+**Status:** verified on prod. Agent Runtime implementation waits only on the
+operator's confirmation.
 
 *Revisit if:* a deployment needs another local account to read the data tree.
 Grant that account group membership; never restore other-access.
