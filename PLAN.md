@@ -2405,6 +2405,11 @@ systemd, against a real server:
 - **Revocation:** exit 3, `NRestarts=0`, and the unit stays stopped.
 - No token in the journal.
 
+**AC-F6** is in `agent_e2e.py`, now 61 checks: three concurrent sessions
+across two real hosts. The shared workspace reports two live sessions (the
+warning), input stays with its own session, and each session ends
+independently. `docs/srp-v1.md` §5.3 gains AM4's note on the terminal stream.
+
 **AC-P1 itself still needs the operator.** Claude Code and OpenCode must be
 logged in as `storm-runtime` before an agent can accept a prompt and edit a
 file.

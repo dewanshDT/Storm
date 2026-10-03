@@ -430,6 +430,34 @@ automatically, so silence reads as support.
 **No inactivity timeout on this stream** — a quiet change feed is normal, not
 stalled.
 
+
+#### The agent terminal stream (Agent Runtime V1, AM4)
+
+`GET /v1/agent/sessions/{id}/terminal/stream?offset=N` is another ordinary
+§5.2 request: SSE, an `Authorization` header (or the single-use `?ticket=`
+in a browser), the origin's `require_auth` and owner check unchanged. That is
+what makes it cross a relay without a special case (R13). The relay is not V1
+acceptance (AM21); this is a design constraint.
+
+```
+event: status
+data: <json-encoded session record>
+
+event: output
+id: <absolute end byte offset>
+data: <base64 of the bytes>
+
+event: gap
+data: {"from": <offset>, "to": <offset>}
+
+```
+
+**It resumes by `?offset=`, never `Last-Event-ID`.** The offset is the
+session's own byte position, so the open question above does not arise. The
+origin ignores the header, and a client reconnects with the offset it last
+rendered. A reader below what is retained gets an explicit `gap`, never a short
+read. Input is `POST …/terminal/input`, a separate ordinary request.
+
 ### 5.4 Closing
 
 `CLOSE { stream_id }` from either side ends one stream without touching the
