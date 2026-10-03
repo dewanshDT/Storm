@@ -354,30 +354,29 @@ fn private_dirs<'a>(
     dirs
 }
 
-/// Removes group-write and all access for other accounts from a directory
-/// Storm owns, and reports whether anything changed.
+/// Clears `PRIVATE_MASK` from a directory Storm owns, and reports whether
+/// anything changed.
 ///
 /// It only ever *removes* bits, so a directory an operator made stricter (0700)
-/// stays as it is. The owner keeps everything, which is why this is safe to run
-/// on a live install: the server and the backup run as the owner. Without it,
-/// `mkdir` under the default umask leaves the tree 0755 and every local account
-/// can read every note and `state/auth.db`, which holds the password hashes.
-#[cfg(unix)]
+/// stays as it is, and the owner keeps everything — which is why this is safe on
+/// a live install: the server and the backup run as the owner.
 pub fn tighten_private_dir(path: &Path) -> std::io::Result<bool> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = fs::metadata(path)?.permissions().mode() & 0o7777;
-    let tightened = mode & !PRIVATE_MASK;
-    if tightened == mode {
-        return Ok(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode() & 0o7777;
+        let tightened = mode & !PRIVATE_MASK;
+        if tightened == mode {
+            return Ok(false);
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(tightened))?;
+        Ok(true)
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(tightened))?;
-    Ok(true)
-}
-
-#[cfg(not(unix))]
-pub fn tighten_private_dir(path: &Path) -> std::io::Result<bool> {
-    let _ = path;
-    Ok(false)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(false)
+    }
 }
 
 /// chown when possible; NFS / root_squash must not abort `up`.
@@ -484,15 +483,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn dir_with_mode(name: &str, mode: u32) -> PathBuf {
+    fn dir_with_mode(mode: u32) -> tempdir::TempDir {
         use std::os::unix::fs::PermissionsExt;
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("storm-private-{name}-{nanos}"));
-        fs::create_dir_all(&dir).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).unwrap();
+        let dir = tempdir::TempDir::new("storm-private").unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
         dir
     }
 
@@ -501,19 +495,17 @@ mod tests {
     fn a_world_readable_state_dir_loses_other_access_and_group_write() {
         // Prod's state directory was 0775: every local account could read
         // auth.db (decision 76).
-        let dir = dir_with_mode("loose", 0o775);
-        assert!(tighten_private_dir(&dir).unwrap());
-        assert_eq!(mode_of(&dir), 0o750);
-        fs::remove_dir_all(&dir).unwrap();
+        let dir = dir_with_mode(0o775);
+        assert!(tighten_private_dir(dir.path()).unwrap());
+        assert_eq!(mode_of(dir.path()), 0o750);
     }
 
     #[cfg(unix)]
     #[test]
     fn a_stricter_dir_is_left_as_the_operator_made_it() {
-        let dir = dir_with_mode("strict", 0o700);
-        assert!(!tighten_private_dir(&dir).unwrap());
-        assert_eq!(mode_of(&dir), 0o700);
-        fs::remove_dir_all(&dir).unwrap();
+        let dir = dir_with_mode(0o700);
+        assert!(!tighten_private_dir(dir.path()).unwrap());
+        assert_eq!(mode_of(dir.path()), 0o700);
     }
 
     #[test]

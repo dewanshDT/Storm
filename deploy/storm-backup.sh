@@ -11,6 +11,9 @@
 # Run by storm-backup.timer; safe to run by hand.
 
 set -euo pipefail
+# The archives carry auth.db and the identity keys, so they are private to the
+# service user and its group even when this runs outside the unit (decision 76).
+umask 027
 
 ENV_FILE="${STORM_ENV_FILE:-/etc/storm/storm.env}"
 # Under systemd the unit's EnvironmentFile= has already set these, and the

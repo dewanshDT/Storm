@@ -14,12 +14,14 @@ fn repo_file(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
+/// A unit file's or shell script's lines, trimmed, without comments.
+fn code_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().map(str::trim).filter(|l| !l.starts_with('#'))
+}
+
 /// The value of `key=` in a unit file, ignoring comments.
 fn unit_value(unit: &str, key: &str) -> Option<String> {
-    unit.lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_string))
+    code_lines(unit).find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_string))
 }
 
 #[test]
@@ -81,18 +83,15 @@ fn both_units_keep_what_they_create_from_other_accounts() {
 #[test]
 fn the_package_closes_the_default_root_to_other_accounts() {
     let postinst = repo_file("apps/server/debian/postinst");
-    let code: Vec<&str> = postinst
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .collect();
+    let code: Vec<&str> = code_lines(&postinst).collect();
     assert!(
         code.iter().any(|l| l.starts_with("chmod o-rwx /srv/storm")),
         "postinst must remove other-access from /srv/storm on every install"
     );
     assert!(
-        code.iter().any(|l| l.starts_with("chmod 0750 /srv/storm ")),
-        "a fresh install must create the default tree 0750"
+        code.iter()
+            .any(|l| l.starts_with("chmod 0750 /srv/storm/vaults ")),
+        "a fresh install must create the default subdirectories 0750"
     );
     assert!(
         code.iter().any(|l| l.contains("! -L /srv/storm")),
