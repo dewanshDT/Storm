@@ -2456,11 +2456,14 @@ not an owner sees exactly the app it saw before (AC-S1).
   It never moves when a session ends: a home screen that reshuffles itself
   when an agent finishes breaks muscle memory. There is **no "N live" stat**
   in the masthead; it would be a second entry point for one intent.
-- **The Agents space on a phone.** The list, with *New session* as a pill at
-  the bottom (the nav bubble's grammar, replacing a Material FAB that was the
-  one off-system control). The launcher preselects the host this device used
-  last. The extra-keys row keeps the pill's slot while the keyboard is open,
-  as the formatting toolbar does in a note: never both, never neither.
+- **The Agents space on a phone.** The list — *Running*, then *Ended* — with
+  *New session* as a pill at the bottom: the nav bubble's grammar, replacing a
+  Material FAB, because the space is a peer of the vault screens
+  (settings-shaped screens such as Hosts and MCP keys keep theirs). The
+  launcher preselects the host this device used last, and a host's only
+  workspace, so most launches are one tap. An open session fills the screen
+  with its extra-keys row where the pill was — the two are never on screen
+  together — and Android back returns to the list rather than leaving.
 - **Wide (≥ 900px).** A **Notes | Agents** switch tops the sidebar, for
   owners only. The Agents side is its **own shell** drawn like the vault
   sidebar — sessions where the tree was, *New session* and *Hosts* at the
@@ -2483,6 +2486,37 @@ space; a vault is a container, and "Agents" is an activity.
 **Not in this pass:** a per-session deep link (`/agents/s/:id`) — tabs
 already reopen sessions — and keyboard shortcuts for the switch, which belong
 with the M18 set.
+
+**Built** on `feat/agents-navigation`:
+- One data source: `agentOverviewProvider` (sessions + hosts), `autoDispose`
+  so the 15 s timer dies with the last watcher, and it **never throws** —
+  unreachable is a value. Riverpod 3 retries a failing provider on its own
+  schedule, which would have been a second, unbounded poll.
+- `AgentsShell` is a `ShellRoute` under the dashboard; `AgentsSidebar`,
+  `AgentsBand`, `SpaceSwitch` and one `AgentSessionRow` shared by all three
+  surfaces. The switch gates itself, so a sidebar places it unconditionally.
+- Pull-to-refresh on the dashboard re-asks the owner check, so a role changed
+  on the server no longer needs an app restart to show.
+- **Found on the way:** the dashboard decides its desk-width forward by
+  reading the router's location *during build*, and on a `go('/')` from
+  another route that read still returns the old one — so it drew the phone
+  dashboard on a wide screen. Nothing went to `/` at desk width before this.
+  The switch goes to `notesHome()` (the vault last in use) instead of
+  relying on the forward.
+
+**Verified:** `test/agents_navigation_test.dart`, 14 tests on the real router
+— member: no band, no switch, `/agents` and `/agents/hosts` bounce home,
+nothing in Server settings (scrolled to the end, since the list is lazy and
+"not found" would otherwise mean "not built"); owner: band above Recents in
+all four idle states and with live sessions, a tap lands in the terminal,
+system back goes list → dashboard; phone list *Running* before *Ended* with
+the pill and no FAB; wide switch round trip, Hosts in the pane; the launcher's
+remembered host. **Both guards were mutation-tested**: with the redirect off
+the member test fails, with `PopScope` letting back through the band test
+fails. The full client suite passes (720) bar `editor_save_loop_test`, which
+codebox cannot finish (CI judges it). A screenshot pass at 400 and 1400 px,
+dark and light, found one defect — the idle row's icon cramped in the dot's
+16 px column, now 22 px for both.
 
 **Revisit if** a non-owner role gains agent access (the band and switch are
 gated on the one owner check), or a third space appears, at which point the

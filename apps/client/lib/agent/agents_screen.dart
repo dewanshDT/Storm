@@ -6,21 +6,26 @@ import 'package:go_router/go_router.dart';
 
 import '../router.dart';
 import '../ui/breakpoints.dart';
+import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
+import '../ui/widgets.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'agent_widgets.dart';
 import 'hosts_screen.dart' show ChipTone, StatusChip;
 import 'session_controller.dart';
 import 'terminal_surface.dart';
 
 /// Agent sessions: the list, the open tabs, and the terminal (freeze §10,
-/// items 2–5; decision 77d).
+/// items 2–5; decisions 77d and 78).
 ///
-/// **The phone layout is the default** (the M12 invariant): one session fills
-/// the screen, with a switcher sheet. At [kExpandedWidth] and wider, the list
-/// sits beside a tab strip. Nothing below the breakpoint changes because of
-/// what renders above it.
+/// **The phone layout is the default** (the M12 invariant): the list, with
+/// *New session* as a pill at the bottom; a session fills the screen, with a
+/// switcher sheet. At [kExpandedWidth] and wider this is only the *pane* — the
+/// list lives in `AgentsSidebar`, beside it in `AgentsShell` — and shows the
+/// tab strip over the open session. Nothing below the breakpoint changes
+/// because of what renders above it.
 class AgentsScreen extends ConsumerStatefulWidget {
   const AgentsScreen({super.key});
 
@@ -29,17 +34,7 @@ class AgentsScreen extends ConsumerStatefulWidget {
 }
 
 class _AgentsScreenState extends ConsumerState<AgentsScreen> {
-  List<AgentSession>? _sessions;
-  List<AgentHost> _hosts = const [];
-  String? _error;
-  bool _loading = false;
   final _controllers = <String, SessionController>{};
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
 
   @override
   void dispose() {
@@ -47,30 +42,6 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
       c.dispose();
     }
     super.dispose();
-  }
-
-  Future<void> _load() async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final sessions = await api.sessions();
-      final hosts = await api.hosts();
-      if (!mounted) return;
-      ref.read(agentTabsProvider.notifier).reconcile(sessions.map((s) => s.id));
-      setState(() {
-        _sessions = sessions.reversed.toList();
-        _hosts = hosts;
-      });
-    } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
-    } finally {
-      api.dispose();
-      if (mounted) setState(() => _loading = false);
-    }
   }
 
   SessionController _controller(String id) => _controllers.putIfAbsent(id, () {
@@ -82,11 +53,6 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
       open: open == null ? null : (offset) => open(id, offset),
     )..start();
   });
-
-  void _open(String id) {
-    ref.read(agentTabsProvider.notifier).open(id);
-    ref.read(activeAgentTabProvider.notifier).state = id;
-  }
 
   void _close(String id) {
     ref.read(agentTabsProvider.notifier).close(id);
@@ -100,54 +66,19 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
     }
   }
 
-  String _hostName(String id) => _hosts
-      .firstWhere(
-        (h) => h.id == id,
-        orElse: () => AgentHost(
-          id: id,
-          name: 'host',
-          status: 'offline',
-          providers: const [],
-          workspaces: const [],
-          maxSessions: 0,
-          lastSeen: null,
-        ),
-      )
-      .name;
-
-  Future<void> _launch() async {
-    final launched = await showModalBottomSheet<AgentSession>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (_) => _Launcher(hosts: _hosts),
-    );
-    if (launched == null || !mounted) return;
-    final fb = launched.fallback;
-    if (fb != null) {
-      // Never silent (freeze §6).
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            "${providerLabel(fb.requested)} isn't installed on "
-            '${_hostName(launched.hostId)}. Using ${providerLabel(fb.used)}.',
-          ),
-        ),
-      );
-    }
-    _open(launched.id);
-    await _load();
-  }
-
   Future<void> _dismiss(AgentSession s) async {
     final api = agentApi(ref);
     if (api == null) return;
     try {
       await api.dismiss(s.id);
       _close(s.id);
-      await _load();
+      await reloadAgents(ref);
     } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
+      }
     } finally {
       api.dispose();
     }
@@ -155,113 +86,127 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // A dismissed session drops off the strip as soon as the list says so.
+    ref.listen(agentOverviewProvider, (_, next) {
+      final o = next.value;
+      if (o != null && !o.unreachable) {
+        ref
+            .read(agentTabsProvider.notifier)
+            .reconcile(o.sessions.map((s) => s.id));
+      }
+    });
+    final overview =
+        ref.watch(agentOverviewProvider).value ??
+        const AgentOverview(sessions: [], hosts: []);
     final tabs = ref.watch(agentTabsProvider);
     final active = ref.watch(activeAgentTabProvider);
-    final wide = context.isExpanded;
     final current = active != null && tabs.contains(active) ? active : null;
 
-    final actions = [
-      IconButton(
-        tooltip: 'Hosts',
-        onPressed: () => context.push(Routes.agentHosts).then((_) => _load()),
-        icon: const Icon(LucideIcons.server, size: 18),
-      ),
-      IconButton(
-        key: const Key('new-session'),
-        tooltip: 'New session',
-        onPressed: _launch,
-        icon: const Icon(LucideIcons.plus, size: 18),
-      ),
-    ];
+    if (context.isExpanded) return _pane(overview, tabs, current);
 
-    if (!wide && current != null) {
-      // Phone, a session open: it fills the screen.
-      return _SessionPage(
-        controller: _controller(current),
-        hostName: (id) => _hostName(id),
-        tabCount: tabs.length,
-        onSwitch: () => _showSwitcher(tabs),
-        onBack: () => ref.read(activeAgentTabProvider.notifier).state = null,
-        onDismiss: _dismiss,
-      );
-    }
-
-    final list = _SessionList(
-      sessions: _sessions,
-      loading: _loading,
-      error: _error,
-      hostName: _hostName,
-      hasHosts: _hosts.isNotEmpty,
-      selected: current,
-      onOpen: _open,
-      onRefresh: _load,
-      onLaunch: _launch,
-      onHosts: () => context.push(Routes.agentHosts).then((_) => _load()),
-    );
-
-    if (!wide) {
-      // On a phone the primary action is under the thumb, as on Hosts.
-      return Scaffold(
-        appBar: AppBar(title: const Text('Agents'), actions: [actions.first]),
-        body: list,
-        floatingActionButton: FloatingActionButton.extended(
-          key: const Key('new-session-fab'),
-          onPressed: _launch,
-          icon: const Icon(LucideIcons.plus),
-          label: const Text('New session'),
+    if (current != null) {
+      // Phone, a session open: it fills the screen. Back returns to the
+      // list, as the arrow in its bar does, rather than leaving the space —
+      // on Android the system back was the one way out that skipped it.
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) ref.read(activeAgentTabProvider.notifier).state = null;
+        },
+        child: _SessionPage(
+          controller: _controller(current),
+          hostName: overview.hostName,
+          tabCount: tabs.length,
+          onSwitch: () => _showSwitcher(tabs, overview),
+          onBack: () => ref.read(activeAgentTabProvider.notifier).state = null,
+          onDismiss: _dismiss,
         ),
       );
     }
 
-    final t = context.tokens;
     return Scaffold(
-      appBar: AppBar(title: const Text('Agents'), actions: actions),
-      body: Row(
+      appBar: AppBar(
+        title: const Text('Agents'),
+        actions: [
+          IconButton(
+            key: const Key('open-hosts'),
+            tooltip: 'Hosts',
+            onPressed: () => context.push(Routes.agentHosts),
+            icon: const Icon(LucideIcons.server, size: 18),
+          ),
+        ],
+      ),
+      body: Stack(
         children: [
-          SizedBox(width: 300, child: list),
-          VerticalDivider(width: t.bw, color: t.border),
-          Expanded(
-            child: current == null
-                ? const EmptyState(
-                    icon: LucideIcons.square_terminal,
-                    title: 'No session open',
-                    detail: 'Open one from the list, or start a new one.',
-                    fill: true,
-                  )
-                : Column(
-                    children: [
-                      _TabStrip(
-                        tabs: tabs,
-                        active: current,
-                        sessions: _sessions ?? const [],
-                        onSelect: (id) =>
-                            ref.read(activeAgentTabProvider.notifier).state =
-                                id,
-                        onClose: _close,
-                      ),
-                      Expanded(
-                        child: _SessionView(
-                          key: ValueKey(current),
-                          controller: _controller(current),
-                          hostName: _hostName,
-                          onDismiss: _dismiss,
-                          keysRow: false,
-                        ),
-                      ),
-                    ],
-                  ),
+          Positioned.fill(
+            child: AgentSessionList(
+              onOpen: (id) => openAgentSession(ref, id),
+              onLaunch: () => launchAgentSession(context, ref),
+              onHosts: () => context.push(Routes.agentHosts),
+              bottomClearance: StormChrome.navClearance(context),
+            ),
+          ),
+          // Under the thumb, in the nav bubble's grammar.
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: NewSessionPill(
+              onTap: () => launchAgentSession(context, ref),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _showSwitcher(List<String> tabs) async {
+  /// The wide pane: the tab strip over the open session, or a quiet prompt.
+  Widget _pane(AgentOverview overview, List<String> tabs, String? current) {
+    final t = context.tokens;
+    return Scaffold(
+      backgroundColor: t.bg,
+      body: SafeArea(
+        left: false,
+        child: current == null
+            ? EmptyState(
+                icon: LucideIcons.square_terminal,
+                title: 'No session open',
+                detail: 'Open one from the list, or start a new one.',
+                action: overview.online.isEmpty ? null : 'New session',
+                onAction: () => launchAgentSession(context, ref),
+                fill: true,
+              )
+            : Column(
+                children: [
+                  _TabStrip(
+                    tabs: tabs,
+                    active: current,
+                    sessions: overview.sessions,
+                    onSelect: (id) =>
+                        ref.read(activeAgentTabProvider.notifier).state = id,
+                    onClose: _close,
+                  ),
+                  Expanded(
+                    child: _SessionView(
+                      key: ValueKey(current),
+                      controller: _controller(current),
+                      hostName: overview.hostName,
+                      onDismiss: _dismiss,
+                      keysRow: false,
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Future<void> _showSwitcher(List<String> tabs, AgentOverview overview) async {
     final picked = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
       builder: (context) {
-        final byId = {for (final s in _sessions ?? <AgentSession>[]) s.id: s};
+        final byId = {for (final s in overview.sessions) s.id: s};
         return SafeArea(
           child: ListView(
             shrinkWrap: true,
@@ -269,7 +214,7 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
               for (final id in tabs)
                 ListTile(
                   leading: const Icon(LucideIcons.square_terminal, size: 18),
-                  title: Text(_title(byId[id])),
+                  title: Text(sessionTitle(byId[id])),
                   subtitle: Text(byId[id]?.statusLabel ?? ''),
                   onTap: () => Navigator.of(context).pop(id),
                 ),
@@ -290,18 +235,50 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
   }
 }
 
-String _title(AgentSession? s) =>
-    s == null ? 'Session' : '${providerLabel(s.provider)} in ${s.workspace}';
+/// Ask the server again now, rather than at the next tick.
+Future<void> reloadAgents(WidgetRef ref) async {
+  ref.invalidate(agentOverviewProvider);
+  await ref.read(agentOverviewProvider.future);
+}
 
-/// How long ago, coarsely: a list is scanned, not read.
-String _ago(String iso) {
-  final at = DateTime.tryParse(iso);
-  if (at == null) return '';
-  final d = DateTime.now().toUtc().difference(at.toUtc());
-  if (d.inMinutes < 1) return 'just now';
-  if (d.inHours < 1) return '${d.inMinutes} min ago';
-  if (d.inDays < 1) return '${d.inHours} h ago';
-  return '${d.inDays} d ago';
+/// Opens a session as this device's active tab. Where to *show* it is the
+/// caller's business: the dashboard pushes the Agents space, the sidebar is
+/// already beside it.
+void openAgentSession(WidgetRef ref, String id) {
+  ref.read(agentTabsProvider.notifier).open(id);
+  ref.read(activeAgentTabProvider.notifier).state = id;
+}
+
+/// The launcher sheet, and everything that follows a launch: the fallback
+/// announced (never silent, freeze §6), the session opened as the active tab,
+/// the list refreshed. Returns the session, or null if nothing was launched.
+Future<AgentSession?> launchAgentSession(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  final overview = ref.read(agentOverviewProvider).value;
+  final launched = await showModalBottomSheet<AgentSession>(
+    context: context,
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (_) => _Launcher(hosts: overview?.hosts ?? const []),
+  );
+  if (launched == null) return null;
+  final fb = launched.fallback;
+  if (fb != null && context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          "${providerLabel(fb.requested)} isn't installed on "
+          '${overview?.hostName(launched.hostId) ?? 'that host'}. '
+          'Using ${providerLabel(fb.used)}.',
+        ),
+      ),
+    );
+  }
+  openAgentSession(ref, launched.id);
+  ref.invalidate(agentOverviewProvider);
+  return launched;
 }
 
 ChipTone _tone(AgentSession? s) => switch (s?.status) {
@@ -311,79 +288,106 @@ ChipTone _tone(AgentSession? s) => switch (s?.status) {
   _ => ChipTone.muted,
 };
 
-class _SessionList extends StatelessWidget {
-  const _SessionList({
-    required this.sessions,
-    required this.loading,
-    required this.error,
-    required this.hostName,
-    required this.hasHosts,
-    required this.selected,
+/// Every session, live ones first, as the phone screen and the wide sidebar
+/// both list them.
+class AgentSessionList extends ConsumerWidget {
+  const AgentSessionList({
+    super.key,
     required this.onOpen,
-    required this.onRefresh,
     required this.onLaunch,
     required this.onHosts,
+    this.dense = false,
+    this.selected,
+    this.bottomClearance = 0,
   });
 
-  final List<AgentSession>? sessions;
-  final bool loading;
-  final String? error;
-  final String Function(String) hostName;
-  final bool hasHosts;
-  final String? selected;
   final ValueChanged<String> onOpen;
-  final Future<void> Function() onRefresh;
   final VoidCallback onLaunch;
   final VoidCallback onHosts;
+  final bool dense;
+  final String? selected;
+
+  /// Room left under the last row for whatever floats over the list.
+  final double bottomClearance;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    final list = sessions;
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: ListView(
-        padding: EdgeInsets.all(t.sp),
-        children: [
-          if (error != null)
-            Padding(
-              padding: EdgeInsets.all(t.sp),
-              child: Text(error!, style: TextStyle(color: t.danger)),
-            ),
-          if (loading && list == null)
-            const SkeletonRows(rows: 4)
-          else if (list != null && list.isEmpty)
-            hasHosts
-                ? EmptyState(
-                    icon: LucideIcons.square_terminal,
-                    title: 'No sessions yet',
-                    detail:
-                        'Start an agent in a workspace on one of your hosts.',
-                    action: 'New session',
-                    onAction: onLaunch,
-                  )
-                : EmptyState(
-                    icon: LucideIcons.server,
-                    title: 'No hosts yet',
-                    detail: 'Agents run on a host. Enroll one to get started.',
-                    action: 'Hosts',
-                    onAction: onHosts,
-                  )
-          else
-            for (final s in list ?? <AgentSession>[])
-              ListTile(
-                key: Key('session-${s.id}'),
-                selected: s.id == selected,
-                contentPadding: EdgeInsets.symmetric(horizontal: t.sp),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(t.rControl),
-                ),
-                title: Text(_title(s)),
-                subtitle: Text('${hostName(s.hostId)} · ${_ago(s.createdAt)}'),
-                trailing: StatusChip(label: s.statusLabel, tone: _tone(s)),
-                onTap: () => onOpen(s.id),
+    final o = ref.watch(agentOverviewProvider).value;
+
+    final List<Widget> children;
+    if (o == null) {
+      children = const [SkeletonRows(rows: 4)];
+    } else if (o.unreachable) {
+      // Offline is a state (the ground rule), and agents cannot run without
+      // the server — so say exactly that, calmly, with no failure text.
+      children = [
+        EmptyState(
+          icon: LucideIcons.cloud_off,
+          title: 'Agents need the server',
+          detail: "Nothing to show until it's back.",
+          action: 'Try again',
+          onAction: () => reloadAgents(ref),
+        ),
+      ];
+    } else if (o.sessions.isEmpty) {
+      children = [
+        o.hosts.isEmpty
+            ? EmptyState(
+                icon: LucideIcons.server,
+                title: 'No hosts yet',
+                detail: 'Agents run on a host. Enroll one to get started.',
+                action: 'Hosts',
+                onAction: onHosts,
+              )
+            : EmptyState(
+                icon: LucideIcons.square_terminal,
+                title: 'No sessions yet',
+                detail: 'Start an agent in a workspace on one of your hosts.',
+                action: o.online.isEmpty ? null : 'New session',
+                onAction: onLaunch,
               ),
+      ];
+    } else {
+      Widget section(String label, List<AgentSession> list) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              t.sp * (dense ? 1 : 0.5),
+              t.sp,
+              0,
+              t.sp,
+            ),
+            child: SectionLabel(label),
+          ),
+          for (final s in list)
+            AgentSessionRow(
+              key: Key('session-${s.id}'),
+              session: s,
+              hostName: o.hostName(s.hostId),
+              selected: s.id == selected,
+              dense: dense,
+              onTap: () => onOpen(s.id),
+            ),
         ],
+      );
+      children = [
+        if (o.live.isNotEmpty) section('Running', o.live),
+        if (o.ended.isNotEmpty) section('Ended', o.ended),
+      ];
+    }
+
+    return RefreshIndicator(
+      onRefresh: () => reloadAgents(ref),
+      child: ListView(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * (dense ? 1 : 2),
+          t.sp * (dense ? 0.5 : 1),
+          t.sp * (dense ? 1 : 2),
+          t.sp + bottomClearance,
+        ),
+        children: children,
       ),
     );
   }
@@ -435,7 +439,7 @@ class _TabStrip extends StatelessWidget {
                 child: Row(
                   children: [
                     Text(
-                      _title(byId[id]),
+                      sessionTitle(byId[id]),
                       style: TextStyle(
                         color: id == active ? t.text : t.text2,
                         fontWeight: id == active
@@ -489,7 +493,7 @@ class _SessionPage extends StatelessWidget {
             onPressed: onBack,
             icon: const Icon(LucideIcons.arrow_left),
           ),
-          title: Text(_title(controller.session)),
+          title: Text(sessionTitle(controller.session)),
           actions: [
             IconButton(
               key: const Key('switch-session'),
@@ -798,9 +802,22 @@ class _LauncherState extends ConsumerState<_Launcher> {
   @override
   void initState() {
     super.initState();
-    final online = _online;
-    if (online.length == 1) _pickHost(online.first);
+    _preselectHost();
     _loadDefault();
+  }
+
+  /// The host this device launched on last, if it is online; otherwise the
+  /// only one there is. Most launches are then a single tap (decision 78).
+  Future<void> _preselectHost() async {
+    final online = _online;
+    final last = await lastLaunchHost();
+    if (!mounted || _host != null) return;
+    final remembered = online.where((h) => h.id == last).firstOrNull;
+    if (remembered != null) {
+      await _pickHost(remembered);
+    } else if (online.length == 1) {
+      await _pickHost(online.first);
+    }
   }
 
   Future<void> _loadDefault() async {
@@ -825,7 +842,13 @@ class _LauncherState extends ConsumerState<_Launcher> {
     if (api == null) return;
     try {
       final ws = await api.workspaces(host.id);
-      if (mounted) setState(() => _workspaces = ws);
+      if (mounted) {
+        setState(() {
+          _workspaces = ws;
+          // One workspace is no choice at all.
+          if (ws.length == 1) _workspace = ws.first;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = describeFailure(e));
     } finally {
@@ -852,6 +875,7 @@ class _LauncherState extends ConsumerState<_Launcher> {
         cols: (size.width / 9).clamp(40, 240).floor(),
         rows: (size.height / 20).clamp(12, 80).floor(),
       );
+      await rememberLaunchHost(host.id);
       if (mounted) Navigator.of(context).pop(session);
     } catch (e) {
       if (mounted) setState(() => _error = describeFailure(e));
