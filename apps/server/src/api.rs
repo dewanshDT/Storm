@@ -135,6 +135,10 @@ pub struct AppState {
     pub host_limiter: crate::auth::ratelimit::LoginLimiter,
     /// The Agent Manager: the only session authority (decision 77c).
     pub agent: Arc<crate::agent::AgentManager>,
+    /// The MCP Gateway's store and data key (decision 81b). Opened at boot so
+    /// the key exists before the first backup; its operations arrive in 81c.
+    #[allow(dead_code)]
+    pub gateway: Arc<crate::gateway::Gateway>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -3354,6 +3358,8 @@ pub(crate) mod tests {
         let (root_changed, _) = broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
         let agent = Arc::new(crate::agent::AgentManager::open(&state_dir).unwrap());
+        let gateway =
+            Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -3375,6 +3381,7 @@ pub(crate) mod tests {
             login_limiter,
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             agent,
+            gateway,
         });
         (
             router(

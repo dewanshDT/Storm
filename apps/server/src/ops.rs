@@ -1483,6 +1483,7 @@ mod tests {
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
+            gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
         })
     }
 

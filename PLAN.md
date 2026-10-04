@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slice 1, the store (81b) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -2762,6 +2762,69 @@ phone edit, and C3 against the real build.
 call an upstream elicitation belongs to (slice 4 needs that to put it on the
 right response stream), or `chacha20poly1305` turns out to pull a C
 toolchain into the musl build.
+
+**81b. Gateway slice 1: `gateway.db`, its data key, and both in every
+backup.** *(2026-10-05)*
+
+**What exists.** `apps/server/src/gateway/`, opened at boot beside the Agent
+Manager and held in `AppState`. No route reads it yet; 81c's connection
+operations are its first caller.
+- **`gateway.db`** (`state/gateway/`): `connections`, `credentials`,
+  `oauth_clients`, `oauth_flows` and `calls` (spec §8), plus `meta` for the
+  active key id. Every statement is `CREATE … IF NOT EXISTS`, and a test
+  fails on a `DROP`, an `ALTER` or a bare `CREATE`. The OAuth tables are
+  created now, with the columns slice 6 needs (issuer metadata, the
+  `resource`, the scope), so slice 6 adds behaviour, not columns.
+- **The AEAD** is `chacha20poly1305` 0.10 (`XChaCha20Poly1305`, pure Rust; no
+  new C, no `aws-lc-rs`). A random 24-byte nonce per seal. **The AAD is
+  `id 0x00 kind`**: the spec's `connection_id ‖ kind`, with a separator so
+  `("ab","c")` and `("a","bc")` differ. A ciphertext moved to another row,
+  or to another kind, does not open.
+- **The key** is 32 raw bytes in `state/gateway/keys/gwk_<26>.key`, created
+  `0600` with `create_new` in a directory created `0700`. `meta.active_key_id`
+  names the sealing key; every key file that loads can open, because each
+  row records its key.
+- **Opened secrets are a `Plaintext`** whose `Debug` prints `<redacted>`
+  and whose buffer is overwritten on drop. `Sealed` prints its key id and
+  length only.
+- **`backup_all()` calls `gateway::backup`** right after `backup_auth`,
+  before the "no vaults" early return: `gateway.db` by `VACUUM INTO`, and the
+  key files copied and re-tightened to `0600` in `0700`. The snapshot mirrors
+  the state layout, so a restore is a plain copy.
+- **The `calls` audit** stores `at_ms` (epoch milliseconds) so the 30-day
+  retention is an exact comparison. The row type has no field for
+  arguments or results, so G-D18 is kept by the type. `prune_calls`
+  applies age first, then the 100k-row cap.
+
+**A lost key is not a lockout** (§8). If `meta.active_key_id` names a key
+file that is missing or unreadable, boot makes a new key active, marks every
+connection sealed under an unloadable key `needs_reauth` (not `revoked` or
+`disabled` ones), and logs one warning that says to restore
+`state/gateway/keys/`. The old key file, if it is merely unreadable, is left
+where it is. The notes stay online either way.
+
+**`revoked` is a connection status the spec's §5 list omits.** §13 says a
+disconnect marks the connection revoked and keeps rows for the audit, so the
+row stays as a tombstone with its credentials deleted, and the unique index
+on `(owner_user_id, slug)` excludes it, so the slug is free again. This is
+§13 read literally, not a design change.
+
+**Verified.**
+- 18 new unit tests, plus `a_backup_carries_the_gateway_store_and_its_data_key`
+  through `backup_all` on a server with no vaults. The backup test restores
+  by plain copy and opens the credential.
+- **Each guard was proved by mutation**, all seven caught: `backup_all`
+  without the gateway call; a backup without the keys; the AAD ignored;
+  plaintext stored as the ciphertext (the database and its WAL are
+  scanned for the canary); a key created `0644`; a lost key not marking
+  its connections; `Plaintext`'s `Debug` printing the secret.
+- `cargo tree -i aws-lc-rs` finds nothing. fmt, clippy `-D warnings` and
+  all 476 unit tests pass. Against a live server: `e2e.py` 81/81
+  unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**Revisit if** data-key rotation is built (it is LATER in the spec): it needs
+a re-seal pass and a rule for when an old key file may be deleted, and
+`meta.active_key_id` is where that starts.
 
 ---
 
