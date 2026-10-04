@@ -4383,7 +4383,10 @@ pub(crate) mod tests {
                 "/v1/config/relays",
                 serde_json::json!({"relays": ["wss://relay.example"]}),
             ),
-            ("/v1/config/registration", serde_json::json!({"enabled": true})),
+            (
+                "/v1/config/registration",
+                serde_json::json!({"enabled": true}),
+            ),
         ];
         for (path, body) in attempts {
             let (status, _) = send(
@@ -4400,7 +4403,10 @@ pub(crate) mod tests {
         )
         .await
         .1;
-        assert_eq!(before, after, "a refused change must leave the config alone");
+        assert_eq!(
+            before, after,
+            "a refused change must leave the config alone"
+        );
 
         // And the owner is not caught by the same check.
         let (status, _) = send(
