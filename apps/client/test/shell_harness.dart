@@ -1,8 +1,14 @@
+import 'dart:async';
+
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 
+import 'package:storm/agent/agent_api.dart';
+import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_connection.dart';
 import 'package:storm/api/storm_api.dart';
@@ -36,7 +42,15 @@ const vaultPaths = [
 /// [configured] cannot express — a paired device with no session, say. The
 /// server fakes are still wired, so a redirect that lands on the dashboard
 /// does not leave a real sync engine's timer running.
-ProviderContainer shellContainer({bool configured = true, Settings? settings}) {
+///
+/// [agentClient] mounts the shell as the server's owner, with it answering
+/// every `/v1/agent/*` call. Absent by default, so every other suite sees
+/// exactly the app a member does — and makes no agent request at all.
+ProviderContainer shellContainer({
+  bool configured = true,
+  Settings? settings,
+  http.Client? agentClient,
+}) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
 
@@ -82,6 +96,23 @@ ProviderContainer shellContainer({bool configured = true, Settings? settings}) {
       // Widget tests have no platform package info; keep Client settings
       // deterministic and free of MissingPluginException noise.
       clientVersionProvider.overrideWith((ref) async => '0.0.0-test'),
+      agentAccessProvider.overrideWith((ref) async => agentClient != null),
+      // Null without a client, rather than the default built from the fake
+      // settings, so no suite can reach a real agent request by accident.
+      agentApiFactoryProvider.overrideWithValue(
+        agentClient == null
+            ? null
+            : () => AgentApi(
+                baseUrl: 'http://test',
+                token: 't',
+                client: agentClient,
+              ),
+      ),
+      // A terminal stream that stays open and says nothing: a test that opens
+      // a session asserts on the chrome around it, not on a live PTY.
+      terminalStreamFactoryProvider.overrideWithValue(
+        (_, _) => StreamController<TerminalEvent>().stream,
+      ),
     ],
   );
   _servers[container] = server;

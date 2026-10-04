@@ -11,7 +11,9 @@ import 'ui/client_settings_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
+import 'agent/agent_state.dart';
 import 'agent/agents_screen.dart';
+import 'agent/agents_shell.dart';
 import 'agent/hosts_screen.dart';
 import 'ui/mcp_keys_screen.dart';
 import 'ui/signup_screen.dart';
@@ -58,8 +60,9 @@ abstract final class Routes {
   /// reason: a key belongs to a user, and minting one is the user vouching.
   static const mcpKeys = '/settings/mcp-keys';
 
-  /// Agent sessions and their tabs (decision 77d). Owner only: the entry point
-  /// exists only when the server's owner check passes.
+  /// The Agents space: sessions and their tabs (decisions 77d, 78). Owner
+  /// only: every entry point exists only when the server's owner check
+  /// passes, and the redirect returns anyone else to the dashboard.
   static const agents = '/agents';
 
   /// Runtime Hosts, enrollment and the default provider.
@@ -121,6 +124,9 @@ final routerProvider = Provider<GoRouter>((ref) {
   // router instead, which is the only thing settings actually affect here.
   final refresh = _RouterRefresh();
   ref.listen(settingsProvider, (_, _) => refresh.notify());
+  // The guard below reads the owner check, which arrives after the first
+  // frame; re-run the redirect when it does.
+  ref.listen(agentAccessProvider, (_, _) => refresh.notify());
   ref.onDispose(refresh.dispose);
 
   final router = GoRouter(
@@ -188,6 +194,16 @@ final routerProvider = Provider<GoRouter>((ref) {
             : Routes.starting;
       }
 
+      // **The Agents space is the owner's** (decision 78). The server's 403
+      // was always the boundary; this is so an account that is not an owner,
+      // arriving by URL, lands somewhere useful instead of on an empty frame.
+      // Only once the check has *answered* no — while it is still asking,
+      // holding is right, and the listener above re-runs this when it lands.
+      if (state.matchedLocation.startsWith(Routes.agents) &&
+          ref.read(agentAccessProvider).value == false) {
+        return Routes.dashboard;
+      }
+
       // The gallery needs no server, and bouncing it to Connect would make it
       // unreachable on exactly the install where the theme is being judged.
       if (state.matchedLocation == Routes.gallery) return null;
@@ -230,8 +246,6 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (_, _) => const AddDeviceScreen(),
       ),
       GoRoute(path: Routes.mcpKeys, builder: (_, _) => const McpKeysScreen()),
-      GoRoute(path: Routes.agents, builder: (_, _) => const AgentsScreen()),
-      GoRoute(path: Routes.agentHosts, builder: (_, _) => const HostsScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       // Everything else is a *child* of the dashboard, so navigating to it
       // builds a stack with the dashboard underneath rather than replacing it.
@@ -244,6 +258,27 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: 'settings/server',
             builder: (_, _) => const ServerSettingsScreen(),
+          ),
+          // The Agents space (decision 78): a child of the dashboard like
+          // every other destination, so Android back returns home rather than
+          // leaving the app — it used to sit at the top level, the shape
+          // decision 17 removed everywhere else. Its own shell, a sibling of
+          // `VaultShell`: at desk width the sessions list sits beside the
+          // pane, and it needs no vault.
+          ShellRoute(
+            builder: (_, _, child) => AgentsShell(child: child),
+            routes: [
+              GoRoute(
+                path: 'agents',
+                builder: (_, _) => const AgentsScreen(),
+                routes: [
+                  GoRoute(
+                    path: 'hosts',
+                    builder: (_, _) => const HostsScreen(),
+                  ),
+                ],
+              ),
+            ],
           ),
           // Every vault-scoped screen sits inside `VaultShell`, which carries
           // the `VaultGate` — making the route's vault active before its

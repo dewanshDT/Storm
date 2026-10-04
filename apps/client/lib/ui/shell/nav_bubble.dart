@@ -60,19 +60,7 @@ class _NavBubbleState extends ConsumerState<NavBubble> {
         child: AnimatedSize(
           duration: t.duration,
           curve: Curves.easeOutCubic,
-          child: Container(
-            decoration: BoxDecoration(
-              color: t.surface.withValues(alpha: 0.96),
-              // A pill, where the corner bubbles are rounded squares. The
-              // shape difference is deliberate grammar: corners are places,
-              // the pill is an action bar.
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(color: t.border, width: t.bw),
-              boxShadow: t.shadow,
-            ),
-            // 5px all round, as the prototype has it: the slots are the
-            // padding. A wider inset made the pill read as a bar.
-            padding: EdgeInsets.all(t.sp * 0.625),
+          child: StormPill(
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -105,17 +93,7 @@ class _Slot extends StatelessWidget {
         child: InkWell(
           onTap: action.onTap,
           customBorder: const CircleBorder(),
-          child: Container(
-            width: t.sp * 5.5,
-            height: t.sp * 5.5,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
-            child: StormIcon(
-              action.glyph,
-              size: t.sp * 2.75,
-              color: t.onAccent,
-            ),
-          ),
+          child: PrimaryCircle(glyph: action.glyph),
         ),
       );
     }
@@ -174,6 +152,57 @@ class _Slot extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The surface every floating action bar is drawn on: the nav bubble, and
+/// the Agents space's *New session* (decision 78). One widget, so the two
+/// cannot drift apart.
+class StormPill extends StatelessWidget {
+  const StormPill({super.key, required this.child, this.padding});
+
+  final Widget child;
+
+  /// Defaults to the nav bubble's 5px, where the slots are the padding.
+  final EdgeInsetsGeometry? padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(
+      decoration: BoxDecoration(
+        color: t.surface.withValues(alpha: 0.96),
+        // A pill, where the corner bubbles are rounded squares. The shape
+        // difference is deliberate grammar: corners are places, the pill is
+        // an action bar.
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: t.border, width: t.bw),
+        boxShadow: t.shadow,
+      ),
+      // 5px all round, as the prototype has it. A wider inset made the pill
+      // read as a bar.
+      padding: padding ?? EdgeInsets.all(t.sp * 0.625),
+      child: child,
+    );
+  }
+}
+
+/// The primary action: a filled accent circle standing proud of the pill.
+class PrimaryCircle extends StatelessWidget {
+  const PrimaryCircle({super.key, required this.glyph});
+
+  final StormGlyph glyph;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(
+      width: t.sp * 5.5,
+      height: t.sp * 5.5,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
+      child: StormIcon(glyph, size: t.sp * 2.75, color: t.onAccent),
     );
   }
 }

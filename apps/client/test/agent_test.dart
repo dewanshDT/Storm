@@ -289,27 +289,8 @@ void main() {
       expect(find.byKey(const Key('enrollment-string')), findsNothing);
     });
 
-    for (final wide in [false, true]) {
-      testWidgets('sessions list at ${wide ? 'desktop' : 'phone'} width', (
-        tester,
-      ) async {
-        tester.view.physicalSize = Size(wide ? 1400 : 400, 900);
-        tester.view.devicePixelRatio = 1;
-        addTearDown(tester.view.reset);
-        await tester.pumpWidget(
-          app(const AgentsScreen(), server(sessions: [session()])),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('Claude Code in storm'), findsOneWidget);
-        expect(find.text('Running'), findsOneWidget);
-        // The wide layout is additive: an empty pane beside the list. The
-        // phone layout has none (the M12 invariant: both sides asserted).
-        expect(
-          find.text('No session open'),
-          wide ? findsOneWidget : findsNothing,
-        );
-      });
-    }
+    // The sessions list at both widths is in agents_navigation_test.dart,
+    // on the real router: since decision 78 the wide list is the sidebar's.
 
     testWidgets('the launcher announces the network and refuses uninstalled', (
       tester,

@@ -14,6 +14,7 @@ import '../surfaces.dart';
 import '../tokens.dart';
 import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
+import 'space_switch.dart';
 import 'vault_actions.dart';
 import 'vault_gate.dart';
 
@@ -59,6 +60,9 @@ class VaultSidebar extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Notes | Agents, for the server's owner only (decision 78). It
+              // draws nothing for anyone else, so the rail is unchanged.
+              const SpaceSwitch(current: StormSpace.notes),
               _VaultSwitcher(vault: vault, accent: accent),
               Padding(
                 padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
