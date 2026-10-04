@@ -99,7 +99,7 @@ void main() {
 
   group('an account that is not the owner sees the app it always saw', () {
     testWidgets('no band on the phone dashboard', (tester) async {
-      final c = shellContainer(agents: false);
+      final c = shellContainer();
       await pumpShell(tester, c, size: phone);
       expect(find.text('AGENTS'), findsNothing);
       expect(find.text('RECENTLY OPENED'), findsOneWidget);
@@ -107,7 +107,7 @@ void main() {
     });
 
     testWidgets('no space switch beside the notes', (tester) async {
-      final c = shellContainer(agents: false);
+      final c = shellContainer();
       await pumpShell(tester, c, size: wide);
       await openVault(tester, c);
       expect(find.byKey(const Key('space-agents')), findsNothing);
@@ -116,7 +116,7 @@ void main() {
     });
 
     testWidgets('and /agents by URL returns to the dashboard', (tester) async {
-      final c = shellContainer(agents: false);
+      final c = shellContainer();
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).go(Routes.agents);
       await tester.pumpAndSettle();
@@ -128,7 +128,7 @@ void main() {
     });
 
     testWidgets('Server settings offers nothing agent-shaped', (tester) async {
-      final c = shellContainer(agents: false);
+      final c = shellContainer();
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).push(Routes.serverSettings);
       await tester.pumpAndSettle();
@@ -145,7 +145,6 @@ void main() {
       'shows live sessions above recents, and a tap lands in the terminal',
       (tester) async {
         final c = shellContainer(
-          agents: true,
           agentClient: agentServer(
             hosts: [host()],
             sessions: [
@@ -212,7 +211,7 @@ void main() {
     for (final MapEntry(key: name, value: (client, key, text))
         in idle.entries) {
       testWidgets('idle: $name', (tester) async {
-        final c = shellContainer(agents: true, agentClient: client);
+        final c = shellContainer(agentClient: client);
         await pumpShell(tester, c, size: phone);
         expect(find.byKey(Key(key)), findsOneWidget);
         expect(find.text(text), findsOneWidget);
@@ -225,7 +224,7 @@ void main() {
     }
 
     testWidgets('setting up a host goes to Hosts', (tester) async {
-      final c = shellContainer(agents: true, agentClient: agentServer());
+      final c = shellContainer(agentClient: agentServer());
       await pumpShell(tester, c, size: phone);
       await tester.tap(find.byKey(const Key('agents-band-setup')));
       await tester.pumpAndSettle();
@@ -239,7 +238,6 @@ void main() {
       tester,
     ) async {
       final c = shellContainer(
-        agents: true,
         agentClient: agentServer(
           hosts: [host()],
           sessions: [
@@ -268,7 +266,6 @@ void main() {
   group('wide: Notes | Agents atop the sidebar', () {
     testWidgets('switches between the two spaces', (tester) async {
       final c = shellContainer(
-        agents: true,
         agentClient: agentServer(
           hosts: [host()],
           sessions: [session('ags_live')],
@@ -307,10 +304,7 @@ void main() {
     });
 
     testWidgets('Server settings keeps hosts, not sessions', (tester) async {
-      final c = shellContainer(
-        agents: true,
-        agentClient: agentServer(hosts: [host()]),
-      );
+      final c = shellContainer(agentClient: agentServer(hosts: [host()]));
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).push(Routes.serverSettings);
       await tester.pumpAndSettle();

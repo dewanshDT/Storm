@@ -2502,7 +2502,24 @@ with the M18 set.
   another route that read still returns the old one — so it drew the phone
   dashboard on a wide screen. Nothing went to `/` at desk width before this.
   The switch goes to `notesHome()` (the vault last in use) instead of
-  relying on the forward.
+  relying on the forward. **Reading `GoRouterState.of` instead — the obvious
+  root fix — was tried in review and broke back navigation:** the same stale
+  read is why system back at desk width lands on the dashboard and leaves the
+  vault instead of being forwarded straight back in. The read is
+  load-bearing; changing it is its own decision, not a tidy-up.
+- **Review pass (`/simplify`):** the agent API factory provider now has a
+  real default derived from the session's address and token only, so a theme
+  change or a font-size drag no longer re-runs the owner check (and the
+  test-only branch is gone); sessions and hosts load in parallel; a poll that
+  falls while the app is backgrounded is skipped and made up on resume;
+  Hosts refreshes the overview after a change; the session row and the band's
+  idle row share one `AgentRow`; the pill is the nav bubble's own
+  `StormPill`/`PrimaryCircle`; ages use `relativeTime`, the wording *Recently
+  opened* uses directly below. **Deferred:** one sidebar frame shared by the
+  Notes and Agents sides (the Agents side ignores ⌘\ collapse today), a
+  shared segmented control with the note's Read/Edit toggle (different scale;
+  tokens aligned instead), and sessions as routes, which would also remove the
+  sidebar's "if on Hosts, go back to the list" branch.
 
 **Verified:** `test/agents_navigation_test.dart`, 14 tests on the real router
 — member: no band, no switch, `/agents` and `/agents/hosts` bounce home,

@@ -235,20 +235,6 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
   }
 }
 
-/// Ask the server again now, rather than at the next tick.
-Future<void> reloadAgents(WidgetRef ref) async {
-  ref.invalidate(agentOverviewProvider);
-  await ref.read(agentOverviewProvider.future);
-}
-
-/// Opens a session as this device's active tab. Where to *show* it is the
-/// caller's business: the dashboard pushes the Agents space, the sidebar is
-/// already beside it.
-void openAgentSession(WidgetRef ref, String id) {
-  ref.read(agentTabsProvider.notifier).open(id);
-  ref.read(activeAgentTabProvider.notifier).state = id;
-}
-
 /// The launcher sheet, and everything that follows a launch: the fallback
 /// announced (never silent, freeze §6), the session opened as the active tab,
 /// the list refreshed. Returns the session, or null if nothing was launched.
@@ -324,8 +310,8 @@ class AgentSessionList extends ConsumerWidget {
       children = [
         EmptyState(
           icon: LucideIcons.cloud_off,
-          title: 'Agents need the server',
-          detail: "Nothing to show until it's back.",
+          title: kAgentsOfflineTitle,
+          detail: kAgentsOfflineDetail,
           action: 'Try again',
           onAction: () => reloadAgents(ref),
         ),

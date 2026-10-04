@@ -43,13 +43,12 @@ const vaultPaths = [
 /// server fakes are still wired, so a redirect that lands on the dashboard
 /// does not leave a real sync engine's timer running.
 ///
-/// [agents] mounts the shell as the server's owner, with [agentClient]
-/// answering every `/v1/agent/*` call. Off by default, so every other suite
-/// sees exactly the app a member does — and makes no agent request at all.
+/// [agentClient] mounts the shell as the server's owner, with it answering
+/// every `/v1/agent/*` call. Absent by default, so every other suite sees
+/// exactly the app a member does — and makes no agent request at all.
 ProviderContainer shellContainer({
   bool configured = true,
   Settings? settings,
-  bool agents = false,
   http.Client? agentClient,
 }) {
   final cache = CacheDb(NativeDatabase.memory());
@@ -97,12 +96,18 @@ ProviderContainer shellContainer({
       // Widget tests have no platform package info; keep Client settings
       // deterministic and free of MissingPluginException noise.
       clientVersionProvider.overrideWith((ref) async => '0.0.0-test'),
-      agentAccessProvider.overrideWith((ref) async => agents),
-      if (agentClient != null)
-        agentApiFactoryProvider.overrideWithValue(
-          () =>
-              AgentApi(baseUrl: 'http://test', token: 't', client: agentClient),
-        ),
+      agentAccessProvider.overrideWith((ref) async => agentClient != null),
+      // Null without a client, rather than the default built from the fake
+      // settings, so no suite can reach a real agent request by accident.
+      agentApiFactoryProvider.overrideWithValue(
+        agentClient == null
+            ? null
+            : () => AgentApi(
+                baseUrl: 'http://test',
+                token: 't',
+                client: agentClient,
+              ),
+      ),
       // A terminal stream that stays open and says nothing: a test that opens
       // a session asserts on the chrome around it, not on a live PTY.
       terminalStreamFactoryProvider.overrideWithValue(

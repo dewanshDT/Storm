@@ -46,8 +46,8 @@ class AgentsBand extends ConsumerWidget {
       body = _BandLine(
         key: const Key('agents-band-offline'),
         icon: LucideIcons.cloud_off,
-        title: 'Agents need the server',
-        detail: "Nothing to show until it's back.",
+        title: kAgentsOfflineTitle,
+        detail: kAgentsOfflineDetail,
         onTap: () => ref.invalidate(agentOverviewProvider),
       );
     } else if (o.live.isNotEmpty) {
@@ -99,7 +99,6 @@ class AgentsBand extends ConsumerWidget {
     // "All" is there whenever there is a list to go to — including the idle
     // case, where it is the way to yesterday's ended sessions.
     final showAll = o != null && !o.unreachable && o.hosts.isNotEmpty;
-    final more = (o?.live.length ?? 0) - limit;
 
     return Padding(
       padding: EdgeInsets.only(bottom: t.sectionRhythm * 0.5),
@@ -121,7 +120,9 @@ class AgentsBand extends ConsumerWidget {
                       vertical: t.sp * 0.25,
                     ),
                     child: Text(
-                      more > 0 ? 'All ${o.live.length} ›' : 'All ›',
+                      o.live.length > limit
+                          ? 'All ${o.live.length} ›'
+                          : 'All ›',
                       style: TextStyle(
                         fontFamily: StormTokens.sansFamily,
                         fontSize: t.labelSize,
@@ -141,7 +142,8 @@ class AgentsBand extends ConsumerWidget {
   }
 }
 
-/// One quiet row: what is true, and what to do about it.
+/// One quiet row: what is true, and what to do about it — drawn on the same
+/// [AgentRow] as a session, so the band reads as one list either way.
 class _BandLine extends StatelessWidget {
   const _BandLine({
     super.key,
@@ -164,71 +166,22 @@ class _BandLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return InkWell(
-      borderRadius: BorderRadius.circular(t.rControl),
+    return AgentRow(
+      title: title,
+      detail: detail,
+      lead: Icon(icon, size: t.codeSize, color: t.text3),
+      trailing: action != null
+          ? Text(
+              '$action ›',
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.codeSize,
+                fontWeight: FontWeight.w600,
+                color: t.accent,
+              ),
+            )
+          : Icon(LucideIcons.chevron_right, size: t.bodySize, color: t.text3),
       onTap: onTap,
-      child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 0.5,
-          vertical: t.sp * 1.25,
-        ),
-        child: Row(
-          children: [
-            // The same column the session rows keep their dot in.
-            SizedBox(
-              width: t.sp * 2.75,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Icon(icon, size: t.codeSize, color: t.text3),
-              ),
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.bodySize,
-                      fontWeight: FontWeight.w600,
-                      color: t.text,
-                    ),
-                  ),
-                  if (detail != null) ...[
-                    SizedBox(height: t.sp * 0.25),
-                    Text(
-                      detail!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.codeSize,
-                        color: t.text3,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            SizedBox(width: t.sp),
-            if (action != null)
-              Text(
-                '$action ›',
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  fontWeight: FontWeight.w600,
-                  color: t.accent,
-                ),
-              )
-            else
-              Icon(LucideIcons.chevron_right, size: t.bodySize, color: t.text3),
-          ],
-        ),
-      ),
     );
   }
 }

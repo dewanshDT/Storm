@@ -50,8 +50,7 @@ class DashboardScreen extends ConsumerWidget {
     // being thrown out of the screen you are using.
     final onDashboard = GoRouter.of(context).state.uri.path == Routes.dashboard;
     if (onDashboard && context.isExpanded && vaults.isNotEmpty) {
-      ref.watch(activeVaultProvider);
-      final target = notesHome(ref);
+      final target = notesHome(vaults, ref.watch(activeVaultProvider));
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted &&
             GoRouter.of(context).state.uri.path == Routes.dashboard) {
@@ -115,13 +114,16 @@ class DashboardScreen extends ConsumerWidget {
 /// vault, because then it is the one screen that can make one.
 ///
 /// Shared with the space switch (decision 78), which must not go to the
-/// dashboard and rely on it forwarding: the dashboard reads the router's
-/// location during build, and on a `go` from another route that read still
-/// returns the old one, so it would draw the phone dashboard on a wide screen.
-String notesHome(WidgetRef ref) {
-  final vaults = ref.read(vaultsProvider).value ?? const [];
+/// dashboard and rely on it forwarding. The forward reads the router's
+/// location (`GoRouter.of(context).state`), which during the build a `go('/')`
+/// from another route triggers still holds the *old* one, so it would draw the
+/// phone dashboard on a wide screen. **That read is load-bearing, not a bug to
+/// tidy:** it is also why system back at this width lands on the dashboard and
+/// leaves the vault instead of being forwarded straight back into it
+/// (`adaptive_layout_test`: "selecting notes does not pile up a back stack").
+/// Reading `GoRouterState.of(context)` instead fixes the switch and breaks back.
+String notesHome(List<VaultInfo> vaults, String active) {
   if (vaults.isEmpty) return Routes.dashboard;
-  final active = ref.read(activeVaultProvider);
   final target = vaults.any((v) => v.id == active && !v.missing)
       ? active
       : (vaults.firstWhere((v) => !v.missing, orElse: () => vaults.first)).id;

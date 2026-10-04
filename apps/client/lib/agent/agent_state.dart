@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,29 +16,27 @@ final terminalStreamFactoryProvider =
       (ref) => null,
     );
 
-/// How an [AgentApi] is built, when a test supplies one.
-final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) => null);
+/// How this client builds an [AgentApi]: from the signed-in session's
+/// address and token, or null without a session. Tests override it.
+///
+/// Watches only those two fields. Watching the whole settings object re-ran
+/// everything downstream on any save — a theme change, a vault switch, every
+/// tick of the font-size slider — and each re-run is an owner check over the
+/// network.
+final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
+  final session = ref.watch(
+    settingsProvider.select((a) {
+      final s = a.value;
+      return s == null || !s.hasSession ? null : (s.baseUrl, s.accessToken);
+    }),
+  );
+  if (session == null) return null;
+  final (baseUrl, token) = session;
+  return () => AgentApi(baseUrl: baseUrl, token: token);
+});
 
 /// An [AgentApi] for the signed-in session, or null without one.
-AgentApi? agentApi(WidgetRef ref) => _agentApi(
-  ref.read(agentApiFactoryProvider),
-  ref.read(settingsProvider).value,
-);
-
-/// The one place an [AgentApi] is built, for widgets and providers alike.
-AgentApi? _agentApi(AgentApi Function()? factory, Settings? settings) {
-  if (factory != null) return factory();
-  if (settings == null || !settings.hasSession) return null;
-  return AgentApi(baseUrl: settings.baseUrl, token: settings.accessToken);
-}
-
-/// The same, for a provider: waits for settings only when it needs them, so
-/// a supplied factory does not hang on a settings load it never uses.
-Future<AgentApi?> _agentApiFor(Ref ref) async {
-  final factory = ref.read(agentApiFactoryProvider);
-  if (factory != null) return factory();
-  return _agentApi(null, await ref.watch(settingsProvider.future));
-}
+AgentApi? agentApi(WidgetRef ref) => ref.read(agentApiFactoryProvider)?.call();
 
 /// Whether to show agents at all. **The server's owner check is the
 /// answer**: a 403 hides every entry point, so "hidden for non-owners"
@@ -46,7 +45,7 @@ Future<AgentApi?> _agentApiFor(Ref ref) async {
 /// Every agent entry point reads this — the dashboard band, the sidebar's
 /// space switch, Server settings, and the router's guard (decision 78).
 final agentAccessProvider = FutureProvider<bool>((ref) async {
-  final api = await _agentApiFor(ref);
+  final api = ref.watch(agentApiFactoryProvider)?.call();
   if (api == null) return false;
   try {
     return await api.canUseAgents();
@@ -94,20 +93,8 @@ class AgentOverview {
       if (h.online) h,
   ];
 
-  String hostName(String id) => hosts
-      .firstWhere(
-        (h) => h.id == id,
-        orElse: () => AgentHost(
-          id: id,
-          name: 'host',
-          status: 'offline',
-          providers: const [],
-          workspaces: const [],
-          maxSessions: 0,
-          lastSeen: null,
-        ),
-      )
-      .name;
+  String hostName(String id) =>
+      hosts.where((h) => h.id == id).firstOrNull?.name ?? 'host';
 }
 
 /// How often a visible list re-asks the server.
@@ -116,24 +103,46 @@ class AgentOverview {
 /// status change — so this only has to keep a *list* from going stale.
 const agentRefreshInterval = Duration(seconds: 15);
 
-/// The overview, refreshed every [agentRefreshInterval] while anything is
-/// watching it, and not at all once nothing is.
+/// The overview, refreshed every [agentRefreshInterval] while it is on screen
+/// and the app is in front.
 ///
-/// `autoDispose` is what stops the polling: the timer belongs to this
-/// computation, so leaving the screen disposes the provider and cancels it.
+/// Two things stop the polling, and neither is `autoDispose` alone: the
+/// dashboard sits under every phone route and is never disposed. Riverpod
+/// pauses a provider whose only listeners are under `TickerMode(false)` — a
+/// covered route — and a paused provider skips its refresh. And a tick that
+/// lands while the app is backgrounded is skipped here, then made up the
+/// moment the app resumes, rather than polling a phone in a pocket.
+///
 /// It never throws. Riverpod 3 retries a failed provider on its own
 /// schedule, which would be a second, unbounded poll alongside this one.
 final agentOverviewProvider = FutureProvider.autoDispose<AgentOverview>((
   ref,
 ) async {
-  final timer = Timer(agentRefreshInterval, ref.invalidateSelf);
-  ref.onDispose(timer.cancel);
+  var due = false;
+  final timer = Timer(agentRefreshInterval, () {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (state == null || state == AppLifecycleState.resumed) {
+      ref.invalidateSelf();
+    } else {
+      due = true;
+    }
+  });
+  final lifecycle = AppLifecycleListener(
+    onResume: () {
+      if (due) ref.invalidateSelf();
+    },
+  );
+  ref.onDispose(() {
+    timer.cancel();
+    lifecycle.dispose();
+  });
 
-  final api = await _agentApiFor(ref);
+  final api = ref.watch(agentApiFactoryProvider)?.call();
   if (api == null) return const AgentOverview.unreachable();
   try {
-    final sessions = await api.sessions();
-    final hosts = await api.hosts();
+    // Independent, so together: one round trip, not two, which is the
+    // difference that shows over the relay.
+    final (sessions, hosts) = await (api.sessions(), api.hosts()).wait;
     return AgentOverview(sessions: sessions.reversed.toList(), hosts: hosts);
   } catch (_) {
     return const AgentOverview.unreachable();
@@ -141,6 +150,20 @@ final agentOverviewProvider = FutureProvider.autoDispose<AgentOverview>((
     api.dispose();
   }
 });
+
+/// Ask the server again now, rather than at the next tick.
+Future<void> reloadAgents(WidgetRef ref) async {
+  ref.invalidate(agentOverviewProvider);
+  await ref.read(agentOverviewProvider.future);
+}
+
+/// Opens a session as this device's active tab. Where to *show* it is the
+/// caller's business: the dashboard pushes the Agents space, the sidebar is
+/// already beside it.
+void openAgentSession(WidgetRef ref, String id) {
+  ref.read(agentTabsProvider.notifier).open(id);
+  ref.read(activeAgentTabProvider.notifier).state = id;
+}
 
 /// The open tabs on this device: session ids, in order (freeze §10).
 ///

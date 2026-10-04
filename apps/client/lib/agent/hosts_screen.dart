@@ -63,6 +63,10 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
       }
       _loading = false;
     });
+    // Every change here ends in this reload, and at desk width the sessions
+    // sidebar sits beside this screen showing the same hosts: refresh it too
+    // rather than leave it up to a poll behind.
+    ref.invalidate(agentOverviewProvider);
   }
 
   Future<void> _enroll() async {

@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../agent/agent_state.dart';
 import '../../router.dart';
+import '../../state/app_state.dart';
 import '../tokens.dart';
 import 'dashboard.dart' show notesHome;
 
@@ -17,7 +18,9 @@ enum StormSpace { notes, agents }
 /// not a disabled control, which would advertise a feature it cannot have
 /// (AC-S1).
 ///
-/// "Notes" rather than "Vaults": each side names what you do there.
+/// "Notes" rather than "Vaults": each side names what you do there. Drawn in
+/// `NoteModeToggle`'s language — the same surface, radii and inactive ink —
+/// at the width of the rail rather than the width of its labels.
 class SpaceSwitch extends ConsumerWidget {
   const SpaceSwitch({super.key, required this.current});
 
@@ -38,14 +41,17 @@ class SpaceSwitch extends ConsumerWidget {
           button: true,
           child: InkWell(
             key: Key('space-${space.name}'),
-            borderRadius: BorderRadius.circular(t.rControl * 0.8),
+            borderRadius: BorderRadius.circular(t.rControl * 0.7),
             // Selecting the space you are in does nothing, not a navigation.
             onTap: on
                 ? null
                 : () => context.go(switch (space) {
                     // The vault last in use — see [notesHome] for why not
                     // the dashboard.
-                    StormSpace.notes => notesHome(ref),
+                    StormSpace.notes => notesHome(
+                      ref.read(vaultsProvider).value ?? const [],
+                      ref.read(activeVaultProvider),
+                    ),
                     StormSpace.agents => Routes.agents,
                   }),
             child: AnimatedContainer(
@@ -55,7 +61,7 @@ class SpaceSwitch extends ConsumerWidget {
               padding: EdgeInsets.symmetric(vertical: t.sp * 0.9),
               decoration: BoxDecoration(
                 color: on ? t.accentSoft : Colors.transparent,
-                borderRadius: BorderRadius.circular(t.rControl * 0.8),
+                borderRadius: BorderRadius.circular(t.rControl * 0.7),
               ),
               child: Text(
                 label,
@@ -63,7 +69,7 @@ class SpaceSwitch extends ConsumerWidget {
                   fontFamily: StormTokens.sansFamily,
                   fontSize: t.codeSize,
                   fontWeight: on ? FontWeight.w600 : FontWeight.w500,
-                  color: on ? t.accent : t.text2,
+                  color: on ? t.accent : t.text3,
                 ),
               ),
             ),
@@ -78,7 +84,7 @@ class SpaceSwitch extends ConsumerWidget {
         padding: EdgeInsets.all(t.sp * 0.375),
         decoration: BoxDecoration(
           color: t.surface2,
-          borderRadius: BorderRadius.circular(t.rControl),
+          borderRadius: BorderRadius.circular(t.rControl * 0.8),
           border: Border.all(color: t.border, width: t.bw),
         ),
         child: Material(

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../ui/icons.dart';
+import '../ui/shell/corner_bubbles.dart' show relativeTime;
+import '../ui/shell/nav_bubble.dart' show PrimaryCircle, StormPill;
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 import 'agent_models.dart';
@@ -14,16 +16,10 @@ import 'agent_models.dart';
 String sessionTitle(AgentSession? s) =>
     s == null ? 'Session' : '${providerLabel(s.provider)} in ${s.workspace}';
 
-/// How long ago, coarsely: a list is scanned, not read.
-String sessionAge(String iso) {
-  final at = DateTime.tryParse(iso);
-  if (at == null) return '';
-  final d = DateTime.now().toUtc().difference(at.toUtc());
-  if (d.inMinutes < 1) return 'just now';
-  if (d.inHours < 1) return '${d.inMinutes} min ago';
-  if (d.inDays < 1) return '${d.inHours} h ago';
-  return '${d.inDays} d ago';
-}
+/// Agents cannot run without the server, and saying so is a state, not an
+/// error (the offline ground rule). One wording wherever it appears.
+const kAgentsOfflineTitle = 'Agents need the server';
+const kAgentsOfflineDetail = "Nothing to show until it's back.";
 
 /// A live session's dot, in the one dot vocabulary: green is good, amber is
 /// work in progress, grey is out of reach. Ended sessions get no dot — their
@@ -35,6 +31,102 @@ DotStatus? sessionDot(AgentSession s) => switch (s.status) {
   'unknown' => DotStatus.offline,
   _ => null,
 };
+
+/// The row every agent list is made of: a lead column (a dot or an icon), a
+/// title over one line of detail, and whatever trails. The band's idle line
+/// and a session use the same frame, so their titles share one left edge.
+class AgentRow extends StatelessWidget {
+  const AgentRow({
+    super.key,
+    required this.title,
+    required this.onTap,
+    this.lead,
+    this.detail,
+    this.trailing,
+    this.muted = false,
+    this.selected = false,
+    this.dense = false,
+  });
+
+  final String title;
+  final VoidCallback onTap;
+  final Widget? lead;
+  final String? detail;
+  final Widget? trailing;
+
+  /// An ended session's title steps back a shade.
+  final bool muted;
+  final bool selected;
+
+  /// The sidebar's tighter rhythm.
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      padding: EdgeInsets.only(bottom: t.sp * (dense ? 0.25 : 0.5)),
+      child: Material(
+        color: selected ? t.accentSoft : Colors.transparent,
+        borderRadius: BorderRadius.circular(t.rControl),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(t.rControl),
+          onTap: onTap,
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * (dense ? 1 : 0.5),
+              vertical: t.sp * (dense ? 0.9 : 1.25),
+            ),
+            child: Row(
+              children: [
+                // The same column whether or not there is a lead, so titles
+                // line up down the list.
+                SizedBox(
+                  width: t.sp * 2.75,
+                  child: lead == null
+                      ? null
+                      : Align(alignment: Alignment.centerLeft, child: lead),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: dense ? t.codeSize : t.bodySize,
+                          fontWeight: FontWeight.w600,
+                          color: muted ? t.text2 : t.text,
+                        ),
+                      ),
+                      if (detail != null) ...[
+                        SizedBox(height: t.sp * 0.25),
+                        Text(
+                          detail!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: StormTokens.sansFamily,
+                            fontSize: dense ? t.labelSize : t.codeSize,
+                            color: t.text3,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (trailing != null) ...[SizedBox(width: t.sp), trailing!],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// One session: dot, title, host and age, and — once it has ended — how.
 class AgentSessionRow extends StatelessWidget {
@@ -51,8 +143,6 @@ class AgentSessionRow extends StatelessWidget {
   final String hostName;
   final VoidCallback onTap;
   final bool selected;
-
-  /// The sidebar's tighter rhythm.
   final bool dense;
 
   @override
@@ -61,90 +151,39 @@ class AgentSessionRow extends StatelessWidget {
     final s = session;
     final dot = sessionDot(s);
     // A live session that is not plainly running says what it is instead.
-    final trailing = s.ended || s.status != 'running' ? s.statusLabel : null;
-
-    return Padding(
-      padding: EdgeInsets.only(bottom: t.sp * (dense ? 0.25 : 0.5)),
-      child: Material(
-        color: selected ? t.accentSoft : Colors.transparent,
-        borderRadius: BorderRadius.circular(t.rControl),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(t.rControl),
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * (dense ? 1 : 0.5),
-              vertical: t.sp * (dense ? 0.9 : 1.25),
+    final status = s.ended || s.status != 'running' ? s.statusLabel : null;
+    return AgentRow(
+      title: sessionTitle(s),
+      // The same age wording as Recently opened, directly below the band.
+      detail:
+          '$hostName · '
+          '${relativeTime(DateTime.tryParse(s.createdAt)?.toLocal())}',
+      lead: dot == null ? null : StatusDot(status: dot),
+      trailing: status == null
+          ? null
+          : Text(
+              status,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.labelSize,
+                color: s.status == 'failed' ? t.danger : t.text3,
+              ),
             ),
-            child: Row(
-              children: [
-                // The same column whether or not there is a dot, so titles
-                // line up down the list.
-                SizedBox(
-                  width: t.sp * 2.75,
-                  child: dot == null
-                      ? null
-                      : Align(
-                          alignment: Alignment.centerLeft,
-                          child: StatusDot(status: dot),
-                        ),
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        sessionTitle(s),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: dense ? t.codeSize : t.bodySize,
-                          fontWeight: FontWeight.w600,
-                          color: s.ended ? t.text2 : t.text,
-                        ),
-                      ),
-                      SizedBox(height: t.sp * 0.25),
-                      Text(
-                        '$hostName · ${sessionAge(s.createdAt)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: dense ? t.labelSize : t.codeSize,
-                          color: t.text3,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (trailing != null) ...[
-                  SizedBox(width: t.sp),
-                  Text(
-                    trailing,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.labelSize,
-                      color: s.status == 'failed' ? t.danger : t.text3,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
+      muted: s.ended,
+      selected: selected,
+      dense: dense,
+      onTap: onTap,
     );
   }
 }
 
 /// *New session*, as a pill floating at the bottom of the phone list.
 ///
-/// The nav bubble's grammar — a pill is an action bar, the primary action a
-/// filled circle inside it — because the Agents space is a *space*, a peer of
-/// the vault screens, and should read as part of the same app (decision 78).
-/// Settings-shaped screens (Hosts, MCP keys) keep their extended FAB: that is
-/// the pattern for a page you visit to configure something.
+/// The nav bubble's own [StormPill] and [PrimaryCircle], because the Agents
+/// space is a *space*, a peer of the vault screens, and should read as part of
+/// the same app (decision 78). Settings-shaped screens (Hosts, MCP keys) keep
+/// their extended FAB: that is the pattern for a page you visit to configure
+/// something.
 class NewSessionPill extends StatelessWidget {
   const NewSessionPill({super.key, required this.onTap});
 
@@ -157,15 +196,8 @@ class NewSessionPill extends StatelessWidget {
       minimum: EdgeInsets.only(bottom: t.sp * 2.5),
       child: Align(
         alignment: Alignment.bottomCenter,
-        // Drawn exactly as the nav bubble is — surface, border, shadow on the
-        // container — with a transparent Material inside only for the ripple.
-        child: Container(
-          decoration: BoxDecoration(
-            color: t.surface.withValues(alpha: 0.96),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: t.border, width: t.bw),
-            boxShadow: t.shadow,
-          ),
+        child: StormPill(
+          padding: EdgeInsets.zero,
           child: Material(
             type: MaterialType.transparency,
             child: InkWell(
@@ -182,20 +214,7 @@ class NewSessionPill extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Container(
-                      width: t.sp * 5.5,
-                      height: t.sp * 5.5,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: t.accent,
-                        shape: BoxShape.circle,
-                      ),
-                      child: StormIcon(
-                        StormGlyph.plus,
-                        size: t.sp * 2.75,
-                        color: t.onAccent,
-                      ),
-                    ),
+                    const PrimaryCircle(glyph: StormGlyph.plus),
                     SizedBox(width: t.sp * 1.5),
                     Text(
                       'New session',
