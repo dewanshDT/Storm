@@ -77,6 +77,48 @@ sudo systemctl edit storm-backup     # add, then save:
 sudo systemctl start storm-backup.service && journalctl -u storm-backup -n 12
 ```
 
+**Up to and including 0.2.9, every local account could read Storm's data**
+(decision 76): every note, every index, `vaults.json`, and `state/auth.db`,
+which holds the password hashes. `postinst` created `/srv/storm` 0755 and the
+unit set no `UMask`, so everything the server wrote came out world-readable.
+The fixed package sets `UMask=0027` in both units and removes other-access
+from `/srv/storm`, but only from the root directory: it cannot know what an
+operator's tree holds below it. An existing install needs this once; until the
+fixed package is installed, the drop-ins are what set the `UMask`.
+
+**Run it as one `sudo sh -c`, not as separate `sudo` lines.** On prod, a pasted
+block of separate lines stopped the server at the first password prompt, and
+the prompt swallowed the remaining lines, including the `start`. This form asks
+for the password once, and it ends by starting the server whatever happened
+before:
+
+```sh
+sudo sh -c '
+systemctl stop storm-server
+chmod 0750 /srv/storm /srv/storm/state
+# The local tree only. -xdev keeps find off any other filesystem, so a vault
+# root mounted under /srv/storm is never touched (the NAS sets its modes).
+# Symlinks are skipped, never followed.
+find /srv/storm -xdev ! -type l -exec chmod o-rwx {} +
+mkdir -p /etc/systemd/system/storm-server.service.d /etc/systemd/system/storm-backup.service.d
+printf "[Service]\nUMask=0027\n" > /etc/systemd/system/storm-server.service.d/umask.conf
+cp /etc/systemd/system/storm-server.service.d/umask.conf /etc/systemd/system/storm-backup.service.d/umask.conf
+systemctl daemon-reload
+systemctl start storm-server
+'
+systemctl show -p UMask storm-server               # UMask=0027
+sudo -u nobody cat /srv/storm/state/auth.db        # Permission denied
+```
+
+Only other-access is removed, so the service user (`User=` in `data-root.conf`)
+keeps every bit it had. **A vault root outside `/srv/storm` is deliberately
+left alone:** on a NAS share other machines write it, and its modes are the
+NAS's to set. An NFS server that assigns its own modes ignores the client's
+umask (prod's assigns 664), so keeping the share from other local accounts is
+a NAS-side change. Once the fixed package is installed the `umask.conf`
+drop-ins are redundant and harmless. If another local account ever needs to
+read the data, add it to the service user's group; never restore other-access.
+
 **Upgrades up to and including 0.2.8 disabled the service.** The package's
 `prerm` ignored whether it was being removed or upgraded, so each `apt upgrade`
 left `storm-server` and `storm-backup.timer` disabled. Both kept running until
@@ -243,7 +285,13 @@ Three things are backed up, for different reasons:
 
 - **the storage root** — every vault's notes. Plain files, so
   `rsync -a --delete` into a dated directory. Dating it means an accidental
-  mass-delete is still recoverable from yesterday.
+  mass-delete is still recoverable from yesterday. **It is the root the server
+  uses**, which `storm-server storage-root` reads from `state/vaults.json`, not
+  `STORM_VAULT_ROOT` (decision 79): the env file only seeds a first run, and a
+  root changed in the app is never written back to it. Until 0.3.0 the script
+  copied the env file's directory, which on an install whose root had moved was
+  an empty one — a backup that verified and held no notes. The log's `root:`
+  line names the directory copied, and the env file's value when they differ.
 - **`state/<vault-id>/index.db`** — one index per vault, holding version
   history that the 3-way merge uses as its base, plus `vaults.json`. The rest
   of an index can be rebuilt by rescanning; the history cannot.
@@ -393,6 +441,52 @@ alone (decision 74). `GET /v1/server` lists the relays it has actually
 registered with, which is the check that it worked; the `PUT` itself returns
 before any connection is attempted. Clients learn the relay from the server when they pair.
 
+## Runtime Hosts (Agent Runtime)
+
+A Runtime Host is a machine that runs agents (Claude Code, OpenCode, a shell)
+for one Storm Server. It may be a separate VM or the server's own machine. It
+dials the server over the network, so the server needs no inbound route to
+it. V1 runs on a direct network; the relay does not carry it yet (decision 77).
+
+```sh
+sudo apt install storm-runtime
+# Workspaces are the directories under /var/lib/storm-runtime/workspaces.
+sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
+# In the app: Settings > Agents > Hosts > Enroll a host. Paste the string here:
+sudo -u storm-runtime storm-runtime enroll
+sudo systemctl enable --now storm-runtime
+sudo -u storm-runtime storm-runtime check        # proves the whole path
+```
+
+**Log the agent CLIs in as `storm-runtime`, once.** The unit's `HOME` is
+`/var/lib/storm-runtime/home`, so log in under that account's home:
+
+```sh
+sudo -u storm-runtime -H claude                 # then /login
+sudo -u storm-runtime -H opencode auth login
+```
+
+The CLIs must be on a system path (`/usr/local/bin`, `/usr/bin`). The unit's
+`ProtectHome` hides `/home`, so a CLI installed into a user's home is reported
+as not installed.
+
+**Workspaces elsewhere** need the unit widened, and listing them in
+`/etc/storm-runtime/runtime.toml`:
+
+```sh
+sudo systemctl edit storm-runtime
+# [Service]
+# ReadWritePaths=/srv/work
+```
+
+What the package guarantees (decision 77e):
+- **The account is its own.** `storm-runtime` is never in the server's group,
+  so on a shared machine it cannot read the vaults or `state/auth.db` (P3).
+- **The sandbox is §5.8's,** with one setting deliberately absent:
+  `MemoryDenyWriteExecute`, under which OpenCode cannot start.
+- **A revoked host exits 3, and the unit does not restart it.** Enroll it
+  again to bring it back.
+
 ## Security
 
 v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a
@@ -404,6 +498,12 @@ The unit runs as a dedicated `storm` user with `ProtectSystem=strict` and
 write access to `/srv/storm` only. That bounds where the storage root can go:
 a root outside `/srv/storm` fails validation as unwritable, so moving it
 elsewhere means widening `ReadWritePaths` in the unit first.
+
+The data tree is the service user's and its group's alone (decision 76):
+`/srv/storm` is 0750 and both units set `UMask=0027`, so no other local account
+can read a note, an index or `state/auth.db`. Check it with
+`sudo -u nobody ls /srv/storm`, which must be refused. A vault root on a NAS
+keeps the modes the NAS assigns.
 
 One token covers the whole server and every vault on it. There is no per-vault
 access control — a second vault is organisation, not isolation.

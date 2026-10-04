@@ -14,12 +14,14 @@ fn repo_file(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
+/// A unit file's or shell script's lines, trimmed, without comments.
+fn code_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().map(str::trim).filter(|l| !l.starts_with('#'))
+}
+
 /// The value of `key=` in a unit file, ignoring comments.
 fn unit_value(unit: &str, key: &str) -> Option<String> {
-    unit.lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_string))
+    code_lines(unit).find_map(|l| l.strip_prefix(&format!("{key}=")).map(str::to_string))
 }
 
 #[test]
@@ -56,5 +58,43 @@ fn the_backup_unit_gets_its_environment_from_systemd() {
     assert!(
         env_mode.contains("\"etc/storm/storm.env\", \"600\""),
         "if the env file stops being 0600 this test's premise changed; revisit"
+    );
+}
+
+/// Both units create files private to their user and group (decision 76).
+///
+/// Without it systemd's default umask, 0022, left every index and `auth.db`
+/// readable by any local account, and the backup's archives — which carry
+/// `auth.db` and the identity keys — the same.
+#[test]
+fn both_units_keep_what_they_create_from_other_accounts() {
+    for unit in ["deploy/storm-server.service", "deploy/storm-backup.service"] {
+        let text = repo_file(unit);
+        assert_eq!(
+            unit_value(&text, "UMask").as_deref(),
+            Some("0027"),
+            "{unit} must set UMask=0027"
+        );
+    }
+}
+
+/// The package closes the default root to other accounts, on upgrades too
+/// (decision 76). A fresh install also gets 0750 subdirectories.
+#[test]
+fn the_package_closes_the_default_root_to_other_accounts() {
+    let postinst = repo_file("apps/server/debian/postinst");
+    let code: Vec<&str> = code_lines(&postinst).collect();
+    assert!(
+        code.iter().any(|l| l.starts_with("chmod o-rwx /srv/storm")),
+        "postinst must remove other-access from /srv/storm on every install"
+    );
+    assert!(
+        code.iter()
+            .any(|l| l.starts_with("chmod 0750 /srv/storm/vaults ")),
+        "a fresh install must create the default subdirectories 0750"
+    );
+    assert!(
+        code.iter().any(|l| l.contains("! -L /srv/storm")),
+        "never chmod through a symlink, which could point at a shared mount"
     );
 }

@@ -3,6 +3,8 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/agent_state.dart';
+import '../../agent/agents_band.dart';
 import '../../api/models.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
@@ -18,7 +20,8 @@ import 'nav_bubble.dart';
 import '../tokens.dart';
 import 'storm_scaffold.dart';
 
-/// Home: a grid of vaults over the notes you opened most recently.
+/// Home: a grid of vaults over the notes you opened most recently — and, for
+/// the server's owner, the agents running now (decision 78).
 ///
 /// The vault grid is the top-level object now — one card per vault rather than
 /// one screen per install. Recents sit underneath and cross vaults, which is
@@ -47,17 +50,11 @@ class DashboardScreen extends ConsumerWidget {
     // being thrown out of the screen you are using.
     final onDashboard = GoRouter.of(context).state.uri.path == Routes.dashboard;
     if (onDashboard && context.isExpanded && vaults.isNotEmpty) {
-      final active = ref.watch(activeVaultProvider);
-      final target = vaults.any((v) => v.id == active && !v.missing)
-          ? active
-          : (vaults.firstWhere(
-              (v) => !v.missing,
-              orElse: () => vaults.first,
-            )).id;
+      final target = notesHome(vaults, ref.watch(activeVaultProvider));
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted &&
             GoRouter.of(context).state.uri.path == Routes.dashboard) {
-          context.go(Routes.browse(target));
+          context.go(target);
         }
       });
       // Blank rather than the dashboard: rendering it for one frame is a
@@ -76,6 +73,10 @@ class DashboardScreen extends ConsumerWidget {
             onRefresh: () async {
               ref.invalidate(vaultsProvider);
               ref.invalidate(recentsProvider);
+              // The owner check too: a role changed on the server shows up on
+              // a pull, rather than only after the app is restarted.
+              ref.invalidate(agentAccessProvider);
+              ref.invalidate(agentOverviewProvider);
             },
             child: ListView(
               padding: EdgeInsets.fromLTRB(
@@ -91,6 +92,11 @@ class DashboardScreen extends ConsumerWidget {
                 // last few you touched.
                 const _Masthead(),
                 SizedBox(height: t.sectionRhythm * 0.5),
+                // An owner's agents, above what they were reading: a running
+                // agent is the one thing here that is still happening
+                // (decision 78). Draws nothing — gap included — for anyone
+                // else.
+                const AgentsBand(),
                 const _Recents(),
                 SizedBox(height: t.sectionRhythm * 0.5),
                 const _Vaults(),
@@ -101,6 +107,27 @@ class DashboardScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Where "Notes" is at desk width: the vault last in use, or the first one
+/// whose directory still exists — and the dashboard only when there is no
+/// vault, because then it is the one screen that can make one.
+///
+/// Shared with the space switch (decision 78), which must not go to the
+/// dashboard and rely on it forwarding. The forward reads the router's
+/// location (`GoRouter.of(context).state`), which during the build a `go('/')`
+/// from another route triggers still holds the *old* one, so it would draw the
+/// phone dashboard on a wide screen. **That read is load-bearing, not a bug to
+/// tidy:** it is also why system back at this width lands on the dashboard and
+/// leaves the vault instead of being forwarded straight back into it
+/// (`adaptive_layout_test`: "selecting notes does not pile up a back stack").
+/// Reading `GoRouterState.of(context)` instead fixes the switch and breaks back.
+String notesHome(List<VaultInfo> vaults, String active) {
+  if (vaults.isEmpty) return Routes.dashboard;
+  final target = vaults.any((v) => v.id == active && !v.missing)
+      ? active
+      : (vaults.firstWhere((v) => !v.missing, orElse: () => vaults.first)).id;
+  return Routes.browse(target);
 }
 
 /// The mark, and the shape of the whole vault set in two numbers.

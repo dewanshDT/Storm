@@ -287,6 +287,50 @@ impl AuthDb {
             );
             CREATE INDEX IF NOT EXISTS api_keys_by_user ON api_keys(user_id);
 
+            -- Runtime Hosts (Agent Runtime V1, decision 77b): the execution
+            -- plane's machines. Public metadata only — the private key never
+            -- leaves the host. Additive, so no schema version bump.
+            CREATE TABLE IF NOT EXISTS runtime_hosts (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                public_key   BLOB NOT NULL,
+                key_id       TEXT NOT NULL,
+                enrolled_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+                enrolled_at  TEXT NOT NULL,
+                last_seen    TEXT,
+                revoked      TEXT
+            );
+
+            -- Single use, 10 minutes. `token_hash` is blake3 of the whole
+            -- `sen_…` string; the plaintext is shown once to the owner.
+            CREATE TABLE IF NOT EXISTS host_enrollments (
+                id          TEXT PRIMARY KEY,
+                token_hash  BLOB NOT NULL UNIQUE,
+                created_by  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created     TEXT NOT NULL,
+                expires     TEXT NOT NULL,
+                consumed    TEXT,
+                consumed_by TEXT
+            );
+
+            -- A host's link credential, minted only by proving its key.
+            CREATE TABLE IF NOT EXISTS host_tokens (
+                id         TEXT PRIMARY KEY,
+                host_id    TEXT NOT NULL REFERENCES runtime_hosts(id) ON DELETE CASCADE,
+                token_hash BLOB NOT NULL UNIQUE,
+                created    TEXT NOT NULL,
+                expires    TEXT NOT NULL,
+                revoked    TEXT
+            );
+            CREATE INDEX IF NOT EXISTS host_tokens_by_host ON host_tokens(host_id);
+
+            -- Server-generated nonces for key authentication: single use, 60 s.
+            CREATE TABLE IF NOT EXISTS host_challenges (
+                nonce   TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL,
+                expires TEXT NOT NULL
+            );
+
             -- Short-lived, single-use tokens for WebSocket handshakes. The
             -- client POSTs to get one, then presents it on the GET /v1/stream
             -- handshake.

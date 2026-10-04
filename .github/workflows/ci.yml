@@ -54,6 +54,26 @@ jobs:
       # relay's share of the check that three wire implementations agree.
       - run: cargo test
 
+  # The Runtime Host: its own crate and its own job, for the relay's reason —
+  # it never depends on apps/server and no workspace joins them (decision 77).
+  runtime:
+    name: runtime (rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   client:
     name: client (flutter)
     runs-on: ubuntu-latest

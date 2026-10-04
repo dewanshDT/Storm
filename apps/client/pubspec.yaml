@@ -62,6 +62,7 @@ dependencies:
   # Reading the bootstrap nonce out of the document Storm served (slice 15).
   # Web-only, behind a conditional import, so native builds never see it.
   web: ^1.1.1
+  xterm2: ^5.2.0
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.

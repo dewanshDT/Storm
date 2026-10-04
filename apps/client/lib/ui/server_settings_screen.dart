@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
+import '../agent/agent_state.dart';
 import '../router.dart';
 import 'tokens.dart';
 import 'widgets.dart';
@@ -86,6 +87,29 @@ class ServerSettingsScreen extends ConsumerWidget {
             )
           else
             const _Muted('Sign in to create keys for MCP clients.'),
+          // Only when the server's owner check passes (decision 77d): other
+          // accounts see no agent entry point at all (AC-S1). Configuration
+          // only — the hosts and the default provider, which live on the
+          // Hosts screen. Sessions are something you *do*, so they are on the
+          // dashboard and the sidebar, not here (decision 78).
+          if (ref.watch(agentAccessProvider).value ?? false) ...[
+            const SizedBox(height: 24),
+            _Section(label: 'Agents'),
+            const _Muted(
+              'The machines agents run on, and which agent starts by default. '
+              'Sessions are on the dashboard.',
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                key: const Key('open-hosts'),
+                onPressed: () => context.push(Routes.agentHosts),
+                icon: const Icon(LucideIcons.server, size: 18),
+                label: const Text('Hosts'),
+              ),
+            ),
+          ],
           const SizedBox(height: 24),
           _Section(label: 'Vaults'),
           vaults.when(

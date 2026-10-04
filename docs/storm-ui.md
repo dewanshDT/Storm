@@ -67,7 +67,11 @@ Every route is also the web client's URL — real, shareable deep links.
 ```
 /connect                      Connect            shown until a server is saved
 /                             Dashboard          vaults + recently opened
+│                                                (+ an owner's running agents)
 ├── /settings/server          Server settings
+├── /agents                   Agents          ┐  owner only (decision 78); on a
+│   └── /agents/hosts         Hosts           ┘  wide screen the agents sidebar
+│                                                sits beside them
 ├── /v/:vault/browse/…        Directory       ┐
 ├── /v/:vault/note/:id        Note            │  these four share one frame:
 ├── /v/:vault/search          Search          │  on a wide screen the vault
@@ -99,6 +103,11 @@ Home. Which vault, or what you were last working on.
 - **Contains** — a grid of vault cards (name, note count, the vault's accent
   colour as its fill); below, **Recently opened**: full-width rows with the note
   title and which vault it came from, merged across every vault.
+- **For the server's owner only, an Agents band** directly above Recently
+  opened, always in that place: the running sessions (provider in workspace,
+  host, age; a tap opens the terminal), or one idle row naming the next step —
+  *Set up a host* · *<host> is offline* · *No agents running · New session* ·
+  *Agents need the server*. Everyone else sees no band at all (decision 78).
 - **Actions** — open a vault · open a recent note · create a vault · set a
   vault's colour · reach server settings.
 - **States** — loading · no vaults yet · no recents yet · `Directory not found`
@@ -182,12 +191,34 @@ Everything about the **server**, rather than about this device.
 - **AI access** — two switches: let an assistant read the notes, and a nested
   one to let it change them. Off by default; the second is dead while the first
   is off.
+- **Agents** (owner only) — a link to Hosts: the machines agents run on and
+  the default provider. Sessions are not here; they are a space of their own.
 - **Vaults** — the list, with create, rename and remove.
 - **States** — not connected · "would orphan every vault" confirmation · AI
   access off / read-only / read and write.
 
 > Two actions sound destructive and are not, and the copy says so: changing the
 > storage root never moves files, and removing a vault only forgets it.
+
+### Agents — `/agents` · adapts at 900px · owner only
+
+Running agents: Claude Code, OpenCode or a shell, in a workspace on a host
+(decisions 77d, 78).
+
+- **Phone** — the sessions, *Running* then *Ended*, with **New session** as a
+  pill at the bottom. A session fills the screen: a status line with *End*, the
+  terminal, and a row of the keys a phone keyboard lacks (Esc, Tab, Ctrl,
+  arrows, Paste). Back returns to the list. Several open sessions are tabs,
+  switched from a sheet.
+- **Wide** — the sidebar's **Notes | Agents** switch leads here. The sessions
+  list is the sidebar, with *New session* and Hosts at its foot; the pane is
+  the tab strip over the open terminal. Hosts opens in the pane.
+- **New session** — host (the last one this device used, preselected) →
+  workspace (preselected when there is only one) → provider, with the
+  network line. A fallback provider is announced, never silent.
+- **States** — loading · no hosts · no sessions · host offline · *Agents need
+  the server* (offline is a state, not an error) · a session's own *Host
+  unreachable* / *Host restarted* / *Exited (n)*.
 
 ### Appearance & connection (device settings)
 
@@ -217,6 +248,9 @@ drawer.**
 At 900px and above the pill is hidden and those same actions become the toolbar
 at the top of the sidebar. Both are drawn from one list, so they can never offer
 different things.
+
+For the server's owner, a **Notes | Agents** switch tops the wide sidebar
+(decision 78). It draws nothing for anyone else.
 
 ### Desktop keyboard shortcuts (M18)
 

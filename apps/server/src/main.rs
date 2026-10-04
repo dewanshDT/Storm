@@ -25,6 +25,7 @@
 // run locally is not a gate; it is a tax on whoever pushes next.
 #![allow(clippy::result_large_err)]
 
+mod agent;
 mod api;
 mod auth;
 mod db;
@@ -87,6 +88,17 @@ enum Commands {
         /// Destination directory for the snapshots.
         #[arg(value_name = "DIR")]
         dest: PathBuf,
+    },
+    /// Print the storage root this server uses, from its registry.
+    ///
+    /// For the nightly backup (decision 79). The stored root wins over
+    /// `STORM_VAULT_ROOT`, which only seeds a first run, so a script that read
+    /// the env file copied the wrong directory once the root was changed in
+    /// the app. Exits 3, printing nothing, when there is no registry yet.
+    StorageRoot {
+        /// State directory holding vaults.json.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
     },
 }
 
@@ -1043,6 +1055,23 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     let state_dir = prepared.state_dir;
     let root = prepared.root;
 
+    // `auth.db` holds the password hashes and cannot be rebuilt, so the state
+    // directory is kept from other accounts here as well as by the package and
+    // `up` (decision 76): an install made any other way gets it too. A failure
+    // is a warning, not a refusal to serve — the vault must stay reachable.
+    match install::tighten_private_dir(&state_dir) {
+        Ok(true) => tracing::info!(
+            state = %state_dir.display(),
+            "restricted the state directory to its owner and group"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            state = %state_dir.display(),
+            error = %e,
+            "could not restrict the state directory; other local accounts may read it"
+        ),
+    }
+
     // The `kit` vault carries the agent tooling every Storm server is expected
     // to have, so a first boot creates it rather than leaving it as a setup
     // step. Only on a first boot: deleting it afterwards is a decision, and
@@ -1168,6 +1197,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         }
     };
 
+    // The Agent Manager (decision 77c). Opening it marks every session that
+    // had not ended `unknown` until its host reports in.
+    let agent = Arc::new(crate::agent::AgentManager::open(&state_dir)?);
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1190,6 +1223,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         hasher: auth::Hasher::new(),
         // Same: one limiter for the process, or the limits do not exist.
         login_limiter: auth::ratelimit::LoginLimiter::new(),
+        host_limiter: auth::ratelimit::LoginLimiter::new(),
+        agent,
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -1488,6 +1523,18 @@ async fn main() -> Result<()> {
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
             println!("index snapshots written to {}", dest.display());
+            Ok(())
+        }
+        Commands::StorageRoot { state } => {
+            // An empty first-run root: with no registry, `load` hands it back
+            // unchanged, which is how "nothing recorded" is told apart from a
+            // real root. Parse errors still fail loudly — a backup must not
+            // fall back to the env file over a registry it cannot read.
+            let registry = registry::Registry::load(&state, Path::new(""))?;
+            if registry.root.as_os_str().is_empty() {
+                std::process::exit(3);
+            }
+            println!("{}", registry.root.display());
             Ok(())
         }
     }

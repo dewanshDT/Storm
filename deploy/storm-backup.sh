@@ -11,6 +11,9 @@
 # Run by storm-backup.timer; safe to run by hand.
 
 set -euo pipefail
+# The archives carry auth.db and the identity keys, so they are private to the
+# service user and its group even when this runs outside the unit (decision 76).
+umask 027
 
 ENV_FILE="${STORM_ENV_FILE:-/etc/storm/storm.env}"
 # Under systemd the unit's EnvironmentFile= has already set these, and the
@@ -32,10 +35,30 @@ mkdir -p "$dest"
 
 echo "storm-backup: $stamp -> $dest"
 
+# Copy the storage root the server *uses*, which is the one its registry
+# records (decision 79). STORM_VAULT_ROOT only seeds a first run: a root
+# changed in the app is never written back to the env file, and copying the
+# env file's directory produced a backup that verified and held no notes.
+# Exit 3 is "no registry yet", the only case where the env file is the answer;
+# any other failure stops here rather than backing up the wrong thing.
+rc=0
+stored="$("$SERVER_BIN" storage-root --state "$STORM_STATE")" || rc=$?
+case "$rc" in
+    0) vault_root="$stored" ;;
+    3) vault_root="$STORM_VAULT_ROOT" ;;
+    *) echo "  ERROR: could not read the storage root from $STORM_STATE" >&2
+       exit 1 ;;
+esac
+if [ "$vault_root" != "$STORM_VAULT_ROOT" ]; then
+    echo "  root:   $vault_root (stored; storm.env says $STORM_VAULT_ROOT)"
+else
+    echo "  root:   $vault_root"
+fi
+
 # The vault is ordinary files; rsync is exactly right for it. --delete keeps
 # the mirror honest about deletions, and the dated directory means an
 # accidental wipe is still recoverable from yesterday's copy.
-rsync -a --delete "$STORM_VAULT_ROOT/" "$dest/vaults/"
+rsync -a --delete "$vault_root/" "$dest/vaults/"
 echo "  vaults: $(find "$dest/vaults" -type f | wc -l | tr -d ' ') files across \
 $(find "$dest/vaults" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') vault(s)"
 
