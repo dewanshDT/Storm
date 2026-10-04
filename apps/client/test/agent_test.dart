@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -108,6 +109,111 @@ void main() {
         [0x63],
       ]);
       expect(t.stickyCtrl, isFalse, reason: 'one keystroke, then released');
+    });
+  });
+
+  group('chords the legacy encoding cannot express', () {
+    // Real key events through the real view, so the hook, its gate and
+    // xterm2's own encoding are all on the path.
+    Future<List<String>> press(
+      WidgetTester tester,
+      List<LogicalKeyboardKey> modifiers,
+      LogicalKeyboardKey key, {
+      String? agentOutput,
+    }) async {
+      final t = StormTerminal();
+      final sent = <String>[];
+      t.onInput = (b) => sent.add(latin1.decode(b));
+      if (agentOutput != null) {
+        t.write(Uint8List.fromList(utf8.encode(agentOutput)));
+      }
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: StormTerminalView(terminal: t, autofocus: true)),
+        ),
+      );
+      await tester.pump();
+      for (final m in modifiers) {
+        await tester.sendKeyDownEvent(m);
+      }
+      await tester.sendKeyEvent(key);
+      for (final m in modifiers.reversed) {
+        await tester.sendKeyUpEvent(m);
+      }
+      await tester.pump();
+      return sent;
+    }
+
+    const shift = LogicalKeyboardKey.shiftLeft;
+    const ctrl = LogicalKeyboardKey.controlLeft;
+    const meta = LogicalKeyboardKey.metaLeft;
+    const enter = LogicalKeyboardKey.enter;
+    const backspace = LogicalKeyboardKey.backspace;
+    // What Claude Code and OpenCode send when they start (measured).
+    const kittyOn = '\x1b[>5u';
+
+    testWidgets('Shift+Enter is a new line, not keypad Enter', (tester) async {
+      expect(await press(tester, [shift], enter), ['\n']);
+    });
+
+    testWidgets('Ctrl+Backspace deletes a word', (tester) async {
+      expect(await press(tester, [ctrl], backspace), ['\x17']);
+    });
+
+    testWidgets('Cmd+Backspace clears the line on macOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        expect(await press(tester, [meta], backspace), ['\x15']);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('plain Enter and Backspace are untouched', (tester) async {
+      expect(await press(tester, [], enter), ['\r']);
+      expect(await press(tester, [], backspace), ['\x7f']);
+    });
+
+    testWidgets('Super+Backspace off macOS is not an editing chord', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      try {
+        expect(await press(tester, [meta], backspace), isNot(contains('\x15')));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('once the agent asks for kitty, xterm2 encodes exactly', (
+      tester,
+    ) async {
+      // xterm2 also reports the modifier keys themselves under kitty; only
+      // the chord's own encoding, and the fallback's absence, are this
+      // surface's business.
+      final enterSent = await press(
+        tester,
+        [shift],
+        enter,
+        agentOutput: kittyOn,
+      );
+      expect(enterSent, contains('\x1b[13;2u'));
+      expect(enterSent, isNot(contains('\n')));
+      final backSent = await press(
+        tester,
+        [ctrl],
+        backspace,
+        agentOutput: kittyOn,
+      );
+      expect(backSent, contains('\x1b[127;5u'));
+      expect(backSent, isNot(contains('\x17')));
+    });
+
+    testWidgets('popping kitty brings the fallback back', (tester) async {
+      expect(
+        await press(tester, [shift], enter, agentOutput: '$kittyOn\x1b[<u'),
+        ['\n'],
+      );
     });
   });
 

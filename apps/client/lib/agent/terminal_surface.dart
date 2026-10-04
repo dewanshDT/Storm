@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:xterm2/xterm.dart';
@@ -67,6 +68,57 @@ class StormTerminal {
   void right() => key(TerminalKey.arrowRight);
 
   void paste(String text) => _terminal.paste(text);
+
+  /// Whether the agent has turned on the kitty keyboard protocol. Only then
+  /// can a modified Enter or Backspace be told apart from a plain one.
+  bool get kittyKeyboard => _terminal.kittyKeyboardMode != 0;
+
+  /// The bytes to send instead of xterm2's encoding for a chord the legacy
+  /// encoding cannot express, or null to let xterm2 encode it.
+  ///
+  /// Without the kitty protocol, Shift+Enter is `ESC O M` (keypad Enter, which
+  /// agents read as submit) and Ctrl/Cmd+Backspace are a plain Backspace. So
+  /// they send the readline equivalents a desktop terminal sends: LF for a new
+  /// line, Ctrl+W for a word, Ctrl+U for the line. Once an agent has asked for
+  /// kitty, xterm2's own encoding is exact and this steps aside. The Runtime
+  /// Host is meant to negotiate that protocol (AM22, draft); this stays the
+  /// path for programs that never ask for it.
+  String? _legacyFallback(
+    LogicalKeyboardKey key, {
+    required bool shift,
+    required bool control,
+    required bool alt,
+    required bool meta,
+    required TargetPlatform platform,
+  }) {
+    if (kittyKeyboard || alt) return null;
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      return shift && !control && !meta ? '\n' : null;
+    }
+    if (key == LogicalKeyboardKey.backspace) {
+      if (control && !meta) return '\x17';
+      // Cmd is Super elsewhere, which a terminal does not use for editing.
+      if (meta && !control && platform == TargetPlatform.macOS) return '\x15';
+    }
+    return null;
+  }
+
+  KeyEventResult _onKeyEvent(FocusNode _, KeyEvent event) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final keys = HardwareKeyboard.instance;
+    final bytes = _legacyFallback(
+      event.logicalKey,
+      shift: keys.isShiftPressed,
+      control: keys.isControlPressed,
+      alt: keys.isAltPressed,
+      meta: keys.isMetaPressed,
+      platform: defaultTargetPlatform,
+    );
+    if (bytes == null) return KeyEventResult.ignored;
+    _emit(bytes);
+    return KeyEventResult.handled;
+  }
 
   void _emit(String data) {
     if (stickyCtrl && data.length == 1) {
@@ -182,6 +234,8 @@ class StormTerminalView extends StatelessWidget {
         focusNode: focusNode,
         autofocus: autofocus,
         readOnly: readOnly,
+        // Asked first; whatever it leaves goes to xterm2's own encoding.
+        onKeyEvent: readOnly ? null : terminal._onKeyEvent,
         theme: theme,
         padding: EdgeInsets.all(t.sp),
         textStyle: TerminalStyle(
