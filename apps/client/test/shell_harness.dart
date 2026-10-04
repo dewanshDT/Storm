@@ -50,6 +50,7 @@ ProviderContainer shellContainer({
   bool configured = true,
   Settings? settings,
   http.Client? agentClient,
+  Stream<TerminalEvent> Function(String sessionId, int offset)? terminalStream,
 }) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
@@ -108,10 +109,11 @@ ProviderContainer shellContainer({
                 client: agentClient,
               ),
       ),
-      // A terminal stream that stays open and says nothing: a test that opens
-      // a session asserts on the chrome around it, not on a live PTY.
+      // A terminal stream that stays open and says nothing, unless the test
+      // scripts one: most tests assert on the chrome around a session, not
+      // on a live PTY.
       terminalStreamFactoryProvider.overrideWithValue(
-        (_, _) => StreamController<TerminalEvent>().stream,
+        terminalStream ?? (_, _) => StreamController<TerminalEvent>().stream,
       ),
     ],
   );

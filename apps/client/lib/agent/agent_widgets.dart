@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../ui/icons.dart';
 import '../ui/shell/corner_bubbles.dart' show relativeTime;
@@ -6,6 +8,7 @@ import '../ui/shell/nav_bubble.dart' show PrimaryCircle, StormPill;
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';
 import 'agent_models.dart';
+import 'agent_state.dart' show agentTitlesProvider;
 
 /// The pieces every agent surface draws a session with (decision 78).
 ///
@@ -128,8 +131,38 @@ class AgentRow extends StatelessWidget {
   }
 }
 
-/// One session: dot, title, host and age, and — once it has ended — how.
-class AgentSessionRow extends StatelessWidget {
+/// The name an agent gave its conversation, from a raw terminal title, or
+/// null when the title says nothing a list does not already say.
+///
+/// Claude Code prefixes its title with a status glyph (`✳`, or a braille
+/// spinner while working) and both CLIs start on their own product name, so
+/// leading symbols are dropped and a bare product name counts as no name.
+String? agentChosenTitle(String? raw) {
+  if (raw == null) return null;
+  final name = raw.replaceFirst(RegExp(r'^[^\p{L}\p{N}]+', unicode: true), '');
+  final trimmed = name.trim();
+  const generic = {'claude code', 'claude', 'opencode', 'open code'};
+  if (trimmed.isEmpty || generic.contains(trimmed.toLowerCase())) return null;
+  return trimmed;
+}
+
+/// A provider's mark. Lucide has no brand logos, so each gets the glyph
+/// nearest its own identity: Claude Code titles itself with an asterisk.
+IconData providerIcon(String provider) => switch (provider) {
+  'claude-code' => LucideIcons.asterisk,
+  'opencode' => LucideIcons.square_code,
+  'shell' => LucideIcons.square_terminal,
+  _ => LucideIcons.bot,
+};
+
+/// The title a session is shown under: the agent's own name for it when
+/// this device has seen one, else "Claude Code in storm".
+String sessionDisplayTitle(AgentSession? s, Map<String, String> titles) =>
+    (s == null ? null : titles[s.id]) ?? sessionTitle(s);
+
+/// One session: its agent, its name, host and age, and its status at the
+/// end of the row.
+class AgentSessionRow extends ConsumerWidget {
   const AgentSessionRow({
     super.key,
     required this.session,
@@ -146,28 +179,41 @@ class AgentSessionRow extends StatelessWidget {
   final bool dense;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final s = session;
     final dot = sessionDot(s);
-    // A live session that is not plainly running says what it is instead.
-    final status = s.ended || s.status != 'running' ? s.statusLabel : null;
+    final titles = ref.watch(agentTitlesProvider);
+    // Running says itself with the dot; anything else is said in words,
+    // because an ended session has no dot (see sessionDot).
+    final words = s.status == 'running' ? null : s.statusLabel;
     return AgentRow(
-      title: sessionTitle(s),
+      title: sessionDisplayTitle(s, titles),
       // The same age wording as Recently opened, directly below the band.
       detail:
           '$hostName · '
           '${relativeTime(DateTime.tryParse(s.createdAt)?.toLocal())}',
-      lead: dot == null ? null : StatusDot(status: dot),
-      trailing: status == null
-          ? null
-          : Text(
-              status,
+      lead: Tooltip(
+        message: providerLabel(s.provider),
+        child: Icon(
+          providerIcon(s.provider),
+          size: dense ? t.bodySize : t.headingSize,
+          color: s.ended ? t.text3 : t.text2,
+        ),
+      ),
+      trailing: words != null
+          ? Text(
+              words,
               style: TextStyle(
                 fontFamily: StormTokens.sansFamily,
                 fontSize: t.labelSize,
                 color: s.status == 'failed' ? t.danger : t.text3,
               ),
+            )
+          // Colour alone is not a status: the dot carries its word too.
+          : Semantics(
+              label: s.statusLabel,
+              child: StatusDot(status: dot ?? DotStatus.synced),
             ),
       muted: s.ended,
       selected: selected,

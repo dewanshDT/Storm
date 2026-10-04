@@ -21,7 +21,12 @@ class StormTerminal {
     );
     _terminal.onOutput = _emit;
     _terminal.onResize = (cols, rows, _, _) => onResize?.call(cols, rows);
+    _terminal.onTitleChange = (t) => title.value = t;
   }
+
+  /// The window title the agent last set (OSC 0/2), raw. Claude Code and
+  /// OpenCode name the conversation there once it has a topic.
+  final title = ValueNotifier<String?>(null);
 
   final _terminal = Terminal(maxLines: 10000);
 
@@ -36,9 +41,20 @@ class StormTerminal {
   /// The view's size changed.
   void Function(int cols, int rows)? onResize;
 
-  /// The phone keys row's sticky Ctrl: the next character typed becomes its
-  /// control code.
-  bool stickyCtrl = false;
+  /// The phone keys row's sticky modifiers. Each applies to the next key,
+  /// typed or tapped on the row, and is then released, as on a phone's own
+  /// shift. Listenable, because typing consumes one without the row knowing.
+  final ctrlArmed = ValueNotifier(false);
+  final shiftArmed = ValueNotifier(false);
+
+  /// Sticky Ctrl: the next character typed becomes its control code.
+  bool get stickyCtrl => ctrlArmed.value;
+  set stickyCtrl(bool on) => ctrlArmed.value = on;
+
+  /// Sticky Shift: Shift+Enter (a new line in agents), Shift+Tab (Claude
+  /// Code's mode switch), Shift+arrows; a typed letter comes out upper case.
+  bool get stickyShift => shiftArmed.value;
+  set stickyShift(bool on) => shiftArmed.value = on;
 
   int get cols => _terminal.viewWidth;
   int get rows => _terminal.viewHeight;
@@ -57,8 +73,31 @@ class StormTerminal {
   /// A line the client writes itself, dimmed, never sent to the agent.
   void note(String text) => _terminal.write('\r\n\x1b[2m$text\x1b[0m\r\n');
 
-  void key(TerminalKey key, {bool ctrl = false}) =>
-      _terminal.keyInput(key, ctrl: ctrl);
+  /// A key from the phone row, with whatever modifiers are armed.
+  void key(TerminalKey key) {
+    final ctrl = stickyCtrl, shift = stickyShift;
+    // Released before the key goes out: its bytes come back through [_emit],
+    // which must not apply them a second time.
+    stickyCtrl = false;
+    stickyShift = false;
+    final arrow = _arrowFinal[key];
+    if (arrow != null && (ctrl || shift)) {
+      // xterm's modified arrow, `CSI 1;<1+shift+4·ctrl><A–D>`, built here:
+      // xterm2 5.2.0's keytab lets an `AnyMod` record ignore its own
+      // `-Shift`, so it sends Shift+Up as Ctrl+Up.
+      final mod = 1 + (shift ? 1 : 0) + (ctrl ? 4 : 0);
+      _emit('\x1b[1;$mod$arrow');
+      return;
+    }
+    _terminal.keyInput(key, ctrl: ctrl, shift: shift);
+  }
+
+  static const _arrowFinal = {
+    TerminalKey.arrowUp: 'A',
+    TerminalKey.arrowDown: 'B',
+    TerminalKey.arrowRight: 'C',
+    TerminalKey.arrowLeft: 'D',
+  };
 
   void escape() => key(TerminalKey.escape);
   void tab() => key(TerminalKey.tab);
@@ -121,6 +160,20 @@ class StormTerminal {
   }
 
   void _emit(String data) {
+    if (stickyShift && data.length == 1) {
+      stickyShift = false;
+      // The keyboard's Enter arrives as CR whatever the protocol (kitty
+      // leaves plain Enter alone), so this is where Shift+Enter is made.
+      if (data == '\r') {
+        if (kittyKeyboard) {
+          _terminal.keyInput(TerminalKey.enter, shift: true);
+        } else {
+          onInput?.call(Uint8List.fromList('\n'.codeUnits));
+        }
+        return;
+      }
+      data = data.toUpperCase();
+    }
     if (stickyCtrl && data.length == 1) {
       final code = data.toUpperCase().codeUnitAt(0);
       // `@`, A–Z and `[ \ ] ^ _` have control codes; anything else is sent as
@@ -134,7 +187,12 @@ class StormTerminal {
     onInput?.call(Uint8List.fromList(utf8.encode(data)));
   }
 
-  void dispose() => _bytes.close();
+  void dispose() {
+    _bytes.close();
+    ctrlArmed.dispose();
+    shiftArmed.dispose();
+    title.dispose();
+  }
 
   /// What a person typing [data] would send, for tests.
   @visibleForTesting
@@ -177,12 +235,18 @@ class StormTerminalView extends StatelessWidget {
     this.focusNode,
     this.autofocus = false,
     this.readOnly = false,
+    this.padding,
   });
 
   final StormTerminal terminal;
   final FocusNode? focusNode;
   final bool autofocus;
   final bool readOnly;
+
+  /// Around the character grid; `sp` on every side when null. The padding is
+  /// drawn in the view's colour, not the agent's, so a full-screen agent that
+  /// paints its own background (OpenCode) shows it as a frame.
+  final EdgeInsets? padding;
 
   @override
   Widget build(BuildContext context) {
@@ -237,7 +301,7 @@ class StormTerminalView extends StatelessWidget {
         // Asked first; whatever it leaves goes to xterm2's own encoding.
         onKeyEvent: readOnly ? null : terminal._onKeyEvent,
         theme: theme,
-        padding: EdgeInsets.all(t.sp),
+        padding: padding ?? EdgeInsets.all(t.sp),
         textStyle: TerminalStyle(
           fontFamily: StormTokens.monoFamily,
           fontSize: t.labelSize + 1,
