@@ -589,13 +589,34 @@ class _SessionViewState extends State<_SessionView> {
       builder: (context, _) {
         final c = widget.controller;
         final s = c.session;
+        // The phone gives the terminal every pixel it can: a tight status
+        // row whose edges line up with the app bar's back arrow and icons,
+        // and a compact End. Wide keeps its roomier row (decision 78's pass).
+        final phone = !context.isExpanded;
+        final rowButton = phone
+            ? TextButton.styleFrom(
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: EdgeInsets.symmetric(horizontal: t.sp),
+                visualDensity: VisualDensity.compact,
+              )
+            : null;
         return Column(
           children: [
             Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: t.sp * 1.5,
-                vertical: t.sp * 0.75,
-              ),
+              padding: phone
+                  // 16 px on the left meets the back arrow; the button's own
+                  // `sp` of padding puts its label 16 px from the right too.
+                  ? EdgeInsets.fromLTRB(
+                      t.sp * 2,
+                      t.sp * 0.25,
+                      t.sp,
+                      t.sp * 0.25,
+                    )
+                  : EdgeInsets.symmetric(
+                      horizontal: t.sp * 1.5,
+                      vertical: t.sp * 0.75,
+                    ),
               child: Row(
                 children: [
                   StatusChip(
@@ -613,11 +634,13 @@ class _SessionViewState extends State<_SessionView> {
                   if (s != null && !s.ended)
                     TextButton(
                       key: const Key('end-session'),
+                      style: rowButton,
                       onPressed: _confirmEnd,
                       child: const Text('End'),
                     ),
                   if (s != null && s.ended)
                     TextButton(
+                      style: rowButton,
                       onPressed: () => widget.onDismiss(s),
                       child: const Text('Dismiss'),
                     ),
@@ -645,6 +668,12 @@ class _SessionViewState extends State<_SessionView> {
                 // should wait for a tap on the terminal.
                 autofocus: context.isExpanded,
                 readOnly: s?.ended ?? false,
+                // Edge to edge on the phone, as phone terminals are: a
+                // full-screen agent paints its own background, and the
+                // padding would frame it in the page colour.
+                padding: phone
+                    ? EdgeInsets.symmetric(vertical: t.sp * 0.5)
+                    : null,
               ),
             ),
             if (widget.keysRow && !(s?.ended ?? false))

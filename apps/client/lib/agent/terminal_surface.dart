@@ -229,12 +229,18 @@ class StormTerminalView extends StatelessWidget {
     this.focusNode,
     this.autofocus = false,
     this.readOnly = false,
+    this.padding,
   });
 
   final StormTerminal terminal;
   final FocusNode? focusNode;
   final bool autofocus;
   final bool readOnly;
+
+  /// Around the character grid; `sp` on every side when null. The padding is
+  /// drawn in the view's colour, not the agent's, so a full-screen agent that
+  /// paints its own background (OpenCode) shows it as a frame.
+  final EdgeInsets? padding;
 
   @override
   Widget build(BuildContext context) {
@@ -289,7 +295,7 @@ class StormTerminalView extends StatelessWidget {
         // Asked first; whatever it leaves goes to xterm2's own encoding.
         onKeyEvent: readOnly ? null : terminal._onKeyEvent,
         theme: theme,
-        padding: EdgeInsets.all(t.sp),
+        padding: padding ?? EdgeInsets.all(t.sp),
         textStyle: TerminalStyle(
           fontFamily: StormTokens.monoFamily,
           fontSize: t.labelSize + 1,
