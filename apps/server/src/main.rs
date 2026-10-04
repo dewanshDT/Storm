@@ -89,6 +89,17 @@ enum Commands {
         #[arg(value_name = "DIR")]
         dest: PathBuf,
     },
+    /// Print the storage root this server uses, from its registry.
+    ///
+    /// For the nightly backup (decision 79). The stored root wins over
+    /// `STORM_VAULT_ROOT`, which only seeds a first run, so a script that read
+    /// the env file copied the wrong directory once the root was changed in
+    /// the app. Exits 3, printing nothing, when there is no registry yet.
+    StorageRoot {
+        /// State directory holding vaults.json.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -1512,6 +1523,18 @@ async fn main() -> Result<()> {
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
             println!("index snapshots written to {}", dest.display());
+            Ok(())
+        }
+        Commands::StorageRoot { state } => {
+            // An empty first-run root: with no registry, `load` hands it back
+            // unchanged, which is how "nothing recorded" is told apart from a
+            // real root. Parse errors still fail loudly — a backup must not
+            // fall back to the env file over a registry it cannot read.
+            let registry = registry::Registry::load(&state, Path::new(""))?;
+            if registry.root.as_os_str().is_empty() {
+                std::process::exit(3);
+            }
+            println!("{}", registry.root.display());
             Ok(())
         }
     }

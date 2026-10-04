@@ -285,7 +285,13 @@ Three things are backed up, for different reasons:
 
 - **the storage root** — every vault's notes. Plain files, so
   `rsync -a --delete` into a dated directory. Dating it means an accidental
-  mass-delete is still recoverable from yesterday.
+  mass-delete is still recoverable from yesterday. **It is the root the server
+  uses**, which `storm-server storage-root` reads from `state/vaults.json`, not
+  `STORM_VAULT_ROOT` (decision 79): the env file only seeds a first run, and a
+  root changed in the app is never written back to it. Until 0.3.0 the script
+  copied the env file's directory, which on an install whose root had moved was
+  an empty one — a backup that verified and held no notes. The log's `root:`
+  line names the directory copied, and the env file's value when they differ.
 - **`state/<vault-id>/index.db`** — one index per vault, holding version
   history that the 3-way merge uses as its base, plus `vaults.json`. The rest
   of an index can be rebuilt by rescanning; the history cannot.
