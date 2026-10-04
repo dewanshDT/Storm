@@ -533,6 +533,17 @@ impl AuthDb {
         )?)
     }
 
+    /// Every event's kind and detail, oldest first — for the tests that
+    /// assert no secret reaches the audit trail.
+    #[cfg(test)]
+    pub fn all_events(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, COALESCE(detail, '') FROM security_events ORDER BY seq")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The address recorded on the most recent event of `kind`.
     #[cfg(test)]
     pub fn latest_event_remote(&self, kind: &str) -> Result<Option<String>> {

@@ -443,6 +443,16 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
 - **The data key is a file, `0600` in a `0700` directory, created with those
   modes.** A missing key at boot is not a lockout: a new key becomes active
   and the affected connections become `needs_reauth`.
+- **Integrations are the owner's alone, on the session tier** (81c). Every
+  `/v1/integrations/*` operation calls `ops::require_integration_owner`, and
+  a connection is found only among the caller's own rows (`404` otherwise).
+  No MCP tool manages one, so an `stk_` key never can.
+- **A connection's URL, slug and auth kind never change after creation.** A
+  credential is presented only to its own upstream (AM24); re-pointing a
+  connection would hand its token to a new host. The store's update does not
+  write those columns.
+- **An integration's audit row names the upstream's host, never its URL** —
+  a pasted URL can carry a key in its query string — and never a credential.
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 

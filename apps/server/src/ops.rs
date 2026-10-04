@@ -1379,6 +1379,400 @@ pub fn runtime_status(
         .map_err(agent_error)
 }
 
+// ---- MCP Gateway: integrations (decisions 81, 81c) -------------------------
+//
+// Every operation here is the owner's alone (G-D20, AM29 `integration.manage`)
+// and acts only on the caller's own connections. There is deliberately no MCP
+// tool for any of them (spec §14), and the routes are session tier, so an
+// `stk_` key can never manage an integration.
+
+use crate::gateway::connections::{
+    self as conn, BUILTIN_ID, BUILTIN_SLUG, Connection, StaticCredential, auth_kind,
+    credential_kind, status,
+};
+
+/// The gate on every `/v1/integrations/*` operation: `403` for anyone but an
+/// owner, never an empty list (the AM5 rule `require_owner` follows).
+pub fn require_integration_owner(actor: &Actor) -> ApiResult<()> {
+    if actor.role() == crate::auth::users::Role::Owner {
+        Ok(())
+    } else {
+        Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "integrations are managed by the server owner only".into(),
+        ))
+    }
+}
+
+/// A connection as the owner's client sees it. **Never a credential**: only
+/// whether one is held.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationView {
+    pub id: String,
+    pub slug: String,
+    pub display_name: String,
+    /// `None` for the built-in connection, which has no network hop.
+    pub url: Option<String>,
+    pub auth_kind: String,
+    pub status: String,
+    pub builtin: bool,
+    pub has_credential: bool,
+    pub tool_allowlist: Vec<String>,
+    pub known_tools: Option<Vec<String>>,
+    pub expose_resources: bool,
+    pub expose_prompts: bool,
+    pub upstream_account_label: Option<String>,
+    pub last_ok: Option<String>,
+    pub last_error_code: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// Built-in only: whether agents could write to the vault at all, which
+    /// needs `mcp_writable` as well as the launch toggle (G-D5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault_writes_available: Option<bool>,
+}
+
+fn builtin_view(state: &Shared) -> IntegrationView {
+    IntegrationView {
+        id: BUILTIN_ID.into(),
+        slug: BUILTIN_SLUG.into(),
+        display_name: "Storm vaults".into(),
+        url: None,
+        auth_kind: auth_kind::NONE.into(),
+        status: status::CONNECTED.into(),
+        builtin: true,
+        has_credential: false,
+        tool_allowlist: Vec::new(),
+        known_tools: None,
+        expose_resources: false,
+        expose_prompts: false,
+        upstream_account_label: None,
+        last_ok: None,
+        last_error_code: None,
+        created_at: None,
+        updated_at: None,
+        vault_writes_available: Some(
+            state
+                .mcp_writable
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+    }
+}
+
+fn integration_view(c: Connection, has_credential: bool) -> IntegrationView {
+    IntegrationView {
+        id: c.id,
+        slug: c.slug,
+        display_name: c.display_name,
+        url: Some(c.url),
+        auth_kind: c.auth_kind,
+        status: c.status,
+        builtin: false,
+        has_credential,
+        tool_allowlist: c.tool_allowlist,
+        known_tools: c.known_tools,
+        expose_resources: c.expose_resources,
+        expose_prompts: c.expose_prompts,
+        upstream_account_label: c.upstream_account_label,
+        last_ok: c.last_ok,
+        last_error_code: c.last_error_code,
+        created_at: Some(c.created_at),
+        updated_at: Some(c.updated_at),
+        vault_writes_available: None,
+    }
+}
+
+fn view_of(state: &Shared, c: Connection) -> ApiResult<IntegrationView> {
+    let held = {
+        let store = state.gateway.store.lock().expect("gateway store lock");
+        store
+            .credential(&c.id, credential_kind::STATIC)
+            .map_err(internal)?
+            .is_some()
+            || store
+                .credential(&c.id, credential_kind::OAUTH_TOKENS)
+                .map_err(internal)?
+                .is_some()
+    };
+    Ok(integration_view(c, held))
+}
+
+/// The caller's own live connection, or `404` — for someone else's too, so an
+/// owner probing ids learns nothing about another owner's integrations.
+fn own_connection(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Connection> {
+    let store = state.gateway.store.lock().expect("gateway store lock");
+    match store.connection(id).map_err(internal)? {
+        Some(c) if c.owner_user_id == actor.user_id() && c.status != status::REVOKED => Ok(c),
+        _ => Err(not_found("no such integration")),
+    }
+}
+
+/// The audit detail for an integration event: ids, slug, kind and the
+/// upstream's **host only**. Never the URL — an owner can paste one with a key
+/// in its query string — and never a credential.
+fn integration_event(
+    state_auth: &crate::auth::AuthDb,
+    kind: &str,
+    actor: &Actor,
+    c: &Connection,
+    now: &str,
+) {
+    let host = c
+        .url
+        .parse::<axum::http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(str::to_string));
+    let detail = serde_json::json!({
+        "connection_id": c.id,
+        "slug": c.slug,
+        "auth_kind": c.auth_kind,
+        "upstream_host": host,
+    });
+    let _ = state_auth.record_event(kind, Some(actor.user_id()), None, now, &detail.to_string());
+}
+
+fn seal_static(
+    state: &Shared,
+    id: &str,
+    credential: &StaticCredential,
+) -> ApiResult<crate::gateway::crypto::Sealed> {
+    let plaintext = serde_json::to_vec(credential).map_err(internal)?;
+    state
+        .gateway
+        .keys
+        .seal(id, credential_kind::STATIC, &plaintext)
+        .map_err(internal)
+}
+
+/// Every integration the owner has, the built-in `storm` connection first.
+pub async fn list_integrations(state: &Shared, actor: &Actor) -> ApiResult<Vec<IntegrationView>> {
+    require_integration_owner(actor)?;
+    let rows = state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .connections_of(actor.user_id())
+        .map_err(internal)?;
+    let mut out = vec![builtin_view(state)];
+    for c in rows {
+        out.push(view_of(state, c)?);
+    }
+    Ok(out)
+}
+
+pub async fn get_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<IntegrationView> {
+    require_integration_owner(actor)?;
+    if id == BUILTIN_ID {
+        return Ok(builtin_view(state));
+    }
+    let c = own_connection(state, actor, id)?;
+    view_of(state, c)
+}
+
+pub struct NewIntegration {
+    pub display_name: String,
+    pub slug: Option<String>,
+    pub url: String,
+    pub auth_kind: String,
+    pub credential: Option<StaticCredential>,
+}
+
+/// Connects an integration. V1 here takes `static` (a header, G-D24's PAT)
+/// and `none`; `oauth` arrives with its authorize flow (81g).
+pub async fn create_integration(
+    state: &Shared,
+    actor: &Actor,
+    req: NewIntegration,
+) -> ApiResult<IntegrationView> {
+    require_integration_owner(actor)?;
+    conn::validate_display_name(&req.display_name).map_err(bad_request)?;
+    let slug = req
+        .slug
+        .clone()
+        .unwrap_or_else(|| conn::slug_from(&req.display_name));
+    conn::validate_slug(&slug).map_err(bad_request)?;
+    conn::validate_url(&req.url).map_err(bad_request)?;
+    match (req.auth_kind.as_str(), &req.credential) {
+        (auth_kind::STATIC, Some(c)) => {
+            conn::validate_static(&c.header, &c.value).map_err(bad_request)?
+        }
+        (auth_kind::STATIC, None) => {
+            return Err(bad_request("a static integration needs a credential"));
+        }
+        (auth_kind::NONE, None) => {}
+        (auth_kind::NONE, Some(_)) => {
+            return Err(bad_request(
+                "an integration without auth takes no credential",
+            ));
+        }
+        (auth_kind::OAUTH, _) => {
+            return Err(bad_request(
+                "OAuth integrations are not available yet; connect with a token",
+            ));
+        }
+        _ => return Err(bad_request("auth_kind is static or none")),
+    }
+
+    let now = crate::index::now_rfc3339();
+    let c = Connection {
+        id: crate::auth::identity::random_id("mcc_"),
+        owner_user_id: actor.user_id().to_string(),
+        slug,
+        display_name: req.display_name.trim().to_string(),
+        url: req.url,
+        auth_kind: req.auth_kind,
+        status: status::CONNECTED.into(),
+        tool_allowlist: Vec::new(),
+        known_tools: None,
+        expose_resources: true,
+        expose_prompts: true,
+        upstream_account_label: None,
+        last_ok: None,
+        last_error_code: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let sealed = match &req.credential {
+        Some(credential) => Some(seal_static(state, &c.id, credential)?),
+        None => None,
+    };
+    state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .insert_connection(&c, sealed.as_ref().map(|s| (credential_kind::STATIC, s)))
+        .map_err(|e| match e {
+            crate::gateway::store::InsertError::SlugTaken => conflict(e.to_string()),
+            crate::gateway::store::InsertError::Other(e) => internal(e),
+        })?;
+    {
+        let auth_db = state.auth_db.lock().await;
+        integration_event(&auth_db, "integration_created", actor, &c, &now);
+    }
+    Ok(integration_view(c, sealed.is_some()))
+}
+
+#[derive(Default)]
+pub struct IntegrationPatch {
+    pub display_name: Option<String>,
+    /// `false` disables (every call refused at once, §6); `true` re-enables.
+    pub enabled: Option<bool>,
+    pub tool_allowlist: Option<Vec<String>>,
+    pub expose_resources: Option<bool>,
+    pub expose_prompts: Option<bool>,
+    /// A replacement static credential (a rotated PAT).
+    pub credential: Option<StaticCredential>,
+}
+
+/// Changes what may change. **Never the URL, the slug or the auth kind**: a
+/// credential is presented only to its own upstream (AM24), so re-pointing a
+/// connection would hand its token to a new host, and live sessions were told
+/// the slug at launch.
+pub async fn update_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    patch: IntegrationPatch,
+) -> ApiResult<IntegrationView> {
+    require_integration_owner(actor)?;
+    if id == BUILTIN_ID {
+        return Err(bad_request("the built-in connection cannot be changed"));
+    }
+    let mut c = own_connection(state, actor, id)?;
+    if let Some(name) = &patch.display_name {
+        conn::validate_display_name(name).map_err(bad_request)?;
+        c.display_name = name.trim().to_string();
+    }
+    if let Some(tools) = &patch.tool_allowlist {
+        conn::validate_allowlist(tools).map_err(bad_request)?;
+        let mut tools = tools.clone();
+        tools.sort();
+        tools.dedup();
+        c.tool_allowlist = tools;
+    }
+    if let Some(on) = patch.expose_resources {
+        c.expose_resources = on;
+    }
+    if let Some(on) = patch.expose_prompts {
+        c.expose_prompts = on;
+    }
+    let mut events: Vec<&str> = Vec::new();
+    let sealed = match &patch.credential {
+        Some(credential) => {
+            if c.auth_kind != auth_kind::STATIC {
+                return Err(bad_request("only a static integration takes a credential"));
+            }
+            conn::validate_static(&credential.header, &credential.value).map_err(bad_request)?;
+            if c.status == status::NEEDS_REAUTH || c.status == status::ERROR {
+                c.status = status::CONNECTED.into();
+            }
+            events.push("integration_reauthorized");
+            Some(seal_static(state, &c.id, credential)?)
+        }
+        None => None,
+    };
+    match patch.enabled {
+        Some(false) if c.status != status::DISABLED => {
+            c.status = status::DISABLED.into();
+            events.push("integration_disabled");
+        }
+        Some(true) if c.status == status::DISABLED => {
+            c.status = status::CONNECTED.into();
+            events.push("integration_enabled");
+        }
+        _ => {}
+    }
+
+    let now = crate::index::now_rfc3339();
+    c.updated_at = now.clone();
+    {
+        let store = state.gateway.store.lock().expect("gateway store lock");
+        if let Some(sealed) = &sealed {
+            store
+                .put_credential(&c.id, credential_kind::STATIC, sealed, None, &now)
+                .map_err(internal)?;
+        }
+        store.update_connection(&c).map_err(internal)?;
+    }
+    if !events.is_empty() {
+        let auth_db = state.auth_db.lock().await;
+        for kind in events {
+            integration_event(&auth_db, kind, actor, &c, &now);
+        }
+    }
+    view_of(state, c)
+}
+
+/// Disconnects (§13): the connection becomes a `revoked` tombstone and its
+/// ciphertexts are deleted at once, so every later call is refused. Upstream
+/// revocation (RFC 7009) is best effort and arrives with OAuth (81g); a
+/// static token such as a GitHub PAT has no revocation call from Storm, and
+/// the owner revokes it upstream.
+pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
+    require_integration_owner(actor)?;
+    if id == BUILTIN_ID {
+        return Err(bad_request("the built-in connection cannot be deleted"));
+    }
+    let c = own_connection(state, actor, id)?;
+    let now = crate::index::now_rfc3339();
+    state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .revoke_connection(&c.id, &now)
+        .map_err(internal)?;
+    let auth_db = state.auth_db.lock().await;
+    integration_event(&auth_db, "integration_deleted", actor, &c, &now);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

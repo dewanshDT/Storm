@@ -11,11 +11,13 @@
 //! future caller share one answer.
 //!
 //! Slice 1 (81b) is the store: `gateway.db`, the data key, and their place in
-//! `backup_all()`. Nothing reads a credential yet; the connection operations
-//! arrive in slice 2 (81c), which is why some of what is here has no caller in
-//! the shipping binary until then.
+//! `backup_all()`. Slice 2 (81c) adds the connection rows and the owner's
+//! operations on them. **Nothing opens a credential or writes the call audit
+//! until the upstream client (81d)**, which is why some of what is here has no
+//! caller in the shipping binary yet; the allow below goes with that slice.
 #![allow(dead_code)]
 
+pub mod connections;
 pub mod crypto;
 pub mod store;
 

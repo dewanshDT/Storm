@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slice 1, the store (81b) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–2: the store (81b), connections (81c) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -2825,6 +2825,86 @@ on `(owner_user_id, slug)` excludes it, so the slug is free again. This is
 **Revisit if** data-key rotation is built (it is LATER in the spec): it needs
 a re-seal pass and a rule for when an old key file may be deleted, and
 `meta.active_key_id` is where that starts.
+
+**81c. Gateway slice 2: connections, the owner's alone, and a credential
+bound to its upstream for life.** *(2026-10-05)*
+
+**The routes** (session tier, every one gated by `ops::require_integration_owner`):
+- `GET` / `POST /v1/integrations/connections`
+- `GET` / `PATCH` / `DELETE /v1/integrations/connections/{id}`
+
+A member gets `403` on all five. Another owner's connection is `404`, the
+same as an id that does not exist, so ids cannot be probed. An `stk_` key is
+`401`, because the tier refuses it (§14: no MCP tool manages integrations).
+
+**What this slice connects:**
+- `static` connections: a header, `Authorization` by default, and a value.
+  A GitHub PAT is `Bearer ghp_…` (G-D24).
+- `none` connections.
+- `oauth` is refused with `400` until its authorize flow exists (81g), so
+  no connection can sit in `pending_auth` with no way out.
+
+**Decisions:**
+- **A connection's URL, slug and auth kind never change.** PATCH has no
+  field for them, and the store's update never writes them:
+  - Re-pointing a connection would send its credential to a new host.
+    AM24 says a credential is presented only to its own upstream.
+  - The slug is what live sessions were told at launch.
+
+  Moving a connection means a new one.
+- **The built-in `storm` connection is listed first, with id and slug
+  `storm`, and is not a row.** It reports `vault_writes_available`, which
+  mirrors `mcp_writable`. PATCH and DELETE on it are `400`. Its id equals
+  its slug, so `start.mcp` and the gateway route name it like any `mcc_`
+  connection.
+- **Slugs are `[a-z0-9-]`, 1–32 characters, with no leading or trailing
+  `-`, and never `storm`.** They are derived from the display name when
+  omitted. A slug becomes OpenCode's `"<slug>_*"` permission glob (AM32), so
+  `_` is refused: one slug's glob must not match another's tools.
+  Uniqueness is per owner, decided by the unique index (`409`), not by a
+  read-then-write. A disconnected slug is free again.
+- **No private-range check on a static connection's URL.** It must be
+  absolute `https`, with no userinfo and no fragment. §10's SSRF rule
+  applies to OAuth discovery, whose URLs come from an upstream's metadata
+  (81g). A static URL is typed by the owner, and a homelab's own MCP server
+  on the LAN is a main use.
+- **A static credential cannot inject a header.** The value is printable
+  ASCII with no CR or LF. Names the transport owns (`Host`,
+  `Mcp-Session-Id`, `Content-Type` …) are refused.
+- **Disconnect** turns the row into the `revoked` tombstone and deletes its
+  ciphertexts in one transaction (§13). Upstream revocation arrives with
+  OAuth (81g). A PAT has no revocation call from Storm.
+- **Insert is one transaction with its credential**, so there is never a row
+  whose credential failed to land.
+
+**Audit.** The `security_events` kinds are `integration_created`,
+`integration_reauthorized` (a rotated static token), `integration_disabled`,
+`integration_enabled` and `integration_deleted`:
+- `integration_enabled` is the inverse §14 did not name. It is additive.
+- The detail is the id, the slug, the auth kind and the upstream's **host
+  only**: an owner can paste a URL with a key in its query string.
+
+**Verified.**
+- Six route tests: the full flow (create, list, disable, re-enable, rotate,
+  allowlist, delete, slug reuse, ciphertexts deleted); member `403` on every
+  route; a second owner's `404` and an independent slug space; `stk_`
+  `401`; ten bad inputs; and canaries in a credential and in a URL's query,
+  absent from every response and every event.
+- Unit tests for slugs, URLs, static headers and a redacted `Debug`.
+- **Mutation-proved, all 8 caught:**
+  - the owner check removed
+  - rows not scoped to their owner
+  - the audit recording the full URL
+  - disconnect keeping ciphertexts
+  - CR/LF allowed in a value
+  - `http` allowed
+  - `storm` claimable
+- fmt, clippy `-D warnings`, 486 unit tests.
+- Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**Not yet:** `POST …/test` and `GET …/tools` need the upstream client
+(81d), and so does `known_tools`. The allowlist is stored as given until
+then.
 
 ---
 
