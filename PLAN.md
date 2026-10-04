@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -2648,6 +2648,120 @@ Runtime/Decisions*; AM22 stays reserved for the terminal-protocol draft):
 either CLI adopts the 2026-07-28 revision (G-D25's pass-through gets an
 actor that acts on it); or a supported upstream stops accepting loopback
 redirects (G-D13).
+
+**81a. The gateway is built in eight slices, storage first and the client
+last.** *(2026-10-05; M20 accepted, so G-D1 lets the build start)*
+
+The spec is still frozen on C3 (the operator's journal grep). The build
+does not wait for it: C3 can only confirm or refute a property of the gates'
+harness, not change the design. If C3 prints anything but 1, the slices stop
+and the spec is re-opened. Each slice is one PR, stacked on the one before,
+each with its own sub-decision (81b, 81c, …). Like 77, a slice that finds a
+concrete contradiction in the spec stops and reports it; nothing is
+redesigned in code.
+
+**The slices**, in build order:
+1. **The gateway store** (81b). `apps/server/src/gateway/`: `gateway.db`
+   with the five §8 tables, created additively; XChaCha20-Poly1305 over
+   `connection_id ‖ kind`; the key file `state/gateway/keys/<key_id>.key`
+   created `0600` in a `0700` directory; `backup_all()` carries the database
+   and its keys together. No route, no network.
+2. **Connections** (81c). The connection operations in `ops.rs` and the
+   owner-only `/v1/integrations/connections` routes (§14) for `static` and
+   `none` connections. Credentials are written encrypted and never returned.
+   `security_events` gains the `integration_*` events, none with a secret.
+   The `storm` slug is reserved for the built-in connection.
+3. **The upstream client** (81d). rmcp's client features at the same `=3.1.2`
+   pin (AM26), `ring` only; **only `*_once` request methods**, enforced by a
+   test that reads the source. The SSRF rule (https; no loopback, link-local
+   or private address, checked on the resolved address). `POST …/test` and
+   `GET …/tools`, the allowlist (tools that appear later default off), the
+   `calls` audit with its retention.
+4. **The gateway route** (81e). `Actor::Agent` (AM31); grants snapshotted at
+   launch into `agent.db.session_mcp_grants` with `allow_vault_writes`;
+   `start` gains `mcp: [{id, slug}]`; `hello` gains
+   `capabilities.mcp_bridge`, and an old host gets no grants and a launch
+   notice; the Host-tier `POST /v1/runtime/sessions/{id}/mcp/{connection}`
+   with request-scoped messages on its own response stream; the per-call
+   authorization in `ops::integration_call` (§7) with stable error codes;
+   the built-in `storm` connection served in process from `mcp.rs`'s
+   router, without `delete_note`, with writes only under both flags;
+   `session_unknown` after a restart; the §9 limits; `mcp.message` for
+   unsolicited messages; disconnect revokes grants.
+5. **The runtime** (81f). `storm-runtime mcp-bridge` (bridge rules 1–6), the
+   daemon's `run/mcp.sock` in a `0700` directory, per-session directories
+   and handles, `capabilities.mcp_bridge`, and the AM32 config writers:
+   `claude-code` gets `--mcp-config <session>/mcp.json --strict-mcp-config`;
+   `opencode` gets `XDG_CONFIG_HOME=<session>/xdg`,
+   `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `permission: {"<slug>_*":
+   "ask"}`; `shell` gets nothing. The bridge's R5, R7 and R8 rules each have
+   a test and the `leak_init`, `retry` and `no_cancel` mutations as negative
+   tests.
+6. **OAuth** (81g). RFC 9728 → RFC 8414 discovery under the SSRF rule;
+   dynamic registration as a public client, else a pasted client; PKCE S256
+   flows (hashed state, encrypted verifier, single use, 10 minutes);
+   `POST …/{id}/authorize` and `POST /v1/integrations/oauth/callback`;
+   single-flight refresh that persists a rotated pair before using it;
+   RFC 7009 revocation on disconnect. rmcp's `CredentialStore` and
+   `StateStore` are implemented over `gateway.db`.
+7. **The client** (81h). Settings ▸ Integrations (owner only, by the
+   server's 403, as 77d's Agents entry), the launcher's "Allow vault writes"
+   toggle and its egress line, the old-host notice, and the OAuth flow:
+   `storm://oauth` on Android and macOS, a loopback listener on desktop,
+   static tokens only on web. **This host has no Flutter: CI is its only
+   verification.**
+8. **Acceptance** (81i). `apps/server/tests/gateway_e2e.py` against a real
+   server, a real `storm-runtime` and a mock upstream: R1–R8 with the three
+   mutations as negative tests, the credential boundary C1, C2 and C4–C7 on
+   the test host with positive controls, and the automatable §17 items
+   (member 403 everywhere, `stk_` refused, an old host's notice, disconnect
+   mid-session, URL-mode elicitation never reaching the agent). In
+   `make test-live` and CI. The gates' harness is ported, not shipped.
+
+Then on-device acceptance, the operator's: the real logins G1 deferred,
+Claude Code before OpenCode (AC-P1), a GitHub PAT, a write merged against a
+phone edit, and C3 against the real build.
+
+**Why this order.**
+- **Storage, then the things that write it, then the things that read it.**
+  Every later slice stores or reads a credential, and the encryption and
+  backup rules are the ones a regression loses data under.
+- **The upstream client before the route.** The route is the client's
+  caller. Testing the client against a mock upstream alone keeps the `*_once`
+  and SSRF rules provable without a host.
+- **The route before the runtime.** The bridge is tested against the real
+  route, the way 77c tested the host against the real link.
+- **OAuth after the whole static path works.** Static tokens are
+  first-class (G-D13), GitHub is a PAT (G-D24), and the operator deferred the
+  real logins. OAuth adds a way to obtain a credential, not a new way to use
+  one.
+- **The client last**, because it cannot be run here, and every server
+  surface it calls is then fixed.
+
+**Decisions this plan makes where the spec was open:**
+- **The AEAD is the RustCrypto `chacha20poly1305` crate's
+  `XChaCha20Poly1305`** (the spec said "to confirm"). Pure Rust, no
+  `aws-lc-rs`, builds on musl with zig. The 24-byte nonce is random per
+  write, which XChaCha's nonce size makes safe without a counter.
+- **The gateway is a module of storm-server, `src/gateway/`**, beside
+  `src/agent/`. Operations stay in `ops.rs` (decision 37). `gateway/` holds
+  storage, crypto and the upstream client, never a policy decision: those
+  are in `ops::integration_*`.
+- **`gateway.db` is opened at boot and held for the process's life**, as
+  `agent.db` is. A missing key file with ciphertexts present is a loud boot
+  warning and those connections become `needs_reauth`, never a refusal to
+  start: losing the key means reconnecting, not a lockout (§8).
+- **`tests/e2e.py` stays 81/81 unmodified** across every slice. New live
+  coverage goes in `tests/gateway_e2e.py`, as auth's went in
+  `auth_e2e.py`.
+- **Decision 80 (#76) is assumed merged before slice 4 ships.** Agent
+  writes are gated on `mcp_writable`, and until 80 a member could switch it
+  on. No slice depends on 80's code.
+
+**Revisit if** a slice finds the rmcp client cannot tell which in-flight
+call an upstream elicitation belongs to (slice 4 needs that to put it on the
+right response stream), or `chacha20poly1305` turns out to pull a C
+toolchain into the musl build.
 
 ---
 
