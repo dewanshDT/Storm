@@ -2539,6 +2539,37 @@ dark and light, found one defect — the idle row's icon cramped in the dot's
 gated on the one owner check), or a third space appears, at which point the
 switch wants to become a real space picker rather than a two-way toggle.
 
+**79. The backup copies the storage root the server uses, not the one in
+`storm.env`.** *(2026-10-04, found planning the v0.3.0 prod upgrade)*
+
+`storm-backup.sh` rsynced `$STORM_VAULT_ROOT`. But the stored root wins
+(`Registry::load`; the invariant in `CLAUDE.md`): `STORM_VAULT_ROOT` only seeds
+a registry that does not exist yet, and a root chosen in the app is recorded in
+`state/vaults.json` and never written back to the env file. Prod is exactly
+that case — `storm.env` says `/srv/storm/vaults` (empty), the registry says
+`/mnt/media/Docs/storm` (the NAS) — so the moment 75's fixed backup unit ran
+there, every nightly backup would have succeeded, said `verified`, and held
+**no notes**: the index snapshot verifies, the empty rsync does not complain.
+
+- **`storm-server storage-root --state DIR`** prints the root the registry
+  records, exit 0. With no registry, or one that names no root, it prints
+  nothing and exits 3, and the script falls back to `STORM_VAULT_ROOT` — a
+  server that has never run has nothing else to go on.
+- **The script asks for it and says which it used**, and names the env
+  file's value too when the two disagree, so a backup log shows the drift
+  instead of hiding it.
+- Reading the registry through the server, not with `sed` on the JSON:
+  one parser for the file, the one that also writes it.
+
+**Not done here:** rewriting `STORM_VAULT_ROOT` in `storm.env` when the app
+changes the root. The env file is root-owned and the server runs unprivileged,
+and once the backup asks the server, nothing else reads that value after the
+first run.
+
+**Revisit if** the backup ever runs where `storm-server` is not installed
+(a backup host pulling over the network); then it needs the root some other
+way.
+
 ---
 
 ## Data model
