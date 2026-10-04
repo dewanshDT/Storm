@@ -609,23 +609,35 @@ async fn register_user(
     }
 }
 
+/// Refuses a server-wide setting to anyone but an owner (decision 80).
+///
+/// Roles are enforced against each other elsewhere but consulted for access
+/// nowhere yet, so this is one explicit check per server-wide switch rather
+/// than the start of a policy system — that is the authorization release
+/// (A9). Every `PUT /v1/config*` route calls it: registration did from the
+/// start, and the storage root, the MCP switches and the relay list were open
+/// to any member until decision 80, which is the gap this exists to close.
+fn require_owner_session(auth: &SessionAuth, what: &str) -> ApiResult<()> {
+    if auth.authenticated.user.role == crate::auth::users::Role::Owner {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!("only an owner can change {what}"),
+        ))
+    }
+}
+
 /// PUT /v1/config/registration — open or close registration (A13).
 ///
-/// Owner only. Roles are enforced against each other elsewhere but consulted
-/// for access nowhere yet, so this is one explicit check rather than the start
-/// of a policy system: opening a server to the world is not a thing a member
-/// should be able to do to an owner.
+/// Owner only: opening a server to the world is not a thing a member should be
+/// able to do to an owner.
 async fn put_registration(
     State(state): State<Shared>,
     Extension(auth): Extension<SessionAuth>,
     Json(body): Json<RegistrationBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if auth.authenticated.user.role != crate::auth::users::Role::Owner {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "only an owner can change registration".into(),
-        ));
-    }
+    require_owner_session(&auth, "registration")?;
 
     {
         let mut vaults = state.vaults.write().await;
@@ -2472,10 +2484,15 @@ struct McpBody {
 /// The atomic is set *after* the registry is saved: if the write fails the
 /// endpoint keeps its old state, which is the honest outcome. The other order
 /// would report success while the setting silently reverted on next boot.
+///
+/// Owner only (decision 80): a member must not be able to arm agent writes on
+/// every vault.
 async fn put_mcp(
     State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
     Json(body): Json<McpBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    require_owner_session(&auth, "AI access")?;
     {
         let mut vaults = state.vaults.write().await;
         vaults.registry.mcp_enabled = body.enabled;
@@ -2525,10 +2542,15 @@ struct RelaysBody {
 /// caller's mistake. The whole point of rejecting the entire list on one bad
 /// URL is that the operator finds out, with a message that says which URL and
 /// why, rather than losing a relay silently.
+///
+/// Owner only (decision 80): the relay list decides where this server can be
+/// reached from.
 async fn put_relays(
     State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
     Json(body): Json<RelaysBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    require_owner_session(&auth, "the relay list")?;
     let mut vaults = state.vaults.write().await;
     vaults
         .registry
@@ -2561,10 +2583,15 @@ struct ConfigBody {
 /// quiet: point the root at an empty directory and the server boots perfectly
 /// healthy with zero vaults, files safe on disk and invisible to every client —
 /// which reads as "my notes are gone".
+///
+/// Owner only (decision 80): re-pointing the storage root is the most
+/// disruptive setting the server has.
 async fn put_config(
     State(state): State<Shared>,
+    Extension(auth): Extension<SessionAuth>,
     Json(body): Json<ConfigBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    require_owner_session(&auth, "the storage root")?;
     let candidate = PathBuf::from(&body.vault_root);
     validate_root(&candidate, &state.state_dir).map_err(|e| bad_request(e.to_string()))?;
     let candidate = candidate
@@ -4308,6 +4335,84 @@ pub(crate) mod tests {
                 .allow_registration
                 .load(std::sync::atomic::Ordering::Relaxed)
         );
+    }
+
+    /// Decision 80: every server-wide setting refuses a member, and refusing
+    /// it leaves the setting as it was. A loop rather than three tests,
+    /// because what it guards against is a new `PUT /v1/config*` route
+    /// shipping without the check — add the route here when you add it.
+    #[tokio::test]
+    async fn only_an_owner_may_change_server_config() {
+        let dir = tempdir::TempDir::new("storm-config-owner").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = device_and_owner(&state).await;
+        let member = {
+            let mut auth_db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut auth_db,
+                crate::auth::users::NewUser {
+                    username: "member",
+                    display_name: None,
+                    password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
+                    role: crate::auth::users::Role::Member,
+                },
+                "2026-10-04T00:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let member_token = session_token(&state, &member).await;
+        let owner_token = session_token(&state, &owner).await;
+        let before = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {owner_token}")),
+        )
+        .await
+        .1;
+
+        let attempts = [
+            (
+                "/v1/config",
+                serde_json::json!({"vault_root": dir.path().display().to_string()}),
+            ),
+            (
+                "/v1/config/mcp",
+                serde_json::json!({"enabled": true, "writable": true}),
+            ),
+            (
+                "/v1/config/relays",
+                serde_json::json!({"relays": ["wss://relay.example"]}),
+            ),
+            ("/v1/config/registration", serde_json::json!({"enabled": true})),
+        ];
+        for (path, body) in attempts {
+            let (status, _) = send(
+                &app,
+                put_json(path, body, Some(&format!("Bearer {member_token}"))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} must refuse a member");
+        }
+
+        let after = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {owner_token}")),
+        )
+        .await
+        .1;
+        assert_eq!(before, after, "a refused change must leave the config alone");
+
+        // And the owner is not caught by the same check.
+        let (status, _) = send(
+            &app,
+            put_json(
+                "/v1/config/mcp",
+                serde_json::json!({"enabled": true}),
+                Some(&format!("Bearer {owner_token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
