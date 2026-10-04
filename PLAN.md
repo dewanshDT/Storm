@@ -58,20 +58,18 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decisions 77–77e merged to `staging` (#60–#65) · 78 (agents navigation) merged (#67) · on-device acceptance and release left |
 
-**Release state (2026-09-26).** **v0.2.9 is released** (PR #48, tag on its
-merge commit `f046eaf`; every `release.yml` job green; the GitHub Release has
-all eight assets; the apt index lists `storm-server` and `storm-relay` at
-`0.2.9-1`). It is all of `staging`, meaning
-decisions 65–71 plus the server packaging fix (#46). It is **the relay's first
-release** (a `storm-relay` `.deb` in the same apt repo; 70), the first
-storm-server that can dial a `wss://` relay (71), and the first whose upgrade
-does not disable storm-server and its backup timer (70, #46). **Prod runs 0.2.9**
-(operator-deployed 2026-09-26, confirmed on the VM 2026-09-27: `0.2.9-1`,
-`storm-server` and `storm-backup.timer` both `enabled`, server active). Still
-open on prod: the `RequiresMountsFor=` drop-in (73) is not yet in place, and
-**the backup timer fails every run** (75), so the last backup is still
-2026-08-20. **No relay is deployed anywhere**; that is
-phase 4 step 3. v0.2.8 (PR #37, 2026-09-02) carried decisions 56–64.
+**Release state (2026-10-04).** **v0.3.0 is being cut** (decision 72's
+steps; this paragraph is the prep PR's): all of `staging`, meaning decisions
+73–79 — the server waits for its storage (73), live relay reconfigure (74),
+the nightly backup that had never run (75) now copying the root the server
+actually uses (79), storage-root permissions (76), and **Agent Runtime V1**
+(77–77e, plus its navigation, 78): the first `storm-runtime` `.deb`, a third
+package in the apt repo. A minor bump rather than 0.2.10 because a whole new
+program and package ship in it. **Prod runs 0.2.9** until the operator's
+upgrade, which on prod's layout needs the `up` drop-in written for
+`storm-backup.service` too (75) — prod's predates it — and is recorded here the
+day it happens. v0.2.9 (PR #48, `f046eaf`) carried decisions 65–71; v0.2.8
+(PR #37, 2026-09-02) carried decisions 56–64.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
