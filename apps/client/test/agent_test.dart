@@ -110,6 +110,62 @@ void main() {
       ]);
       expect(t.stickyCtrl, isFalse, reason: 'one keystroke, then released');
     });
+
+    group('sticky Shift', () {
+      List<String> run(StormTerminal t, void Function() act) {
+        final sent = <String>[];
+        t.onInput = (b) => sent.add(latin1.decode(b));
+        t.stickyShift = true;
+        act();
+        return sent;
+      }
+
+      test('Tab becomes Shift+Tab, once', () {
+        final t = StormTerminal();
+        expect(run(t, t.tab), ['\x1b[Z']);
+        expect(t.stickyShift, isFalse);
+        t.tab();
+        expect(t.stickyShift, isFalse);
+      });
+
+      test('the keyboard Enter becomes a new line, not a submit', () {
+        final t = StormTerminal();
+        expect(run(t, () => t.typeForTest('\r')), ['\n']);
+        expect(t.stickyShift, isFalse);
+      });
+
+      test('under kitty, the Enter is the exact Shift+Enter', () {
+        final t = StormTerminal();
+        t.write(Uint8List.fromList(utf8.encode('\x1b[>5u')));
+        expect(run(t, () => t.typeForTest('\r')), ['\x1b[13;2u']);
+      });
+
+      test('a typed letter comes out upper case', () {
+        final t = StormTerminal();
+        expect(run(t, () => t.typeForTest('a')), ['A']);
+      });
+
+      test('arrows carry it, as xterm encodes them', () {
+        final t = StormTerminal();
+        expect(run(t, t.up), ['\x1b[1;2A']);
+        expect(run(t, t.left), ['\x1b[1;2D']);
+        final sent = <String>[];
+        t.onInput = (b) => sent.add(latin1.decode(b));
+        t.stickyCtrl = true;
+        t.stickyShift = true;
+        t.right();
+        expect(sent, ['\x1b[1;6C'], reason: 'Ctrl+Shift together');
+      });
+
+      test('armed modifiers are announced, so the row can light up', () {
+        final t = StormTerminal();
+        var changes = 0;
+        t.shiftArmed.addListener(() => changes++);
+        t.stickyShift = true;
+        t.typeForTest('x');
+        expect(changes, 2, reason: 'armed, then released by the keystroke');
+      });
+    });
   });
 
   group('chords the legacy encoding cannot express', () {

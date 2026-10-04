@@ -169,8 +169,20 @@ void main() {
         await tester.tap(find.byKey(const Key('band-ags_live')));
         await tester.pumpAndSettle();
         expect(location(c), Routes.agents);
-        expect(find.byKey(const Key('key-esc')), findsOneWidget);
+        expect(find.byKey(const Key('switch-session')), findsOneWidget);
         expect(c.read(activeAgentTabProvider), 'ags_live');
+
+        // The keys row rides on the keyboard, as the note editor's
+        // formatting bar does: absent while it is down, there once it is up.
+        expect(find.byKey(const Key('key-esc')), findsNothing);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('key-esc')), findsOneWidget);
+        expect(find.byKey(const Key('key-shift')), findsOneWidget);
+        expect(find.byKey(const Key('keys-done')), findsOneWidget);
+        tester.view.resetViewInsets();
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('key-esc')), findsNothing);
 
         // System back: first to the list, then home — never out of the app.
         await tester.binding.handlePopRoute();

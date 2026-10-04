@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import '../router.dart';
 import '../ui/breakpoints.dart';
+import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
@@ -470,6 +471,9 @@ class _SessionPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Asked here, above the Scaffold, where the inset is still readable; the
+    // note screen does the same for its formatting bar. See keyboardIsOpen.
+    final keyboard = keyboardIsOpen(context);
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) => Scaffold(
@@ -497,7 +501,7 @@ class _SessionPage extends StatelessWidget {
           controller: controller,
           hostName: hostName,
           onDismiss: onDismiss,
-          keysRow: true,
+          keysRow: keyboard,
         ),
       ),
     );
@@ -517,7 +521,10 @@ class _SessionView extends StatefulWidget {
   final String Function(String) hostName;
   final ValueChanged<AgentSession> onDismiss;
 
-  /// The phone's extra-keys row (freeze §10).
+  /// The phone's extra-keys row (freeze §10). Shown only while the
+  /// on-screen keyboard is up, like the note editor's formatting bar: the
+  /// keys stand in for ones that keyboard lacks, so without it they only
+  /// take room from the terminal.
   final bool keysRow;
 
   @override
@@ -634,12 +641,14 @@ class _SessionViewState extends State<_SessionView> {
               child: StormTerminalView(
                 terminal: c.terminal,
                 focusNode: _focus,
-                autofocus: !widget.keysRow,
+                // Not on the phone: focus opens the keyboard there, which
+                // should wait for a tap on the terminal.
+                autofocus: context.isExpanded,
                 readOnly: s?.ended ?? false,
               ),
             ),
             if (widget.keysRow && !(s?.ended ?? false))
-              _ExtraKeys(terminal: c.terminal),
+              _ExtraKeys(terminal: c.terminal, onDone: _focus.unfocus),
           ],
         );
       },
@@ -647,114 +656,185 @@ class _SessionViewState extends State<_SessionView> {
   }
 }
 
-/// Esc, Tab, sticky Ctrl, arrows and Paste: the keys a phone keyboard lacks
-/// (freeze §10, AC-F4).
-class _ExtraKeys extends StatefulWidget {
-  const _ExtraKeys({required this.terminal});
+/// Esc, Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
+/// keyboard lacks (freeze §10, AC-F4).
+///
+/// Drawn like the note editor's formatting bar (`EditorToolbar`), so the two
+/// rows that ride on the keyboard look like one family: same surface, rule,
+/// height, quiet buttons, and a Done that puts the keyboard away.
+class _ExtraKeys extends StatelessWidget {
+  const _ExtraKeys({required this.terminal, required this.onDone});
 
   final StormTerminal terminal;
 
-  @override
-  State<_ExtraKeys> createState() => _ExtraKeysState();
-}
+  /// Puts the keyboard away, which also hides this row.
+  final VoidCallback onDone;
 
-class _ExtraKeysState extends State<_ExtraKeys> {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final term = widget.terminal;
-    // Equal keys across the full width: eight 44 px targets fit a 360 px
-    // phone, so nothing scrolls out of view. Arrows and paste are icons,
-    // because the mono face draws the arrow glyphs at uneven sizes.
-    Widget key(
-      Widget label,
-      VoidCallback onTap, {
-      bool on = false,
-      Key? k,
-      String? tip,
-    }) => Expanded(
-      child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: t.sp * 0.2),
-        child: Tooltip(
-          message: tip ?? '',
-          child: OutlinedButton(
-            key: k,
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size(0, 44),
-              padding: EdgeInsets.zero,
-              backgroundColor: on ? t.accentSoft : null,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(t.rControl),
-              ),
-            ),
-            onPressed: onTap,
-            child: label,
-          ),
-        ),
-      ),
-    );
-    Text word(String w) => Text(
-      w,
-      style: TextStyle(
-        fontFamily: StormTokens.monoFamily,
-        fontSize: t.labelSize,
-      ),
-    );
-    const size = 16.0;
-    return SafeArea(
-      top: false,
-      child: Container(
-        padding: EdgeInsets.symmetric(
-          vertical: t.sp * 0.5,
-          horizontal: t.sp * 0.3,
-        ),
+    final term = terminal;
+    return Material(
+      color: t.surface,
+      child: DecoratedBox(
         decoration: BoxDecoration(
-          color: t.surface,
           border: Border(
             top: BorderSide(color: t.border, width: t.bw),
           ),
         ),
-        child: Row(
-          children: [
-            key(word('Esc'), term.escape, k: const Key('key-esc')),
-            key(word('Tab'), term.tab, k: const Key('key-tab')),
-            key(
-              word('Ctrl'),
-              () => setState(() => term.stickyCtrl = !term.stickyCtrl),
-              on: term.stickyCtrl,
-              k: const Key('key-ctrl'),
+        child: SafeArea(
+          top: false,
+          child: SizedBox(
+            height: t.sp * 6.5,
+            // Armed modifiers light up, and go dark again when the next key
+            // consumes them, typed or tapped.
+            child: ListenableBuilder(
+              listenable: Listenable.merge([term.ctrlArmed, term.shiftArmed]),
+              builder: (context, _) => Row(
+                children: [
+                  Expanded(
+                    // Scrolls rather than squeezes, as the editor bar does.
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: EdgeInsets.symmetric(horizontal: t.sp * 0.75),
+                      children: [
+                        _Key(
+                          key: const Key('key-esc'),
+                          label: 'Esc',
+                          tooltip: 'Escape',
+                          onTap: term.escape,
+                        ),
+                        _Key(
+                          key: const Key('key-tab'),
+                          label: 'Tab',
+                          tooltip: 'Tab',
+                          onTap: term.tab,
+                        ),
+                        _Key(
+                          key: const Key('key-ctrl'),
+                          label: 'Ctrl',
+                          tooltip: 'Ctrl, for the next key',
+                          active: term.stickyCtrl,
+                          onTap: () => term.stickyCtrl = !term.stickyCtrl,
+                        ),
+                        _Key(
+                          key: const Key('key-shift'),
+                          icon: LucideIcons.arrow_big_up,
+                          tooltip: 'Shift, for the next key',
+                          active: term.stickyShift,
+                          onTap: () => term.stickyShift = !term.stickyShift,
+                        ),
+                        _Key(
+                          icon: LucideIcons.arrow_up,
+                          tooltip: 'Up',
+                          onTap: term.up,
+                        ),
+                        _Key(
+                          icon: LucideIcons.arrow_down,
+                          tooltip: 'Down',
+                          onTap: term.down,
+                        ),
+                        _Key(
+                          icon: LucideIcons.arrow_left,
+                          tooltip: 'Left',
+                          onTap: term.left,
+                        ),
+                        _Key(
+                          icon: LucideIcons.arrow_right,
+                          tooltip: 'Right',
+                          onTap: term.right,
+                        ),
+                        _Key(
+                          key: const Key('key-paste'),
+                          icon: LucideIcons.clipboard_paste,
+                          tooltip: 'Paste',
+                          onTap: () async {
+                            final data = await Clipboard.getData(
+                              Clipboard.kTextPlain,
+                            );
+                            final text = data?.text;
+                            if (text != null && text.isNotEmpty) {
+                              term.paste(text);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(
+                    key: const Key('keys-done'),
+                    onPressed: onDone,
+                    child: Text(
+                      'Done',
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        fontWeight: FontWeight.w600,
+                        color: t.accent,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            key(
-              const Icon(LucideIcons.arrow_up, size: size),
-              term.up,
-              tip: 'Up',
-            ),
-            key(
-              const Icon(LucideIcons.arrow_down, size: size),
-              term.down,
-              tip: 'Down',
-            ),
-            key(
-              const Icon(LucideIcons.arrow_left, size: size),
-              term.left,
-              tip: 'Left',
-            ),
-            key(
-              const Icon(LucideIcons.arrow_right, size: size),
-              term.right,
-              tip: 'Right',
-            ),
-            key(
-              const Icon(LucideIcons.clipboard_paste, size: size),
-              () async {
-                final data = await Clipboard.getData(Clipboard.kTextPlain);
-                final text = data?.text;
-                if (text != null && text.isNotEmpty) term.paste(text);
-              },
-              k: const Key('key-paste'),
-              tip: 'Paste',
-            ),
-          ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One key, in the editor bar's button style. A word where a glyph would be
+/// cryptic (Esc, Tab, Ctrl), an icon for the rest; arrows are icons because
+/// the mono face draws their glyphs at uneven sizes.
+class _Key extends StatelessWidget {
+  const _Key({
+    super.key,
+    this.label,
+    this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.active = false,
+  }) : assert((label == null) != (icon == null));
+
+  final String? label;
+  final IconData? icon;
+  final String tooltip;
+  final VoidCallback onTap;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final color = active ? t.accent : t.text2;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        // InkWell takes no focus, so the terminal keeps it and the keyboard
+        // stays up between taps.
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(t.rControl * 0.8),
+        child: Container(
+          margin: EdgeInsets.symmetric(vertical: t.sp * 0.75),
+          // A shade narrower than the editor bar's 1.25: nine keys and Done
+          // then fit a 411 px phone, so Paste is never scrolled away.
+          padding: EdgeInsets.symmetric(horizontal: t.sp),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: active ? t.accentSoft : null,
+            borderRadius: BorderRadius.circular(t.rControl * 0.8),
+          ),
+          child: icon != null
+              ? Icon(icon, size: t.headingSize, color: color)
+              : Text(
+                  label!,
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.codeSize,
+                    fontWeight: FontWeight.w600,
+                    color: color,
+                  ),
+                ),
         ),
       ),
     );
