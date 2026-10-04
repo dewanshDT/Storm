@@ -224,6 +224,12 @@ final agentTabsProvider = NotifierProvider<AgentTabs, List<String>>(
 /// The tab in view on this device.
 final activeAgentTabProvider = StateProvider<String?>((ref) => null);
 
+/// The names agents gave their sessions, by session id, as this device saw
+/// them in a terminal title. Only sessions opened here are known; the rest
+/// show their provider and workspace. (A host-reported title, so every
+/// device knows every name, belongs with the host's terminal state, AM22.)
+final agentTitlesProvider = StateProvider<Map<String, String>>((ref) => {});
+
 /// The host this device launched on last, so the launcher can preselect it.
 ///
 /// Per device rather than per account: the laptop and the phone may well

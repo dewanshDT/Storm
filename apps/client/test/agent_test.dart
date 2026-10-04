@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -12,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/agent_widgets.dart';
 import 'package:storm/agent/agents_screen.dart';
 import 'package:storm/agent/hosts_screen.dart';
 import 'package:storm/agent/session_controller.dart';
@@ -67,6 +69,33 @@ void main() {
     });
   });
 
+  group('the name an agent gives its session', () {
+    test('status glyphs go, the name stays', () {
+      expect(
+        agentChosenTitle('✳ Fix the login redirect'),
+        'Fix the login redirect',
+      );
+      expect(
+        agentChosenTitle('⠐ Refactor the sync engine'),
+        'Refactor the sync engine',
+      );
+      expect(agentChosenTitle('  Tidy imports  '), 'Tidy imports');
+    });
+
+    test('a bare product name or nothing is no name', () {
+      expect(agentChosenTitle('✳ Claude Code'), isNull);
+      expect(agentChosenTitle('OpenCode'), isNull);
+      expect(agentChosenTitle('⠂ '), isNull);
+      expect(agentChosenTitle(null), isNull);
+    });
+
+    test('the list falls back to provider and workspace', () {
+      final s = AgentSession.fromJson(session());
+      expect(sessionDisplayTitle(s, const {}), 'Claude Code in storm');
+      expect(sessionDisplayTitle(s, const {'ags_1': 'Fix it'}), 'Fix it');
+    });
+  });
+
   group('a session says what happened in plain words', () {
     test('every status has a label, and none is a raw code', () {
       String label(String s, {String? r, int? x}) => AgentSession.fromJson(
@@ -108,6 +137,167 @@ void main() {
         [0x63],
       ]);
       expect(t.stickyCtrl, isFalse, reason: 'one keystroke, then released');
+    });
+
+    group('sticky Shift', () {
+      List<String> run(StormTerminal t, void Function() act) {
+        final sent = <String>[];
+        t.onInput = (b) => sent.add(latin1.decode(b));
+        t.stickyShift = true;
+        act();
+        return sent;
+      }
+
+      test('Tab becomes Shift+Tab, once', () {
+        final t = StormTerminal();
+        expect(run(t, t.tab), ['\x1b[Z']);
+        expect(t.stickyShift, isFalse);
+        t.tab();
+        expect(t.stickyShift, isFalse);
+      });
+
+      test('the keyboard Enter becomes a new line, not a submit', () {
+        final t = StormTerminal();
+        expect(run(t, () => t.typeForTest('\r')), ['\n']);
+        expect(t.stickyShift, isFalse);
+      });
+
+      test('under kitty, the Enter is the exact Shift+Enter', () {
+        final t = StormTerminal();
+        t.write(Uint8List.fromList(utf8.encode('\x1b[>5u')));
+        expect(run(t, () => t.typeForTest('\r')), ['\x1b[13;2u']);
+      });
+
+      test('a typed letter comes out upper case', () {
+        final t = StormTerminal();
+        expect(run(t, () => t.typeForTest('a')), ['A']);
+      });
+
+      test('arrows carry it, as xterm encodes them', () {
+        final t = StormTerminal();
+        expect(run(t, t.up), ['\x1b[1;2A']);
+        expect(run(t, t.left), ['\x1b[1;2D']);
+        final sent = <String>[];
+        t.onInput = (b) => sent.add(latin1.decode(b));
+        t.stickyCtrl = true;
+        t.stickyShift = true;
+        t.right();
+        expect(sent, ['\x1b[1;6C'], reason: 'Ctrl+Shift together');
+      });
+
+      test('armed modifiers are announced, so the row can light up', () {
+        final t = StormTerminal();
+        var changes = 0;
+        t.shiftArmed.addListener(() => changes++);
+        t.stickyShift = true;
+        t.typeForTest('x');
+        expect(changes, 2, reason: 'armed, then released by the keystroke');
+      });
+    });
+  });
+
+  group('chords the legacy encoding cannot express', () {
+    // Real key events through the real view, so the hook, its gate and
+    // xterm2's own encoding are all on the path.
+    Future<List<String>> press(
+      WidgetTester tester,
+      List<LogicalKeyboardKey> modifiers,
+      LogicalKeyboardKey key, {
+      String? agentOutput,
+    }) async {
+      final t = StormTerminal();
+      final sent = <String>[];
+      t.onInput = (b) => sent.add(latin1.decode(b));
+      if (agentOutput != null) {
+        t.write(Uint8List.fromList(utf8.encode(agentOutput)));
+      }
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: StormTerminalView(terminal: t, autofocus: true)),
+        ),
+      );
+      await tester.pump();
+      for (final m in modifiers) {
+        await tester.sendKeyDownEvent(m);
+      }
+      await tester.sendKeyEvent(key);
+      for (final m in modifiers.reversed) {
+        await tester.sendKeyUpEvent(m);
+      }
+      await tester.pump();
+      return sent;
+    }
+
+    const shift = LogicalKeyboardKey.shiftLeft;
+    const ctrl = LogicalKeyboardKey.controlLeft;
+    const meta = LogicalKeyboardKey.metaLeft;
+    const enter = LogicalKeyboardKey.enter;
+    const backspace = LogicalKeyboardKey.backspace;
+    // What Claude Code and OpenCode send when they start (measured).
+    const kittyOn = '\x1b[>5u';
+
+    testWidgets('Shift+Enter is a new line, not keypad Enter', (tester) async {
+      expect(await press(tester, [shift], enter), ['\n']);
+    });
+
+    testWidgets('Ctrl+Backspace deletes a word', (tester) async {
+      expect(await press(tester, [ctrl], backspace), ['\x17']);
+    });
+
+    testWidgets('Cmd+Backspace clears the line on macOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        expect(await press(tester, [meta], backspace), ['\x15']);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('plain Enter and Backspace are untouched', (tester) async {
+      expect(await press(tester, [], enter), ['\r']);
+      expect(await press(tester, [], backspace), ['\x7f']);
+    });
+
+    testWidgets('Super+Backspace off macOS is not an editing chord', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      try {
+        expect(await press(tester, [meta], backspace), isNot(contains('\x15')));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('once the agent asks for kitty, xterm2 encodes exactly', (
+      tester,
+    ) async {
+      // xterm2 also reports the modifier keys themselves under kitty; only
+      // the chord's own encoding, and the fallback's absence, are this
+      // surface's business.
+      final enterSent = await press(
+        tester,
+        [shift],
+        enter,
+        agentOutput: kittyOn,
+      );
+      expect(enterSent, contains('\x1b[13;2u'));
+      expect(enterSent, isNot(contains('\n')));
+      final backSent = await press(
+        tester,
+        [ctrl],
+        backspace,
+        agentOutput: kittyOn,
+      );
+      expect(backSent, contains('\x1b[127;5u'));
+      expect(backSent, isNot(contains('\x17')));
+    });
+
+    testWidgets('popping kitty brings the fallback back', (tester) async {
+      expect(
+        await press(tester, [shift], enter, agentOutput: '$kittyOn\x1b[<u'),
+        ['\n'],
+      );
     });
   });
 
