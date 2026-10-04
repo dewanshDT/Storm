@@ -56,7 +56,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
-| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decisions 77–77e merged to `staging` (#60–#65) · 78 (agents navigation) on `feat/agents-navigation` · on-device acceptance and release left |
+| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decisions 77–77e merged to `staging` (#60–#65) · 78 (agents navigation) merged (#67) · on-device acceptance and release left |
 
 **Release state (2026-09-26).** **v0.2.9 is released** (PR #48, tag on its
 merge commit `f046eaf`; every `release.yml` job green; the GitHub Release has
