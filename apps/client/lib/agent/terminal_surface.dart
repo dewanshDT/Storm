@@ -21,7 +21,12 @@ class StormTerminal {
     );
     _terminal.onOutput = _emit;
     _terminal.onResize = (cols, rows, _, _) => onResize?.call(cols, rows);
+    _terminal.onTitleChange = (t) => title.value = t;
   }
+
+  /// The window title the agent last set (OSC 0/2), raw. Claude Code and
+  /// OpenCode name the conversation there once it has a topic.
+  final title = ValueNotifier<String?>(null);
 
   final _terminal = Terminal(maxLines: 10000);
 
@@ -186,6 +191,7 @@ class StormTerminal {
     _bytes.close();
     ctrlArmed.dispose();
     shiftArmed.dispose();
+    title.dispose();
   }
 
   /// What a person typing [data] would send, for tests.

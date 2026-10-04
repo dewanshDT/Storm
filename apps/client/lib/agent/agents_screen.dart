@@ -48,11 +48,23 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
   SessionController _controller(String id) => _controllers.putIfAbsent(id, () {
     final api = agentApi(ref)!;
     final open = ref.read(terminalStreamFactoryProvider);
-    return SessionController(
+    final c = SessionController(
       api: api,
       sessionId: id,
       open: open == null ? null : (offset) => open(id, offset),
     )..start();
+    // The name the agent gives the conversation, for every list that shows
+    // this session.
+    c.terminal.title.addListener(() {
+      final name = agentChosenTitle(c.terminal.title.value);
+      if (!mounted) return;
+      final titles = ref.read(agentTitlesProvider);
+      if (titles[id] == name) return;
+      final next = {...titles};
+      name == null ? next.remove(id) : next[id] = name;
+      ref.read(agentTitlesProvider.notifier).state = next;
+    });
+    return c;
   });
 
   void _close(String id) {
@@ -208,14 +220,18 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
       showDragHandle: true,
       builder: (context) {
         final byId = {for (final s in overview.sessions) s.id: s};
+        final titles = ref.read(agentTitlesProvider);
         return SafeArea(
           child: ListView(
             shrinkWrap: true,
             children: [
               for (final id in tabs)
                 ListTile(
-                  leading: const Icon(LucideIcons.square_terminal, size: 18),
-                  title: Text(sessionTitle(byId[id])),
+                  leading: Icon(
+                    providerIcon(byId[id]?.provider ?? ''),
+                    size: 18,
+                  ),
+                  title: Text(sessionDisplayTitle(byId[id], titles)),
                   subtitle: Text(byId[id]?.statusLabel ?? ''),
                   onTap: () => Navigator.of(context).pop(id),
                 ),
@@ -425,13 +441,18 @@ class _TabStrip extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    Text(
-                      sessionTitle(byId[id]),
-                      style: TextStyle(
-                        color: id == active ? t.text : t.text2,
-                        fontWeight: id == active
-                            ? FontWeight.w600
-                            : FontWeight.w400,
+                    Consumer(
+                      builder: (context, ref, _) => Text(
+                        sessionDisplayTitle(
+                          byId[id],
+                          ref.watch(agentTitlesProvider),
+                        ),
+                        style: TextStyle(
+                          color: id == active ? t.text : t.text2,
+                          fontWeight: id == active
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                        ),
                       ),
                     ),
                     IconButton(
@@ -483,7 +504,15 @@ class _SessionPage extends StatelessWidget {
             onPressed: onBack,
             icon: const Icon(LucideIcons.arrow_left),
           ),
-          title: Text(sessionTitle(controller.session)),
+          title: Consumer(
+            builder: (context, ref, _) => Text(
+              sessionDisplayTitle(
+                controller.session,
+                ref.watch(agentTitlesProvider),
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
           actions: [
             IconButton(
               key: const Key('switch-session'),

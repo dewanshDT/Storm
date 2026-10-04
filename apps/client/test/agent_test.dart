@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/agent_widgets.dart';
 import 'package:storm/agent/agents_screen.dart';
 import 'package:storm/agent/hosts_screen.dart';
 import 'package:storm/agent/session_controller.dart';
@@ -65,6 +66,33 @@ void main() {
       );
       final gap = e.single as GapEvent;
       expect((gap.from, gap.to), (0, 900));
+    });
+  });
+
+  group('the name an agent gives its session', () {
+    test('status glyphs go, the name stays', () {
+      expect(
+        agentChosenTitle('✳ Fix the login redirect'),
+        'Fix the login redirect',
+      );
+      expect(
+        agentChosenTitle('⠐ Refactor the sync engine'),
+        'Refactor the sync engine',
+      );
+      expect(agentChosenTitle('  Tidy imports  '), 'Tidy imports');
+    });
+
+    test('a bare product name or nothing is no name', () {
+      expect(agentChosenTitle('✳ Claude Code'), isNull);
+      expect(agentChosenTitle('OpenCode'), isNull);
+      expect(agentChosenTitle('⠂ '), isNull);
+      expect(agentChosenTitle(null), isNull);
+    });
+
+    test('the list falls back to provider and workspace', () {
+      final s = AgentSession.fromJson(session());
+      expect(sessionDisplayTitle(s, const {}), 'Claude Code in storm');
+      expect(sessionDisplayTitle(s, const {'ags_1': 'Fix it'}), 'Fix it');
     });
   });
 
