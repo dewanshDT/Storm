@@ -453,6 +453,18 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   write those columns.
 - **An integration's audit row names the upstream's host, never its URL** —
   a pasted URL can carry a key in its query string — and never a credential.
+- **Only rmcp's `*_once` request methods send anything upstream** (AM26,
+  81d). `call_tool`, `get_prompt` and `read_resource` re-send their request
+  to drive SEP-2322 rounds, so one agent call would execute several times.
+  `only_the_once_methods_send_a_request_upstream` reads `ops.rs` and
+  `src/gateway/` and fails on them.
+- **The gateway's HTTP client never follows a redirect**, so a credential
+  header is never replayed to a host it was not configured for, and its TLS
+  is `ring` with the bundled roots, configured on the client itself.
+- **An upstream's error text never leaves `gateway::upstream`.** Failures are
+  the stable §12 codes; rmcp's `HTTP <status>: <body>` is read for the status
+  only. `--gateway-allow-http-upstreams` is hidden and exists for the test
+  suites.
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 

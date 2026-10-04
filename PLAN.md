@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–2: the store (81b), connections (81c) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–3: the store (81b), connections (81c), the upstream client (81d) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -2905,6 +2905,110 @@ same as an id that does not exist, so ids cannot be probed. An `stk_` key is
 **Not yet:** `POST …/test` and `GET …/tools` need the upstream client
 (81d), and so does `known_tools`. The allowlist is stored as given until
 then.
+
+**81d. Gateway slice 3: the upstream client, `*_once` only, and the
+owner's test.** *(2026-10-05)*
+
+**rmcp gains its client features at the same `=3.1.2` pin** (AM26):
+`client`, `transport-streamable-http-client-reqwest` and
+`reqwest-tls-no-provider`. `cargo tree -i aws-lc-rs` still finds nothing.
+- **`only_the_once_methods_send_a_request_upstream`** reads `ops.rs` and every
+  file in `src/gateway/`, and fails on `.call_tool(`, `.get_prompt(`,
+  `.read_resource(` or their `_with_mrtr_max_rounds` forms.
+- `list_all_tools` is allowed: it pages with cursors and re-sends nothing.
+
+**The HTTP client is the gateway's own**, handed to rmcp's transport with
+`with_client`:
+- **No redirects followed.** A test points an upstream at a 307 to a second
+  server and asserts the credential header never arrives there.
+- **rustls on `ring` with the bundled webpki roots,** passed as a
+  preconfigured config. It does not depend on `/etc/ssl` (static musl), nor
+  on the process default provider having been installed first, which unit
+  tests never do.
+- **A connect timeout, and no whole-request timeout.** A whole-request
+  timeout would also cut the standalone SSE stream. Each operation carries
+  its own deadline: 30 s for the owner's probe here, and the spec's 60 s per
+  agent call in slice 4.
+- **`reinit_on_expired_session(true)` is set by name**, so it is not
+  tidied off (G3, R3b).
+
+**The credential reaches the transport as a header and nowhere else.**
+`Gateway::target` opens the sealed value per call. It becomes a
+`HeaderValue` marked sensitive. `Target`'s `Debug` names header names only.
+A static credential uses rmcp's `custom_headers`, not `auth_header`, because
+the owner stores the whole value (`Bearer ghp_…`, or an `X-Api-Key`).
+
+**Errors are stable codes, never upstream text** (§12):
+- `upstream_unauthorized`: 401, or 403 with a challenge. It sets the
+  connection to `needs_reauth`.
+- `upstream_rate_limited`
+- `upstream_unavailable`
+- `upstream_protocol_error`
+- `integration_needs_reauth`: the credential cannot be opened.
+
+rmcp formats a non-success answer as `HTTP <status>: <body>`, and only the
+status is read. **Neither `ClientInitializeError::TransportError` nor
+`ServiceError::TransportSend` marks its transport error as a `source`**, so
+the classifier steps into them by hand. Found by a failing test, which first
+read a 401 as unavailable.
+
+**The owner's routes:**
+- `POST /v1/integrations/connections/{id}/test` and `GET …/tools` open one
+  short-lived session with no capabilities, list every tool, and close.
+- They record `last_ok` or `last_error_code`, and one `calls` row with
+  method `tools/list` and no session.
+- A disabled connection is `409`, and the built-in one is `400`.
+- `tools` answers a failure with `502` and the code only.
+
+**The allowlist rule (G-D16), in `reconcile_tools`:**
+- The first listing turns every tool on and records them in `known_tools`.
+- After that, a tool not in `known_tools` stays off and is reported once as
+  `new`. That report is the owner's notice: `new_tools` on `test`, and
+  `new: true` on `tools`.
+- `known_tools` only grows, so a tool that vanishes and returns keeps the
+  owner's decision.
+- Only the owner's listings update it. An agent's listing (slice 4) will
+  filter by the allowlist and record nothing.
+
+**The call audit** is written through `Gateway::record_call`, which never
+fails the call it describes. It prunes to 30 days and 100k rows at boot and
+every 1000 rows.
+
+**`--gateway-allow-http-upstreams`, a hidden `serve` flag, for the test
+suites only.** It lets a mock upstream on loopback be `http://`, and logs a
+warning when set. Nothing in a deployment sets it.
+
+**The elicitation question in 81a is answered.** rmcp 3.1.2 tags an inbound
+upstream request with `InboundStreamOrigin::OutboundRequest(<request id>)`,
+the id of the POST whose response stream carried it (SEP-2260). Slice 4 can
+put an elicitation on the right agent call's stream with no workaround.
+
+**Verified.**
+- Seven upstream tests against a real rmcp server in process: a probe with
+  its credential; a refused credential; an unreachable port; the redirect;
+  the allowlist rule; the source guard; the redacted `Debug`.
+- Three route tests: the owner's test turns everything on and a later tool
+  stays off; a refusal sets `needs_reauth` until the token is rotated; `http`
+  needs the flag, and disabled or built-in connections are not probed. The
+  member test now covers `test` and `tools`.
+- **Mutation-proved, all 7 caught:**
+  - a `.call_tool(` in the gateway
+  - redirects followed
+  - new tools on by default
+  - 401 read as unavailable
+  - a refusal not setting `needs_reauth`
+  - `http` without the flag
+  - the probe not audited
+- **Real TLS:** `a_real_https_upstream_answers_through_ring_and_the_bundled_roots`
+  is ignored in CI because it needs the network. Run here, Notion's MCP
+  endpoint answered `Unauthorized` over TLS through `ring` and the bundled
+  roots.
+- fmt, clippy `-D warnings`, 496 unit tests. Live: `e2e.py` 81/81
+  unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**Not verified here:** the musl/zig release build with the new dependencies
+(no zig on this host). G3 built the same rmcp feature set as a static musl
+binary with system gcc. The release job is the check.
 
 ---
 

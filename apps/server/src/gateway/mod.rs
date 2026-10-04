@@ -12,14 +12,13 @@
 //!
 //! Slice 1 (81b) is the store: `gateway.db`, the data key, and their place in
 //! `backup_all()`. Slice 2 (81c) adds the connection rows and the owner's
-//! operations on them. **Nothing opens a credential or writes the call audit
-//! until the upstream client (81d)**, which is why some of what is here has no
-//! caller in the shipping binary yet; the allow below goes with that slice.
-#![allow(dead_code)]
+//! operations on them; slice 3 (81d) the upstream client, the owner's test
+//! and tool listing, and the call audit.
 
 pub mod connections;
 pub mod crypto;
 pub mod store;
+pub mod upstream;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -38,7 +37,23 @@ pub struct Gateway {
     /// A `std::sync::Mutex`, never held across an `.await` (the `agent/` rule).
     pub store: Mutex<store::GatewayDb>,
     pub keys: crypto::Keyring,
+    /// Test suites only: accept `http://` upstream URLs (a mock on loopback
+    /// has no certificate). Set by the hidden `--gateway-allow-http-upstreams`.
+    allow_http_upstreams: std::sync::atomic::AtomicBool,
+    /// Audit rows written since the last prune.
+    calls_since_prune: std::sync::atomic::AtomicU64,
 }
+
+/// Epoch milliseconds, the call audit's clock.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Prune the call audit once per this many rows, and at boot.
+const PRUNE_EVERY: u64 = 1000;
 
 pub fn db_path(state_dir: &Path) -> PathBuf {
     state_dir.join(GATEWAY_DIR).join(GATEWAY_DB_FILE)
@@ -73,10 +88,42 @@ impl Gateway {
                  backup to avoid this)"
             );
         }
+        let _ = db.prune_calls(now_ms(), store::CALLS_KEEP_ROWS);
         Ok(Self {
             store: Mutex::new(db),
             keys: loaded.keyring,
+            allow_http_upstreams: std::sync::atomic::AtomicBool::new(false),
+            calls_since_prune: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    pub fn allow_http_upstreams(&self) -> bool {
+        self.allow_http_upstreams
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// For the test suites only; see the field.
+    pub fn set_allow_http_upstreams(&self, allow: bool) {
+        self.allow_http_upstreams
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Writes one audit row (G-D18: metadata only, by type) and applies the
+    /// retention every [`PRUNE_EVERY`] rows. A failure to audit is logged and
+    /// never fails the call it describes.
+    pub fn record_call(&self, call: store::CallRecord) {
+        let store = self.store.lock().expect("gateway store lock");
+        if let Err(e) = store.record_call(&call) {
+            tracing::warn!(error = %e, "could not write a gateway call audit row");
+        }
+        let n = self
+            .calls_since_prune
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n + 1 >= PRUNE_EVERY {
+            self.calls_since_prune
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            let _ = store.prune_calls(now_ms(), store::CALLS_KEEP_ROWS);
+        }
     }
 }
 

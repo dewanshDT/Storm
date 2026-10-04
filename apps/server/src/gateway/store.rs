@@ -406,7 +406,9 @@ impl GatewayDb {
             .optional()?)
     }
 
-    /// Deletes every credential of a connection; how many went.
+    /// Deletes every credential of a connection; how many went. A
+    /// disconnect does this inside its own transaction (`revoke_connection`).
+    #[cfg(test)]
     pub fn delete_credentials(&self, connection_id: &str) -> Result<usize> {
         Ok(self.conn.execute(
             "DELETE FROM credentials WHERE connection_id = ?1",
@@ -478,6 +480,7 @@ impl GatewayDb {
         Ok(old + excess)
     }
 
+    #[cfg(test)]
     pub fn recent_calls(&self, limit: i64) -> Result<Vec<CallRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT at_ms, owner_user_id, connection_id, session_id, host_id, method, tool,
