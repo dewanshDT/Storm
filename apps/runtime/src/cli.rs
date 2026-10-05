@@ -145,10 +145,14 @@ impl Provider for CliProvider {
         let mut command = Command::new(&program);
         command
             .args(&self.args)
+            .args(&spec.launch.args)
             .current_dir(&spec.workspace)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
-            .envs(self.env.iter().map(|(k, v)| (k, v)));
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            // The session's own values last (AM32): its MCP config must win
+            // over anything a provider env file says.
+            .envs(spec.launch.env.iter().map(|(k, v)| (k, v)));
         let child = pty::spawn(&mut command, &slave)
             .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
         // The parent's copy must go, or the master never sees end-of-file.

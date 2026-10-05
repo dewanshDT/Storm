@@ -78,6 +78,13 @@ pub struct ProviderConfig {
     /// `KEY=VALUE` lines, mode `0600`.
     #[serde(default)]
     pub env_file: Option<PathBuf>,
+    /// Provider settings merged into a session's own config, for `opencode`
+    /// (G-D22): a session runs with `XDG_CONFIG_HOME` of its own, so the
+    /// host's global OpenCode settings (model, agents) are not loaded, and
+    /// this is where they come from instead. **Never an MCP server**: an `mcp`
+    /// key here is dropped by the writer.
+    #[serde(default)]
+    pub settings: Option<toml::Value>,
 }
 
 fn cli_kind() -> String {
@@ -118,6 +125,17 @@ impl RuntimeConfig {
             }
         }
         Ok(())
+    }
+
+    /// The `settings` of the `opencode` provider entry, as JSON.
+    pub fn opencode_settings(&self) -> Option<serde_json::Value> {
+        self.providers
+            .as_ref()?
+            .iter()
+            .find(|p| p.id == "opencode")?
+            .settings
+            .as_ref()
+            .and_then(|v| serde_json::to_value(v).ok())
     }
 
     /// The providers this host offers, by id.

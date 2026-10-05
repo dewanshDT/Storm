@@ -117,6 +117,10 @@ struct RelayState {
     calls: Mutex<HashMap<RequestId, CallRoute>>,
     elicitations: Mutex<HashMap<String, PendingElicitation>>,
     next_elicitation: AtomicU64,
+    /// Random per upstream session, so an elicitation id is never reused —
+    /// not after a restart, not after a re-`initialize`. A late answer to an
+    /// old elicitation must never be taken for an answer to a new one.
+    elicitation_prefix: String,
     events: Box<dyn Fn(RelayEvent) + Send + Sync>,
 }
 
@@ -138,6 +142,12 @@ impl Relay {
             calls: Mutex::new(HashMap::new()),
             elicitations: Mutex::new(HashMap::new()),
             next_elicitation: AtomicU64::new(1),
+            elicitation_prefix: {
+                use rand::Rng;
+                let mut b = [0u8; 6];
+                rand::rng().fill_bytes(&mut b);
+                b.iter().map(|x| format!("{x:02x}")).collect()
+            },
             events: Box::new(events),
         }))
     }
@@ -219,7 +229,7 @@ impl ClientHandler for Relay {
             return Ok(cancelled());
         };
         let n = self.0.next_elicitation.fetch_add(1, Ordering::Relaxed);
-        let agent_id = format!("storm-elicit-{n}");
+        let agent_id = format!("storm-elicit-{}-{n}", self.0.elicitation_prefix);
         let (answer, rx) = oneshot::channel();
         self.0.elicitations.lock().unwrap().insert(
             agent_id.clone(),

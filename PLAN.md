@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3147,6 +3147,129 @@ The operator should confirm this reading.
   - `shell` granted.
 - fmt, clippy `-D warnings`, 508 unit tests.
 - Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**81f. Gateway slice 5: the runtime — `storm-runtime mcp-bridge`, the daemon
+socket, and the AM32 config writers.** *(2026-10-05)*
+
+**The host forwards and never authorizes.** It learns ids and slugs from
+`start.mcp`, and holds no credential, because none exists on the host.
+
+**What `storm-runtime` does:**
+- **`hello` and `inventory` report `mcp_bridge: true`.**
+- **On a `start` with grants,** it writes the provider's config into
+  `sessions/<ags>/` (`0700`, files `0600`, created with those modes). It
+  mints a random 256-bit session handle and registers it against the
+  session's slugs → connection ids. A config that cannot be written fails
+  the start, rather than launching without `--strict-mcp-config` (G-D12).
+- **The writers (AM32, exactly):**
+  - **`claude-code`** gets `--mcp-config <session>/mcp.json
+    --strict-mcp-config`, with one stdio server per slug:
+    `storm-runtime mcp-bridge <slug>`, its env holding only
+    `STORM_MCP_HANDLE` and `STORM_MCP_SOCK`.
+  - **`opencode`** gets `XDG_CONFIG_HOME=<session>/xdg`, with the config in
+    `xdg/opencode/opencode.json`, plus `OPENCODE_DISABLE_PROJECT_CONFIG=1`
+    and `permission: {"<slug>_*": "ask"}` for every connection. That
+    permission is set last, so no setting relaxes it.
+  - **Anything else** (`shell`, `fake`, a custom id) gets nothing, and no
+    directory is created.
+- **`runtime.toml`'s provider entry gains `settings`** (G-D22): it is
+  merged into OpenCode's session config, since the host's global OpenCode
+  settings no longer load. Its `mcp` key is replaced, so a setting can never
+  add an MCP server.
+- **The provider contract stays MCP-free (AM20).** `SessionSpec` gains a
+  generic `launch: LaunchExtras { args, env }`. A `cli` provider appends the
+  args after its own and the env after everything else, so the session's
+  values win over an env file.
+- **The daemon socket** is `run/mcp.sock`: `0600`, in a `0700` directory,
+  and the unit already allows `AF_UNIX`.
+  - **A bridge connects per message:** one line `{handle, connection,
+    message}` in, the server's NDJSON streamed back verbatim.
+  - **While the link is down,** the answer is `{"storm_error":
+    "storm_unreachable"}`. Never queued, never retried. A `401` asks the
+    link to re-authenticate.
+  - **An unknown handle** gets `not_granted`.
+  - **A second kind of connection, `subscribe: true`,** stays open and
+    carries the link's `mcp.message` (unsolicited messages) to that
+    session's bridges.
+- **Cleanup.** When a session ends or fails to start, its handle stops
+  working, its subscribers go, and its directory is deleted. At boot every
+  `sessions/` directory is removed, because they belonged to sessions that
+  died with the previous process.
+
+**The bridge (`src/bridge.rs`)** implements spec §11's six rules over a
+`Daemon` trait (the socket, or a test's script):
+- It keeps the agent's `initialize`.
+- On `session_unknown`, it replays `initialize` under `storm-reinit-N`,
+  swallows the answer, sends `notifications/initialized`, then resends the
+  original request once.
+- Any other failure, including a stream that ends without a response, is
+  one JSON-RPC error and is never retried.
+- When a call ends, every upstream request it opened toward the agent that
+  is still unanswered is cancelled with `notifications/cancelled`.
+- An answer to an unknown or closed elicitation is dropped.
+- Stdout has one writer task, so lines never interleave. It logs nothing,
+  because stdout is the MCP stream.
+
+**Found on the way, and fixed on the server:** elicitation ids were
+`storm-elicit-<n>` per upstream session, so after a restart the first new one
+reused `storm-elicit-1`. A late answer to the old elicitation could then have
+answered the new one. Ids are now `storm-elicit-<random>-<n>`, unique per
+upstream session. `gateway_e2e.py`'s R8 check found it.
+
+**`apps/server/tests/gateway_e2e.py`** (in `make test-live`, 50 checks, about
+a minute) runs a real server, a real `storm-runtime`, a mock upstream and a
+scripted agent:
+- The mock upstream and the scripted agent (`tests/gateway_support/`) are
+  ported from the gates. They are fixtures, not shipped code.
+- The runtime launches the scripted agent as `claude-code` and as
+  `opencode`, with exactly the config it would give the real CLIs. The agent
+  starts the bridges from that config.
+- It checks:
+  - the owner-only routes, and `stk_` refused;
+  - the AM32 launch for both providers;
+  - calls, the allowlist and the built-in `storm` connection;
+  - capabilities stripped upstream;
+  - progress, form elicitation, and URL elicitation never reaching the
+    agent;
+  - **R2–R8 for real:** a server restart re-initializes with exactly one
+    initialize result; an in-flight call during a `SIGKILL` fails once and
+    is executed upstream once; an open elicitation is cancelled and a late
+    answer never reaches upstream; an upstream restart (404) re-initializes
+    transparently and runs once;
+  - `shell` has no grants, and a disconnect refuses the next call;
+  - **the credential boundary on this host:**
+    - C1, C5, C7: every file under the suite's directory except the
+      upstream's own and the server's state, which holds the credential
+      only sealed;
+    - C2, C4: every readable process's `environ` and `cmdline`;
+    - the spellings raw, `Bearer`, base64 and base64url;
+    - two positive controls: the canary file, and a planted process.
+
+**Verified.**
+- Runtime unit tests: both writers, shell and unknown providers, handles,
+  and the bridge's R5, R7, R8 and timely-answer rules.
+- **Mutation-proved in the unit tests, 7/7 caught:** `leak_init`, `retry`,
+  `no_cancel`, a late answer forwarded, no `--strict-mcp-config`, no
+  OpenCode `ask`, project config allowed.
+- **The gates' three mutations against the real build**, each caught by
+  `gateway_e2e.py` (R5, R7 and R8 failing respectively):
+  - `leak_init`;
+  - `retry`, which retries until the server is back and re-initializes;
+  - `no_cancel`.
+
+  Run by rebuilding `storm-runtime` with each mutation; the runner is not
+  shipped.
+- A naive retry without re-initializing is refused by the gateway itself
+  (`session_unknown`), so it cannot double-execute. Only the gates' full
+  mutation can.
+- fmt and clippy `-D warnings` on both crates, and `cargo tree -i aws-lc-rs`
+  finds nothing. Server 508 unit tests.
+- Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py`
+  61/61, `gateway_e2e.py` 50/50.
+
+**Not here:** the real Claude Code and OpenCode against the real build is
+on-device acceptance (G2 proved the configs with the gates' harness). C3, the
+journal, stays the operator's.
 
 ---
 

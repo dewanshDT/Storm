@@ -39,13 +39,21 @@
 //! - [`config`]: `runtime.toml`, provider env files, and workspace resolution.
 //! - [`host`]: `storm-runtime serve`. It runs the link, one uploader per
 //!   session, and the `sessions.json` restart table.
+//!
+//! ## The MCP Gateway (decision 81f)
+//!
+//! - [`mcp`]: the per-provider config writers, session handles and the
+//!   daemon socket's line format. The host forwards; it never authorizes.
+//! - [`bridge`]: `storm-runtime mcp-bridge`, the agent's stdio MCP server.
 
+pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod config;
 pub mod fake;
 pub mod host;
 pub mod identity;
+pub mod mcp;
 pub mod provider;
 mod pty;
 pub mod scrollback;
