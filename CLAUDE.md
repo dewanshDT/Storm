@@ -493,6 +493,16 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   "ask"`; everything else gets nothing. A config that cannot be written fails
   the start rather than launching unconfined. It holds a handle and a socket
   path, never a credential.
+- **OAuth discovery never reaches a private address** (81g, §10). rmcp's
+  OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
+  every URL and redirect hop resolved and refused unless all its addresses
+  are public, then connected to exactly those addresses.
+- **An OAuth flow is single use by SQL, not by code order**: loading it
+  claims it with one `UPDATE … WHERE used_at IS NULL`. The state is stored
+  only as a hash; the redirect URI is loopback or `storm://oauth`, never LAN.
+- **A refresh is single flight per connection, and a rotated pair is
+  persisted before it is used**; a rejected refresh is `needs_reauth`, never
+  retried in a loop.
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 
