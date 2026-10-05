@@ -17,6 +17,7 @@
 
 pub mod connections;
 pub mod crypto;
+pub mod oauth;
 pub mod session;
 pub mod store;
 pub mod upstream;
@@ -47,6 +48,16 @@ pub struct Gateway {
     /// memory only: a restart loses them, which is what `session_unknown`
     /// reports (G-D19).
     pub sessions: session::Sessions,
+    /// One lock per OAuth connection, held across a refresh (single flight).
+    refresh_locks: Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// An RFC 3339 instant `secs` from now, in the same format as
+/// `index::now_rfc3339`, so the two compare as strings.
+pub fn rfc3339_in(secs: i64) -> String {
+    let t = time::OffsetDateTime::now_utc() + time::Duration::seconds(secs);
+    t.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Epoch milliseconds, the call audit's clock.
@@ -100,6 +111,7 @@ impl Gateway {
             allow_http_upstreams: std::sync::atomic::AtomicBool::new(false),
             calls_since_prune: std::sync::atomic::AtomicU64::new(0),
             sessions: session::Sessions::default(),
+            refresh_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 

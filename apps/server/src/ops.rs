@@ -1690,9 +1690,10 @@ pub async fn create_integration(
                 "an integration without auth takes no credential",
             ));
         }
-        (auth_kind::OAUTH, _) => {
+        (auth_kind::OAUTH, None) => {}
+        (auth_kind::OAUTH, Some(_)) => {
             return Err(bad_request(
-                "OAuth integrations are not available yet; connect with a token",
+                "an OAuth integration is authorized, not given a credential",
             ));
         }
         _ => return Err(bad_request("auth_kind is static or none")),
@@ -1705,8 +1706,13 @@ pub async fn create_integration(
         slug,
         display_name: req.display_name.trim().to_string(),
         url: req.url,
+        // An OAuth connection waits for its authorization (§8 lifecycle).
+        status: if req.auth_kind == auth_kind::OAUTH {
+            status::PENDING_AUTH.into()
+        } else {
+            status::CONNECTED.into()
+        },
         auth_kind: req.auth_kind,
-        status: status::CONNECTED.into(),
         tool_allowlist: Vec::new(),
         known_tools: None,
         expose_resources: true,
@@ -1845,6 +1851,12 @@ pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiR
         return Err(bad_request("the built-in connection cannot be deleted"));
     }
     let c = own_connection(state, actor, id)?;
+    // Read before the ciphertexts go: what an RFC 7009 revocation would send.
+    let revocation = if c.auth_kind == auth_kind::OAUTH {
+        state.gateway.revocation_for(&c).await
+    } else {
+        None
+    };
     let now = crate::index::now_rfc3339();
     state
         .gateway
@@ -1853,6 +1865,11 @@ pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiR
         .expect("gateway store lock")
         .revoke_connection(&c.id, &now)
         .map_err(internal)?;
+    // Best effort, upstream (§13); the connection is already gone here.
+    if let Some(r) = revocation {
+        let gateway = state.gateway.clone();
+        tokio::spawn(async move { gateway.revoke(r).await });
+    }
     // Its grants die with it (§13; the rows stay for the audit), and its live
     // upstream sessions close, so the next call is refused at once.
     state.agent.revoke_grants_for(&c.id).map_err(internal)?;
@@ -1908,10 +1925,21 @@ async fn probe_integration(
         return Err(conflict("the integration is disabled; enable it first"));
     }
     let started = std::time::Instant::now();
-    let result = match state.gateway.target(&c) {
+    let mut result = match state.gateway.target(&c, false).await {
         Ok(target) => crate::gateway::upstream::probe(target).await,
         Err(e) => Err(e),
     };
+    // An OAuth upstream that refuses its access token gets one refresh and
+    // one more listing: a listing executes nothing, so this is not a retry of
+    // anything an agent asked for.
+    if c.auth_kind == auth_kind::OAUTH
+        && result.as_ref().err() == Some(&crate::gateway::upstream::UpstreamError::Unauthorized)
+    {
+        result = match state.gateway.target(&c, true).await {
+            Ok(target) => crate::gateway::upstream::probe(target).await,
+            Err(e) => Err(e),
+        };
+    }
     let now = crate::index::now_rfc3339();
     let mut new_tools = Vec::new();
     match &result {
@@ -1926,7 +1954,12 @@ async fn probe_integration(
         }
         Err(e) => {
             c.last_error_code = Some(e.code().to_string());
-            if e.needs_reauth() {
+            // A connection still waiting for its first authorization stays
+            // `pending_auth`: there was nothing to lose.
+            if e.needs_reauth() && c.status != status::PENDING_AUTH {
+                if c.auth_kind == auth_kind::OAUTH && c.status == status::CONNECTED {
+                    record_refresh_failed(state, &c);
+                }
                 c.status = status::NEEDS_REAUTH.into();
             }
         }
@@ -2378,10 +2411,33 @@ fn note_upstream_failure(
         row.last_error_code = Some(e.code().to_string());
         if e.needs_reauth() && row.status == status::CONNECTED {
             row.status = status::NEEDS_REAUTH.into();
+            if row.auth_kind == auth_kind::OAUTH {
+                record_refresh_failed(state, &row);
+            }
         }
         row.updated_at = crate::index::now_rfc3339();
         let _ = store.update_connection(&row);
     }
+}
+
+/// An OAuth connection whose refresh failed for good: audited (§14), never
+/// with a token. Spawned because the callers hold the gateway's sync lock.
+fn record_refresh_failed(state: &Shared, c: &Connection) {
+    let state = state.clone();
+    let detail = serde_json::json!({
+        "connection_id": c.id, "slug": c.slug, "auth_kind": c.auth_kind,
+    });
+    let owner = c.owner_user_id.clone();
+    tokio::spawn(async move {
+        let auth_db = state.auth_db.lock().await;
+        let _ = auth_db.record_event(
+            "integration_refresh_failed",
+            Some(&owner),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        );
+    });
 }
 
 /// The agent's `initialize`: a fresh upstream session (replacing any old one)
@@ -2427,20 +2483,36 @@ async fn open_upstream(
     let relay = crate::gateway::session::Relay::new(&agent_caps, events);
     let service = match &authorized.connection {
         Some(c) => {
-            let target = state.gateway.target(c).map_err(|e| {
+            let target = state.gateway.target(c, false).await.map_err(|e| {
                 note_upstream_failure(state, Some(c), e);
-                CallFailure::Code(format!("integration_needs_reauth:{}", c.slug))
+                CallFailure::Code(if e.needs_reauth() {
+                    format!("integration_needs_reauth:{}", c.slug)
+                } else {
+                    e.code().to_string()
+                })
             })?;
-            crate::gateway::upstream::connect(target, relay)
-                .await
-                .map_err(|e| {
-                    note_upstream_failure(state, Some(c), e);
-                    CallFailure::Code(if e.needs_reauth() {
-                        format!("integration_needs_reauth:{}", c.slug)
-                    } else {
-                        e.code().to_string()
-                    })
-                })?
+            let first = crate::gateway::upstream::connect(target, relay.clone()).await;
+            // An OAuth upstream refusing the token at `initialize`: refresh
+            // once and initialize again. Nothing the agent asked for has run.
+            let first = match first {
+                Err(crate::gateway::upstream::UpstreamError::Unauthorized)
+                    if c.auth_kind == auth_kind::OAUTH =>
+                {
+                    match state.gateway.target(c, true).await {
+                        Ok(target) => crate::gateway::upstream::connect(target, relay).await,
+                        Err(e) => Err(e),
+                    }
+                }
+                other => other,
+            };
+            first.map_err(|e| {
+                note_upstream_failure(state, Some(c), e);
+                CallFailure::Code(if e.needs_reauth() {
+                    format!("integration_needs_reauth:{}", c.slug)
+                } else {
+                    e.code().to_string()
+                })
+            })?
         }
         None => connect_builtin(state, authorized, session_id, host_id, relay)
             .await
@@ -2551,6 +2623,274 @@ pub fn sweep_gateway_sessions(state: &Shared) {
             state.gateway.sessions.close_session(&session);
         }
     }
+}
+
+// ---- MCP Gateway: OAuth (decision 81g, spec §10) ----------------------------
+
+pub struct AuthorizeIntegration {
+    pub redirect_uri: String,
+    /// A client the owner registered by hand, when the server offers no
+    /// dynamic registration (§10 step 2).
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorizationStarted {
+    /// The URL the client opens in the system browser.
+    pub authorization_url: String,
+    pub expires: String,
+}
+
+fn oauth_refusal(f: crate::gateway::oauth::OAuthFailure) -> ApiError {
+    use crate::gateway::oauth::OAuthFailure as F;
+    let status = match f {
+        F::NeedsClient | F::FlowSpent => axum::http::StatusCode::BAD_REQUEST,
+        F::NoOAuth => axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        _ => axum::http::StatusCode::BAD_GATEWAY,
+    };
+    ApiError(status, f.code().into())
+}
+
+/// `POST /v1/integrations/connections/{id}/authorize`: discovery, a client
+/// (reused, registered dynamically, or pasted), and the PKCE authorization
+/// URL. The flow is recorded hashed and sealed, for ten minutes.
+pub async fn authorize_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    req: AuthorizeIntegration,
+) -> ApiResult<AuthorizationStarted> {
+    use crate::gateway::oauth::{self as oauth, OAuthFailure};
+    require_integration_owner(actor)?;
+    let c = own_connection(state, actor, id)?;
+    if c.auth_kind != auth_kind::OAUTH {
+        return Err(bad_request("only an OAuth integration is authorized here"));
+    }
+    if c.status == status::DISABLED {
+        return Err(conflict("the integration is disabled; enable it first"));
+    }
+    oauth::validate_redirect(&req.redirect_uri).map_err(bad_request)?;
+    if let Some(client_id) = &req.client_id
+        && (client_id.is_empty()
+            || client_id.len() > 512
+            || client_id.chars().any(char::is_control))
+    {
+        return Err(bad_request("a client id is 1–512 printable characters"));
+    }
+    let (mut manager, metadata) = oauth::discovered_manager(&state.gateway, &c.url)
+        .await
+        .map_err(oauth_refusal)?;
+    let issuer = metadata
+        .issuer
+        .clone()
+        .unwrap_or_else(|| metadata.authorization_endpoint.clone());
+    let now = crate::index::now_rfc3339();
+    let metadata_json = serde_json::to_string(&metadata).ok();
+
+    let existing = state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .oauth_client_for(actor.user_id(), &issuer, &req.redirect_uri)
+        .map_err(internal)?;
+    let client = match (&req.client_id, existing) {
+        // A pasted client always wins: the owner is telling us which one.
+        (Some(client_id), _) => {
+            let row_id = crate::auth::identity::random_id("oac_");
+            let secret = match &req.client_secret {
+                Some(s) => Some(
+                    state
+                        .gateway
+                        .keys
+                        .seal(&row_id, "client_secret", s.as_bytes())
+                        .map_err(internal)?,
+                ),
+                None => None,
+            };
+            crate::gateway::store::OAuthClientRow {
+                id: row_id,
+                owner_user_id: actor.user_id().into(),
+                issuer: issuer.clone(),
+                client_id: client_id.clone(),
+                redirect_uri: req.redirect_uri.clone(),
+                registered: false,
+                metadata: metadata_json.clone(),
+                secret,
+                created_at: now.clone(),
+            }
+        }
+        (None, Some(row)) => crate::gateway::store::OAuthClientRow {
+            metadata: metadata_json.clone(),
+            ..row
+        },
+        (None, None) => {
+            if metadata.registration_endpoint.is_none() {
+                return Err(oauth_refusal(OAuthFailure::NeedsClient));
+            }
+            let scopes: Vec<&str> = req.scopes.iter().map(String::as_str).collect();
+            let registered = manager
+                .register_client("Storm", &req.redirect_uri, &scopes)
+                .await
+                .map_err(|_| oauth_refusal(OAuthFailure::Registration))?;
+            crate::gateway::store::OAuthClientRow {
+                id: crate::auth::identity::random_id("oac_"),
+                owner_user_id: actor.user_id().into(),
+                issuer: issuer.clone(),
+                client_id: registered.client_id,
+                redirect_uri: req.redirect_uri.clone(),
+                registered: true,
+                metadata: metadata_json.clone(),
+                secret: None,
+                created_at: now.clone(),
+            }
+        }
+    };
+    state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .insert_oauth_client(&client)
+        .map_err(internal)?;
+    manager
+        .configure_client(oauth::client_config(
+            &client.client_id,
+            &client.redirect_uri,
+            state.gateway.client_secret(&client),
+        ))
+        .map_err(|_| oauth_refusal(OAuthFailure::Discovery))?;
+    manager.set_state_store(oauth::FlowStore {
+        gateway: state.gateway.clone(),
+        connection: c.id.clone(),
+        owner: actor.user_id().into(),
+        oauth_client: client.id.clone(),
+        redirect_uri: client.redirect_uri.clone(),
+        resource: c.url.clone(),
+    });
+    let scopes: Vec<&str> = req.scopes.iter().map(String::as_str).collect();
+    let authorization_url = manager
+        .get_authorization_url(&scopes)
+        .await
+        .map_err(|_| oauth_refusal(OAuthFailure::Discovery))?;
+    Ok(AuthorizationStarted {
+        authorization_url,
+        expires: crate::gateway::rfc3339_in(oauth::FLOW_TTL_SECS),
+    })
+}
+
+pub struct OAuthCallback {
+    pub state: String,
+    pub code: String,
+    /// RFC 9207's `iss`, when the redirect carried one.
+    pub iss: Option<String>,
+}
+
+/// `POST /v1/integrations/oauth/callback` (§10 step 5): the client relays
+/// what the browser brought back. The flow is single use and the caller's
+/// own; the code is exchanged, the tokens sealed, and the integration tested.
+pub async fn oauth_callback(
+    state: &Shared,
+    actor: &Actor,
+    req: OAuthCallback,
+) -> ApiResult<IntegrationTest> {
+    use crate::gateway::oauth::{self as oauth, OAuthFailure};
+    require_integration_owner(actor)?;
+    if req.state.is_empty() || req.state.len() > 512 || req.code.is_empty() || req.code.len() > 4096
+    {
+        return Err(bad_request("state and code are required"));
+    }
+    let hash = oauth::state_hash(&req.state);
+    let flow = state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .live_flow(&hash, &crate::index::now_rfc3339())
+        .map_err(internal)?
+        .ok_or_else(|| oauth_refusal(OAuthFailure::FlowSpent))?;
+    // Another owner's flow reads exactly like a spent one.
+    if flow.owner_user_id != actor.user_id() {
+        return Err(oauth_refusal(OAuthFailure::FlowSpent));
+    }
+    let c = own_connection(state, actor, &flow.connection_id)?;
+    let client = state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .oauth_client(&flow.oauth_client)
+        .map_err(internal)?
+        .ok_or_else(|| oauth_refusal(OAuthFailure::FlowSpent))?;
+    let (mut manager, _) = oauth::discovered_manager(&state.gateway, &c.url)
+        .await
+        .map_err(oauth_refusal)?;
+    manager
+        .configure_client(oauth::client_config(
+            &client.client_id,
+            &client.redirect_uri,
+            state.gateway.client_secret(&client),
+        ))
+        .map_err(|_| oauth_refusal(OAuthFailure::Exchange))?;
+    manager.set_state_store(oauth::FlowStore {
+        gateway: state.gateway.clone(),
+        connection: c.id.clone(),
+        owner: actor.user_id().into(),
+        oauth_client: client.id.clone(),
+        redirect_uri: client.redirect_uri.clone(),
+        resource: c.url.clone(),
+    });
+    manager.set_credential_store(oauth::TokenStore {
+        gateway: state.gateway.clone(),
+        connection: c.id.clone(),
+    });
+    // The flow store's `load` claims the flow, so a replayed callback — or a
+    // second one racing this — finds nothing and exchanges nothing.
+    let had_tokens = state
+        .gateway
+        .store
+        .lock()
+        .expect("gateway store lock")
+        .credential(&c.id, credential_kind::OAUTH_TOKENS)
+        .map_err(internal)?
+        .is_some();
+    manager
+        .exchange_code_for_token_with_issuer(&req.code, &req.state, req.iss.as_deref())
+        .await
+        .map_err(|e| match e {
+            rmcp::transport::auth::AuthError::InternalError(m) if m.contains("state not found") => {
+                oauth_refusal(OAuthFailure::FlowSpent)
+            }
+            _ => oauth_refusal(OAuthFailure::Exchange),
+        })?;
+
+    let now = crate::index::now_rfc3339();
+    let mut c = c;
+    c.status = status::CONNECTED.into();
+    c.last_error_code = None;
+    c.updated_at = now.clone();
+    {
+        let store = state.gateway.store.lock().expect("gateway store lock");
+        store
+            .set_connection_oauth(&c.id, &client.id, &now)
+            .map_err(internal)?;
+        store.update_connection(&c).map_err(internal)?;
+    }
+    // Live sessions pick the new tokens up on their next initialize.
+    state.gateway.sessions.close_connection(&c.id);
+    {
+        let auth_db = state.auth_db.lock().await;
+        let kind = if had_tokens {
+            "integration_reauthorized"
+        } else {
+            "integration_authorized"
+        };
+        integration_event(&auth_db, kind, actor, &c, &now);
+    }
+    // §10 step 6: a test listing, which also turns every tool on.
+    test_integration(state, actor, &c.id).await
 }
 
 #[cfg(test)]

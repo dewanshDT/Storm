@@ -471,6 +471,14 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/integrations/connections/{id}/tools",
             get(integrations_tools),
         )
+        .route(
+            "/v1/integrations/connections/{id}/authorize",
+            post(integrations_authorize),
+        )
+        .route(
+            "/v1/integrations/oauth/callback",
+            post(integrations_callback),
+        )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
@@ -1725,6 +1733,66 @@ async fn integrations_tools(
 ) -> ApiResult<Json<Vec<crate::ops::IntegrationTool>>> {
     Ok(Json(
         crate::ops::integration_tools(&state, &actor, &id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct AuthorizeRequest {
+    redirect_uri: String,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+async fn integrations_authorize(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<AuthorizeRequest>,
+) -> ApiResult<Json<crate::ops::AuthorizationStarted>> {
+    Ok(Json(
+        crate::ops::authorize_integration(
+            &state,
+            &actor,
+            &id,
+            crate::ops::AuthorizeIntegration {
+                redirect_uri: body.redirect_uri,
+                client_id: body.client_id,
+                client_secret: body.client_secret,
+                scopes: body.scopes,
+            },
+        )
+        .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct CallbackRequest {
+    state: String,
+    code: String,
+    #[serde(default)]
+    iss: Option<String>,
+}
+
+async fn integrations_callback(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<CallbackRequest>,
+) -> ApiResult<Json<crate::ops::IntegrationTest>> {
+    Ok(Json(
+        crate::ops::oauth_callback(
+            &state,
+            &actor,
+            crate::ops::OAuthCallback {
+                state: body.state,
+                code: body.code,
+                iss: body.iss,
+            },
+        )
+        .await?,
     ))
 }
 
@@ -6755,7 +6823,7 @@ pub(crate) mod tests {
         create_github(&app, &owner, "ghp_x").await;
         let cases = [
             (
-                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "oauth"}),
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "oauth", "credential": {"value": "x"}}),
                 StatusCode::BAD_REQUEST,
             ),
             (
@@ -7567,6 +7635,583 @@ pub(crate) mod tests {
             vec![serde_json::json!({"storm_error": "session_unknown"})]
         );
         assert_eq!(f.upstream_calls(), 1);
+    }
+
+    // ---- MCP Gateway: OAuth (decision 81g) --------------------------------
+
+    /// A mock authorization server and protected MCP resource on one port.
+    #[derive(Default)]
+    struct MockAs {
+        access: std::sync::Mutex<String>,
+        refresh: std::sync::Mutex<String>,
+        n: std::sync::atomic::AtomicUsize,
+        expires_in: std::sync::atomic::AtomicU64,
+        reject_refresh: std::sync::atomic::AtomicBool,
+        registrations: std::sync::Mutex<Vec<serde_json::Value>>,
+        token_requests: std::sync::Mutex<Vec<HashMap<String, String>>>,
+        revoked: std::sync::Mutex<Vec<String>>,
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockAs {
+        fn refreshes(&self) -> usize {
+            self.token_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.get("grant_type").map(String::as_str) == Some("refresh_token"))
+                .count()
+        }
+
+        fn issue(&self) -> serde_json::Value {
+            let n = self.n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            *self.access.lock().unwrap() = format!("upstream-canary-at-{n}");
+            *self.refresh.lock().unwrap() = format!("upstream-canary-rt-{n}");
+            serde_json::json!({
+                "access_token": format!("upstream-canary-at-{n}"),
+                "refresh_token": format!("upstream-canary-rt-{n}"),
+                "token_type": "Bearer",
+                "expires_in": self.expires_in.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        }
+    }
+
+    async fn serve_oauth_upstream(tools: &[&str]) -> (String, Arc<MockAs>) {
+        use axum::response::IntoResponse;
+        let mock = Arc::new(MockAs::default());
+        mock.expires_in
+            .store(3600, std::sync::atomic::Ordering::SeqCst);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let up = crate::gateway::upstream::tests::mock(tools);
+        let mcp = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+            move || Ok(up.clone()),
+            Arc::new(rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default()),
+            rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+                .disable_allowed_hosts(),
+        );
+        let gate_mock = mock.clone();
+        let gate_base = base.clone();
+        let gate = move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let mock = gate_mock.clone();
+            let base = gate_base.clone();
+            async move {
+                let want = format!("Bearer {}", mock.access.lock().unwrap());
+                let ok = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v == want && !mock.access.lock().unwrap().is_empty());
+                if !ok {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        [(
+                            "www-authenticate",
+                            format!(
+                                "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""
+                            ),
+                        )],
+                    )
+                        .into_response();
+                }
+                next.run(request).await
+            }
+        };
+        let m = mock.clone();
+        let b = base.clone();
+        let prm = move || {
+            let b = b.clone();
+            m.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Json(
+                    serde_json::json!({"resource": format!("{b}/mcp"), "authorization_servers": [b]}),
+                )
+            }
+        };
+        let b = base.clone();
+        let asm = move || {
+            let b = b.clone();
+            async move {
+                Json(serde_json::json!({
+                    "issuer": b,
+                    "authorization_endpoint": format!("{b}/authorize"),
+                    "token_endpoint": format!("{b}/token"),
+                    "registration_endpoint": format!("{b}/register"),
+                    "revocation_endpoint": format!("{b}/revoke"),
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                }))
+            }
+        };
+        let m = mock.clone();
+        let register = move |Json(body): Json<serde_json::Value>| {
+            let m = m.clone();
+            async move {
+                m.registrations.lock().unwrap().push(body.clone());
+                (
+                    StatusCode::CREATED,
+                    Json(
+                        serde_json::json!({"client_id": "dcr-client", "redirect_uris": body["redirect_uris"]}),
+                    ),
+                )
+            }
+        };
+        let m = mock.clone();
+        let token =
+            move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
+                let m = m.clone();
+                async move {
+                    m.token_requests.lock().unwrap().push(form.clone());
+                    let bad = || {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error": "invalid_grant"})),
+                        )
+                            .into_response()
+                    };
+                    match form.get("grant_type").map(String::as_str) {
+                        Some("authorization_code")
+                            if form.get("code").map(String::as_str) == Some("good-code")
+                                && form.get("code_verifier").is_some_and(|v| v.len() >= 43)
+                                && form.contains_key("resource") =>
+                        {
+                            Json(m.issue()).into_response()
+                        }
+                        Some("refresh_token")
+                            if !m.reject_refresh.load(std::sync::atomic::Ordering::SeqCst)
+                                && form.get("refresh_token")
+                                    == Some(&m.refresh.lock().unwrap().clone()) =>
+                        {
+                            Json(m.issue()).into_response()
+                        }
+                        _ => bad(),
+                    }
+                }
+            };
+        let m = mock.clone();
+        let revoke =
+            move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
+                let m = m.clone();
+                async move {
+                    m.revoked
+                        .lock()
+                        .unwrap()
+                        .push(form.get("token").cloned().unwrap_or_default());
+                    StatusCode::OK
+                }
+            };
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(prm.clone()),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource",
+                axum::routing::get(prm),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                axum::routing::get(asm),
+            )
+            .route("/register", axum::routing::post(register))
+            .route("/token", axum::routing::post(token))
+            .route("/revoke", axum::routing::post(revoke))
+            .nest_service(
+                "/mcp",
+                axum::Router::new()
+                    .fallback_service(mcp)
+                    .layer(axum::middleware::from_fn(gate)),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, mock)
+    }
+
+    fn query_param(url: &str, name: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).unwrap();
+        parsed
+            .query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.to_string())
+    }
+
+    async fn authorize(app: &Router, bearer: &str, id: &str) -> (StatusCode, serde_json::Value) {
+        send(
+            app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/authorize"),
+                serde_json::json!({"redirect_uri": "http://127.0.0.1:53682/callback"}),
+                bearer,
+            ),
+        )
+        .await
+    }
+
+    async fn callback(
+        app: &Router,
+        bearer: &str,
+        state: &str,
+        code: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            app,
+            post_json_with_auth(
+                "/v1/integrations/oauth/callback",
+                serde_json::json!({"state": state, "code": code}),
+                bearer,
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_oauth_integration_is_authorized_through_the_client_and_its_tokens_sealed() {
+        let dir = tempdir::TempDir::new("storm-oauth-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        let (status, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Notion", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["status"], "pending_auth");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Only a loopback or storm:// redirect (G-D13).
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/authorize"),
+                serde_json::json!({"redirect_uri": "http://192.168.1.51:8484/oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, started) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let url = started["authorization_url"].as_str().unwrap().to_string();
+        assert!(url.starts_with(&format!("{base}/authorize")), "{url}");
+        assert_eq!(
+            query_param(&url, "code_challenge_method").as_deref(),
+            Some("S256")
+        );
+        assert_eq!(
+            query_param(&url, "client_id").as_deref(),
+            Some("dcr-client")
+        );
+        assert!(query_param(&url, "resource").is_some(), "{url}");
+        let flow_state = query_param(&url, "state").unwrap();
+        // Registered dynamically, as a public client.
+        let reg = mock.registrations.lock().unwrap().clone();
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg[0]["token_endpoint_auth_method"], "none");
+        // A second authorization reuses that client.
+        let (_, again) = authorize(&app, &owner, &id).await;
+        assert_eq!(mock.registrations.lock().unwrap().len(), 1);
+        let spare_state =
+            query_param(again["authorization_url"].as_str().unwrap(), "state").unwrap();
+
+        // The state is stored only as its hash.
+        let flows: i64 = state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_flows WHERE state_hash = ?1",
+                rusqlite::params![flow_state],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flows, 0, "a raw state was stored");
+
+        // The browser comes back to the client; the client relays it.
+        let (status, test) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        assert_eq!(test["ok"], true, "{test}");
+        assert_eq!(test["integration"]["status"], "connected");
+        assert_eq!(test["integration"]["has_credential"], true);
+        assert_eq!(
+            test["integration"]["tool_allowlist"],
+            serde_json::json!(["search"])
+        );
+        let exchange = mock.token_requests.lock().unwrap()[0].clone();
+        assert!(exchange.contains_key("resource") && exchange.contains_key("code_verifier"));
+
+        // Single use: the same state again exchanges nothing.
+        let (status, body) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "oauth_flow_expired_or_used".into())
+        );
+        assert_eq!(mock.token_requests.lock().unwrap().len(), 1);
+        // An expired flow is refused too.
+        state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE oauth_flows SET expires_at = '2000-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        let (status, _) = callback(&app, &owner, &spare_state, "good-code").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The tokens are sealed: not in the database, not in any event.
+        let bytes = std::fs::read(crate::gateway::db_path(&state.state_dir)).unwrap();
+        let wal = std::fs::read(format!(
+            "{}-wal",
+            crate::gateway::db_path(&state.state_dir).display()
+        ))
+        .unwrap_or_default();
+        for b in [&bytes, &wal] {
+            assert!(
+                !b.windows(16).any(|w| w == b"upstream-canary-"),
+                "a token is in gateway.db"
+            );
+        }
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        assert!(events.iter().any(|(k, _)| k == "integration_authorized"));
+        assert!(events.iter().all(|(_, d)| !d.contains("upstream-canary")));
+    }
+
+    #[tokio::test]
+    async fn tokens_refresh_once_under_concurrency_persist_rotated_and_a_rejected_refresh_needs_reauth()
+     {
+        let dir = tempdir::TempDir::new("storm-oauth-refresh").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        let (_, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Linear", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        // Tokens that are always within a minute of expiry.
+        mock.expires_in
+            .store(30, std::sync::atomic::Ordering::SeqCst);
+        let (_, started) = authorize(&app, &owner, &id).await;
+        let flow_state =
+            query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
+        let (_, test) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(test["ok"], true, "{test}");
+
+        // Two calls at once find the stored token stale: one refresh between
+        // them, and the fresh token (an hour long) serves the second.
+        mock.expires_in
+            .store(3600, std::sync::atomic::Ordering::SeqCst);
+        let before = mock.refreshes();
+        let c = state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .connection(&id)
+            .unwrap()
+            .unwrap();
+        let (a, b) = tokio::join!(
+            state.gateway.target(&c, false),
+            state.gateway.target(&c, false)
+        );
+        assert!(a.is_ok() && b.is_ok());
+        assert_eq!(
+            mock.refreshes(),
+            before + 1,
+            "the refresh was not single-flight"
+        );
+        // The rotated pair is what is stored, before anything used it.
+        let stored = crate::gateway::oauth::TokenStore {
+            gateway: state.gateway.clone(),
+            connection: id.clone(),
+        };
+        let saved = rmcp::transport::auth::CredentialStore::load(&stored)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            use oauth2::TokenResponse;
+            let t = saved.token_response.unwrap();
+            assert_eq!(
+                t.refresh_token().unwrap().secret(),
+                &*mock.refresh.lock().unwrap()
+            );
+        }
+
+        // A rejected refresh: the integration needs reconnecting, audited.
+        // Its stored token is made stale again, so the test must refresh.
+        mock.expires_in
+            .store(30, std::sync::atomic::Ordering::SeqCst);
+        state.gateway.target(&c, true).await.unwrap();
+        mock.reject_refresh
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, test) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(test["ok"], false);
+        assert_eq!(test["integration"]["status"], "needs_reauth", "{test}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(k, _)| k == "integration_refresh_failed"),
+            "{events:?}"
+        );
+
+        // Reconnecting through a new authorization restores it.
+        mock.reject_refresh
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        mock.expires_in
+            .store(3600, std::sync::atomic::Ordering::SeqCst);
+        let (_, started) = authorize(&app, &owner, &id).await;
+        let flow_state =
+            query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
+        let (_, test) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(test["integration"]["status"], "connected", "{test}");
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        assert!(events.iter().any(|(k, _)| k == "integration_reauthorized"));
+
+        // Disconnecting revokes upstream, best effort (RFC 7009).
+        let latest = mock.refresh.lock().unwrap().clone();
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("{CONNECTIONS}/{id}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        for _ in 0..50 {
+            if !mock.revoked.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(*mock.revoked.lock().unwrap(), vec![latest]);
+    }
+
+    #[tokio::test]
+    async fn a_flow_is_spent_once_even_by_racing_callbacks_and_is_its_owners_alone() {
+        let dir = tempdir::TempDir::new("storm-oauth-race").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        let (_, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Race", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let (_, started) = authorize(&app, &owner, &id).await;
+        let flow_state =
+            query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
+
+        // Another owner holding the state learns nothing and spends nothing.
+        let second = {
+            let mut db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "second",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Owner,
+                },
+                "2026-10-05T00:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let second = format!("Bearer {}", session_token(&state, &second).await);
+        let (status, body) = callback(&app, &second, &flow_state, "good-code").await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "oauth_flow_expired_or_used".into())
+        );
+        assert!(mock.token_requests.lock().unwrap().is_empty());
+
+        // Two callbacks at once: exactly one exchanges the code.
+        let (a, b) = tokio::join!(
+            callback(&app, &owner, &flow_state, "good-code"),
+            callback(&app, &owner, &flow_state, "good-code")
+        );
+        let oks = [a.0, b.0].iter().filter(|s| **s == StatusCode::OK).count();
+        assert_eq!(oks, 1, "{a:?} {b:?}");
+        let exchanges = mock
+            .token_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("grant_type").map(String::as_str) == Some("authorization_code"))
+            .count();
+        assert_eq!(exchanges, 1, "a flow was spent twice");
+    }
+
+    #[tokio::test]
+    async fn oauth_is_the_owners_alone_and_discovery_never_reaches_a_private_address() {
+        let dir = tempdir::TempDir::new("storm-oauth-boundary").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        // https on a loopback address: a URL the owner may save, and one
+        // discovery must refuse to touch (no test switch here).
+        let loopback = base.replace("http://", "https://");
+        let (_, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Sneaky", "url": format!("{loopback}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let (status, body) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "oauth_discovery_failed");
+        assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let member = seed_member(&state, "member").await;
+        let member = format!("Bearer {}", session_token(&state, &member).await);
+        let (status, _) = authorize(&app, &member, &id).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = callback(&app, &member, "x", "y").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // A static integration is not authorized this way.
+        let static_id = create_github(&app, &owner, "ghp_x").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _) = authorize(&app, &owner, &static_id).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
