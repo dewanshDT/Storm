@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use cache::{OutputCache, Read};
-use store::{Fallback, SessionRecord, Store};
+use store::{Fallback, McpGrant, SessionRecord, Store};
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
 pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
@@ -47,6 +47,12 @@ pub enum Command {
         provider: String,
         interaction: String,
         terminal: TerminalSize,
+        /// The connections this session may use (AM23, spec §6): ids and
+        /// slugs only. Omitted when empty, so a session without grants sends
+        /// exactly the bytes it always did — an old host ignores the field
+        /// anyway, which is why a launch never relies on it (§6, old hosts).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mcp: Vec<McpGrant>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -62,6 +68,16 @@ pub enum Command {
     Replay { session: String, from: u64 },
     #[serde(rename = "refresh")]
     Refresh,
+    /// An **unsolicited** upstream message for a session's bridge (spec §9:
+    /// `list_changed`, a resource update). At most once: lost if the link is
+    /// down. Request-scoped messages never come this way — they ride their
+    /// call's own response stream.
+    #[serde(rename = "mcp.message")]
+    McpMessage {
+        session: String,
+        connection: String,
+        message: serde_json::Value,
+    },
 }
 
 /// A command with its sequence number, as it goes on the wire.
@@ -89,6 +105,11 @@ pub struct Capabilities {
     pub workspaces: Vec<String>,
     #[serde(default)]
     pub max_sessions: u32,
+    /// The host runs `storm-runtime mcp-bridge` (spec §6). A host that does
+    /// not say so is an old host: its sessions get no grants, and the launch
+    /// says why.
+    #[serde(default)]
+    pub mcp_bridge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +163,20 @@ pub struct Launch {
     #[serde(default = "terminal")]
     pub interaction: String,
     pub terminal: TerminalSize,
+    /// The launch toggle "Allow vault writes" (G-D5): off unless asked for.
+    #[serde(default)]
+    pub allow_vault_writes: bool,
+}
+
+/// What a launch did about the MCP Gateway (spec §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpOutcome {
+    /// These connections were granted and sent in `start`.
+    Granted(Vec<McpGrant>),
+    /// The `shell` provider gets none (G-D9).
+    Shell,
+    /// The host has no `mcp_bridge`; the caller announces it.
+    OldHost,
 }
 
 fn terminal() -> String {
@@ -515,7 +550,12 @@ impl AgentManager {
 
     /// Launches a session (freeze §6, §11.1). Returns the record, which
     /// carries any `provider_fallback`.
-    pub fn launch(&self, owner: &str, req: Launch) -> AgentResult<SessionRecord> {
+    pub fn launch(
+        &self,
+        owner: &str,
+        req: Launch,
+        offered_grants: Vec<McpGrant>,
+    ) -> AgentResult<(SessionRecord, McpOutcome)> {
         if req.interaction != "terminal" {
             return Err(AgentError::BadRequest(
                 "V1 offers the terminal interaction only".into(),
@@ -601,7 +641,30 @@ impl AgentManager {
             cols: req.terminal.cols,
             rows: req.terminal.rows,
         };
-        self.store.lock().unwrap().insert(&record)?;
+        // The grants (spec §6): none for `shell` (G-D9), none for a host
+        // that cannot bridge, and otherwise everything the caller offered.
+        // Written before `start` goes out.
+        let outcome = if provider.id == "shell" {
+            McpOutcome::Shell
+        } else if !caps.mcp_bridge {
+            McpOutcome::OldHost
+        } else {
+            McpOutcome::Granted(offered_grants)
+        };
+        let grants = match &outcome {
+            McpOutcome::Granted(g) => g.clone(),
+            _ => Vec::new(),
+        };
+        {
+            let mut store = self.store.lock().unwrap();
+            store.insert(&record)?;
+            store.insert_grants(
+                &record.id,
+                req.allow_vault_writes,
+                &grants,
+                &record.created_at,
+            )?;
+        }
         self.live
             .lock()
             .unwrap()
@@ -616,6 +679,7 @@ impl AgentManager {
                 provider: record.provider.clone(),
                 interaction: "terminal".into(),
                 terminal: req.terminal,
+                mcp: grants,
             },
         );
         let mut record = record;
@@ -629,7 +693,47 @@ impl AgentManager {
         }
         self.store.lock().unwrap().update(&record)?;
         self.bump(&record.id);
-        Ok(record)
+        Ok((record, outcome))
+    }
+
+    // ---- the MCP Gateway's view (decision 81e) ---------------------------
+
+    /// A live grant for `(session, connection)`: its slug and the session's
+    /// vault-write flag. `None` is "not granted", including a revoked grant.
+    pub fn grant(&self, session_id: &str, connection_id: &str) -> Result<Option<(String, bool)>> {
+        self.store.lock().unwrap().grant(session_id, connection_id)
+    }
+
+    #[cfg(test)]
+    pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
+        self.store.lock().unwrap().grants_of(session_id)
+    }
+
+    /// Disconnecting a connection revokes its grants (§13); the rows stay.
+    pub fn revoke_grants_for(&self, connection_id: &str) -> Result<usize> {
+        self.store
+            .lock()
+            .unwrap()
+            .revoke_grants_for(connection_id, &now())
+    }
+
+    /// Sends an unsolicited upstream message to a session's host (spec §9).
+    /// At most once; an offline host simply misses it.
+    pub fn mcp_message(&self, session_id: &str, connection: &str, message: serde_json::Value) {
+        let Ok(Some(r)) = self.store.lock().unwrap().get(session_id) else {
+            return;
+        };
+        if r.is_ended() {
+            return;
+        }
+        let _ = self.send(
+            &r.host_id,
+            Command::McpMessage {
+                session: r.id,
+                connection: connection.to_string(),
+                message,
+            },
+        );
     }
 
     pub fn get(&self, id: &str) -> AgentResult<SessionRecord> {
@@ -818,6 +922,7 @@ mod tests {
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
             max_sessions: 2,
+            mcp_bridge: true,
         }
     }
 
@@ -836,6 +941,27 @@ mod tests {
     }
 
     fn launch(m: &AgentManager, provider: Option<&str>) -> AgentResult<SessionRecord> {
+        launch_with(m, provider, offered()).map(|(r, _)| r)
+    }
+
+    fn offered() -> Vec<McpGrant> {
+        vec![
+            McpGrant {
+                id: "storm".into(),
+                slug: "storm".into(),
+            },
+            McpGrant {
+                id: "mcc_GH".into(),
+                slug: "github".into(),
+            },
+        ]
+    }
+
+    fn launch_with(
+        m: &AgentManager,
+        provider: Option<&str>,
+        grants: Vec<McpGrant>,
+    ) -> AgentResult<(SessionRecord, McpOutcome)> {
         m.launch(
             "usr_OWNER",
             Launch {
@@ -844,8 +970,74 @@ mod tests {
                 provider: provider.map(Into::into),
                 interaction: "terminal".into(),
                 terminal: TerminalSize { cols: 80, rows: 24 },
+                allow_vault_writes: false,
             },
+            grants,
         )
+    }
+
+    #[test]
+    fn a_launch_grants_the_offered_connections_and_tells_the_host_ids_and_slugs_only() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+        let (r, outcome) = launch_with(&m, None, offered()).unwrap();
+        assert_eq!(outcome, McpOutcome::Granted(offered()));
+        let cmd = rx.try_recv().unwrap();
+        let wire = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(
+            wire["mcp"],
+            serde_json::json!([{"id": "storm", "slug": "storm"}, {"id": "mcc_GH", "slug": "github"}])
+        );
+        // Persisted before `start`, and revocable.
+        assert_eq!(
+            m.grant(&r.id, "mcc_GH").unwrap(),
+            Some(("github".into(), false))
+        );
+        assert_eq!(m.grant(&r.id, "mcc_OTHER").unwrap(), None);
+        assert_eq!(m.revoke_grants_for("mcc_GH").unwrap(), 1);
+        assert_eq!(m.grant(&r.id, "mcc_GH").unwrap(), None);
+        assert_eq!(m.grants_of(&r.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn shell_and_old_hosts_get_no_grants_and_start_carries_none() {
+        // G-D9 and spec §6: `shell` gets nothing; a host without
+        // `mcp_bridge` gets nothing and the launch says so.
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let (r, outcome) = launch_with(&m, Some("shell"), offered()).unwrap();
+        assert_eq!(outcome, McpOutcome::Shell);
+        assert!(m.grants_of(&r.id).unwrap().is_empty());
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("mcp").is_none(), "{wire}");
+
+        let (m, _d) = manager();
+        let mut old = caps(&[("claude-code", true)]);
+        old.mcp_bridge = false;
+        let mut rx = online(&m, "hst_A", old);
+        let (r, outcome) = launch_with(&m, None, offered()).unwrap();
+        assert_eq!(outcome, McpOutcome::OldHost);
+        assert!(m.grants_of(&r.id).unwrap().is_empty());
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("mcp").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn an_unsolicited_message_goes_down_the_link_only_for_a_live_session() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+        let r = launch(&m, None).unwrap();
+        let _start = rx.try_recv().unwrap();
+        let msg =
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
+        m.mcp_message(&r.id, "mcc_GH", msg.clone());
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert_eq!(wire["type"], "mcp.message");
+        assert_eq!(wire["session"], r.id);
+        assert_eq!(wire["connection"], "mcc_GH");
+        assert_eq!(wire["message"], msg);
+        m.mcp_message("ags_NOPE", "mcc_GH", msg);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -946,7 +1138,9 @@ mod tests {
                 provider: None,
                 interaction: "terminal".into(),
                 terminal: TerminalSize { cols: 80, rows: 24 },
+                allow_vault_writes: false,
             },
+            Vec::new(),
         );
         assert!(matches!(bad, Err(AgentError::BadRequest(_))));
     }

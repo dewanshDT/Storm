@@ -1050,6 +1050,7 @@ pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     // Its link closes and its sessions fail now (freeze §5.6); the host ends
     // them itself when it is next refused.
     state.agent.revoke_host(host_id).map_err(internal)?;
+    sweep_gateway_sessions(state);
     Ok(())
 }
 
@@ -1219,24 +1220,99 @@ pub async fn host_workspaces(
         .collect())
 }
 
+/// A launched session, plus what the MCP Gateway granted it (spec §6).
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchedSession {
+    #[serde(flatten)]
+    pub session: crate::agent::store::SessionRecord,
+    pub mcp: LaunchMcp,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchMcp {
+    /// The granted connections, the built-in `storm` among them.
+    pub connections: Vec<crate::agent::store::McpGrant>,
+    pub allow_vault_writes: bool,
+    /// Said out loud when a session gets none it could have had (§6): the
+    /// host is too old to bridge.
+    pub notice: Option<String>,
+}
+
 pub async fn launch_session(
     state: &Shared,
     actor: &Actor,
     req: crate::agent::Launch,
-) -> ApiResult<crate::agent::store::SessionRecord> {
+) -> ApiResult<LaunchedSession> {
     require_owner(actor)?;
     // The host must exist and be live in auth.db, not merely connected.
-    {
+    let host_name = {
         let auth_db = state.auth_db.lock().await;
         match auth_db.host_by_id(&req.host_id).map_err(internal)? {
-            Some(h) if !h.is_revoked() => {}
+            Some(h) if !h.is_revoked() => h.name,
             _ => return Err(not_found("no such host")),
         }
-    }
-    state
+    };
+    // Every non-disabled connection of the owner, plus `storm` (spec §6,
+    // G-D9). Snapshotted here; the manager drops them for `shell` and for a
+    // host that cannot bridge.
+    let mut offered = vec![crate::agent::store::McpGrant {
+        id: BUILTIN_ID.into(),
+        slug: BUILTIN_SLUG.into(),
+    }];
+    offered.extend(
+        state
+            .gateway
+            .store
+            .lock()
+            .expect("gateway store lock")
+            .connections_of(actor.user_id())
+            .map_err(internal)?
+            .into_iter()
+            .filter(|c| c.status != status::DISABLED)
+            .map(|c| crate::agent::store::McpGrant {
+                id: c.id,
+                slug: c.slug,
+            }),
+    );
+    let allow_vault_writes = req.allow_vault_writes;
+    let (session, outcome) = state
         .agent
-        .launch(actor.user_id(), req)
-        .map_err(agent_error)
+        .launch(actor.user_id(), req, offered)
+        .map_err(agent_error)?;
+    let (connections, notice) = match outcome {
+        crate::agent::McpOutcome::Granted(g) => (g, None),
+        crate::agent::McpOutcome::Shell => (Vec::new(), None),
+        crate::agent::McpOutcome::OldHost => (
+            Vec::new(),
+            Some(format!(
+                "{host_name} can't use integrations — update storm-runtime"
+            )),
+        ),
+    };
+    if !connections.is_empty() {
+        let auth_db = state.auth_db.lock().await;
+        let detail = serde_json::json!({
+            "session_id": session.id,
+            "host_id": session.host_id,
+            "connections": connections.iter().map(|g| &g.id).collect::<Vec<_>>(),
+            "allow_vault_writes": allow_vault_writes,
+        });
+        let _ = auth_db.record_event(
+            "integration_grant",
+            Some(actor.user_id()),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        );
+    }
+    Ok(LaunchedSession {
+        session,
+        mcp: LaunchMcp {
+            connections,
+            allow_vault_writes,
+            notice,
+        },
+    })
 }
 
 pub async fn list_sessions(
@@ -1340,7 +1416,9 @@ pub async fn runtime_hello(
         let auth_db = state.auth_db.lock().await;
         let _ = auth_db.touch_host(host_id, &crate::index::now_rfc3339());
     }
-    state.agent.hello(host_id, hello).map_err(agent_error)
+    state.agent.hello(host_id, hello).map_err(agent_error)?;
+    sweep_gateway_sessions(state);
+    Ok(())
 }
 
 pub fn runtime_inventory(
@@ -1376,7 +1454,9 @@ pub fn runtime_status(
     state
         .agent
         .host_status(host_id, session, report)
-        .map_err(agent_error)
+        .map_err(agent_error)?;
+    sweep_gateway_sessions(state);
+    Ok(())
 }
 
 // ---- MCP Gateway: integrations (decisions 81, 81c) -------------------------
@@ -1740,6 +1820,11 @@ pub async fn update_integration(
         }
         store.update_connection(&c).map_err(internal)?;
     }
+    // A disabled connection, or one whose credential just changed, keeps no
+    // live upstream session: the next call opens one with the new state.
+    if c.status == status::DISABLED || sealed.is_some() {
+        state.gateway.sessions.close_connection(&c.id);
+    }
     if !events.is_empty() {
         let auth_db = state.auth_db.lock().await;
         for kind in events {
@@ -1768,6 +1853,10 @@ pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiR
         .expect("gateway store lock")
         .revoke_connection(&c.id, &now)
         .map_err(internal)?;
+    // Its grants die with it (§13; the rows stay for the audit), and its live
+    // upstream sessions close, so the next call is refused at once.
+    state.agent.revoke_grants_for(&c.id).map_err(internal)?;
+    state.gateway.sessions.close_connection(&c.id);
     let auth_db = state.auth_db.lock().await;
     integration_event(&auth_db, "integration_deleted", actor, &c, &now);
     Ok(())
@@ -1920,6 +2009,548 @@ pub async fn integration_tools(
         .collect();
     tools.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(tools)
+}
+
+// ---- MCP Gateway: an agent's call (decision 81e, spec §7) ------------------
+
+/// Methods an agent may send (spec §9). Anything else is refused.
+fn method_permitted(method: &str, c: Option<&Connection>) -> bool {
+    let resources = c.is_none_or(|c| c.expose_resources);
+    let prompts = c.is_none_or(|c| c.expose_prompts);
+    match method {
+        "initialize" | "ping" | "tools/list" | "tools/call" | "completion/complete" => true,
+        "resources/list"
+        | "resources/templates/list"
+        | "resources/read"
+        | "resources/subscribe"
+        | "resources/unsubscribe" => resources,
+        "prompts/list" | "prompts/get" => prompts,
+        _ => false,
+    }
+}
+
+/// What authorization established about a call, for the forwarding half.
+struct Authorized {
+    owner: String,
+    owner_role: crate::auth::users::Role,
+    /// `None` for the built-in `storm` connection.
+    connection: Option<Connection>,
+    /// The session's launch flag **and** `mcp_writable` (G-D5).
+    vault_writes: bool,
+}
+
+/// Every check in spec §7, in order. A refusal is a stable code.
+async fn authorize_call(
+    state: &Shared,
+    host_id: &str,
+    session_id: &str,
+    connection_id: &str,
+) -> Result<Authorized, String> {
+    // The host owns the session, and it is live.
+    let session = state
+        .agent
+        .get(session_id)
+        .map_err(|_| "not_your_session".to_string())?;
+    if session.host_id != host_id {
+        return Err("not_your_session".into());
+    }
+    if !matches!(session.status.as_str(), "starting" | "running") {
+        return Err("session_not_live".into());
+    }
+    // A live grant.
+    let (_, allow_vault_writes) = state
+        .agent
+        .grant(session_id, connection_id)
+        .map_err(|_| "not_granted".to_string())?
+        .ok_or_else(|| "not_granted".to_string())?;
+    // The owner is active (the A14 check keys get).
+    let owner_role = {
+        let auth_db = state.auth_db.lock().await;
+        match auth_db.user_by_id(&session.owner_user_id) {
+            Ok(Some(u)) if u.status == crate::auth::users::Status::Active => u.role,
+            _ => return Err("owner_inactive".into()),
+        }
+    };
+    // The connection is the owner's, and connected.
+    let connection = if connection_id == BUILTIN_ID {
+        None
+    } else {
+        let c = state
+            .gateway
+            .store
+            .lock()
+            .expect("gateway store lock")
+            .connection(connection_id)
+            .map_err(|_| "not_granted".to_string())?
+            .ok_or_else(|| "not_granted".to_string())?;
+        if c.owner_user_id != session.owner_user_id {
+            return Err("not_granted".into());
+        }
+        match c.status.as_str() {
+            status::CONNECTED => {}
+            status::NEEDS_REAUTH | status::ERROR => {
+                return Err(format!("integration_needs_reauth:{}", c.slug));
+            }
+            _ => return Err("not_granted".into()),
+        }
+        Some(c)
+    };
+    let vault_writes = allow_vault_writes
+        && state
+            .mcp_writable
+            .load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Authorized {
+        owner: session.owner_user_id,
+        owner_role,
+        connection,
+        vault_writes,
+    })
+}
+
+/// `POST /v1/runtime/sessions/{id}/mcp/{connection}` (spec §14): one JSON-RPC
+/// message from a session's bridge. The answer is a stream of lines — the
+/// request-scoped messages, then the final response — or nothing for a
+/// notification or an agent's answer to an elicitation.
+///
+/// **At most once.** Nothing here retries, and a request the gateway did not
+/// forward is answered `session_unknown`, which is the only case the bridge
+/// may replay `initialize` and resend.
+pub async fn integration_call(
+    state: &Shared,
+    host_id: &str,
+    session_id: &str,
+    connection_id: &str,
+    message: serde_json::Value,
+) -> ApiResult<tokio::sync::mpsc::Receiver<serde_json::Value>> {
+    use crate::gateway::session::{error_line, message_line};
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let id = crate::gateway::session::agent_id(&message);
+    let method = message
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
+    let is_request = method.is_some() && message.get("id").is_some();
+
+    let authorized = match authorize_call(state, host_id, session_id, connection_id).await {
+        Ok(a) => a,
+        Err(code) => {
+            if is_request {
+                let _ = tx.send(error_line(&id, &code)).await;
+            }
+            audit_call(
+                state,
+                None,
+                session_id,
+                host_id,
+                connection_id,
+                method.as_deref(),
+                None,
+                Err(&code),
+                0,
+                None,
+            );
+            return Ok(rx);
+        }
+    };
+
+    let Some(method) = method else {
+        // The agent answering an upstream request (an elicitation). Dropped
+        // when nothing waits for it — a late answer is never sent upstream.
+        if let (Some(up), Some(agent_id)) = (
+            state.gateway.sessions.get(session_id, connection_id),
+            message.get("id").and_then(|v| v.as_str()),
+        ) {
+            up.relay.answer(agent_id, &message);
+        }
+        return Ok(rx);
+    };
+    if !is_request {
+        // A notification. `initialized` is rmcp's to send, and it already
+        // did; `cancelled` and the rest go upstream when a session exists.
+        if method != "notifications/initialized"
+            && let Some(up) = state.gateway.sessions.get(session_id, connection_id)
+            && let Ok(n) = serde_json::from_value::<rmcp::model::ClientNotification>(
+                serde_json::json!({"method": method, "params": message.get("params")}),
+            )
+        {
+            up.notify(n).await;
+        }
+        return Ok(rx);
+    }
+
+    if !method_permitted(&method, authorized.connection.as_ref()) {
+        let _ = tx.send(error_line(&id, "method_not_permitted")).await;
+        return Ok(rx);
+    }
+    let tool = (method == "tools/call")
+        .then(|| {
+            message
+                .pointer("/params/name")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .flatten();
+    if let Some(name) = &tool {
+        let allowed = match &authorized.connection {
+            Some(c) => c.tool_allowlist.contains(name),
+            None => {
+                !crate::mcp::NEVER_FOR_AGENTS.contains(&name.as_str())
+                    && (authorized.vault_writes
+                        || !crate::mcp::WRITE_TOOLS.contains(&name.as_str()))
+            }
+        };
+        if !allowed {
+            let _ = tx.send(error_line(&id, "tool_not_allowed")).await;
+            audit_call(
+                state,
+                Some(&authorized.owner),
+                session_id,
+                host_id,
+                connection_id,
+                Some(&method),
+                tool.as_deref(),
+                Err("tool_not_allowed"),
+                0,
+                None,
+            );
+            return Ok(rx);
+        }
+    }
+
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    let host_id = host_id.to_string();
+    let connection_id = connection_id.to_string();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let outcome = run_call(
+            &state,
+            &authorized,
+            &session_id,
+            &host_id,
+            &connection_id,
+            &method,
+            &message,
+            tx.clone(),
+        )
+        .await;
+        let (result, bytes) = match outcome {
+            Ok(result) => {
+                let bytes = result.to_string().len();
+                if bytes > crate::gateway::session::RESPONSE_CAP {
+                    let _ = tx.send(error_line(&id, "response_too_large")).await;
+                    (Err("response_too_large".to_string()), Some(bytes as i64))
+                } else {
+                    let _ = tx
+                        .send(message_line(
+                            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                        ))
+                        .await;
+                    (Ok(()), Some(bytes as i64))
+                }
+            }
+            Err(CallFailure::Code(code)) => {
+                if code == "session_unknown" {
+                    // Not forwarded, so the bridge may replay `initialize`.
+                    let _ = tx
+                        .send(serde_json::json!({"storm_error": "session_unknown"}))
+                        .await;
+                } else {
+                    let _ = tx.send(error_line(&id, &code)).await;
+                }
+                (Err(code), None)
+            }
+            Err(CallFailure::Rpc(e)) => {
+                let _ = tx
+                    .send(message_line(
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "error": e}),
+                    ))
+                    .await;
+                (Err("upstream_error".to_string()), None)
+            }
+        };
+        audit_call(
+            &state,
+            Some(&authorized.owner),
+            &session_id,
+            &host_id,
+            &connection_id,
+            Some(&method),
+            tool.as_deref(),
+            result.as_ref().map(|_| ()).map_err(|e| e.as_str()),
+            started.elapsed().as_millis() as i64,
+            bytes,
+        );
+    });
+    Ok(rx)
+}
+
+enum CallFailure {
+    Code(String),
+    Rpc(rmcp::ErrorData),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_call(
+    state: &Shared,
+    authorized: &Authorized,
+    session_id: &str,
+    host_id: &str,
+    connection_id: &str,
+    method: &str,
+    message: &serde_json::Value,
+    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+) -> Result<serde_json::Value, CallFailure> {
+    if method == "initialize" {
+        return open_upstream(
+            state,
+            authorized,
+            session_id,
+            host_id,
+            connection_id,
+            message,
+        )
+        .await;
+    }
+    let Some(upstream) = state.gateway.sessions.get(session_id, connection_id) else {
+        return Err(CallFailure::Code("session_unknown".into()));
+    };
+    if method == "ping" {
+        return Ok(serde_json::json!({}));
+    }
+    let Some(_permit) = state.gateway.sessions.permit(session_id, connection_id) else {
+        return Err(CallFailure::Code("gateway_rate_limited".into()));
+    };
+    let request: rmcp::model::ClientRequest = serde_json::from_value(serde_json::json!({
+        "method": method,
+        "params": message.get("params").cloned().unwrap_or(serde_json::json!({})),
+    }))
+    .map_err(|_| CallFailure::Code("invalid_request".into()))?;
+    let agent_progress = message.pointer("/params/_meta/progressToken").cloned();
+    let mut result = upstream
+        .forward(request, agent_progress, tx)
+        .await
+        .map_err(|e| match e {
+            crate::gateway::session::ForwardError::Rpc(e) => CallFailure::Rpc(e),
+            crate::gateway::session::ForwardError::Upstream(e) => {
+                note_upstream_failure(state, authorized.connection.as_ref(), e);
+                CallFailure::Code(match e {
+                    crate::gateway::upstream::UpstreamError::Unauthorized
+                    | crate::gateway::upstream::UpstreamError::Credential => format!(
+                        "integration_needs_reauth:{}",
+                        authorized
+                            .connection
+                            .as_ref()
+                            .map_or(BUILTIN_SLUG, |c| &c.slug)
+                    ),
+                    other => other.code().to_string(),
+                })
+            }
+        })?;
+    if method == "tools/list"
+        && let Some(tools) = result.get_mut("tools").and_then(|t| t.as_array_mut())
+    {
+        // The agent sees only what it may call (G-D16, G-D5).
+        tools.retain(|t| {
+            let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            match &authorized.connection {
+                Some(c) => c.tool_allowlist.iter().any(|a| a == name),
+                None => {
+                    !crate::mcp::NEVER_FOR_AGENTS.contains(&name)
+                        && (authorized.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+                }
+            }
+        });
+    }
+    Ok(result)
+}
+
+/// An upstream that refused the credential is `needs_reauth` from now on
+/// (§12); one that is down records its code for the owner.
+fn note_upstream_failure(
+    state: &Shared,
+    connection: Option<&Connection>,
+    e: crate::gateway::upstream::UpstreamError,
+) {
+    let Some(c) = connection else { return };
+    let store = state.gateway.store.lock().expect("gateway store lock");
+    if let Ok(Some(mut row)) = store.connection(&c.id) {
+        row.last_error_code = Some(e.code().to_string());
+        if e.needs_reauth() && row.status == status::CONNECTED {
+            row.status = status::NEEDS_REAUTH.into();
+        }
+        row.updated_at = crate::index::now_rfc3339();
+        let _ = store.update_connection(&row);
+    }
+}
+
+/// The agent's `initialize`: a fresh upstream session (replacing any old one)
+/// presenting the agent's capabilities minus what is never forwarded.
+async fn open_upstream(
+    state: &Shared,
+    authorized: &Authorized,
+    session_id: &str,
+    host_id: &str,
+    connection_id: &str,
+    message: &serde_json::Value,
+) -> Result<serde_json::Value, CallFailure> {
+    let agent_caps = message
+        .pointer("/params/capabilities")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let events = {
+        let state = state.clone();
+        let session_id = session_id.to_string();
+        let host_id = host_id.to_string();
+        let connection_id = connection_id.to_string();
+        let owner = authorized.owner.clone();
+        move |event: crate::gateway::session::RelayEvent| match event {
+            crate::gateway::session::RelayEvent::Unsolicited(m) => {
+                state.agent.mcp_message(&session_id, &connection_id, m);
+            }
+            crate::gateway::session::RelayEvent::UrlElicitationDeclined => {
+                audit_call(
+                    &state,
+                    Some(&owner),
+                    &session_id,
+                    &host_id,
+                    &connection_id,
+                    Some("elicitation/create"),
+                    None,
+                    Err("url_elicitation_declined"),
+                    0,
+                    None,
+                );
+            }
+        }
+    };
+    let relay = crate::gateway::session::Relay::new(&agent_caps, events);
+    let service = match &authorized.connection {
+        Some(c) => {
+            let target = state.gateway.target(c).map_err(|e| {
+                note_upstream_failure(state, Some(c), e);
+                CallFailure::Code(format!("integration_needs_reauth:{}", c.slug))
+            })?;
+            crate::gateway::upstream::connect(target, relay)
+                .await
+                .map_err(|e| {
+                    note_upstream_failure(state, Some(c), e);
+                    CallFailure::Code(if e.needs_reauth() {
+                        format!("integration_needs_reauth:{}", c.slug)
+                    } else {
+                        e.code().to_string()
+                    })
+                })?
+        }
+        None => connect_builtin(state, authorized, session_id, host_id, relay)
+            .await
+            .map_err(|_| CallFailure::Code("upstream_unavailable".into()))?,
+    };
+    let info = service
+        .peer_info()
+        .map(|i| serde_json::to_value(&*i).unwrap_or_default())
+        .unwrap_or_default();
+    let mut result = info;
+    // What the agent is told the server offers follows the owner's switches
+    // (G-D17): a hidden capability is one the agent never tries.
+    if let (Some(c), Some(caps)) = (
+        &authorized.connection,
+        result
+            .get_mut("capabilities")
+            .and_then(|c| c.as_object_mut()),
+    ) {
+        if !c.expose_resources {
+            caps.remove("resources");
+        }
+        if !c.expose_prompts {
+            caps.remove("prompts");
+        }
+    }
+    if let Some(obj) = result.as_object_mut()
+        && !obj.contains_key("serverInfo")
+    {
+        obj.insert(
+            "serverInfo".into(),
+            serde_json::json!({"name": authorized.connection.as_ref().map_or(BUILTIN_SLUG, |c| &c.slug), "version": ""}),
+        );
+    }
+    state.gateway.sessions.put(
+        session_id,
+        connection_id,
+        crate::gateway::session::Upstream::new(service),
+    );
+    Ok(result)
+}
+
+/// The built-in `storm` connection: `mcp.rs`'s own handler, served in process
+/// over an in-memory pipe as `Actor::Agent` (spec §5). No network, no
+/// credential, and the same client path as any upstream.
+async fn connect_builtin(
+    state: &Shared,
+    authorized: &Authorized,
+    session_id: &str,
+    host_id: &str,
+    relay: crate::gateway::session::Relay,
+) -> anyhow::Result<
+    rmcp::service::RunningService<rmcp::service::RoleClient, crate::gateway::session::Relay>,
+> {
+    use rmcp::ServiceExt;
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let actor = Actor::Agent {
+        session_id: session_id.to_string(),
+        host_id: host_id.to_string(),
+        user_id: authorized.owner.clone(),
+        role: authorized.owner_role,
+    };
+    let handler = crate::mcp::Storm::for_agent(state.clone(), authorized.vault_writes, actor);
+    tokio::spawn(async move {
+        if let Ok(running) = handler.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    Ok(relay.serve(client_io).await?)
+}
+
+/// One metadata-only audit row (G-D18).
+#[allow(clippy::too_many_arguments)]
+fn audit_call(
+    state: &Shared,
+    owner: Option<&str>,
+    session_id: &str,
+    host_id: &str,
+    connection_id: &str,
+    method: Option<&str>,
+    tool: Option<&str>,
+    outcome: Result<(), &str>,
+    duration_ms: i64,
+    response_bytes: Option<i64>,
+) {
+    state
+        .gateway
+        .record_call(crate::gateway::store::CallRecord {
+            at_ms: crate::gateway::now_ms(),
+            owner_user_id: owner.unwrap_or("").to_string(),
+            connection_id: connection_id.to_string(),
+            session_id: Some(session_id.to_string()),
+            host_id: Some(host_id.to_string()),
+            method: method.unwrap_or("response").to_string(),
+            tool: tool.map(str::to_string),
+            outcome: if outcome.is_ok() { "ok" } else { "refused" }.into(),
+            error_code: outcome.err().map(str::to_string),
+            duration_ms: Some(duration_ms),
+            response_bytes,
+        });
+}
+
+/// Closes the upstream sessions of agent sessions that have ended (§13: a
+/// session's grants die with it). Called whenever a host reports.
+pub fn sweep_gateway_sessions(state: &Shared) {
+    for session in state.gateway.sessions.sessions() {
+        let ended = state.agent.get(&session).map_or(true, |r| r.is_ended());
+        if ended {
+            state.gateway.sessions.close_session(&session);
+        }
+    }
 }
 
 #[cfg(test)]

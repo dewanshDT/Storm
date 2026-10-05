@@ -380,16 +380,61 @@ pub(crate) mod tests {
         async fn call_tool(
             &self,
             request: rmcp::model::CallToolRequestParams,
-            _: RequestContext<RoleServer>,
+            ctx: RequestContext<RoleServer>,
         ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(
-                CallToolResult::success(vec![rmcp::model::ContentBlock::text(format!(
-                    "called {}",
-                    request.name
-                ))])
-                .into(),
-            )
+            let text = match request.name.as_ref() {
+                // What the gateway declared upstream (§9: never sampling,
+                // roots or `elicitation.url`).
+                "caps" => ctx
+                    .peer
+                    .peer_info()
+                    .map(|i| serde_json::to_string(&i.capabilities).unwrap_or_default())
+                    .unwrap_or_default(),
+                // Two progress notifications on this call's stream, then done.
+                "slow" => {
+                    if let Some(token) = ctx.meta.get_progress_token() {
+                        for n in 1..=2 {
+                            let p: rmcp::model::ProgressNotificationParam =
+                                serde_json::from_value(serde_json::json!({
+                                    "progressToken": token, "progress": n, "total": 2
+                                }))
+                                .unwrap();
+                            let _ = ctx.peer.notify_progress(p).await;
+                        }
+                    }
+                    "slow done".into()
+                }
+                // A form elicitation (or a URL one), answered by the agent.
+                "ask" | "ask_url" => {
+                    let params = if request.name == "ask" {
+                        serde_json::json!({"mode": "form", "message": "lang?",
+                            "requestedSchema": {"type": "object", "properties": {"answer": {"type": "string"}}}})
+                    } else {
+                        serde_json::json!({"mode": "url", "message": "log in",
+                            "url": "https://example.com/login", "elicitationId": "e1"})
+                    };
+                    let params: rmcp::model::ElicitRequestParams =
+                        serde_json::from_value(params).unwrap();
+                    let answer = ctx
+                        .peer
+                        .send_request(rmcp::model::ServerRequest::ElicitRequest(
+                            rmcp::model::ElicitRequest::new(params),
+                        ))
+                        .await;
+                    format!(
+                        "answer {}",
+                        serde_json::to_string(&answer.ok()).unwrap_or_default()
+                    )
+                }
+                // Holds the call open, for the in-flight cases.
+                "hang" => {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    "late".into()
+                }
+                name => format!("called {name}"),
+            };
+            Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(text)]).into())
         }
     }
 

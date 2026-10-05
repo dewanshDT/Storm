@@ -342,6 +342,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(runtime_output),
         )
         .route("/v1/runtime/sessions/{id}/status", post(runtime_status))
+        // The MCP Gateway (decision 81e): a session's bridge traffic, carried
+        // by the host's existing token — no new credential (G-D3).
+        .route(
+            "/v1/runtime/sessions/{id}/mcp/{connection}",
+            post(runtime_mcp),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -1819,6 +1825,28 @@ async fn runtime_status(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// One JSON-RPC message from a session's bridge; the answer streams back as
+/// newline-delimited JSON lines (`{"message": …}` or `{"storm_error": …}`).
+async fn runtime_mcp(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path((id, connection)): Path<(String, String)>,
+    Json(message): Json<serde_json::Value>,
+) -> ApiResult<axum::response::Response> {
+    use futures_util::StreamExt;
+    let rx = crate::ops::integration_call(&state, &auth.host.id, &id, &connection, message).await?;
+    let lines = tokio_stream::wrappers::ReceiverStream::new(rx).map(|line| {
+        let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
+        bytes.push(b'\n');
+        Ok::<_, std::convert::Infallible>(bytes)
+    });
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from_stream(lines))
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn agent_host_workspaces(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
@@ -1833,7 +1861,7 @@ async fn agent_launch(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Json(req): Json<crate::agent::Launch>,
-) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+) -> ApiResult<Json<crate::ops::LaunchedSession>> {
     Ok(Json(crate::ops::launch_session(&state, &actor, req).await?))
 }
 
@@ -6842,6 +6870,703 @@ pub(crate) mod tests {
             created_detail.contains("mcp.example.com"),
             "{created_detail}"
         );
+    }
+
+    // ---- MCP Gateway: the host-tier route (decision 81e) -----------------
+
+    struct GatewayFixture {
+        app: Router,
+        state: Shared,
+        owner: String,
+        owner_bearer: String,
+        host_id: String,
+        host_bearer: String,
+        /// The host's link, so tests can see what was sent down it.
+        link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+        up: crate::gateway::upstream::tests::MockUpstream,
+        connection: String,
+    }
+
+    fn host_caps(bridge: bool) -> serde_json::Value {
+        serde_json::json!({
+            "providers": [
+                {"id": "claude-code", "kind": "cli", "interactions": ["terminal"], "available": true},
+                {"id": "shell", "kind": "cli", "interactions": ["terminal"], "available": true},
+            ],
+            "workspaces": ["storm"],
+            "max_sessions": 8,
+            "mcp_bridge": bridge,
+        })
+    }
+
+    /// An owner, a mock upstream connected as a static integration with every
+    /// tool allowed, and an enrolled host that is online and can bridge.
+    async fn gateway_fixture(dir: &FsPath) -> GatewayFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        state.gateway.set_allow_http_upstreams(true);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let up = crate::gateway::upstream::tests::mock(&[
+            "echo", "slow", "ask", "ask_url", "caps", "hang", "secret",
+        ]);
+        let url = crate::gateway::upstream::tests::serve_mock(
+            up.clone(),
+            Some(("x-api-key", "upstream-canary-route".into())),
+        )
+        .await;
+        let connection = create_against(&app, &owner_bearer, &url, "upstream-canary-route").await;
+        // The owner's test turns every tool on; then `secret` is turned off.
+        let (_, test) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{connection}/test"),
+                serde_json::json!({}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(test["ok"], true, "{test}");
+        send(
+            &app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{connection}"),
+                serde_json::json!({"tool_allowlist": ["echo", "slow", "ask", "ask_url", "caps", "hang"]}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        let (host_id, token) = enroll_a_host(&app, &owner_bearer).await;
+        let (_, link) = state.agent.connect_host(&host_id);
+        state
+            .agent
+            .hello(&host_id, serde_json::from_value(host_caps(true)).unwrap())
+            .unwrap();
+        GatewayFixture {
+            app,
+            state,
+            owner,
+            owner_bearer,
+            host_id,
+            host_bearer: format!("Bearer {token}"),
+            link,
+            up,
+            connection,
+        }
+    }
+
+    impl GatewayFixture {
+        /// Launches a session and has the host report it running.
+        async fn launch(&mut self, provider: &str, allow_vault_writes: bool) -> serde_json::Value {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/agent/sessions",
+                    serde_json::json!({
+                        "host_id": self.host_id, "workspace": "storm", "provider": provider,
+                        "terminal": {"cols": 80, "rows": 24},
+                        "allow_vault_writes": allow_vault_writes,
+                    }),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let id = body["id"].as_str().unwrap().to_string();
+            self.report(&id, "running").await;
+            body
+        }
+
+        async fn report(&self, session: &str, status: &str) {
+            let (code, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{session}/status"),
+                    serde_json::json!({"status": status}),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success(), "{code} {body}");
+        }
+
+        /// One bridge message; every line of the answer.
+        async fn mcp(
+            &self,
+            session: &str,
+            connection: &str,
+            message: serde_json::Value,
+        ) -> Vec<serde_json::Value> {
+            mcp_as(&self.app, &self.host_bearer, session, connection, message).await
+        }
+
+        async fn initialize(&self, session: &str, connection: &str) -> serde_json::Value {
+            let lines = self
+                .mcp(
+                    session,
+                    connection,
+                    serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {"roots": {"listChanged": true}, "sampling": {}, "elicitation": {"form": {}, "url": {}}},
+                        "clientInfo": {"name": "claude-code", "version": "2.1.289"},
+                    }}),
+                )
+                .await;
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            lines[0]["message"]["result"].clone()
+        }
+
+        async fn call(
+            &self,
+            session: &str,
+            connection: &str,
+            tool: &str,
+        ) -> Vec<serde_json::Value> {
+            self.mcp(
+                session,
+                connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": tool, "arguments": {}}}),
+            )
+            .await
+        }
+
+        fn upstream_calls(&self) -> usize {
+            self.up.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn gateway_request(
+        bearer: &str,
+        session: &str,
+        connection: &str,
+        message: &serde_json::Value,
+    ) -> axum::http::Request<axum::body::Body> {
+        post_json_with_auth(
+            &format!("/v1/runtime/sessions/{session}/mcp/{connection}"),
+            message.clone(),
+            bearer,
+        )
+    }
+
+    async fn mcp_as(
+        app: &Router,
+        bearer: &str,
+        session: &str,
+        connection: &str,
+        message: serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        let response = app
+            .clone()
+            .oneshot(gateway_request(bearer, session, connection, &message))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn error_code(lines: &[serde_json::Value]) -> Option<String> {
+        lines
+            .last()
+            .and_then(|l| l.pointer("/message/error/data/storm_error"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    fn tool_text(lines: &[serde_json::Value]) -> String {
+        lines
+            .last()
+            .and_then(|l| l.pointer("/message/result/content/0/text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn an_agent_reaches_an_integration_through_the_host_link_and_only_its_allowlist() {
+        let dir = tempdir::TempDir::new("storm-gateway-route").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let launched = f.launch("claude-code", false).await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        // The launch granted the owner's connection and `storm`, and told the
+        // host ids and slugs only (AM23).
+        let granted: Vec<&str> = launched["mcp"]["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(granted, vec!["storm", f.connection.as_str()]);
+        let start = serde_json::to_string(&f.link.try_recv().unwrap()).unwrap();
+        assert!(start.contains("\"mcp\""), "{start}");
+        assert!(
+            !start.contains("upstream-canary"),
+            "a credential reached the host: {start}"
+        );
+
+        // Before `initialize`, the gateway forwards nothing (G-D19).
+        let lines = f.call(&session, &f.connection, "echo").await;
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({"storm_error": "session_unknown"})]
+        );
+        assert_eq!(
+            f.upstream_calls(),
+            0,
+            "a session_unknown request was forwarded"
+        );
+
+        let init = f.initialize(&session, &f.connection).await;
+        assert_eq!(init["serverInfo"]["name"], "mock-upstream");
+
+        // The agent sees only the allowlist, and calls exactly once.
+        let lines = f
+            .mcp(
+                &session,
+                &f.connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .await;
+        let names: Vec<String> = lines[0]["message"]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!names.contains(&"secret".to_string()), "{names:?}");
+        assert!(names.contains(&"echo".to_string()));
+        let lines = f.call(&session, &f.connection, "echo").await;
+        assert_eq!(tool_text(&lines), "called echo");
+        assert_eq!(lines[0]["message"]["id"], 7);
+        assert_eq!(f.upstream_calls(), 1);
+        let lines = f.call(&session, &f.connection, "secret").await;
+        assert_eq!(error_code(&lines).as_deref(), Some("tool_not_allowed"));
+        assert_eq!(f.upstream_calls(), 1, "a disallowed tool reached upstream");
+
+        // What went upstream: no sampling, no roots, no URL elicitation (§9).
+        let caps: serde_json::Value =
+            serde_json::from_str(&tool_text(&f.call(&session, &f.connection, "caps").await))
+                .unwrap();
+        assert_eq!(caps, serde_json::json!({"elicitation": {"form": {}}}));
+
+        // Every call left a metadata-only audit row with its session.
+        let calls = f
+            .state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(20)
+            .unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.session_id.as_deref() == Some(session.as_str())
+                    && c.tool.as_deref() == Some("echo")
+                    && c.outcome == "ok")
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.error_code.as_deref() == Some("tool_not_allowed"))
+        );
+
+        // A user credential cannot reach the route; it is the host's tier.
+        let response = f
+            .app
+            .clone()
+            .oneshot(gateway_request(
+                &f.owner_bearer,
+                &session,
+                &f.connection,
+                &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn every_authorization_check_refuses_with_a_stable_code() {
+        // Spec §7, one check at a time.
+        let dir = tempdir::TempDir::new("storm-gateway-authz").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+
+        // A connection added after launch is not granted (§6: fixed grants).
+        let later = create_github(&f.app, &f.owner_bearer, "ghp_later").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error_code(&f.call(&session, &later, "echo").await).as_deref(),
+            Some("not_granted")
+        );
+        // An unknown session, and a session that is not this host's: another
+        // enrolled host's valid token reaches the route and is refused.
+        assert_eq!(
+            error_code(&f.call("ags_NOPE", &f.connection, "echo").await).as_deref(),
+            Some("not_your_session")
+        );
+        let (_, other) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let lines = mcp_as(&f.app, &format!("Bearer {other}"), &session, &f.connection,
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": {}}})).await;
+        assert_eq!(error_code(&lines).as_deref(), Some("not_your_session"));
+        // Disabled: refused at once on the live session.
+        let path = format!("{CONNECTIONS}/{}", f.connection);
+        send(
+            &f.app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("not_granted")
+        );
+        send(
+            &f.app,
+            patch_json_with_auth(&path, serde_json::json!({"enabled": true}), &f.owner_bearer),
+        )
+        .await;
+        // Disabling closed the upstream session: the bridge must re-initialize.
+        assert_eq!(
+            f.call(&session, &f.connection, "echo").await,
+            vec![serde_json::json!({"storm_error": "session_unknown"})]
+        );
+        f.initialize(&session, &f.connection).await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+
+        // A disabled owner: every call refused (the A14 check). Another
+        // owner exists so the last-owner rule allows the disable.
+        {
+            let mut db = f.state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "backup",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Owner,
+                },
+                "2026-10-05T00:00:00Z",
+            )
+            .unwrap();
+            crate::auth::users::set_status(
+                &mut db,
+                "dewansh",
+                crate::auth::users::Status::Disabled,
+                "2026-10-05T00:00:01Z",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("owner_inactive")
+        );
+        {
+            let mut db = f.state.auth_db.lock().await;
+            crate::auth::users::set_status(
+                &mut db,
+                "dewansh",
+                crate::auth::users::Status::Active,
+                "2026-10-05T00:00:02Z",
+            )
+            .unwrap();
+        }
+
+        // Disconnected mid-session: refused at once, and the grant is revoked.
+        let before = f.upstream_calls();
+        let (status, _) = send(&f.app, delete_with_auth(&path, &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("not_granted")
+        );
+        assert_eq!(f.upstream_calls(), before);
+        assert_eq!(f.state.agent.grant(&session, &f.connection).unwrap(), None);
+
+        // An ended session: refused, and its upstream sessions are gone.
+        f.initialize(&session, "storm").await;
+        f.report(&session, "completed").await;
+        assert_eq!(
+            error_code(&f.call(&session, "storm", "list_vaults").await).as_deref(),
+            Some("session_not_live")
+        );
+        assert!(f.state.gateway.sessions.get(&session, "storm").is_none());
+        let _ = &f.owner;
+    }
+
+    #[tokio::test]
+    async fn shell_gets_nothing_and_an_old_host_is_announced() {
+        let dir = tempdir::TempDir::new("storm-gateway-shell").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let shell = f.launch("shell", false).await;
+        assert_eq!(shell["mcp"]["connections"], serde_json::json!([]));
+        assert_eq!(shell["mcp"]["notice"], serde_json::Value::Null);
+        let session = shell["id"].as_str().unwrap();
+        assert_eq!(
+            error_code(&f.call(session, "storm", "list_vaults").await).as_deref(),
+            Some("not_granted")
+        );
+
+        // The same host, reporting no bridge: no grants, and the launch says why.
+        f.state
+            .agent
+            .hello(
+                &f.host_id,
+                serde_json::from_value(host_caps(false)).unwrap(),
+            )
+            .unwrap();
+        let old = f.launch("claude-code", false).await;
+        assert_eq!(old["mcp"]["connections"], serde_json::json!([]));
+        assert_eq!(
+            old["mcp"]["notice"],
+            "build-vm can't use integrations — update storm-runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_builtin_storm_connection_reads_and_writes_only_under_both_flags_and_never_deletes()
+    {
+        let dir = tempdir::TempDir::new("storm-gateway-builtin").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let tools_of = |lines: Vec<serde_json::Value>| -> Vec<String> {
+            lines[0]["message"]["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let list = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+        // Read only: the launch toggle is off.
+        let s1 = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let init = f.initialize(&s1, "storm").await;
+        assert_eq!(init["serverInfo"]["name"], "storm");
+        let tools = tools_of(f.mcp(&s1, "storm", list.clone()).await);
+        assert!(tools.contains(&"list_vaults".to_string()), "{tools:?}");
+        assert!(
+            !tools
+                .iter()
+                .any(|t| crate::mcp::WRITE_TOOLS.contains(&t.as_str())),
+            "{tools:?}"
+        );
+        let lines = f.call(&s1, "storm", "list_vaults").await;
+        assert!(lines[0]["message"]["result"].is_object(), "{lines:?}");
+        assert_eq!(
+            error_code(&f.call(&s1, "storm", "create_note").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+
+        // The toggle without `mcp_writable`: still read only (G-D5).
+        let s2 = f.launch("claude-code", true).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&s2, "storm").await;
+        let tools = tools_of(f.mcp(&s2, "storm", list.clone()).await);
+        assert!(!tools.contains(&"create_note".to_string()), "{tools:?}");
+
+        // Both: writes, and still never `delete_note`.
+        f.state
+            .mcp_writable
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let s3 = f.launch("claude-code", true).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&s3, "storm").await;
+        let tools = tools_of(f.mcp(&s3, "storm", list.clone()).await);
+        assert!(tools.contains(&"create_note".to_string()), "{tools:?}");
+        assert!(!tools.contains(&"delete_note".to_string()), "{tools:?}");
+        assert_eq!(
+            error_code(&f.call(&s3, "storm", "delete_note").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+        // Switching `mcp_writable` off applies to the live session at once.
+        f.state
+            .mcp_writable
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            error_code(&f.call(&s3, "storm", "create_note").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_scoped_messages_ride_their_calls_stream() {
+        // Progress with the agent's own token, a form elicitation answered by
+        // the agent, and a URL elicitation that never reaches it (G-D23).
+        let dir = tempdir::TempDir::new("storm-gateway-stream").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+
+        let lines = f
+            .mcp(&session, &f.connection, serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "slow", "arguments": {}, "_meta": {"progressToken": "agent-tok"}}}))
+            .await;
+        let progress: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| {
+                l.pointer("/message/method") == Some(&serde_json::json!("notifications/progress"))
+            })
+            .collect();
+        assert_eq!(progress.len(), 2, "{lines:?}");
+        assert!(
+            progress
+                .iter()
+                .all(|p| p.pointer("/message/params/progressToken")
+                    == Some(&serde_json::json!("agent-tok")))
+        );
+        assert_eq!(tool_text(&lines), "slow done");
+
+        // A form elicitation: read the stream until it arrives, answer it on
+        // a second POST, then read the final result.
+        use futures_util::StreamExt;
+        let response = f
+            .app
+            .clone()
+            .oneshot(gateway_request(&f.host_bearer, &session, &f.connection, &serde_json::json!(
+                {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "ask", "arguments": {}}})))
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut buffer = String::new();
+        let elicitation = loop {
+            let chunk = body.next().await.unwrap().unwrap();
+            buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+            if let Some(line) = buffer.lines().next() {
+                break serde_json::from_str::<serde_json::Value>(line).unwrap();
+            }
+        };
+        assert_eq!(elicitation["message"]["method"], "elicitation/create");
+        let elicit_id = elicitation["message"]["id"].as_str().unwrap().to_string();
+        assert!(elicit_id.starts_with("storm-elicit-"));
+        let answered = f
+            .mcp(
+                &session,
+                &f.connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": elicit_id,
+                "result": {"action": "accept", "content": {"answer": "rust"}}}),
+            )
+            .await;
+        assert!(answered.is_empty());
+        let mut rest = String::new();
+        while let Some(chunk) = body.next().await {
+            rest.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+        }
+        let last: serde_json::Value = serde_json::from_str(rest.lines().last().unwrap()).unwrap();
+        let text = last
+            .pointer("/message/result/content/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(text.contains("accept") && text.contains("rust"), "{text}");
+        // A late second answer to the same elicitation is dropped.
+        assert!(
+            f.mcp(
+                &session,
+                &f.connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": elicit_id,
+            "result": {"action": "accept"}})
+            )
+            .await
+            .is_empty()
+        );
+
+        // URL mode: declined by the gateway, never on the agent's stream.
+        let lines = f.call(&session, &f.connection, "ask_url").await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(tool_text(&lines).contains("decline"), "{lines:?}");
+        let calls = f
+            .state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(50)
+            .unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.error_code.as_deref() == Some("url_elicitation_declined"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_call_fails_once_when_its_upstream_session_is_lost_and_is_not_retried() {
+        // R7 at the gateway: a call whose upstream session goes away (as on a
+        // server restart) ends with one error, upstream executed it once, and
+        // the next request is `session_unknown` — never a silent resend.
+        let dir = tempdir::TempDir::new("storm-gateway-inflight").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+        let app = f.app.clone();
+        let bearer = f.host_bearer.clone();
+        let (s, c) = (session.clone(), f.connection.clone());
+        let call = tokio::spawn(async move {
+            mcp_as(
+                &app,
+                &bearer,
+                &s,
+                &c,
+                serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                "params": {"name": "hang", "arguments": {}}}),
+            )
+            .await
+        });
+        for _ in 0..100 {
+            if f.upstream_calls() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(f.upstream_calls(), 1);
+        f.state.gateway.sessions.close_session(&session);
+        let lines = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(error_code(&lines).is_some(), "{lines:?}");
+        assert_eq!(f.upstream_calls(), 1, "the in-flight call was re-sent");
+        assert_eq!(
+            f.call(&session, &f.connection, "echo").await,
+            vec![serde_json::json!({"storm_error": "session_unknown"})]
+        );
+        assert_eq!(f.upstream_calls(), 1);
     }
 
     #[tokio::test]

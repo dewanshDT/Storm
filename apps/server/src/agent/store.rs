@@ -41,6 +41,14 @@ impl SessionRecord {
     }
 }
 
+/// A granted connection as the host is told of it (AM23): an id and a slug,
+/// **never a credential and never a user**.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpGrant {
+    pub id: String,
+    pub slug: String,
+}
+
 /// A provider other than the one asked for, said out loud (freeze §6).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fallback {
@@ -87,7 +95,28 @@ impl Store {
                  cols              INTEGER NOT NULL,
                  rows              INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS sessions_by_host ON sessions(host_id);",
+             CREATE INDEX IF NOT EXISTS sessions_by_host ON sessions(host_id);
+
+             -- The MCP Gateway's grants (spec §6, decision 81e), snapshotted at
+             -- launch and fixed for the session's life. Additive: two new
+             -- tables, the sessions table untouched.
+             CREATE TABLE IF NOT EXISTS session_mcp (
+                 session_id         TEXT PRIMARY KEY,
+                 allow_vault_writes INTEGER NOT NULL,
+                 created_at         TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS session_mcp_grants (
+                 session_id    TEXT NOT NULL,
+                 connection_id TEXT NOT NULL,
+                 slug          TEXT NOT NULL,
+                 granted_at    TEXT NOT NULL,
+                 -- Set when the connection is disconnected (§13). The row is
+                 -- kept for the audit; a revoked grant authorizes nothing.
+                 revoked_at    TEXT,
+                 PRIMARY KEY (session_id, connection_id)
+             );
+             CREATE INDEX IF NOT EXISTS grants_by_connection
+                 ON session_mcp_grants(connection_id);",
         )?;
         Ok(Self { conn })
     }
@@ -182,6 +211,73 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Records a session's grants and its vault-write flag, in one
+    /// transaction with nothing else: the launch writes these before `start`
+    /// is sent, so a host can never be told of a grant that is not on disk.
+    pub fn insert_grants(
+        &mut self,
+        session_id: &str,
+        allow_vault_writes: bool,
+        grants: &[McpGrant],
+        now: &str,
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO session_mcp (session_id, allow_vault_writes, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![session_id, allow_vault_writes, now],
+        )?;
+        for g in grants {
+            tx.execute(
+                "INSERT INTO session_mcp_grants (session_id, connection_id, slug, granted_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![session_id, g.id, g.slug, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A live grant: the connection's slug and the session's write flag, or
+    /// `None` when there is no grant or it was revoked.
+    pub fn grant(&self, session_id: &str, connection_id: &str) -> Result<Option<(String, bool)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT g.slug, m.allow_vault_writes
+                 FROM session_mcp_grants g JOIN session_mcp m ON m.session_id = g.session_id
+                 WHERE g.session_id = ?1 AND g.connection_id = ?2 AND g.revoked_at IS NULL",
+                params![session_id, connection_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// A session's live grants, for the record the owner sees.
+    #[cfg(test)]
+    pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT connection_id, slug FROM session_mcp_grants
+             WHERE session_id = ?1 AND revoked_at IS NULL ORDER BY slug",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok(McpGrant {
+                id: r.get(0)?,
+                slug: r.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Marks every grant of a connection revoked (§13); how many changed.
+    pub fn revoke_grants_for(&self, connection_id: &str, now: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE session_mcp_grants SET revoked_at = ?2
+             WHERE connection_id = ?1 AND revoked_at IS NULL",
+            params![connection_id, now],
+        )?)
     }
 
     pub fn delete(&self, id: &str) -> Result<bool> {

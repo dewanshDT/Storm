@@ -1163,8 +1163,10 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
                 "terminal": {"cols": 80, "rows": 24},
             }))
             .unwrap(),
+            Vec::new(),
         )
-        .unwrap();
+        .unwrap()
+        .0;
     let host = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
     state
         .agent
