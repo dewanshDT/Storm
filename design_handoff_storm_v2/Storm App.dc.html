@@ -1,0 +1,1266 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+*{box-sizing:border-box}
+a{color:var(--accent,oklch(0.68 0.15 293))}
+a:hover{color:var(--text,oklch(0.95 0.008 55))}
+select option{background:#2a2826;color:#eee}
+</style>
+</helmet>
+<div style="{{ rootVars }}">
+<div style="{{ frameStyle }}">
+
+<sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+  <div style="position:absolute;inset:0;display:flex">
+    <div style="width:56px;flex:none;background:var(--bg,oklch(0.22 0.008 55));border-right:1px solid var(--border,oklch(0.36 0.008 55));display:flex;flex-direction:column;align-items:center;padding:16px 0 14px;gap:8px">
+      <div onClick="{{ goNotes }}" title="Notes" style="{{ notesRailStyle }}">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><path d="M9 13h6M9 17h4"></path></svg>
+        <span style="font-size:10px;letter-spacing:.02em">Notes</span>
+      </div>
+      <div onClick="{{ goAgents }}" title="Agents" style="{{ agentsRailStyle }}">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="m7 10 3 2-3 2"></path><path d="M13 15h4"></path></svg>
+        <span style="font-size:10px;letter-spacing:.02em">Agents</span>
+        <sc-if value="{{ hasRunning }}" hint-placeholder-val="{{ false }}">
+          <span style="position:absolute;top:3px;right:6px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;background:var(--accent,oklch(0.68 0.15 293));color:var(--on-accent,oklch(0.16 0.03 293));font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;display:flex;align-items:center;justify-content:center">{{ runningCount }}</span>
+        </sc-if>
+      </div>
+      <div style="flex:1"></div>
+      <div onClick="{{ toggleStatus }}" title="Status" style="width:40px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:var(--r-control,10px)">
+        <div style="{{ statusDotStyle }}"></div>
+      </div>
+      <div onClick="{{ goSettings }}" title="Settings" style="{{ settingsRailStyle }}">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg>
+      </div>
+    </div>
+
+    <div style="width:260px;flex:none;background:var(--surface,oklch(0.27 0.008 55));border-right:1px solid var(--border,oklch(0.36 0.008 55));display:flex;flex-direction:column;min-height:0">
+      <sc-if value="{{ isNotes }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:16px 12px 8px;display:flex;flex-direction:column;gap:8px">
+          <div onClick="{{ toggleVaultMenu }}" style="display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:var(--r-control,10px);cursor:pointer" style-hover="background:var(--surface2)">
+            <div style="{{ vaultTileStyle }}">{{ vaultInitial }}</div>
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+              <span style="font-size:14px;font-weight:600;color:var(--text,oklch(0.95 0.008 55))">{{ vaultName }}</span>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3,oklch(0.66 0.008 55))">{{ syncShort }}</span>
+            </div>
+            <span style="color:var(--text3,oklch(0.66 0.008 55));font-size:12px">▾</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface2,oklch(0.31 0.008 55));border:1px solid var(--border,oklch(0.36 0.008 55));color:var(--text3,oklch(0.66 0.008 55));font-size:13px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+            <span style="flex:1">Search {{ vaultName }}</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px">⌘K</span>
+          </div>
+        </div>
+        <div style="flex:1;overflow:auto;padding:4px 8px 12px;display:flex;flex-direction:column">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3,oklch(0.66 0.008 55));padding:10px 8px 6px">Recent</div>
+          <sc-for list="{{ recentRows }}" as="r" hint-placeholder-count="4">
+            <div onClick="{{ r.open }}" style="{{ r.rowStyle }}">
+              <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px">{{ r.title }}</span>
+              <span style="{{ r.tagStyle }}">{{ r.vault }}</span>
+            </div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3,oklch(0.66 0.008 55));padding:16px 8px 6px">Folders</div>
+          <sc-for list="{{ treeRows }}" as="t" hint-placeholder-count="6">
+            <div onClick="{{ t.click }}" style="{{ t.rowStyle }}">
+              <span style="width:12px;flex:none;color:var(--text3,oklch(0.66 0.008 55));font-size:10px">{{ t.chev }}</span>
+              <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.name }}</span>
+              <sc-if value="{{ t.unseen }}" hint-placeholder-val="{{ false }}"><span title="Changed by an agent since you last opened it" style="width:6px;height:6px;border-radius:999px;background:var(--accent,oklch(0.68 0.15 293));flex:none"></span></sc-if>
+            </div>
+          </sc-for>
+        </div>
+        <div style="border-top:1px solid var(--border,oklch(0.36 0.008 55));padding:10px 12px;display:flex;gap:6px">
+          <div style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px;border-radius:var(--r-control,10px);background:var(--accent,oklch(0.68 0.15 293));color:var(--on-accent,oklch(0.16 0.03 293));font-size:13px;font-weight:500;cursor:pointer">＋ New note</div>
+          <div title="New folder" style="width:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-control,10px);border:1px solid var(--border,oklch(0.36 0.008 55));color:var(--text2,oklch(0.74 0.008 55));cursor:pointer">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
+          </div>
+          <div title="Tags" style="width:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-control,10px);border:1px solid var(--border,oklch(0.36 0.008 55));color:var(--text2,oklch(0.74 0.008 55));font-family:'IBM Plex Mono',monospace;font-size:14px;cursor:pointer">#</div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isAgents }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:16px 12px 8px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:14px;font-weight:600;color:var(--text);padding:6px 8px 4px">Agents</div>
+          <sc-if value="{{ canLaunch }}" hint-placeholder-val="{{ true }}">
+            <div onClick="{{ newSession }}" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:9px;border-radius:var(--r-control,10px);background:var(--accent,oklch(0.68 0.15 293));color:var(--on-accent,oklch(0.16 0.03 293));font-size:13px;font-weight:500;cursor:pointer">＋ New session</div>
+          </sc-if>
+          <div onClick="{{ openOverview }}" style="{{ overviewRowStyle }}">Overview</div>
+        </div>
+        <div style="flex:1;overflow:auto;padding:0 8px 12px;display:flex;flex-direction:column">
+          <sc-if value="{{ hasRunningRows }}" hint-placeholder-val="{{ true }}">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:12px 8px 6px">Running</div>
+            <sc-for list="{{ runningRows }}" as="s" hint-placeholder-count="2">
+              <div onClick="{{ s.open }}" style="{{ s.rowStyle }}">
+                <div style="{{ s.dotStyle }}"></div>
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                  <span style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.name }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.sub }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </sc-if>
+          <sc-if value="{{ hasEndedRows }}" hint-placeholder-val="{{ true }}">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:16px 8px 6px">Ended</div>
+            <sc-for list="{{ endedRows }}" as="s" hint-placeholder-count="2">
+              <div onClick="{{ s.open }}" style="{{ s.rowStyle }}">
+                <div style="{{ s.dotStyle }}"></div>
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                  <span style="font-size:13px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.name }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.sub }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:22px 12px 12px;display:flex;flex-direction:column;gap:2px;overflow:auto">
+          <div style="font-size:14px;font-weight:600;color:var(--text);padding:0 8px 10px">Settings</div>
+          <sc-for list="{{ settingsNav }}" as="i" hint-placeholder-count="10">
+            <sc-if value="{{ i.isHeader }}" hint-placeholder-val="{{ false }}">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 8px 6px">{{ i.label }}</div>
+            </sc-if>
+            <sc-if value="{{ i.isItem }}" hint-placeholder-val="{{ true }}">
+              <div onClick="{{ i.pick }}" style="{{ i.style }}">
+                <span style="flex:1">{{ i.label }}</span>
+                <sc-if value="{{ i.dot }}" hint-placeholder-val="{{ false }}"><span style="width:6px;height:6px;border-radius:999px;background:var(--danger)"></span></sc-if>
+              </div>
+            </sc-if>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="flex:1;min-width:0;position:relative;background:var(--bg,oklch(0.22 0.008 55))">
+      <sc-if value="{{ showNotesEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text3);font-size:14px">Select a note, or press ⌘K to search</div>
+      </sc-if>
+
+      <sc-if value="{{ dShowOverview }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;overflow:auto">
+          <div style="max-width:760px;padding:28px 40px 60px;display:flex;flex-direction:column;gap:24px">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <div style="font-size:25px;font-weight:600;color:var(--text)">Agents</div>
+              <div style="font-size:14px;color:var(--text2);line-height:1.5">What your agents are working on. Sessions keep running on your hosts when you close Storm.</div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Work</div>
+              <sc-for list="{{ workGroups }}" as="g" hint-placeholder-count="2">
+                <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card,16px);padding:16px 18px;display:flex;flex-direction:column;gap:4px">
+                  <div style="display:flex;align-items:baseline;gap:8px;padding-bottom:6px">
+                    <span style="font-size:15px;font-weight:600;color:var(--text)">{{ g.workspace }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">on {{ g.host }}</span>
+                  </div>
+                  <sc-for list="{{ g.rows }}" as="s" hint-placeholder-count="2">
+                    <div onClick="{{ s.open }}" style="display:flex;align-items:center;gap:10px;padding:8px 8px;margin:0 -8px;border-radius:var(--r-control,10px);cursor:pointer" style-hover="background:var(--surface2)">
+                      <div style="{{ s.dotStyle }}"></div>
+                      <span style="font-size:14px;color:var(--text)">{{ s.name }}</span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ s.meta }}</span>
+                      <span style="flex:1"></span>
+                      <sc-if value="{{ s.hasCtx }}" hint-placeholder-val="{{ false }}">
+                        <span style="font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:2px 8px;display:flex;align-items:center;gap:5px">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>{{ s.ctxTitle }}
+                        </span>
+                      </sc-if>
+                      <sc-if value="{{ s.hasWrote }}" hint-placeholder-val="{{ false }}">
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">{{ s.wroteLabel }}</span>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Start an agent</div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px">
+                <sc-for list="{{ availableAgents }}" as="a" hint-placeholder-count="3">
+                  <div onClick="{{ a.start }}" style="display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);background:var(--surface);cursor:pointer;min-width:150px" style-hover="border-color:var(--accent)">
+                    <span style="font-size:14px;color:var(--text);font-weight:500">{{ a.name }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ a.where }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div onClick="{{ openHostsSettings }}" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);cursor:pointer">{{ infraLine }} · <span style="color:var(--accent)">Settings ›</span></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ dShowFirst }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding:0 64px">
+          <div style="max-width:460px;display:flex;flex-direction:column;gap:14px">
+            <div style="font-size:25px;font-weight:600;color:var(--text)">Start your first session</div>
+            <div style="font-size:15px;color:var(--text2);line-height:1.55">build-vm is online with Claude Code and OpenCode. A session runs in one of its workspaces and keeps going after you close Storm.</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:8px">Start from a note</div>
+            <sc-for list="{{ suggestNotes }}" as="n" hint-placeholder-count="2">
+              <div onClick="{{ n.start }}" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);background:var(--surface);cursor:pointer" style-hover="border-color:var(--accent)">
+                <span style="flex:1;font-size:14px;color:var(--text)">{{ n.title }}</span>
+                <span style="{{ n.tagStyle }}">{{ n.vault }}</span>
+              </div>
+            </sc-for>
+            <div style="display:flex;align-items:center;gap:12px;padding-top:6px">
+              <div onClick="{{ newSession }}" style="padding:9px 16px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:14px;font-weight:500;cursor:pointer">New session</div>
+              <span style="font-size:13px;color:var(--text3)">or start without a note</span>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ dShowEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding:0 64px">
+          <div style="max-width:480px;display:flex;flex-direction:column;gap:14px">
+            <div style="font-size:25px;font-weight:600;color:var(--text)">Agents run on a machine you own</div>
+            <div style="font-size:15px;color:var(--text2);line-height:1.55">Storm keeps each session running on that machine, so you can leave and pick it up from any device.</div>
+            <sc-for list="{{ setupSteps }}" as="st" hint-placeholder-count="3">
+              <div style="display:flex;align-items:center;gap:12px">
+                <span style="{{ st.numStyle }}">{{ st.n }}</span>
+                <span style="{{ st.textStyle }}">{{ st.text }}</span>
+                <sc-if value="{{ st.hasAction }}" hint-placeholder-val="{{ false }}">
+                  <span onClick="{{ openHostsSettings }}" style="padding:6px 12px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500;cursor:pointer">Enroll a host</span>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ dShowSession }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)">
+          <div style="display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border)">
+            <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:4px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:16px;font-weight:600;color:var(--text)">{{ sess.name }}</span>
+                <span style="{{ sess.chipStyle }}"><span style="{{ sess.dotStyle }}"></span>{{ sess.statusLabel }}</span>
+                <span style="flex:1"></span>
+                <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
+                  <span onClick="{{ askEnd }}" style="font-size:13px;color:var(--text2);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">End</span>
+                </sc-if>
+                <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
+                  <span onClick="{{ runAgain }}" style="font-size:13px;color:var(--accent);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">Run again</span>
+                  <span onClick="{{ dismissSession }}" style="font-size:13px;color:var(--text2);padding:5px 10px;cursor:pointer">Dismiss</span>
+                </sc-if>
+              </div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ sess.meta }}</span>
+            </div>
+            <sc-if value="{{ endConfirm }}" hint-placeholder-val="{{ false }}">
+              <div style="margin:12px 16px 0;padding:12px 14px;border-radius:var(--r-control,10px);background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;gap:10px">
+                <span style="flex:1;font-size:13px;color:var(--text);line-height:1.45">End {{ sess.name }}? The agent and everything it started are stopped on the host.</span>
+                <span onClick="{{ cancelEnd }}" style="font-size:13px;color:var(--text2);cursor:pointer;padding:5px 8px">Cancel</span>
+                <span onClick="{{ confirmEnd }}" style="font-size:13px;color:var(--on-accent);background:var(--danger);padding:6px 10px;border-radius:var(--r-control,10px);cursor:pointer">End session</span>
+              </div>
+            </sc-if>
+            <div style="flex:1;overflow:auto;padding:16px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;background:var(--bg)">
+              <sc-for list="{{ sess.lines }}" as="l" hint-placeholder-count="4">
+                <div style="{{ l.style }}">{{ l.text }}</div>
+              </sc-for>
+              <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
+                <div style="color:var(--text)">› <span style="display:inline-block;width:8px;height:15px;background:var(--text2);vertical-align:-2px"></span></div>
+              </sc-if>
+            </div>
+            <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:10px 20px;border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ sess.endedLine }} · scrollback kept until you dismiss it</div>
+            </sc-if>
+          </div>
+          <div style="display:flex;flex-direction:column;min-height:0;background:var(--bg)">
+            <div style="display:flex;gap:4px;padding:10px 14px;border-bottom:1px solid var(--border)">
+              <sc-for list="{{ tabs }}" as="tb" hint-placeholder-count="3">
+                <div onClick="{{ tb.pick }}" style="{{ tb.style }}">{{ tb.label }}</div>
+              </sc-for>
+            </div>
+            <div style="flex:1;overflow:auto">
+              <sc-if value="{{ tabNote }}" hint-placeholder-val="{{ true }}">
+                <div style="padding:22px 28px 40px;display:flex;flex-direction:column;gap:10px">
+                  <div style="display:flex;align-items:center;gap:8px">
+                    <sc-if value="{{ panelBack }}" hint-placeholder-val="{{ false }}"><span onClick="{{ panelBackClick }}" style="font-size:13px;color:var(--accent);cursor:pointer">‹ Wrote</span></sc-if>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ pn.crumb }}</span>
+                    <span style="flex:1"></span>
+                    <span onClick="{{ pn.openInNotes }}" style="font-size:13px;color:var(--accent);cursor:pointer">Open in Notes ›</span>
+                  </div>
+                  <div style="font-family:'Newsreader',serif;font-size:26px;font-weight:600;color:var(--text);line-height:1.2">{{ pn.title }}</div>
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ pn.versionLine }}</div>
+                  <sc-for list="{{ pn.blocks }}" as="b" hint-placeholder-count="4">
+                    <div style="{{ b.style }}">{{ b.text }}</div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ tabNoCtx }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:28px;font-size:14px;color:var(--text3);line-height:1.5">Started without a note. Notes this session writes appear under Wrote.</div>
+              </sc-if>
+              <sc-if value="{{ tabWrote }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:18px 16px;display:flex;flex-direction:column;gap:2px">
+                  <sc-for list="{{ wroteRows }}" as="w" hint-placeholder-count="2">
+                    <div onClick="{{ w.open }}" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-control,10px);cursor:pointer" style-hover="background:var(--surface)">
+                      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+                        <span style="font-size:14px;color:var(--text)">{{ w.title }}</span>
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.crumb }}</span>
+                      </div>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.meta }}</span>
+                    </div>
+                  </sc-for>
+                  <sc-if value="{{ wroteEmpty }}" hint-placeholder-val="{{ false }}">
+                    <div style="padding:10px 12px;font-size:14px;color:var(--text3);line-height:1.5">{{ wroteEmptyText }}</div>
+                  </sc-if>
+                </div>
+              </sc-if>
+              <sc-if value="{{ tabAbout }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:22px 28px;display:flex;flex-direction:column;gap:14px">
+                  <sc-for list="{{ aboutRows }}" as="a" hint-placeholder-count="5">
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ a.k }}</span>
+                      <span style="font-size:14px;color:var(--text);line-height:1.45">{{ a.v }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+
+    <sc-if value="{{ dDrawer }}" hint-placeholder-val="{{ true }}">
+      <div style="position:absolute;top:0;right:0;bottom:0;width:280px;background:var(--surface,oklch(0.27 0.008 55));border-left:1px solid var(--border,oklch(0.36 0.008 55));padding:24px 20px;display:flex;flex-direction:column;gap:16px;z-index:2">
+        <div style="display:flex;align-items:center"><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Properties</span><span style="flex:1"></span><span onClick="{{ toggleDrawer }}" style="color:var(--text3);cursor:pointer;font-size:14px">×</span></div>
+        <sc-for list="{{ note.props }}" as="p" hint-placeholder-count="3">
+          <div style="display:flex;flex-direction:column;gap:5px">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ p.k }}</span>
+            <sc-if value="{{ p.isTags }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <sc-for list="{{ p.tags }}" as="tg" hint-placeholder-count="2"><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--amber);background:var(--amber-soft);border-radius:var(--r-control,10px);padding:2px 8px">#{{ tg }}</span></sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ p.isText }}" hint-placeholder-val="{{ true }}">
+              <span style="font-size:14px;color:var(--text)">{{ p.v }}</span>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ vaultMenu }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeMenus }}" style="position:absolute;inset:0;z-index:39"></div>
+      <div style="position:absolute;top:62px;left:68px;width:240px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-card,16px);box-shadow:var(--shadow);padding:8px;z-index:40;display:flex;flex-direction:column">
+        <sc-for list="{{ vaultList }}" as="v" hint-placeholder-count="3">
+          <div onClick="{{ v.pick }}" style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:var(--r-control,10px);cursor:pointer" style-hover="background:var(--surface)">
+            <div style="{{ v.tileStyle }}">{{ v.initial }}</div>
+            <span style="flex:1;font-size:14px;color:var(--text)">{{ v.name }}</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ v.count }}</span>
+            <span style="width:14px;color:var(--accent);font-size:12px">{{ v.check }}</span>
+          </div>
+        </sc-for>
+        <div style="height:1px;background:var(--border);margin:6px 4px"></div>
+        <div style="padding:6px 8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ syncLine }}</div>
+        <div onClick="{{ manageVaults }}" style="padding:6px 8px 4px;font-size:13px;color:var(--accent);cursor:pointer">Manage vaults ›</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ statusMenu }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeMenus }}" style="position:absolute;inset:0;z-index:39"></div>
+      <div style="position:absolute;bottom:58px;left:64px;width:280px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-card,16px);box-shadow:var(--shadow);padding:12px;z-index:40;display:flex;flex-direction:column;gap:2px">
+        <sc-for list="{{ healthRows }}" as="h" hint-placeholder-count="4">
+          <div style="display:flex;align-items:center;gap:10px;padding:6px 4px">
+            <div style="{{ h.dotStyle }}"></div>
+            <span style="flex:1;font-size:13px;color:var(--text)">{{ h.text }}</span>
+          </div>
+        </sc-for>
+        <div onClick="{{ openHealth }}" style="padding:8px 4px 2px;font-size:13px;color:var(--accent);cursor:pointer">About &amp; health ›</div>
+      </div>
+    </sc-if>
+  </div>
+</sc-if>
+
+<sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;inset:0">
+    <sc-if value="{{ pShowRoot }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:auto;padding:80px 20px 120px;display:flex;flex-direction:column">
+        <sc-if value="{{ pInFolder }}" hint-placeholder-val="{{ false }}">
+          <span onClick="{{ pUp }}" style="font-size:14px;color:var(--accent);cursor:pointer;padding-bottom:6px">‹ {{ pUpLabel }}</span>
+        </sc-if>
+        <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:6px">{{ pTitle }}</div>
+        <sc-if value="{{ pAtRoot }}" hint-placeholder-val="{{ true }}">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 0 4px">Recent</div>
+          <sc-for list="{{ recentRows }}" as="r" hint-placeholder-count="4">
+            <div onClick="{{ r.open }}" style="display:flex;align-items:center;gap:10px;padding:11px 0;cursor:pointer;border-bottom:1px solid var(--border)">
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+                <span style="font-size:15px;font-weight:500;color:var(--text)">{{ r.title }}</span>
+                <span style="font-size:12px;color:var(--text3)">{{ r.where }}</span>
+              </div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ r.age }}</span>
+            </div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:22px 0 4px">Folders</div>
+        </sc-if>
+        <sc-for list="{{ pRows }}" as="r" hint-placeholder-count="4">
+          <div onClick="{{ r.click }}" style="display:flex;align-items:center;gap:12px;padding:12px 0;cursor:pointer;border-bottom:1px solid var(--border)">
+            <span style="width:16px;color:var(--text3);font-size:13px;text-align:center">{{ r.icon }}</span>
+            <span style="flex:1;font-size:15px;color:var(--text)">{{ r.name }}</span>
+            <sc-if value="{{ r.unseen }}" hint-placeholder-val="{{ false }}"><span style="width:6px;height:6px;border-radius:999px;background:var(--accent)"></span></sc-if>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ r.meta }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ pShowAgents }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:auto;padding:80px 20px 120px;display:flex;flex-direction:column">
+        <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:4px">Agents</div>
+        <sc-if value="{{ pAgentsEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="font-size:15px;color:var(--text2);line-height:1.55;padding:6px 0 16px">Agents run on a machine you own. Sessions keep going when this phone is off.</div>
+          <sc-for list="{{ setupSteps }}" as="st" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="{{ st.numStyle }}">{{ st.n }}</span><span style="{{ st.textStyle }}">{{ st.text }}</span></div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ pAgentsFirst }}" hint-placeholder-val="{{ false }}">
+          <div style="font-size:15px;color:var(--text2);line-height:1.55;padding:6px 0 12px">build-vm is online. Start from a note, or tap ＋.</div>
+          <sc-for list="{{ suggestNotes }}" as="n" hint-placeholder-count="2">
+            <div onClick="{{ n.start }}" style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer"><span style="flex:1;font-size:15px;color:var(--text)">▶  {{ n.title }}</span><span style="{{ n.tagStyle }}">{{ n.vault }}</span></div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ hasRunningRows }}" hint-placeholder-val="{{ true }}">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 0 4px">Running</div>
+          <sc-for list="{{ runningRows }}" as="s" hint-placeholder-count="2">
+            <div onClick="{{ s.open }}" style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer">
+              <div style="{{ s.dotStyle }}"></div>
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;color:var(--text)">{{ s.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ s.sub }}</span></div>
+            </div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ hasEndedRows }}" hint-placeholder-val="{{ true }}">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:22px 0 4px">Ended</div>
+          <sc-for list="{{ endedRows }}" as="s" hint-placeholder-count="2">
+            <div onClick="{{ s.open }}" style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer">
+              <div style="{{ s.dotStyle }}"></div>
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;color:var(--text2)">{{ s.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ s.sub }}</span></div>
+            </div>
+          </sc-for>
+        </sc-if>
+        <sc-if value="{{ hasHosts }}" hint-placeholder-val="{{ true }}">
+          <div onClick="{{ openHostsSettings }}" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);padding-top:18px;cursor:pointer">{{ infraLine }}</div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ pShowSession }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;padding-top:76px">
+        <div style="padding:0 20px 10px;display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span onClick="{{ backToList }}" style="font-size:14px;color:var(--accent);cursor:pointer">‹ Agents</span>
+            <span style="flex:1"></span>
+            <span style="{{ sess.chipStyle }}"><span style="{{ sess.dotStyle }}"></span>{{ sess.statusLabel }}</span>
+          </div>
+          <div style="font-size:20px;font-weight:600;color:var(--text)">{{ sess.name }}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-if value="{{ sess.hasCtx }}" hint-placeholder-val="{{ false }}">
+              <span onClick="{{ pOpenCtx }}" style="font-size:13px;color:var(--text);border:1px solid var(--border);background:var(--surface);border-radius:var(--r-control,10px);padding:6px 10px;cursor:pointer">▤ {{ sess.ctxTitle }}</span>
+            </sc-if>
+            <span onClick="{{ openInfo }}" style="font-size:13px;color:var(--accent);border:1px solid var(--border);background:var(--surface);border-radius:var(--r-control,10px);padding:6px 10px;cursor:pointer">{{ sess.wroteLabel }}</span>
+            <span onClick="{{ openInfo }}" style="font-size:13px;color:var(--text2);border:1px solid var(--border);background:var(--surface);border-radius:var(--r-control,10px);padding:6px 10px;cursor:pointer">Details</span>
+          </div>
+        </div>
+        <div style="flex:1;overflow:auto;padding:12px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;background:var(--surface);border-top:1px solid var(--border)">
+          <sc-for list="{{ sess.lines }}" as="l" hint-placeholder-count="4"><div style="{{ l.style }}">{{ l.text }}</div></sc-for>
+          <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}"><div style="color:var(--text)">› <span style="display:inline-block;width:7px;height:13px;background:var(--text2);vertical-align:-2px"></span></div></sc-if>
+        </div>
+        <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;gap:6px;padding:8px 10px 26px;background:var(--surface2);border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)">
+            <span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Esc</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Tab</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Ctrl</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">←</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">→</span><span style="flex:1"></span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Paste</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;gap:8px;padding:12px 16px 28px;border-top:1px solid var(--border)">
+            <span onClick="{{ runAgain }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:14px;font-weight:500;cursor:pointer">Run again</span>
+            <span onClick="{{ dismissSession }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);border:1px solid var(--border);color:var(--text2);font-size:14px;cursor:pointer">Dismiss</span>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ infoSheet }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeInfo }}" style="position:absolute;inset:0;background:rgba(0,0,0,.35);z-index:44"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--r-card,16px) var(--r-card,16px) 0 0;padding:10px 20px 30px;z-index:45;display:flex;flex-direction:column;gap:12px;max-height:75%;overflow:auto">
+        <div style="align-self:center;width:36px;height:4px;border-radius:2px;background:var(--border)"></div>
+        <sc-if value="{{ sess.hasCtx }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Started from</span>
+            <span onClick="{{ pOpenCtx }}" style="font-size:15px;color:var(--text);padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">▤ {{ sess.ctxTitle }} ›</span>
+          </div>
+        </sc-if>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Wrote</span>
+          <sc-for list="{{ wroteRows }}" as="w" hint-placeholder-count="2">
+            <div onClick="{{ w.open }}" style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer"><span style="flex:1;font-size:15px;color:var(--text)">{{ w.title }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.meta }}</span></div>
+          </sc-for>
+          <sc-if value="{{ wroteEmpty }}" hint-placeholder-val="{{ false }}"><span style="font-size:14px;color:var(--text3);padding:6px 0">{{ wroteEmptyText }}</span></sc-if>
+        </div>
+        <sc-for list="{{ aboutRows }}" as="a" hint-placeholder-count="3">
+          <div style="display:flex;flex-direction:column;gap:2px"><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ a.k }}</span><span style="font-size:14px;color:var(--text);line-height:1.45">{{ a.v }}</span></div>
+        </sc-for>
+        <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
+          <sc-if value="{{ endConfirm }}" hint-placeholder-val="{{ false }}">
+            <div style="font-size:13px;color:var(--text2);line-height:1.45">The agent and everything it started are stopped on the host.</div>
+            <div style="display:flex;gap:8px"><span onClick="{{ cancelEnd }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);border:1px solid var(--border);color:var(--text2);cursor:pointer">Cancel</span><span onClick="{{ confirmEnd }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);background:var(--danger);color:var(--on-accent);cursor:pointer">End session</span></div>
+          </sc-if>
+          <sc-if value="{{ notEndConfirm }}" hint-placeholder-val="{{ true }}">
+            <span onClick="{{ askEnd }}" style="text-align:center;padding:12px;border-radius:var(--r-control,10px);border:1px solid var(--border);color:var(--danger);font-size:14px;cursor:pointer">End session</span>
+          </sc-if>
+        </sc-if>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ pShowSettingsList }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:auto;padding:80px 20px 40px;display:flex;flex-direction:column">
+        <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:6px">Settings</div>
+        <sc-for list="{{ settingsNav }}" as="i" hint-placeholder-count="10">
+          <sc-if value="{{ i.isHeader }}" hint-placeholder-val="{{ false }}"><div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:18px 0 4px">{{ i.label }}</div></sc-if>
+          <sc-if value="{{ i.isItem }}" hint-placeholder-val="{{ true }}">
+            <div onClick="{{ i.pick }}" style="display:flex;align-items:center;gap:10px;padding:13px 0;border-bottom:1px solid var(--border);cursor:pointer">
+              <span style="flex:1;font-size:15px;color:var(--text)">{{ i.label }}</span>
+              <sc-if value="{{ i.dot }}" hint-placeholder-val="{{ false }}"><span style="width:6px;height:6px;border-radius:999px;background:var(--danger)"></span></sc-if>
+              <span style="color:var(--text3)">›</span>
+            </div>
+          </sc-if>
+        </sc-for>
+      </div>
+    </sc-if>
+
+    <div style="position:absolute;top:20px;left:20px;z-index:20">
+      <div onClick="{{ togglePlace }}" style="{{ placeBubbleStyle }}">
+        <sc-if value="{{ bubbleIsAgents }}" hint-placeholder-val="{{ false }}">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="m7 10 3 2-3 2"></path><path d="M13 15h4"></path></svg>
+        </sc-if>
+        <sc-if value="{{ bubbleIsVault }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ vaultTileStyle }}">{{ vaultInitial }}</div>
+        </sc-if>
+        <div style="{{ bubbleDotStyle }}"></div>
+      </div>
+    </div>
+    <div style="position:absolute;top:20px;right:20px;z-index:20">
+      <div onClick="{{ goSettings }}" style="{{ setBubbleStyle }}">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg>
+      </div>
+    </div>
+
+    <sc-if value="{{ placeMenu }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ closeMenus }}" style="position:absolute;inset:0;z-index:39"></div>
+      <div style="position:absolute;top:72px;left:20px;width:250px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-card,16px);box-shadow:var(--shadow);padding:8px;z-index:40;display:flex;flex-direction:column">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:8px 8px 4px">Notes</div>
+        <sc-for list="{{ vaultList }}" as="v" hint-placeholder-count="3">
+          <div onClick="{{ v.pick }}" style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:var(--r-control,10px);cursor:pointer">
+            <div style="{{ v.tileStyle }}">{{ v.initial }}</div>
+            <span style="flex:1;font-size:15px;color:var(--text)">{{ v.name }}</span>
+            <span style="width:14px;color:var(--accent);font-size:12px">{{ v.checkPhone }}</span>
+          </div>
+        </sc-for>
+        <div style="height:1px;background:var(--border);margin:6px 4px"></div>
+        <div onClick="{{ goAgents }}" style="display:flex;align-items:center;gap:10px;padding:10px 8px;border-radius:var(--r-control,10px);cursor:pointer">
+          <div style="width:28px;height:28px;border-radius:var(--r-control,10px);background:var(--surface);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="m7 10 3 2-3 2"></path><path d="M13 15h4"></path></svg></div>
+          <span style="flex:1;font-size:15px;color:var(--text)">Agents</span>
+          <sc-if value="{{ hasRunning }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">{{ runningCount }} running</span></sc-if>
+          <span style="width:14px;color:var(--accent);font-size:12px">{{ agentsCheck }}</span>
+        </div>
+        <div style="height:1px;background:var(--border);margin:6px 4px"></div>
+        <div style="padding:6px 8px 8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ syncLine }}</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ pShowPill }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:15;display:flex;align-items:center;gap:4px;padding:6px;border-radius:999px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)">
+        <sc-if value="{{ pillNotes }}" hint-placeholder-val="{{ true }}">
+          <div onClick="{{ pRoot }}" title="Directory" style="width:44px;height:44px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text2);cursor:pointer"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg></div>
+          <div title="Search" style="width:44px;height:44px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg></div>
+          <div title="New note" style="width:48px;height:48px;border-radius:999px;display:flex;align-items:center;justify-content:center;background:var(--accent);color:var(--on-accent);font-size:22px">＋</div>
+          <div title="Tags" style="width:44px;height:44px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:16px">#</div>
+        </sc-if>
+        <sc-if value="{{ pillAgents }}" hint-placeholder-val="{{ false }}">
+          <div onClick="{{ newSession }}" style="height:48px;padding:0 22px;border-radius:999px;display:flex;align-items:center;gap:8px;background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:500;cursor:pointer">＋ New session</div>
+        </sc-if>
+      </div>
+    </sc-if>
+  </div>
+</sc-if>
+
+<sc-if value="{{ showNote }}" hint-placeholder-val="{{ true }}">
+  <div style="{{ noteViewStyle }}">
+    <div style="{{ noteInnerStyle }}">
+      <div style="display:flex;align-items:center;gap:10px;min-height:32px">
+        <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+          <span onClick="{{ noteBack }}" style="font-size:14px;color:var(--accent,oklch(0.68 0.15 293));cursor:pointer">‹ {{ noteBackLabel }}</span>
+        </sc-if>
+        <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3,oklch(0.66 0.008 55))">{{ note.crumb }}</span>
+        </sc-if>
+        <span style="flex:1"></span>
+        <div style="display:flex;padding:3px;border-radius:calc(var(--r-control,10px) * .8);background:var(--surface2,oklch(0.31 0.008 55));border:1px solid var(--border,oklch(0.36 0.008 55))">
+          <span onClick="{{ setRead }}" style="{{ readSegStyle }}">Read</span>
+          <span onClick="{{ setEdit }}" style="{{ editSegStyle }}">Edit</span>
+        </div>
+        <span onClick="{{ startFromNote }}" title="Start a session with this note" style="display:flex;align-items:center;gap:6px;padding:6px 11px;border-radius:var(--r-control,10px);background:var(--accent-soft,oklch(0.30 0.05 293));color:var(--accent,oklch(0.68 0.15 293));font-size:13px;font-weight:500;cursor:pointer">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l11-7z"></path></svg>{{ startLabel }}
+        </span>
+        <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+          <span onClick="{{ toggleDrawer }}" title="Properties" style="display:flex;padding:6px;border-radius:var(--r-control,10px);color:var(--text3,oklch(0.66 0.008 55));cursor:pointer"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></svg></span>
+        </sc-if>
+      </div>
+      <div style="font-family:'Newsreader',serif;font-size:34px;font-weight:600;line-height:1.15;color:var(--text,oklch(0.95 0.008 55));padding-top:22px;text-wrap:pretty">{{ note.title }}</div>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:8px 0 18px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3,oklch(0.66 0.008 55))">
+        <span>{{ note.versionLine }}</span>
+        <sc-if value="{{ note.hasProv }}" hint-placeholder-val="{{ false }}">
+          <span onClick="{{ note.openProv }}" style="color:var(--accent,oklch(0.68 0.15 293));cursor:pointer">{{ note.provText }}</span>
+        </sc-if>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <sc-for list="{{ note.blocks }}" as="b" hint-placeholder-count="5">
+          <div style="{{ b.style }}"><span style="color:var(--text3,oklch(0.66 0.008 55));font-family:'IBM Plex Mono',monospace;font-size:14px">{{ b.marker }}</span>{{ b.text }}</div>
+        </sc-for>
+      </div>
+      <div style="margin-top:40px;padding-top:14px;border-top:1px solid var(--border,oklch(0.36 0.008 55));display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text3,oklch(0.66 0.008 55))">
+        <span>Linked mentions</span><span style="font-family:'IBM Plex Mono',monospace;font-size:12px">{{ note.mentions }}</span><span>▸</span>
+      </div>
+    </div>
+  </div>
+</sc-if>
+
+<sc-if value="{{ showSettingsPage }}" hint-placeholder-val="{{ false }}">
+  <div style="{{ settingsPageStyle }}">
+    <div style="{{ settingsInnerStyle }}">
+      <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+        <span onClick="{{ pSettingsBack }}" style="font-size:14px;color:var(--accent);cursor:pointer">‹ Settings</span>
+      </sc-if>
+      <div style="font-size:25px;font-weight:600;color:var(--text)">{{ pageTitle }}</div>
+      <div style="font-size:14px;color:var(--text2);line-height:1.5;margin-top:-8px">{{ pageIntro }}</div>
+
+      <sc-if value="{{ pgDevice }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Appearance</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-for list="{{ presetButtons }}" as="pb" hint-placeholder-count="3">
+              <div onClick="{{ pb.pick }}" style="{{ pb.style }}"><div style="{{ pb.swatch }}"></div><span>{{ pb.label }}</span></div>
+            </sc-for>
+          </div>
+          <div style="display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">Text size</span><span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text2)">16 px</span></div>
+          <div style="display:flex;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">Note font</span><span style="font-family:'Newsreader',serif;font-size:15px;color:var(--text2)">Newsreader</span></div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:14px">Notes</div>
+          <sc-for list="{{ deviceToggles }}" as="t" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ t.label }}</span><span style="font-size:12px;color:var(--text3)">{{ t.sub }}</span></div>
+              <div onClick="{{ t.flip }}" style="{{ t.track }}"><div style="{{ t.knob }}"></div></div>
+            </div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:14px">Keyboard</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px 18px;font-size:13px;color:var(--text2)">
+            <span><span style="font-family:'IBM Plex Mono',monospace;color:var(--text)">⌘K</span> Search</span><span><span style="font-family:'IBM Plex Mono',monospace;color:var(--text)">⌘N</span> New note</span><span><span style="font-family:'IBM Plex Mono',monospace;color:var(--text)">⌘\</span> Sidebar</span><span><span style="font-family:'IBM Plex Mono',monospace;color:var(--text)">⌘E</span> Read / Edit</span>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgAccess }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-bottom:4px">Signed-in devices</div>
+          <sc-for list="{{ devices }}" as="d" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ d.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ d.meta }}</span></div>
+              <span style="font-size:13px;color:var(--text2);cursor:pointer">{{ d.action }}</span>
+            </div>
+          </sc-for>
+          <div style="display:flex;padding-top:12px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);font-size:13px;color:var(--text);cursor:pointer">＋ Add a device</span></div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:26px 0 4px">Access keys</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.5;padding-bottom:4px">For AI apps outside Storm, such as Claude on a laptop. A key acts as you, and is shown once.</div>
+          <div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)">
+            <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">laptop-claude</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">stk_••••3f9a · used 1h ago</span></div>
+            <span style="font-size:13px;color:var(--text2);cursor:pointer">Revoke</span>
+          </div>
+          <div style="display:flex;padding-top:12px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);font-size:13px;color:var(--text);cursor:pointer">＋ New key</span></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgVaults }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ vaultList }}" as="v" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="{{ v.tileStyle }}">{{ v.initial }}</div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ v.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ v.count }} notes · /srv/storm/vaults/{{ v.name }}</span></div>
+              <span style="font-size:13px;color:var(--text2);cursor:pointer">Rename</span><span style="font-size:13px;color:var(--text2);cursor:pointer">Remove</span>
+            </div>
+          </sc-for>
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);opacity:.7">
+            <div style="width:28px;height:28px;border-radius:var(--r-control,10px);border:1px dashed var(--border)"></div>
+            <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text3)">archive</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">Directory not found. Nothing was deleted.</span></div>
+          </div>
+          <div style="font-size:12px;color:var(--text3);line-height:1.5;padding-top:12px">Removing a vault takes it out of Storm. Its directory and every note stay where they are.</div>
+          <div style="display:flex;padding-top:12px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500;cursor:pointer">＋ New vault</span></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgAi }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-bottom:4px">AI apps outside Storm</div>
+          <sc-for list="{{ appToggles }}" as="t" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ t.label }}</span><span style="font-size:12px;color:var(--text3);line-height:1.45">{{ t.sub }}</span></div>
+              <div onClick="{{ t.flip }}" style="{{ t.track }}"><div style="{{ t.knob }}"></div></div>
+            </div>
+          </sc-for>
+          <div onClick="{{ goAccess }}" style="font-size:13px;color:var(--accent);padding:10px 0;cursor:pointer">Access keys are in Devices &amp; access ›</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:20px 0 4px">Storm agents</div>
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+            <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">Sessions can read your vaults</span><span style="font-size:12px;color:var(--text3)">Every session except a shell.</span></div>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">always</span>
+          </div>
+          <sc-for list="{{ agentToggles }}" as="t" hint-placeholder-count="1">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ t.label }}</span><span style="font-size:12px;color:var(--text3);line-height:1.45">{{ t.sub }}</span></div>
+              <div onClick="{{ t.flip }}" style="{{ t.track }}"><div style="{{ t.knob }}"></div></div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgInt }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="font-size:13px;color:var(--text2);line-height:1.55;padding:12px 14px;border-radius:var(--r-control,10px);background:var(--surface);border:1px solid var(--border)">Connect a service once, here. Every agent session except a shell can then use it. Anything an agent can read, it can send elsewhere.</div>
+          <sc-for list="{{ integrations }}" as="it" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ it.name }}</span><span style="font-size:12px;color:var(--text3)">{{ it.detail }}</span></div>
+              <span style="{{ it.statusStyle }}">{{ it.status }}</span>
+              <span style="font-size:13px;color:var(--text2);cursor:pointer">{{ it.action }}</span>
+            </div>
+          </sc-for>
+          <div style="display:flex;padding-top:6px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500;cursor:pointer">＋ Add integration</span></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgHosts }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ hostRows }}" as="h" hint-placeholder-count="2">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="{{ h.dotStyle }}"></div>
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ h.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ h.meta }}</span></div>
+              <span style="font-size:13px;color:var(--text2);cursor:pointer">Rename</span><span style="font-size:13px;color:var(--text2);cursor:pointer">Revoke</span>
+            </div>
+          </sc-for>
+          <sc-if value="{{ noHosts }}" hint-placeholder-val="{{ false }}"><div style="font-size:14px;color:var(--text3);padding:6px 0 4px">No hosts enrolled yet.</div></sc-if>
+          <div style="display:flex;padding:12px 0 6px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500;cursor:pointer">＋ Enroll a host</span></div>
+          <div style="font-size:12px;color:var(--text3);line-height:1.5">Enrolling shows a one-time string. Run <span style="font-family:'IBM Plex Mono',monospace;color:var(--text2)">storm-runtime enroll</span> on the machine and paste it.</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:24px 0 8px">Default agent</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-for list="{{ defaultAgentOpts }}" as="o" hint-placeholder-count="3"><span onClick="{{ o.pick }}" style="{{ o.style }}">{{ o.label }}</span></sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgStorage }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Vault storage root</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:14px;color:var(--text);padding:10px 12px;border-radius:var(--r-control,10px);background:var(--surface2);border:1px solid var(--border)">/srv/storm/vaults</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.5">4 vaults live here. Changing the root doesn't move any files. Storm refuses a change that would leave vaults behind.</div>
+          <div style="display:flex"><span style="padding:8px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);font-size:13px;color:var(--text);cursor:pointer">Change…</span></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgConn }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ connRows }}" as="c" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">{{ c.k }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)">{{ c.v }}</span></div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:24px 0 4px">Relays</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.5;padding-bottom:4px">Used when this device can't reach the server directly. A relay can't read your notes.</div>
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">relay.example.net</span><span style="font-size:13px;color:var(--text2);cursor:pointer">Remove</span></div>
+          <div style="display:flex;padding:12px 0"><span style="padding:8px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);font-size:13px;color:var(--text);cursor:pointer">＋ Add relay</span></div>
+          <div style="display:flex;align-items:center;gap:12px;padding:16px 0 0;border-top:1px solid var(--border);margin-top:12px">
+            <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--danger)">Disconnect this device</span><span style="font-size:12px;color:var(--text3)">Forgets this server and its sign-in. Your notes stay on the server.</span></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgAdv }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ advRows }}" as="c" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+              <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ c.k }}</span><span style="font-size:12px;color:var(--text3)">{{ c.sub }}</span></div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)">{{ c.v }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgHealth }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ healthRows }}" as="h" hint-placeholder-count="4">
+            <div style="display:flex;align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid var(--border)">
+              <div style="{{ h.dotStyle }}"></div>
+              <span style="flex:1;font-size:14px;color:var(--text)">{{ h.text }}</span>
+              <span onClick="{{ h.go }}" style="font-size:13px;color:var(--accent);cursor:pointer">{{ h.action }}</span>
+            </div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);padding-top:16px">Storm 0.4.0 · storm.home:7420</div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+</sc-if>
+
+<sc-if value="{{ launcherOpen }}" hint-placeholder-val="{{ false }}">
+  <div onClick="{{ closeLauncher }}" style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:49"></div>
+  <div style="{{ launcherStyle }}">
+    <div style="display:flex;align-items:center"><span style="font-size:18px;font-weight:600;color:var(--text)">New session</span><span style="flex:1"></span><span onClick="{{ closeLauncher }}" style="color:var(--text3);cursor:pointer;font-size:16px">×</span></div>
+    <sc-if value="{{ L.hasCtx }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Context</span>
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-control,10px);background:var(--accent-soft);border:1px solid var(--border)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>
+          <span style="flex:1;font-size:14px;color:var(--text)">{{ L.ctxTitle }}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ L.ctxVault }}</span>
+          <span onClick="{{ clearCtx }}" style="color:var(--text3);cursor:pointer">×</span>
+        </div>
+      </div>
+    </sc-if>
+    <sc-for list="{{ L.fields }}" as="f" hint-placeholder-count="3">
+      <div style="display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:10px">
+        <span style="font-size:13px;color:var(--text2)">{{ f.label }}</span>
+        <select value="{{ f.value }}" onChange="{{ f.change }}" style="appearance:none;-webkit-appearance:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:9px 12px;font-family:'IBM Plex Sans',sans-serif;font-size:14px;width:100%">
+          <sc-for list="{{ f.options }}" as="o" hint-placeholder-count="2"><option value="{{ o.v }}">{{ o.label }}</option></sc-for>
+        </select>
+      </div>
+    </sc-for>
+    <sc-if value="{{ L.showWrites }}" hint-placeholder-val="{{ true }}">
+      <div style="display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:10px">
+        <span style="font-size:13px;color:var(--text2)">Can write to</span>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div onClick="{{ L.flipWrites }}" style="{{ L.track }}"><div style="{{ L.knob }}"></div></div>
+          <sc-if value="{{ L.writes }}" hint-placeholder-val="{{ false }}">
+            <select value="{{ L.writeVault }}" onChange="{{ L.setWriteVault }}" style="appearance:none;-webkit-appearance:none;flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:7px 12px;font-family:'IBM Plex Sans',sans-serif;font-size:14px">
+              <sc-for list="{{ L.vaultOpts }}" as="o" hint-placeholder-count="3"><option value="{{ o.v }}">{{ o.label }}</option></sc-for>
+            </select>
+          </sc-if>
+          <sc-if value="{{ L.readOnly }}" hint-placeholder-val="{{ true }}"><span style="font-size:13px;color:var(--text3)">{{ L.readOnlyText }}</span></sc-if>
+        </div>
+      </div>
+    </sc-if>
+    <div style="font-size:12px;color:var(--text3);line-height:1.55;padding:10px 12px;border-radius:var(--r-control,10px);background:var(--surface2)">{{ L.risk }}</div>
+    <div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;color:var(--text3)">{{ L.note }}</span><span style="flex:1"></span><span onClick="{{ launch }}" style="padding:10px 20px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:14px;font-weight:500;cursor:pointer">Launch</span></div>
+  </div>
+</sc-if>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:800},&quot;device&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;desktop&quot;,&quot;phone&quot;],&quot;default&quot;:&quot;desktop&quot;,&quot;tsType&quot;:&quot;'desktop'|'phone'&quot;},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;storm-dark&quot;,&quot;storm-light&quot;,&quot;slowflow-earth&quot;],&quot;default&quot;:&quot;storm-dark&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;agentsState&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;running&quot;,&quot;first&quot;,&quot;empty&quot;],&quot;default&quot;:&quot;running&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const PRESETS = {
+  'storm-dark': { label: 'Storm dark', dark: true, bgL: 22, hue: 55, chroma: 8, accentH: 293, accentC: 0.15, accentL: 68, rCard: 16, rControl: 10, shadow: 35 },
+  'storm-light': { label: 'Storm light', dark: false, bgL: 92, hue: 55, chroma: 8, accentH: 293, accentC: 0.15, accentL: 68, rCard: 16, rControl: 10, shadow: 20 },
+  'slowflow-earth': { label: 'SlowFlow earth', dark: false, bgL: 84, hue: 62, chroma: 22, accentH: 55, accentC: 0.06, accentL: 45, rCard: 2, rControl: 10, shadow: 16 }
+};
+function derive(p) {
+  const dir = p.dark ? 1 : -1, b = p.bgL / 100;
+  const n = (l) => `oklch(${l.toFixed(3)} ${(p.chroma / 1000).toFixed(3)} ${p.hue})`;
+  const aL = p.dark ? p.accentL / 100 : Math.min(0.40, p.accentL / 100);
+  const v = {
+    '--bg': n(b), '--surface': n(b + dir * 0.05), '--surface2': n(b + dir * 0.09), '--border': n(b + dir * 0.14),
+    '--text': n(p.dark ? 0.95 : 0.18), '--text2': n(p.dark ? 0.74 : 0.34), '--text3': n(p.dark ? 0.66 : 0.40),
+    '--accent': `oklch(${aL} ${p.accentC} ${p.accentH})`, '--accent-soft': `oklch(${(b + dir * 0.08).toFixed(3)} ${(p.accentC / 3).toFixed(3)} ${p.accentH})`,
+    '--on-accent': aL > 0.6 ? `oklch(0.16 0.03 ${p.accentH})` : '#ffffff',
+    '--amber': `oklch(${p.dark ? 0.74 : 0.38} 0.14 68)`, '--amber-soft': `oklch(${(b + dir * 0.08).toFixed(3)} 0.05 68)`,
+    '--green': `oklch(${p.dark ? 0.74 : 0.38} 0.13 148)`, '--danger': `oklch(${p.dark ? 0.70 : 0.38} 0.17 25)`,
+    '--r-card': p.rCard + 'px', '--r-control': p.rControl + 'px',
+    '--shadow': `0 ${Math.round(p.shadow / 3)}px ${Math.round(p.shadow * 1.2)}px -8px rgba(0,0,0,${(p.shadow / 100).toFixed(2)})`
+  };
+  return { dir, surfaceL: b + dir * 0.05, dark: p.dark, vars: v, str: Object.entries(v).map(([k, x]) => `${k}:${x}`).join(';') };
+}
+const VAULTS = [
+  { id: 'personal', hue: 135, cs: 1, count: 412 },
+  { id: 'work', hue: 290, cs: 1, count: 88 },
+  { id: 'kit', hue: 70, cs: 0.4, count: 23 }
+];
+const HOSTS = [
+  { id: 'build-vm', online: true, agents: ['Claude Code', 'OpenCode', 'Shell'], workspaces: ['storm', 'site', 'infra'], seen: 'online now' },
+  { id: 'mac-mini', online: false, agents: ['Claude Code', 'Shell'], workspaces: ['storm'], seen: 'offline · last seen 3h ago' }
+];
+const NOTES0 = {
+  gw: { vault: 'personal', path: ['projects', 'storm'], title: 'Gateway spec', version: 14, age: '2h', mentions: 3, props: { status: 'draft', tags: ['storm', 'mcp'], color: 'sage' }, body: [
+    ['p', 'Storm holds third-party MCP credentials, so agents can use Notion, Linear and GitHub without ever seeing a token.'],
+    ['h', 'Goals'],
+    ['li', 'Connect a service once, in Settings.'],
+    ['li', 'Every non-shell session gets every connection at launch.'],
+    ['li', 'Tools that appear later start off until you review them.'],
+    ['h', 'Open work'],
+    ['p', 'Move the finished acceptance items on BOARD to Done, and log today’s decisions.']] },
+  board: { vault: 'personal', path: ['projects', 'storm'], title: 'BOARD', version: 51, age: '1d', mentions: 6, editedBy: 's2', editedAgo: '2h ago', props: { status: 'active', tags: ['storm'] }, body: [
+    ['h', 'Now'], ['li', 'Gateway acceptance on Android'], ['li', 'Relay settings screen'], ['h', 'Next'], ['li', 'Remove the accounts UI'], ['li', 'Sessions as routes']] },
+  shared: { vault: 'personal', path: ['projects', 'storm'], title: 'Shared knowledge', version: 6, age: '5d', mentions: 2, props: { status: 'open', tags: ['storm'] }, body: [['p', 'Should agent writes land directly in a vault, or in a scratch space that a person promotes?']] },
+  daily: { vault: 'personal', path: ['daily'], title: '2026-10-07', version: 3, age: '1d', mentions: 0, props: { tags: ['daily'] }, body: [['p', 'Walked through the IA options. Going with the activity rail.']] },
+  reading: { vault: 'personal', path: ['reading'], title: 'Local-first software', version: 2, age: '3w', mentions: 1, props: { tags: ['reading'] }, body: [['p', 'Notes on ownership, offline work and sync.']] },
+  sprint: { vault: 'work', path: [], title: 'Sprint notes', version: 9, age: '3h', mentions: 0, props: { tags: ['work'] }, body: [['p', 'Ship the gateway client to staging.']] },
+  lead: { vault: 'kit', path: ['agents'], title: 'Storm Lead', version: 4, age: '4d', mentions: 2, props: { tags: ['kit'] }, body: [['p', 'Plans the work, splits it up, and reviews what comes back.']] }
+};
+const SESSIONS0 = [
+  { id: 's1', name: 'docs-pass', status: 'running', agent: 'OpenCode', host: 'build-vm', workspace: 'site', context: null, wrote: [], age: '40m', writeVault: null, lines: ['$ opencode', '› reading site/content/docs', '› drafting the install guide…'] },
+  { id: 's2', name: 'test-sweep', status: 'completed', agent: 'Claude Code', host: 'build-vm', workspace: 'storm', context: 'board', wrote: ['board'], age: '2h', writeVault: 'personal', ended: 'Completed 14:02 · ran 38 min', lines: ['$ claude', '› read personal/projects/storm/BOARD', '› ran 412 tests, 3 flaky', '› updated BOARD', '✓ done'] },
+  { id: 's3', name: 'lint-fix', status: 'failed', agent: 'Claude Code', host: 'mac-mini', workspace: 'storm', context: null, wrote: [], age: '5h', writeVault: null, ended: 'Failed · host restarted', lines: ['$ claude', '› running clippy…', '✕ host restarted; the session was lost'] }
+];
+const STATUS = {
+  starting: { label: 'Starting', c: 'var(--accent)', live: true, ring: true },
+  running: { label: 'Running', c: 'var(--accent)', live: true },
+  completed: { label: 'Completed', c: 'var(--text3)' },
+  stopped: { label: 'Stopped', c: 'var(--text3)' },
+  failed: { label: 'Failed', c: 'var(--danger)' },
+  unknown: { label: 'Unknown', c: 'var(--text3)', live: true }
+};
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const mono = "font-family:'IBM Plex Mono',monospace";
+
+class Component extends DCLogic {
+  state = {
+    preset: null, activity: 'notes', vault: 'personal', noteId: 'gw', mode: 'read', drawer: true,
+    expanded: { 'personal/projects': true, 'personal/projects/storm': true },
+    recents: ['gw', 'sprint', 'lead', 'daily'], notes: clone(NOTES0), sessions: clone(SESSIONS0),
+    sessionId: null, tab: 'context', panelNote: null, endConfirm: false, settingsPage: 'device',
+    launcher: null, vaultMenu: false, statusMenu: false, placeMenu: false, infoSheet: false,
+    phonePath: [], overlayNote: null, phoneSettingsOpen: false,
+    prefs: { read: true, showId: false, appsRead: true, appsWrite: false, agentWrite: true }, defaultAgent: 'Claude Code'
+  };
+  seq = 0; timers = [];
+
+  componentDidMount() { if (this.props.device === 'phone') this.setState({ noteId: null }); }
+  componentWillUnmount() { this.timers.forEach(clearTimeout); }
+
+  get phone() { return this.props.device === 'phone'; }
+  hosts() { return (this.props.agentsState ?? 'running') === 'empty' ? [] : HOSTS; }
+  visSessions() { const st = this.props.agentsState ?? 'running'; return st === 'running' ? this.state.sessions : this.state.sessions.filter(s => s.fresh); }
+  updS(id, fn) { this.setState(s => ({ sessions: s.sessions.map(x => x.id === id ? fn({ ...x }) : x) })); }
+  later(ms, fn) { this.timers.push(setTimeout(fn, ms)); }
+
+  openNote(id) {
+    const n = this.state.notes[id]; if (!n) return;
+    const exp = { ...this.state.expanded };
+    n.path.forEach((_, i) => { exp[n.vault + '/' + n.path.slice(0, i + 1).join('/')] = true; });
+    this.setState(s => ({
+      activity: 'notes', vault: n.vault, noteId: id, overlayNote: null, vaultMenu: false, placeMenu: false, infoSheet: false, expanded: exp,
+      phonePath: n.path, recents: [id, ...s.recents.filter(r => r !== id)].slice(0, 6),
+      notes: { ...s.notes, [id]: { ...s.notes[id], unseen: false } }
+    }));
+  }
+  openSession(id, tab) { this.setState({ activity: 'agents', sessionId: id, tab: tab || 'context', panelNote: null, endConfirm: false, placeMenu: false, infoSheet: false, overlayNote: null }); }
+  openLauncher(ctx, base) {
+    const hosts = this.hosts().filter(h => h.online); if (!hosts.length) return;
+    const n = ctx ? this.state.notes[ctx] : null;
+    this.setState({ launcher: base ? { ...base } : { context: ctx || null, host: hosts[0].id, workspace: 'storm', agent: this.state.defaultAgent, writes: this.state.prefs.agentWrite, writeVault: n ? n.vault : 'personal' }, placeMenu: false });
+  }
+  launch() {
+    const L = this.state.launcher, id = 'n' + (++this.seq), notes = this.state.notes;
+    const ctx = L.context ? notes[L.context] : null;
+    const shell = L.agent === 'Shell';
+    const writes = L.writes && this.state.prefs.agentWrite && !shell;
+    const name = ctx ? ctx.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') : `${L.workspace}-${this.seq}`;
+    const cmd = L.agent === 'Claude Code' ? '$ claude' : L.agent === 'OpenCode' ? '$ opencode' : '$ bash';
+    const s = { id, name, status: 'starting', agent: L.agent, host: L.host, workspace: L.workspace, context: L.context, wrote: [], age: 'now', writeVault: writes ? L.writeVault : null, lines: [cmd], fresh: true, launch: { ...L } };
+    this.setState(st => ({ sessions: [s, ...st.sessions], activity: 'agents', sessionId: id, tab: ctx ? 'context' : 'about', panelNote: null, launcher: null, endConfirm: false }));
+    this.later(700, () => this.updS(id, x => ({ ...x, status: 'running', lines: [...x.lines, `› starting in ${L.workspace} on ${L.host}`] })));
+    if (!ctx || shell) { this.later(1600, () => this.updS(id, x => ({ ...x, lines: [...x.lines, '› waiting for input'] }))); return; }
+    const where = `${ctx.vault}/${ctx.path.join('/')}/${ctx.title}`;
+    this.later(1700, () => this.updS(id, x => ({ ...x, lines: [...x.lines, `› read ${where}`] })));
+    if (!writes) { this.later(3200, () => this.updS(id, x => ({ ...x, lines: [...x.lines, '› drafted changes to BOARD (vault writes are off for this session)', '› waiting for input'] }))); return; }
+    const wv = L.writeVault;
+    if (wv === 'personal') {
+      this.later(3300, () => {
+        this.setState(st => ({ notes: { ...st.notes, board: { ...st.notes.board, version: st.notes.board.version + 1, editedBy: id, editedAgo: 'just now', unseen: true } } }));
+        this.updS(id, x => ({ ...x, wrote: [...x.wrote, 'board'], lines: [...x.lines, '› updated BOARD: 2 items moved to Done'] }));
+      });
+    }
+    const logId = 'log' + id;
+    this.later(4900, () => {
+      const path = wv === 'personal' ? ['projects', 'storm', 'log'] : ['log'];
+      this.setState(st => ({ notes: { ...st.notes, [logId]: { vault: wv, path, title: '2026-10-08', version: 1, age: 'now', mentions: 0, created: true, editedBy: id, editedAgo: 'just now', unseen: true, props: { tags: ['log'], source: 'ai' }, body: [['h', 'Decisions'], ['li', 'Tools that appear later stay off until reviewed.'], ['li', 'Web clients use static tokens only.']] } }, expanded: { ...st.expanded, [wv + '/' + path.join('/')]: true } }));
+      this.updS(id, x => ({ ...x, wrote: [...x.wrote, logId], lines: [...x.lines, `› created ${wv}/${path.join('/')}/2026-10-08`, '› waiting for input'] }));
+    });
+  }
+
+  tile(v, t) {
+    const step = t.dir > 0 ? 0.35 : 0.09 + (1 - v.cs) * 0.05;
+    return `oklch(${Math.min(0.99, t.surfaceL + step).toFixed(3)} ${(0.085 * v.cs).toFixed(3)} ${v.hue})`;
+  }
+  tileStyle(v, t, size) {
+    return `width:${size}px;height:${size}px;flex:none;border-radius:calc(var(--r-control,10px) * .8);background:${this.tile(v, t)};color:oklch(0.22 0.03 ${v.hue});display:flex;align-items:center;justify-content:center;${mono};font-size:${Math.round(size * 0.46)}px;font-weight:500`;
+  }
+  toggle(on, flip) {
+    return {
+      flip, track: `width:38px;height:22px;flex:none;border-radius:999px;position:relative;cursor:pointer;background:${on ? 'var(--accent)' : 'var(--surface2)'};border:1px solid ${on ? 'var(--accent)' : 'var(--border)'}`,
+      knob: `position:absolute;top:2px;left:${on ? 18 : 2}px;width:16px;height:16px;border-radius:999px;background:${on ? 'var(--on-accent)' : 'var(--text3)'};transition:left 160ms`
+    };
+  }
+  dot(c, ring, size = 8) { return `width:${size}px;height:${size}px;flex:none;border-radius:999px;${ring ? `border:2px solid ${c}` : `background:${c}`}`; }
+  crumb(n) { return [n.vault, ...n.path].join(' / '); }
+  blocks(n, edit) {
+    const serif = "font-family:'Newsreader',serif;color:var(--text);";
+    return n.body.map(([k, text]) => ({
+      text, marker: edit ? (k === 'h' ? '## ' : k === 'li' ? '- ' : '') : (k === 'li' ? '' : ''),
+      style: k === 'h' ? `${serif}font-size:22px;font-weight:600;padding-top:10px` : k === 'li' ? `${serif}font-size:18px;line-height:1.55;padding-left:${edit ? 0 : 20}px;${edit ? '' : 'list-style:disc;display:list-item;margin-left:18px;padding-left:2px'}` : `${serif}font-size:18px;line-height:1.6`
+    }));
+  }
+
+  renderVals() {
+    const S = this.state, phone = this.phone, desk = !phone;
+    const preset = S.preset || this.props.theme || 'storm-dark';
+    const T = derive(PRESETS[preset] || PRESETS['storm-dark']);
+    const hosts = this.hosts(), online = hosts.filter(h => h.online);
+    const sessions = this.visSessions();
+    const live = sessions.filter(s => STATUS[s.status].live), ended = sessions.filter(s => !STATUS[s.status].live);
+    const notes = S.notes;
+    const vaultOf = (id) => VAULTS.find(v => v.id === id);
+    const V = vaultOf(S.vault);
+    const close = { vaultMenu: false, statusMenu: false, placeMenu: false };
+
+    const railStyle = (on) => `width:46px;padding:7px 0 5px;display:flex;flex-direction:column;align-items:center;gap:3px;border-radius:var(--r-control,10px);cursor:pointer;position:relative;color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accent-soft)' : 'transparent'}`;
+    const tag = (vid) => `${mono};font-size:10.5px;color:var(--text3);border:1px solid var(--border);border-radius:calc(var(--r-control,10px) * .5);padding:0 5px;flex:none`;
+
+    const worst = (() => {
+      const rows = [];
+      rows.push({ c: 'var(--green)', text: 'Notes synced 2m ago', action: 'Sync now', go: () => {} });
+      if (hosts.length) rows.push({ c: online.length === hosts.length ? 'var(--green)' : 'var(--text3)', text: `${online.length} of ${hosts.length} hosts online`, action: 'Hosts', go: () => this.setState({ activity: 'settings', settingsPage: 'hosts', phoneSettingsOpen: true, ...close }) });
+      else rows.push({ c: 'var(--text3)', text: 'No hosts enrolled', action: 'Enroll', go: () => this.setState({ activity: 'settings', settingsPage: 'hosts', phoneSettingsOpen: true, ...close }) });
+      rows.push({ c: 'var(--danger)', text: 'GitHub needs you to sign in again', action: 'Integrations', go: () => this.setState({ activity: 'settings', settingsPage: 'integrations', phoneSettingsOpen: true, ...close }) });
+      rows.push({ c: 'var(--text3)', text: 'This client and the server are compatible', action: '', go: () => {} });
+      return rows;
+    })();
+    const healthRows = worst.map(r => ({ ...r, dotStyle: this.dot(r.c) }));
+    const statusColor = worst.some(r => r.c === 'var(--danger)') ? 'var(--danger)' : 'var(--green)';
+
+    // notes sidebar / phone directory
+    const vNotes = Object.entries(notes).filter(([, n]) => n.vault === S.vault);
+    const treeRows = [];
+    const walk = (prefix, depth) => {
+      const folders = [...new Set(vNotes.filter(([, n]) => n.path.length > prefix.length && prefix.every((p, i) => n.path[i] === p)).map(([, n]) => n.path[prefix.length]))].sort();
+      folders.forEach(f => {
+        const p = [...prefix, f], key = S.vault + '/' + p.join('/'), open = !!S.expanded[key];
+        treeRows.push({ name: f, chev: open ? '▾' : '▸', unseen: !open && vNotes.some(([, n]) => n.unseen && p.every((x, i) => n.path[i] === x)), click: () => this.setState(s => ({ expanded: { ...s.expanded, [key]: !open } })), rowStyle: `display:flex;align-items:center;gap:6px;padding:5px 8px 5px ${8 + depth * 14}px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;color:var(--text2)` });
+        if (open) walk(p, depth + 1);
+      });
+      vNotes.filter(([, n]) => n.path.length === prefix.length && prefix.every((p, i) => n.path[i] === p)).forEach(([id, n]) => {
+        const sel = S.noteId === id && S.activity === 'notes';
+        treeRows.push({ name: n.title, chev: '', unseen: !!n.unseen, click: () => this.openNote(id), rowStyle: `display:flex;align-items:center;gap:6px;padding:5px 8px 5px ${8 + depth * 14}px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;color:${sel ? 'var(--text)' : 'var(--text2)'};background:${sel ? 'var(--surface2)' : 'transparent'}` });
+      });
+    };
+    walk([], 0);
+
+    const recentRows = S.recents.filter(id => notes[id]).slice(0, 4).map(id => {
+      const n = notes[id], sel = S.noteId === id && S.activity === 'notes' && desk;
+      return { title: n.title, vault: n.vault, where: [n.vault, ...n.path].join(' · '), age: n.age, open: () => this.openNote(id), tagStyle: tag(n.vault), rowStyle: `display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--r-control,10px);cursor:pointer;color:${sel ? 'var(--text)' : 'var(--text2)'};background:${sel ? 'var(--surface2)' : 'transparent'}` };
+    });
+
+    const pp = S.phonePath;
+    const pFolders = [...new Set(vNotes.filter(([, n]) => n.path.length > pp.length && pp.every((p, i) => n.path[i] === p)).map(([, n]) => n.path[pp.length]))].sort();
+    const pRows = [
+      ...pFolders.map(f => ({ icon: '▸', name: f, unseen: vNotes.some(([, n]) => n.unseen && n.path[pp.length] === f && pp.every((p, i) => n.path[i] === p)), meta: String(vNotes.filter(([, n]) => n.path[pp.length] === f && pp.every((p, i) => n.path[i] === p)).length), click: () => this.setState({ phonePath: [...pp, f] }) })),
+      ...vNotes.filter(([, n]) => n.path.length === pp.length && pp.every((p, i) => n.path[i] === p)).map(([id, n]) => ({ icon: '·', name: n.title, unseen: !!n.unseen, meta: n.age, click: () => this.openNote(id) }))
+    ];
+
+    // note view
+    const nid = phone ? (S.overlayNote || (S.activity === 'notes' ? S.noteId : null)) : (S.activity === 'notes' ? S.noteId : null);
+    const N = nid ? notes[nid] : null;
+    const edit = S.mode === 'edit';
+    const note = N ? {
+      title: N.title, crumb: this.crumb(N), mentions: N.mentions,
+      versionLine: `v${N.version} · Saved${S.prefs.showId ? ' · id ' + nid : ''}`,
+      hasProv: !!N.editedBy, provText: N.editedBy ? `${N.created ? 'Created' : 'Edited'} by session ${(S.sessions.find(s => s.id === N.editedBy) || {}).name || 'a session'}, ${N.editedAgo} ›` : '',
+      openProv: () => N.editedBy && this.openSession(N.editedBy, 'wrote'),
+      blocks: this.blocks(N, edit),
+      props: [
+        ...(N.props.status ? [{ k: 'status', v: N.props.status, isText: true, isTags: false }] : []),
+        { k: 'tags', tags: N.props.tags || [], isTags: true, isText: false },
+        ...(N.props.color ? [{ k: 'color', v: N.props.color, isText: true, isTags: false }] : []),
+        ...(N.props.source ? [{ k: 'source', v: N.props.source, isText: true, isTags: false }] : []),
+        { k: 'modified', v: N.editedBy ? N.editedAgo : N.age + ' ago', isText: true, isTags: false }
+      ]
+    } : { title: '', crumb: '', blocks: [], props: [], versionLine: '', hasProv: false };
+    const seg = (on) => `padding:4px 11px;border-radius:calc(var(--r-control,10px) * .6);font-size:12.5px;cursor:pointer;font-weight:${on ? 600 : 500};color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accent-soft)' : 'transparent'}`;
+    const drawerOn = desk && S.drawer && !!N;
+    const ovSess = S.overlayNote ? S.sessions.find(s => s.id === S.sessionId) : null;
+
+    // agents
+    const sRow = (s, sel) => {
+      const st = STATUS[s.status];
+      return { name: s.name, sub: `${s.workspace} · ${s.agent} · ${st.live ? s.age : st.label.toLowerCase()}`, dotStyle: this.dot(st.c, st.ring), open: () => this.openSession(s.id),
+        rowStyle: `display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:var(--r-control,10px);cursor:pointer;background:${sel ? 'var(--surface2)' : 'transparent'}` };
+    };
+    const curS = S.activity === 'agents' && S.sessionId ? sessions.find(s => s.id === S.sessionId) : null;
+    const groups = {};
+    sessions.forEach(s => { const k = s.workspace + '@' + s.host; (groups[k] = groups[k] || { workspace: s.workspace, host: s.host, rows: [] }).rows.push(s); });
+    const workGroups = Object.values(groups).map(g => ({ ...g, rows: g.rows.map(s => { const st = STATUS[s.status]; return {
+      name: s.name, meta: `${s.agent} · ${st.live ? s.age : st.label.toLowerCase()}`, dotStyle: this.dot(st.c, st.ring), open: () => this.openSession(s.id),
+      hasCtx: !!(s.context && notes[s.context]), ctxTitle: s.context && notes[s.context] ? notes[s.context].title : '',
+      hasWrote: s.wrote.length > 0, wroteLabel: `wrote ${s.wrote.length}` }; }) }));
+    const agentNames = ['Claude Code', 'OpenCode', 'Shell'];
+    const availableAgents = agentNames.map(a => { const on = online.filter(h => h.agents.includes(a)); const all = hosts.filter(h => h.agents.includes(a)); return { name: a, where: on.length ? `${on.map(h => h.id).join(', ')}` : `${all.length} host offline`, start: () => { this.openLauncher(null); this.setState(s => s.launcher ? { launcher: { ...s.launcher, agent: a } } : null); } }; });
+    const agentsView = !hosts.length ? 'empty' : !sessions.length ? 'first' : curS ? 'session' : 'overview';
+    const setupSteps = [
+      { n: '1', text: 'Enroll a host', hasAction: true },
+      { n: '2', text: 'Sign Claude Code or OpenCode in on that host', hasAction: false },
+      { n: '3', text: 'Start a session', hasAction: false }
+    ].map((x, i) => ({ ...x, numStyle: `width:26px;height:26px;flex:none;border-radius:999px;display:flex;align-items:center;justify-content:center;${mono};font-size:12px;border:1px solid ${i === 0 ? 'var(--accent)' : 'var(--border)'};color:${i === 0 ? 'var(--accent)' : 'var(--text3)'}`, textStyle: `font-size:15px;color:${i === 0 ? 'var(--text)' : 'var(--text3)'}`, hasAction: x.hasAction && desk }));
+    const suggestNotes = S.recents.filter(id => notes[id]).slice(0, 3).map(id => ({ title: notes[id].title, vault: notes[id].vault, tagStyle: tag(), start: () => this.openLauncher(id) }));
+
+    const sess = curS ? (() => {
+      const st = STATUS[curS.status];
+      return {
+        name: curS.name, statusLabel: st.label, isLive: !!st.live, isEnded: !st.live, endedLine: curS.ended || '',
+        dotStyle: this.dot(st.c, st.ring, 7), chipStyle: `display:inline-flex;align-items:center;gap:6px;${mono};font-size:11px;color:${st.c};border:1px solid var(--border);border-radius:999px;padding:2px 9px`,
+        meta: `${curS.agent} · ${curS.workspace} on ${curS.host} · ${st.live ? 'started ' + curS.age + (curS.age === 'now' ? '' : ' ago') : (curS.ended || '')}`,
+        hasCtx: !!(curS.context && notes[curS.context]), ctxTitle: curS.context && notes[curS.context] ? notes[curS.context].title : '',
+        wroteLabel: curS.wrote.length ? `Wrote ${curS.wrote.length}` : 'Wrote 0',
+        lines: curS.lines.map(t => ({ text: t, style: `white-space:pre-wrap;color:${t.startsWith('$') ? 'var(--text)' : t.startsWith('✕') ? 'var(--danger)' : t.startsWith('✓') ? 'var(--text)' : /updated|created/.test(t) ? 'var(--accent)' : 'var(--text2)'}` }))
+      };
+    })() : { lines: [], name: '' };
+    const ctxN = curS && curS.context ? notes[curS.context] : null;
+    const pnId = S.panelNote || (curS && curS.context);
+    const PN = pnId ? notes[pnId] : null;
+    const tabs = curS ? [['context', 'Context'], ['wrote', `Wrote ${curS.wrote.length}`], ['about', 'About']].map(([k, label]) => ({ label, pick: () => this.setState({ tab: k, panelNote: null }), style: `padding:6px 12px;border-radius:var(--r-control,10px);font-size:13px;cursor:pointer;font-weight:${S.tab === k ? 600 : 500};color:${S.tab === k ? 'var(--accent)' : 'var(--text3)'};background:${S.tab === k ? 'var(--accent-soft)' : 'transparent'}` })) : [];
+    const wroteRows = curS ? curS.wrote.filter(id => notes[id]).map(id => ({ title: notes[id].title, crumb: this.crumb(notes[id]), meta: notes[id].created ? 'new' : `v${notes[id].version}`, open: () => phone ? this.setState({ overlayNote: id, infoSheet: false }) : this.setState({ tab: 'wrote', panelNote: id }) })) : [];
+    const wv = curS && curS.writeVault;
+    const aboutRows = curS ? [
+      { k: 'Agent', v: curS.agent },
+      { k: 'Workspace', v: `${curS.workspace} on ${curS.host}` },
+      { k: 'Vault access', v: curS.agent === 'Shell' ? 'None. Shell sessions have no Storm access.' : wv ? `Reads all vaults. Writes to ${wv}. Never deletes.` : 'Reads all vaults. No writes.' },
+      { k: 'Integrations', v: curS.agent === 'Shell' ? 'None' : 'Linear, GitHub. Fixed when the session started.' },
+      { k: 'Network', v: `Inherits ${curS.host}’s policy` }
+    ] : [];
+
+    // settings
+    const pages = [['device', 'This device', 'Only affects this device.'], ['access', 'Devices & access', 'Where you’re signed in, and keys for AI apps outside Storm.'], ['h', 'Storm'], ['vaults', 'Vaults', 'Each vault is a folder of Markdown under the storage root.'], ['ai', 'AI access', 'What AI apps outside Storm, and agents inside it, can do with your notes.'], ['integrations', 'Integrations', 'Services your agents can use, such as Linear or GitHub.'], ['hosts', 'Hosts & default agent', 'The machines agents run on.'], ['storage', 'Storage', 'Where your vaults live on the server.'], ['connection', 'Connection', 'How this device reaches your Storm.'], ['advanced', 'Advanced', 'Details for troubleshooting and for connecting other tools.'], ['h', ''], ['health', 'About & health', 'Whether everything is working.']];
+    const settingsNav = pages.map(([id, label]) => id === 'h' ? { isHeader: !!label, isItem: false, label } : {
+      isHeader: false, isItem: true, label, dot: id === 'integrations',
+      pick: () => this.setState({ settingsPage: id, phoneSettingsOpen: true, activity: 'settings' }),
+      style: `display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;color:${S.settingsPage === id ? 'var(--text)' : 'var(--text2)'};background:${S.settingsPage === id ? 'var(--surface2)' : 'transparent'}`
+    });
+    const pg = pages.find(p => p[0] === S.settingsPage) || pages[0];
+    const pr = S.prefs, flip = (k) => () => this.setState(s => ({ prefs: { ...s.prefs, [k]: !s.prefs[k] } }));
+    const showSettingsPage = S.activity === 'settings' && (desk || S.phoneSettingsOpen);
+
+    // launcher
+    const L = S.launcher;
+    const Lv = L ? (() => {
+      const h = HOSTS.find(x => x.id === L.host) || online[0];
+      const set = (k) => (e) => { const val = e.target.value; this.setState(s => { const nl = { ...s.launcher, [k]: val }; if (k === 'host') { const hh = HOSTS.find(x => x.id === val); nl.workspace = hh.workspaces[0]; if (!hh.agents.includes(nl.agent)) nl.agent = hh.agents[0]; } return { launcher: nl }; }); };
+      const ctx = L.context ? notes[L.context] : null;
+      const shell = L.agent === 'Shell';
+      const t = this.toggle(L.writes && pr.agentWrite, () => pr.agentWrite && this.setState(s => ({ launcher: { ...s.launcher, writes: !s.launcher.writes } })));
+      return {
+        hasCtx: !!ctx, ctxTitle: ctx ? ctx.title : '', ctxVault: ctx ? this.crumb(ctx) : '',
+        fields: [
+          { label: 'Host', value: L.host, change: set('host'), options: online.map(x => ({ v: x.id, label: `${x.id} · online` })) },
+          { label: 'Workspace', value: L.workspace, change: set('workspace'), options: h.workspaces.map(w => ({ v: w, label: w + (sessions.some(s => STATUS[s.status].live && s.workspace === w && s.host === h.id) ? '  (another session is working here)' : '') })) },
+          { label: 'Agent', value: L.agent, change: set('agent'), options: h.agents.map(a => ({ v: a, label: a + (a === S.defaultAgent ? ' · default' : '') })) }
+        ],
+        showWrites: !shell, writes: L.writes && pr.agentWrite, readOnly: !(L.writes && pr.agentWrite),
+        readOnlyText: pr.agentWrite ? 'Read only' : 'Off in Settings › AI access',
+        track: t.track, knob: t.knob, flipWrites: t.flip, writeVault: L.writeVault,
+        setWriteVault: (e) => { const val = e.target.value; this.setState(s => ({ launcher: { ...s.launcher, writeVault: val } })); },
+        vaultOpts: VAULTS.map(v => ({ v: v.id, label: v.id })),
+        risk: shell ? `Network: inherits ${L.host}’s policy. A shell has no access to your vaults or integrations.` : `Network: inherits ${L.host}’s policy. This session can use your integrations (Linear, GitHub) and read your vaults, with that network access.`,
+        note: ctx ? 'The agent reads the note through Storm.' : ''
+      };
+    })() : {};
+
+    // phone chrome
+    const bubble = `width:44px;height:44px;border-radius:var(--r-control,10px);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;position:relative;cursor:pointer;color:var(--text2)`;
+    const pAgentsList = phone && S.activity === 'agents' && !curS;
+
+    return {
+      rootVars: T.str + `;color:var(--text);font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:antialiased`,
+      frameStyle: desk ? 'position:relative;width:1280px;height:800px;overflow:hidden;background:var(--bg,oklch(0.22 0.008 55));border-radius:12px;border:1px solid var(--border,oklch(0.36 0.008 55))' : 'position:relative;width:390px;height:844px;overflow:hidden;background:var(--bg,oklch(0.22 0.008 55));border-radius:36px;border:1px solid var(--border,oklch(0.36 0.008 55))',
+      isDesktop: desk, isPhone: phone,
+      isNotes: S.activity === 'notes', isAgents: S.activity === 'agents', isSettings: S.activity === 'settings',
+      notesRailStyle: railStyle(S.activity === 'notes'), agentsRailStyle: railStyle(S.activity === 'agents'), settingsRailStyle: railStyle(S.activity === 'settings').replace('padding:7px 0 5px', 'padding:8px 0'),
+      goNotes: () => this.setState({ activity: 'notes', ...close, overlayNote: null }),
+      goAgents: () => this.setState({ activity: 'agents', sessionId: phone ? null : S.sessionId, ...close, overlayNote: null, infoSheet: false }),
+      goSettings: () => this.setState({ activity: 'settings', phoneSettingsOpen: false, ...close, overlayNote: null, infoSheet: false }),
+      runningCount: live.length, hasRunning: live.length > 0,
+      statusDotStyle: this.dot(statusColor, false, 9), toggleStatus: () => this.setState({ statusMenu: !S.statusMenu }), statusMenu: S.statusMenu,
+      healthRows, openHealth: () => this.setState({ activity: 'settings', settingsPage: 'health', ...close }),
+      closeMenus: () => this.setState(close),
+      vaultTileStyle: this.tileStyle(V, T, phone ? 30 : 30), vaultInitial: V.id[0].toUpperCase(), vaultName: V.id,
+      syncShort: 'synced 2m ago', syncLine: 'Synced 2m ago · Sync now',
+      toggleVaultMenu: () => this.setState({ vaultMenu: !S.vaultMenu }), vaultMenu: S.vaultMenu,
+      vaultList: VAULTS.map(v => ({ name: v.id, initial: v.id[0].toUpperCase(), count: v.count, tileStyle: this.tileStyle(v, T, 28), check: v.id === S.vault ? '✓' : '', checkPhone: v.id === S.vault && S.activity === 'notes' ? '✓' : '', pick: () => this.setState({ vault: v.id, activity: 'notes', noteId: desk ? (S.recents.find(r => notes[r] && notes[r].vault === v.id) || null) : null, phonePath: [], ...close }) })),
+      agentsCheck: S.activity === 'agents' ? '✓' : '',
+      manageVaults: () => this.setState({ activity: 'settings', settingsPage: 'vaults', ...close }),
+      recentRows, treeRows,
+      showNotesEmpty: desk && S.activity === 'notes' && !N,
+      showNote: !!N, note,
+      noteViewStyle: desk ? `position:absolute;top:0;bottom:0;left:316px;right:${drawerOn ? 280 : 0}px;overflow:auto;background:var(--bg,oklch(0.22 0.008 55))` : `position:absolute;inset:0;overflow:auto;background:var(--bg,oklch(0.22 0.008 55));z-index:${S.overlayNote ? 30 : 1}`,
+      noteInnerStyle: desk ? 'max-width:720px;margin:0 auto;padding:28px 40px 80px' : 'padding:80px 20px 130px',
+      noteBack: () => S.overlayNote ? this.setState({ overlayNote: null }) : this.setState({ noteId: null }),
+      noteBackLabel: S.overlayNote ? (ovSess ? ovSess.name : 'Back') : (N && N.path.length ? N.path[N.path.length - 1] : V.id),
+      readSegStyle: seg(!edit), editSegStyle: seg(edit), setRead: () => this.setState({ mode: 'read' }), setEdit: () => this.setState({ mode: 'edit' }),
+      startFromNote: () => (online.length ? this.openLauncher(nid) : this.setState({ activity: 'agents', overlayNote: null })), startLabel: phone ? 'Session' : 'Start session',
+      toggleDrawer: () => this.setState({ drawer: !S.drawer }), dDrawer: drawerOn,
+      canLaunch: online.length > 0, newSession: () => this.openLauncher(null),
+      openOverview: () => this.setState({ sessionId: null }),
+      overviewRowStyle: `padding:7px 10px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;color:${!curS ? 'var(--text)' : 'var(--text2)'};background:${!curS && sessions.length ? 'var(--surface2)' : 'transparent'}`,
+      runningRows: live.map(s => sRow(s, curS && curS.id === s.id)), endedRows: ended.map(s => sRow(s, curS && curS.id === s.id)),
+      hasRunningRows: live.length > 0, hasEndedRows: ended.length > 0, hasHosts: hosts.length > 0,
+      dShowOverview: desk && S.activity === 'agents' && agentsView === 'overview', dShowFirst: desk && S.activity === 'agents' && agentsView === 'first', dShowEmpty: desk && S.activity === 'agents' && agentsView === 'empty', dShowSession: desk && S.activity === 'agents' && agentsView === 'session',
+      workGroups, availableAgents, setupSteps, suggestNotes,
+      infraLine: hosts.length ? `${online.length} of ${hosts.length} hosts online · 2 integrations, 1 needs sign-in` : 'No hosts yet',
+      openHostsSettings: () => this.setState({ activity: 'settings', settingsPage: 'hosts', phoneSettingsOpen: true }),
+      sess, endConfirm: S.endConfirm, notEndConfirm: !S.endConfirm,
+      askEnd: () => this.setState({ endConfirm: true }), cancelEnd: () => this.setState({ endConfirm: false }),
+      confirmEnd: () => { this.updS(curS.id, x => ({ ...x, status: 'stopped', ended: 'Stopped by you just now', lines: [...x.lines, '■ stopped'] })); this.setState({ endConfirm: false, infoSheet: false }); },
+      dismissSession: () => this.setState(s => ({ sessions: s.sessions.filter(x => x.id !== curS.id), sessionId: null })),
+      runAgain: () => curS && this.openLauncher(curS.context, curS.launch || { context: curS.context, host: online[0] ? online[0].id : 'build-vm', workspace: curS.workspace, agent: curS.agent, writes: !!curS.writeVault, writeVault: curS.writeVault || 'personal' }),
+      tabs, tabNote: !!curS && ((S.tab === 'context' && !!ctxN) || (S.tab === 'wrote' && !!S.panelNote)), tabNoCtx: !!curS && S.tab === 'context' && !ctxN,
+      tabWrote: !!curS && S.tab === 'wrote' && !S.panelNote, tabAbout: !!curS && S.tab === 'about',
+      panelBack: !!S.panelNote, panelBackClick: () => this.setState({ panelNote: null }),
+      pn: PN ? { title: PN.title, crumb: this.crumb(PN), versionLine: `v${PN.version}${PN.editedBy === (curS && curS.id) ? (PN.created ? ' · created by this session' : ' · edited by this session') : ''}`, blocks: this.blocks(PN, false), openInNotes: () => this.openNote(pnId) } : { blocks: [] },
+      wroteRows, wroteEmpty: wroteRows.length === 0,
+      wroteEmptyText: curS && !curS.writeVault ? 'This session can’t write to your vaults.' : 'Nothing written yet. Notes appear here as the session writes them.',
+      aboutRows,
+      settingsNav, showSettingsPage, pageTitle: pg[1], pageIntro: pg[2],
+      settingsPageStyle: desk ? 'position:absolute;top:0;bottom:0;left:316px;right:0;overflow:auto;background:var(--bg)' : 'position:absolute;inset:0;overflow:auto;background:var(--bg);z-index:5',
+      settingsInnerStyle: desk ? 'max-width:680px;padding:28px 40px 60px;display:flex;flex-direction:column;gap:18px' : 'padding:80px 20px 60px;display:flex;flex-direction:column;gap:16px',
+      pgDevice: S.settingsPage === 'device', pgAccess: S.settingsPage === 'access', pgVaults: S.settingsPage === 'vaults', pgAi: S.settingsPage === 'ai', pgInt: S.settingsPage === 'integrations', pgHosts: S.settingsPage === 'hosts', pgStorage: S.settingsPage === 'storage', pgConn: S.settingsPage === 'connection', pgAdv: S.settingsPage === 'advanced', pgHealth: S.settingsPage === 'health',
+      presetButtons: Object.entries(PRESETS).map(([k, p]) => { const d = derive(p); return { label: p.label, pick: () => this.setState({ preset: k }), swatch: `width:18px;height:18px;border-radius:999px;background:${d.vars['--bg']};border:3px solid ${d.vars['--accent']}`, style: `display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;color:var(--text);border:1px solid ${k === preset ? 'var(--accent)' : 'var(--border)'};background:${k === preset ? 'var(--accent-soft)' : 'var(--surface)'}` }; }),
+      deviceToggles: [{ label: 'Open notes in Read mode', sub: 'Switch to Edit with ⌘E.', ...this.toggle(pr.read, flip('read')) }, { label: 'Show note id', sub: 'Shown on the version line.', ...this.toggle(pr.showId, flip('showId')) }],
+      devices: [{ name: phone ? 'Pixel 8 (this device)' : 'MacBook (this device)', meta: 'active now', action: 'Sign out' }, { name: phone ? 'MacBook' : 'Pixel 8', meta: 'active 2h ago', action: 'Revoke' }, { name: 'Web · Firefox', meta: 'active 3d ago', action: 'Revoke' }],
+      appToggles: [{ label: 'Let AI apps read your notes', sub: 'Serves your vaults to apps that hold an access key.', ...this.toggle(pr.appsRead, flip('appsRead')) }, { label: 'Let them create, edit and delete', sub: 'Storm has no trash. A deleted note is gone.', ...this.toggle(pr.appsWrite, flip('appsWrite')) }],
+      agentToggles: [{ label: 'Allow writes when chosen at launch', sub: 'You pick one vault per session. Agents never delete notes.', ...this.toggle(pr.agentWrite, flip('agentWrite')) }],
+      goAccess: () => this.setState({ settingsPage: 'access' }),
+      integrations: [
+        { name: 'Storm vaults', detail: 'Built in. Read only unless a session is allowed to write.', status: 'Built in', action: '', c: 'var(--text3)' },
+        { name: 'Linear', detail: 'Signed in · 14 tools on', status: 'Connected', action: 'Choose tools', c: 'var(--text2)' },
+        { name: 'GitHub', detail: 'Token expired 2 days ago', status: 'Needs sign-in', action: 'Sign in again', c: 'var(--danger)' }
+      ].map(i => ({ ...i, statusStyle: `${mono};font-size:11px;color:${i.c};border:1px solid var(--border);border-radius:999px;padding:2px 8px` })),
+      hostRows: hosts.map(h => ({ name: h.id, meta: `${h.seen} · ${h.agents.join(', ')} · network: host policy`, dotStyle: this.dot(h.online ? 'var(--green)' : 'var(--text3)') })), noHosts: !hosts.length,
+      defaultAgentOpts: ['Claude Code', 'OpenCode', 'Shell'].map(a => ({ label: a, pick: () => this.setState({ defaultAgent: a }), style: `padding:7px 12px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;border:1px solid ${S.defaultAgent === a ? 'var(--accent)' : 'var(--border)'};color:${S.defaultAgent === a ? 'var(--accent)' : 'var(--text2)'};background:${S.defaultAgent === a ? 'var(--accent-soft)' : 'transparent'}` })),
+      connRows: [{ k: 'Server address', v: 'storm.home:7420' }, { k: 'Route', v: 'direct' }, { k: 'Server identity', v: 'verified · 4F:2A:91…' }],
+      advRows: [{ k: 'MCP endpoint', sub: 'For AI apps that connect with an access key.', v: 'storm.home:7420/mcp' }, { k: 'Versions', sub: 'Client and server.', v: '0.4.0 · 0.4.0' }, { k: 'Re-pair this device', sub: 'Scan a new pairing code without signing out.', v: '›' }],
+      launcherOpen: !!L, L: Lv, launch: () => this.launch(), closeLauncher: () => this.setState({ launcher: null }), clearCtx: () => this.setState(s => ({ launcher: { ...s.launcher, context: null } })),
+      launcherStyle: desk ? 'position:absolute;left:50%;top:96px;transform:translateX(-50%);width:460px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card,16px);box-shadow:var(--shadow);padding:22px;display:flex;flex-direction:column;gap:14px;z-index:50' : 'position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--r-card,16px) var(--r-card,16px) 0 0;padding:20px 20px 32px;display:flex;flex-direction:column;gap:14px;z-index:50',
+      // phone
+      pShowRoot: phone && S.activity === 'notes' && !S.noteId, pAtRoot: pp.length === 0, pInFolder: pp.length > 0,
+      pTitle: pp.length ? pp[pp.length - 1] : V.id, pUpLabel: pp.length > 1 ? pp[pp.length - 2] : V.id, pUp: () => this.setState({ phonePath: pp.slice(0, -1) }), pRoot: () => this.setState({ noteId: null, phonePath: [] }), pRows,
+      pShowAgents: pAgentsList, pAgentsEmpty: pAgentsList && agentsView === 'empty', pAgentsFirst: pAgentsList && agentsView === 'first',
+      pShowSession: phone && S.activity === 'agents' && !!curS, backToList: () => this.setState({ sessionId: null, endConfirm: false }),
+      pOpenCtx: () => this.setState({ overlayNote: curS.context, infoSheet: false }),
+      openInfo: () => this.setState({ infoSheet: true }), closeInfo: () => this.setState({ infoSheet: false, endConfirm: false }), infoSheet: phone && S.infoSheet && !!curS,
+      pShowSettingsList: phone && S.activity === 'settings' && !S.phoneSettingsOpen, pSettingsBack: () => this.setState({ phoneSettingsOpen: false }),
+      placeMenu: S.placeMenu, togglePlace: () => this.setState({ placeMenu: !S.placeMenu }),
+      placeBubbleStyle: bubble, setBubbleStyle: bubble + (S.activity === 'settings' ? ';color:var(--accent);border-color:var(--accent)' : ''),
+      bubbleIsAgents: S.activity === 'agents', bubbleIsVault: S.activity !== 'agents',
+      bubbleDotStyle: `position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:999px;border:2px solid var(--bg);background:${S.activity === 'agents' ? (live.length ? 'var(--accent)' : 'var(--text3)') : 'var(--green)'}`,
+      pShowPill: phone && ((S.activity === 'notes' && !S.noteId) || (S.activity === 'agents' && !curS && online.length > 0)) && !S.overlayNote,
+      pillNotes: S.activity === 'notes', pillAgents: S.activity === 'agents'
+    };
+  }
+}
+</script>
+</body>
+</html>

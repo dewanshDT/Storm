@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#e9e6e0}
+a{color:#4f3fa8}a:hover{color:#2f2475}
+</style>
+</helmet>
+<div style="padding:48px 56px 96px;display:flex;flex-direction:column;gap:28px;font-family:'IBM Plex Sans',sans-serif;color:#2a2722">
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:900px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#6b665d">Storm · high-fidelity prototype · same structure on both devices</div>
+    <div style="font-size:28px;font-weight:600">Activity rail, Agents as an activity, global Settings</div>
+    <div style="font-size:15px;line-height:1.6;color:#4a463f;text-wrap:pretty">Both frames are live, and each keeps its own state. To try the core loop, open <b>Gateway spec</b>, press <b>Start session</b>, then <b>Launch</b>. Within about five seconds, the session reads the note, updates BOARD and creates a log note. BOARD then links back to the session. Use Tweaks to switch the theme and the Agents state (running, first session, no host).</div>
+  </div>
+  <div style="display:flex;gap:48px;align-items:flex-start;flex-wrap:wrap">
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#6b665d">Desktop · 1280 × 800</div>
+      <dc-import name="Storm App" device="desktop" theme="{{ theme }}" agents-state="{{ agentsState }}" hint-size="1280px,800px"></dc-import>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#6b665d">Phone · 390 × 844</div>
+      <dc-import name="Storm App" device="phone" theme="{{ theme }}" agents-state="{{ agentsState }}" hint-size="390px,844px"></dc-import>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;storm-dark&quot;,&quot;storm-light&quot;,&quot;slowflow-earth&quot;],&quot;default&quot;:&quot;storm-dark&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;agentsState&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;running&quot;,&quot;first&quot;,&quot;empty&quot;],&quot;default&quot;:&quot;running&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'storm-dark', agentsState: this.props.agentsState ?? 'running' };
+  }
+}
+</script>
+</body>
+</html>
