@@ -357,6 +357,37 @@ args = ["-i"]
         a.tool("storm", 103, "list_vaults")
         check("an agent reads the vault through the gateway", "result" in a.answer("storm", 103))
 
+        print("\n=== new upstream tools: recorded, off, and shown until reviewed (§9, 81k) ===")
+        allowlist = sorted(call("GET", f"/v1/integrations/connections/{cid}", auth=owner)[1]["tool_allowlist"])
+        with open(os.path.join(UP_STATE, "extra_tools.json"), "w") as f:
+            json.dump(["added_later", "bad\u0007name"], f)
+        a.send(slug, {"jsonrpc": "2.0", "id": 110, "method": "tools/list"})
+        listed = [t["name"] for t in a.answer(slug, 110)["result"]["tools"]]
+        check("an agent never sees a tool that appeared later", "added_later" not in listed, listed)
+        _, view = call("GET", f"/v1/integrations/connections/{cid}", auth=owner)
+        check("the agent's listing records it for the owner, and only the valid name",
+              view["new_tools"] == ["added_later"], view.get("new_tools"))
+        check("recording it enabled nothing", sorted(view["tool_allowlist"]) == allowlist, view["tool_allowlist"])
+        a.tool(slug, 111, "added_later")
+        refused = a.answer(slug, 111)
+        check("a call to it is refused", refused.get("error", {}).get("data", {}).get("storm_error")
+              == "tool_not_allowed", refused)
+        status, view = call("PATCH", f"/v1/integrations/connections/{cid}", {"tool_allowlist": allowlist},
+                            auth=owner)
+        check("saving the tool list unchanged is the review: the notice clears and the tool stays off",
+              status == 200 and view["new_tools"] == [] and "added_later" not in view["tool_allowlist"], view)
+        a.send(slug, {"jsonrpc": "2.0", "id": 112, "method": "tools/list"})
+        a.answer(slug, 112)
+        _, view = call("GET", f"/v1/integrations/connections/{cid}", auth=owner)
+        check("a reviewed tool is not new again", view["new_tools"] == [], view.get("new_tools"))
+        call("PATCH", f"/v1/integrations/connections/{cid}", {"tool_allowlist": allowlist + ["added_later"]},
+             auth=owner)
+        a.send(slug, {"jsonrpc": "2.0", "id": 113, "method": "tools/list"})
+        listed = [t["name"] for t in a.answer(slug, 113)["result"]["tools"]]
+        check("only the owner turns it on", "added_later" in listed, listed)
+        call("PATCH", f"/v1/integrations/connections/{cid}", {"tool_allowlist": allowlist}, auth=owner)
+        os.remove(os.path.join(UP_STATE, "extra_tools.json"))
+
         print("\n=== R2–R6: the server restarts ===")
         inits_before = len([e for e in upstream_log() if e["kind"] == "initialize"])
         server.send_signal(signal.SIGTERM)
