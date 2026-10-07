@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i); **built, awaiting on-device acceptance** |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); **merged into `staging` 2026-10-08 (#76–#88), awaiting on-device acceptance** |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -2680,8 +2680,8 @@ redirects (G-D13).
 **81a. The gateway is built in eight slices, storage first and the client
 last.** *(2026-10-05; M20 accepted, so G-D1 lets the build start)*
 
-The spec is still frozen on C3 (the operator's journal grep). The build
-does not wait for it: C3 can only confirm or refute a property of the gates'
+When this was decided the spec was frozen on C3, the operator's journal
+grep (it passed on 2026-10-08, printing 1). The build did not wait for it: C3 can only confirm or refute a property of the gates'
 harness, not change the design. If C3 prints anything but 1, the slices stop
 and the spec is re-opened. Each slice is one PR, stacked on the one before,
 each with its own sub-decision (81b, 81c, …). Like 77, a slice that finds a
@@ -3545,7 +3545,10 @@ upstream and the scripted agent. This slice adds **Phase 1's exit (AM28)**:
 | `e2e.py` 81/81 unmodified | every slice |
 
 **Left for the operator (on-device acceptance):**
-- **C3**: the journal grep, now also against the real build.
+- **C3**: passed 2026-10-08 (the grep printed 1: the planted control line
+  and no credential). The window held the real build's local test runs,
+  but those servers log to files, not the journal, so the grep is repeated
+  once the gateway runs under systemd after a deploy.
 - **G1's real logins:** Notion and Linear sign-in, exchange, refresh
   rotation and revocation, through the app's loopback sign-in (81h), on
   macOS, Linux and **Android**. Android is the case to watch, because the
