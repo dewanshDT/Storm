@@ -457,6 +457,14 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
                 .patch(integrations_patch)
                 .delete(integrations_delete),
         )
+        .route(
+            "/v1/integrations/connections/{id}/test",
+            post(integrations_test),
+        )
+        .route(
+            "/v1/integrations/connections/{id}/tools",
+            get(integrations_tools),
+        )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
@@ -1703,6 +1711,26 @@ async fn integrations_patch(
             },
         )
         .await?,
+    ))
+}
+
+async fn integrations_test(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::IntegrationTest>> {
+    Ok(Json(
+        crate::ops::test_integration(&state, &actor, &id).await?,
+    ))
+}
+
+async fn integrations_tools(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crate::ops::IntegrationTool>>> {
+    Ok(Json(
+        crate::ops::integration_tools(&state, &actor, &id).await?,
     ))
 }
 
@@ -6480,6 +6508,220 @@ pub(crate) mod tests {
         assert_ne!(again["id"], id);
     }
 
+    async fn create_against(app: &Router, bearer: &str, url: &str, value: &str) -> String {
+        let (status, body) = send(
+            app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({
+                    "display_name": "Mock",
+                    "url": url,
+                    "auth_kind": "static",
+                    "credential": {"header": "X-Api-Key", "value": value},
+                }),
+                bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn the_owners_test_turns_every_tool_on_and_later_tools_stay_off() {
+        // G-D16 over the real routes, against a real MCP upstream.
+        let dir = tempdir::TempDir::new("storm-integrations-probe").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let up = crate::gateway::upstream::tests::mock(&["search", "get_issue"]);
+        let url = crate::gateway::upstream::tests::serve_mock(
+            up.clone(),
+            Some(("x-api-key", "upstream-canary-probe".into())),
+        )
+        .await;
+        let id = create_against(&app, &owner, &url, "upstream-canary-probe").await;
+
+        let (status, test) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        assert_eq!(test["ok"], true);
+        assert_eq!(test["server_name"], "mock-upstream");
+        assert_eq!(test["tool_count"], 2);
+        assert_eq!(test["new_tools"], serde_json::json!([]));
+        assert_eq!(
+            test["integration"]["tool_allowlist"],
+            serde_json::json!(["get_issue", "search"])
+        );
+        assert!(test["integration"]["last_ok"].is_string());
+
+        // A tool appears upstream: listed, new, and off.
+        up.tools.lock().unwrap().push("delete_repo".into());
+        let tools_path = format!("{CONNECTIONS}/{id}/tools");
+        let (status, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
+        assert_eq!(status, StatusCode::OK, "{tools}");
+        let by_name = |name: &str| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(by_name("delete_repo")["allowed"], false);
+        assert_eq!(by_name("delete_repo")["new"], true);
+        assert_eq!(by_name("search")["allowed"], true);
+        assert_eq!(by_name("search")["new"], false);
+        // Seen once, it is no longer new — and still off until the owner says.
+        let (_, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
+        let again = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "delete_repo")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (again["allowed"].clone(), again["new"].clone()),
+            (false.into(), false.into())
+        );
+
+        // Probes never call a tool, and each one left a metadata-only audit row.
+        assert_eq!(up.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let calls = state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(10)
+            .unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.method == "tools/list" && c.outcome == "ok" && c.connection_id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_credential_marks_the_integration_needs_reauth_until_rotated() {
+        let dir = tempdir::TempDir::new("storm-integrations-reauth").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let url = crate::gateway::upstream::tests::serve_mock(
+            crate::gateway::upstream::tests::mock(&["search"]),
+            Some(("x-api-key", "k-right".into())),
+        )
+        .await;
+        let id = create_against(&app, &owner, &url, "k-wrong").await;
+        let test_path = format!("{CONNECTIONS}/{id}/test");
+
+        let (status, test) = send(
+            &app,
+            post_json_with_auth(&test_path, serde_json::json!({}), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(test["ok"], false);
+        assert_eq!(test["error_code"], "upstream_unauthorized");
+        assert_eq!(test["integration"]["status"], "needs_reauth");
+        assert_eq!(
+            test["integration"]["last_error_code"],
+            "upstream_unauthorized"
+        );
+        // The tool listing says the same, as a 502 carrying only the code.
+        let (status, body) = send(
+            &app,
+            get_with_auth(&format!("{CONNECTIONS}/{id}/tools"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "upstream_unauthorized");
+
+        // Rotating the token and testing again reconnects it.
+        let path = format!("{CONNECTIONS}/{id}");
+        let (_, patched) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"credential": {"header": "X-Api-Key", "value": "k-right"}}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(patched["status"], "connected");
+        let (_, test) = send(
+            &app,
+            post_json_with_auth(&test_path, serde_json::json!({}), &owner),
+        )
+        .await;
+        assert_eq!(test["ok"], true, "{test}");
+        assert_eq!(
+            test["integration"]["last_error_code"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_upstream_needs_the_test_only_flag_and_a_disabled_one_is_not_probed() {
+        let dir = tempdir::TempDir::new("storm-integrations-http").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Plain", "url": "http://127.0.0.1:9/mcp", "auth_kind": "none"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "http must need the flag");
+
+        let id = create_github(&app, &owner, "ghp_x").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        send(
+            &app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{id}"),
+                serde_json::json!({"enabled": false}),
+                &owner,
+            ),
+        )
+        .await;
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/storm/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn integration_management_is_the_owners_alone() {
         // G-D20 / AM29: 403 on every route for a member, never an empty list.
@@ -6503,6 +6745,8 @@ pub(crate) mod tests {
             get_with_auth(&path, &member),
             patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &member),
             delete_with_auth(&path, &member),
+            post_json_with_auth(&format!("{path}/test"), serde_json::json!({}), &member),
+            get_with_auth(&format!("{path}/tools"), &member),
         ];
         for request in requests {
             let uri = format!("{} {}", request.method(), request.uri());

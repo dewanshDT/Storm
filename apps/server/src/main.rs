@@ -268,6 +268,13 @@ struct ServeArgs {
     /// a decision rather than a side effect of upgrading.
     #[arg(long)]
     mcp: bool,
+
+    /// Test suites only: let MCP Gateway integrations use `http://` upstream
+    /// URLs, so a mock upstream on loopback needs no certificate. Never set in
+    /// a deployment: an integration's credential would cross the network in
+    /// the clear.
+    #[arg(long, hide = true)]
+    gateway_allow_http_upstreams: bool,
     // Deliberately no `--relay` here, however much it looks like `--mcp`'s
     // sibling. `Registry::relays` is a setting the app can also change at
     // runtime, and a flag would seed it before `state/vaults.json` exists —
@@ -1211,6 +1218,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         crate::gateway::Gateway::open(&state_dir, &crate::index::now_rfc3339())
             .context("opening the MCP gateway's store")?,
     );
+    if args.gateway_allow_http_upstreams {
+        gateway.set_allow_http_upstreams(true);
+        tracing::warn!(
+            "--gateway-allow-http-upstreams is set: integrations may send their \
+             credentials over plain http. This flag exists for the test suites."
+        );
+    }
 
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),

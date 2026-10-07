@@ -30,7 +30,25 @@ ed25519-dalek = "3.0.0"
 futures-util = { version = "0.3", default-features = false }
 notify = "8.2.0"
 rand = "0.10.2"
-rmcp = { version = "=3.1.2", features = ["server", "transport-streamable-http-server", "macros"] }
+# Server features for `/mcp` (decision 39); client features for the MCP
+# Gateway's upstream calls (AM26, decision 81d), at the same exact pin.
+# `reqwest-tls-no-provider`, never `reqwest`: that one pulls aws-lc-rs.
+# **Only the `*_once` request methods may send an upstream request** —
+# `gateway::upstream`'s tests read the source to keep it so.
+rmcp = { version = "=3.1.2", features = [
+    "server",
+    "transport-streamable-http-server",
+    "macros",
+    "client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest-tls-no-provider",
+] }
+# The gateway's HTTP client to upstreams, handed to rmcp's transport so its
+# redirects, timeouts and TLS roots are ours. Same version and TLS choice as
+# apps/runtime: rustls with no default provider, configured with `ring` and
+# the bundled roots in `gateway::upstream`.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+webpki-roots = "1.0.9"
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1"

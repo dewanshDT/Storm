@@ -11,6 +11,8 @@ pub const BUILTIN_ID: &str = "storm";
 pub const BUILTIN_SLUG: &str = "storm";
 
 pub mod status {
+    /// An `oauth` connection before its first authorization (81g).
+    #[allow(dead_code)]
     pub const PENDING_AUTH: &str = "pending_auth";
     pub const CONNECTED: &str = "connected";
     pub const NEEDS_REAUTH: &str = "needs_reauth";
@@ -137,12 +139,21 @@ pub fn validate_display_name(name: &str) -> Result<(), &'static str> {
 /// A static connection's URL is typed by the owner, who may run their own MCP
 /// server on the LAN; refusing a private address there would protect the
 /// owner from themselves and break a homelab's main use. (decision 81c)
-pub fn validate_url(url: &str) -> Result<(), &'static str> {
+///
+/// `allow_http` exists for the test suites only (`serve
+/// --gateway-allow-http-upstreams`, hidden): a mock upstream on loopback has
+/// no certificate. Nothing in a real deployment sets it.
+pub fn validate_url(url: &str, allow_http: bool) -> Result<(), &'static str> {
     if url.len() > 2048 || url.chars().any(|c| c.is_control() || c == ' ') {
         return Err("the URL is too long or contains spaces or control characters");
     }
     let uri: axum::http::Uri = url.parse().map_err(|_| "the URL does not parse")?;
-    if uri.scheme_str() != Some("https") {
+    let scheme_ok = match uri.scheme_str() {
+        Some("https") => true,
+        Some("http") => allow_http,
+        _ => false,
+    };
+    if !scheme_ok {
         return Err("an integration URL must be https");
     }
     let Some(authority) = uri.authority() else {
@@ -216,8 +227,30 @@ pub fn validate_allowlist(tools: &[String]) -> Result<(), &'static str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A plausible row, for tests elsewhere in the gateway.
+    pub(crate) fn connection() -> Connection {
+        Connection {
+            id: "mcc_TEST".into(),
+            owner_user_id: "usr_TEST".into(),
+            slug: "test".into(),
+            display_name: "Test".into(),
+            url: "https://x.example/mcp".into(),
+            auth_kind: auth_kind::NONE.into(),
+            status: status::CONNECTED.into(),
+            tool_allowlist: Vec::new(),
+            known_tools: None,
+            expose_resources: true,
+            expose_prompts: true,
+            upstream_account_label: None,
+            last_ok: None,
+            last_error_code: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        }
+    }
 
     #[test]
     fn slugs_fit_every_place_an_agent_sees_them() {
@@ -244,10 +277,11 @@ mod tests {
 
     #[test]
     fn an_upstream_url_is_https_with_a_host_and_no_userinfo() {
-        assert!(validate_url("https://mcp.notion.com/mcp").is_ok());
-        assert!(validate_url("https://api.example.com:8443/mcp/?x=1").is_ok());
+        assert!(validate_url("https://mcp.notion.com/mcp", false).is_ok());
+        assert!(validate_url("http://127.0.0.1:9/mcp", true).is_ok());
+        assert!(validate_url("https://api.example.com:8443/mcp/?x=1", false).is_ok());
         // The owner's own LAN MCP server is allowed (decision 81c).
-        assert!(validate_url("https://192.168.1.20/mcp").is_ok());
+        assert!(validate_url("https://192.168.1.20/mcp", false).is_ok());
         for bad in [
             "http://mcp.notion.com/mcp",
             "mcp.notion.com/mcp",
@@ -258,7 +292,7 @@ mod tests {
             "https://mcp.example.com/a b",
             "ftp://x/",
         ] {
-            assert!(validate_url(bad).is_err(), "{bad}");
+            assert!(validate_url(bad, false).is_err(), "{bad}");
         }
     }
 

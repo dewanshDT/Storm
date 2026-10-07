@@ -1596,7 +1596,7 @@ pub async fn create_integration(
         .clone()
         .unwrap_or_else(|| conn::slug_from(&req.display_name));
     conn::validate_slug(&slug).map_err(bad_request)?;
-    conn::validate_url(&req.url).map_err(bad_request)?;
+    conn::validate_url(&req.url, state.gateway.allow_http_upstreams()).map_err(bad_request)?;
     match (req.auth_kind.as_str(), &req.credential) {
         (auth_kind::STATIC, Some(c)) => {
             conn::validate_static(&c.header, &c.value).map_err(bad_request)?
@@ -1771,6 +1771,155 @@ pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiR
     let auth_db = state.auth_db.lock().await;
     integration_event(&auth_db, "integration_deleted", actor, &c, &now);
     Ok(())
+}
+
+/// What the owner's `test` learns. **Never the upstream's error text**: only
+/// the stable code (§12).
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationTest {
+    pub ok: bool,
+    pub error_code: Option<&'static str>,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub tool_count: usize,
+    /// Tools seen for the first time, which stay off until the owner turns
+    /// them on (G-D16). This is the owner's notice.
+    pub new_tools: Vec<String>,
+    pub integration: IntegrationView,
+}
+
+/// One upstream tool as the owner's allowlist editor sees it.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationTool {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub allowed: bool,
+    pub new: bool,
+}
+
+/// Runs the owner's probe against a connection and records what it found:
+/// `last_ok` or `last_error_code`, `needs_reauth` on a refused credential,
+/// the allowlist rule for new tools, and one metadata-only audit row.
+async fn probe_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<(
+    Connection,
+    Result<crate::gateway::upstream::ProbeResult, crate::gateway::upstream::UpstreamError>,
+    Vec<String>,
+)> {
+    require_integration_owner(actor)?;
+    if id == BUILTIN_ID {
+        return Err(bad_request("the built-in connection is served in process"));
+    }
+    let mut c = own_connection(state, actor, id)?;
+    if c.status == status::DISABLED {
+        return Err(conflict("the integration is disabled; enable it first"));
+    }
+    let started = std::time::Instant::now();
+    let result = match state.gateway.target(&c) {
+        Ok(target) => crate::gateway::upstream::probe(target).await,
+        Err(e) => Err(e),
+    };
+    let now = crate::index::now_rfc3339();
+    let mut new_tools = Vec::new();
+    match &result {
+        Ok(found) => {
+            let names: Vec<String> = found.tools.iter().map(|t| t.name.to_string()).collect();
+            new_tools = crate::gateway::upstream::reconcile_tools(&mut c, &names);
+            c.last_ok = Some(now.clone());
+            c.last_error_code = None;
+            if c.status == status::NEEDS_REAUTH || c.status == status::ERROR {
+                c.status = status::CONNECTED.into();
+            }
+        }
+        Err(e) => {
+            c.last_error_code = Some(e.code().to_string());
+            if e.needs_reauth() {
+                c.status = status::NEEDS_REAUTH.into();
+            }
+        }
+    }
+    c.updated_at = now;
+    {
+        let store = state.gateway.store.lock().expect("gateway store lock");
+        store.update_connection(&c).map_err(internal)?;
+    }
+    state
+        .gateway
+        .record_call(crate::gateway::store::CallRecord {
+            at_ms: crate::gateway::now_ms(),
+            owner_user_id: c.owner_user_id.clone(),
+            connection_id: c.id.clone(),
+            session_id: None,
+            host_id: None,
+            method: "tools/list".into(),
+            tool: None,
+            outcome: if result.is_ok() { "ok" } else { "error" }.into(),
+            error_code: result.as_ref().err().map(|e| e.code().to_string()),
+            duration_ms: Some(started.elapsed().as_millis() as i64),
+            response_bytes: None,
+        });
+    Ok((c, result, new_tools))
+}
+
+/// `POST /v1/integrations/connections/{id}/test` (§14).
+pub async fn test_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<IntegrationTest> {
+    let (c, result, new_tools) = probe_integration(state, actor, id).await?;
+    let (ok, error_code, server_name, server_version, tool_count) = match &result {
+        Ok(found) => (
+            true,
+            None,
+            Some(found.server_name.clone()),
+            Some(found.server_version.clone()),
+            found.tools.len(),
+        ),
+        Err(e) => (false, Some(e.code()), None, None, 0),
+    };
+    Ok(IntegrationTest {
+        ok,
+        error_code,
+        server_name,
+        server_version,
+        tool_count,
+        new_tools,
+        integration: view_of(state, c)?,
+    })
+}
+
+/// `GET /v1/integrations/connections/{id}/tools` (§14): the upstream's tools
+/// now, each with whether agents may call it. A failure is `502` with the
+/// stable code, never the upstream's text.
+pub async fn integration_tools(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<Vec<IntegrationTool>> {
+    let (c, result, new_tools) = probe_integration(state, actor, id).await?;
+    let found =
+        result.map_err(|e| ApiError(axum::http::StatusCode::BAD_GATEWAY, e.code().to_string()))?;
+    let mut tools: Vec<IntegrationTool> = found
+        .tools
+        .into_iter()
+        .map(|t| {
+            let name = t.name.to_string();
+            IntegrationTool {
+                allowed: c.tool_allowlist.contains(&name),
+                new: new_tools.contains(&name),
+                title: t.title.clone(),
+                description: t.description.as_ref().map(|d| d.to_string()),
+                name,
+            }
+        })
+        .collect();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tools)
 }
 
 #[cfg(test)]
