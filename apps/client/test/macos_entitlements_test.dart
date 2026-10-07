@@ -20,8 +20,6 @@ void main() {
         'every HTTP request and the sync WebSocket',
     'com.apple.security.files.user-selected.read-only':
         'reading a file chosen in the attachment picker',
-    'com.apple.security.network.server':
-        "the integrations sign-in's loopback listener (decision 81h)",
   };
 
   for (final name in const ['DebugProfile', 'Release']) {
@@ -44,6 +42,15 @@ void main() {
       test('is sandboxed', () {
         expect(text, _grants('com.apple.security.app-sandbox'));
       });
+
+      // The release app listens on no port: integration sign-ins come back
+      // as `storm://oauth` links (decision 81l). The debug build keeps the
+      // template's grant, which Flutter's tooling uses.
+      if (name == 'Release') {
+        test('does not grant network.server', () {
+          expect(text, isNot(_grants('com.apple.security.network.server')));
+        });
+      }
 
       for (final entry in required.entries) {
         test('grants ${entry.key}', () {

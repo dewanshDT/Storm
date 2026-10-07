@@ -3701,6 +3701,72 @@ amendment (2026-10-08).
 - Client tests: the review button (plural and singular), a review that sends
   no new tool, and name cleaning.
 
+
+**81l. `storm://oauth` on Android and macOS, loopback on Linux and Windows
+(spec §10.4, built to the frozen spec).** *(2026-10-08)*
+
+81h signed in through loopback on every native platform and left
+`storm://oauth` for later. That contradicted the frozen spec §10.4: a
+loopback listener on desktop, and a newly registered `storm://oauth` on
+Android and macOS. The operator chose to build the spec, not amend it
+(2026-10-08).
+
+**Why the split matters:**
+- On Android the listener lives inside an app that is backgrounded during
+  the login, so an app frozen or killed meanwhile loses the sign-in.
+- A loopback port changes on every sign-in, so each one registered a new
+  OAuth client upstream.
+- A scheme hands the redirect to the app and brings it to the front. One
+  fixed redirect URI reuses one client per authorization server.
+
+**What it is:**
+- **The redirect:** `storm://oauth/callback` (`appRedirect`) on Android and
+  macOS (`usesAppScheme`); the 81h loopback listener, unchanged, on Linux and
+  Windows. The server's `validate_redirect` already accepted both.
+- **Native side:** no third-party plugin, by the Kotlin-plugin rule.
+  - Android: a `VIEW`/`BROWSABLE` intent filter for `storm://oauth` only, with
+    `flutter_deeplinking_enabled=false` so the link never becomes a router
+    page.
+  - macOS: `CFBundleURLTypes` for `storm`, and `application(_:open:)`.
+  - Both buffer links until Dart calls `takeLinks` on the `storm/links`
+    channel, then forward them as `link` calls, so a link that launched the
+    app is not lost.
+- **Dart (`OAuthLinks`):**
+  - A redirect goes to the sign-in waiting for its `state`, which the client
+    reads from the authorization URL.
+  - Anything but `storm://oauth` with a `state` is ignored, because the
+    scheme is public.
+  - **A link no sign-in in this process is waiting for is an orphan**: the
+    app root opens Integrations, which relays it. The flow, PKCE and all,
+    lives on the server, so any instance can finish it.
+- **Android's launch mode is unchanged** (`singleTop`, `taskAffinity=""`).
+  Whether a browser's link reaches the running instance or a fresh one is
+  for on-device acceptance to show. Both paths are handled: the fresh
+  instance relays the orphan, and a sign-in still waiting learns on resume
+  that its integration became connected, instead of waiting out the deadline.
+- **macOS Release drops `network.server`**: the release app listens on no
+  port now. The debug build keeps the template's grant.
+- **Native builds:** `.github/workflows/acceptance.yml` builds the APK
+  (debug-signed, no secrets) and the macOS app on a push to `acceptance/*`.
+  It never releases. It's the first place this Kotlin and Swift compile:
+  PR CI does not build native projects.
+
+**Verified:**
+- Dart tests:
+  - the scheme redirect is matched by `state` and relayed;
+  - another sign-in's redirect and a non-oauth `storm://` link don't finish
+    it;
+  - a cancel relays nothing;
+  - a sign-in finished by another instance completes on resume;
+  - links buffered before Dart listens are taken at start;
+  - the Integrations screen relays an orphan.
+- Registration guards for the manifest, Info.plist, `MainActivity` and the
+  macOS delegate.
+- The Release entitlements no longer grant `network.server`.
+
+**Not verified here:** the Kotlin and Swift compile only on the acceptance
+workflow, and their behaviour on a device is on-device acceptance.
+
 ---
 
 ## Data model

@@ -1,0 +1,76 @@
+name: Acceptance builds
+
+# The native apps of a branch, for on-device acceptance, **without a
+# release**: push the commit to `acceptance/<anything>` and download the
+# artifacts. Nothing here creates a GitHub Release, touches the apt repo or
+# moves `main` (decision 45: only a tag makes a release).
+#
+# This is also the only place the app's own Kotlin and Swift get compiled
+# before a release: PR CI runs `flutter analyze` and the Dart tests, which
+# never build the native projects (decision 81l).
+#
+# The APK is debug-signed — no release secrets are used — so it will not
+# install over a release-signed Storm without uninstalling that first.
+
+on:
+  push:
+    branches: ["acceptance/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: android (apk, debug-signed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build APK
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build apk --release --build-number="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "dist/storm-acceptance-${GITHUB_SHA::7}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-acceptance
+          path: apps/client/dist/*
+          retention-days: 14
+
+  macos:
+    name: macos (app)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: Build macOS app
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build macos --release --build-number="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          APP="build/macos/Build/Products/Release/Storm.app"
+          test -d "$APP"
+          # Ad-hoc signed and unnotarized, like a release's.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" \
+            "dist/Storm-acceptance-${GITHUB_SHA::7}-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-acceptance
+          path: apps/client/dist/*
+          retention-days: 14

@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
+import 'agent/oauth_links.dart';
 import 'router.dart';
 import 'state/app_state.dart';
 import 'ui/theme.dart';
@@ -27,6 +29,14 @@ class _StormAppState extends ConsumerState<StormApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Integration sign-ins come back as `storm://oauth` links on Android and
+    // macOS (spec §10.4, 81l). One this process was not waiting for — the
+    // app was killed while the browser was open — opens Integrations, which
+    // relays it. Listening before `start`, which may deliver one at once.
+    if (!kIsWeb) {
+      OAuthLinks.instance.orphans.addListener(_showIntegrations);
+      OAuthLinks.instance.start();
+    }
     // Once, at startup. **Not `addPostFrameCallback`** — that fires after the
     // first frame, which is well before `settingsProvider` has finished
     // loading preferences and the keychain, so the check ran against a null
@@ -38,7 +48,13 @@ class _StormAppState extends ConsumerState<StormApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    OAuthLinks.instance.orphans.removeListener(_showIntegrations);
     super.dispose();
+  }
+
+  void _showIntegrations() {
+    if (OAuthLinks.instance.orphans.value.isEmpty) return;
+    ref.read(routerProvider).go(Routes.integrations);
   }
 
   @override

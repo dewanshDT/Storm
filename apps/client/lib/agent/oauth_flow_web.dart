@@ -11,3 +11,9 @@ Future<IntegrationCheck> signIn(
 }) => Future.error(
   UnsupportedError('Sign-in is not available in the browser; use a token.'),
 );
+
+/// The web registers no `storm://` scheme, so it never has a redirect to relay.
+Future<IntegrationCheck> relayRedirect(
+  IntegrationsApi api,
+  Map<String, String> params,
+) => Future.error(UnsupportedError('No sign-in redirects in the browser.'));

@@ -503,11 +503,27 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
 - **A refresh is single flight per connection, and a rotated pair is
   persisted before it is used**; a rejected refresh is `needs_reauth`, never
   retried in a loop.
-- **The client's sign-in listens on loopback before it opens the browser,
-  and relays only `{state, code}`** (81h). It answers only its redirect path,
-  closes after one sign-in, and never sees a token. The macOS Release build
-  needs `network.server` for it; the entitlements test holds it. **"Allow
-  vault writes" is off by default and absent for `shell`.**
+- **The client's sign-in redirect is the spec's, per platform** (§10.4,
+  81l): **`storm://oauth/callback` on Android and macOS, a loopback listener
+  on Linux and Windows.** Never loopback everywhere: that is the design the
+  spec rejected for Android, where the app is backgrounded during the login.
+  Either way the client relays only `{state, code}` and never sees a token.
+  - The loopback listener listens before it opens the browser, answers only
+    its redirect path, and closes after one sign-in.
+  - A `storm://oauth` link is buffered by the native side
+    (`MainActivity.kt`, `AppDelegate.swift`) until Dart calls `takeLinks`.
+  - A link no sign-in in this process is waiting for is an **orphan, relayed
+    by the Integrations screen, never dropped**: Android may deliver it to a
+    fresh instance, and the flow lives on the server.
+  - The registrations are configuration that fails silently, and
+    `test/oauth_scheme_registration_test.dart` guards them. Flutter's own
+    deep linking is off on Android, so the link never becomes a page route.
+  - The macOS Release app no longer grants `network.server`, and the
+    entitlements test holds that.
+  - PR CI never compiles the native projects; push to `acceptance/*` and
+    the acceptance workflow does.
+
+  **"Allow vault writes" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 - **A new upstream tool is recorded, never enabled** (spec §9, 81k). Only

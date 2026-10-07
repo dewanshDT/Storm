@@ -13,6 +13,7 @@ import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/agents_screen.dart';
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart';
+import 'package:storm/agent/oauth_links.dart';
 import 'package:storm/ui/theme.dart';
 
 /// MCP Gateway, client side (decision 81h).
@@ -75,7 +76,7 @@ void main() {
       if (path == '/v1/integrations/connections' && req.method == 'POST') {
         return http.Response(jsonEncode(github()), 201);
       }
-      if (path.endsWith('/test')) {
+      if (path.endsWith('/test') || path == '/v1/integrations/oauth/callback') {
         return http.Response(jsonEncode(check(github())), 200);
       }
       if (path.endsWith('/tools')) {
@@ -96,20 +97,21 @@ void main() {
     return (client, seen);
   }
 
-  Widget app(Widget child, MockClient client, {bool oauth = true}) =>
-      ProviderScope(
-        overrides: [
-          integrationsApiFactoryProvider.overrideWithValue(
-            () => IntegrationsApi(
-              baseUrl: 'http://s',
-              token: 't',
-              client: client,
-            ),
-          ),
-          oauthSupportedProvider.overrideWithValue(oauth),
-        ],
-        child: MaterialApp(theme: StormTheme.light(), home: child),
-      );
+  Widget app(
+    Widget child,
+    MockClient client, {
+    bool oauth = true,
+    OAuthLinks? links,
+  }) => ProviderScope(
+    overrides: [
+      oauthLinksProvider.overrideWithValue(links ?? OAuthLinks.detached()),
+      integrationsApiFactoryProvider.overrideWithValue(
+        () => IntegrationsApi(baseUrl: 'http://s', token: 't', client: client),
+      ),
+      oauthSupportedProvider.overrideWithValue(oauth),
+    ],
+    child: MaterialApp(theme: StormTheme.light(), home: child),
+  );
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
@@ -272,6 +274,27 @@ void main() {
     final long = 'x' * 100;
     expect(displayToolName(long), '${'x' * 64}…');
     expect(displayToolName('search'), 'search');
+  });
+
+  testWidgets('a sign-in redirect no sign-in was waiting for is relayed '
+      '(spec §10.4, 81l)', (tester) async {
+    // The app was killed while the browser was open, or Android handed the
+    // link to a fresh instance: the redirect arrives as an orphan, and the
+    // Integrations screen finishes the sign-in with it.
+    final (client, seen) = server();
+    final links = OAuthLinks.detached()
+      ..deliver(Uri.parse('storm://oauth/callback?state=s9&code=c9'));
+    await tester.pumpWidget(
+      app(const IntegrationsScreen(), client, links: links),
+    );
+    await tester.pumpAndSettle();
+    final relay = seen.where(
+      (r) => r.url.path == '/v1/integrations/oauth/callback',
+    );
+    expect(relay, hasLength(1));
+    expect(jsonDecode(relay.single.body), {'state': 's9', 'code': 'c9'});
+    expect(find.textContaining('Connected: 2 tool(s)'), findsOneWidget);
+    expect(links.orphans.value, isEmpty);
   });
 
   testWidgets('disconnecting a token says Storm cannot revoke it', (
