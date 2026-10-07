@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3298,6 +3298,122 @@ scripted agent:
 **Not here:** the real Claude Code and OpenCode against the real build is
 on-device acceptance (G2 proved the configs with the gates' harness). C3, the
 journal, stays the operator's.
+
+**81g. Gateway slice 6: OAuth — Storm as the client, the browser back to the
+app, and the tokens sealed.** *(2026-10-05)*
+
+**rmcp's `auth` feature does the protocol.** That is
+`AuthorizationManager`: RFC 9728 → 8414 discovery, RFC 7591 registration as
+a public client (`token_endpoint_auth_method: none`), PKCE S256, RFC 8707
+`resource`, the code exchange and the refresh. Storm owns every seam it
+exposes. `cargo tree -i aws-lc-rs` still finds nothing.
+- **`SsrfHttp`** (rmcp's `OAuthHttpClient`) is the only HTTP client it gets:
+  - **https only**;
+  - every URL and **every redirect hop** is resolved, and refused unless
+    **all** its addresses are public (loopback, RFC 1918, link-local,
+    CGNAT, ULA and v4-mapped are all refused);
+  - then it connects to exactly those addresses (`resolve_to_addrs`), so a
+    second DNS answer cannot change the target;
+  - redirects are followed by hand, with `Authorization` dropped across
+    origins.
+- **`TokenStore`** (`CredentialStore`): the token set is sealed under kind
+  `oauth_tokens`. rmcp saves a refreshed pair through it before returning
+  the new access token, so a rotated refresh token is persisted before use.
+- **`FlowStore`** (`StateStore`) over `oauth_flows`:
+  - the `state` is stored as its blake3 hash, and the PKCE state sealed (AAD
+    = hash, `pkce_verifier`);
+  - ten minutes;
+  - **loading claims**: one `UPDATE … WHERE used_at IS NULL`, so of two
+    racing callbacks exactly one exchanges the code.
+- **Discovery must be published.** rmcp's legacy fallback (synthesized
+  `/authorize`, `/token`) is refused as `oauth_not_offered`.
+
+**The routes (owner only, session tier):**
+- **`POST …/connections/{id}/authorize`** `{redirect_uri, client_id?,
+  client_secret?, scopes?}`:
+  - **the redirect URI must be an `http` loopback or `storm://oauth`**
+    (G-D13, G1), never a LAN or public URL;
+  - the client is a pasted one (its secret sealed), else one already
+    registered for this owner, issuer and redirect, else a new dynamic
+    registration, else `oauth_client_required`;
+  - the answer is the authorization URL.
+- **`POST /v1/integrations/oauth/callback`** `{state, code, iss?}`:
+  - another owner's state reads exactly like a spent one;
+  - the code is exchanged, the connection becomes `connected`, live
+    upstream sessions close so the next `initialize` uses the new tokens,
+    and the integration is tested;
+  - audited `integration_authorized`, or `_reauthorized` when it already
+    had tokens.
+- Every failure is a stable code (`oauth_discovery_failed`,
+  `oauth_registration_failed`, `oauth_exchange_failed`,
+  `oauth_flow_expired_or_used` …), never the upstream's text.
+
+**Using the tokens:**
+- `Gateway::target` is now async. For `oauth` it presents `Bearer <access>`,
+  refreshing first when the token is within a minute of expiry.
+- **Refresh is single flight**: one lock per connection is held across the
+  refresh, and the token set is re-read under it.
+- An upstream `401` at `initialize`, or on the owner's listing, gets one
+  forced refresh and one retry. Neither executes anything an agent asked
+  for, so this is not a retry of a call.
+- A refresh the authorization server **rejects** makes the connection
+  `needs_reauth` and records `integration_refresh_failed`. A transient
+  failure is `upstream_unavailable`.
+
+**A new `oauth` connection starts `pending_auth`** and stays so until it is
+authorized; a failed test does not move it to `needs_reauth`.
+**Disconnecting** reads what RFC 7009 revocation needs before the
+ciphertexts go, then POSTs it to the advertised `revocation_endpoint`, best
+effort, under the SSRF rule, and nothing waits on it.
+
+**Additive schema:** `connection_oauth` records which client a connection
+was authorized with, so a refresh uses it. The `oauth_clients` row (81b) now
+also holds the discovered metadata, which is where the revocation endpoint
+comes from.
+
+**Not the spec's literal shape, by design (recorded, not a contradiction):**
+- A loopback redirect with a new port per desktop launch registers a new
+  dynamic client per port. That is harmless, and it is what Notion's
+  post-login redirect check will need.
+- The `resource` sent on a refresh comes from re-running discovery, because
+  rmcp keeps the discovered resource private. A refresh therefore costs a
+  discovery round trip, which is rare.
+
+**Verified.**
+- A mock authorization server and protected MCP resource (axum, in process):
+  - the full flow: `pending_auth`; a LAN redirect refused; S256, `resource`
+    and a registered public client in the URL; the client reused; the state
+    never stored raw; the exchange carries the verifier and `resource`;
+    `connected` with tools; replay and expiry refused; no token in
+    `gateway.db`, its WAL or `security_events`;
+  - refresh: two concurrent callers refresh once; the rotated refresh
+    token is what is stored; a rejected refresh means `needs_reauth` and
+    `integration_refresh_failed`; re-authorizing restores it as
+    `_reauthorized`; disconnect revokes the latest refresh token;
+  - racing callbacks exchange once, and another owner's state is
+    refused;
+  - discovery against an `https://127.0.0.1` integration never connects;
+    a member gets `403`; a static integration is refused.
+- Unit tests for the address rules, `check_target`, the client refusing
+  before connecting, and redirect URIs.
+- **Mutation-proved, 7/7 caught:**
+  - the SSRF check off
+  - the claim not single use
+  - the refresh lock removed
+  - LAN redirects allowed
+  - the flow-owner check removed
+  - no revocation
+  - a rejected refresh treated as transient
+- **Real discovery** (an ignored network test, run here): Notion, Linear
+  and GitHub's remote MCP resolve through `SsrfHttp`. Notion and Linear
+  offer registration; GitHub does not (G-D24).
+- fmt, clippy `-D warnings`, 516 unit tests. Live: `e2e.py` 81/81
+  unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61, `gateway_e2e.py`
+  50/50.
+
+**Not verified:** a real login, token exchange, refresh rotation and
+revocation at Notion or Linear. G1's logins were deferred by the operator
+into acceptance, and they stay there.
 
 ---
 

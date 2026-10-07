@@ -130,6 +130,14 @@ const SCHEMA: &str = "
         response_bytes INTEGER
     );
     CREATE INDEX IF NOT EXISTS calls_by_time ON calls(at_ms);
+
+    -- Which OAuth client an `oauth` connection was authorized with, so a
+    -- refresh uses the same one (decision 81g).
+    CREATE TABLE IF NOT EXISTS connection_oauth (
+        connection_id TEXT PRIMARY KEY,
+        oauth_client  TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+    );
 ";
 
 /// One audit row. There is deliberately no field that could carry arguments
@@ -147,6 +155,37 @@ pub struct CallRecord {
     pub error_code: Option<String>,
     pub duration_ms: Option<i64>,
     pub response_bytes: Option<i64>,
+}
+
+/// An OAuth client of one authorization server, for one owner and redirect.
+#[derive(Debug, Clone)]
+pub struct OAuthClientRow {
+    pub id: String,
+    pub owner_user_id: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    /// Registered dynamically (RFC 7591), or pasted by the owner.
+    pub registered: bool,
+    /// The authorization server's metadata, as discovered.
+    pub metadata: Option<String>,
+    /// A pasted client secret, sealed (AAD = id, `client_secret`).
+    pub secret: Option<Sealed>,
+    pub created_at: String,
+}
+
+/// A pending authorization (§8): the state as a hash, the verifier sealed.
+#[derive(Debug, Clone)]
+pub struct FlowRow {
+    pub state_hash: String,
+    pub connection_id: String,
+    pub owner_user_id: String,
+    pub oauth_client: String,
+    pub redirect_uri: String,
+    pub resource: String,
+    pub sealed: Sealed,
+    pub created_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -503,6 +542,205 @@ impl GatewayDb {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- OAuth (decision 81g) --------------------------------------------
+
+    /// Deletes one credential of a connection; whether it existed.
+    pub fn delete_credential(&self, connection_id: &str, kind: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM credentials WHERE connection_id = ?1 AND kind = ?2",
+            params![connection_id, kind],
+        )? > 0)
+    }
+
+    pub fn insert_oauth_client(&self, c: &OAuthClientRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO oauth_clients (id, owner_user_id, issuer, client_id, redirect_uri,
+                 registered, metadata, secret_key_id, secret_nonce, secret_ciphertext, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(owner_user_id, issuer, redirect_uri) DO UPDATE SET
+                 id = excluded.id, client_id = excluded.client_id,
+                 registered = excluded.registered, metadata = excluded.metadata,
+                 secret_key_id = excluded.secret_key_id, secret_nonce = excluded.secret_nonce,
+                 secret_ciphertext = excluded.secret_ciphertext",
+            params![
+                c.id,
+                c.owner_user_id,
+                c.issuer,
+                c.client_id,
+                c.redirect_uri,
+                c.registered,
+                c.metadata,
+                c.secret.as_ref().map(|s| s.key_id.clone()),
+                c.secret.as_ref().map(|s| s.nonce.clone()),
+                c.secret.as_ref().map(|s| s.ciphertext.clone()),
+                c.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn oauth_client_where(
+        &self,
+        clause: &str,
+        args: &[&dyn rusqlite::ToSql],
+    ) -> Result<Option<OAuthClientRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT id, owner_user_id, issuer, client_id, redirect_uri, registered, metadata,
+                            secret_key_id, secret_nonce, secret_ciphertext, created_at
+                     FROM oauth_clients WHERE {clause}"
+                ),
+                args,
+                |r| {
+                    let key: Option<String> = r.get(7)?;
+                    Ok(OAuthClientRow {
+                        id: r.get(0)?,
+                        owner_user_id: r.get(1)?,
+                        issuer: r.get(2)?,
+                        client_id: r.get(3)?,
+                        redirect_uri: r.get(4)?,
+                        registered: r.get(5)?,
+                        metadata: r.get(6)?,
+                        secret: match key {
+                            Some(key_id) => Some(Sealed {
+                                key_id,
+                                nonce: r.get(8)?,
+                                ciphertext: r.get(9)?,
+                            }),
+                            None => None,
+                        },
+                        created_at: r.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn oauth_client(&self, id: &str) -> Result<Option<OAuthClientRow>> {
+        self.oauth_client_where("id = ?1", &[&id])
+    }
+
+    pub fn oauth_client_for(
+        &self,
+        owner: &str,
+        issuer: &str,
+        redirect_uri: &str,
+    ) -> Result<Option<OAuthClientRow>> {
+        self.oauth_client_where(
+            "owner_user_id = ?1 AND issuer = ?2 AND redirect_uri = ?3",
+            &[&owner, &issuer, &redirect_uri],
+        )
+    }
+
+    pub fn set_connection_oauth(&self, connection_id: &str, client: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO connection_oauth (connection_id, oauth_client, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(connection_id) DO UPDATE SET oauth_client = excluded.oauth_client,
+                 updated_at = excluded.updated_at",
+            params![connection_id, client, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn connection_oauth(&self, connection_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT oauth_client FROM connection_oauth WHERE connection_id = ?1",
+                params![connection_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn insert_flow(&self, f: &FlowRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO oauth_flows (state_hash, connection_id, owner_user_id, oauth_client,
+                 redirect_uri, resource, scope, verifier_key_id, verifier_nonce, verifier_ciphertext,
+                 created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                f.state_hash,
+                f.connection_id,
+                f.owner_user_id,
+                f.oauth_client,
+                f.redirect_uri,
+                f.resource,
+                f.sealed.key_id,
+                f.sealed.nonce,
+                f.sealed.ciphertext,
+                f.created_at,
+                f.expires_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    const FLOW_COLUMNS: &'static str = "state_hash, connection_id, owner_user_id, oauth_client, \
+        redirect_uri, resource, verifier_key_id, verifier_nonce, verifier_ciphertext, created_at, \
+        expires_at";
+
+    fn flow_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FlowRow> {
+        Ok(FlowRow {
+            state_hash: r.get(0)?,
+            connection_id: r.get(1)?,
+            owner_user_id: r.get(2)?,
+            oauth_client: r.get(3)?,
+            redirect_uri: r.get(4)?,
+            resource: r.get(5)?,
+            sealed: Sealed {
+                key_id: r.get(6)?,
+                nonce: r.get(7)?,
+                ciphertext: r.get(8)?,
+            },
+            created_at: r.get(9)?,
+            expires_at: r.get(10)?,
+        })
+    }
+
+    /// A live flow (unused, unexpired), without claiming it.
+    pub fn live_flow(&self, state_hash: &str, now: &str) -> Result<Option<FlowRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM oauth_flows
+                     WHERE state_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
+                    Self::FLOW_COLUMNS
+                ),
+                params![state_hash, now],
+                Self::flow_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Marks a flow used and returns it, **only if** it was unused and
+    /// unexpired: one `UPDATE … WHERE used_at IS NULL`, so of two racing
+    /// callers exactly one gets the row.
+    pub fn claim_flow(&self, state_hash: &str, now: &str) -> Result<Option<FlowRow>> {
+        let changed = self.conn.execute(
+            "UPDATE oauth_flows SET used_at = ?2
+             WHERE state_hash = ?1 AND used_at IS NULL AND expires_at > ?2",
+            params![state_hash, now],
+        )?;
+        if changed != 1 {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM oauth_flows WHERE state_hash = ?1",
+                    Self::FLOW_COLUMNS
+                ),
+                params![state_hash],
+                Self::flow_from_row,
+            )
+            .optional()?)
     }
 
     #[cfg(test)]

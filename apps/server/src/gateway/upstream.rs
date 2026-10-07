@@ -93,13 +93,25 @@ impl std::fmt::Debug for Target {
 }
 
 impl super::Gateway {
-    /// The target for a connection: its URL and, for a `static` connection,
-    /// its opened credential as a header. An `oauth` connection's tokens are
-    /// slice 6's (81g).
-    pub fn target(&self, c: &Connection) -> Result<Target, UpstreamError> {
+    /// The target for a connection: its URL and its credential as a header —
+    /// a `static` connection's opened value, or an `oauth` connection's access
+    /// token, refreshed first when it is about to expire (81g). `force`
+    /// refreshes regardless: an upstream just refused the token.
+    pub async fn target(
+        self: &Arc<Self>,
+        c: &Connection,
+        force: bool,
+    ) -> Result<Target, UpstreamError> {
         let mut headers = HashMap::new();
         match c.auth_kind.as_str() {
             auth_kind::NONE => {}
+            auth_kind::OAUTH => {
+                let token = self.oauth_access_token(c, force).await?;
+                let mut value = axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|_| UpstreamError::Credential)?;
+                value.set_sensitive(true);
+                headers.insert(axum::http::header::AUTHORIZATION, value);
+            }
             auth_kind::STATIC => {
                 let sealed = self
                     .store
@@ -132,22 +144,25 @@ impl super::Gateway {
     }
 }
 
+/// rustls on `ring` with the bundled Mozilla roots: every TLS connection the
+/// gateway makes, to an upstream or to an authorization server.
+pub fn tls_config() -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
+
 /// The one HTTP client for every upstream, built once.
 pub fn http_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default TLS versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
             reqwest::Client::builder()
-                .use_preconfigured_tls(tls)
+                .use_preconfigured_tls(tls_config())
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(CONNECT_TIMEOUT)
                 // rmcp's own default, for its reason: a pooled connection whose
