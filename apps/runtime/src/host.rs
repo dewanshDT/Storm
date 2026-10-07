@@ -238,24 +238,37 @@ impl Host {
     }
 
     async fn post(&self, path: &str, body: &serde_json::Value) -> Result<reqwest::StatusCode> {
+        Ok(self.post_for_response(path, body, None).await?.status())
+    }
+
+    /// A POST on the host token. A `401` wakes re-authentication, whoever
+    /// made the call: the token is the link's, not the caller's.
+    async fn post_for_response(
+        &self,
+        path: &str,
+        body: &(impl serde::Serialize + ?Sized),
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response> {
         let token = self
             .token
             .read()
             .await
             .clone()
             .ok_or_else(|| anyhow!("no token yet"))?;
-        let response = self
+        let mut request = self
             .client
             .http()
             .post(format!("{}{path}", self.client.base()))
             .bearer_auth(token)
-            .json(body)
-            .send()
-            .await?;
+            .json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = request.send().await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             self.reauth.notify_one();
         }
-        Ok(response.status())
+        Ok(response)
     }
 
     /// Runs until revoked. Returns the refusal that ended it.
@@ -781,42 +794,23 @@ impl Host {
             return;
         };
         // At most once: no link, no call — never queued, never retried.
-        let token = self.token.read().await.clone();
-        let (true, Some(token)) = (*self.link_up.borrow(), token) else {
+        let response = if *self.link_up.borrow() {
+            self.post_for_response(
+                &format!("/v1/runtime/sessions/{session}/mcp/{connection}"),
+                &*message,
+                Some(MCP_FORWARD_TIMEOUT),
+            )
+            .await
+            .ok()
+            .filter(|r| r.status().is_success())
+        } else {
+            None
+        };
+        let Some(response) = response else {
             let _ = write
                 .write_all(&send(json!({"storm_error": "storm_unreachable"})))
                 .await;
             return;
-        };
-        let response = self
-            .client
-            .http()
-            .post(format!(
-                "{}/v1/runtime/sessions/{session}/mcp/{connection}",
-                self.client.base()
-            ))
-            .bearer_auth(token)
-            .timeout(MCP_FORWARD_TIMEOUT)
-            .json(&message)
-            .send()
-            .await;
-        let response = match response {
-            Ok(r) if r.status().is_success() => r,
-            Ok(r) => {
-                if r.status() == reqwest::StatusCode::UNAUTHORIZED {
-                    self.reauth.notify_one();
-                }
-                let _ = write
-                    .write_all(&send(json!({"storm_error": "storm_unreachable"})))
-                    .await;
-                return;
-            }
-            Err(_) => {
-                let _ = write
-                    .write_all(&send(json!({"storm_error": "storm_unreachable"})))
-                    .await;
-                return;
-            }
         };
         // The server's lines go through as they arrive. If the stream breaks,
         // the bridge sees no final response and fails the call once.

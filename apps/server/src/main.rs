@@ -556,49 +556,8 @@ fn backup_auth(state_dir: &Path, dest: &Path) -> Result<()> {
         return Ok(());
     }
     let keys_out = dest.join(auth::IDENTITY_DIR);
-    std::fs::create_dir_all(&keys_out)
-        .with_context(|| format!("creating {}", keys_out.display()))?;
-    restrict_to_owner(&keys_out)?;
-
-    let mut copied = 0;
-    for entry in std::fs::read_dir(&keys).with_context(|| format!("reading {}", keys.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let to = keys_out.join(entry.file_name());
-        std::fs::copy(entry.path(), &to)
-            .with_context(|| format!("copying {}", entry.path().display()))?;
-        // Set explicitly rather than trusting the copy to carry the mode: this
-        // is the whole reason the key is a file instead of a row.
-        restrict_key_file(&to)?;
-        copied += 1;
-    }
+    let copied = auth::identity::copy_key_dir(&keys, &keys_out)?;
     println!("  keys -> {} ({copied})", keys_out.display());
-    Ok(())
-}
-
-fn restrict_to_owner(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("tightening {}", dir.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
-}
-
-fn restrict_key_file(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("tightening {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 

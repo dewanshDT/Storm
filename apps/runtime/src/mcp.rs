@@ -256,8 +256,9 @@ impl Handles {
 pub struct BridgeLine {
     pub handle: String,
     pub connection: String,
+    /// Forwarded byte for byte: the host never needs to look inside it.
     #[serde(default)]
-    pub message: Option<Value>,
+    pub message: Option<Box<serde_json::value::RawValue>>,
     /// Keep this connection open for the session's unsolicited messages.
     #[serde(default)]
     pub subscribe: bool,

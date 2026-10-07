@@ -298,10 +298,6 @@ pub struct Storm {
     /// letting it try and refusing — and it makes the refusal impossible to
     /// forget in one tool's body.
     writable: bool,
-    /// Built for an agent in a session, as the MCP Gateway's built-in `storm`
-    /// connection (spec §5, decision 81e). **`delete_note` is never offered to
-    /// an agent** (G-D5), writable or not.
-    for_agent: bool,
 }
 
 /// Tools an agent is never offered, whatever its write flags (G-D5).
@@ -365,7 +361,6 @@ impl Storm {
             state,
             writable,
             actor,
-            for_agent: false,
         }
     }
 
@@ -376,8 +371,15 @@ impl Storm {
             state,
             writable,
             actor: Some(actor),
-            for_agent: true,
         }
+    }
+
+    /// Built for an agent in a session, as the MCP Gateway's built-in `storm`
+    /// connection (spec §5, decision 81e). Read off the actor, so the two can
+    /// never disagree. **`delete_note` is never offered to an agent** (G-D5),
+    /// writable or not.
+    fn is_agent(&self) -> bool {
+        matches!(self.actor, Some(Actor::Agent { .. }))
     }
 
     /// The authenticated caller, or a refusal.
@@ -399,7 +401,7 @@ impl Storm {
                 router.remove_route(name);
             }
         }
-        if self.for_agent {
+        if self.is_agent() {
             for name in NEVER_FOR_AGENTS {
                 router.remove_route(name);
             }
@@ -667,7 +669,7 @@ impl ServerHandler for Storm {
         // the model reads: telling it the tools are read-only when they are not
         // would be worse than saying nothing.
         info.instructions = Some(
-            if self.writable && self.for_agent {
+            if self.writable && self.is_agent() {
                 "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
                  addressed by vault id and note id — never by file path. Start with \
                  list_vaults, then search to find notes and get_note to read one. You may \

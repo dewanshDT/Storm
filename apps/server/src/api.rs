@@ -1635,34 +1635,12 @@ async fn integrations_list(
     Ok(Json(crate::ops::list_integrations(&state, &actor).await?))
 }
 
-#[derive(Deserialize)]
-struct CreateIntegrationRequest {
-    display_name: String,
-    #[serde(default)]
-    slug: Option<String>,
-    url: String,
-    auth_kind: String,
-    #[serde(default)]
-    credential: Option<crate::gateway::connections::StaticCredential>,
-}
-
 async fn integrations_create(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
-    Json(body): Json<CreateIntegrationRequest>,
+    Json(body): Json<crate::ops::NewIntegration>,
 ) -> ApiResult<(StatusCode, Json<crate::ops::IntegrationView>)> {
-    let view = crate::ops::create_integration(
-        &state,
-        &actor,
-        crate::ops::NewIntegration {
-            display_name: body.display_name,
-            slug: body.slug,
-            url: body.url,
-            auth_kind: body.auth_kind,
-            credential: body.credential,
-        },
-    )
-    .await?;
+    let view = crate::ops::create_integration(&state, &actor, body).await?;
     Ok((StatusCode::CREATED, Json(view)))
 }
 
@@ -1676,43 +1654,14 @@ async fn integrations_get(
     ))
 }
 
-#[derive(Deserialize)]
-struct PatchIntegrationRequest {
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    enabled: Option<bool>,
-    #[serde(default)]
-    tool_allowlist: Option<Vec<String>>,
-    #[serde(default)]
-    expose_resources: Option<bool>,
-    #[serde(default)]
-    expose_prompts: Option<bool>,
-    #[serde(default)]
-    credential: Option<crate::gateway::connections::StaticCredential>,
-}
-
 async fn integrations_patch(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
-    Json(body): Json<PatchIntegrationRequest>,
+    Json(body): Json<crate::ops::IntegrationPatch>,
 ) -> ApiResult<Json<crate::ops::IntegrationView>> {
     Ok(Json(
-        crate::ops::update_integration(
-            &state,
-            &actor,
-            &id,
-            crate::ops::IntegrationPatch {
-                display_name: body.display_name,
-                enabled: body.enabled,
-                tool_allowlist: body.tool_allowlist,
-                expose_resources: body.expose_resources,
-                expose_prompts: body.expose_prompts,
-                credential: body.credential,
-            },
-        )
-        .await?,
+        crate::ops::update_integration(&state, &actor, &id, body).await?,
     ))
 }
 
@@ -1736,63 +1685,24 @@ async fn integrations_tools(
     ))
 }
 
-#[derive(Deserialize)]
-struct AuthorizeRequest {
-    redirect_uri: String,
-    #[serde(default)]
-    client_id: Option<String>,
-    #[serde(default)]
-    client_secret: Option<String>,
-    #[serde(default)]
-    scopes: Vec<String>,
-}
-
 async fn integrations_authorize(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
-    Json(body): Json<AuthorizeRequest>,
+    Json(body): Json<crate::ops::AuthorizeIntegration>,
 ) -> ApiResult<Json<crate::ops::AuthorizationStarted>> {
     Ok(Json(
-        crate::ops::authorize_integration(
-            &state,
-            &actor,
-            &id,
-            crate::ops::AuthorizeIntegration {
-                redirect_uri: body.redirect_uri,
-                client_id: body.client_id,
-                client_secret: body.client_secret,
-                scopes: body.scopes,
-            },
-        )
-        .await?,
+        crate::ops::authorize_integration(&state, &actor, &id, body).await?,
     ))
-}
-
-#[derive(Deserialize)]
-struct CallbackRequest {
-    state: String,
-    code: String,
-    #[serde(default)]
-    iss: Option<String>,
 }
 
 async fn integrations_callback(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
-    Json(body): Json<CallbackRequest>,
+    Json(body): Json<crate::ops::OAuthCallback>,
 ) -> ApiResult<Json<crate::ops::IntegrationTest>> {
     Ok(Json(
-        crate::ops::oauth_callback(
-            &state,
-            &actor,
-            crate::ops::OAuthCallback {
-                state: body.state,
-                code: body.code,
-                iss: body.iss,
-            },
-        )
-        .await?,
+        crate::ops::oauth_callback(&state, &actor, body).await?,
     ))
 }
 
@@ -1902,7 +1812,7 @@ async fn runtime_mcp(
     Json(message): Json<serde_json::Value>,
 ) -> ApiResult<axum::response::Response> {
     use futures_util::StreamExt;
-    let rx = crate::ops::integration_call(&state, &auth.host.id, &id, &connection, message).await?;
+    let rx = crate::ops::integration_call(&state, &auth.host.id, &id, &connection, message).await;
     let lines = tokio_stream::wrappers::ReceiverStream::new(rx).map(|line| {
         let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
         bytes.push(b'\n');

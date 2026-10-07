@@ -16,20 +16,26 @@ final terminalStreamFactoryProvider =
       (ref) => null,
     );
 
-/// How this client builds an [AgentApi]: from the signed-in session's
-/// address and token, or null without a session. Tests override it.
+/// The signed-in session's address and token, or null without a session:
+/// what every owner-only REST client here is built from.
 ///
 /// Watches only those two fields. Watching the whole settings object re-ran
 /// everything downstream on any save — a theme change, a vault switch, every
 /// tick of the font-size slider — and each re-run is an owner check over the
 /// network.
-final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
-  final session = ref.watch(
+final sessionCredentialsProvider = Provider<(String, String)?>(
+  (ref) => ref.watch(
     settingsProvider.select((a) {
       final s = a.value;
       return s == null || !s.hasSession ? null : (s.baseUrl, s.accessToken);
     }),
-  );
+  ),
+);
+
+/// How this client builds an [AgentApi], or null without a session. Tests
+/// override it.
+final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
+  final session = ref.watch(sessionCredentialsProvider);
   if (session == null) return null;
   final (baseUrl, token) = session;
   return () => AgentApi(baseUrl: baseUrl, token: token);

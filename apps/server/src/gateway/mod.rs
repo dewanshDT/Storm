@@ -182,24 +182,7 @@ pub fn backup(state_dir: &Path, dest: &Path) -> Result<()> {
         return Ok(());
     }
     let keys_out = crypto::keys_dir(dest);
-    crypto::create_private_dir(&keys_out)?;
-    let mut copied = 0;
-    for entry in std::fs::read_dir(&keys).with_context(|| format!("reading {}", keys.display()))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let to = keys_out.join(entry.file_name());
-        std::fs::copy(entry.path(), &to)
-            .with_context(|| format!("copying {}", entry.path().display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("tightening {}", to.display()))?;
-        }
-        copied += 1;
-    }
+    let copied = crate::auth::identity::copy_key_dir(&keys, &keys_out)?;
     println!("  gateway keys -> {} ({copied})", keys_out.display());
     Ok(())
 }

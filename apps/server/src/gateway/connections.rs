@@ -12,7 +12,6 @@ pub const BUILTIN_SLUG: &str = "storm";
 
 pub mod status {
     /// An `oauth` connection before its first authorization (81g).
-    #[allow(dead_code)]
     pub const PENDING_AUTH: &str = "pending_auth";
     pub const CONNECTED: &str = "connected";
     pub const NEEDS_REAUTH: &str = "needs_reauth";

@@ -79,6 +79,13 @@ impl<D: Daemon> Bridge<D> {
         let _ = self.out.send(message);
     }
 
+    /// Sends one message whose answer nobody reads (a notification, an
+    /// agent's response), draining the answer so the exchange completes.
+    async fn send_unanswered(&self, message: Value) {
+        let mut rx = self.daemon.exchange(message).await;
+        while rx.recv().await.is_some() {}
+    }
+
     /// One line from the agent. Requests other than `initialize` run
     /// concurrently; `initialize` is answered before anything else is read.
     pub async fn on_agent_message(self: &Arc<Self>, message: Value) {
@@ -96,11 +103,8 @@ impl<D: Daemon> Bridge<D> {
                 let me = self.clone();
                 tokio::spawn(async move { me.request(message).await });
             }
-            (Some(_), false) => {
-                // A notification: forwarded once, its answer drained.
-                let mut rx = self.daemon.exchange(message).await;
-                while rx.recv().await.is_some() {}
-            }
+            // A notification: forwarded once.
+            (Some(_), false) => self.send_unanswered(message).await,
             (None, _) => {
                 let me = self.clone();
                 tokio::spawn(async move { me.response(message).await });
@@ -115,8 +119,7 @@ impl<D: Daemon> Bridge<D> {
         if !known {
             return; // late: dropped, never sent upstream
         }
-        let mut rx = self.daemon.exchange(message).await;
-        while rx.recv().await.is_some() {}
+        self.send_unanswered(message).await;
     }
 
     /// Rule 2: replays the kept `initialize` under the bridge's own id and
@@ -143,11 +146,8 @@ impl<D: Daemon> Bridge<D> {
             }
         }
         if ok {
-            let mut rx = self
-                .daemon
-                .exchange(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+            self.send_unanswered(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
                 .await;
-            while rx.recv().await.is_some() {}
         }
         ok
     }
@@ -160,7 +160,7 @@ impl<D: Daemon> Bridge<D> {
         for attempt in 1..=2 {
             let mut replay = false;
             let mut rx = self.daemon.exchange(req.clone()).await;
-            while let Some(line) = rx.recv().await {
+            while let Some(mut line) = rx.recv().await {
                 if let Some(code) = line.get("storm_error").and_then(|c| c.as_str()) {
                     if code == "session_unknown" && attempt == 1 && !is_initialize {
                         replay = true;
@@ -170,7 +170,7 @@ impl<D: Daemon> Bridge<D> {
                     }
                     break;
                 }
-                let Some(m) = line.get("message").cloned() else {
+                let Some(m) = line.get_mut("message").map(Value::take) else {
                     continue;
                 };
                 if m.get("method").is_some() && m.get("id").is_some() {
@@ -226,9 +226,9 @@ impl<D: Daemon> Bridge<D> {
         loop {
             if let Some(mut rx) = self.daemon.subscribe().await {
                 backoff = std::time::Duration::from_millis(500);
-                while let Some(line) = rx.recv().await {
-                    if let Some(m) = line.get("message") {
-                        self.emit(m.clone());
+                while let Some(mut line) = rx.recv().await {
+                    if let Some(m) = line.get_mut("message") {
+                        self.emit(m.take());
                     }
                 }
             }

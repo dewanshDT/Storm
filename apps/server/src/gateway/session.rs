@@ -43,6 +43,24 @@ use tokio::sync::{mpsc, oneshot};
 /// The spec's operational defaults (§9).
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const RESPONSE_CAP: usize = 1024 * 1024;
+
+/// The length of `value` serialized, without building the bytes: a result
+/// can be up to [`RESPONSE_CAP`], and it is serialized for real on the way out.
+pub fn serialized_len(value: &Value) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
+}
 pub const PER_SESSION_CONCURRENT: usize = 4;
 pub const PER_SESSION_PER_SECOND: usize = 10;
 pub const PER_CONNECTION_CONCURRENT: usize = 8;
@@ -146,7 +164,7 @@ impl Relay {
                 use rand::Rng;
                 let mut b = [0u8; 6];
                 rand::rng().fill_bytes(&mut b);
-                b.iter().map(|x| format!("{x:02x}")).collect()
+                data_encoding::HEXLOWER.encode(&b)
             },
             events: Box::new(events),
         }))
