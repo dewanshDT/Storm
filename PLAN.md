@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); **merged into `staging` 2026-10-08 (#76–#88), awaiting on-device acceptance** |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3560,6 +3560,40 @@ upstream and the scripted agent. This slice adds **Phase 1's exit (AM28)**:
   - an agent writes a note while a phone edits it.
 - **Releases.** Neither the musl/zig release build nor the native app
   builds have been run with these changes.
+
+**Status 2026-10-08, on the staging environment** (dew-omarchy, build
+`dcb0a80`, signed acceptance APK `acfa4d9`):
+- **Real Claude Code 2.1.292: passed.**
+  - It launches with `--mcp-config <session>/mcp.json --strict-mcp-config`.
+  - `/mcp` shows only the session's servers, none of the host's own.
+  - It asks before every gateway tool.
+  - An agent's write against a phone edit kept both edits. The edit
+    overlapped, so it came back `conflict` with markers.
+- **Real OpenCode: passed.**
+  - Its config matches AM32 exactly.
+  - It used Notion through the gateway and got real data.
+  - Its live prompt was blocked by its model quota at first, then exercised
+    on the phone.
+- **Android native OAuth (G1's real logins): passed** for Notion and
+  Linear.
+  - Both came back to the app through `storm://oauth/callback` (81l).
+  - Disconnecting Notion refused the next call with `not_granted`, and
+    Linear kept working.
+- **Also passed:**
+  - a real TLS upstream (DeepWiki), and a disconnect mid-session;
+  - the released v0.3.1 host's launch announcing it can't use integrations;
+  - a member getting 403 and an `stk_` key 401 on every integration route;
+  - no canary in any process, file or scrollback, with a live session.
+- **Found and fixed on the way:**
+  - the per-session limit against Claude Code's startup (AM-G11, 81m);
+  - releases never upload-key signed (81m);
+  - the web Add-integration UI (81n).
+- **Left:**
+  - macOS native OAuth;
+  - a GitHub PAT tool call;
+  - the journal grep against the real build (`journalctl -t
+    storm-staging-server`, expect 1, the control line);
+  - the release builds and the release.
 
 **Verified.** `gateway_e2e.py` 58/58 here; the mutation runner 3/3 caught.
 
