@@ -2573,6 +2573,34 @@ first run.
 (a backup host pulling over the network); then it needs the root some other
 way.
 
+**80. Every server-wide setting is owner-only.** *(2026-10-04, found during
+the MCP Gateway spec review)*
+
+`PUT /v1/config/registration` refused a member from the start (A13), and its
+neighbours did not. **Any signed-in member could re-point the storage root
+(`PUT /v1/config`), switch MCP on and arm its writes (`/v1/config/mcp`), or
+replace the relay list (`/v1/config/relays`).** `AllowAuthenticated` made
+that look harmless, but these are server settings, not vault access, and A9's
+matrix never gave them to a member. A member arming `mcp_writable` matters
+more once agents use the vault (the gateway spec in the vault puts agent
+writes behind that switch).
+
+- **One helper, `require_owner_session`, called by every `PUT /v1/config*`
+  handler**, with registration's own check folded into it and its message
+  unchanged. A refusal is `403` and leaves the setting untouched.
+- **`only_an_owner_may_change_server_config` loops over the four routes**, so
+  a new config route added without the check is caught by adding it to the
+  list. That is the shape of the bug: the check existed on one route and was
+  copied to none of the others.
+- **Not here:** vault create, rename and remove are still open to a member.
+  They are vault administration, and A9's matrix gives them to admin too, so
+  they belong to the authorization release rather than to an owner check.
+  `GET /v1/config` (Q21) is also left as it is.
+
+**Revisit if** the authorization release lands: these checks become the
+policy's "server config" rule, and admin may gain them (A9's matrix says
+yes).
+
 **81. The MCP Gateway: Storm owns integration credentials, and a Runtime Host
 only forwards.** *(2026-10-04; spec approved by the operator, nothing built)*
 
