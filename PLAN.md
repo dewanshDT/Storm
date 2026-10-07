@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3414,6 +3414,96 @@ comes from.
 **Not verified:** a real login, token exchange, refresh rotation and
 revocation at Notion or Linear. G1's logins were deferred by the operator
 into acceptance, and they stay there.
+
+**81h. Gateway slice 7: the client — Settings ▸ Integrations, the launcher
+toggle, and a loopback sign-in.** *(2026-10-07)*
+
+**Settings ▸ Integrations** (`lib/agent/integrations_screen.dart`, route
+`/settings/integrations`):
+- **Entry and access.** The entry appears in Server settings beside Hosts,
+  under the same owner check. The screen itself shows the server's `403`
+  text, never an empty list (the 77d rule).
+- **The list.** The built-in `Storm vaults` comes first, with whether
+  writes are possible at all. Each integration shows its status in plain
+  words (`Needs reconnecting`, …) and its last error from the §12 codes;
+  never upstream text.
+- **Actions:**
+  - Test.
+  - Choose tools: new tools are marked and start off (G-D16).
+  - Sign in again, or Replace token.
+  - Enable or Disable.
+  - Disconnect. For a token, the confirmation says Storm cannot revoke it;
+    for OAuth, that Storm asks the service to.
+- **Add.** Sign in (OAuth), Token, or None, over https only.
+  - A token for `Authorization` is sent as `Bearer <token>` unless it
+    already carries a scheme. It is sent once and never shown again.
+  - The GitHub PAT advice from risk 6 is shown.
+  - On the web there is no Sign in (G-D13); the dialog says so.
+- **The intro states the blast radius** (spec risk 1): every non-shell
+  session can use these, with its host's network.
+
+**The launcher (G-D5, G-D9, AM27):**
+- For every provider but `shell`, an **"Allow vault writes" switch, off by
+  default**, sends `allow_vault_writes`.
+- A second line under the unchanged "Network: inherits <host>'s policy"
+  says agents can use the integrations and read the vaults with that
+  network access.
+- A launch answer's `mcp.notice` (an old host) is shown as a snackbar.
+
+**The sign-in uses a loopback listener on every native platform**
+(`oauth_flow_io.dart`; the web build gets `oauth_flow_web.dart`, which
+refuses):
+- It binds `127.0.0.1` on an OS-chosen port, **listening before** the
+  browser opens, asks the server to authorize with
+  `http://127.0.0.1:<port>/oauth/callback`, and opens the system browser.
+- It answers only that path with a `state` or `error`. A stray request (a
+  favicon) gets `404` and does not end the sign-in.
+- It relays `{state, code, iss}` to `/v1/integrations/oauth/callback` and
+  closes. It never sees a token.
+- macOS's sandbox needs `com.apple.security.network.server` in
+  `Release.entitlements` (`DebugProfile` already had it). The entitlements
+  test guards it.
+
+**A deviation from §10 step 4, recorded here and in the report.** The spec
+allows `storm://oauth` on Android and macOS, and that is **not built**:
+- It needs an intent filter, a URL type and native glue, and only a release
+  build on each platform can prove them. CLAUDE.md's Android-plugin rule is
+  the warning.
+- Loopback is what G1 found Notion and Linear accept, and Linear on any
+  port, so one plugin-free path serves macOS, Linux and Android.
+- **Risk on Android:** the app is backgrounded while the browser is open,
+  and the redirect must reach it while it still runs. That is the device
+  pass's first check. If it fails there, `storm://oauth` is the fix the
+  spec already allows.
+
+**The test found a bug.** The first version started listening only after
+the browser call returned, so a redirect that arrived first waited forever.
+Now the listener runs before the browser opens.
+
+**Verified — locally, with Flutter 3.44.8 (CI's version), installed for this
+slice:**
+- `dart format`, `flutter analyze` (no issues) and the full `flutter test`:
+  761 tests, all passing.
+- `integrations_test.dart` (10 tests):
+  - the list and its statuses, with no menu on the built-in;
+  - a member's `403`;
+  - a token sent once as `Bearer` and then tested, never on screen after;
+  - `http` refused before any request;
+  - the web is token-only;
+  - new tools off, and the allowlist PATCH;
+  - the disconnect wording and its DELETE;
+  - the launcher toggle off by default and sent when on;
+  - `shell` with no toggle and no integrations line;
+  - the old-host notice parsed from the launch answer.
+- `oauth_flow_test.dart` (2 tests): the redirect is caught on loopback (a
+  stray request ignored) and relayed, and the port is closed afterwards; a
+  cancelled sign-in relays nothing.
+- **Mutation-proved, 6/6 caught:** writes on by default, the toggle shown
+  for `shell`, listening after opening, a stray request ending the sign-in,
+  `http` accepted, the `network.server` entitlement removed.
+
+**Not verified:** a real browser sign-in on any device, and the Android
+background case above. Both are on-device acceptance.
 
 ---
 

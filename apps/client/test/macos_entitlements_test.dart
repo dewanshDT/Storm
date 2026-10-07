@@ -20,6 +20,8 @@ void main() {
         'every HTTP request and the sync WebSocket',
     'com.apple.security.files.user-selected.read-only':
         'reading a file chosen in the attachment picker',
+    'com.apple.security.network.server':
+        "the integrations sign-in's loopback listener (decision 81h)",
   };
 
   for (final name in const ['DebugProfile', 'Release']) {

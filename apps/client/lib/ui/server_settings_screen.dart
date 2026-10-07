@@ -109,6 +109,24 @@ class ServerSettingsScreen extends ConsumerWidget {
                 label: const Text('Hosts'),
               ),
             ),
+            // The MCP Gateway (decision 81h): the services agents may use,
+            // connected once, here. The same owner check gates it.
+            const SizedBox(height: 24),
+            _Section(label: 'Integrations'),
+            const _Muted(
+              'Services your agents can use, like Notion or GitHub. Storm '
+              'keeps their credentials; agents never see them.',
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                key: const Key('open-integrations'),
+                onPressed: () => context.push(Routes.integrations),
+                icon: const Icon(LucideIcons.plug, size: 18),
+                label: const Text('Integrations'),
+              ),
+            ),
           ],
           const SizedBox(height: 24),
           _Section(label: 'Vaults'),

@@ -113,6 +113,7 @@ class AgentSession {
     required this.rows,
     required this.createdAt,
     required this.fallback,
+    this.launchNotice,
   });
 
   final String id;
@@ -130,6 +131,11 @@ class AgentSession {
   final int rows;
   final String createdAt;
   final ProviderFallback? fallback;
+
+  /// Said at launch when the session could have had integrations and does
+  /// not: its host is too old to bridge them (MCP Gateway, spec §6). Only on
+  /// the launch answer.
+  final String? launchNotice;
 
   bool get ended =>
       status == 'completed' || status == 'failed' || status == 'stopped';
@@ -169,5 +175,6 @@ class AgentSession {
         : ProviderFallback.fromJson(
             j['provider_fallback'] as Map<String, dynamic>,
           ),
+    launchNotice: (j['mcp'] as Map?)?['notice'] as String?,
   );
 }
