@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i); **built, awaiting on-device acceptance** |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3476,6 +3476,61 @@ slice:**
 
 **Not verified:** a real browser sign-in on any device, and the Android
 background case above. Both are on-device acceptance.
+
+**81i. Gateway slice 8: acceptance — what can be automated is, and the rest
+is the operator's.** *(2026-10-07)*
+
+**`tests/gateway_e2e.py` (81f) grows to 58 checks.** It runs in `make
+test-live` and CI against a real server, a real `storm-runtime`, a mock
+upstream and the scripted agent. This slice adds **Phase 1's exit (AM28)**:
+- the owner turns MCP writes on;
+- a session launched with "Allow vault writes" sees `create_note` and
+  `update_note`, and never `delete_note`;
+- the agent creates a note, a "phone" (REST) edits it, and the agent's
+  stale `update_note` comes back **merged**, with both edits in the note;
+- a `delete_note` is `tool_not_allowed`;
+- switching MCP writes off refuses the same live session's next write.
+
+**The gates' three mutations, as negative tests:**
+- `make test-gateway-mutations` (`tests/gateway_mutations.py`) rebuilds
+  `storm-runtime` with the bridge broken three ways (`leak_init`, `retry`
+  and `no_cancel`, the gates' own), runs the suite against each, and
+  requires the matching R5, R7 or R8 check to fail. It always restores the
+  source.
+- Not in `make test-live`: three rebuilds take minutes.
+- Run here: **3 of 3 caught**.
+
+**The spec's §17 acceptance list, item by item:**
+
+| §17 item | Where it is proved |
+|---|---|
+| Connect, authorize, launch, use | `gateway_e2e.py` (static); route tests (OAuth, 81g) |
+| An agent write merges against a phone edit | `gateway_e2e.py`, this slice |
+| Disconnect mid-session refuses the next call | `gateway_e2e.py` |
+| R1–R8 against the real build, with the 3 mutations | `gateway_e2e.py` + `make test-gateway-mutations` |
+| No token on the host: files, environment, argv, bridge config, scrollback | `gateway_e2e.py` (C1, C2, C4, C5, C7, positive controls) |
+| OpenCode asks, and loads only the session's servers | config proved in `gateway_e2e.py`; the real prompt is the operator's |
+| No `elicitation.url` upstream, and URL mode never reaches the agent | `gateway_e2e.py` |
+| An old host's launch announces the degrade | route test (81e), client test (81h) |
+| A member gets 403 everywhere | route tests; `gateway_e2e.py` |
+| An `stk_` key is refused on the integration routes | route test; `gateway_e2e.py` |
+| `e2e.py` 81/81 unmodified | every slice |
+
+**Left for the operator (on-device acceptance):**
+- **C3**: the journal grep, now also against the real build.
+- **G1's real logins:** Notion and Linear sign-in, exchange, refresh
+  rotation and revocation, through the app's loopback sign-in (81h), on
+  macOS, Linux and **Android**. Android is the case to watch, because the
+  app is backgrounded while the browser is open.
+- **A GitHub PAT** connection making a real tool call.
+- **Real Claude Code, then real OpenCode** (AC-P1):
+  - a gateway tool prompts before it runs;
+  - only the session's servers load;
+  - an agent writes a note while a phone edits it.
+- **Releases.** Neither the musl/zig release build nor the native app
+  builds have been run with these changes.
+
+**Verified.** `gateway_e2e.py` 58/58 here; the mutation runner 3/3 caught.
 
 ---
 

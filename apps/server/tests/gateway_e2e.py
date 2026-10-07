@@ -209,7 +209,7 @@ def main():
     os.makedirs(os.path.join(WORK, "vaults", "primary"))
     with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
         f.write("# Seed\n")
-    for ws in ("gw", "oc", "sh"):
+    for ws in ("gw", "oc", "sh", "wr"):
         os.makedirs(os.path.join(WORKSPACES, ws))
     os.makedirs(UP_STATE)
     with open(CANARY_FILE, "w") as f:
@@ -438,6 +438,44 @@ args = ["-i"]
         oc.initialize(slug, 1)
         oc.tool(slug, 2, "echo", {"text": "oc"})
         check("OpenCode's session calls through its bridge", text_of(oc.answer(slug, 2)) == "echo: oc")
+
+        print("\n=== Phase 1's exit: an agent's write merges with a phone's (AM28) ===")
+        status, _ = call("PUT", "/v1/config/mcp", {"enabled": True, "writable": True}, auth=owner)
+        check("the owner turns MCP writes on", status in (200, 204), status)
+        _, vaults = call("GET", "/v1/vaults", auth=owner)
+        vault = vaults["vaults"][0]["id"]
+        launch("claude-code", "wr", writes=True)
+        w = Agent("wr")
+        w.initialize("storm", 1)
+        w.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        wtools = [t["name"] for t in w.answer("storm", 2)["result"]["tools"]]
+        check("with both flags the agent may write, and still never delete",
+              "create_note" in wtools and "update_note" in wtools and "delete_note" not in wtools, wtools)
+        w.tool("storm", 3, "create_note", {"vault": vault, "path": "Agents/Plan.md",
+                                           "content": "# Plan\n\nfirst: draft\n\nsecond: draft\n"})
+        made = w.answer("storm", 3)["result"].get("structuredContent", {})
+        note_id, version = made["note"]["id"], made["note"]["version"]
+        check("the agent creates a note through the gateway", bool(note_id), made)
+        status, phone = call("PUT", f"/v1/vaults/{vault}/notes/{note_id}", {
+            "base_version": version, "content": "# Plan\n\nfirst: from the phone\n\nsecond: draft\n"}, auth=owner)
+        check("a phone edits it meanwhile", status == 200, phone)
+        w.tool("storm", 4, "update_note", {"vault": vault, "note_id": note_id, "base_version": version,
+                                           "content": "# Plan\n\nfirst: draft\n\nsecond: from the agent\n"})
+        merged = w.answer("storm", 4)["result"].get("structuredContent", {})
+        check("the agent's stale write is merged, not overwritten", merged.get("merged") is True, merged)
+        _, final = call("GET", f"/v1/vaults/{vault}/notes/{note_id}", auth=owner)
+        body = final.get("content", "")
+        check("both edits are in the note", "from the phone" in body and "from the agent" in body, body)
+        w.tool("storm", 5, "delete_note", {"vault": vault, "note_id": note_id})
+        refused = w.answer("storm", 5)
+        check("and the agent cannot delete it (G-D5)",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
+        call("PUT", "/v1/config/mcp", {"enabled": True, "writable": False}, auth=owner)
+        w.tool("storm", 6, "update_note", {"vault": vault, "note_id": note_id, "base_version": 1,
+                                           "content": "x"})
+        refused = w.answer("storm", 6)
+        check("switching MCP writes off refuses the live session's next write",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
 
         print("\n=== shell, and disconnecting mid-session ===")
         rec = launch("shell", "sh")
