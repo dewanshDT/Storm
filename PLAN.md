@@ -3830,6 +3830,47 @@ installed release.
     install of an upload-key-signed build needs one uninstall. Every build
     after it updates in place.
 
+
+**81n. The Add-integration dialog says how Storm connects; the web shows
+sign-in as unavailable (UI amendment, approved by the operator).**
+*(2026-10-08)*
+
+Found in acceptance: on the web, the dialog offered only "Token | None",
+and the one sentence explaining why sat at the bottom, under the GitHub
+text. That is the spec's behaviour, not a bug: G-D13 and §10.7 make the web
+token-only, because a browser can't receive a redirect (a LAN `http`
+redirect is refused upstream, G1). But it read like a missing feature. Two
+real defects came with it:
+- On the web, an OAuth integration's **Reconnect** and **Sign in again**
+  could only fail.
+- The failure was reported as "Could not reach the server".
+
+**Client only; the architecture and the spec are unchanged:**
+- **A labelled section, "How Storm connects",** directly under the address:
+  - the selector stretched to the fields' width;
+  - one help line for the chosen option;
+  - on the web, the explanation directly under it.
+- **The same three choices everywhere: Sign in · Token · No sign-in**
+  ("None" renamed).
+  - On the web, Sign in is disabled and visibly so: greyed by the disabled
+    state, a lock icon, and the tooltip "Available in the Storm apps".
+  - No check mark, and single-line compact labels, so nothing wraps at phone
+    width.
+- **On the web, an OAuth integration needing reconnection** says "Reconnect
+  from a Storm app" on its own line, and its "Sign in again from a Storm
+  app" menu item is disabled. An `UnsupportedError` reports its own message,
+  never "Could not reach the server".
+- **Not done, by the operator's decision:** collapsing the Header field.
+
+**Verified:**
+- Widget tests:
+  - the web's disabled Sign in, the token default and the adjacent note;
+  - the help line per option;
+  - the web OAuth row: no reconnect action, the menu item disabled, no
+    `/authorize` sent.
+- 773 client tests pass. The UI was reviewed as rendered screenshots before
+  merging.
+
 ---
 
 ## Data model

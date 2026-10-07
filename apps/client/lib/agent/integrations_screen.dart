@@ -128,7 +128,13 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     try {
       await action(api);
     } catch (e) {
-      _say(e is StateError ? e.message : describeFailure(e));
+      _say(switch (e) {
+        StateError(:final message) => message,
+        // This platform cannot do it (signing in from the browser): say so,
+        // rather than blaming the network.
+        UnsupportedError(:final message) => message ?? 'Not available here.',
+        _ => describeFailure(e),
+      });
     } finally {
       api.dispose();
       if (mounted) setState(() => _loading = false);
@@ -165,6 +171,10 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   }
 
   Future<void> _reconnect(Integration i) async {
+    if (i.authKind == 'oauth' && !ref.read(oauthSupportedProvider)) {
+      _say('Sign in again from a Storm app: the browser cannot sign in.');
+      return;
+    }
     if (i.authKind == 'oauth') {
       await _with((api) async => _reportCheck(await _signIn(api, i.id)));
       return;
@@ -277,6 +287,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
                 _IntegrationTile(
                   integration: i,
                   busy: _loading,
+                  canSignIn: ref.read(oauthSupportedProvider),
                   onTest: () =>
                       _with((api) async => _reportCheck(await api.test(i.id))),
                   onTools: () => _tools(i),
@@ -296,6 +307,7 @@ class _IntegrationTile extends StatelessWidget {
   const _IntegrationTile({
     required this.integration,
     required this.busy,
+    required this.canSignIn,
     required this.onTest,
     required this.onTools,
     required this.onReconnect,
@@ -305,6 +317,9 @@ class _IntegrationTile extends StatelessWidget {
 
   final Integration integration;
   final bool busy;
+
+  /// Whether this platform can run an OAuth sign-in (G-D13: not the web).
+  final bool canSignIn;
   final VoidCallback onTest;
   final VoidCallback onTools;
   final VoidCallback onReconnect;
@@ -332,6 +347,10 @@ class _IntegrationTile extends StatelessWidget {
               describeIntegrationError(i.lastError),
           ].join(' · ');
     final attention = i.needsReconnect || i.status == 'error';
+    // An OAuth integration is reconnected by signing in, which the browser
+    // cannot do (G-D13): it says where to do it instead of offering an action
+    // that can only fail.
+    final reconnectHere = i.authKind != 'oauth' || canSignIn;
     return Container(
       key: Key('integration-${i.id}'),
       margin: EdgeInsets.only(bottom: t.sp),
@@ -369,6 +388,16 @@ class _IntegrationTile extends StatelessWidget {
                   detail,
                   style: TextStyle(fontSize: t.labelSize, color: t.text3),
                 ),
+                // On its own line, under the detail: beside the menu it took
+                // the width the integration's name needs.
+                if (!i.builtin && attention && !reconnectHere) ...[
+                  SizedBox(height: t.sp * 0.5),
+                  Text(
+                    'Reconnect from a Storm app',
+                    key: Key('reconnect-elsewhere-${i.id}'),
+                    style: TextStyle(fontSize: t.labelSize, color: t.amber),
+                  ),
+                ],
                 // Spec §9: the owner is told, and nothing is turned on.
                 if (!i.builtin && !i.disabled && i.newTools.isNotEmpty)
                   Align(
@@ -385,7 +414,7 @@ class _IntegrationTile extends StatelessWidget {
               ],
             ),
           ),
-          if (!i.builtin && attention)
+          if (!i.builtin && attention && reconnectHere)
             TextButton(
               key: Key('reconnect-${i.id}'),
               onPressed: busy ? null : onReconnect,
@@ -419,8 +448,13 @@ class _IntegrationTile extends StatelessWidget {
                   ),
                 PopupMenuItem(
                   value: 'reconnect',
+                  enabled: reconnectHere,
                   child: Text(
-                    i.authKind == 'oauth' ? 'Sign in again' : 'Replace token',
+                    i.authKind != 'oauth'
+                        ? 'Replace token'
+                        : reconnectHere
+                        ? 'Sign in again'
+                        : 'Sign in again from a Storm app',
                   ),
                 ),
                 PopupMenuItem(
@@ -529,6 +563,7 @@ class _AddDialogState extends State<_AddDialog> {
                 hintText: 'Notion, Linear, GitHub (work)',
               ),
             ),
+            SizedBox(height: t.sp),
             TextField(
               key: const Key('integration-url'),
               controller: _url,
@@ -539,29 +574,97 @@ class _AddDialogState extends State<_AddDialog> {
               ),
             ),
             SizedBox(height: t.sp * 2),
-            SegmentedButton<String>(
-              segments: [
-                if (widget.oauthSupported)
-                  const ButtonSegment(value: 'oauth', label: Text('Sign in')),
-                const ButtonSegment(value: 'static', label: Text('Token')),
-                const ButtonSegment(value: 'none', label: Text('None')),
-              ],
-              selected: {_kind},
-              onSelectionChanged: (s) => setState(() => _kind = s.first),
+            // One section: what the choice is, the choice, and what the
+            // chosen option means — so it reads as part of connecting to the
+            // address above, not as a stray control.
+            Text(
+              'How Storm connects',
+              style: TextStyle(
+                fontSize: t.labelSize,
+                fontWeight: FontWeight.w600,
+              ),
             ),
             SizedBox(height: t.sp),
-            if (_kind == 'oauth')
+            // As wide as the fields above it, so the section reads as one.
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                key: const Key('integration-auth'),
+                segments: [
+                  // Shown everywhere, so the web's choices are visibly the same
+                  // set with one unavailable (G-D13), not a different feature.
+                  // Unavailable must not look selectable: greyed by the disabled
+                  // state, a lock where the others have none, and a tooltip.
+                  ButtonSegment(
+                    value: 'oauth',
+                    label: const Text('Sign in', maxLines: 1, softWrap: false),
+                    enabled: widget.oauthSupported,
+                    icon: widget.oauthSupported
+                        ? null
+                        : const Icon(LucideIcons.lock, size: 14),
+                    tooltip: widget.oauthSupported
+                        ? null
+                        : 'Available in the Storm apps',
+                  ),
+                  const ButtonSegment(
+                    value: 'static',
+                    label: Text('Token', maxLines: 1, softWrap: false),
+                  ),
+                  const ButtonSegment(
+                    value: 'none',
+                    label: Text('No sign-in', maxLines: 1, softWrap: false),
+                  ),
+                ],
+                selected: {_kind},
+                onSelectionChanged: (s) => setState(() => _kind = s.first),
+                // Three choices across a phone-width dialog: no check mark (the
+                // selected one is filled already) and compact labels, so no
+                // label ever wraps mid-word.
+                showSelectedIcon: false,
+                style: ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  // The family is set, not inherited: a style here replaces the
+                  // theme's label style whole (the StatusChip rule).
+                  textStyle: WidgetStatePropertyAll(
+                    TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.labelSize,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            SizedBox(height: t.sp * 0.75),
+            Text(
+              switch (_kind) {
+                'oauth' =>
+                  'Your browser opens to sign in; Storm keeps the sign-in.',
+                'static' =>
+                  'An API token or personal access token, sent as a header.',
+                _ => 'For public servers that need no credential.',
+              },
+              key: const Key('integration-auth-help'),
+              style: TextStyle(fontSize: t.labelSize, color: t.text3),
+            ),
+            if (!widget.oauthSupported) ...[
+              SizedBox(height: t.sp * 0.5),
               Text(
-                'Your browser opens to sign in; Storm keeps the sign-in.',
+                'Sign-in is available in the Storm apps (Android, macOS, '
+                'Linux, Windows). In the browser, use a token, or add this '
+                'integration from an app.',
+                key: const Key('integration-web-note'),
                 style: TextStyle(fontSize: t.labelSize, color: t.text3),
               ),
+            ],
             if (_kind == 'static') ...[
+              SizedBox(height: t.sp),
               TextField(
                 key: const Key('integration-token'),
                 controller: _token,
                 obscureText: true,
                 decoration: const InputDecoration(labelText: 'Token'),
               ),
+              SizedBox(height: t.sp),
               TextField(
                 controller: _header,
                 decoration: const InputDecoration(labelText: 'Header'),
@@ -572,14 +675,6 @@ class _AddDialogState extends State<_AddDialog> {
                 'short expiry. Storm keeps it encrypted and sends it only to '
                 'this address, but it cannot narrow or revoke it: that is done '
                 'at GitHub.',
-                style: TextStyle(fontSize: t.labelSize, color: t.text3),
-              ),
-            ],
-            if (!widget.oauthSupported) ...[
-              SizedBox(height: t.sp),
-              Text(
-                'Signing in is available in the desktop and mobile apps. In '
-                'the browser, connect with a token.',
                 style: TextStyle(fontSize: t.labelSize, color: t.text3),
               ),
             ],
