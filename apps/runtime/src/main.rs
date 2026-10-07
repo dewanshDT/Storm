@@ -41,6 +41,14 @@ enum Command {
         #[arg(long, env = "STORM_RUNTIME_CONFIG", default_value = storm_runtime::config::DEFAULT_CONFIG)]
         config: PathBuf,
     },
+    /// The agent's stdio MCP server for one gateway connection. Started by
+    /// the agent CLI from the session's MCP config, never by hand: it reads
+    /// its session handle and the daemon's socket from the environment, and
+    /// holds no credential.
+    McpBridge {
+        /// The connection's slug.
+        slug: String,
+    },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
     Check {
@@ -58,6 +66,8 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     match Cli::parse().command {
+        // Logs nothing: stdout is the MCP stream, and stderr is the agent's.
+        Command::McpBridge { slug } => storm_runtime::bridge::run(slug).await,
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
             let name = name.unwrap_or_else(default_name);

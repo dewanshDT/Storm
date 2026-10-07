@@ -481,6 +481,18 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   `shell` and a host without `mcp_bridge` get no grants. **Agents never see
   `delete_note`** (`mcp::NEVER_FOR_AGENTS`), and `Actor::Agent` is the
   session owner's identity, read through `user_id()`/`role()`.
+- **The bridge never retries, and replays `initialize` only on
+  `session_unknown`** (81f, spec §11). `apps/runtime/src/bridge.rs`'s six
+  rules each have a test, and `gateway_e2e.py` catches the gates' `leak_init`,
+  `retry` and `no_cancel` mutations against the real build. A late answer to
+  an elicitation is dropped, and elicitation ids are unique per upstream
+  session so one can never answer another.
+- **A session's MCP config is AM32 exactly**: `claude-code` gets
+  `--mcp-config … --strict-mcp-config`; `opencode` gets its own
+  `XDG_CONFIG_HOME`, `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `"<slug>_*":
+  "ask"`; everything else gets nothing. A config that cannot be written fails
+  the start rather than launching unconfined. It holds a handle and a socket
+  path, never a credential.
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 
