@@ -72,6 +72,7 @@ Practical consequences worth knowing before you start:
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/relay/` | `storm-relay` — the SRP v1 relay. Standalone crate; **no workspace** (R6). |
+| `apps/server/src/gateway/` | The MCP Gateway's store, data key and upstream client (M21, decision 81). Policy stays in `ops.rs`. |
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
@@ -425,6 +426,25 @@ decision 77):
   fell behind gets an explicit gap.** Never a short read and never
   `Last-Event-ID`: resume has to be exact, and it has to cross the relay
   (SRP §5.3).
+
+From M21 (the MCP Gateway — the spec is the vault's *MCP Gateway/V1
+Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
+
+- **`state/gateway/gateway.db` and `state/gateway/keys/` cannot be rebuilt,
+  and travel together** (81b). `backup_all()` carries both, before the "no
+  vaults" early return. Ciphertexts without their key restore a gateway that
+  can authenticate nothing.
+- **An upstream credential is never in the clear at rest.** It is sealed with
+  XChaCha20-Poly1305 (`chacha20poly1305`, pure Rust) under an AAD of
+  `<id> 0x00 <kind>`, so a ciphertext moved to another row does not open. An
+  opened secret is a `Plaintext`, whose `Debug` is redacted. Say plainly what
+  this buys: protection against a leak of the database alone, not against
+  root or a full backup.
+- **The data key is a file, `0600` in a `0700` directory, created with those
+  modes.** A missing key at boot is not a lockout: a new key becomes active
+  and the affected connections become `needs_reauth`.
+- **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
+  `DROP` or `ALTER`; a test reads the schema to enforce it.
 
 ## Style
 

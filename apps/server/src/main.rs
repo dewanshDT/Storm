@@ -30,6 +30,7 @@ mod api;
 mod auth;
 mod db;
 mod frontmatter;
+mod gateway;
 mod index;
 mod install;
 mod kit;
@@ -472,8 +473,8 @@ fn migrate_legacy_index(state_dir: &Path, registry: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// Snapshots the auth database, the server's keys and every vault's index into
-/// `dest`.
+/// Snapshots the auth database, the server's keys, the MCP gateway's store and
+/// data key, and every vault's index into `dest`.
 fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
 
@@ -489,6 +490,9 @@ fn backup_all(state_dir: &Path, dest: &Path) -> Result<()> {
     // every note with nobody able to log in. A server with no vaults yet still
     // has an identity worth keeping.
     backup_auth(state_dir, dest)?;
+    // Same reason, same place: `gateway.db` and its data key cannot be
+    // rebuilt either, and travel together or not at all (decision 81b).
+    gateway::backup(state_dir, dest)?;
 
     let registry = Registry::load(state_dir, Path::new("/"))?;
     if registry.vaults.is_empty() {
@@ -1201,6 +1205,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // had not ended `unknown` until its host reports in.
     let agent = Arc::new(crate::agent::AgentManager::open(&state_dir)?);
 
+    // The MCP Gateway's store and data key (decision 81b). Opened at boot,
+    // like `agent.db`, so the key file exists before the first backup runs.
+    let gateway = Arc::new(
+        crate::gateway::Gateway::open(&state_dir, &crate::index::now_rfc3339())
+            .context("opening the MCP gateway's store")?,
+    );
+
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1225,6 +1236,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         login_limiter: auth::ratelimit::LoginLimiter::new(),
         host_limiter: auth::ratelimit::LoginLimiter::new(),
         agent,
+        gateway,
     });
 
     // One watcher over the whole root, attributing each event to a vault by
@@ -1799,6 +1811,31 @@ mod tests {
             let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "the backed-up key is {mode:o}");
         }
+    }
+
+    #[test]
+    fn a_backup_carries_the_gateway_store_and_its_data_key() {
+        // Decision 81b. Called through `backup_all`, not `gateway::backup`,
+        // because the regression this guards is the call going missing — and
+        // on a server with no vaults, since the early return is where a call
+        // placed after it would silently never run.
+        let dir = tempdir::TempDir::new("storm-backup-gateway").unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let gw = gateway::Gateway::open(&state, "2026-10-05T00:00:00Z").unwrap();
+        let key = gw.keys.active_key_id().to_string();
+        drop(gw);
+
+        let dest = dir.path().join("snapshot");
+        backup_all(&state, &dest).unwrap();
+        assert!(
+            gateway::db_path(&dest).exists(),
+            "gateway.db is not in the snapshot — every integration would need reconnecting"
+        );
+        assert!(
+            gateway::crypto::key_path(&dest, &key).exists(),
+            "the gateway's data key is not in the snapshot — its ciphertexts would restore unreadable"
+        );
     }
 
     #[test]

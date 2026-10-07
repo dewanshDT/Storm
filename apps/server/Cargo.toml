@@ -12,6 +12,10 @@ anyhow = "1.0.104"
 argon2 = "0.5.3"
 axum = { version = "0.8.9", features = ["ws"] }
 blake3 = "1.8.5"
+# The MCP Gateway's credential encryption (decision 81a): XChaCha20-Poly1305,
+# pure Rust. Never a C-backed AEAD: the musl/zig release build cannot compile
+# one, which is the same reason rustls runs on `ring` below.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.5", features = ["derive", "env"] }
 data-encoding = "2.11.1"
 # Renders the pairing URI as a scannable block for `storm-server pair --qr`.

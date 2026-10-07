@@ -6,7 +6,9 @@
 # cannot be rebuilt from the markdown. auth.db and the key files under
 # state/identity/ are the server's own identity — nothing anywhere rebuilds
 # those, and a restore without them is a server holding every note that no
-# paired device recognises.
+# paired device recognises. The same holds for state/gateway/ (the MCP
+# Gateway's encrypted integration credentials and the key that opens them),
+# which `storm-server backup` carries with auth.db (decision 81b).
 #
 # Run by storm-backup.timer; safe to run by hand.
 
