@@ -3644,6 +3644,60 @@ changed, with behaviour held fixed:**
   client integration suite.
 - `make test-gateway-mutations`: 3 of 3 caught after the bridge changes.
 
+
+**81k. New upstream tools: recorded, off, and announced to the owner (spec
+§9, built to the frozen spec).** *(2026-10-08)*
+
+Spec §9 says tools added after the allowlist was set default off, **"and
+the owner is notified."** 81d–81i built the first half: the allowlist names
+tools explicitly, so a new tool was already off. The notice existed only in
+the owner's next manual test, and only once, because that test marked the
+tool known. The operator chose to build the spec as frozen, without an
+amendment (2026-10-08).
+
+- **What records a new tool:**
+  - *Any listing.* The owner's test, the owner's tool listing, and **an
+    agent's `tools/list`** all record names not in `known_tools` into a
+    new `new_tools` table. It's a table, not a column, so an observation
+    is an `INSERT OR IGNORE` that no rewrite of the connection row can
+    clobber (the `note_access` precedent).
+  - *Only the owner's first test is a baseline* (G-D16, unchanged). An
+    agent's listing never is, so nothing an agent does can enable a tool.
+  - *Only valid names* are recorded (`valid_tool_name`: the allowlist's
+    rule), and at most 200 stay pending per connection, because the
+    upstream controls both.
+- **What the owner sees:** "N new tools — review" on the integration's row,
+  opening the tool chooser with those marked *(new)*.
+  - **Saving the tool list is the review:** the pending tools become known,
+    on or off exactly as the list says. Nothing else changes the allowlist.
+  - The client shows upstream names through `displayToolName`: control,
+    format (bidi, zero-width) and line-separator characters removed,
+    whitespace collapsed, at most 64 characters. Display only; the allowlist
+    keeps the raw name.
+- **Not done, by the operator's decision:** push or email notification. That
+  would be an amendment, proposed separately.
+- **`known_tools` has its own writers** (`observe_tools`, `review_tools`), and
+  `update_connection` no longer writes it, so a stale copy of the row cannot
+  undo a review.
+
+**Verified:**
+- Store tests:
+  - the first-test baseline;
+  - an agent's listing that never baselines;
+  - a review that enables nothing;
+  - an older row copy that can't undo a review;
+  - invalid names, and the 200 cap;
+  - a disconnect forgetting pending tools.
+- `gateway_e2e.py` 65/65, adding seven checks for a tool the mock upstream
+  adds mid-session:
+  - hidden from the agent;
+  - recorded, valid name only;
+  - refused if called;
+  - cleared by a review while staying off;
+  - enabled only by the owner.
+- Client tests: the review button (plural and singular), a review that sends
+  no new tool, and name cleaning.
+
 ---
 
 ## Data model

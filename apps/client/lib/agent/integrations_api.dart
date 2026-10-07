@@ -16,6 +16,7 @@ class Integration {
     required this.status,
     required this.builtin,
     required this.toolAllowlist,
+    required this.newTools,
     required this.lastError,
     required this.vaultWritesAvailable,
   });
@@ -32,6 +33,11 @@ class Integration {
   final String status;
   final bool builtin;
   final List<String> toolAllowlist;
+
+  /// Tools the upstream added since the owner last reviewed this connection's
+  /// tools (spec §9). Off until the owner turns them on. Upstream names: show
+  /// them through [displayToolName].
+  final List<String> newTools;
   final String? lastError;
 
   /// Built-in only: whether the server lets agents write at all.
@@ -62,9 +68,34 @@ class Integration {
     toolAllowlist: [
       for (final t in (j['tool_allowlist'] as List? ?? const [])) t as String,
     ],
+    newTools: [
+      for (final t in (j['new_tools'] as List? ?? const [])) t as String,
+    ],
     lastError: j['last_error_code'] as String?,
     vaultWritesAvailable: j['vault_writes_available'] as bool?,
   );
+}
+
+/// Characters that draw nothing or reorder what follows: control and format
+/// characters (bidi overrides, zero-width joiners) and line separators.
+final _invisible = RegExp(r'[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', unicode: true);
+
+/// Text an upstream chose (a tool's name or description), made safe to show:
+/// invisible and reordering characters removed, whitespace collapsed, and at
+/// most [max] characters. **Display only**: the allowlist keeps the raw name,
+/// because that is what the upstream calls the tool.
+String displayToolName(String name, {int max = 64}) {
+  // Whitespace first: a newline or tab is a control character too, and it
+  // should read as a space rather than glue two words together.
+  final cleaned = name
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .replaceAll(_invisible, '')
+      .trim();
+  if (cleaned.isEmpty) return '(unnamed tool)';
+  final runes = cleaned.runes;
+  return runes.length <= max
+      ? cleaned
+      : '${String.fromCharCodes(runes.take(max))}…';
 }
 
 /// One upstream tool, for the allowlist editor (G-D16).

@@ -1489,6 +1489,10 @@ pub struct IntegrationView {
     pub has_credential: bool,
     pub tool_allowlist: Vec<String>,
     pub known_tools: Option<Vec<String>>,
+    /// Tools that appeared since the owner last reviewed this connection's
+    /// tools: off, and shown as "N new tools — review" (spec §9). Upstream
+    /// names, so a client cleans them before display.
+    pub new_tools: Vec<String>,
     pub expose_resources: bool,
     pub expose_prompts: bool,
     pub upstream_account_label: Option<String>,
@@ -1514,6 +1518,7 @@ fn builtin_view(state: &Shared) -> IntegrationView {
         has_credential: false,
         tool_allowlist: Vec::new(),
         known_tools: None,
+        new_tools: Vec::new(),
         expose_resources: false,
         expose_prompts: false,
         upstream_account_label: None,
@@ -1529,7 +1534,11 @@ fn builtin_view(state: &Shared) -> IntegrationView {
     }
 }
 
-fn integration_view(c: Connection, has_credential: bool) -> IntegrationView {
+fn integration_view(
+    c: Connection,
+    has_credential: bool,
+    new_tools: Vec<String>,
+) -> IntegrationView {
     IntegrationView {
         id: c.id,
         slug: c.slug,
@@ -1541,6 +1550,7 @@ fn integration_view(c: Connection, has_credential: bool) -> IntegrationView {
         has_credential,
         tool_allowlist: c.tool_allowlist,
         known_tools: c.known_tools,
+        new_tools,
         expose_resources: c.expose_resources,
         expose_prompts: c.expose_prompts,
         upstream_account_label: c.upstream_account_label,
@@ -1553,10 +1563,14 @@ fn integration_view(c: Connection, has_credential: bool) -> IntegrationView {
 }
 
 fn view_of(state: &Shared, c: Connection) -> ApiResult<IntegrationView> {
-    let held = gateway_store(state)
-        .has_credential(&c.id)
-        .map_err(internal)?;
-    Ok(integration_view(c, held))
+    let (held, new_tools) = {
+        let store = gateway_store(state);
+        (
+            store.has_credential(&c.id).map_err(internal)?,
+            store.new_tools(&c.id).map_err(internal)?,
+        )
+    };
+    Ok(integration_view(c, held, new_tools))
 }
 
 /// The gateway's store. A `std::sync::Mutex`: never hold the guard across an
@@ -1724,7 +1738,7 @@ pub async fn create_integration(
         let auth_db = state.auth_db.lock().await;
         integration_event(&auth_db, "integration_created", actor, &c, &now);
     }
-    Ok(integration_view(c, sealed.is_some()))
+    Ok(integration_view(c, sealed.is_some(), Vec::new()))
 }
 
 /// The request body of `PATCH /v1/integrations/connections/{id}`; every
@@ -1804,13 +1818,18 @@ pub async fn update_integration(
     let now = crate::index::now_rfc3339();
     c.updated_at = now.clone();
     {
-        let store = gateway_store(state);
+        let mut store = gateway_store(state);
         if let Some(sealed) = &sealed {
             store
                 .put_credential(&c.id, credential_kind::STATIC, sealed, None, &now)
                 .map_err(internal)?;
         }
         store.update_connection(&c).map_err(internal)?;
+        // Saving the tool list is the owner's review of the new tools (§9):
+        // they become known, on or off exactly as the list says.
+        if patch.tool_allowlist.is_some() {
+            store.review_tools(&c.id).map_err(internal)?;
+        }
     }
     // A disabled connection, or one whose credential just changed, keeps no
     // live upstream session: the next call opens one with the new state.
@@ -1870,8 +1889,8 @@ pub struct IntegrationTest {
     pub server_name: Option<String>,
     pub server_version: Option<String>,
     pub tool_count: usize,
-    /// Tools seen for the first time, which stay off until the owner turns
-    /// them on (G-D16). This is the owner's notice.
+    /// Tools awaiting the owner's review: off until the owner turns them on
+    /// (G-D16), and listed here until the owner saves the tool list (§9).
     pub new_tools: Vec<String>,
     pub integration: IntegrationView,
 }
@@ -1896,7 +1915,6 @@ async fn probe_integration(
 ) -> ApiResult<(
     Connection,
     Result<crate::gateway::upstream::ProbeResult, crate::gateway::upstream::UpstreamError>,
-    Vec<String>,
 )> {
     require_integration_owner(actor)?;
     if id == BUILTIN_ID {
@@ -1913,11 +1931,8 @@ async fn probe_integration(
         .with_target(&c, crate::gateway::upstream::probe)
         .await;
     let now = crate::index::now_rfc3339();
-    let mut new_tools = Vec::new();
     match &result {
-        Ok(found) => {
-            let names: Vec<String> = found.tools.iter().map(|t| t.name.to_string()).collect();
-            new_tools = crate::gateway::upstream::reconcile_tools(&mut c, &names);
+        Ok(_) => {
             c.last_ok = Some(now.clone());
             c.last_error_code = None;
             if c.status == status::NEEDS_REAUTH || c.status == status::ERROR {
@@ -1936,10 +1951,21 @@ async fn probe_integration(
             }
         }
     }
-    c.updated_at = now;
+    c.updated_at = now.clone();
     {
-        let store = gateway_store(state);
+        let mut store = gateway_store(state);
         store.update_connection(&c).map_err(internal)?;
+        // The owner's own listing: the baseline on the first test, and after
+        // it new tools recorded and left off (G-D16, §9).
+        if let Ok(found) = &result {
+            let names: Vec<String> = found.tools.iter().map(|t| t.name.to_string()).collect();
+            store
+                .observe_tools(&c.id, &names, true, &now)
+                .map_err(internal)?;
+        }
+        if let Some(fresh) = store.connection(&c.id).map_err(internal)? {
+            c = fresh;
+        }
     }
     state
         .gateway
@@ -1956,7 +1982,7 @@ async fn probe_integration(
             duration_ms: Some(started.elapsed().as_millis() as i64),
             response_bytes: None,
         });
-    Ok((c, result, new_tools))
+    Ok((c, result))
 }
 
 /// `POST /v1/integrations/connections/{id}/test` (§14).
@@ -1965,7 +1991,8 @@ pub async fn test_integration(
     actor: &Actor,
     id: &str,
 ) -> ApiResult<IntegrationTest> {
-    let (c, result, new_tools) = probe_integration(state, actor, id).await?;
+    let (c, result) = probe_integration(state, actor, id).await?;
+    let integration = view_of(state, c)?;
     let (ok, error_code, server_name, server_version, tool_count) = match &result {
         Ok(found) => (
             true,
@@ -1982,8 +2009,8 @@ pub async fn test_integration(
         server_name,
         server_version,
         tool_count,
-        new_tools,
-        integration: view_of(state, c)?,
+        new_tools: integration.new_tools.clone(),
+        integration,
     })
 }
 
@@ -1995,7 +2022,8 @@ pub async fn integration_tools(
     actor: &Actor,
     id: &str,
 ) -> ApiResult<Vec<IntegrationTool>> {
-    let (c, result, new_tools) = probe_integration(state, actor, id).await?;
+    let (c, result) = probe_integration(state, actor, id).await?;
+    let new_tools = gateway_store(state).new_tools(&c.id).map_err(internal)?;
     let found =
         result.map_err(|e| ApiError(axum::http::StatusCode::BAD_GATEWAY, e.code().to_string()))?;
     let mut tools: Vec<IntegrationTool> = found
@@ -2359,6 +2387,23 @@ async fn run_call(
     if method == "tools/list"
         && let Some(tools) = result.get_mut("tools").and_then(|t| t.as_array_mut())
     {
+        // A tool the owner has not seen is recorded for review before it is
+        // filtered out (§9): "N new tools — review" appears without the
+        // owner having to run a test. Never a baseline, so never enabling.
+        if let Some(c) = &authorized.connection {
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect();
+            if let Err(e) = gateway_store(state).observe_tools(
+                &c.id,
+                &names,
+                false,
+                &crate::index::now_rfc3339(),
+            ) {
+                tracing::warn!(error = %e, "could not record an upstream's new tools");
+            }
+        }
         // The agent sees only what it may call (G-D16, G-D5).
         tools.retain(|t| authorized.may_call(t.get("name").and_then(|n| n.as_str()).unwrap_or("")));
     }

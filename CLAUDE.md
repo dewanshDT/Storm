@@ -510,6 +510,14 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   vault writes" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
+- **A new upstream tool is recorded, never enabled** (spec §9, 81k). Only
+  the owner's *first* test turns tools on (G-D16). After that, any listing,
+  the owner's or an agent's, records unknown names in `new_tools`, and the
+  owner sees "N new tools — review" until they save the tool list. Nothing
+  but that save changes the allowlist. `known_tools` is written only by
+  `observe_tools` and `review_tools`, never by `update_connection`, so an
+  older copy of the row cannot undo a review. Tool names are the upstream's:
+  the client shows them through `displayToolName`.
 
 ## Style
 

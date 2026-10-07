@@ -130,6 +130,20 @@ const SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS calls_by_time ON calls(at_ms);
 
+    -- Upstream tools that appeared after the owner's first test and that the
+    -- owner has not reviewed yet (spec §9, decision 81k). Off by
+    -- construction — the allowlist names tools explicitly — and shown as
+    -- N new tools, review until the owner saves the connection's tool
+    -- list. A table rather than a column on `connections`, so an observation
+    -- is one `INSERT OR IGNORE` that no rewrite of the connection row clobbers
+    -- (the reason `note_access` is a table in the index database).
+    CREATE TABLE IF NOT EXISTS new_tools (
+        connection_id TEXT NOT NULL,
+        name          TEXT NOT NULL,
+        seen_at       TEXT NOT NULL,
+        PRIMARY KEY (connection_id, name)
+    );
+
     -- Which OAuth client an `oauth` connection was authorized with, so a
     -- refresh uses the same one (decision 81g).
     CREATE TABLE IF NOT EXISTS connection_oauth (
@@ -194,6 +208,10 @@ pub enum InsertError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+/// At most this many tools await review per connection: an upstream decides
+/// how many it lists, so the record of them is bounded.
+pub const MAX_NEW_TOOLS: i64 = 200;
 
 const CONNECTION_COLUMNS: &str = "id, owner_user_id, slug, display_name, url, auth_kind, \
     status, tool_allowlist, known_tools, expose_resources, expose_prompts, \
@@ -345,19 +363,25 @@ impl GatewayDb {
     /// and `auth_kind` are never rewritten: a credential is presented only to
     /// its own upstream (AM24), so a connection cannot be re-pointed, and the
     /// slug is what live sessions were told.
+    ///
+    /// **`known_tools` is not among them**: only [`observe_tools`] and
+    /// [`review_tools`] write it, each in one step under the store's lock, so
+    /// a caller holding an older copy of the row cannot undo a review.
+    ///
+    /// [`observe_tools`]: Self::observe_tools
+    /// [`review_tools`]: Self::review_tools
     pub fn update_connection(&self, c: &Connection) -> Result<()> {
         self.conn.execute(
             "UPDATE connections SET display_name = ?2, status = ?3, tool_allowlist = ?4,
-                 known_tools = ?5, expose_resources = ?6, expose_prompts = ?7,
-                 upstream_account_label = ?8, last_ok = ?9, last_error_code = ?10,
-                 updated_at = ?11
+                 expose_resources = ?5, expose_prompts = ?6,
+                 upstream_account_label = ?7, last_ok = ?8, last_error_code = ?9,
+                 updated_at = ?10
              WHERE id = ?1",
             params![
                 c.id,
                 c.display_name,
                 c.status,
                 json_list(&c.tool_allowlist),
-                c.known_tools.as_deref().map(json_list),
                 c.expose_resources,
                 c.expose_prompts,
                 c.upstream_account_label,
@@ -366,6 +390,136 @@ impl GatewayDb {
                 c.updated_at,
             ],
         )?;
+        Ok(())
+    }
+
+    // ---- the allowlist rule over time (G-D16, spec §9) ---------------------
+
+    /// Applies a listing of the upstream's tools to the connection's records.
+    ///
+    /// - **The owner's first test is the baseline** (`baseline`, and no
+    ///   `known_tools` yet): every listed tool is turned on and remembered
+    ///   ("everything is on at connect time", G-D16).
+    /// - **After it, a tool not seen before is recorded as new and stays
+    ///   off.** Nothing here ever adds to the allowlist, so a new tool is off
+    ///   by construction until the owner turns it on.
+    /// - **An agent's listing is never a baseline** (`baseline` false): before
+    ///   the owner's first test it records nothing, so an agent cannot cause a
+    ///   tool to be enabled.
+    /// - A name that fails [`valid_tool_name`] is ignored, and at most
+    ///   [`MAX_NEW_TOOLS`] stay pending per connection: an upstream controls
+    ///   both its names and how many it lists.
+    ///
+    /// Returns the names newly recorded as new by this call.
+    ///
+    /// [`valid_tool_name`]: super::connections::valid_tool_name
+    pub fn observe_tools(
+        &mut self,
+        connection_id: &str,
+        listed: &[String],
+        baseline: bool,
+        now: &str,
+    ) -> Result<Vec<String>> {
+        let mut listed: Vec<String> = listed
+            .iter()
+            .filter(|n| super::connections::valid_tool_name(n))
+            .cloned()
+            .collect();
+        listed.sort();
+        listed.dedup();
+        let tx = self.conn.transaction()?;
+        let known: Option<Option<String>> = tx
+            .query_row(
+                "SELECT known_tools FROM connections WHERE id = ?1",
+                params![connection_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(known) = known else {
+            return Ok(Vec::new());
+        };
+        let Some(known) =
+            known.map(|s| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default())
+        else {
+            if baseline {
+                tx.execute(
+                    "UPDATE connections SET known_tools = ?2, tool_allowlist = ?2 WHERE id = ?1",
+                    params![connection_id, json_list(&listed)],
+                )?;
+                tx.execute(
+                    "DELETE FROM new_tools WHERE connection_id = ?1",
+                    params![connection_id],
+                )?;
+                tx.commit()?;
+            }
+            return Ok(Vec::new());
+        };
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM new_tools WHERE connection_id = ?1",
+            params![connection_id],
+            |r| r.get(0),
+        )?;
+        let mut room = (MAX_NEW_TOOLS - pending).max(0);
+        let mut added = Vec::new();
+        for name in listed.iter().filter(|n| !known.contains(n)) {
+            if room == 0 {
+                break;
+            }
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO new_tools (connection_id, name, seen_at) VALUES (?1, ?2, ?3)",
+                params![connection_id, name, now],
+            )?;
+            if inserted > 0 {
+                room -= 1;
+                added.push(name.clone());
+            }
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// The connection's tools awaiting the owner's review, by name.
+    pub fn new_tools(&self, connection_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM new_tools WHERE connection_id = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![connection_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The owner reviewed the connection's tools (saved its tool list): every
+    /// pending new tool becomes known, on or off as the owner left it. Enables
+    /// nothing by itself.
+    pub fn review_tools(&mut self, connection_id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let known: Option<String> = tx
+            .query_row(
+                "SELECT known_tools FROM connections WHERE id = ?1",
+                params![connection_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut known: Vec<String> = known
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default();
+        {
+            let mut stmt = tx.prepare("SELECT name FROM new_tools WHERE connection_id = ?1")?;
+            for name in stmt.query_map(params![connection_id], |r| r.get::<_, String>(0))? {
+                known.push(name?);
+            }
+        }
+        known.sort();
+        known.dedup();
+        tx.execute(
+            "UPDATE connections SET known_tools = ?2 WHERE id = ?1",
+            params![connection_id, json_list(&known)],
+        )?;
+        tx.execute(
+            "DELETE FROM new_tools WHERE connection_id = ?1",
+            params![connection_id],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -381,6 +535,10 @@ impl GatewayDb {
         )?;
         tx.execute(
             "DELETE FROM credentials WHERE connection_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM new_tools WHERE connection_id = ?1",
             params![id],
         )?;
         tx.commit()?;
@@ -809,6 +967,7 @@ mod tests {
             "connections",
             "credentials",
             "meta",
+            "new_tools",
             "oauth_clients",
             "oauth_flows",
         ] {
@@ -936,5 +1095,140 @@ mod tests {
             )
             .unwrap();
         insert("mcc_4", "usr_A", "pending_auth").unwrap();
+    }
+
+    // ---- new upstream tools (G-D16, spec §9, decision 81k) -----------------
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn with_connection(dir: &Path) -> (GatewayDb, String) {
+        let mut d = db(dir);
+        let c = crate::gateway::connections::tests::connection();
+        d.insert_connection(&c, None).unwrap();
+        (d, c.id)
+    }
+
+    #[test]
+    fn the_first_owner_test_turns_everything_on_and_later_tools_stay_off_until_reviewed() {
+        let dir = tempdir::TempDir::new("storm-gw-newtools").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        assert!(
+            d.observe_tools(&id, &names(&["b", "a"]), true, "t")
+                .unwrap()
+                .is_empty()
+        );
+        let c = d.connection(&id).unwrap().unwrap();
+        assert_eq!(c.tool_allowlist, names(&["a", "b"]));
+        assert_eq!(c.known_tools, Some(names(&["a", "b"])));
+
+        // A later listing names `c`: recorded as new, and off.
+        let added = d
+            .observe_tools(&id, &names(&["a", "b", "c"]), true, "t")
+            .unwrap();
+        assert_eq!(added, names(&["c"]));
+        assert_eq!(d.new_tools(&id).unwrap(), names(&["c"]));
+        let c = d.connection(&id).unwrap().unwrap();
+        assert_eq!(
+            c.tool_allowlist,
+            names(&["a", "b"]),
+            "a new tool was enabled"
+        );
+        // Seen again: still one pending entry, not reported twice.
+        assert!(
+            d.observe_tools(&id, &names(&["c"]), false, "t")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(d.new_tools(&id).unwrap(), names(&["c"]));
+    }
+
+    #[test]
+    fn an_agents_listing_never_sets_the_baseline() {
+        // Before the owner's first test an agent's listing records nothing,
+        // so nothing an agent does can turn a tool on.
+        let dir = tempdir::TempDir::new("storm-gw-newtools-agent").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        assert!(
+            d.observe_tools(&id, &names(&["a", "b"]), false, "t")
+                .unwrap()
+                .is_empty()
+        );
+        let c = d.connection(&id).unwrap().unwrap();
+        assert!(c.tool_allowlist.is_empty());
+        assert_eq!(c.known_tools, None);
+        assert!(d.new_tools(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_review_makes_new_tools_known_without_enabling_them() {
+        let dir = tempdir::TempDir::new("storm-gw-newtools-review").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        d.observe_tools(&id, &names(&["a"]), true, "t").unwrap();
+        d.observe_tools(&id, &names(&["a", "b", "c"]), false, "t")
+            .unwrap();
+        d.review_tools(&id).unwrap();
+        assert!(d.new_tools(&id).unwrap().is_empty());
+        let c = d.connection(&id).unwrap().unwrap();
+        assert_eq!(c.known_tools, Some(names(&["a", "b", "c"])));
+        assert_eq!(
+            c.tool_allowlist,
+            names(&["a"]),
+            "a review enabled something"
+        );
+        // Reviewed tools are no longer new, even if they vanish and return.
+        assert!(
+            d.observe_tools(&id, &names(&["a", "b"]), false, "t")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_older_copy_of_the_row_cannot_undo_a_review_or_drop_a_new_tool() {
+        let dir = tempdir::TempDir::new("storm-gw-newtools-stale").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        d.observe_tools(&id, &names(&["a"]), true, "t").unwrap();
+        let stale = d.connection(&id).unwrap().unwrap();
+        d.observe_tools(&id, &names(&["a", "b"]), false, "t")
+            .unwrap();
+        d.update_connection(&stale).unwrap();
+        assert_eq!(d.new_tools(&id).unwrap(), names(&["b"]));
+        d.review_tools(&id).unwrap();
+        d.update_connection(&stale).unwrap();
+        let c = d.connection(&id).unwrap().unwrap();
+        assert_eq!(c.known_tools, Some(names(&["a", "b"])));
+    }
+
+    #[test]
+    fn invalid_names_are_never_recorded_and_the_pending_list_is_bounded() {
+        let dir = tempdir::TempDir::new("storm-gw-newtools-bound").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        d.observe_tools(&id, &names(&["a"]), true, "t").unwrap();
+        let long = "x".repeat(129);
+        let added = d
+            .observe_tools(
+                &id,
+                &[String::new(), long, "bell\u{7}".into(), "ok".into()],
+                false,
+                "t",
+            )
+            .unwrap();
+        assert_eq!(added, names(&["ok"]));
+        let flood: Vec<String> = (0..500).map(|i| format!("t{i:03}")).collect();
+        d.observe_tools(&id, &flood, false, "t").unwrap();
+        assert_eq!(d.new_tools(&id).unwrap().len() as i64, MAX_NEW_TOOLS);
+    }
+
+    #[test]
+    fn a_disconnect_forgets_the_pending_tools() {
+        let dir = tempdir::TempDir::new("storm-gw-newtools-revoke").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        d.observe_tools(&id, &names(&["a"]), true, "t").unwrap();
+        d.observe_tools(&id, &names(&["a", "b"]), false, "t")
+            .unwrap();
+        d.revoke_connection(&id, "t2").unwrap();
+        assert!(d.new_tools(&id).unwrap().is_empty());
     }
 }

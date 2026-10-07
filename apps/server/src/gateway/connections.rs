@@ -46,9 +46,10 @@ pub struct Connection {
     pub auth_kind: String,
     pub status: String,
     pub tool_allowlist: Vec<String>,
-    /// Every tool name seen the last time the upstream was listed; `None`
-    /// until it has been. A tool not in here when it first appears defaults
-    /// off (G-D16).
+    /// The tool names the owner has been shown: the first listing's, and
+    /// every new one the owner has since reviewed. `None` until the owner's
+    /// first test. A tool not in here defaults off (G-D16) and is recorded in
+    /// the store's `new_tools` until the owner reviews it (spec §9).
     pub known_tools: Option<Vec<String>>,
     pub expose_resources: bool,
     pub expose_prompts: bool,
@@ -216,13 +217,17 @@ pub fn validate_allowlist(tools: &[String]) -> Result<(), &'static str> {
     if tools.len() > 1000 {
         return Err("an allowlist names at most 1000 tools");
     }
-    if tools
-        .iter()
-        .any(|t| t.is_empty() || t.len() > 128 || t.chars().any(char::is_control))
-    {
+    if !tools.iter().all(|t| valid_tool_name(t)) {
         return Err("a tool name is 1–128 characters, without control characters");
     }
     Ok(())
+}
+
+/// A tool name the owner could put on an allowlist: 1–128 bytes, no control
+/// characters. An upstream names its own tools, so a listed name that fails
+/// this is never recorded: the owner could not turn it on anyway.
+pub fn valid_tool_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
 }
 
 #[cfg(test)]

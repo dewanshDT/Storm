@@ -6586,19 +6586,36 @@ pub(crate) mod tests {
         assert_eq!(by_name("delete_repo")["new"], true);
         assert_eq!(by_name("search")["allowed"], true);
         assert_eq!(by_name("search")["new"], false);
-        // Seen once, it is no longer new — and still off until the owner says.
+        // Spec §9: it stays new — and the integration says so — until the
+        // owner reviews it. Listing it again is not a review.
+        let delete_repo = |tools: &serde_json::Value| {
+            let t = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == "delete_repo")
+                .unwrap()
+                .clone();
+            (t["allowed"].clone(), t["new"].clone())
+        };
         let (_, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
-        let again = tools
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["name"] == "delete_repo")
-            .unwrap()
-            .clone();
-        assert_eq!(
-            (again["allowed"].clone(), again["new"].clone()),
-            (false.into(), false.into())
-        );
+        assert_eq!(delete_repo(&tools), (false.into(), true.into()));
+        let (_, view) = send(&app, get_with_auth(&format!("{CONNECTIONS}/{id}"), &owner)).await;
+        assert_eq!(view["new_tools"], serde_json::json!(["delete_repo"]));
+        // Saving the tool list is the review: no longer new, and still off.
+        let (status, view) = send(
+            &app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{id}"),
+                serde_json::json!({"tool_allowlist": ["get_issue", "search"]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["new_tools"], serde_json::json!([]));
+        let (_, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
+        assert_eq!(delete_repo(&tools), (false.into(), false.into()));
 
         // Probes never call a tool, and each one left a metadata-only audit row.
         assert_eq!(up.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -6609,7 +6626,8 @@ pub(crate) mod tests {
             .unwrap()
             .recent_calls(10)
             .unwrap();
-        assert_eq!(calls.len(), 3);
+        // The test, and three tool listings.
+        assert_eq!(calls.len(), 4);
         assert!(
             calls
                 .iter()

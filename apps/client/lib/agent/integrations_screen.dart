@@ -90,7 +90,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     if (check.ok) {
       final fresh = check.newTools.isEmpty
           ? ''
-          : ' ${check.newTools.length} new tool(s) are off until you turn them on.';
+          : ' ${check.newTools.length} new tool(s) are off until you review them.';
       _say('Connected: ${check.toolCount} tool(s).$fresh');
     } else {
       _say(describeIntegrationError(check.errorCode));
@@ -346,6 +346,19 @@ class _IntegrationTile extends StatelessWidget {
                   detail,
                   style: TextStyle(fontSize: t.labelSize, color: t.text3),
                 ),
+                // Spec §9: the owner is told, and nothing is turned on.
+                if (!i.builtin && !i.disabled && i.newTools.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      key: Key('review-tools-${i.id}'),
+                      onPressed: busy ? null : onTools,
+                      child: Text(
+                        '${i.newTools.length} new '
+                        '${i.newTools.length == 1 ? 'tool' : 'tools'} — review',
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -662,10 +675,18 @@ class _ToolsDialogState extends State<_ToolsDialog> {
                 onChanged: (v) => setState(
                   () => v == true ? _on.add(tool.name) : _on.remove(tool.name),
                 ),
-                title: Text(tool.isNew ? '${tool.name}  (new)' : tool.name),
+                title: Text(
+                  tool.isNew
+                      ? '${displayToolName(tool.name)}  (new)'
+                      : displayToolName(tool.name),
+                ),
                 subtitle: tool.description == null
                     ? null
-                    : Text(tool.description!, maxLines: 2),
+                    : Text(
+                        displayToolName(tool.description!, max: 200),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
               ),
           ],
         ),

@@ -338,38 +338,6 @@ fn classify_http(e: &StreamableHttpError<reqwest::Error>) -> UpstreamError {
     }
 }
 
-/// The allowlist rule (G-D16), applied to a fresh listing. Returns the tools
-/// that are new to the owner.
-///
-/// - **The first listing turns everything on**, and remembers it.
-/// - **Later, a tool not seen before stays off** until the owner turns it on,
-///   and is reported as new so the Integrations screen can say so.
-/// - A tool the owner already decided on keeps that decision, even if it
-///   vanished upstream and came back: `known_tools` only grows.
-pub fn reconcile_tools(c: &mut Connection, listed: &[String]) -> Vec<String> {
-    let mut listed: Vec<String> = listed.to_vec();
-    listed.sort();
-    listed.dedup();
-    match &mut c.known_tools {
-        None => {
-            c.tool_allowlist = listed.clone();
-            c.known_tools = Some(listed);
-            Vec::new()
-        }
-        Some(known) => {
-            let new: Vec<String> = listed
-                .iter()
-                .filter(|t| !known.contains(t))
-                .cloned()
-                .collect();
-            known.extend(new.iter().cloned());
-            known.sort();
-            known.dedup();
-            new
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -648,24 +616,6 @@ pub(crate) mod tests {
             .err()
             .unwrap();
         assert_eq!(error, UpstreamError::Unauthorized);
-    }
-
-    #[test]
-    fn new_tools_default_off_and_known_decisions_stick() {
-        let mut c = crate::gateway::connections::tests::connection();
-        // First listing: all on.
-        assert!(reconcile_tools(&mut c, &["b".into(), "a".into()]).is_empty());
-        assert_eq!(c.tool_allowlist, vec!["a", "b"]);
-        // The owner turns `b` off.
-        c.tool_allowlist = vec!["a".into()];
-        // A new tool appears: reported, and off.
-        let new = reconcile_tools(&mut c, &["a".into(), "b".into(), "c".into()]);
-        assert_eq!(new, vec!["c"]);
-        assert_eq!(c.tool_allowlist, vec!["a"]);
-        // `b` vanishes and returns: still the owner's decision, not "new".
-        assert!(reconcile_tools(&mut c, &["a".into()]).is_empty());
-        assert!(reconcile_tools(&mut c, &["a".into(), "b".into()]).is_empty());
-        assert_eq!(c.tool_allowlist, vec!["a"]);
     }
 
     #[test]

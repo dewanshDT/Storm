@@ -11,10 +11,13 @@ not part of Storm.
   call's own stream), `ask_url` (a URL elicitation, which must never reach the
   agent), `caps` (what the client declared).
 - Every request is logged to a JSONL file so the suite can count executions.
+- `extra_tools.json` beside the log file, when present, adds tools to every
+  `tools/list` from then on: the suite's way to make a tool appear later.
 
     upstream.py <port> <canary-file> <log-file>
 """
 import json
+import os
 import sys
 import threading
 import time
@@ -34,6 +37,15 @@ TOOLS = [{"name": n, "description": d, "inputSchema": {"type": "object"}} for n,
     ("ask_url", "Ask the human to visit a URL (URL elicitation)."),
     ("caps", "Return the client's declared capabilities."),
 ]]
+
+
+def extra_tools():
+    try:
+        with open(os.path.join(os.path.dirname(LOG), "extra_tools.json")) as f:
+            return [{"name": n, "description": "added later", "inputSchema": {"type": "object"}}
+                    for n in json.load(f)]
+    except OSError:
+        return []
 
 
 def log(entry):
@@ -115,7 +127,8 @@ class H(BaseHTTPRequestHandler):
         if method == "ping":
             return self._json(200, {"jsonrpc": "2.0", "id": msg["id"], "result": {}})
         if method == "tools/list":
-            return self._json(200, {"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": TOOLS}})
+            return self._json(200, {"jsonrpc": "2.0", "id": msg["id"],
+                                    "result": {"tools": TOOLS + extra_tools()}})
 
         if method == "tools/call":
             name = msg["params"]["name"]

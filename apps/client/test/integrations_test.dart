@@ -30,7 +30,11 @@ void main() {
     'vault_writes_available': false,
   };
 
-  Map<String, dynamic> github({String status = 'connected', String? error}) => {
+  Map<String, dynamic> github({
+    String status = 'connected',
+    String? error,
+    List<String> newTools = const [],
+  }) => {
     'id': 'mcc_GH',
     'slug': 'github',
     'display_name': 'GitHub',
@@ -41,6 +45,7 @@ void main() {
     'has_credential': true,
     'tool_allowlist': ['search'],
     'known_tools': ['search', 'delete_repo'],
+    'new_tools': newTools,
     'last_error_code': error,
   };
 
@@ -221,6 +226,52 @@ void main() {
     expect(jsonDecode(patch.body), {
       'tool_allowlist': ['search'],
     });
+  });
+
+  testWidgets('new upstream tools are announced, and reviewing them enables '
+      'nothing (spec §9)', (tester) async {
+    final (client, seen) = server(
+      items: [
+        builtin(),
+        github(newTools: ['delete_repo', 'merge_pr']),
+      ],
+    );
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    expect(find.text('2 new tools — review'), findsOneWidget);
+    // The built-in connection never has one.
+    expect(find.byKey(const Key('review-tools-storm')), findsNothing);
+    await tester.tap(find.byKey(const Key('review-tools-mcc_GH')));
+    await tester.pumpAndSettle();
+    expect(find.text('delete_repo  (new)'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('save-tools')));
+    await tester.pumpAndSettle();
+    final patch = seen.firstWhere((r) => r.method == 'PATCH');
+    expect(jsonDecode(patch.body), {
+      'tool_allowlist': ['search'],
+    }, reason: 'reviewing must not turn a new tool on');
+  });
+
+  testWidgets('one new tool is singular', (tester) async {
+    final (client, _) = server(
+      items: [
+        github(newTools: ['merge_pr']),
+      ],
+    );
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    expect(find.text('1 new tool — review'), findsOneWidget);
+  });
+
+  test('an upstream tool name is cleaned and bounded before it is shown', () {
+    // A right-to-left override would make the name read as something else.
+    expect(displayToolName('delete\u202Erepo'), 'deleterepo');
+    expect(displayToolName('zero\u200Bwidth'), 'zerowidth');
+    expect(displayToolName('two\nlines\there'), 'two lines here');
+    expect(displayToolName('\u0007\u200B'), '(unnamed tool)');
+    final long = 'x' * 100;
+    expect(displayToolName(long), '${'x' * 64}…');
+    expect(displayToolName('search'), 'search');
   });
 
   testWidgets('disconnecting a token says Storm cannot revoke it', (
