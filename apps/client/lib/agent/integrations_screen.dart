@@ -11,6 +11,7 @@ import 'agent_state.dart' show sessionCredentialsProvider;
 import 'hosts_screen.dart' show ChipTone, StatusChip;
 import 'integrations_api.dart';
 import 'oauth_flow.dart';
+import 'oauth_links.dart';
 
 /// How this client builds an [IntegrationsApi], or null without a session.
 /// Tests override it.
@@ -52,10 +53,32 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
 
   IntegrationsApi? _api() => ref.read(integrationsApiFactoryProvider)?.call();
 
+  late final OAuthLinks _links = ref.read(oauthLinksProvider);
+
   @override
   void initState() {
     super.initState();
     _load();
+    // A sign-in redirect this process was not waiting for (spec §10.4,
+    // 81l): finish it here. The app root brings this screen up for one.
+    _links.orphans.addListener(_relayOrphans);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _relayOrphans());
+  }
+
+  @override
+  void dispose() {
+    _links.orphans.removeListener(_relayOrphans);
+    super.dispose();
+  }
+
+  void _relayOrphans() {
+    if (!mounted || _links.orphans.value.isEmpty) return;
+    final orphans = _links.takeOrphans();
+    _with((api) async {
+      for (final params in orphans) {
+        _reportCheck(await relayRedirect(api, params));
+      }
+    });
   }
 
   Future<void> _load() async {
