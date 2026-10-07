@@ -2363,7 +2363,11 @@ async fn run_call(
     if method == "ping" {
         return Ok(serde_json::json!({}));
     }
-    let Some(_permit) = state.gateway.sessions.permit(session_id, connection_id) else {
+    let Some(_permit) = state
+        .gateway
+        .sessions
+        .permit(session_id, connection_id, method)
+    else {
         return Err(CallFailure::Code("gateway_rate_limited".into()));
     };
     let agent_progress = message.pointer("/params/_meta/progressToken").cloned();
