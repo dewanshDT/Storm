@@ -3815,6 +3815,17 @@ installed release.
   a correctly signed acceptance APK installs as an update.
 - Creating the upload keystore is the operator's; it is Storm's Android
   identity from then on.
+- **Created 2026-10-08.** The operator ran `storm-signing-setup.sh` on
+  dew-omarchy:
+  - The key: PKCS12, RSA 4096, alias `storm`, subject `CN=Storm Android
+    upload key`, SHA-256 `C0:90:38:74:…:5C:12:AB:4E`.
+  - It lives in the operator's home, which the `storm-runtime` account (every
+    agent on the host) cannot read. It is backed up off the machine.
+  - The four `STORM_UPLOAD_*` secrets are set. The acceptance APK `acfa4d9`
+    is verified signed with it, its v2 block read directly.
+  - **v0.3.1 and earlier were signed with throwaway keys**, so the first
+    install of an upload-key-signed build needs one uninstall. Every build
+    after it updates in place.
 
 ---
 
