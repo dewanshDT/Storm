@@ -87,6 +87,11 @@ test-runtime:
 test-client:
 	cd $(CLIENT) && flutter test
 
+## test-gateway-mutations: rebuild the bridge broken three ways; gateway_e2e.py must catch each
+test-gateway-mutations:
+	@cd $(SERVER) && cargo build --quiet
+	@python3 $(SERVER)/tests/gateway_mutations.py
+
 ## test-live: integration suites against a real server, started and torn down
 test-live:
 	@cd $(SERVER) && cargo build --quiet
@@ -361,7 +366,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-client test-live fmt \
+.PHONY: help check lint test test-server test-client test-live test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check codegen clean \
         deploy-web deploy-web-check \
         build-server deploy deploy-check
