@@ -65,6 +65,24 @@ pub const PER_SESSION_CONCURRENT: usize = 4;
 pub const PER_SESSION_PER_SECOND: usize = 10;
 pub const PER_CONNECTION_CONCURRENT: usize = 8;
 
+/// Whether a forwarded method counts against the per-session budget
+/// ([`PER_SESSION_CONCURRENT`], [`PER_SESSION_PER_SECOND`]).
+///
+/// **Listings do not** (AM-G11, approved 2026-10-08): an agent CLI lists
+/// every server's tools, prompts and resources in parallel as it starts, so
+/// with the built-in connection and two integrations Claude Code's own
+/// startup was refused `gateway_rate_limited` and an integration had no tools
+/// for the whole session (found in acceptance). A listing executes nothing;
+/// it is still bounded per connection ([`PER_CONNECTION_CONCURRENT`]). The
+/// budget stays on what it exists for: the work an agent asks an upstream to
+/// do. `initialize` and `ping` never reach the limiter at all.
+pub fn counts_against_session(method: &str) -> bool {
+    !matches!(
+        method,
+        "tools/list" | "resources/list" | "resources/templates/list" | "prompts/list"
+    )
+}
+
 /// A line of a POST's response body: a JSON-RPC message for the agent, or a
 /// `storm_error` the bridge acts on.
 pub type Line = Value;
@@ -437,7 +455,8 @@ pub struct Sessions {
 
 /// Held for a forwarded call's duration.
 pub struct Permit {
-    _session: tokio::sync::OwnedSemaphorePermit,
+    /// `None` for a listing (AM-G11).
+    _session: Option<tokio::sync::OwnedSemaphorePermit>,
     _connection: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -501,17 +520,11 @@ impl Sessions {
         out
     }
 
-    /// Takes a slot for one forwarded call, or `None` when a limit is hit
-    /// (`gateway_rate_limited`). Never waits: an agent over its budget is told
-    /// at once rather than queued.
-    pub fn permit(&self, session: &str, connection: &str) -> Option<Permit> {
-        let s = self
-            .session_slots
-            .lock()
-            .unwrap()
-            .entry(session.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(PER_SESSION_CONCURRENT)))
-            .clone();
+    /// Takes a slot for one forwarded call of `method`, or `None` when a
+    /// limit is hit (`gateway_rate_limited`). Never waits: an agent over its
+    /// budget is told at once rather than queued. A listing takes only its
+    /// connection's slot ([`counts_against_session`]).
+    pub fn permit(&self, session: &str, connection: &str, method: &str) -> Option<Permit> {
         let c = self
             .connection_slots
             .lock()
@@ -519,8 +532,21 @@ impl Sessions {
             .entry(connection.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(PER_CONNECTION_CONCURRENT)))
             .clone();
+        if !counts_against_session(method) {
+            return Some(Permit {
+                _session: None,
+                _connection: c.try_acquire_owned().ok()?,
+            });
+        }
+        let s = self
+            .session_slots
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(PER_SESSION_CONCURRENT)))
+            .clone();
         let permit = Permit {
-            _session: s.try_acquire_owned().ok()?,
+            _session: Some(s.try_acquire_owned().ok()?),
             _connection: c.try_acquire_owned().ok()?,
         };
         // Only a call that will run counts against the per-second budget.
@@ -571,22 +597,78 @@ mod tests {
     fn the_limits_refuse_rather_than_queue() {
         let s = Sessions::default();
         let held: Vec<Permit> = (0..PER_SESSION_CONCURRENT)
-            .map(|_| s.permit("ags_A", "mcc_A").unwrap())
+            .map(|_| s.permit("ags_A", "mcc_A", "tools/call").unwrap())
             .collect();
         assert!(
-            s.permit("ags_A", "mcc_A").is_none(),
+            s.permit("ags_A", "mcc_A", "tools/call").is_none(),
             "a fifth concurrent call"
         );
         drop(held);
         // Ten per second: four used above, six more, then refused.
         for _ in 0..(PER_SESSION_PER_SECOND - PER_SESSION_CONCURRENT) {
-            assert!(s.permit("ags_A", "mcc_A").is_some());
+            assert!(s.permit("ags_A", "mcc_A", "tools/call").is_some());
         }
         assert!(
-            s.permit("ags_A", "mcc_A").is_none(),
+            s.permit("ags_A", "mcc_A", "tools/call").is_none(),
             "an eleventh call this second"
         );
         // Another session has its own budget.
-        assert!(s.permit("ags_B", "mcc_A").is_some());
+        assert!(s.permit("ags_B", "mcc_A", "tools/call").is_some());
+    }
+
+    #[test]
+    fn an_agents_startup_listings_are_never_refused_by_the_session_budget() {
+        // AM-G11: what Claude Code does as it starts. Three connections, each
+        // listed three ways in parallel, while the session's budget is spent.
+        let s = Sessions::default();
+        let held: Vec<Permit> = (0..PER_SESSION_CONCURRENT)
+            .map(|_| s.permit("ags_A", "storm", "tools/call").unwrap())
+            .collect();
+        let mut listings = Vec::new();
+        for connection in ["storm", "mcc_A", "mcc_B"] {
+            for method in ["tools/list", "prompts/list", "resources/list"] {
+                listings.push(
+                    s.permit("ags_A", connection, method)
+                        .unwrap_or_else(|| panic!("{method} on {connection} was refused")),
+                );
+            }
+        }
+        // ...and they took nothing from it: execution is still refused.
+        assert!(s.permit("ags_A", "mcc_A", "tools/call").is_none());
+        drop(held);
+        drop(listings);
+    }
+
+    #[test]
+    fn listings_are_still_bounded_per_connection() {
+        let s = Sessions::default();
+        let held: Vec<Permit> = (0..PER_CONNECTION_CONCURRENT)
+            .map(|_| s.permit("ags_A", "mcc_A", "tools/list").unwrap())
+            .collect();
+        assert!(s.permit("ags_B", "mcc_A", "tools/list").is_none());
+        assert!(s.permit("ags_A", "mcc_B", "tools/list").is_some());
+        drop(held);
+    }
+
+    #[test]
+    fn only_the_listings_are_exempt() {
+        for method in [
+            "tools/list",
+            "prompts/list",
+            "resources/list",
+            "resources/templates/list",
+        ] {
+            assert!(!counts_against_session(method), "{method}");
+        }
+        for method in [
+            "tools/call",
+            "resources/read",
+            "resources/subscribe",
+            "resources/unsubscribe",
+            "prompts/get",
+            "completion/complete",
+        ] {
+            assert!(counts_against_session(method), "{method}");
+        }
     }
 }
