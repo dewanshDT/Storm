@@ -3764,6 +3764,58 @@ Android and macOS. The operator chose to build the spec, not amend it
 **Not verified here:** the Kotlin and Swift compile only on the acceptance
 workflow, and their behaviour on a device is on-device acceptance.
 
+
+**81m. An agent's listings don't count against its session budget
+(amendment AM-G11, approved by the operator).** *(2026-10-08)*
+
+**Found in acceptance on staging.**
+- Real Claude Code 2.1.292 lists every server's tools, prompts and
+  resources in parallel as it starts.
+- The per-session limit (§9's operational defaults: 4 concurrent, 10/s,
+  shared by all of a session's connections) refuses rather than waits.
+- With the built-in connection and two integrations, one integration's
+  `tools/list` and `prompts/list` came back `gateway_rate_limited`, and
+  Claude Code showed "tools fetch failed": that integration had no tools for
+  the whole session. With the operator's real setup (Notion, Linear, GitHub
+  and `storm`) it would happen at nearly every launch.
+
+**Decided:**
+- **Option A, recorded in the frozen spec as AM-G11**, not edited silently:
+  listings (`tools/list`, `prompts/list`, `resources/list`,
+  `resources/templates/list`) take only their connection's slot (8
+  concurrent).
+- The session budget stays on execution: `tools/call`, `resources/read`,
+  subscriptions, `prompts/get` and `completion/complete`.
+- §12 is unchanged: a limit that is hit is refused, never queued.
+
+**Rejected:**
+- *Raising the numbers:* that still breaks as integrations are added, and
+  loosens the bound on real calls.
+- *Queueing:* it contradicts §12 and adds latency to every call.
+
+**Verified:**
+- Unit tests:
+  - Claude Code's startup pattern (3 connections × 3 listings) succeeds
+    while the session budget is spent, and takes nothing from it;
+  - listings are still capped per connection;
+  - exactly the four listing methods are exempt.
+- **On staging:** the same real Claude Code startup that failed made 10
+  gateway calls with 0 refused. `/mcp` shows all three servers with tools
+  (canary 3, deepwiki 3, storm 11).
+
+**Also found while preparing the Android acceptance build: no release has
+ever been signed with an upload key.** `release.yml` reads
+`STORM_UPLOAD_STORE_BASE64` and `STORM_UPLOAD_*`; none of those secrets
+exist, and the v0.3.1 run logged "APK will be debug-signed". So every
+released APK is signed by a throwaway key from its own CI run: no release
+installs as an update over another, and no new build can update an
+installed release.
+- `acceptance.yml` now takes the same secrets the same way, when they
+  exist, and stamps the latest release's run number as the build number, so
+  a correctly signed acceptance APK installs as an update.
+- Creating the upload keystore is the operator's; it is Storm's Android
+  identity from then on.
+
 ---
 
 ## Data model

@@ -526,6 +526,13 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   **"Allow vault writes" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
+- **An agent's listings never count against its session's budget**
+  (AM-G11, 81m). `tools/list`, `prompts/list`, `resources/list` and
+  `resources/templates/list` take only their connection's slot
+  (`counts_against_session`). An agent CLI lists every server in parallel as
+  it starts, and refusing that silently leaves an integration with no tools
+  for the session. Execution keeps the full budget, and a limit hit is still
+  refused, never queued (§12).
 - **A new upstream tool is recorded, never enabled** (spec §9, 81k). Only
   the owner's *first* test turns tools on (G-D16). After that, any listing,
   the owner's or an agent's, records unknown names in `new_tools`, and the
