@@ -166,6 +166,28 @@ impl Keyring {
             .map_err(|_| anyhow::anyhow!("a sealed value did not authenticate"))?;
         Ok(Plaintext(plaintext))
     }
+
+    /// [`seal`](Self::seal)s `value` as JSON.
+    pub fn seal_json<T: serde::Serialize + ?Sized>(
+        &self,
+        id: &str,
+        kind: &str,
+        value: &T,
+    ) -> Result<Sealed> {
+        self.seal(id, kind, &serde_json::to_vec(value)?)
+    }
+
+    /// [`open`](Self::open)s a value sealed with [`seal_json`](Self::seal_json).
+    pub fn open_json<T: serde::de::DeserializeOwned>(
+        &self,
+        id: &str,
+        kind: &str,
+        sealed: &Sealed,
+    ) -> Result<T> {
+        Ok(serde_json::from_slice(
+            self.open(id, kind, sealed)?.expose(),
+        )?)
+    }
 }
 
 pub fn keys_dir(state_dir: &Path) -> PathBuf {
@@ -212,7 +234,7 @@ pub fn load_or_create(state_dir: &Path, recorded_active: Option<&str>) -> Result
         }
         match read_key_file(&path) {
             Ok(bytes) => {
-                warn_if_readable_by_others(&path);
+                warn_if_readable_by_others(&path, "a gateway data key");
                 keys.insert(key_id, XChaCha20Poly1305::new_from_slice(&bytes)?);
             }
             Err(e) => tracing::warn!(
@@ -259,72 +281,9 @@ fn read_key_file(path: &Path) -> Result<[u8; KEY_LEN]> {
         .map_err(|_| anyhow::anyhow!("{} is {} bytes, not {KEY_LEN}", path.display(), bytes.len()))
 }
 
-/// Creates a directory at `0700`, and tightens it if it already existed wider.
-/// Created *with* the mode, so there is no window where it is listable.
-pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if let Some(parent) = dir.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        if !dir.exists() {
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
-        }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("tightening {}", dir.display()))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    Ok(())
-}
-
-/// Writes key bytes at `0600` with no window at a wider mode — the identity
-/// key's rule (`auth::identity::write_key_file`).
-fn write_key_file(path: &Path, secret: &[u8; KEY_LEN]) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    use std::io::Write;
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    file.write_all(secret)
-        .with_context(|| format!("writing {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("flushing {}", path.display()))?;
-    Ok(())
-}
-
-/// A warning, not a refusal, for the identity key's reason: a restore that
-/// lost permissions should produce a journal line, not a server that will not
-/// start.
-fn warn_if_readable_by_others(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mode = meta.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                tracing::warn!(
-                    path = %path.display(),
-                    mode = format!("{mode:o}"),
-                    "a gateway data key is readable beyond its owner; chmod 600 it"
-                );
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
+// The key-file rules are the identity key's, in one place (A2).
+pub(crate) use crate::auth::identity::create_private_dir;
+use crate::auth::identity::{warn_if_readable_by_others, write_key_file};
 
 #[cfg(test)]
 mod tests {

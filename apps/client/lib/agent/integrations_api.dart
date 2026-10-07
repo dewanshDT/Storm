@@ -15,9 +15,7 @@ class Integration {
     required this.authKind,
     required this.status,
     required this.builtin,
-    required this.hasCredential,
     required this.toolAllowlist,
-    required this.knownTools,
     required this.lastError,
     required this.vaultWritesAvailable,
   });
@@ -33,9 +31,7 @@ class Integration {
   /// `pending_auth`, `connected`, `needs_reauth`, `error` or `disabled`.
   final String status;
   final bool builtin;
-  final bool hasCredential;
   final List<String> toolAllowlist;
-  final List<String>? knownTools;
   final String? lastError;
 
   /// Built-in only: whether the server lets agents write at all.
@@ -63,11 +59,9 @@ class Integration {
     authKind: j['auth_kind'] as String,
     status: j['status'] as String,
     builtin: j['builtin'] as bool? ?? false,
-    hasCredential: j['has_credential'] as bool? ?? false,
     toolAllowlist: [
       for (final t in (j['tool_allowlist'] as List? ?? const [])) t as String,
     ],
-    knownTools: (j['known_tools'] as List?)?.cast<String>(),
     lastError: j['last_error_code'] as String?,
     vaultWritesAvailable: j['vault_writes_available'] as bool?,
   );

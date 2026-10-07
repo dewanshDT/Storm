@@ -5,9 +5,10 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../router.dart';
-import '../state/app_state.dart';
 import '../ui/states.dart';
 import '../ui/tokens.dart';
+import 'agent_state.dart' show sessionCredentialsProvider;
+import 'hosts_screen.dart' show ChipTone, StatusChip;
 import 'integrations_api.dart';
 import 'oauth_flow.dart';
 
@@ -16,12 +17,7 @@ import 'oauth_flow.dart';
 final integrationsApiFactoryProvider = Provider<IntegrationsApi Function()?>((
   ref,
 ) {
-  final session = ref.watch(
-    settingsProvider.select((a) {
-      final s = a.value;
-      return s == null || !s.hasSession ? null : (s.baseUrl, s.accessToken);
-    }),
-  );
+  final session = ref.watch(sessionCredentialsProvider);
   if (session == null) return null;
   final (baseUrl, token) = session;
   return () => IntegrationsApi(baseUrl: baseUrl, token: token);
@@ -150,13 +146,14 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
       await _with((api) async => _reportCheck(await _signIn(api, i.id)));
       return;
     }
-    final draft = await showDialog<_Draft>(
+    final credential = await showDialog<(String, String)>(
       context: context,
       builder: (_) => _TokenDialog(integration: i),
     );
-    if (draft == null || !mounted) return;
+    if (credential == null || !mounted) return;
+    final (header, value) = credential;
     await _with((api) async {
-      await api.update(i.id, header: draft.header, value: draft.value);
+      await api.update(i.id, header: header, value: value);
       _reportCheck(await api.test(i.id));
     });
   }
@@ -337,13 +334,10 @@ class _IntegrationTile extends StatelessWidget {
                       ),
                     ),
                     SizedBox(width: t.sp),
-                    Text(
-                      i.builtin ? 'Built in' : i.statusLabel,
+                    StatusChip(
                       key: Key('status-${i.id}'),
-                      style: TextStyle(
-                        fontSize: t.labelSize,
-                        color: attention ? t.amber : t.text3,
-                      ),
+                      label: i.builtin ? 'Built in' : i.statusLabel,
+                      tone: attention ? ChipTone.warn : ChipTone.muted,
                     ),
                   ],
                 ),
@@ -622,16 +616,7 @@ class _TokenDialogState extends State<_TokenDialog> {
       FilledButton(
         onPressed: () {
           if (_token.text.trim().isEmpty) return;
-          final (header, value) = _credential(_header.text, _token.text);
-          Navigator.of(context).pop(
-            _Draft(
-              name: widget.integration.displayName,
-              url: widget.integration.url ?? '',
-              kind: 'static',
-              header: header,
-              value: value,
-            ),
-          );
+          Navigator.of(context).pop(_credential(_header.text, _token.text));
         },
         child: const Text('Save'),
       ),

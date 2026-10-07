@@ -234,7 +234,7 @@ fn load(
         );
     }
 
-    warn_if_readable_by_others(&path);
+    warn_if_readable_by_others(&path, "the server's private key");
 
     Ok(ServerIdentity {
         server_id: server.id.clone(),
@@ -289,20 +289,15 @@ pub fn key_path(state_dir: &Path, key_id: &str) -> PathBuf {
     state_dir.join(IDENTITY_DIR).join(format!("{key_id}.key"))
 }
 
-/// Writes private key bytes at mode 0600, with no window at a wider mode.
+/// Writes private key bytes at mode 0600, with no window at a wider mode, in
+/// a `0700` directory. Every key file Storm writes goes through here: the
+/// server's identity key and the gateway's data keys (81b).
 ///
 /// Created *with* the mode rather than chmod-ed afterwards: between the two
 /// there is an instant where the file exists and anyone can read it, and a
 /// homelab box with other users on it is exactly where that matters.
-fn write_key_file(path: &Path, secret: &[u8; 32]) -> Result<()> {
-    let dir = path.parent().expect("key path has a parent");
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("tightening {}", dir.display()))?;
-    }
+pub(crate) fn write_key_file(path: &Path, secret: &[u8; 32]) -> Result<()> {
+    create_private_dir(path.parent().expect("key path has a parent"))?;
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -327,7 +322,9 @@ fn write_key_file(path: &Path, secret: &[u8; 32]) -> Result<()> {
 /// Refusing to boot would turn a restore that did not preserve permissions
 /// into a server that will not start, which is a worse failure than the one
 /// being reported. The point is that this is visible in the journal.
-fn warn_if_readable_by_others(path: &Path) {
+///
+/// `what` names the key for the journal ("the server's private key").
+pub(crate) fn warn_if_readable_by_others(path: &Path, what: &str) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -337,13 +334,64 @@ fn warn_if_readable_by_others(path: &Path) {
                 tracing::warn!(
                     path = %path.display(),
                     mode = format!("{mode:o}"),
-                    "the server's private key is readable beyond its owner; chmod 600 it"
+                    "{what} is readable beyond its owner; chmod 600 it"
                 );
             }
         }
     }
     #[cfg(not(unix))]
-    let _ = path;
+    let _ = (path, what);
+}
+
+/// Creates a directory at `0700`, and tightens it if it already existed wider.
+/// Created *with* the mode, so there is no window where it is listable.
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        if !dir.exists() {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir)
+                .with_context(|| format!("creating {}", dir.display()))?;
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("tightening {}", dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(())
+}
+
+/// Copies every key file in `from` into `to` for a backup, returning how many.
+///
+/// The modes are set explicitly, `0600` in a `0700` directory, rather than
+/// trusting the copy to carry them: that is the whole reason a key is a file
+/// instead of a row. `backup_auth` and the gateway's backup both use this.
+pub(crate) fn copy_key_dir(from: &Path, to: &Path) -> Result<usize> {
+    create_private_dir(to)?;
+    let mut copied = 0;
+    for entry in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let dest = to.join(entry.file_name());
+        std::fs::copy(entry.path(), &dest)
+            .with_context(|| format!("copying {}", entry.path().display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("tightening {}", dest.display()))?;
+        }
+        copied += 1;
+    }
+    Ok(copied)
 }
 
 /// A label for the operator, not an identifier. Renaming is a settings change

@@ -3560,6 +3560,90 @@ upstream and the scripted agent. This slice adds **Phase 1's exit (AM28)**:
 
 **Verified.** `gateway_e2e.py` 58/58 here; the mutation runner 3/3 caught.
 
+**81j. A simplify pass over the gateway stack: no behaviour changes, and
+five findings left open on purpose.** *(2026-10-07)*
+
+A reuse, simplification, efficiency and altitude review of 81b–81i. **What
+changed, with behaviour held fixed:**
+
+*One copy of each rule:*
+- **"May this agent call this tool"** is `Authorized::may_call`. It is used
+  by both the `tools/call` gate and the `tools/list` filter, so neither can
+  drift from the other.
+- **The `integration_needs_reauth:<slug>` code** is spelled in one place
+  (`needs_reauth_code`). Every upstream failure maps to the agent's code
+  through `upstream_failure`.
+- **The OAuth refresh-once rule** is `Gateway::with_target`, used by the
+  owner's probe and by an agent's `initialize`. `target()` never fails with
+  `Unauthorized`, so this matches both old copies exactly.
+- **OAuth manager setup** is `Gateway::configure_client`, with
+  `FlowStore::new` and `TokenStore::new`. A connection's OAuth client is
+  `oauth_client_of`.
+- **The SSRF-pinned reqwest client** is `pinned_client`.
+- **Key files** use one set of helpers in `auth::identity`
+  (`write_key_file`, `create_private_dir`, `warn_if_readable_by_others`,
+  `copy_key_dir`). `backup_auth` and the gateway's backup share the key copy.
+- **Owner gates** share a single predicate (`owner_only`).
+- **JSON through the keyring** is `Keyring::seal_json` / `open_json`.
+- **The REST bodies** are the `ops` input structs, as `agent_launch` already
+  did.
+- **The runtime's authenticated POST** is one path, `post_for_response`, so
+  the 401 → reauth rule exists once.
+- **In the client:** one `sessionCredentialsProvider`; the tile status is a
+  `StatusChip`; the token dialog returns only the credential; two unread
+  fields are removed.
+
+*Cheaper paths:*
+- **A result's size** is counted, not built as a string.
+- **An agent's params** are moved, not deep-copied.
+- **The TLS config** is built once.
+- **Call-audit pruning** walks the primary key instead of building a
+  100,000-row `NOT IN` set, which it did under the gateway's lock.
+- **Listing integrations** costs one `EXISTS` per row.
+- **The bridge** takes each message out of its line instead of cloning it.
+- **The host forwards a bridge's message as raw JSON**
+  (`serde_json/raw_value`).
+
+*Leaks and dead code:*
+- **An upstream session's event hook** now holds the agent manager and a
+  `Weak` gateway. It used to capture `AppState` whole, a reference cycle
+  through `gateway.sessions`.
+- **Removed:** the `Storm.for_agent` flag (now read off the actor), the
+  never-written `oauth_flows.scope` column (the schema is unreleased), and
+  `ops::integration_call`'s `Result`, which never returned an error.
+
+**Left open: each changes behaviour or is a redesign.**
+1. **Session cleanup is polled.** `sweep_gateway_sessions` runs after a host
+   reports, not when a session ends, and `end_session` doesn't call it. The
+   deeper fix is for the agent manager to publish a session's end.
+2. **The connection status rules differ by path.** `note_upstream_failure`
+   marks `needs_reauth` only from `connected`; the probe does so from
+   anything but `pending_auth`; `status::ERROR` is read and never set. The
+   fix is a `Status` enum with transitions, and it changes which
+   transitions happen.
+3. **No shared test vectors.** The gateway's NDJSON line format and error
+   shape are re-derived in both crates, and the messages differ (`<code>` vs
+   `storm: <code>`). The fix is a `docs/gateway-vectors.json`.
+4. **AM26 is enforced by grepping source.** A wrapper type that hides rmcp's
+   `Peer` would make the type system enforce it.
+5. **A spent OAuth flow is recognised by rmcp's error text.**
+   `FlowStore::load` could record the outcome instead.
+
+**Also not done:**
+- Refresh still rediscovers OAuth metadata. Reusing the stored copy would
+  refresh against stale endpoints after an upstream moves them.
+- The rate limiter and the elicitation route wait are as they were.
+- `gateway_e2e.py` still copies `agent_e2e.py`'s helpers; a shared harness
+  means rewriting that older suite too.
+
+**Verified.**
+- `make check`: clippy `-D warnings` and `flutter analyze` clean; the server's
+  516 unit tests and the client's 761 pass.
+- `make test-live`: `e2e.py` 81/81 **unmodified**, `mcp_e2e.py` 80/80,
+  `agent_e2e.py` 61/61, `gateway_e2e.py` 58/58, `auth_e2e.py` 74/74, and the
+  client integration suite.
+- `make test-gateway-mutations`: 3 of 3 caught after the bridge changes.
+
 ---
 
 ## Data model

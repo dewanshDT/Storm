@@ -121,11 +121,9 @@ impl super::Gateway {
                     .map_err(|_| UpstreamError::Credential)?
                     .ok_or(UpstreamError::Credential)?
                     .0;
-                let opened = self
+                let credential: StaticCredential = self
                     .keys
-                    .open(&c.id, credential_kind::STATIC, &sealed)
-                    .map_err(|_| UpstreamError::Credential)?;
-                let credential: StaticCredential = serde_json::from_slice(opened.expose())
+                    .open_json(&c.id, credential_kind::STATIC, &sealed)
                     .map_err(|_| UpstreamError::Credential)?;
                 let name = axum::http::HeaderName::from_bytes(credential.header.as_bytes())
                     .map_err(|_| UpstreamError::Credential)?;
@@ -142,18 +140,45 @@ impl super::Gateway {
             headers,
         })
     }
+
+    /// Runs `op` against a connection's target. **An OAuth upstream that
+    /// refuses its access token gets one forced refresh and one more `op`.**
+    /// Only for an `op` that executes nothing an agent asked for (a listing,
+    /// an `initialize`), so this is never a retry of an agent's call (AM26).
+    pub async fn with_target<T, Fut>(
+        self: &Arc<Self>,
+        c: &Connection,
+        op: impl Fn(Target) -> Fut,
+    ) -> Result<T, UpstreamError>
+    where
+        Fut: std::future::Future<Output = Result<T, UpstreamError>>,
+    {
+        let result = op(self.target(c, false).await?).await;
+        if c.auth_kind == auth_kind::OAUTH && matches!(result, Err(UpstreamError::Unauthorized)) {
+            return op(self.target(c, true).await?).await;
+        }
+        result
+    }
 }
 
 /// rustls on `ring` with the bundled Mozilla roots: every TLS connection the
-/// gateway makes, to an upstream or to an authorization server.
+/// gateway makes, to an upstream or to an authorization server. Built once;
+/// a clone shares the root store.
 pub fn tls_config() -> rustls::ClientConfig {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default TLS versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth()
+    static CONFIG: std::sync::OnceLock<rustls::ClientConfig> = std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default TLS versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+        })
+        .clone()
 }
 
 /// The one HTTP client for every upstream, built once.

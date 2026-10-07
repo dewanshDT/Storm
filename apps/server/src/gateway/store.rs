@@ -104,7 +104,6 @@ const SCHEMA: &str = "
         oauth_client        TEXT NOT NULL,
         redirect_uri        TEXT NOT NULL,
         resource            TEXT NOT NULL,
-        scope               TEXT,
         verifier_key_id     TEXT NOT NULL,
         verifier_nonce      BLOB NOT NULL,
         verifier_ciphertext BLOB NOT NULL,
@@ -419,6 +418,15 @@ impl GatewayDb {
         Ok(())
     }
 
+    /// Whether the connection holds any credential, of any kind.
+    pub fn has_credential(&self, connection_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM credentials WHERE connection_id = ?1)",
+            params![connection_id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// A credential and its expiry, still sealed.
     pub fn credential(
         &self,
@@ -511,9 +519,11 @@ impl GatewayDb {
             "DELETE FROM calls WHERE at_ms < ?1",
             params![now_ms - CALLS_KEEP_MS],
         )?;
+        // Ids only grow, so "all but the newest N" is everything at or below
+        // the (N+1)th newest id: a walk of the key, not an N-row `NOT IN` set.
         let excess = self.conn.execute(
-            "DELETE FROM calls WHERE id NOT IN
-                 (SELECT id FROM calls ORDER BY id DESC LIMIT ?1)",
+            "DELETE FROM calls WHERE id <=
+                 (SELECT id FROM calls ORDER BY id DESC LIMIT 1 OFFSET ?1)",
             params![keep_rows],
         )?;
         Ok(old + excess)
@@ -660,9 +670,9 @@ impl GatewayDb {
     pub fn insert_flow(&self, f: &FlowRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO oauth_flows (state_hash, connection_id, owner_user_id, oauth_client,
-                 redirect_uri, resource, scope, verifier_key_id, verifier_nonce, verifier_ciphertext,
+                 redirect_uri, resource, verifier_key_id, verifier_nonce, verifier_ciphertext,
                  created_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 f.state_hash,
                 f.connection_id,

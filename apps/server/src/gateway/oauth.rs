@@ -150,13 +150,7 @@ impl SsrfHttp {
         for _ in 0..=MAX_REDIRECTS {
             let url = url::Url::parse(&uri.to_string())?;
             let (host, addrs) = check_target(&url, self.allow_private).await?;
-            // Pinned to the checked addresses: the connect cannot re-resolve.
-            let client = reqwest::Client::builder()
-                .use_preconfigured_tls(super::upstream::tls_config())
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(OAUTH_TIMEOUT)
-                .resolve_to_addrs(&host, &addrs)
-                .build()?;
+            let client = pinned_client(&host, &addrs)?;
             let mut req = client.request(method.clone(), url.clone());
             for (name, value) in headers.iter() {
                 req = req.header(name, value);
@@ -188,6 +182,18 @@ impl SsrfHttp {
         }
         Err("too many redirects".into())
     }
+}
+
+/// A client for one request under the SSRF rule: **pinned to the checked
+/// addresses**, so the connect cannot re-resolve, and following no redirect
+/// itself (each hop is checked by the caller).
+fn pinned_client(host: &str, addrs: &[SocketAddr]) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .use_preconfigured_tls(super::upstream::tls_config())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(OAUTH_TIMEOUT)
+        .resolve_to_addrs(host, addrs)
+        .build()
 }
 
 async fn collect(
@@ -224,6 +230,15 @@ pub struct TokenStore {
     pub connection: String,
 }
 
+impl TokenStore {
+    pub fn new(gateway: &Arc<Gateway>, c: &super::connections::Connection) -> Self {
+        Self {
+            gateway: gateway.clone(),
+            connection: c.id.clone(),
+        }
+    }
+}
+
 fn store_error(e: impl std::fmt::Display) -> AuthError {
     AuthError::InternalError(e.to_string())
 }
@@ -241,22 +256,22 @@ impl CredentialStore for TokenStore {
         let Some((sealed, _)) = row else {
             return Ok(None);
         };
-        let opened = self
-            .gateway
+        self.gateway
             .keys
-            .open(&self.connection, credential_kind::OAUTH_TOKENS, &sealed)
-            .map_err(store_error)?;
-        Ok(Some(
-            serde_json::from_slice(opened.expose()).map_err(store_error)?,
-        ))
+            .open_json(&self.connection, credential_kind::OAUTH_TOKENS, &sealed)
+            .map(Some)
+            .map_err(store_error)
     }
 
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
-        let plaintext = serde_json::to_vec(&credentials).map_err(store_error)?;
         let sealed = self
             .gateway
             .keys
-            .seal(&self.connection, credential_kind::OAUTH_TOKENS, &plaintext)
+            .seal_json(
+                &self.connection,
+                credential_kind::OAUTH_TOKENS,
+                &credentials,
+            )
             .map_err(store_error)?;
         self.gateway
             .store
@@ -297,6 +312,25 @@ pub struct FlowStore {
     pub resource: String,
 }
 
+impl FlowStore {
+    /// The flow store for authorizing connection `c` with `client`, whose
+    /// owner is the connection's.
+    pub fn new(
+        gateway: &Arc<Gateway>,
+        c: &super::connections::Connection,
+        client: &super::store::OAuthClientRow,
+    ) -> Self {
+        Self {
+            gateway: gateway.clone(),
+            connection: c.id.clone(),
+            owner: c.owner_user_id.clone(),
+            oauth_client: client.id.clone(),
+            redirect_uri: client.redirect_uri.clone(),
+            resource: c.url.clone(),
+        }
+    }
+}
+
 const PKCE_KIND: &str = "pkce_verifier";
 
 #[async_trait]
@@ -307,11 +341,10 @@ impl StateStore for FlowStore {
         state: StoredAuthorizationState,
     ) -> Result<(), AuthError> {
         let hash = state_hash(csrf_token);
-        let plaintext = serde_json::to_vec(&state).map_err(store_error)?;
         let sealed = self
             .gateway
             .keys
-            .seal(&hash, PKCE_KIND, &plaintext)
+            .seal_json(&hash, PKCE_KIND, &state)
             .map_err(store_error)?;
         let now = crate::index::now_rfc3339();
         let expires = super::rfc3339_in(FLOW_TTL_SECS);
@@ -350,14 +383,11 @@ impl StateStore for FlowStore {
         if row.connection_id != self.connection {
             return Ok(None);
         }
-        let opened = self
-            .gateway
+        self.gateway
             .keys
-            .open(&hash, PKCE_KIND, &row.sealed)
-            .map_err(store_error)?;
-        Ok(Some(
-            serde_json::from_slice(opened.expose()).map_err(store_error)?,
-        ))
+            .open_json(&hash, PKCE_KIND, &row.sealed)
+            .map(Some)
+            .map_err(store_error)
     }
 
     async fn delete(&self, _csrf_token: &str) -> Result<(), AuthError> {
@@ -411,11 +441,7 @@ pub async fn discovered_manager(
     Ok((manager, resolution.metadata))
 }
 
-pub fn client_config(
-    client_id: &str,
-    redirect_uri: &str,
-    secret: Option<String>,
-) -> OAuthClientConfig {
+fn client_config(client_id: &str, redirect_uri: &str, secret: Option<String>) -> OAuthClientConfig {
     let config = OAuthClientConfig::new(client_id, redirect_uri);
     match secret {
         Some(s) => config.with_client_secret(s),
@@ -478,10 +504,36 @@ impl Gateway {
     }
 
     /// The pasted client secret of an OAuth client, opened.
-    pub fn client_secret(&self, client: &super::store::OAuthClientRow) -> Option<String> {
+    fn client_secret(&self, client: &super::store::OAuthClientRow) -> Option<String> {
         let sealed = client.secret.as_ref()?;
         let opened = self.keys.open(&client.id, "client_secret", sealed).ok()?;
         String::from_utf8(opened.expose().to_vec()).ok()
+    }
+
+    /// Points `manager` at a stored OAuth client: its id, its redirect URI
+    /// and any pasted secret.
+    pub fn configure_client(
+        &self,
+        manager: &mut AuthorizationManager,
+        client: &super::store::OAuthClientRow,
+    ) -> Result<(), AuthError> {
+        manager.configure_client(client_config(
+            &client.client_id,
+            &client.redirect_uri,
+            self.client_secret(client),
+        ))
+    }
+
+    /// The OAuth client connection `connection` was authorized with.
+    fn oauth_client_of(
+        &self,
+        connection: &str,
+    ) -> anyhow::Result<Option<super::store::OAuthClientRow>> {
+        let store = self.store.lock().expect("gateway store lock");
+        match store.connection_oauth(connection)? {
+            Some(id) => store.oauth_client(&id),
+            None => Ok(None),
+        }
     }
 
     /// An `oauth` connection's access token, refreshed first when it is within
@@ -499,10 +551,7 @@ impl Gateway {
     ) -> Result<String, super::upstream::UpstreamError> {
         use super::upstream::UpstreamError;
         use oauth2::TokenResponse;
-        let tokens = TokenStore {
-            gateway: self.clone(),
-            connection: c.id.clone(),
-        };
+        let tokens = TokenStore::new(self, c);
         let current = |s: &StoredCredentials| {
             s.token_response
                 .as_ref()
@@ -526,26 +575,14 @@ impl Gateway {
         if !needs_refresh(&stored) && !force {
             return current(&stored).ok_or(UpstreamError::Credential);
         }
-        let client = {
-            let store = self.store.lock().expect("gateway store lock");
-            let id = store
-                .connection_oauth(&c.id)
-                .map_err(|_| UpstreamError::Credential)?
-                .ok_or(UpstreamError::Credential)?;
-            store
-                .oauth_client(&id)
-                .map_err(|_| UpstreamError::Credential)?
-                .ok_or(UpstreamError::Credential)?
-        };
+        let client = self
+            .oauth_client_of(&c.id)
+            .map_err(|_| UpstreamError::Credential)?
+            .ok_or(UpstreamError::Credential)?;
         let (mut manager, _) = discovered_manager(self, &c.url)
             .await
             .map_err(|_| UpstreamError::Unavailable)?;
-        manager
-            .configure_client(client_config(
-                &client.client_id,
-                &client.redirect_uri,
-                self.client_secret(&client),
-            ))
+        self.configure_client(&mut manager, &client)
             .map_err(|_| UpstreamError::Credential)?;
         manager.set_credential_store(tokens);
         match manager.refresh_token().await {
@@ -575,18 +612,8 @@ impl Gateway {
         c: &super::connections::Connection,
     ) -> Option<Revocation> {
         use oauth2::TokenResponse;
-        let stored = TokenStore {
-            gateway: self.clone(),
-            connection: c.id.clone(),
-        }
-        .load()
-        .await
-        .ok()??;
-        let client = {
-            let store = self.store.lock().expect("gateway store lock");
-            let id = store.connection_oauth(&c.id).ok()??;
-            store.oauth_client(&id).ok()??
-        };
+        let stored = TokenStore::new(self, c).load().await.ok()??;
+        let client = self.oauth_client_of(&c.id).ok()??;
         let metadata: serde_json::Value = serde_json::from_str(client.metadata.as_deref()?).ok()?;
         let endpoint = metadata.get("revocation_endpoint")?.as_str()?.to_string();
         let response = stored.token_response?;
@@ -611,13 +638,7 @@ impl Gateway {
         let Ok((host, addrs)) = check_target(&url, self.allow_http_upstreams()).await else {
             return;
         };
-        let Ok(client) = reqwest::Client::builder()
-            .use_preconfigured_tls(super::upstream::tls_config())
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(OAUTH_TIMEOUT)
-            .resolve_to_addrs(&host, &addrs)
-            .build()
-        else {
+        let Ok(client) = pinned_client(&host, &addrs) else {
             return;
         };
         let body = url::form_urlencoded::Serializer::new(String::new())
