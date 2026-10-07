@@ -136,8 +136,7 @@ pub struct AppState {
     /// The Agent Manager: the only session authority (decision 77c).
     pub agent: Arc<crate::agent::AgentManager>,
     /// The MCP Gateway's store and data key (decision 81b). Opened at boot so
-    /// the key exists before the first backup; its operations arrive in 81c.
-    #[allow(dead_code)]
+    /// the key exists before the first backup.
     pub gateway: Arc<crate::gateway::Gateway>,
 }
 
@@ -445,6 +444,18 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route(
             "/v1/config/agent",
             get(agent_get_config).put(agent_put_config),
+        )
+        // MCP Gateway integrations (decision 81c) — owner only, checked in
+        // ops. **Session tier**, so an `stk_` key can never manage one (§14).
+        .route(
+            "/v1/integrations/connections",
+            get(integrations_list).post(integrations_create),
+        )
+        .route(
+            "/v1/integrations/connections/{id}",
+            get(integrations_get)
+                .patch(integrations_patch)
+                .delete(integrations_delete),
         )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
@@ -1602,6 +1613,105 @@ async fn agent_revoke_host(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     crate::ops::revoke_host(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- MCP Gateway: integrations (decision 81c) — owner only, in ops ---------
+
+async fn integrations_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::ops::IntegrationView>>> {
+    Ok(Json(crate::ops::list_integrations(&state, &actor).await?))
+}
+
+#[derive(Deserialize)]
+struct CreateIntegrationRequest {
+    display_name: String,
+    #[serde(default)]
+    slug: Option<String>,
+    url: String,
+    auth_kind: String,
+    #[serde(default)]
+    credential: Option<crate::gateway::connections::StaticCredential>,
+}
+
+async fn integrations_create(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<CreateIntegrationRequest>,
+) -> ApiResult<(StatusCode, Json<crate::ops::IntegrationView>)> {
+    let view = crate::ops::create_integration(
+        &state,
+        &actor,
+        crate::ops::NewIntegration {
+            display_name: body.display_name,
+            slug: body.slug,
+            url: body.url,
+            auth_kind: body.auth_kind,
+            credential: body.credential,
+        },
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn integrations_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::IntegrationView>> {
+    Ok(Json(
+        crate::ops::get_integration(&state, &actor, &id).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct PatchIntegrationRequest {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    tool_allowlist: Option<Vec<String>>,
+    #[serde(default)]
+    expose_resources: Option<bool>,
+    #[serde(default)]
+    expose_prompts: Option<bool>,
+    #[serde(default)]
+    credential: Option<crate::gateway::connections::StaticCredential>,
+}
+
+async fn integrations_patch(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchIntegrationRequest>,
+) -> ApiResult<Json<crate::ops::IntegrationView>> {
+    Ok(Json(
+        crate::ops::update_integration(
+            &state,
+            &actor,
+            &id,
+            crate::ops::IntegrationPatch {
+                display_name: body.display_name,
+                enabled: body.enabled,
+                tool_allowlist: body.tool_allowlist,
+                expose_resources: body.expose_resources,
+                expose_prompts: body.expose_prompts,
+                credential: body.credential,
+            },
+        )
+        .await?,
+    ))
+}
+
+async fn integrations_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::delete_integration(&state, &actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -6226,6 +6336,379 @@ pub(crate) mod tests {
             let (status, _) = send(&app, request).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
         }
+    }
+
+    // ---- MCP Gateway: integrations (decision 81c) ------------------------
+
+    const CONNECTIONS: &str = "/v1/integrations/connections";
+
+    async fn owner_bearer(state: &Shared) -> (String, String) {
+        let owner = seed_owner(state).await;
+        let bearer = format!("Bearer {}", session_token(state, &owner).await);
+        (owner, bearer)
+    }
+
+    async fn create_github(app: &Router, bearer: &str, pat: &str) -> serde_json::Value {
+        let (status, body) = send(
+            app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({
+                    "display_name": "GitHub (work)",
+                    "url": "https://api.example.com/mcp/",
+                    "auth_kind": "static",
+                    "credential": {"value": format!("Bearer {pat}")},
+                }),
+                bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body
+    }
+
+    #[tokio::test]
+    async fn an_owner_connects_changes_and_disconnects_an_integration() {
+        let dir = tempdir::TempDir::new("storm-integrations-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, bearer) = owner_bearer(&state).await;
+
+        let created = create_github(&app, &bearer, "ghp_first").await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("mcc_"), "{id}");
+        assert_eq!(created["slug"], "github-work");
+        assert_eq!(created["status"], "connected");
+        assert_eq!(created["has_credential"], true);
+        assert_eq!(created["builtin"], false);
+
+        // The built-in connection is always listed first, and cannot go.
+        let (status, list) = send(&app, get_with_auth(CONNECTIONS, &bearer)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list[0]["id"], "storm");
+        assert_eq!(list[0]["builtin"], true);
+        assert_eq!(list[1]["id"], id);
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("{CONNECTIONS}/storm"), &bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Disable, re-enable, rotate the token, narrow the allowlist.
+        let path = format!("{CONNECTIONS}/{id}");
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &bearer),
+        )
+        .await;
+        assert_eq!(
+            (status, body["status"].clone()),
+            (StatusCode::OK, "disabled".into())
+        );
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({
+                    "enabled": true,
+                    "credential": {"value": "Bearer ghp_second"},
+                    "tool_allowlist": ["search", "search", "get_issue"],
+                    "expose_prompts": false,
+                }),
+                &bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "connected");
+        assert_eq!(
+            body["tool_allowlist"],
+            serde_json::json!(["get_issue", "search"])
+        );
+        assert_eq!(body["expose_prompts"], false);
+        // The rotated token is what is sealed now.
+        {
+            let (sealed, _) = state
+                .gateway
+                .store
+                .lock()
+                .unwrap()
+                .credential(&id, "static")
+                .unwrap()
+                .unwrap();
+            let opened = state.gateway.keys.open(&id, "static", &sealed).unwrap();
+            let credential: crate::gateway::connections::StaticCredential =
+                serde_json::from_slice(opened.expose()).unwrap();
+            assert_eq!(credential.header, "Authorization");
+            assert_eq!(credential.value, "Bearer ghp_second");
+        }
+
+        // Re-pointing a connection would hand its token to a new host: the
+        // URL is not a field PATCH accepts, so it is unchanged.
+        let (_, body) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"url": "https://evil.example/"}),
+                &bearer,
+            ),
+        )
+        .await;
+        assert_eq!(body["url"], "https://api.example.com/mcp/");
+
+        // Disconnect: gone from the list, 404 by id, ciphertexts deleted, and
+        // the slug is free for a new connection.
+        let (status, _) = send(&app, delete_with_auth(&path, &bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, list) = send(&app, get_with_auth(CONNECTIONS, &bearer)).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        let (status, _) = send(&app, get_with_auth(&path, &bearer)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            state
+                .gateway
+                .store
+                .lock()
+                .unwrap()
+                .credential(&id, "static")
+                .unwrap()
+                .is_none()
+        );
+        let again = create_github(&app, &bearer, "ghp_third").await;
+        assert_eq!(again["slug"], "github-work");
+        assert_ne!(again["id"], id);
+    }
+
+    #[tokio::test]
+    async fn integration_management_is_the_owners_alone() {
+        // G-D20 / AM29: 403 on every route for a member, never an empty list.
+        let dir = tempdir::TempDir::new("storm-integrations-owner").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let id = create_github(&app, &owner, "ghp_x").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let member = seed_member(&state, "member").await;
+        let member = format!("Bearer {}", session_token(&state, &member).await);
+        let path = format!("{CONNECTIONS}/{id}");
+        let requests = [
+            get_with_auth(CONNECTIONS, &member),
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Mine", "url": "https://x.example/", "auth_kind": "none"}),
+                &member,
+            ),
+            get_with_auth(&path, &member),
+            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &member),
+            delete_with_auth(&path, &member),
+        ];
+        for request in requests {
+            let uri = format!("{} {}", request.method(), request.uri());
+            let (status, _) = send(&app, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+        // And nothing changed.
+        let (_, body) = send(&app, get_with_auth(&path, &owner)).await;
+        assert_eq!(body["status"], "connected");
+    }
+
+    #[tokio::test]
+    async fn another_owners_integration_is_not_found_not_forbidden() {
+        // Rows carry their owner (G-D20). A second owner probing ids learns
+        // nothing: 404, the same as an id that does not exist.
+        let dir = tempdir::TempDir::new("storm-integrations-two-owners").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, first) = owner_bearer(&state).await;
+        let id = create_github(&app, &first, "ghp_x").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let second = {
+            let mut db = state.auth_db.lock().await;
+            crate::auth::users::create_user(
+                &mut db,
+                crate::auth::users::NewUser {
+                    username: "second",
+                    display_name: None,
+                    password_hash: "hash",
+                    role: crate::auth::users::Role::Owner,
+                },
+                "2026-10-05T00:00:00Z",
+            )
+            .unwrap()
+            .id
+        };
+        let second = format!("Bearer {}", session_token(&state, &second).await);
+        let path = format!("{CONNECTIONS}/{id}");
+        for request in [
+            get_with_auth(&path, &second),
+            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &second),
+            delete_with_auth(&path, &second),
+        ] {
+            let (status, _) = send(&app, request).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+        let (_, list) = send(&app, get_with_auth(CONNECTIONS, &second)).await;
+        assert_eq!(
+            list.as_array().unwrap().len(),
+            1,
+            "only the built-in: {list}"
+        );
+        // The same slug is free for the second owner: unique per owner.
+        let theirs = create_github(&app, &second, "ghp_y").await;
+        assert_eq!(theirs["slug"], "github-work");
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_cannot_reach_the_integration_routes() {
+        // §14: session tier, so a key can never manage an integration.
+        let dir = tempdir::TempDir::new("storm-integrations-key").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (_, key) = send(
+            &app,
+            post_json_with_auth("/v1/keys", serde_json::json!({"name": "agent"}), &owner),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for request in [
+            get_with_auth(CONNECTIONS, &key),
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "X", "url": "https://x.example/", "auth_kind": "none"}),
+                &key,
+            ),
+        ] {
+            let (status, _) = send(&app, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_integration_is_refused_when_its_input_is_wrong() {
+        let dir = tempdir::TempDir::new("storm-integrations-input").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        create_github(&app, &owner, "ghp_x").await;
+        let cases = [
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "oauth"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "static"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "none", "credential": {"value": "x"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "http://x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://u:p@x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "Storm", "url": "https://x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "slug": "storm", "url": "https://x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "static", "credential": {"header": "Host", "value": "x"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "static", "credential": {"value": "a\r\nX-Evil: 1"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "GitHub (work)", "url": "https://x.example/", "auth_kind": "none"}),
+                StatusCode::CONFLICT,
+            ),
+        ];
+        for (body, want) in cases {
+            let (status, answer) =
+                send(&app, post_json_with_auth(CONNECTIONS, body.clone(), &owner)).await;
+            assert_eq!(status, want, "{body} -> {answer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_integration_secret_reaches_a_response_or_the_security_events() {
+        // The invariant every auth area holds, for the gateway: a credential
+        // is sealed, never returned, never in `security_events`. A URL can
+        // carry a key in its query string, so the audit records its host only.
+        let dir = tempdir::TempDir::new("storm-integrations-secrets").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let mut seen = Vec::new();
+        let (status, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({
+                    "display_name": "Linear",
+                    "url": "https://mcp.example.com/mcp?api_key=upstream-canary-url",
+                    "auth_kind": "static",
+                    "credential": {"header": "X-Api-Key", "value": "upstream-canary-one"},
+                }),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        seen.push(created.clone());
+        let path = format!("{CONNECTIONS}/{}", created["id"].as_str().unwrap());
+        let (_, patched) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"credential": {"header": "X-Api-Key", "value": "upstream-canary-two"}, "enabled": false}),
+                &owner,
+            ),
+        )
+        .await;
+        seen.push(patched);
+        seen.push(send(&app, get_with_auth(&path, &owner)).await.1);
+        seen.push(send(&app, get_with_auth(CONNECTIONS, &owner)).await.1);
+        let (status, _) = send(&app, delete_with_auth(&path, &owner)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        for body in &seen {
+            let text = body.to_string();
+            assert!(!text.contains("upstream-canary-one"), "{text}");
+            assert!(!text.contains("upstream-canary-two"), "{text}");
+        }
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        let kinds: Vec<&str> = events.iter().map(|(k, _)| k.as_str()).collect();
+        for kind in [
+            "integration_created",
+            "integration_reauthorized",
+            "integration_disabled",
+            "integration_deleted",
+        ] {
+            assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
+        }
+        for (kind, detail) in &events {
+            assert!(!detail.contains("upstream-canary"), "{kind}: {detail}");
+        }
+        let created_detail = &events
+            .iter()
+            .find(|(k, _)| k == "integration_created")
+            .unwrap()
+            .1;
+        assert!(
+            created_detail.contains("mcp.example.com"),
+            "{created_detail}"
+        );
     }
 
     #[tokio::test]

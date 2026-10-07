@@ -17,12 +17,13 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection as Sqlite, OptionalExtension, params};
 
+use super::connections::Connection;
 use super::crypto::Sealed;
 
 pub struct GatewayDb {
-    conn: Connection,
+    conn: Sqlite,
 }
 
 /// How long the call audit keeps a row, and how many rows it keeps at most
@@ -148,9 +149,47 @@ pub struct CallRecord {
     pub response_bytes: Option<i64>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum InsertError {
+    #[error("that slug is already used by another of your integrations")]
+    SlugTaken,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+const CONNECTION_COLUMNS: &str = "id, owner_user_id, slug, display_name, url, auth_kind, \
+    status, tool_allowlist, known_tools, expose_resources, expose_prompts, \
+    upstream_account_label, last_ok, last_error_code, created_at, updated_at";
+
+fn json_list(items: &[String]) -> String {
+    serde_json::to_string(items).expect("a list of strings serializes")
+}
+
+fn connection_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Connection> {
+    let list = |s: String| serde_json::from_str::<Vec<String>>(&s).unwrap_or_default();
+    Ok(Connection {
+        id: r.get(0)?,
+        owner_user_id: r.get(1)?,
+        slug: r.get(2)?,
+        display_name: r.get(3)?,
+        url: r.get(4)?,
+        auth_kind: r.get(5)?,
+        status: r.get(6)?,
+        tool_allowlist: list(r.get(7)?),
+        known_tools: r.get::<_, Option<String>>(8)?.map(list),
+        expose_resources: r.get(9)?,
+        expose_prompts: r.get(10)?,
+        upstream_account_label: r.get(11)?,
+        last_ok: r.get(12)?,
+        last_error_code: r.get(13)?,
+        created_at: r.get(14)?,
+        updated_at: r.get(15)?,
+    })
+}
+
 impl GatewayDb {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = Sqlite::open(path)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
@@ -180,6 +219,134 @@ impl GatewayDb {
             params![key, value],
         )?;
         Ok(())
+    }
+
+    // ---- connections ----------------------------------------------------
+
+    /// Inserts a connection and, if it has one, its sealed credential, in one
+    /// transaction: there is never a connection row whose credential failed
+    /// to land, nor a credential with no row. A live slug clash with the same
+    /// owner is [`InsertError::SlugTaken`], decided by the unique index rather
+    /// than by a read-then-write that two requests could race.
+    pub fn insert_connection(
+        &mut self,
+        c: &Connection,
+        credential: Option<(&str, &Sealed)>,
+    ) -> Result<(), InsertError> {
+        let tx = self.conn.transaction().map_err(anyhow::Error::from)?;
+        let result = tx.execute(
+            &format!(
+                "INSERT INTO connections ({CONNECTION_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
+            ),
+            params![
+                c.id,
+                c.owner_user_id,
+                c.slug,
+                c.display_name,
+                c.url,
+                c.auth_kind,
+                c.status,
+                json_list(&c.tool_allowlist),
+                c.known_tools.as_deref().map(json_list),
+                c.expose_resources,
+                c.expose_prompts,
+                c.upstream_account_label,
+                c.last_ok,
+                c.last_error_code,
+                c.created_at,
+                c.updated_at,
+            ],
+        );
+        match result {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(InsertError::SlugTaken);
+            }
+            Err(e) => return Err(InsertError::Other(e.into())),
+        }
+        if let Some((kind, sealed)) = credential {
+            tx.execute(
+                "INSERT INTO credentials
+                     (connection_id, kind, key_id, nonce, ciphertext, expires_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6)",
+                params![c.id, kind, sealed.key_id, sealed.nonce, sealed.ciphertext, c.created_at],
+            )
+            .map_err(anyhow::Error::from)?;
+        }
+        tx.commit().map_err(anyhow::Error::from)?;
+        Ok(())
+    }
+
+    /// A connection by id, revoked ones included (the audit names them).
+    pub fn connection(&self, id: &str) -> Result<Option<Connection>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {CONNECTION_COLUMNS} FROM connections WHERE id = ?1"),
+                params![id],
+                connection_from_row,
+            )
+            .optional()?)
+    }
+
+    /// An owner's live connections — everything but the revoked tombstones.
+    pub fn connections_of(&self, owner_user_id: &str) -> Result<Vec<Connection>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CONNECTION_COLUMNS} FROM connections
+             WHERE owner_user_id = ?1 AND status != 'revoked'
+             ORDER BY created_at, id"
+        ))?;
+        let rows = stmt.query_map(params![owner_user_id], connection_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Writes back the mutable fields. `id`, `owner_user_id`, `slug`, `url`
+    /// and `auth_kind` are never rewritten: a credential is presented only to
+    /// its own upstream (AM24), so a connection cannot be re-pointed, and the
+    /// slug is what live sessions were told.
+    pub fn update_connection(&self, c: &Connection) -> Result<()> {
+        self.conn.execute(
+            "UPDATE connections SET display_name = ?2, status = ?3, tool_allowlist = ?4,
+                 known_tools = ?5, expose_resources = ?6, expose_prompts = ?7,
+                 upstream_account_label = ?8, last_ok = ?9, last_error_code = ?10,
+                 updated_at = ?11
+             WHERE id = ?1",
+            params![
+                c.id,
+                c.display_name,
+                c.status,
+                json_list(&c.tool_allowlist),
+                c.known_tools.as_deref().map(json_list),
+                c.expose_resources,
+                c.expose_prompts,
+                c.upstream_account_label,
+                c.last_ok,
+                c.last_error_code,
+                c.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A disconnect (§13): the row becomes the `revoked` tombstone and every
+    /// ciphertext it had is deleted, in one transaction, so there is no
+    /// moment where a revoked connection still holds a credential.
+    pub fn revoke_connection(&mut self, id: &str, now: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE connections SET status = 'revoked', updated_at = ?2
+             WHERE id = ?1 AND status != 'revoked'",
+            params![id, now],
+        )?;
+        tx.execute(
+            "DELETE FROM credentials WHERE connection_id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(changed > 0)
     }
 
     // ---- credentials ----------------------------------------------------
@@ -336,7 +503,7 @@ impl GatewayDb {
     }
 
     #[cfg(test)]
-    pub(crate) fn conn(&self) -> &Connection {
+    pub(crate) fn conn(&self) -> &Sqlite {
         &self.conn
     }
 }
