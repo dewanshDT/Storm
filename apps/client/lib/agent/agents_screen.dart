@@ -918,6 +918,9 @@ class _LauncherState extends ConsumerState<_Launcher> {
   String? _error;
   bool _busy = false;
 
+  /// "Allow vault writes" (G-D5): off by default, for this launch only.
+  bool _allowWrites = false;
+
   List<AgentHost> get _online => [
     for (final h in widget.hosts)
       if (h.online) h,
@@ -998,9 +1001,18 @@ class _LauncherState extends ConsumerState<_Launcher> {
         // A first guess; the terminal sends its real size once laid out.
         cols: (size.width / 9).clamp(40, 240).floor(),
         rows: (size.height / 20).clamp(12, 80).floor(),
+        allowVaultWrites: _allowWrites && _provider != 'shell',
       );
       await rememberLaunchHost(host.id);
-      if (mounted) Navigator.of(context).pop(session);
+      if (!mounted) return;
+      // An old host gets no integrations; the launch says so (spec §6).
+      final notice = session.launchNotice;
+      if (notice != null) {
+        ScaffoldMessenger.maybeOf(
+          context,
+        )?.showSnackBar(SnackBar(content: Text(notice)));
+      }
+      Navigator.of(context).pop(session);
     } catch (e) {
       if (mounted) setState(() => _error = describeFailure(e));
     } finally {
@@ -1112,11 +1124,35 @@ class _LauncherState extends ConsumerState<_Launcher> {
                       ),
                   ],
                 ),
+                // The MCP Gateway (G-D5, G-D9): every session but a shell can
+                // use the owner's integrations and read the vaults; writing
+                // is this launch's choice, off by default.
+                if (_provider != 'shell') ...[
+                  SizedBox(height: t.sp),
+                  SwitchListTile(
+                    key: const Key('allow-vault-writes'),
+                    contentPadding: EdgeInsets.zero,
+                    value: _allowWrites,
+                    onChanged: (v) => setState(() => _allowWrites = v),
+                    title: const Text('Allow vault writes'),
+                    subtitle: const Text(
+                      'Agents can create and edit notes. Needs MCP writes on '
+                      'in Server settings.',
+                    ),
+                  ),
+                ],
                 SizedBox(height: t.sp * 2),
                 Text(
                   "Network: inherits ${host.name}'s policy",
                   style: TextStyle(fontSize: t.labelSize, color: t.text3),
                 ),
+                if (_provider != 'shell')
+                  Text(
+                    'Agents here can use your integrations and read your '
+                    'vaults, with that network access (AM27).',
+                    key: const Key('egress-integrations'),
+                    style: TextStyle(fontSize: t.labelSize, color: t.text3),
+                  ),
               ],
               if (_error != null) ...[
                 SizedBox(height: t.sp),

@@ -503,6 +503,11 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
 - **A refresh is single flight per connection, and a rotated pair is
   persisted before it is used**; a rejected refresh is `needs_reauth`, never
   retried in a loop.
+- **The client's sign-in listens on loopback before it opens the browser,
+  and relays only `{state, code}`** (81h). It answers only its redirect path,
+  closes after one sign-in, and never sees a token. The macOS Release build
+  needs `network.server` for it; the entitlements test holds it. **"Allow
+  vault writes" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 

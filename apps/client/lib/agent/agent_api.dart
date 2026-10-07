@@ -155,6 +155,7 @@ class AgentApi {
     String? provider,
     required int cols,
     required int rows,
+    bool allowVaultWrites = false,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -166,6 +167,8 @@ class AgentApi {
               'provider': ?provider,
               'interaction': 'terminal',
               'terminal': {'cols': cols, 'rows': rows},
+              // The launch toggle (G-D5): off unless asked for.
+              'allow_vault_writes': allowVaultWrites,
             }),
           ),
         )

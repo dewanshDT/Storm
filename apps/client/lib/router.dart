@@ -15,6 +15,7 @@ import 'agent/agent_state.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
 import 'agent/hosts_screen.dart';
+import 'agent/integrations_screen.dart';
 import 'ui/mcp_keys_screen.dart';
 import 'ui/signup_screen.dart';
 import 'ui/starting_screen.dart';
@@ -67,6 +68,10 @@ abstract final class Routes {
 
   /// Runtime Hosts, enrollment and the default provider.
   static const agentHosts = '/agents/hosts';
+
+  /// Settings ▸ Integrations (MCP Gateway, decision 81h). Owner only, by the
+  /// server's 403; the entry exists only when the owner check passes.
+  static const integrations = '/settings/integrations';
 
   /// The same two screens, mounted inside the vault shell.
   ///
@@ -258,6 +263,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: 'settings/server',
             builder: (_, _) => const ServerSettingsScreen(),
+          ),
+          GoRoute(
+            path: 'settings/integrations',
+            builder: (_, _) => const IntegrationsScreen(),
           ),
           // The Agents space (decision 78): a child of the dashboard like
           // every other destination, so Android back returns home rather than
