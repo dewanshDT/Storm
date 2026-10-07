@@ -56,7 +56,8 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
-| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decisions 77–78 released in **v0.3.0** · on-device fixes from the operator's first tests in **v0.3.1** (#72, #73) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
+| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -2599,6 +2600,82 @@ writes behind that switch).
 **Revisit if** the authorization release lands: these checks become the
 policy's "server config" rule, and admin may gain them (A9's matrix says
 yes).
+
+**81. The MCP Gateway: Storm owns integration credentials, and a Runtime Host
+only forwards.** *(2026-10-04; spec approved by the operator, nothing built)*
+
+**The spec** is *MCP Gateway/V1 Specification* in the personal vault, rev 3:
+decisions G-D1 to G-D25, gate evidence in its §19. This entry records that it
+is approved and which existing decisions it amends. Where they disagree, the
+spec wins and this entry gets fixed. **It is not built.** It is its own track
+and starts after Agent Runtime V1's on-device acceptance (G-D1).
+
+**In one paragraph.**
+- The owner connects an MCP integration (Notion, Linear, GitHub…) **once, in
+  Storm**. storm-server holds its credential, encrypted in a new
+  `state/gateway/gateway.db`, and is the MCP client to the upstream.
+- An agent session reaches it through a per-session **stdio bridge**
+  (`storm-runtime mcp-bridge`). The bridge forwards to the host daemon,
+  which POSTs `/v1/runtime/sessions/{ags}/mcp/{connection}` with its
+  **existing host token**.
+- **No new credential exists.** The agent holds nothing it could use off the
+  host, and the host never sees an upstream credential.
+- Every call is authorized in `ops.rs`: host owns session, live, grant,
+  connection, owner active, method and tool allowed.
+- Storm's own vault is a **built-in connection**. This is how Roadmap Phase 1
+  (agents use the vault) arrives.
+
+**The amendments** (Agent Runtime **AM23–AM32**, D13 in *Agent
+Runtime/Decisions*; AM22 stays reserved for the terminal-protocol draft):
+
+| AM | Was | Amends | Change |
+|---|---|---|---|
+| AM23 | AM-G1 | Freeze §7.1 | The host is also told the ids and slugs of granted connections; never a credential or a user. |
+| AM24 | AM-G2 | Freeze §12.2, *Security* | "Never stores or forwards **model-provider** secrets." **Integration** credentials are stored encrypted, sent only to their own upstream, never to a host or agent. |
+| AM25 | AM-G3 | *Auth Data Model* invariant 5 | Invariant 5 is scoped to Storm's own credentials in `auth.db`. Storm may be an OAuth **client** to upstreams; that is additive under R1. |
+| AM26 | AM-G4 | **Decision 39** | storm-server's MCP surface stays HTTP only. The host's per-session bridge is stdio. rmcp gains its client features at the same `=3.1.2` pin, and **only its `*_once` methods** may send a request upstream. |
+| AM27 | AM-G5 | AM6, *Networking* | The host-inherited egress exception now also covers vault and integration data. It is shown at launch, and closed by Phase 2. |
+| AM28 | AM-G6 | *Roadmap*, freeze §2 | Phase 1 is delivered through the built-in `storm` connection. Its exit criteria are written before the track starts. |
+| AM29 | AM-G7 | *Security* scopes | `integration.manage` (owner) and `integration.use:<connection>` (a grant). |
+| AM30 | AM-G8 | *MCP Integration* | Agents in sessions reach Storm's vault through the gateway, as `Actor::Agent`, not with `stk_` keys. |
+| AM31 | AM-G9 | `authz.rs` | `Actor::Agent { session_id, host_id, user_id, role }`: the owner's identity (A14.3), with the session id for audit. |
+| AM32 | AM-G10 | Freeze §9.2; **decision 77a** "The environment" | With grants, `claude-code` gains `--mcp-config <session>/mcp.json --strict-mcp-config`. `opencode` gains `XDG_CONFIG_HOME=<session>/xdg`, `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `permission: {"<slug>_*": "ask"}`. `shell` gets nothing. |
+
+**What the gates found that a reader would otherwise re-derive** (run
+2026-10-04 on a Runtime Host, throwaway harness, evidence in the spec):
+- **OpenCode runs MCP tools without asking by default**, and its
+  `OPENCODE_CONFIG*` variables *merge* with the global config rather than
+  replacing it. Without AM32's three settings, "the provider prompts before a
+  tool" is false for OpenCode.
+- **rmcp's `call_tool` re-sends `tools/call`** to drive SEP-2322 rounds. Only
+  `call_tool_once` keeps a call at-most-once. An in-flight call whose stream
+  breaks is not re-sent, and an expired upstream session (`404`) re-initializes
+  with the call executed exactly once.
+- **Notion and Linear refuse a LAN `http` OAuth redirect** at registration,
+  and accept loopback and `storm://`. So the browser returns to the *client*,
+  which relays the code to the server. GitHub's remote MCP has no dynamic
+  registration, so it is a PAT connection in V1 (G-D24).
+- **The bridge rules were proved by breaking them.** Each mutation was
+  caught: leaking the replayed `initialize` result, retrying a failed call
+  (2 executions), and not cancelling an open elicitation. A "drop stale
+  progress" filter turned out unreachable: progress rides its call's own
+  response stream, so a failed call has no stream left to deliver it.
+- **No upstream credential reached the host.** A canary was absent from
+  62,561 host files and from 205 live processes' `environ` and `argv`, with
+  positive controls. The journal check (C3) needs an account that can read
+  the journal, and is the one item before the spec is called frozen.
+
+**Accepted, and recorded as V1 risks rather than mitigated:**
+- every non-shell session gets all of the owner's integrations and vaults,
+  with host-inherited egress;
+- sessions on one host share an OS user, so Phase 2 isolation must precede
+  any multi-user gateway;
+- a GitHub PAT is long-lived and scoped at GitHub, not by Storm.
+
+**Revisit if** OpenCode gains a strict-config flag (AM32 simplifies);
+either CLI adopts the 2026-07-28 revision (G-D25's pass-through gets an
+actor that acts on it); or a supported upstream stops accepting loopback
+redirects (G-D13).
 
 ---
 
