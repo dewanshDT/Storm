@@ -197,7 +197,16 @@ void main() {
     expect(seen.where((r) => r.method == 'POST'), isEmpty);
   });
 
-  testWidgets('the web offers tokens only (G-D13)', (tester) async {
+  /// The segment for `value` in the Add dialog's auth choice.
+  ButtonSegment<String> segment(WidgetTester tester, String value) => tester
+      .widget<SegmentedButton<String>>(
+        find.byKey(const Key('integration-auth')),
+      )
+      .segments
+      .firstWhere((s) => s.value == value);
+
+  testWidgets('the web shows sign-in as unavailable and connects with a token '
+      '(G-D13)', (tester) async {
     final (client, _) = server();
     await tester.pumpWidget(
       app(const IntegrationsScreen(), client, oauth: false),
@@ -205,8 +214,61 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('add-integration')));
     await tester.pumpAndSettle();
-    expect(find.text('Sign in'), findsNothing);
-    expect(find.textContaining('connect with a token'), findsOneWidget);
+    expect(find.text('How Storm connects'), findsOneWidget);
+    expect(segment(tester, 'oauth').enabled, isFalse);
+    expect(segment(tester, 'static').enabled, isTrue);
+    expect(find.text('No sign-in'), findsOneWidget);
+    // Token is the default, and the note explaining why sits with the choice.
+    expect(find.byKey(const Key('integration-token')), findsOneWidget);
+    expect(find.byKey(const Key('integration-web-note')), findsOneWidget);
+  });
+
+  testWidgets('each auth choice says what it means', (tester) async {
+    final (client, _) = server();
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('add-integration')));
+    await tester.pumpAndSettle();
+    expect(segment(tester, 'oauth').enabled, isTrue);
+    expect(find.byKey(const Key('integration-web-note')), findsNothing);
+    String help() => tester
+        .widget<Text>(find.byKey(const Key('integration-auth-help')))
+        .data!;
+    expect(help(), contains('browser opens to sign in'));
+    await tester.tap(find.text('Token'));
+    await tester.pumpAndSettle();
+    expect(help(), contains('token'));
+    await tester.tap(find.text('No sign-in'));
+    await tester.pumpAndSettle();
+    expect(help(), contains('no credential'));
+  });
+
+  testWidgets('on the web, an OAuth integration is reconnected from an app, '
+      'not by an action that can only fail', (tester) async {
+    final notion = {
+      ...github(status: 'needs_reauth'),
+      'id': 'mcc_NO',
+      'slug': 'notion',
+      'display_name': 'Notion',
+      'auth_kind': 'oauth',
+    };
+    final (client, seen) = server(items: [builtin(), notion]);
+    await tester.pumpWidget(
+      app(const IntegrationsScreen(), client, oauth: false),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('reconnect-mcc_NO')), findsNothing);
+    expect(find.text('Reconnect from a Storm app'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('menu-mcc_NO')));
+    await tester.pumpAndSettle();
+    final item = tester.widget<PopupMenuItem<String>>(
+      find.ancestor(
+        of: find.text('Sign in again from a Storm app'),
+        matching: find.byType(PopupMenuItem<String>),
+      ),
+    );
+    expect(item.enabled, isFalse);
+    expect(seen.where((r) => r.url.path.endsWith('/authorize')), isEmpty);
   });
 
   testWidgets('new tools start off and the owner chooses', (tester) async {
