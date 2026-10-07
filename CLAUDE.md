@@ -465,6 +465,22 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   the stable §12 codes; rmcp's `HTTP <status>: <body>` is read for the status
   only. `--gateway-allow-http-upstreams` is hidden and exists for the test
   suites.
+- **Every agent call is authorized in `ops::integration_call`, per call**
+  (spec §7, 81e): host owns session, session live, live grant, owner active,
+  connection the owner's and `connected`, method permitted, tool allowed,
+  and vault writes only under the launch flag **and** `mcp_writable`. A
+  refusal is a JSON-RPC error with a stable code, never an HTTP error.
+- **A request the gateway did not forward is `session_unknown`, and nothing
+  else is.** That is the only answer the bridge may replay `initialize` on.
+  Upstream sessions live in memory so a restart produces it; closing one
+  cancels it, so an in-flight call fails once and is never re-sent.
+- **Request-scoped messages ride their call's own response stream**;
+  only unsolicited ones use the link's `mcp.message`. A call's progress and
+  elicitations die with it.
+- **The host is told connection ids and slugs, never a credential** (AM23);
+  `shell` and a host without `mcp_bridge` get no grants. **Agents never see
+  `delete_note`** (`mcp::NEVER_FOR_AGENTS`), and `Actor::Agent` is the
+  session owner's identity, read through `user_id()`/`role()`.
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 

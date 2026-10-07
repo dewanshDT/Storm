@@ -63,6 +63,23 @@ pub enum Actor {
         user_id: String,
         role: Role,
     },
+    /// An agent in an Agent Runtime session, reaching Storm's vault through
+    /// the MCP Gateway's built-in `storm` connection (AM30, AM31; decision
+    /// 81e).
+    ///
+    /// **The principal is the session's owner** (A14.3's rule, as for a key):
+    /// `user_id` and `role` are the owner's, so a policy never needs a special
+    /// case. `session_id` and `host_id` ride along **for audit and stamping,
+    /// never for a decision** — whether the session may make the call at all
+    /// was decided in `ops::integration_call` before this actor existed.
+    Agent {
+        #[allow(dead_code)] // Audit, like `Key::key_id`; read by tests.
+        session_id: String,
+        #[allow(dead_code)]
+        host_id: String,
+        user_id: String,
+        role: Role,
+    },
 }
 
 // There is deliberately **no `Mcp` variant**. There was, briefly, and it was a
@@ -86,6 +103,7 @@ impl Actor {
         match self {
             Actor::Session { .. } => "session",
             Actor::Key { .. } => "mcp-key",
+            Actor::Agent { .. } => "agent",
         }
     }
 
@@ -103,7 +121,9 @@ impl Actor {
     /// removed the only `None`, and the type says so now.
     pub fn user_id(&self) -> &str {
         match self {
-            Actor::Session { user_id, .. } | Actor::Key { user_id, .. } => user_id,
+            Actor::Session { user_id, .. }
+            | Actor::Key { user_id, .. }
+            | Actor::Agent { user_id, .. } => user_id,
         }
     }
 
@@ -113,7 +133,9 @@ impl Actor {
     /// A key carries its **owner's** role, unnarrowed (A14).
     pub fn role(&self) -> Role {
         match self {
-            Actor::Session { role, .. } | Actor::Key { role, .. } => *role,
+            Actor::Session { role, .. } | Actor::Key { role, .. } | Actor::Agent { role, .. } => {
+                *role
+            }
         }
     }
 
@@ -216,12 +238,32 @@ mod tests {
         }
     }
 
+    fn agent() -> Actor {
+        Actor::Agent {
+            session_id: "ags_1".into(),
+            host_id: "hst_1".into(),
+            user_id: "usr_1".into(),
+            role: Role::Member,
+        }
+    }
+
+    #[test]
+    fn an_agent_acts_as_its_sessions_owner() {
+        // AM31: the owner's identity, read through the accessors a policy
+        // uses — never the variant.
+        let a = agent();
+        assert_eq!(a.user_id(), "usr_1");
+        assert_eq!(a.role(), Role::Member);
+        assert_eq!(a.describe(), "agent");
+        assert_eq!(a.key_id(), None);
+    }
+
     #[test]
     fn the_shipped_policy_allows_every_authenticated_actor() {
         // The current answer, stated so a change to it is a visible diff
         // rather than a behaviour someone notices in production.
         let policy = AllowAuthenticated;
-        for actor in [session(), key()] {
+        for actor in [session(), key(), agent()] {
             for access in [Access::Read, Access::Write] {
                 assert_eq!(
                     policy.decide(&actor, "any-vault", access),
@@ -252,7 +294,7 @@ mod tests {
     fn an_actor_never_describes_itself_with_a_secret() {
         // `describe()` goes into logs and `security_events`, so it has to stay
         // a fixed label rather than anything derived from a credential.
-        for actor in [session(), key()] {
+        for actor in [session(), key(), agent()] {
             let described = actor.describe();
             assert!(!described.contains("testtoken"));
             assert!(

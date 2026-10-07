@@ -17,6 +17,7 @@
 
 pub mod connections;
 pub mod crypto;
+pub mod session;
 pub mod store;
 pub mod upstream;
 
@@ -42,6 +43,10 @@ pub struct Gateway {
     allow_http_upstreams: std::sync::atomic::AtomicBool,
     /// Audit rows written since the last prune.
     calls_since_prune: std::sync::atomic::AtomicU64,
+    /// Live upstream MCP sessions, one per (agent session, connection). In
+    /// memory only: a restart loses them, which is what `session_unknown`
+    /// reports (G-D19).
+    pub sessions: session::Sessions,
 }
 
 /// Epoch milliseconds, the call audit's clock.
@@ -94,6 +99,7 @@ impl Gateway {
             keys: loaded.keyring,
             allow_http_upstreams: std::sync::atomic::AtomicBool::new(false),
             calls_since_prune: std::sync::atomic::AtomicU64::new(0),
+            sessions: session::Sessions::default(),
         })
     }
 

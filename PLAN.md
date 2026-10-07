@@ -57,7 +57,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–3: the store (81b), connections (81c), the upstream client (81d) |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) · gates run; journal check (C3) pending · M20 accepted 2026-10-05, so the build may start (G-D1) · **building**: eight slices (81a); slices 1–4: the store (81b), connections (81c), the upstream client (81d), the gateway route (81e) |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3037,6 +3037,144 @@ put an elicitation on the right agent call's stream with no workaround.
 **Not verified here:** the musl/zig release build with the new dependencies
 (no zig on this host). G3 built the same rmcp feature set as a static musl
 binary with system gcc. The release job is the check.
+
+**81e. Gateway slice 4: the gateway route — grants at launch, per-call
+authorization, the built-in `storm` connection.** *(2026-10-05)*
+
+**Grants (spec §6).**
+- `POST /v1/agent/sessions` gains `allow_vault_writes`, off by default.
+- At launch, `ops::launch_session` offers the built-in `storm` connection
+  plus every non-disabled connection of the owner.
+- The Agent Manager drops all of them for `shell` (G-D9), and for a host
+  whose capabilities lack `mcp_bridge`. For that host, the launch answer
+  carries `mcp.notice`: "<host> can't use integrations — update
+  storm-runtime".
+- The grants are written to `agent.db` before `start` goes out:
+  - `session_mcp` holds the session's write flag;
+  - `session_mcp_grants` holds one row per connection, with `revoked_at`
+    for §13.
+  - Both are new tables, created additively, and `sessions` is untouched.
+- `start` gains `mcp: [{id, slug}]`. The field is omitted when empty, so a
+  session without grants sends the same bytes as before.
+- The launch answer is the session record flattened, plus `mcp:
+  {connections, allow_vault_writes, notice}`.
+- `integration_grant` is audited with ids only.
+- An old `storm-runtime` ignores `mcp` in `start`, and logs and skips an
+  unknown `mcp.message`, so nothing breaks. Its sessions just have no
+  grants.
+
+**`Actor::Agent { session_id, host_id, user_id, role }`** (AM31) carries the
+owner's identity. `describe()` is `agent`. Every policy reads `user_id()`
+and `role()`, so it needs no special case.
+
+**The route, `POST /v1/runtime/sessions/{id}/mcp/{connection}`** (Host tier):
+- The body is one JSON-RPC message from the bridge.
+- The answer is `application/x-ndjson`: lines of `{"message": <JSON-RPC>}`,
+  or the one bridge signal `{"storm_error": "session_unknown"}`.
+- Every refusal is one JSON-RPC error with code `-32001`, the stable code as
+  its `message`, and `data.storm_error`. Never an HTTP error once the host
+  is authenticated.
+- The codes are §12's (`not_granted`,
+  `integration_needs_reauth:<slug>`, `upstream_unavailable`,
+  `upstream_rate_limited`, `gateway_rate_limited`) and five additive ones:
+  `not_your_session`, `session_not_live`, `owner_inactive`,
+  `method_not_permitted`, `tool_not_allowed`, plus `response_too_large`
+  for the 1 MiB cap.
+
+**`ops::integration_call`** runs §7's checks in order: the host owns the
+session; the session is `starting`/`running`; a live grant exists; the owner
+is active; the connection is the owner's and `connected`; the method is in
+§9's list (resources and prompts follow the owner's switches); the tool is
+in the allowlist; and for the vault, writes need the launch flag **and**
+`mcp_writable`, read per call.
+
+**Upstream sessions (`gateway::session`).**
+- One per (agent session, connection), opened by the agent's `initialize`
+  and held in memory only. A restart loses them, so the next request is
+  answered `session_unknown` without being forwarded (G-D19).
+- The agent's capabilities go upstream minus `sampling`, `roots` and
+  `elicitation.url`. URL-only means no elicitation at all.
+- The agent's `initialize` answer is the upstream's, with `resources` and
+  `prompts` hidden when the owner switched them off.
+- **Request-scoped messages ride their call's response stream:**
+  - Progress is rewritten to the agent's own token, and only sent if the
+    agent asked for it.
+  - A form elicitation is found by rmcp's
+    `InboundStreamOrigin::OutboundRequest` and sent as `storm-elicit-<n>`.
+    The agent answers it with a second POST to the same route.
+  - When a call ends, its route and pending elicitations are dropped, so a
+    late answer is never sent upstream and a stale message has nowhere to
+    go.
+  - A URL elicitation is declined and audited as `url_elicitation_declined`
+    (G-D23).
+- **Unsolicited messages** (`list_changed`, `resources/updated`) go down the
+  link as `mcp.message` (at most once).
+- **Closing is cancelling.** A disconnect, a disable, a credential rotation,
+  a replaced `initialize` or a session that ended cancels the upstream
+  session. A call in flight on it fails at once, once, and is never re-sent.
+  A test holds a call in flight, closes the session, and counts one
+  upstream execution.
+- **Limits** (§9) refuse rather than queue: per session 4 concurrent calls
+  and 10 per second; per connection 8 concurrent.
+- Ended sessions' upstream sessions are swept whenever a host reports or is
+  revoked.
+
+**Requests are sent with `send_cancellable_request`, not the `*_once`
+helpers.** This is an interpretation of AM26, not a change to it:
+- The helpers are one-line wrappers over the same single send. The gateway
+  must know the request's id and rmcp's progress token at send time, to
+  route its stream, and the helpers hide both.
+- AM26's purpose, at most one upstream execution per agent call, is
+  unchanged.
+- The source guard still forbids the re-sending helpers.
+
+The operator should confirm this reading.
+
+**The built-in `storm` connection** is `mcp.rs`'s own handler,
+`Storm::for_agent`, served in process over a `tokio::io::duplex` pipe as
+`Actor::Agent`, and reached through the same client path as any upstream:
+- **`delete_note` is never offered** (`NEVER_FOR_AGENTS`).
+- Write tools are listed and callable only under both flags.
+- **It does not require `/mcp` to be enabled.** That switch governs the HTTP
+  surface for `stk_` keys. The built-in is reached only by a session's own
+  grant.
+
+**Not here:**
+- The owner is not notified when an agent's listing shows a new tool
+  (§9). The tool stays off, which is the safety property, and the owner
+  sees it as `new` on the next test. The client (81h) surfaces that.
+- An upstream 404 re-initializing transparently is rmcp's
+  (`reinit_on_expired_session`, proved by G3). It is re-checked against the
+  real build in acceptance (81i).
+
+**Verified.**
+- Six route tests through the real router, with a real enrolled host and a
+  real rmcp upstream:
+  - the full flow: the host sees ids and slugs and no canary;
+    `session_unknown` before `initialize` with zero upstream calls; the
+    allowlist on listing and calling; the stripped capabilities upstream;
+    the audit; a user credential gets `401`;
+  - every §7 refusal, a second host's token included;
+  - `shell` and an old host get nothing, and the notice is shown;
+  - the built-in under each flag combination, never deleting;
+  - progress, a form elicitation answered and a late answer dropped, a URL
+    elicitation declined and audited;
+  - an in-flight call failing once with no re-send.
+- Manager tests: grants and `start`, `shell` and old hosts, `mcp.message`.
+- Unit tests: capability stripping and the limits.
+- **Mutation-proved, all 16 caught:**
+  - each of the seven authorization checks removed;
+  - `delete_note` offered;
+  - `mcp_writable` ignored;
+  - sampling forwarded;
+  - URL elicitation forwarded or delivered;
+  - the progress token not rewritten;
+  - forwarding without a session;
+  - close not cancelling;
+  - disconnect leaving grants;
+  - `shell` granted.
+- fmt, clippy `-D warnings`, 508 unit tests.
+- Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
 
 ---
 

@@ -298,7 +298,14 @@ pub struct Storm {
     /// letting it try and refusing — and it makes the refusal impossible to
     /// forget in one tool's body.
     writable: bool,
+    /// Built for an agent in a session, as the MCP Gateway's built-in `storm`
+    /// connection (spec §5, decision 81e). **`delete_note` is never offered to
+    /// an agent** (G-D5), writable or not.
+    for_agent: bool,
 }
+
+/// Tools an agent is never offered, whatever its write flags (G-D5).
+pub const NEVER_FOR_AGENTS: &[&str] = &["delete_note"];
 
 /// Renders an operation's result as a tool result.
 ///
@@ -358,6 +365,18 @@ impl Storm {
             state,
             writable,
             actor,
+            for_agent: false,
+        }
+    }
+
+    /// The built-in `storm` connection's handler: the same tools, served in
+    /// process to the gateway as `Actor::Agent`, never with `delete_note`.
+    pub fn for_agent(state: Shared, writable: bool, actor: Actor) -> Self {
+        Self {
+            state,
+            writable,
+            actor: Some(actor),
+            for_agent: true,
         }
     }
 
@@ -377,6 +396,11 @@ impl Storm {
         let mut router = Self::tool_router();
         if !self.writable {
             for name in WRITE_TOOLS {
+                router.remove_route(name);
+            }
+        }
+        if self.for_agent {
+            for name in NEVER_FOR_AGENTS {
                 router.remove_route(name);
             }
         }
@@ -643,7 +667,14 @@ impl ServerHandler for Storm {
         // the model reads: telling it the tools are read-only when they are not
         // would be worse than saying nothing.
         info.instructions = Some(
-            if self.writable {
+            if self.writable && self.for_agent {
+                "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+                 addressed by vault id and note id — never by file path. Start with \
+                 list_vaults, then search to find notes and get_note to read one. You may \
+                 also create and update notes: always read a note before updating it and \
+                 send back its base_version, so a change made on another device is merged \
+                 rather than overwritten. Notes cannot be deleted from here."
+            } else if self.writable {
                 "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
                  addressed by vault id and note id — never by file path. Start with \
                  list_vaults, then search to find notes and get_note to read one. You may \
