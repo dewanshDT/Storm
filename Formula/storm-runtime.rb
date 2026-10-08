@@ -28,7 +28,7 @@ class StormRuntime < Formula
       storm-runtime runs as a LaunchDaemon under its own hidden account,
       _stormruntime, never as you. Install the service (copies this binary to
       /Library/StormRuntime/bin, creates the account and the plist):
-        sudo storm-runtime install
+        sudo #{opt_bin}/storm-runtime install
 
       Then, in the Storm app: Settings > Agents > Hosts > Enroll a host, and
       paste the string at this prompt (never as an argument):
@@ -38,11 +38,11 @@ class StormRuntime < Formula
       directories under /Library/StormRuntime/workspaces.
 
       Upgrading needs the install step again, which replaces the daemon's copy:
-        brew upgrade storm-runtime && sudo storm-runtime install
+        brew upgrade storm-runtime && sudo #{opt_bin}/storm-runtime install
 
       Remove the service (add --purge to remove its state and account too;
       workspaces are always kept):
-        sudo storm-runtime uninstall
+        sudo /Library/StormRuntime/bin/storm-runtime uninstall
     EOS
   end
 

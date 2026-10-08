@@ -59,7 +59,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
-| M23 | macOS Runtime Hosts — the same host, on launchd | **in progress** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · built in seven slices on `feat/runtime-macos-*` · real-Mac acceptance (AC-M1–M9) not yet run |
+| M23 | macOS Runtime Hosts — the same host, on launchd | **in progress** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven slices built and stacked on `feat/runtime-macos-1…7-*` (83–83g) · Linux: runtime suite + `agent_e2e.py` 85/85 · macOS: cross-checked with clippy only · **real-Mac acceptance (AC-M1–M9) not yet run**: `apps/runtime/tests/macos_acceptance.py`, CI `macos-acceptance.yml` |
 
 **Release state (2026-10-08).** **v0.4.0 is being cut** (decision 72's
 steps; this paragraph is the prep PR's), at the operator's request after the
@@ -4627,6 +4627,69 @@ the client's platform, and that switching works.
 has no room for one. CI's `client` job is the first run. The APIs the sheet
 uses (`ChoiceChips`, `ChoiceOption`, `copyToClipboard`) were checked against
 their definitions.
+
+**83g. Slice 7: macOS distribution, and scripted acceptance on a real Mac
+(AM41).** *(2026-10-08)*
+
+**A tag also builds `runtime-macos`** on `macos-latest`:
+- an arm64 and an x86_64 build, combined with `lipo` into one universal
+  binary;
+- ad-hoc signed, like the app;
+- shipped as `storm-runtime-X-macos-universal.tar.gz` with a README of the
+  install and enroll commands, listed in `checksums.txt` and the release
+  notes.
+
+The version is stamped from the tag (46), with `sed -i.bak` because BSD sed
+needs a suffix.
+
+**`Formula/storm-runtime.rb` makes the repository the tap**
+(`brew tap dewanshdt/storm https://github.com/dewanshDT/Storm`).
+- **It builds from the git tag** with `cargo install`, so there is no sha
+  and no second version source.
+- **Its caveats** use `sudo #{opt_bin}/storm-runtime install`, since `sudo`
+  need not search Homebrew's prefix. The client and `deploy/README.md` use
+  `"$(brew --prefix)/bin/storm-runtime"`, the same idea.
+- **`make formula-check`** (also run by the `www` CI job) fails when the
+  formula's tag differs from `release.ts`, so the release-prep PR bumps
+  both.
+- **Until the release that carries macOS hosts, it names v0.4.0,** which has
+  no `install` subcommand. Nobody is pointed at it before then: the client's
+  instructions ship in that same release.
+
+**`deploy/README.md`'s Runtime Hosts section is now one host on two
+platforms:**
+- install, enrollment and launchd's enrollment gate;
+- `launchctl print`, `kickstart` and `bootout`, plus logs, upgrade and
+  uninstall;
+- where CLIs must live;
+- logging CLIs in as `_stormruntime`. Claude Code may keep its credentials
+  in a Keychain that a daemon account has no session for; the fallback is
+  `claude setup-token` into a `0600` `env_file`.
+- workspace ACLs, TCC and refused roots, and troubleshooting.
+
+**`apps/runtime/tests/macos_acceptance.py`** drives AC-M1–M8 against the
+installed LaunchDaemon and a throwaway storm-server, through REST/SSE,
+`launchctl`, `dscl`, `ps` and `stat`.
+- **Output:** a PASS/FAIL/MANUAL table keyed by AC id, exiting non-zero on
+  any FAIL.
+- **Safeguards:** it refuses to run over an existing install unless
+  `STORM_ACCEPT_REPLACE=1`. It stubs `claude` and `opencode` only with
+  `STORM_ACCEPT_STUBS=1`, and removes the stubs afterwards.
+- **MANUAL** (a human must check): a real CLI prompt, the Mac → phone
+  handoff, a reboot, and the Full Disk Access inspection.
+
+**`macos-acceptance.yml`** runs it on `macos-latest`, on `acceptance/**`
+pushes and on dispatch.
+
+**Its review found the §7.3 job-control gap that 83d fixed.**
+
+**Verified here (Linux):**
+- every workflow parses;
+- the packaging step, rendered from YAML, built a correct tarball;
+- `formula-check` passes, and fails on a mutated tag;
+- the harness compiles, and its parsers pass against sample macOS output.
+
+**Not yet run on a Mac.**
 
 ---
 

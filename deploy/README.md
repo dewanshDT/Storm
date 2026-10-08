@@ -447,7 +447,7 @@ exists for nothing else:
 
 | | Linux | macOS |
 |---|---|---|
-| Install | `apt install storm-runtime` (`.deb`) | Homebrew or the release tarball, then `sudo storm-runtime install` |
+| Install | `apt install storm-runtime` (`.deb`) | Homebrew or the release tarball, then `storm-runtime install` as root |
 | Service | systemd `storm-runtime.service` | launchd LaunchDaemon `dev.storm.runtime` |
 | Account | `storm-runtime` | `_stormruntime` (hidden, no login) |
 | Binary | `/usr/bin/storm-runtime` | `/Library/StormRuntime/bin/storm-runtime` |
@@ -522,7 +522,7 @@ release tag, so it needs Rust and takes a couple of minutes):
 ```sh
 brew tap dewanshdt/storm https://github.com/dewanshDT/Storm
 brew install storm-runtime
-sudo storm-runtime install
+sudo "$(brew --prefix)/bin/storm-runtime" install
 ```
 
 Or from the release's `storm-runtime-X-macos-universal.tar.gz` (arm64 and
@@ -569,7 +569,7 @@ tail -f /Library/Logs/StormRuntime/storm-runtime.log
 copy and restarts the job:
 
 ```sh
-brew upgrade storm-runtime && sudo storm-runtime install
+brew upgrade storm-runtime && sudo "$(brew --prefix)/bin/storm-runtime" install
 ```
 
 **Uninstall:**
