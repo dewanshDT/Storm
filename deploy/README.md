@@ -436,9 +436,41 @@ before any connection is attempted. Clients learn the relay from the server when
 ## Runtime Hosts (Agent Runtime)
 
 A Runtime Host is a machine that runs agents (Claude Code, OpenCode, a shell)
-for one Storm Server. It may be a separate VM or the server's own machine. It
-dials the server over the network, so the server needs no inbound route to
-it. V1 runs on a direct network; the relay does not carry it yet (decision 77).
+for one Storm Server. It may be a separate VM, the server's own machine, or a
+Mac. It dials the server over the network, so the server needs no inbound
+route to it. V1 runs on a direct network; the relay does not carry it yet
+(decision 77).
+
+It is the same `storm-runtime` on both platforms (decision 83). Each platform
+runs it under the platform's own service manager, as a dedicated account that
+exists for nothing else:
+
+| | Linux | macOS |
+|---|---|---|
+| Install | `apt install storm-runtime` (`.deb`) | Homebrew or the release tarball, then `sudo storm-runtime install` |
+| Service | systemd `storm-runtime.service` | launchd LaunchDaemon `dev.storm.runtime` |
+| Account | `storm-runtime` | `_stormruntime` (hidden, no login) |
+| Binary | `/usr/bin/storm-runtime` | `/Library/StormRuntime/bin/storm-runtime` |
+| Config | `/etc/storm-runtime/runtime.toml` | `/Library/StormRuntime/runtime.toml` |
+| State, key, `HOME` | `/var/lib/storm-runtime` (`home/` inside) | `/Library/StormRuntime/state` (`home/` inside) |
+| Workspaces | `/var/lib/storm-runtime/workspaces` | `/Library/StormRuntime/workspaces` |
+| Logs | `journalctl -u storm-runtime` | `/Library/Logs/StormRuntime/storm-runtime.log` |
+
+What both guarantee (decisions 77e and 83):
+- **The account is its own.** It is never in the server's group, `admin` or
+  `staff`, so on a shared machine it cannot read the vaults or
+  `state/auth.db` (P3).
+- **The enrollment string is read from a prompt or stdin, never from an
+  argument**, so `ps` never shows it.
+- **Stopping the host ends every session and everything the sessions
+  spawned.** The service passes `--exclusive-account`, so at start and after
+  shutdown the host also ends any other process left running under its
+  account. Those sessions show as `failed (host_restart)` when it comes back.
+- **A revoked host ends its sessions, renames `host.json` to
+  `host.json.revoked` and exits 3, and stays stopped.** Enroll it again to
+  bring it back; no `--force` is needed.
+
+### Linux
 
 ```sh
 sudo apt install storm-runtime
@@ -471,13 +503,173 @@ sudo systemctl edit storm-runtime
 # ReadWritePaths=/srv/work
 ```
 
-What the package guarantees (decision 77e):
-- **The account is its own.** `storm-runtime` is never in the server's group,
-  so on a shared machine it cannot read the vaults or `state/auth.db` (P3).
-- **The sandbox is §5.8's,** with one setting deliberately absent:
-  `MemoryDenyWriteExecute`, under which OpenCode cannot start.
-- **A revoked host exits 3, and the unit does not restart it.** Enroll it
-  again to bring it back.
+**The sandbox is §5.8's,** with one setting deliberately absent:
+`MemoryDenyWriteExecute`, under which OpenCode cannot start. The unit's
+`RestartPreventExitStatus=3` keeps a revoked host stopped.
+
+Remove it with `sudo apt remove storm-runtime`.
+
+### macOS
+
+The host runs as a **LaunchDaemon under the `_stormruntime` account**, never
+as you. It starts at boot whether or not anyone is logged in, and it has the
+whole machine: there is no VM in the way, and the job runs at launchd's
+`Standard` priority rather than `Background`.
+
+**Install.** With Homebrew (this repository is the tap; it builds from the
+release tag, so it needs Rust and takes a couple of minutes):
+
+```sh
+brew tap dewanshdt/storm https://github.com/dewanshDT/Storm
+brew install storm-runtime
+sudo storm-runtime install
+```
+
+Or from the release's `storm-runtime-X-macos-universal.tar.gz` (arm64 and
+x86_64; ad-hoc signed, not notarized):
+
+```sh
+tar -xzf storm-runtime-*-macos-universal.tar.gz
+xattr -d com.apple.quarantine ./storm-runtime    # only if Gatekeeper refuses it
+sudo ./storm-runtime install
+```
+
+`install` is idempotent. It:
+- creates the hidden `_stormruntime` account and group;
+- creates the layout in the table above;
+- copies the binary to `/Library/StormRuntime/bin`, owned by root, so only
+  root can replace what launchd runs;
+- writes `runtime.toml` if there is none;
+- writes `/Library/LaunchDaemons/dev.storm.runtime.plist` and bootstraps it.
+
+**The job does not run yet.** launchd keeps it alive only while
+`state/host.json` exists, so an unenrolled host never runs.
+
+**Enroll.** In the app: Settings > Agents > Hosts > Enroll a host. Then paste
+the string at this prompt:
+
+```sh
+sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
+sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check   # proves the whole path
+```
+
+launchd starts the host by itself as soon as enrollment writes `host.json`,
+and it comes up `online` in the app. There is nothing to enable.
+
+**Service lifecycle:**
+
+```sh
+sudo launchctl print system/dev.storm.runtime           # loaded? running? last exit?
+sudo launchctl kickstart -k system/dev.storm.runtime    # restart it
+sudo launchctl kill TERM system/dev.storm.runtime       # stop it once; launchd restarts it
+tail -f /Library/Logs/StormRuntime/storm-runtime.log
+```
+
+**Upgrade** by running the new binary's `install`, which replaces the daemon's
+copy and restarts the job:
+
+```sh
+brew upgrade storm-runtime && sudo storm-runtime install
+```
+
+**Uninstall:**
+
+```sh
+sudo /Library/StormRuntime/bin/storm-runtime uninstall           # job, plist and binary
+sudo /Library/StormRuntime/bin/storm-runtime uninstall --purge   # also state, logs, config, account
+```
+
+**Workspaces are never deleted.** They stay in
+`/Library/StormRuntime/workspaces` until you remove them.
+
+**Providers and `PATH`.** launchd gives a job almost no `PATH`, so the host
+sets one explicitly, and it is the same `PATH` the agents get:
+
+```
+$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+- **`HOME`** is `/Library/StormRuntime/state/home` and **`SHELL`** is
+  `/bin/zsh`; the shell provider runs `/bin/zsh -l`.
+- **Set `path = [...]` in `runtime.toml`** to choose the directories
+  yourself.
+- **Install the agent CLIs where `_stormruntime` can run them:**
+  - **Homebrew** (`brew install opencode`, or Claude Code's formula or
+    cask);
+  - **or as the account itself**, which puts them in its own
+    `~/.local/bin`:
+
+    ```sh
+    cd / && sudo -u _stormruntime -H sh -c 'curl -fsSL https://claude.ai/install.sh | bash'
+    ```
+
+  A CLI inside your own home (`~/.local/bin`, `~/.nvm`) is out of the
+  account's reach, by design, and the host reports it as not installed.
+
+**Log the agent CLIs in as `_stormruntime`, once.** The `cd /` matters: the
+account cannot read your current directory.
+
+```sh
+cd / && sudo -u _stormruntime -H claude                # then /login
+cd / && sudo -u _stormruntime -H opencode auth login
+```
+
+Claude Code on macOS may keep its credentials in the login Keychain, which a
+daemon account without a login session may not have. If a session asks you
+to log in again, use a long-lived token instead:
+1. Run `claude setup-token` as yourself.
+2. Put `CLAUDE_CODE_OAUTH_TOKEN=<token>` in an env file, owned by
+   `_stormruntime` with mode `0600`, for example
+   `/Library/StormRuntime/state/claude.env`.
+3. Name that file in `runtime.toml`:
+
+   ```toml
+   [[providers]]
+   id = "claude-code"
+   env_file = "/Library/StormRuntime/state/claude.env"
+   ```
+
+Storm never stores or transmits what is in it. Also, a login running as
+`_stormruntime` is ended if the host restarts during it (the
+`--exclusive-account` sweep), so log in while the host is up.
+
+**Workspaces, permissions and macOS privacy (TCC).**
+- **The workspace root is `/Library/StormRuntime/workspaces`.** It is outside
+  every user home and every privacy-protected folder.
+- **`install` gives it two inheritable ACL entries:** one for
+  `_stormruntime`, and one for you (the `sudo` user, or `--operator <user>`).
+  A checkout made by you or by an agent stays readable and writable by both,
+  and you can work in it without `sudo`.
+- **To put an existing project in front of an agent, clone or move it into
+  the root:**
+
+  ```sh
+  git clone git@github.com:you/project /Library/StormRuntime/workspaces/project
+  ```
+
+- **No Full Disk Access is needed, and none should be granted.** A
+  LaunchDaemon cannot answer macOS's privacy prompts. A root under `/Users`
+  (every home, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive),
+  `/Volumes` (external and network disks) or `/Network` is **refused when the
+  host starts**. That keeps an agent out of your files by configuration as
+  well as by permission. It also keeps it out of a Storm vault on a mounted
+  share.
+- **There is no counterpart to systemd's `ProtectSystem` and `ProtectHome`.**
+  On macOS the boundary is the account plus file permissions and ACLs.
+  Never add `_stormruntime` to `admin` or `staff`, and never give it access
+  to a vault.
+
+**Troubleshooting:**
+
+| Symptom | Check |
+|---|---|
+| The host never appears after enrolling | `sudo launchctl print system/dev.storm.runtime`; `ls -l /Library/StormRuntime/state/host.json` must exist; read the log. |
+| `claude` or `opencode` shows as not installed | Run `sudo -u _stormruntime -H sh -c 'command -v claude'` with the `PATH` above. A CLI in your home is not reachable; install it with Homebrew or as the account. |
+| The host exits at start with "refused" or "root" | A `workspace_roots` entry is under `/Users`, `/Volumes` or `/Network`, or overlaps a Storm data root. Move it to `/Library/StormRuntime/workspaces`. |
+| The host stays stopped and `host.json.revoked` exists | It was revoked. Enroll it again (the command above). |
+| An agent cannot read a file you put in a workspace | The file came from outside (moved, not copied, from a home folder), so it lacks the inherited ACL. `ls -le` shows it. Re-copy it, or `chmod -R +a "user:_stormruntime allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,list,search,add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" <dir>`. |
+
+### Never share an account with the vaults
 
 **Never run a Runtime Host under the server's account, or under any account
 that can read or write the vaults.** Storm enforces what a session may do
@@ -488,7 +680,8 @@ can edit or delete vault files on disk and bypass all of that. The 2026-10-08
 real-run staging had server, vaults and host under one Unix user, and Claude
 offered to edit a note's file directly from a read-only session. Filesystem
 permissions are the only boundary there. On a shared machine, check it with
-`sudo -u storm-runtime ls /srv/storm`, which must be refused.
+`sudo -u storm-runtime ls /srv/storm` (on a Mac, `sudo -u _stormruntime ls`
+the vault root), which must be refused.
 
 ## Security
 
