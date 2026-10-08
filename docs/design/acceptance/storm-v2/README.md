@@ -62,22 +62,33 @@ the state recipe in `harness/shots.py`.
 | `desktop-02-note-start-session.png` | same name | 4 | captured 2026-10-08 |
 | `desktop-03-vault-switcher.png` | same name | 4 | captured 2026-10-08 |
 | `desktop-04-health-popover.png` | same name | 3 (+4 for sidebar/header) | rail + popover captured 2026-10-08; health rows are the fixture's real state (sync only) |
-| `desktop-05-new-session-launcher.png` | same name | 6 | — |
-| `desktop-06-agents-overview.png` | same name | 6 | — |
-| `desktop-06b-agents-first-session.png` | same name | 6 | — |
-| `desktop-06c-agents-no-host.png` | same name | 6 | — |
-| `desktop-07-session-running.png` … `desktop-11c-session-end-confirm.png` | same names | 6 | — |
+| `desktop-05-new-session-launcher.png` | same name | 6 | captured 2026-10-08 (Start session on Gateway spec); deltas below |
+| `desktop-06-agents-overview.png` | same name | 6 | captured 2026-10-08; deltas below |
+| `desktop-06b-agents-first-session.png` | same name | 6 | captured 2026-10-08 (`step` `hosts`) |
+| `desktop-06c-agents-no-host.png` | same name | 6 | captured 2026-10-08 (before any host) |
+| `desktop-07-session-running.png` … `desktop-11c-session-end-confirm.png` | same names | 6 | captured 2026-10-08 (`step` `sessions`); deltas below |
 | `desktop-12-settings-this-device.png` … `desktop-21-settings-about-health.png` | same names | 7 | captured 2026-10-08 on `feat/v2-settings`; a key and a relay seeded through the API (`("api", …)` actions); deltas below |
 | `desktop-loop-a-unseen-dots.png`, `desktop-loop-b-edited-by-session.png` | same names | 8 | — |
 | `phone-02-place-picker.png` | same name | 3 (+4 for the root list, pill) | captured 2026-10-08; deltas below |
 | `phone-01-notes-vault-root.png`, `phone-03-note-start-session.png` | same names | 4 | captured 2026-10-08 |
 | `phone-10-settings-list.png`, `phone-11-settings-page-ai-access.png` | same names | 7 | captured 2026-10-08; deltas below |
-| `phone-04` … `phone-09` | same names | 6 | — |
+| `phone-04` … `phone-09` | same names | 6 | captured 2026-10-08; deltas below |
 
-Agent states need an enrolled host: from slice 5 the harness also starts
-`storm-runtime` with the `fake` provider (it exists for exactly this) and a
-scripted MCP client acting as the session's agent, so sessions, Wrote rows and
-provenance in these shots are real server state, never client fixtures.
+Agent states are real server state, never client fixtures (`harness/agents.py`,
+slice 6). Shots in `shots.py` can carry a `step`, which moves the server on:
+`hosts` enrolls two `storm-runtime` hosts against the harness's server
+(`build-vm`, workspaces `storm` and `site`; `mac-mini`, workspace `storm`),
+turns agent writes on and records three opens for START FROM A NOTE;
+`sessions` launches four sessions through `POST /v1/agent/sessions`. The
+hosts' `claude-code` and `opencode` providers run `harness/agent.py`, a
+scripted agent started with the real MCP configuration (as
+`apps/server/tests/gateway_e2e.py` does), whose `session_context`,
+`update_note` and `create_note` calls go through the bridge and the gateway —
+so names, contexts, write vaults, Wrote rows and versions are the server's.
+`lint-fix`'s host is SIGKILLed and restarted under it (the runtime reports it
+`failed`/`host_restart`) and then stopped, so `mac-mini` is offline; the BOARD
+session's agent exits 0 (`completed`). Needs `cargo build` in `apps/runtime`
+too. A shot with `fresh=True` starts from a new page load.
 
 ## Deliberate, documented deltas
 
@@ -120,4 +131,22 @@ prototype's illustrative coloured lines, §10 of the handoff).
   only way to clear one; Integrations keeps a ⋯ menu for Test, Replace token,
   Disable and Disconnect beside the row action; phone pages start below the
   corner bubbles at slice 3's inset, so "‹ Settings" sits ~14px lower.
+- **Agents (desktop-05…11c, phone-04…09), slice 6.** The terminal is the real
+  xterm surface with what the scripted agent printed about the calls it really
+  made, not the prototype's illustrative lines (handoff §10): no "✕ host
+  restarted" line on lint-fix (the real terminal just stops), no "ran 412
+  tests" on test-sweep, and the cursor stays drawn on an ended session.
+  Session names are the server's (Q12): `gateway-spec` from its note, `board`
+  for the BOARD session, `site-1` and `storm-1` for the two without a note,
+  where the prototype has hand-picked `test-sweep`, `docs-pass`, `lint-fix`.
+  Ages are real ("now", "ran 1 s", today's clock) and versions the fixture's
+  (v1, v3). No integrations are configured, so the infra line reads "0
+  integrations", the risk box names none and About › Integrations is "None",
+  and the rail dot is green. The launcher's Workspace defaults to the host's
+  first, and the runtime lists workspaces by name, so it reads `site`; the
+  overview's work cards are in newest-session order. The phone keeps the
+  existing extra keys (⇧, ↑, ↓ besides the prototype's Esc Tab Ctrl ← →
+  Paste). phone-08 is the note screen pushed over the session; its back link
+  is the note header's "‹ storm", not "‹ gateway-spec" (slice 8's loop). The
+  Context tab's body uses the note view's own size and colour.
 

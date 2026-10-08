@@ -506,7 +506,8 @@ class _ContextBox extends ConsumerWidget {
             children: [
               Icon(LucideIcons.file, size: t.uiSize, color: t.accent),
               SizedBox(width: t.sp * 1.25),
-              Flexible(
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: t.sp * 25),
                 child: Text(
                   shown,
                   maxLines: 1,

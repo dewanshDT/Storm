@@ -4112,6 +4112,52 @@ health is the shared health rows with actions plus a compatibility row
 `client_settings_screen.dart`, `mcp_keys_screen.dart`, `ClientSettingsBody`
 and `settingsLeading` are gone.
 
+**Slice 6 (Agents; `feat/v2-agents`):** sessions are routes,
+`/agents/s/:id?tab=context|wrote|about`; `logicalParent` takes one back to
+`/agents` and `NavMemory` remembers it. `sessionControllerProvider` (an
+autoDispose family) owns each stream, so the desk split and the phone screen
+share one; `sessionDetailProvider` re-reads a live session's record every 4 s
+while it is shown (the stream's `status` event is the bare record, with no
+name, context or count) and `sessionWritesProvider` re-fetches
+`…/writes` only when `wrote_count` moves. `agentTabsProvider`,
+`activeAgentTabProvider`, `agentTitlesProvider`, the tab strip, the switcher
+sheet, the End `AlertDialog`, `AgentRow`/`AgentSessionRow`/
+`AgentSessionList`, `agentChosenTitle` and `launcherForTest` are gone; the
+name is the server's. The sidebar is on `SidebarFrame` (＋ New session only
+with a host online, Overview, RUNNING/ENDED `SessionRow`s with the §3.2 dots);
+the desk pane is the overview (work cards by (workspace, host) with the
+context chip and "wrote n", START AN AGENT cards, the infra line), or the
+first-session / no-host states (`NumberedSteps` gains an `inline` action);
+the phone is the flat list with the labelled pill. The launcher
+(`launcher.dart`) is a 460 modal at desk width and a bottom sheet below,
+keeps the old load logic (last host, workspaces, default agent, fallback and
+launch notices), and sends `context` and `write_vault_id`, never
+`allow_vault_writes`: "Can write to" defaults on when `agent_writes` is on,
+to the context note's vault (else the first), is disabled with "Off in
+Settings › AI access" when it is off, and is absent for `shell`. A launch
+opens the session on Context (with a note) or About. `launchAgentSession`
+keeps its positional signature and adds `contextNote`, `provider` and
+`runAgain`; slice 4's Start session passes the open note. Session detail:
+`SessionHeader` with End → `InlineConfirm` (desk) or the details sheet
+(phone), Run again (prefilled with context, host — falling back to an online
+one — workspace, agent and write vault; Launch still pressed) and Dismiss;
+the panel's Context shows the note read only (`StormMarkdownView`, the
+launch-snapshot title), Wrote lists writes with a "‹ Wrote" in-panel view
+(a kit-script row is a file under its path, never a link), About is a
+`KeyValueList`. Status words are Starting/Running/Unknown/Completed/Stopped/
+Failed with the reason in the meta and ended lines. `lib/ui/panels.dart`
+holds `PanelTabs`, `KeyValueList`, `InlineConfirm`, `MonoTag`. Contract
+changes in tests: `agents_navigation_test.dart` (sessions are routes; no
+tabs; "No hosts yet" → the no-host steps; Hosts test kept from slice 7) and
+`agent_test.dart` (status words, server names; the tab and terminal-title
+tests retired), `integrations_test.dart`'s launcher group (write vault, not
+the toggle). 883 client tests; mutation-checked: Wrote ignoring
+`wrote_count`, the launcher ignoring `agent_writes`, Run again dropping the
+write vault. The acceptance harness enrolls two real `storm-runtime` hosts
+and drives a scripted agent through the gateway (`harness/agents.py`); 19
+shots captured, deltas in its README. Open: the session view carries no
+grants, so About › Integrations lists the account's current connections.
+
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
 
