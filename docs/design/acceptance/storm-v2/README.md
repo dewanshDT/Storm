@@ -61,7 +61,7 @@ the state recipe in `harness/shots.py`.
 | `desktop-01-notes-provenance.png` | same name | 4 + 8 | — |
 | `desktop-02-note-start-session.png` | same name | 4 | — |
 | `desktop-03-vault-switcher.png` | same name | 4 | — |
-| `desktop-04-health-popover.png` | same name | 3 | — |
+| `desktop-04-health-popover.png` | same name | 3 (+4 for sidebar/header) | rail + popover captured 2026-10-08; health rows are the fixture's real state (sync only) |
 | `desktop-05-new-session-launcher.png` | same name | 6 | — |
 | `desktop-06-agents-overview.png` | same name | 6 | — |
 | `desktop-06b-agents-first-session.png` | same name | 6 | — |
@@ -69,7 +69,8 @@ the state recipe in `harness/shots.py`.
 | `desktop-07-session-running.png` … `desktop-11c-session-end-confirm.png` | same names | 6 | — |
 | `desktop-12-settings-this-device.png` … `desktop-21-settings-about-health.png` | same names | 7 | — |
 | `desktop-loop-a-unseen-dots.png`, `desktop-loop-b-edited-by-session.png` | same names | 8 | — |
-| `phone-01` … `phone-11` | same names | 3–8 | — |
+| `phone-02-place-picker.png` | same name | 3 (+4 for the root list, pill) | captured 2026-10-08; deltas below |
+| `phone-01`, `phone-03` … `phone-11` | same names | 4–8 | — |
 
 Agent states need an enrolled host: from slice 5 the harness also starts
 `storm-runtime` with the `fake` provider (it exists for exactly this) and a
@@ -80,3 +81,10 @@ provenance in these shots are real server state, never client fixtures.
 
 Filled in as slices land (for example: the real xterm surface instead of the
 prototype's illustrative coloured lines, §10 of the handoff).
+
+- **phone-02:** vaults are listed in the server's order (kit, personal, work)
+  rather than the prototype's; `kit` has no colour because the server seeds
+  it (the fixture colours personal and work through `_storm/vault.md`);
+  "1 running" needs a live session, which the harness gains with slices 5/6.
+- **desktop-04:** the popover shows only the rows the fixture's real state
+  produces — no hosts, no integrations, no version row until slice 5.

@@ -58,7 +58,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
-| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **in progress** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · **slice 0 done 2026-10-08** (#95) · **slice 1a** (#96, single-user server, `auth.db` v6) · **slice 1b** (#97, single-user client) · **slice 2** (design-system additions) · next: slice 3, shell + routing |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **in progress** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · **slice 0 done 2026-10-08** (#95) · **slice 1a** (#96, single-user server, `auth.db` v6) · **slice 1b** (#97, single-user client) · **slice 2** (#98, design-system additions) · **slice 3** (shell + routing) · slice 5 (server agent capabilities) in parallel · next: slice 4, Notes |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -4002,6 +4002,25 @@ sidebars now use; `placePopover`, with a `right` side for the rail. All in
 `lib/ui/`, so the conformance scan covers them. Gallery shot
 `docs/design/acceptance/storm-v2/design-system/gallery.png` (three presets);
 784 client tests.
+
+**Slice 3 (shell + routing; `feat/v2-shell-routing`):** `AppShell` wraps every
+signed-in route: the activity rail at ≥900 (Notes, Agents with a live-session
+badge, the health dot and its popover, Settings), the phone's places bubble
+(place picker) and settings gear below it. `/` is a redirect to the device's
+last location (`NavMemory`, prefs `storm.nav.*`, read once by
+`SettingsNotifier` and owned by `navMemoryProvider` after); `/notes` opens the
+last vault or the no-vaults state; retired routes redirect (`/settings/server`,
+`/v/:v/settings/*`, `/settings/mcp-keys`, `/agents/hosts`). System back follows
+Q2 through a `BackButtonListener`: the router pops first, then
+`logicalParent` (note → folder → parent; Agents/Settings → last Notes
+location); a vault root exits. The dashboard, the space switch, the agents
+band and the "A" appearance popover are gone; until slice 7 the settings
+pages mount the old screens in the new shell. Found on the way: each nested
+navigator's modal barrier carries `BlockSemantics`, which hid the rail and the
+sidebars from screen readers; `PaneSemantics` puts each pane in its own
+semantics container. 804 client tests; the back contract and health rows
+mutation-checked; desktop-04 and phone-02 captured. Gap until slice 4:
+cross-vault recents (they lived on the dashboard).
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.

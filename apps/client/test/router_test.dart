@@ -23,15 +23,17 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('a configured app lands on the dashboard', (tester) async {
+    testWidgets('a configured app with no history opens the vault root', (
+      tester,
+    ) async {
       final c = shellContainer();
       await pumpShell(tester, c);
 
-      // The wordmark is gone — the app's own name is the least useful thing
-      // on the screen you opened the app to see.
-      expect(find.text('STORM'), findsNothing);
-      expect(find.text('RECENTLY OPENED'), findsOneWidget);
-      expect(find.text('VAULTS'), findsOneWidget);
+      expect(
+        c.read(routerProvider).state.uri.path,
+        Routes.browse(FakeServer.primaryVault),
+      );
+      expect(find.text('Daily'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -46,7 +48,7 @@ void main() {
 
       expect(c.read(settingsProvider).value?.isPaired, isFalse);
       expect(find.text('Pair with your Storm server'), findsNothing);
-      expect(find.text('VAULTS'), findsOneWidget);
+      expect(find.text('Daily'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -70,7 +72,7 @@ void main() {
       // the old one, so this redirect never fired.
       final c = shellContainer();
       await pumpShell(tester, c);
-      expect(find.text('RECENTLY OPENED'), findsOneWidget);
+      expect(find.text('Daily'), findsOneWidget);
 
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
@@ -123,7 +125,7 @@ void main() {
           .go(Routes.folder(FakeServer.primaryVault, 'Projects/Storm'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vaults'), findsOneWidget);
+      expect(find.text('Primary'), findsOneWidget);
       expect(find.text('Projects'), findsWidgets);
       expect(find.text('Storm'), findsWidgets);
       expect(find.text('Design'), findsOneWidget);
@@ -213,5 +215,39 @@ void main() {
         await disposeShell(tester, c);
       });
     }
+  });
+
+  group('retired locations redirect (handoff §1.4)', () {
+    const v = FakeServer.primaryVault;
+    final cases = {
+      '/settings/server': '/settings/vaults',
+      '/v/$v/settings/server': '/settings/vaults',
+      '/settings/mcp-keys': '/settings/access',
+      '/agents/hosts': '/settings/hosts',
+      '/v/$v/settings/client': '/settings/device',
+      '/settings/nonsense': '/settings',
+      '/settings/integrations': '/settings/integrations',
+    };
+    for (final MapEntry(key: from, value: to) in cases.entries) {
+      testWidgets('$from → $to', (tester) async {
+        final c = shellContainer();
+        await pumpShell(tester, c);
+        c.read(routerProvider).go(from);
+        await tester.pumpAndSettle();
+        expect(c.read(routerProvider).state.uri.path, to);
+        await disposeShell(tester, c);
+      });
+    }
+
+    testWidgets('/ goes to the last location', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      c.read(routerProvider).go(Routes.agents);
+      await tester.pumpAndSettle();
+      c.read(routerProvider).go(Routes.root);
+      await tester.pumpAndSettle();
+      expect(c.read(routerProvider).state.uri.path, Routes.agents);
+      await disposeShell(tester, c);
+    });
   });
 }

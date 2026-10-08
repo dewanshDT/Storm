@@ -6,7 +6,6 @@ import 'package:go_router/go_router.dart';
 import '../router.dart';
 import '../ui/breakpoints.dart';
 import '../ui/shell/sidebar_frame.dart';
-import '../ui/shell/space_switch.dart';
 import '../ui/tokens.dart';
 import 'agent_state.dart';
 import 'agents_screen.dart';
@@ -34,7 +33,7 @@ class AgentsShell extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const AgentsSidebar(),
-          Expanded(child: child),
+          Expanded(child: PaneSemantics(child: child)),
         ],
       ),
     );
@@ -51,34 +50,21 @@ class AgentsSidebar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final active = ref.watch(activeAgentTabProvider);
-    final onHosts = GoRouterState.of(context).uri.path == Routes.agentHosts;
-
-    // Selecting a session from Hosts has to bring the sessions pane back.
-    void open(String id) {
-      openAgentSession(ref, id);
-      if (onHosts) context.go(Routes.agents);
-    }
-
-    Future<void> launch() async {
-      final launched = await launchAgentSession(context, ref);
-      if (launched != null && onHosts && context.mounted) {
-        context.go(Routes.agents);
-      }
-    }
+    void open(String id) => openAgentSession(ref, id);
+    Future<void> launch() => launchAgentSession(context, ref);
 
     return SidebarFrame(
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const SpaceSwitch(current: StormSpace.agents),
           SizedBox(height: t.sp * 1.5),
           Expanded(
             child: AgentSessionList(
               dense: true,
-              selected: onHosts ? null : active,
+              selected: active,
               onOpen: open,
               onLaunch: launch,
-              onHosts: () => context.go(Routes.agentHosts),
+              onHosts: () => context.go(Routes.settingsPage('hosts')),
             ),
           ),
         ],
@@ -89,26 +75,28 @@ class AgentsSidebar extends ConsumerWidget {
           vertical: t.sp * 1.25,
         ),
         child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            TextButton.icon(
-              key: const Key('new-session'),
-              onPressed: launch,
-              icon: Icon(LucideIcons.plus, size: t.bodySize),
-              label: const Text('New session'),
+            Flexible(
+              child: TextButton.icon(
+                key: const Key('new-session'),
+                onPressed: launch,
+                icon: Icon(LucideIcons.plus, size: t.bodySize),
+                label: const Text(
+                  'New session',
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ),
             ),
-            const Spacer(),
             IconButton(
               key: const Key('open-hosts'),
-              icon: Icon(
-                LucideIcons.server,
-                size: t.bodySize,
-                color: onHosts ? t.accent : t.text3,
-              ),
+              icon: Icon(LucideIcons.server, size: t.bodySize, color: t.text3),
               tooltip: 'Hosts',
               visualDensity: VisualDensity.compact,
               padding: EdgeInsets.zero,
               constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
-              onPressed: onHosts ? null : () => context.go(Routes.agentHosts),
+              onPressed: () => context.go(Routes.settingsPage('hosts')),
             ),
           ],
         ),

@@ -8,6 +8,9 @@ import 'package:http/http.dart' as http;
 
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/integrations_api.dart';
+import 'package:storm/agent/integrations_screen.dart'
+    show integrationsApiFactoryProvider;
 import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_connection.dart';
@@ -16,6 +19,7 @@ import 'package:storm/cache/cache_db.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/state/client_version.dart';
+import 'package:storm/state/nav_memory.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
@@ -49,6 +53,8 @@ const vaultPaths = [
 ProviderContainer shellContainer({
   bool configured = true,
   Settings? settings,
+  NavMemory nav = const NavMemory(),
+  http.Client? integrationsClient,
   http.Client? agentClient,
   Stream<TerminalEvent> Function(String sessionId, int offset)? terminalStream,
 }) {
@@ -91,7 +97,7 @@ ProviderContainer shellContainer({
       ),
       settingsProvider.overrideWith(
         () => settings == null
-            ? FakeSettings(configured)
+            ? FakeSettings(configured, nav: nav)
             : FixedSettings(settings),
       ),
       // Widget tests have no platform package info; keep Client settings
@@ -111,6 +117,15 @@ ProviderContainer shellContainer({
       // A terminal stream that stays open and says nothing, unless the test
       // scripts one: most tests assert on the chrome around a session, not
       // on a live PTY.
+      integrationsApiFactoryProvider.overrideWithValue(
+        integrationsClient == null
+            ? null
+            : () => IntegrationsApi(
+                baseUrl: 'http://test',
+                token: 't',
+                client: integrationsClient,
+              ),
+      ),
       terminalStreamFactoryProvider.overrideWithValue(
         terminalStream ?? (_, _) => StreamController<TerminalEvent>().stream,
       ),
@@ -169,9 +184,14 @@ NoteMeta noteMeta(String path) => NoteMeta(
 /// Settings without SharedPreferences, so the router's redirect can be driven
 /// directly.
 class FakeSettings extends SettingsNotifier {
-  FakeSettings(this.configured, {this.activeVault = FakeServer.primaryVault});
+  FakeSettings(
+    this.configured, {
+    this.activeVault = FakeServer.primaryVault,
+    this.nav = const NavMemory(),
+  });
 
   final bool configured;
+  final NavMemory nav;
 
   /// Which vault starts active, as the real app persists it across launches.
   final String activeVault;
@@ -185,6 +205,7 @@ class FakeSettings extends SettingsNotifier {
           accessToken: 'sta_test',
           theme: StormPreset.stormDark,
           activeVault: activeVault,
+          nav: nav,
         )
       : const Settings();
 

@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../router.dart';
 import '../ui/states.dart';
+import '../ui/settings/settings_shell.dart' show settingsLeading;
 import '../ui/tokens.dart';
 import 'agent_state.dart' show sessionCredentialsProvider;
 import 'hosts_screen.dart' show ChipTone, StatusChip;
@@ -248,12 +247,8 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     final items = _items;
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(LucideIcons.arrow_left),
-          onPressed: () => context.canPop()
-              ? context.pop()
-              : context.go(Routes.serverSettings),
-        ),
+        leading: settingsLeading(context),
+        automaticallyImplyLeading: false,
         title: const Text('Integrations'),
       ),
       floatingActionButton: items == null

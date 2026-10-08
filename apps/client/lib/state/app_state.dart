@@ -18,6 +18,7 @@ import 'web_bootstrap.dart';
 import '../ui/theme.dart';
 import '../ui/tokens.dart';
 import '../sync/sync_engine.dart';
+import 'nav_memory.dart';
 import 'note_session.dart';
 import '../ui/accents.dart';
 import 'vault_config.dart';
@@ -51,7 +52,11 @@ class Settings {
     this.userId = '',
     this.serverId = '',
     this.relays = const <RelayAdvert>[],
+    this.nav = const NavMemory(),
   });
+
+  /// Read at launch only; [navMemoryProvider] owns it afterwards.
+  final NavMemory nav;
 
   final String baseUrl;
 
@@ -222,6 +227,7 @@ class Settings {
     String? userId,
     String? serverId,
     List<RelayAdvert>? relays,
+    NavMemory? nav,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     theme: theme ?? this.theme,
@@ -240,6 +246,7 @@ class Settings {
     userId: userId ?? this.userId,
     serverId: serverId ?? this.serverId,
     relays: relays ?? this.relays,
+    nav: nav ?? this.nav,
   );
 }
 
@@ -298,6 +305,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       userId: prefs.getString(_kUserId) ?? '',
       serverId: prefs.getString(_kServerId) ?? '',
       relays: _decodeRelays(prefs.getString(_kRelays)),
+      nav: NavMemory.read(prefs),
     );
   }
 

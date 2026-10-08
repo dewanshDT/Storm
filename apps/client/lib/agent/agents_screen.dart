@@ -138,37 +138,43 @@ class _AgentsScreenState extends ConsumerState<AgentsScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Agents'),
-        actions: [
-          IconButton(
-            key: const Key('open-hosts'),
-            tooltip: 'Hosts',
-            onPressed: () => context.push(Routes.agentHosts),
-            icon: const Icon(LucideIcons.server, size: 18),
+      body: StormChrome(
+        showNav: false,
+        header: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: StormChrome.contentInset(context),
           ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: AgentSessionList(
-              onOpen: (id) => openAgentSession(ref, id),
-              onLaunch: () => launchAgentSession(context, ref),
-              onHosts: () => context.push(Routes.agentHosts),
-              bottomClearance: StormChrome.navClearance(context),
+          child: Text(
+            'Agents',
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: context.tokens.titleSize,
+              fontWeight: FontWeight.w600,
+              color: context.tokens.text,
             ),
           ),
-          // Under the thumb, in the nav bubble's grammar.
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: NewSessionPill(
-              onTap: () => launchAgentSession(context, ref),
+        ),
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: AgentSessionList(
+                onOpen: (id) => openAgentSession(ref, id),
+                onLaunch: () => launchAgentSession(context, ref),
+                onHosts: () => context.go(Routes.settingsPage('hosts')),
+                bottomClearance: StormChrome.navClearance(context),
+              ),
             ),
-          ),
-        ],
+            // Under the thumb, in the nav bubble's grammar.
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: NewSessionPill(
+                onTap: () => launchAgentSession(context, ref),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

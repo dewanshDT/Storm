@@ -211,6 +211,13 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   There is one breakpoint (900px, `lib/ui/breakpoints.dart`). A change that
   alters what renders below it is a defect, not a design choice — every
   adaptive test asserts both sides for that reason.
+- **Every pane beside the rail or a sidebar sits in `PaneSemantics`** (Storm
+  v2). The pane is a nested navigator whose route carries a modal barrier
+  with `BlockSemantics`, which otherwise removes every sibling painted before
+  it — the rail, the sidebar — from screen readers.
+- **`/` is not a screen** (Storm v2). It redirects to the device's last
+  location (`NavMemory`), and system back follows `logicalParent` in
+  `AppShell` once the router has nothing to pop; only a vault root exits.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose

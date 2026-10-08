@@ -13,7 +13,7 @@ import 'shell_harness.dart';
 /// had it off, would be worse than no control at all.
 void main() {
   Future<void> openSettings(WidgetTester tester, container) async {
-    container.read(routerProvider).go(Routes.serverSettings);
+    container.read(routerProvider).go(Routes.settingsPage('ai'));
     await tester.pumpAndSettle();
   }
 

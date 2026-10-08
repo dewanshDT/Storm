@@ -236,7 +236,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       ref.read(noteSessionProvider).close();
       ref.read(openNoteIdProvider.notifier).state = null;
       ref.invalidate(treeProvider);
-      if (mounted) context.go(Routes.dashboard);
+      if (mounted) context.go(Routes.browse(ref.read(activeVaultProvider)));
     } catch (e) {
       _toast('$e');
     }

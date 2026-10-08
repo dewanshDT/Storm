@@ -152,7 +152,7 @@ class StormChrome extends StatelessWidget {
             Positioned(
               top: bubbleTopInset(context),
               left: contentInset(context),
-              child: const VaultBubble(),
+              child: const PlacesBubble(),
             ),
             Positioned(
               top: bubbleTopInset(context),

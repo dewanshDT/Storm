@@ -40,3 +40,16 @@ class SidebarFrame extends StatelessWidget {
     );
   }
 }
+
+/// Wraps a nested navigator's pane. Its route's modal barrier carries
+/// `BlockSemantics`, which otherwise hides every sibling painted before it
+/// (the rail, the sidebar) from screen readers.
+class PaneSemantics extends StatelessWidget {
+  const PaneSemantics({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      Semantics(container: true, explicitChildNodes: true, child: child);
+}
