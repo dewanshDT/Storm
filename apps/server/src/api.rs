@@ -3499,19 +3499,33 @@ pub(crate) mod tests {
     /// whether it was permitted.
     #[derive(Debug, Default)]
     struct RecordingPolicy {
-        seen: std::sync::Mutex<Vec<(String, String)>>,
-        /// The full actors, for tests asking *what kind* of caller arrived
-        /// rather than only which user.
-        actors: std::sync::Mutex<Vec<Actor>>,
+        /// One entry per decision: the user and vault it was asked about,
+        /// and the full actor, for tests asking *what kind* of caller
+        /// arrived. **One lock for both**, so entry `i` of `pairs()` and of
+        /// `actors()` are always the same call. Two locks let concurrent
+        /// decisions interleave between the pushes, and
+        /// `concurrent_mcp_calls_do_not_share_an_identity` then reported a
+        /// leak that never happened.
+        seen: std::sync::Mutex<Vec<((String, String), Actor)>>,
     }
 
     impl RecordingPolicy {
         fn pairs(&self) -> Vec<(String, String)> {
-            self.seen.lock().unwrap().clone()
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(p, _)| p.clone())
+                .collect()
         }
 
         fn actors(&self) -> Vec<Actor> {
-            self.actors.lock().unwrap().clone()
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, a)| a.clone())
+                .collect()
         }
     }
 
@@ -3523,8 +3537,10 @@ pub(crate) mod tests {
             // to hold a credential is added, which is the coupling A14.3
             // exists to avoid.
             let who = actor.user_id().to_string();
-            self.seen.lock().unwrap().push((who, vault_id.to_string()));
-            self.actors.lock().unwrap().push(actor.clone());
+            self.seen
+                .lock()
+                .unwrap()
+                .push(((who, vault_id.to_string()), actor.clone()));
             Decision::Allow
         }
     }
