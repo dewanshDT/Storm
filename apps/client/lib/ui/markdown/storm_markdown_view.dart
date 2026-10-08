@@ -71,45 +71,49 @@ class StormMarkdownView extends ConsumerWidget {
     );
 
     try {
-      return MarkdownBody(
-        key: const Key('storm-markdown-body'),
-        data: _withCompletedTaskStrike(markdown),
-        selectable: true,
-        styleSheet: style,
-        styleSheetTheme: MarkdownStyleSheetBaseTheme.material,
-        // Baseline alignment fights a non-text checkbox widget.
-        listItemCrossAxisAlignment: MarkdownListItemCrossAxisAlignment.start,
-        extensionSet: md.ExtensionSet(
-          md.ExtensionSet.gitHubFlavored.blockSyntaxes,
-          <md.InlineSyntax>[
-            WikilinkSyntax(),
-            ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
-          ],
-        ),
-        // Right pad must match [MarkdownStyleSheet.listBulletPadding]: the
-        // package sizes the bullet column to indent+pad and passes that as a
-        // *tight* width. Without the pad here the 18px box stretches to the
-        // full column and paints over the label.
-        checkboxBuilder: (checked) => Padding(
-          padding: EdgeInsets.only(
-            top: checkboxTop,
-            right: kStormMarkdownCheckboxGap,
+      // Selectable blocks are read-only text fields, whose text Flutter web
+      // leaves out of the accessibility tree; plain text in a SelectionArea
+      // reads and selects the same.
+      return SelectionArea(
+        child: MarkdownBody(
+          key: const Key('storm-markdown-body'),
+          data: _withCompletedTaskStrike(markdown),
+          styleSheet: style,
+          styleSheetTheme: MarkdownStyleSheetBaseTheme.material,
+          // Baseline alignment fights a non-text checkbox widget.
+          listItemCrossAxisAlignment: MarkdownListItemCrossAxisAlignment.start,
+          extensionSet: md.ExtensionSet(
+            md.ExtensionSet.gitHubFlavored.blockSyntaxes,
+            <md.InlineSyntax>[
+              WikilinkSyntax(),
+              ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
+            ],
           ),
-          child: StormCheckbox(
-            value: checked,
-            // Read-only for this phase — no second mutation path.
-            onChanged: null,
-            size: checkboxSize,
+          // Right pad must match [MarkdownStyleSheet.listBulletPadding]: the
+          // package sizes the bullet column to indent+pad and passes that as a
+          // *tight* width. Without the pad here the 18px box stretches to the
+          // full column and paints over the label.
+          checkboxBuilder: (checked) => Padding(
+            padding: EdgeInsets.only(
+              top: checkboxTop,
+              right: kStormMarkdownCheckboxGap,
+            ),
+            child: StormCheckbox(
+              value: checked,
+              // Read-only for this phase — no second mutation path.
+              onChanged: null,
+              size: checkboxSize,
+            ),
           ),
+          imageBuilder: (uri, title, alt) => _MarkdownImage(
+            uri: uri,
+            alt: alt,
+            connection: connection,
+            vaultId: vaultId,
+          ),
+          onTapLink: (text, href, title) =>
+              _onTapLink(context, text: text, href: href),
         ),
-        imageBuilder: (uri, title, alt) => _MarkdownImage(
-          uri: uri,
-          alt: alt,
-          connection: connection,
-          vaultId: vaultId,
-        ),
-        onTapLink: (text, href, title) =>
-            _onTapLink(context, text: text, href: href),
       );
     } catch (e) {
       return EmptyState(

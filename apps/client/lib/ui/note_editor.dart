@@ -358,15 +358,18 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                         if (title != null)
                           Padding(
                             padding: EdgeInsets.only(top: t.sp * 2.75),
-                            child: Text(
-                              title,
-                              key: const Key('note-title'),
-                              style: TextStyle(
-                                fontFamily: settings.bodyFont.family,
-                                fontSize: t.displaySize,
-                                fontWeight: FontWeight.w600,
-                                height: 1.15,
-                                color: t.text,
+                            child: Semantics(
+                              header: true,
+                              child: Text(
+                                title,
+                                key: const Key('note-title'),
+                                style: TextStyle(
+                                  fontFamily: settings.bodyFont.family,
+                                  fontSize: t.displaySize,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.15,
+                                  color: t.text,
+                                ),
                               ),
                             ),
                           ),

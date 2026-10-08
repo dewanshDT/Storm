@@ -201,6 +201,7 @@ class ProvenanceLink extends StatelessWidget {
     );
     if (!linked) return label;
     return Semantics(
+      container: true,
       link: true,
       label: text,
       excludeSemantics: true,

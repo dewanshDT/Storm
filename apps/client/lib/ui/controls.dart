@@ -369,6 +369,35 @@ class SettingsRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final toggle = trailing is StormToggle;
+    final text = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: large ? t.uiSize * 1.05 : t.uiSize,
+            color: labelColor ?? (muted ? t.text3 : t.text),
+          ),
+        ),
+        if (sub != null) ...[
+          SizedBox(height: t.sp * 0.25),
+          Text(
+            sub!,
+            style: TextStyle(
+              fontFamily: monoSub
+                  ? StormTokens.monoFamily
+                  : StormTokens.sansFamily,
+              fontSize: monoSub ? t.labelSize : t.codeSize,
+              height: 1.45,
+              color: t.text3,
+            ),
+          ),
+        ],
+      ],
+    );
     final row = Container(
       padding: EdgeInsets.symmetric(vertical: t.sp * (large ? 1.625 : 1.5)),
       decoration: divider
@@ -381,37 +410,14 @@ class SettingsRow extends StatelessWidget {
       child: Row(
         children: [
           if (leading != null) ...[leading!, SizedBox(width: t.sp * 1.5)],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: large ? t.uiSize * 1.05 : t.uiSize,
-                    color: labelColor ?? (muted ? t.text3 : t.text),
-                  ),
-                ),
-                if (sub != null) ...[
-                  SizedBox(height: t.sp * 0.25),
-                  Text(
-                    sub!,
-                    style: TextStyle(
-                      fontFamily: monoSub
-                          ? StormTokens.monoFamily
-                          : StormTokens.sansFamily,
-                      fontSize: monoSub ? t.labelSize : t.codeSize,
-                      height: 1.45,
-                      color: t.text3,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          if (trailing != null) ...[SizedBox(width: t.sp * 1.5), trailing!],
+          // A toggle carries the row's words, so the switch is named by them.
+          Expanded(child: toggle ? ExcludeSemantics(child: text) : text),
+          if (trailing != null) ...[
+            SizedBox(width: t.sp * 1.5),
+            toggle
+                ? Semantics(label: label, hint: sub, child: trailing)
+                : trailing!,
+          ],
         ],
       ),
     );

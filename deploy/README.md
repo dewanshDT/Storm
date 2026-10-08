@@ -479,6 +479,17 @@ What the package guarantees (decision 77e):
 - **A revoked host exits 3, and the unit does not restart it.** Enroll it
   again to bring it back.
 
+**Never run a Runtime Host under the server's account, or under any account
+that can read or write the vaults.** Storm enforces what a session may do
+(read only, its one write vault, never delete) in the server, on the tools
+it offers. An agent is a process: it can also do anything its OS account can
+do to files. A host running as the server's user, or as a member of its group,
+can edit or delete vault files on disk and bypass all of that. The 2026-10-08
+real-run staging had server, vaults and host under one Unix user, and Claude
+offered to edit a note's file directly from a read-only session. Filesystem
+permissions are the only boundary there. On a shared machine, check it with
+`sudo -u storm-runtime ls /srv/storm`, which must be refused.
+
 ## Security
 
 v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a

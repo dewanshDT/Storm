@@ -223,6 +223,50 @@ void main() {
     });
   });
 
+  group('colour-scheme reports (DEC 2031)', () {
+    Future<List<String>> reports(
+      WidgetTester tester,
+      Future<void> Function(Future<void> Function(ThemeData) pump) act,
+    ) async {
+      final t = StormTerminal();
+      final sent = <String>[];
+      t.onInput = (b) => sent.add(latin1.decode(b));
+      Future<void> pump(ThemeData theme) => tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: Scaffold(body: StormTerminalView(terminal: t)),
+        ),
+      );
+      await pump(StormTheme.dark());
+      t.write(Uint8List.fromList(utf8.encode('\x1b[?2031h')));
+      sent.clear();
+      await act(pump);
+      return sent;
+    }
+
+    testWidgets('a rebuild tells the agent nothing', (tester) async {
+      // A late report lands after the agent restored echo on exit, and the
+      // PTY prints it into the scrollback as ^[[?997;1n.
+      expect(
+        await reports(tester, (pump) async {
+          await pump(StormTheme.dark());
+          await pump(StormTheme.dark());
+        }),
+        isEmpty,
+      );
+    });
+
+    testWidgets('a real theme change is still reported', (tester) async {
+      expect(
+        await reports(tester, (pump) async {
+          await pump(StormTheme.light());
+          await tester.pumpAndSettle();
+        }),
+        isNotEmpty,
+      );
+    });
+  });
+
   group('chords the legacy encoding cannot express', () {
     // Real key events through the real view, so the hook, its gate and
     // xterm2's own encoding are all on the path.
