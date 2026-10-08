@@ -60,6 +60,27 @@ pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> 
 /// (`ESRCH`) or is not ours to ask about (`EPERM`) is skipped; a zombie
 /// (`SZOMB`) is already gone for our purposes.
 pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
+    Ok(all_pids()?
+        .into_iter()
+        // SAFETY: getsid has no memory-safety preconditions.
+        .filter(|&pid| unsafe { libc::getsid(pid) } == sid)
+        .filter(|&pid| !zombie(pid))
+        .collect())
+}
+
+/// Every live process whose real or effective uid is `uid`.
+pub fn account_processes(uid: u32) -> io::Result<Vec<i32>> {
+    Ok(all_pids()?
+        .into_iter()
+        .filter(|&pid| {
+            bsdinfo(pid).is_some_and(|i| {
+                i.pbi_status != libc::SZOMB && (i.pbi_uid == uid || i.pbi_ruid == uid)
+            })
+        })
+        .collect())
+}
+
+fn all_pids() -> io::Result<Vec<i32>> {
     // SAFETY: a null buffer asks for the count only.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count < 0 {
@@ -74,16 +95,11 @@ pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
         return Err(io::Error::last_os_error());
     }
     pids.truncate(n as usize);
-    Ok(pids
-        .into_iter()
-        .filter(|&pid| pid > 0)
-        // SAFETY: getsid has no memory-safety preconditions.
-        .filter(|&pid| unsafe { libc::getsid(pid) } == sid)
-        .filter(|&pid| !zombie(pid))
-        .collect())
+    pids.retain(|&pid| pid > 0);
+    Ok(pids)
 }
 
-fn zombie(pid: i32) -> bool {
+fn bsdinfo(pid: i32) -> Option<libc::proc_bsdinfo> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     // SAFETY: `info` is a live `proc_bsdinfo` of `size` bytes.
@@ -96,5 +112,9 @@ fn zombie(pid: i32) -> bool {
             size,
         )
     };
-    got == size && info.pbi_status == libc::SZOMB
+    (got == size).then_some(info)
+}
+
+fn zombie(pid: i32) -> bool {
+    bsdinfo(pid).is_some_and(|i| i.pbi_status == libc::SZOMB)
 }

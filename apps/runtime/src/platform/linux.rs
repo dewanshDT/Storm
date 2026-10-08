@@ -60,6 +60,47 @@ pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
     Ok(out)
 }
 
+/// Every live process whose real or effective uid is `uid`: the ones a
+/// process of that account may signal. `/proc/<pid>/status` has
+/// `Uid: real effective saved fs`.
+pub fn account_processes(uid: u32) -> io::Result<Vec<i32>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let Ok(entry) = entry else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        if status_owned_by(&status, uid) {
+            out.push(pid);
+        }
+    }
+    Ok(out)
+}
+
+fn status_owned_by(status: &str, uid: u32) -> bool {
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(str::trim)
+    };
+    if field("State:").is_some_and(|s| s.starts_with('Z') || s.starts_with('X')) {
+        return false;
+    }
+    field("Uid:").is_some_and(|ids| {
+        ids.split_whitespace()
+            .take(2)
+            .any(|id| id.parse() == Ok(uid))
+    })
+}
+
 /// The session of a live process, from its `stat` line; `None` for a zombie.
 fn stat_session(stat: &str) -> Option<i32> {
     let rest = &stat[stat.rfind(')')? + 1..];
@@ -87,6 +128,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("apt remove storm-runtime"), "{e}");
+    }
+
+    #[test]
+    fn an_owner_is_the_real_or_effective_uid_of_a_live_process() {
+        let s = |state: &str, ids: &str| format!("Name:\tx\nState:\t{state}\nUid:\t{ids}\n");
+        assert!(super::status_owned_by(
+            &s("S (sleeping)", "999\t999\t999\t999"),
+            999
+        ));
+        assert!(super::status_owned_by(
+            &s("R (running)", "0\t999\t0\t0"),
+            999
+        ));
+        assert!(!super::status_owned_by(
+            &s("S (sleeping)", "0\t0\t999\t0"),
+            999
+        ));
+        assert!(!super::status_owned_by(
+            &s("Z (zombie)", "999\t999\t999\t999"),
+            999
+        ));
     }
 
     #[test]

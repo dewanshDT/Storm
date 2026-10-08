@@ -4511,8 +4511,19 @@ Shutdown waits for `ended`, so it leaves nothing behind. Only a process that
 called `setsid` itself has left the session.
 
 **`--exclusive-account`** is passed by the systemd unit and the launchd plist.
-- **What it does:** `kill(-1)` SIGHUP, then SIGKILL after 0.5 s, at startup
-  and after a shutdown or revocation. That is the counterpart of systemd's
+- **What it does:** it lists every live process of the account except
+  itself, then sends SIGHUP, then SIGKILL after 0.5 s to what is left. It
+  runs at startup and after a shutdown or revocation.
+- **It is not `kill(-1)`.** The first version used `kill(-1)`, which on Linux
+  excludes the caller. **On macOS a POSIX `kill(-1)` includes the caller:** on
+  the first real-Mac run (CI, `macos-latest`) the host killed itself the
+  moment launchd started it, wrote nothing, and sat in `spawn scheduled`
+  forever. No test had run the real sweep, because it would kill the test
+  runner. The process list is testable without signalling anything:
+  `the_sweep_targets_the_accounts_other_processes_never_itself` lists a
+  child and never the caller, and is mutation-checked.
+  - **Listing:** `/proc/<pid>/status` `Uid:` on Linux; `proc_pidinfo`
+    `pbi_uid`/`pbi_ruid` on macOS. That is the counterpart of systemd's
   control-group kill. It also covers a host that was SIGKILLed or crashed,
   which launchd's job-group kill does not reach.
 - **The guard:** it is refused as root and as any account but

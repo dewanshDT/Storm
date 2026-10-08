@@ -179,22 +179,62 @@ pub fn account_name(uid: u32) -> Option<String> {
     )
 }
 
+/// Every live process of this account except this one: what the sweep
+/// signals. Listed, not `kill(-1)`: on macOS a POSIX `kill(-1)` reaches the
+/// caller too, so the first real-Mac run of the sweep killed the host as it
+/// started (decision 83).
+pub fn sweep_targets() -> io::Result<Vec<i32>> {
+    let uid = rustix::process::geteuid().as_raw();
+    let me = rustix::process::getpid().as_raw_nonzero().get();
+    Ok(os::account_processes(uid)?
+        .into_iter()
+        .filter(|&pid| pid != me)
+        .collect())
+}
+
 /// Ends every other process of this account: SIGHUP, then SIGKILL after
-/// `grace`. The counterpart of systemd's control-group kill, and the only
-/// one launchd has (AM37). `kill(-1, …)` reaches every process the caller
-/// may signal except itself; **call it only after
+/// `grace` to whatever is left. The counterpart of systemd's control-group
+/// kill, and the only one launchd has (AM37). **Call it only after
 /// [`check_exclusive_account`] passed** — `serve` does, and nothing else
 /// calls this.
 pub fn sweep_account(grace: Duration) {
-    // SAFETY: kill(2) has no memory-safety preconditions.
-    unsafe { libc::kill(-1, libc::SIGHUP) };
+    let signal_all = |signal| {
+        for pid in sweep_targets().unwrap_or_default() {
+            if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+                // ESRCH: it is already gone.
+                let _ = rustix::process::kill_process(pid, signal);
+            }
+        }
+    };
+    signal_all(rustix::process::Signal::HUP);
     std::thread::sleep(grace);
-    unsafe { libc::kill(-1, libc::SIGKILL) };
+    signal_all(rustix::process::Signal::KILL);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sweep_targets_the_accounts_other_processes_never_itself() {
+        // Lists without signalling, so it is safe whoever runs the suite.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let targets = sweep_targets().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let me = rustix::process::getpid().as_raw_nonzero().get();
+        assert!(
+            !targets.contains(&me),
+            "the sweep would kill the host itself"
+        );
+        assert!(
+            targets.contains(&(child.id() as i32)),
+            "a process of this account is missing: {targets:?}"
+        );
+    }
 
     #[test]
     fn the_sweep_runs_only_as_the_service_account() {
