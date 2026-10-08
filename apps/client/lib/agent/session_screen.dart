@@ -970,7 +970,7 @@ String _wroteMeta(SessionWrite w) => w.created
     ? 'new'
     : w.version != null
     ? 'v${w.version}'
-    : w.kind;
+    : 'edited';
 
 String _wroteTitle(SessionWrite w) {
   final title = noteTitleOf(w.title, w.path);

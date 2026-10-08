@@ -347,7 +347,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(agents.count('GET', writes), 1, reason: 'the count did not move');
 
-    agents.session('ags_1')!['wrote_count'] = 1;
+    agents.session('ags_1')!['wrote_count'] = 2;
     agents.writes['ags_1'] = [
       {
         'vault_id': primary,
@@ -358,13 +358,31 @@ void main() {
         'version': 3,
         'at': '2026-10-08T10:00:00Z',
       },
+      {
+        'vault_id': primary,
+        'note_id': null,
+        'title': 'tool.sh',
+        'path': 'scripts/tool.sh',
+        'kind': 'script_edited',
+        'version': null,
+        'at': '2026-10-08T09:00:00Z',
+      },
     ];
     await tester.pump(sessionRefreshInterval + const Duration(seconds: 1));
     await tester.pumpAndSettle();
     expect(agents.count('GET', writes), 2);
     expect(find.text('Plan'), findsOneWidget);
     expect(find.text('new'), findsOneWidget);
-    expect(find.text('Wrote 1'), findsOneWidget);
+    expect(find.text('Wrote 2'), findsOneWidget);
+    // A kit script is a file under its path, never a note link.
+    expect(find.text('tool.sh'), findsOneWidget);
+    expect(find.text('Primary / scripts'), findsOneWidget);
+    await tester.tap(find.text('tool.sh'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('back-to-wrote')), findsNothing);
+    await tester.tap(find.text('Plan'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('back-to-wrote')), findsOneWidget);
     await disposeShell(tester, c);
   });
 

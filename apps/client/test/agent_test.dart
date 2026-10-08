@@ -123,14 +123,20 @@ void main() {
       expect(sessionSub(failed), 'storm · Claude Code · failed');
     });
 
-    test('a write row with no note still has something to show', () {
+    test('a kit script in Wrote is a file under its path, not a note', () {
       final w = SessionWrite.fromJson({
-        'path': 'scripts/sync.sh',
-        'kind': 'script',
+        'vault_id': 'v-kit',
+        'note_id': null,
+        'title': 'tool.sh',
+        'path': 'scripts/tool.sh',
+        'kind': 'script_created',
+        'version': null,
         'at': '2026-10-03T12:00:00Z',
       });
       expect(w.note, isNull);
-      expect(noteTitleOf(w.title, w.path), 'sync.sh');
+      expect((w.isScript, w.created), (true, true));
+      expect(noteTitleOf(w.title, w.path), 'tool.sh');
+      expect(noteCrumb('kit', w.path), 'kit / scripts');
     });
   });
 

@@ -274,12 +274,15 @@ class SessionWrite {
   final String? title;
   final String? path;
 
-  /// `created` or `edited` for a note; anything else is shown as it is.
+  /// `created` or `edited` for a note; `script_created` or `script_edited`
+  /// for a kit script, which has a path and no note.
   final String kind;
   final int? version;
   final String at;
 
-  bool get created => kind == 'created';
+  bool get created => kind == 'created' || kind == 'script_created';
+
+  bool get isScript => kind.startsWith('script_');
 
   /// The note to open, if there is one.
   ({String vaultId, String noteId})? get note =>
