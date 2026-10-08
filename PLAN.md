@@ -4158,6 +4158,57 @@ and drives a scripted agent through the gateway (`harness/agents.py`); 19
 shots captured, deltas in its README. Open: the session view carries no
 grants, so About › Integrations lists the account's current connections.
 
+**Slice 8 (the loop; `feat/v2-loop`):** a note's version line carries the
+provenance link — "Edited by session {name}, {age} ›" / "Created by session
+…", from `GET …/notes/{id}`'s `agent_write`, opening
+`/agents/s/{id}?tab=wrote`; it is fetched (`noteProvenanceProvider`) only for
+a note in the vault's `agent-writes` map, and again only when that note's
+latest agent version moves. A later human edit keeps it (Q13). **A dismissed
+session's name stays, as plain `text3` text with no ›**: its route is a 404
+("This session is gone"), so there is nothing to link to. **Unseen is
+device-local and never on the server** (`SeenVersions`, prefs `storm.seen`,
+`{"<vault>/<note>": version}`, the newest 2000): the note screen records
+whatever version it has on screen, including one adopted from sync while
+open, and a note is unseen when its latest agent write version (`GET
+…/agent-writes`, `agentWritesProvider`) is above that. The map is re-read with
+the vault's sync (`vaultRevisionProvider`) and whenever the sessions' summed
+`wrote_count` moves in the overview the rail and bubbles already poll. Dots:
+desktop tree note rows and a collapsed folder holding one (an open folder
+does not roll up), phone folder and note rows. **Not on RECENT**: the
+prototype draws none there (desktop or phone, loop-a's reference agrees), and
+the prototype wins over the brief. The session panel's version line adds "·
+edited/created by this session" when this session is the note's latest agent
+writer (Context and a Wrote note opened in-panel); the panel re-reads its
+note when the session's `wrote_count` moves, and the session screen
+invalidates the overview then, so the sidebar's and overview's "wrote n"
+follow within the 4 s detail poll rather than the 15 s list poll. A note
+pushed from a phone session carries `?session=<id>` (`Routes.note(…,
+session:)`) and its back link reads "‹ {session name}", back to the session;
+the desk keeps the crumb. **Server (additive):** session views gain
+`integrations: [{id, slug, display_name}]` — what the session was granted at
+launch, named as then, Storm itself excluded — from a new `agent.db` table
+`session_integrations` written in the launch's store transaction from the
+connections offered (`LaunchMeta.integration_names`); a rename or disconnect
+changes none of it (orchestrator: grants are launch history, like the
+context). A session from before the table falls back to its
+`session_mcp_grants` slugs; `shell` and an old host have none. About ›
+Integrations uses it, and the account's current connections only from a
+server that does not send it. Tests: `loop_v2_test.dart` (17: provenance
+created/edited/dismissed/after a human edit at both widths, unseen rollup /
+clear-on-open / version / per-device persistence, the panel lines, About,
+phone-08 at both widths, and a widget-level loop from Start session to the
+provenance link back to Wrote); Rust
+`a_sessions_integrations_are_launch_history_named_as_at_launch` and the
+gateway-writes API test (rename after launch); `gateway_e2e.py` +3. 900
+client tests. Mutation-checked: unseen ignoring the version, the folder
+rollup off, the provenance link opening Context, "by this session" ignoring
+the session id, and the integrations never stored. The acceptance harness
+launches the core loop's session **through the UI** (Start session → Launch
+on Gateway spec) and its scripted agent reads the note with
+`session_context`, edits BOARD and creates a log note through the gateway
+(`agents.py` `run_loop`); desktop-01 is now shot after the BOARD session's
+write, so its provenance link is real.
+
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
 

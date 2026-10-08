@@ -58,7 +58,7 @@ the state recipe in `harness/shots.py`.
 | `baseline/*` (10 shots) | — (pre-v2 record) | 0 | captured 2026-10-08 on `staging` `c9131b4` |
 | `auth/phone-setup.png`, `auth/phone-signin.png` | — (not redesigned; existing style) | 1b | password only, captured 2026-10-08 |
 | `design-system/gallery.png` | — (`/gallery`, three presets) | 2 | captured 2026-10-08 (`--set design`) |
-| `desktop-01-notes-provenance.png` | same name | 4 + 8 | sidebar, header, title, version line captured 2026-10-08; provenance link is slice 8 |
+| `desktop-01-notes-provenance.png` | same name | 4 + 8 | re-shot 2026-10-08 (slice 8) after the `board` session's real write: the provenance link is the server's `agent_write` |
 | `desktop-02-note-start-session.png` | same name | 4 | captured 2026-10-08 |
 | `desktop-03-vault-switcher.png` | same name | 4 | captured 2026-10-08 |
 | `desktop-04-health-popover.png` | same name | 3 (+4 for sidebar/header) | rail + popover captured 2026-10-08; health rows are the fixture's real state (sync only) |
@@ -68,7 +68,8 @@ the state recipe in `harness/shots.py`.
 | `desktop-06c-agents-no-host.png` | same name | 6 | captured 2026-10-08 (before any host) |
 | `desktop-07-session-running.png` … `desktop-11c-session-end-confirm.png` | same names | 6 | captured 2026-10-08 (`step` `sessions`); deltas below |
 | `desktop-12-settings-this-device.png` … `desktop-21-settings-about-health.png` | same names | 7 | captured 2026-10-08 on `feat/v2-settings`; a key and a relay seeded through the API (`("api", …)` actions); deltas below |
-| `desktop-loop-a-unseen-dots.png`, `desktop-loop-b-edited-by-session.png` | same names | 8 | — |
+| `desktop-loop-0-launched-on-context.png` | — (core loop: Start session → Launch in the UI) | 8 | captured 2026-10-08 |
+| `desktop-loop-a-unseen-dots.png`, `desktop-loop-b-edited-by-session.png` | same names | 8 | captured 2026-10-08 (`step` `loop`); deltas below |
 | `phone-02-place-picker.png` | same name | 3 (+4 for the root list, pill) | captured 2026-10-08; deltas below |
 | `phone-01-notes-vault-root.png`, `phone-03-note-start-session.png` | same names | 4 | captured 2026-10-08 |
 | `phone-10-settings-list.png`, `phone-11-settings-page-ai-access.png` | same names | 7 | captured 2026-10-08; deltas below |
@@ -89,6 +90,19 @@ so names, contexts, write vaults, Wrote rows and versions are the server's.
 `failed`/`host_restart`) and then stopped, so `mac-mini` is offline; the BOARD
 session's agent exits 0 (`completed`). Needs `cargo build` in `apps/runtime`
 too. A shot with `fresh=True` starts from a new page load.
+
+**The core loop (slice 8, handoff §11).** `desktop-loop-0` opens Gateway
+spec, taps **Start session**, picks the `storm` workspace and **Launch**es
+in the UI; the session opens on Context. `step` `loop` (`agents.py`
+`run_loop`) then finds that session by its context note, checks its write
+vault is `personal`, and has its agent read the note through
+`session_context`, edit BOARD and create `projects/storm/log/2026-10-08`
+through the gateway. The loop shots are the result: unseen dots on BOARD
+and the new log note (the `log` folder opened by a tap), and BOARD's
+provenance link. The sessions step no longer launches `gateway-spec` itself.
+`--only desktop-loop` runs just the three, since steps always run. A tree
+row's accessible label is "Changed by an agent since you last opened it\n
+{name}" while it carries a dot, so the taps match `(^|\n)name$`.
 
 ## Deliberate, documented deltas
 
@@ -147,6 +161,15 @@ prototype's illustrative coloured lines, §10 of the handoff).
   overview's work cards are in newest-session order. The phone keeps the
   existing extra keys (⇧, ↑, ↓ besides the prototype's Esc Tab Ctrl ← →
   Paste). phone-08 is the note screen pushed over the session; its back link
-  is the note header's "‹ storm", not "‹ gateway-spec" (slice 8's loop). The
+  now reads "‹ gateway-spec" (slice 8), cut to "‹ gatew…" because the phone
+  header also carries ⋯ and the properties button. The
   Context tab's body uses the note view's own size and colour.
-
+- **The loop (desktop-01, loop-a/b), slice 8.** Real state, so: BOARD is v2
+  (desktop-01, edited by the `board` session) and v3 (loop-b, edited by
+  `gateway-spec`), not v51/v52; ages read "just now"; BOARD's body is what
+  the scripted agents wrote (a "Flaky sync test" line and a "Done" section),
+  where the reference's agent rewrote the list. The log note is
+  `2026-10-08` under `log`, as in the reference. **No unseen dot on RECENT**,
+  matching the prototype and the references (the brief asked for RECENT too;
+  the prototype wins). The drawer keeps the existing property rows, as in
+  slice 4. The rail badge counts the harness's other live session too.

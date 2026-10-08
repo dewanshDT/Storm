@@ -41,8 +41,6 @@ CURRENT = [
 ]
 
 V2 = [
-    dict(name="desktop-01-notes-provenance", viewport="desktop", route=f"/v/{P}/browse",
-         actions=opened(LEAD, SPRINT, GW, BOARD)),
     dict(name="desktop-02-note-start-session", viewport="desktop", route=f"/v/{P}/browse",
          actions=opened(DAILY, LEAD, SPRINT, GW)),
     dict(name="phone-01-notes-vault-root", viewport="phone", route=f"/v/{P}/browse",
@@ -89,6 +87,18 @@ V2 = [
     dict(name="phone-04-new-session-sheet", viewport="phone", route=f"/v/{P}/note/{GW}",
          fresh=True, actions=[("tap", "^Session$")], settle=2.5),
     dict(step="sessions"),
+    # Slice 8, the loop. BOARD's latest agent writer is now the BOARD
+    # session, which this device has not seen: opening BOARD marks it seen.
+    dict(name="desktop-01-notes-provenance", viewport="desktop", route=f"/v/{P}/browse",
+         fresh=True, actions=opened(LEAD, SPRINT, GW, BOARD)),
+    # The core loop, end to end: Start session on the note, Launch in the
+    # UI, the session opens on Context; then its agent writes (`loop`).
+    dict(name="desktop-loop-0-launched-on-context", viewport="desktop",
+         route=f"/v/{P}/note/{GW}", fresh=True,
+         actions=[("tap", "^Start session$"), ("wait", 1.5), ("tap", "^Workspace: "),
+                  ("tap", "^storm$"), ("tap", "^Launch$"), ("wait", 3)],
+         settle=2.5),
+    dict(step="loop"),
     dict(name="desktop-06-agents-overview", viewport="desktop", route="/agents",
          fresh=True),
     dict(name="desktop-07-session-running", viewport="desktop",
@@ -116,6 +126,12 @@ V2 = [
          actions=[("tap", "^▤ Gateway spec$")], settle=2.5),
     dict(name="phone-09-session-ended", viewport="phone",
          route="/agents/s/{session:test-sweep}", fresh=True, settle=2.5),
+    # The agent's two notes are unseen here: BOARD (edited since this device
+    # opened it) and the new log note, whose folder is opened to show it.
+    dict(name="desktop-loop-a-unseen-dots", viewport="desktop", route=f"/v/{P}/note/{GW}",
+         fresh=True, actions=[("tap", r"(^|\n)log$")], settle=2.5),
+    dict(name="desktop-loop-b-edited-by-session", viewport="desktop",
+         route=f"/v/{P}/note/{GW}", actions=[("tap", r"(^|\n)BOARD$")], settle=2.5),
 ]
 
 DESIGN = [

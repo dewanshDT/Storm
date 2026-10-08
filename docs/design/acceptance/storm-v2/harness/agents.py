@@ -209,7 +209,8 @@ class AgentWorld:
         return vault, n
 
     def run_sessions(self):
-        """Two live, two ended, and what they wrote."""
+        """One live, two ended; the fourth is the core loop's, launched from
+        the UI (`run_loop`)."""
         build, mac = self.hosts["build-vm"], self.hosts["mac-mini"]
         board = "note:personal/projects/storm/BOARD.md"
 
@@ -242,12 +243,27 @@ class AgentWorld:
         _, a = self.launch(build, "site", "opencode", "docs-pass")
         a.say("› waiting for input")
 
-        # gateway-spec: from the spec, writes BOARD and a log note.
-        _, a = self.launch(build, "storm", "claude-code", "gateway-spec",
-                           context="note:personal/projects/storm/Gateway spec.md",
-                           write_vault="personal")
+    def run_loop(self):
+        """The core loop's agent (handoff §11): the session the UI launched
+        from Gateway spec reads its note, edits BOARD and creates a log note,
+        all through the gateway, in its write vault."""
+        board = "note:personal/projects/storm/BOARD.md"
+        spec = self.h.ids["note:personal/projects/storm/Gateway spec.md"]
+
+        def launched():
+            _, sessions = self.call("GET", "/v1/agent/sessions")
+            return next((s for s in sessions if (s.get("context") or {}).get("note_id") == spec
+                         and s["status"] == "running"), None)
+        rec = wait(launched, 30, "the session launched from Gateway spec")
+        if rec["write_vault_id"] != self.h.ids["vault:personal"]:
+            raise RuntimeError(f"the launcher's write vault: {rec}")
+        self.h.ids["session:gateway-spec"] = rec["id"]
+        host = next(h for h in self.hosts.values() if h.id == rec["host_id"])
+        a = Agent(host, rec["workspace"], rec["id"])
         a.initialize()
-        a.tool("session_context")
+        context = a.tool("session_context")
+        if "Storm holds third-party MCP credentials" not in context.get("content", ""):
+            raise RuntimeError(f"session_context: {context}")
         a.say("› read personal/projects/storm/Gateway spec")
         vault, n = self.note(board)
         a.tool("update_note", {"vault": vault, "note_id": n["id"], "base_version": n["version"],

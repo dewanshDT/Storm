@@ -218,6 +218,10 @@ From M9/M10 (`docs/storm-multi-vault.md`):
 - **`/` is not a screen** (Storm v2). It redirects to the device's last
   location (`NavMemory`), and system back follows `logicalParent` in
   `AppShell` once the router has nothing to pop; only a vault root exits.
+- **Unseen is device-local and never stored on the server** (Storm v2,
+  slice 8): the last version each device opened is in its prefs
+  (`SeenVersions`), compared with the server's `agent-writes` map. A server
+  copy would clear a phone's dot because the laptop opened the note.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose

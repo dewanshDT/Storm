@@ -814,5 +814,5 @@ real Wrote rows, real provenance, no client-side simulation.
 - [x] Slice 5 — server agent capabilities
 - [x] Slice 6 — Agents
 - [x] Slice 7 — Settings
-- [ ] Slice 8 — the loop
+- [x] Slice 8 — the loop
 - [ ] Slice 9 — regression + acceptance
