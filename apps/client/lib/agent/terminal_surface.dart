@@ -236,6 +236,8 @@ class StormTerminalView extends StatelessWidget {
     this.autofocus = false,
     this.readOnly = false,
     this.padding,
+    this.fontSize,
+    this.surface = false,
   });
 
   final StormTerminal terminal;
@@ -247,6 +249,10 @@ class StormTerminalView extends StatelessWidget {
   /// drawn in the view's colour, not the agent's, so a full-screen agent that
   /// paints its own background (OpenCode) shows it as a frame.
   final EdgeInsets? padding;
+  final double? fontSize;
+
+  /// On `surface` rather than `bg` (the phone's session, handoff §3.6).
+  final bool surface;
 
   @override
   Widget build(BuildContext context) {
@@ -257,7 +263,7 @@ class StormTerminalView extends StatelessWidget {
     // would vanish. Both colours still come from the tokens: the light theme's
     // off-black text and off-white page, swapped.
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final background = dark ? t.bg : t.text;
+    final background = dark ? (surface ? t.surface : t.bg) : t.text;
     final foreground = dark ? t.text : t.bg;
     final theme = TerminalTheme(
       cursor: foreground.withValues(alpha: 0.7),
@@ -304,7 +310,7 @@ class StormTerminalView extends StatelessWidget {
         padding: padding ?? EdgeInsets.all(t.sp),
         textStyle: TerminalStyle(
           fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize + 1,
+          fontSize: fontSize ?? t.labelSize + 1,
         ),
         keyboardAppearance: Brightness.dark,
         // Agents redraw on resize; the terminal follows its box.

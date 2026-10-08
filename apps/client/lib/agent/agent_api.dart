@@ -143,7 +143,8 @@ class AgentApi {
     String? provider,
     required int cols,
     required int rows,
-    bool allowVaultWrites = false,
+    ({String vaultId, String noteId})? context,
+    String? writeVaultId,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -155,13 +156,37 @@ class AgentApi {
               'provider': ?provider,
               'interaction': 'terminal',
               'terminal': {'cols': cols, 'rows': rows},
-              // The launch toggle (G-D5): off unless asked for.
-              'allow_vault_writes': allowVaultWrites,
+              if (context != null)
+                'context': {
+                  'vault_id': context.vaultId,
+                  'note_id': context.noteId,
+                },
+              // Absent is read only (decision 82); `allow_vault_writes` is
+              // the pre-v2 field and is never sent.
+              'write_vault_id': ?writeVaultId,
             }),
           ),
         )
         as Map<String, dynamic>,
   );
+
+  /// The notes a session created or edited, newest write first.
+  Future<List<SessionWrite>> writes(String id) async {
+    final json = _decode(
+      await _client.get(_uri('${_s(id)}/writes'), headers: _headers),
+    );
+    return [
+      for (final w in json as List)
+        SessionWrite.fromJson(w as Map<String, dynamic>),
+    ];
+  }
+
+  /// Settings › AI access › "Allow writes when chosen at launch". Absent
+  /// (an older server) reads as off.
+  Future<bool> agentWrites() async =>
+      (_decode(await _client.get(_uri('/v1/config'), headers: _headers))
+          as Map)['agent_writes'] ==
+      true;
 
   Future<void> end(String id) async {
     _decode(await _client.post(_uri('${_s(id)}/end'), headers: _headers));

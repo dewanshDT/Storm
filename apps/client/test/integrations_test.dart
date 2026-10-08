@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
-import 'package:storm/agent/agents_screen.dart';
+import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart';
 import 'package:storm/agent/oauth_links.dart';
@@ -437,39 +437,44 @@ void main() {
       ],
       child: MaterialApp(
         theme: StormTheme.light(),
-        home: Scaffold(body: launcherForTest(hosts)),
+        home: Scaffold(body: NewSessionLauncher(hosts: hosts)),
       ),
     );
 
-    testWidgets('vault writes are off unless the owner turns them on', (
+    testWidgets('an agent is told it can use your integrations', (
       tester,
     ) async {
       final (client, seen) = agentServer();
       await tester.pumpWidget(launcher(client));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('egress-integrations')), findsOneWidget);
-      final toggle = tester.widget<SwitchListTile>(
-        find.byKey(const Key('allow-vault-writes')),
+      expect(
+        find.textContaining('This session can use your integrations'),
+        findsOneWidget,
       );
-      expect(toggle.value, isFalse);
-      await tester.tap(find.byKey(const Key('allow-vault-writes')));
-      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('launch')));
       await tester.pumpAndSettle();
       final launch = seen.firstWhere((r) => r.method == 'POST');
-      expect(jsonDecode(launch.body)['allow_vault_writes'], isTrue);
+      expect(
+        (jsonDecode(launch.body) as Map).containsKey('allow_vault_writes'),
+        isFalse,
+        reason: 'the pre-v2 toggle is never sent (decision 82)',
+      );
     });
 
-    testWidgets('a shell gets no toggle and no integrations line (G-D9)', (
+    testWidgets('a shell gets no write field and no integrations (G-D9)', (
       tester,
     ) async {
       final (client, _) = agentServer();
       await tester.pumpWidget(launcher(client));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('provider-shell')));
+      expect(find.byKey(const Key('launcher-writes')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('launcher-agent')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('allow-vault-writes')), findsNothing);
-      expect(find.byKey(const Key('egress-integrations')), findsNothing);
+      await tester.tap(find.text('Shell').last);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('launcher-writes')), findsNothing);
+      expect(find.textContaining('A shell has no access'), findsOneWidget);
+      expect(find.textContaining('can use your integrations'), findsNothing);
     });
 
     test('an old host is announced on the launch answer', () {
