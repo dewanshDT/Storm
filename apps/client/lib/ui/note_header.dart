@@ -75,16 +75,22 @@ class NoteCrumb extends StatelessWidget {
 
 /// The drawer toggle at the end of the desktop note header.
 class DrawerToggle extends StatelessWidget {
-  const DrawerToggle({super.key, required this.open, required this.onTap});
+  const DrawerToggle({
+    super.key,
+    required this.open,
+    required this.onTap,
+    this.tooltip = 'Properties',
+  });
 
   final bool open;
   final VoidCallback onTap;
+  final String tooltip;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return Tooltip(
-      message: 'Properties',
+      message: tooltip,
       child: InkWell(
         key: const Key('drawer-toggle'),
         onTap: onTap,

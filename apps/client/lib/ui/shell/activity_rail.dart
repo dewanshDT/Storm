@@ -32,7 +32,7 @@ class ActivityRail extends ConsumerWidget {
           right: BorderSide(color: t.border, width: t.bw),
         ),
       ),
-      padding: EdgeInsets.only(top: t.sp * 2, bottom: t.sp * 1.75),
+      padding: EdgeInsets.only(top: t.sp * 2, bottom: t.sp),
       child: SafeArea(
         right: false,
         child: Column(
@@ -107,71 +107,81 @@ class RailItem extends StatelessWidget {
           child: InkWell(
             onTap: onTap,
             borderRadius: radius,
-            child: SizedBox(
-              width: t.sp * 5.75,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Padding(
-                    padding: EdgeInsets.symmetric(
-                      vertical: showLabel ? t.sp * 0.875 : t.sp,
-                      horizontal: t.sp * 0.625,
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(icon, size: t.sp * 2.5, color: ink),
-                        if (showLabel) ...[
-                          SizedBox(height: t.sp * 0.375),
-                          Text(
-                            label,
-                            style: TextStyle(
-                              fontFamily: StormTokens.sansFamily,
-                              fontSize: t.labelSize,
-                              color: ink,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  if (badge > 0)
-                    Positioned(
-                      top: t.sp * 0.375,
-                      right: t.sp * 0.75,
-                      child: Container(
-                        key: const Key('rail-badge'),
-                        constraints: BoxConstraints(
-                          minWidth: t.sp * 1.875,
-                          minHeight: t.sp * 1.875,
-                        ),
-                        padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: t.accent,
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          '$badge',
-                          style: TextStyle(
-                            fontFamily: StormTokens.monoFamily,
-                            fontSize: t.labelSize,
-                            fontWeight: FontWeight.w500,
-                            color: t.onAccent,
-                            height: 1.2,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
+            child: showLabel ? _labelled(t, ink) : _square(t, ink),
           ),
         ),
       ),
     );
   }
+
+  /// The rail's foot controls share one square, centred on the rail's axis.
+  Widget _square(StormTokens t, Color ink) => SizedBox.square(
+    dimension: railFootSize(t),
+    child: Center(
+      child: Icon(icon, size: t.sp * 2.5, color: ink),
+    ),
+  );
+
+  Widget _labelled(StormTokens t, Color ink) => SizedBox(
+    width: t.sp * 5.75,
+    child: Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Padding(
+          padding: EdgeInsets.symmetric(
+            vertical: t.sp * 0.875,
+            horizontal: t.sp * 0.625,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: t.sp * 2.5, color: ink),
+              SizedBox(height: t.sp * 0.375),
+              Text(
+                label,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.labelSize,
+                  color: ink,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (badge > 0)
+          Positioned(
+            top: t.sp * 0.375,
+            right: t.sp * 0.75,
+            child: Container(
+              key: const Key('rail-badge'),
+              constraints: BoxConstraints(
+                minWidth: t.sp * 1.875,
+                minHeight: t.sp * 1.875,
+              ),
+              padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: t.accent,
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                '$badge',
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  fontWeight: FontWeight.w500,
+                  color: t.onAccent,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
 }
+
+double railFootSize(StormTokens t) => t.sp * 5;
 
 Color healthColor(HealthTone tone, StormTokens t) => switch (tone) {
   HealthTone.good => t.green,
@@ -202,10 +212,9 @@ class _RailStatusDotState extends ConsumerState<RailStatusDot> {
         key: const Key('rail-status'),
         borderRadius: BorderRadius.circular(t.rControl),
         onTap: _open,
-        child: SizedBox(
+        child: SizedBox.square(
           key: _anchor,
-          width: t.sp * 5,
-          height: t.sp * 4,
+          dimension: railFootSize(t),
           child: Center(
             child: Container(
               width: t.sp * 1.125,

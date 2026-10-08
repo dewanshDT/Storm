@@ -96,7 +96,8 @@ root exits the app. Launch restores the last activity and location.
 Agents (badge = live sessions, only above 0), a spacer, the **health dot**
 (green when healthy; its popover lists sync, hosts and integrations rows that
 link into Settings) and the Settings gear. Active item: `accent` on
-`accentSoft`.
+`accentSoft`. The health dot and the gear share one 40 px square on the
+rail's axis, 8 apart and 8 from the bottom.
 
 **Phone: two corner bubbles** (44 × 44 at 20 / 20). Left opens the **place
 picker** — the vaults (tile, name, count, ✓), Agents with "{n} running", and
@@ -136,8 +137,11 @@ the id when asked for) with the **provenance link** — "Edited by session
 {name}, {age} ›" or "Created by session …" in `accent`, opening that session's
 Wrote; a dismissed session's name stays as plain text. The body is the
 existing editor (Edit) or the rendered markdown (Read): Newsreader at about 18
-(`proseSize = fs·√scale`), line height 1.6, H2 about 22 / 600, at a 640
-measure. Below: attachments (Edit) and **Linked mentions**.
+(`proseSize = fs·√scale`), line height 1.6, H2 about 22 / 600. The editor
+surface fills everything between the sidebar and the Properties drawer (or the
+window's edge when it is shut): the header row spans it, and the prose wraps
+at the surface's width up to a 900 px measure. Below: attachments (Edit) and
+**Linked mentions**.
 
 Start session opens the launcher with the note as context while a host is
 online, otherwise Agents (which explains what is missing). A note pushed from a
@@ -189,18 +193,28 @@ opens the session on Context (with a note) or About.
 
 ### Session
 
-Desk: the terminal column (header with name, status chip and End; a meta
-line; the real xterm surface) beside a panel with **Context | Wrote {n} |
-About**. End asks inline and ends as stopped; an ended session shows its
-footer with **Run again** (the launcher, prefilled) and **Dismiss**.
+Desk: the session workspace. Its header — name, status chip, the Details
+toggle and End, and a meta line — spans the whole workspace; under it the real
+xterm surface fills the width (a 10 px inset) beside an optional **Details
+inspector** with **Context | Wrote {n} | About** and a close button. The
+inspector behaves like Properties: open by default from 1200 px, shut below,
+toggled from the header; 320 px wide, its left edge drags it between 260 and
+500 while the terminal keeps at least 360; open state and width last for the
+run, not across launches. End asks inline in a compact banner — "End {name}"
+in bold, the consequence, then Cancel and the red End session on one row (the
+message wraps under the title when the banner is narrow) — and ends as
+stopped; an ended session shows its footer with **Run again** (the launcher,
+prefilled) and **Dismiss**.
 **Context** is the source note read only with "Open in Notes ›", or "Started
 without a note…". **Wrote** lists created and edited notes ("new" / "v{n}")
 and kit scripts, opening a note in the panel with "‹ Wrote"; a note this
 session last wrote says "· edited by this session". **About**: Agent,
 Workspace, Vault access, Integrations (as granted at launch), Network.
 
-Phone: a full-screen terminal, a chip row (Context, Details), the extra-keys
-row while live (Esc, Tab, Ctrl, arrows, ⇧, ↑, ↓, Paste), the **details sheet**
+Phone: a full-screen terminal (a 10 px inset), a chip row (Context, Details),
+the extra-keys row as a keyboard accessory — only while the software keyboard
+is open (`viewInsets.bottom > 0`), above it, with Done (Esc, Tab, Ctrl, ⇧,
+arrows, Paste) — the **details sheet**
 (Started from, Wrote, About, End with confirmation) and Run again / Dismiss
 bars once ended. The context note is pushed full screen.
 

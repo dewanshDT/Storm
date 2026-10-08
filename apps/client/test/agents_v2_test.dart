@@ -199,12 +199,21 @@ void main() {
       await tester.tap(find.byKey(const Key('end-session')));
       await tester.pumpAndSettle();
       expect(find.byType(AlertDialog), findsNothing);
+      expect(find.text('End gateway-spec'), findsOneWidget);
       expect(
         find.text(
-          'End gateway-spec? The agent and everything it started are '
-          'stopped on the host.',
+          'The agent and everything it started are stopped on the host.',
         ),
         findsOneWidget,
+      );
+      // One compact row at desk width: the title, its message and the actions
+      // share a line, and the banner stays a small part of the terminal's height.
+      final title = tester.getRect(find.byKey(const Key('confirm-title')));
+      final action = tester.getRect(find.byKey(const Key('confirm-action')));
+      expect((title.center.dy - action.center.dy).abs(), lessThan(2));
+      expect(
+        tester.getSize(find.byKey(const Key('end-confirm'))).height,
+        lessThan(64),
       );
       await tester.tap(find.byKey(const Key('confirm-cancel')));
       await tester.pumpAndSettle();

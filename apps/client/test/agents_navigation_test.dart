@@ -94,15 +94,17 @@ void main() {
         expect(location(c), '/agents/s/ags_live');
         expect(find.byKey(const Key('chip-details')), findsOneWidget);
 
-        // Live: the extra keys are there with the keyboard down, and Done
-        // comes with the keyboard.
-        expect(find.byKey(const Key('key-esc')), findsOneWidget);
-        expect(find.byKey(const Key('key-shift')), findsOneWidget);
-        expect(find.byKey(const Key('keys-done')), findsNothing);
+        // Live: the extra keys are a keyboard accessory — absent with the
+        // keyboard down, there with Done while it is up, gone again after.
+        expect(find.byKey(const Key('key-esc')), findsNothing);
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.pumpAndSettle();
+        expect(find.byKey(const Key('key-esc')), findsOneWidget);
+        expect(find.byKey(const Key('key-shift')), findsOneWidget);
         expect(find.byKey(const Key('keys-done')), findsOneWidget);
         tester.view.resetViewInsets();
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('key-esc')), findsNothing);
         await tester.pumpAndSettle();
 
         // System back: to the list, then to the last Notes location.
