@@ -57,25 +57,27 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
-| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
-| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **all slices built, awaiting merge** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · slices 0–3 (#95–#98 and the shell) · 4 Notes · 5 server agent capabilities · 6 Agents · 7 Settings · 8 the loop (#104) · **9 regression + acceptance** (`feat/v2-acceptance`): every suite green, handoff §11 43 of 44 ticked (`docs/design/acceptance/storm-v2/CHECKLIST.md`; Android back on a device not run) · real Claude Code run passed; its three findings fixed (`fix/v2-acceptance-findings`) · stacked on `feat/v2-loop`, nothing merged to `staging` yet |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 
-**Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
-steps; this paragraph is the prep PR's): client-only fixes from the
-operator's first on-device tests of Agent Runtime V1, no server, runtime or
-packaging change. **#72**: Shift+Enter, Ctrl+Backspace and Cmd+Backspace send
-LF, Ctrl+W and Ctrl+U while the agent has not enabled the kitty keyboard
-protocol (agents never get it today, because their startup terminal queries
-are answered by the client too late or not at all; the fix for that is AM22,
-drafted in the vault). **#73**: the phone keys row rides on the keyboard and
-matches the note editor's bar, gains a sticky Shift, the phone session view
-is edge to edge with a compact status row, and session rows show the
-provider's mark and the name the agent gives the session. **v0.3.0** (PR #71,
-`df45838`) carried decisions 73–79 and the first `storm-runtime` `.deb`;
-**prod runs it** (its agent routes answer, and a runtime host is enrolled
-there), deployed by the operator, date not recorded here. v0.2.9 (PR #48,
-`f046eaf`) carried decisions 65–71; v0.2.8 (PR #37, 2026-09-02) carried
-decisions 56–64.
+**Release state (2026-10-08).** **v0.4.0 is being cut** (decision 72's
+steps; this paragraph is the prep PR's), at the operator's request after the
+Storm v2 stack merged into `staging`. It carries **M21, the MCP Gateway**
+(decisions 81, 81a–81n: integrations through Storm, encrypted upstream
+credentials, the runtime bridge, OAuth, `storm://oauth` on Android and macOS)
+and **M22, Storm v2** (decision 82: the activity rail, single user, the
+knowledge ↔ agent loop, #95–#107). **Upgrading runs `auth.db` v6** — the
+single-user migration keeps the oldest active owner and deletes every other
+account after writing `auth.db.pre-v6`; run `storm-server single-user --keep
+<name>` first to choose who survives (prod and the codebox dev server both
+have more than one owner). **Known issue:** the web client can stay on the
+spinner after a correct password in Firefox-based browsers (Zen) — the server
+signs in; Chrome works (vault: *Storm v2/Issue — Zen login hang*). **v0.3.1**
+(PR #75, `3829134`) carried client-only fixes for Agent Runtime V1 (#72,
+#73); **v0.3.0** (PR #71, `df45838`) carried decisions 73–79 and the first
+`storm-runtime` `.deb`; **prod runs v0.3.0** until the operator upgrades.
+v0.2.9 (PR #48, `f046eaf`) carried decisions 65–71; v0.2.8 (PR #37,
+2026-09-02) carried decisions 56–64.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
