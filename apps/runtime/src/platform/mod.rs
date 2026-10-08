@@ -49,6 +49,15 @@ pub fn default_path() -> Option<std::ffi::OsString> {
     os::default_path()
 }
 
+/// Locations no workspace root may be in or contain, whatever
+/// `runtime.toml` says (AM39). macOS: every person's home (and with it
+/// `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive), removable and
+/// network volumes, autofs mounts, and the data volume's own spelling of
+/// all of these. A LaunchDaemon cannot answer the privacy prompts guarding
+/// them, and the host never asks for Full Disk Access. Linux: none beyond
+/// the unit's `ProtectHome`.
+pub const PROTECTED_ROOTS: &[&str] = os::PROTECTED_ROOTS;
+
 /// `storm-runtime install` (AM35).
 #[derive(Debug, Default)]
 pub struct InstallOptions {

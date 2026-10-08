@@ -20,6 +20,11 @@ pub const CONFIG: &str = "/Library/StormRuntime/runtime.toml";
 /// system.
 pub const DEFAULT_PATH: &str = "$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// macOS's `platform::PROTECTED_ROOTS` (AM39). `/System/Volumes/Data` is
+/// where `/Users` and `/Volumes` really live (firmlinks): a root spelled
+/// through it would otherwise slip past the first two.
+pub const PROTECTED_ROOTS: &[&str] = &["/Users", "/Volumes", "/Network", "/System/Volumes/Data"];
+
 /// [`DEFAULT_PATH`] for an account whose home is `home`.
 pub fn path_for_home(home: &str) -> String {
     DEFAULT_PATH.replace("$HOME", home)
@@ -216,7 +221,8 @@ pub fn default_config(layout: &Layout) -> String {
 # Each subdirectory of a root is a workspace, named by its directory name.
 # The default root is Storm's own, outside every user home, so the host needs
 # no Full Disk Access (AM39). You and the host's account can both read and
-# write it.
+# write it. Roots under /Users, /Volumes or /Network are refused: to work on
+# an existing checkout, clone or move it into a workspace here.
 workspace_roots = ["{workspaces}"]
 
 max_sessions = 8

@@ -14,6 +14,7 @@ pub const SERVICE_ACCOUNT: &str = "_stormruntime";
 /// `ptcwrite` then sleeps until the whole write fits. One byte per wait
 /// never blocks.
 pub const PTY_WRITE_CHUNK: usize = 1;
+pub const PROTECTED_ROOTS: &[&str] = super::launchd::PROTECTED_ROOTS;
 
 pub use super::macos_service::{install, uninstall};
 
