@@ -12,6 +12,18 @@ against the fixture server at run time (ids are UUIDs minted at boot).
 GW = "{note:personal/projects/storm/Gateway spec.md}"
 BOARD = "{note:personal/projects/storm/BOARD.md}"
 P = "{vault:personal}"
+DAILY = "{note:personal/daily/2026-10-07.md}"
+SPRINT = "{note:work/Sprint notes.md}"
+LEAD = "{note:kit/agents/Storm Lead.md}"
+
+
+def opened(*notes):
+    """Open notes oldest first, so the server's recents end in this order."""
+    vaults = {DAILY: P, GW: P, BOARD: P, SPRINT: "{vault:work}", LEAD: "{vault:kit}"}
+    # A vault switch adopts the vault before the note opens, so give each open
+    # time to reach the server before the next navigation replaces it.
+    return [a for n in notes for a in (("go", f"/v/{vaults[n]}/note/{n}"), ("wait", 2.5))]
+
 
 CURRENT = [
     dict(name="baseline/desktop-note", viewport="desktop", route=f"/v/{P}/note/{GW}"),
@@ -29,6 +41,15 @@ CURRENT = [
 ]
 
 V2 = [
+    dict(name="desktop-01-notes-provenance", viewport="desktop", route=f"/v/{P}/browse",
+         actions=opened(LEAD, SPRINT, GW, BOARD)),
+    dict(name="desktop-02-note-start-session", viewport="desktop", route=f"/v/{P}/browse",
+         actions=opened(DAILY, LEAD, SPRINT, GW)),
+    dict(name="phone-01-notes-vault-root", viewport="phone", route=f"/v/{P}/browse",
+         actions=opened(DAILY, LEAD, SPRINT, GW) + [("go", f"/v/{P}/browse")]),
+    dict(name="phone-03-note-start-session", viewport="phone", route=f"/v/{P}/note/{GW}"),
+    dict(name="desktop-03-vault-switcher", viewport="desktop", route=f"/v/{P}/note/{GW}",
+         actions=[("tap", "^personal")]),
     dict(name="desktop-04-health-popover", viewport="desktop", route=f"/v/{P}/note/{BOARD}",
          actions=[("tap", "^Status$")]),
     dict(name="phone-02-place-picker", viewport="phone", route=f"/v/{P}/browse",

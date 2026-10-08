@@ -139,10 +139,12 @@ class PropertiesDrawer extends StatelessWidget {
         SizedBox(
           width: context.drawerWidth,
           child: Material(
-            color: t.bg,
-            // No close of its own: the rail's toggle is what opens and shuts
-            // it, and the design draws the header as the word alone.
-            child: PropertiesPanel(content: content, onChanged: onChanged),
+            color: t.surface,
+            child: PropertiesPanel(
+              content: content,
+              onChanged: onChanged,
+              onClose: onClose,
+            ),
           ),
         ),
       ],

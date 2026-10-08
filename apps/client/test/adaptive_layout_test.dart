@@ -121,7 +121,7 @@ void main() {
       final sidebar = find.byType(VaultSidebar);
       Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
 
-      final search = inRail(find.text('Search…'));
+      final search = inRail(find.byKey(const Key('sidebar-search')));
       final actions = inRail(find.byTooltip('Tags'));
       expect(search, findsOneWidget, reason: 'the rail offers search');
       expect(actions, findsOneWidget);
@@ -193,7 +193,7 @@ void main() {
       await enterEditMode(tester);
 
       final bubble = tester.getTopLeft(find.byType(PlacesBubble)).dx;
-      final back = tester.getTopLeft(find.byIcon(LucideIcons.chevron_left)).dx;
+      final back = tester.getTopLeft(find.byKey(const Key('back-link'))).dx;
       final prose = tester.getTopLeft(find.byKey(const Key('note-body'))).dx;
 
       expect(back, moreOrLessEquals(bubble, epsilon: 0.5));
@@ -201,20 +201,27 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('and the header buttons are evenly spaced', (tester) async {
-      // One was left-aligned in its box, one centred and one right-aligned,
-      // so the gaps between the three glyphs were all different.
+    testWidgets('and the phone header is one row: back, mode, session, '
+        'actions, properties', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
 
-      final actions = tester.getTopLeft(find.byIcon(LucideIcons.ellipsis)).dx;
-      final props = tester
-          .getTopLeft(find.byIcon(LucideIcons.sliders_horizontal))
-          .dx;
-      final t = StormTokens.from(StormPreset.stormDark);
-      expect(props - actions, moreOrLessEquals(t.sp * 5.5, epsilon: 0.5));
+      final row = find.byKey(const Key('note-header-row'));
+      double centreY(Finder f) => tester.getCenter(f).dy;
+      final y = centreY(row);
+      for (final f in [
+        find.byKey(const Key('back-link')),
+        find.byKey(const Key('mode-read')),
+        find.byKey(const Key('start-session')),
+        find.byTooltip('Note actions'),
+        find.byTooltip('Properties'),
+      ]) {
+        expect(find.descendant(of: row, matching: f), findsOneWidget);
+        expect(centreY(f), moreOrLessEquals(y, epsilon: 1));
+      }
+      expect(find.text('Session'), findsOneWidget, reason: 'the phone label');
       await disposeShell(tester, c);
     });
   });
@@ -482,15 +489,22 @@ void main() {
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
 
-      expect(find.byType(PropertiesDrawer), findsNothing, reason: 'closed');
+      // Open by default, as the design draws it.
+      expect(find.byType(PropertiesDrawer), findsOneWidget);
+      await tester.tap(find.byTooltip('Properties'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PropertiesDrawer), findsNothing);
       await tester.tap(find.byTooltip('Properties'));
       await tester.pumpAndSettle();
       expect(find.byType(PropertiesDrawer), findsOneWidget);
 
-      // And close again, because a drawer that cannot be dismissed is a
-      // column. The rail's toggle is what does it: the design draws the
-      // drawer's header as the word alone, with no close of its own.
-      await tester.tap(find.byTooltip('Properties'));
+      // And the drawer's own × closes it.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(PropertiesDrawer),
+          matching: find.byTooltip('Close'),
+        ),
+      );
       await tester.pumpAndSettle();
       expect(find.byType(PropertiesDrawer), findsNothing);
       await disposeShell(tester, c);
@@ -506,8 +520,6 @@ void main() {
       await pumpShell(tester, c, size: desk);
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Properties'));
-      await tester.pumpAndSettle();
 
       expect(
         tester.getTopLeft(find.byType(PropertiesDrawer)).dy,
@@ -517,7 +529,9 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('stay open when the next note is opened', (tester) async {
+    testWidgets('keep their state when the next note is opened', (
+      tester,
+    ) async {
       // The drawer is a pane at this width, not a thing belonging to one
       // note's screen — opening a second note built a second state and shut
       // it.
@@ -527,7 +541,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('Properties'));
       await tester.pumpAndSettle();
-      expect(find.byType(PropertiesDrawer), findsOneWidget);
+      expect(find.byType(PropertiesDrawer), findsNothing);
 
       // Out to the browser and into another note, so the note screen's own
       // State is destroyed rather than merely re-keyed.
@@ -536,7 +550,7 @@ void main() {
       c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n1'));
       await tester.pumpAndSettle();
 
-      expect(find.byType(PropertiesDrawer), findsOneWidget);
+      expect(find.byType(PropertiesDrawer), findsNothing, reason: 'still shut');
       await disposeShell(tester, c);
     });
 

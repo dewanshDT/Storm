@@ -17,6 +17,7 @@ import 'shell/storm_scaffold.dart';
 import 'editor_toolbar.dart';
 import 'markdown/storm_markdown_view.dart';
 import 'note_find_bar.dart';
+import 'note_header.dart';
 import 'note_mode_toggle.dart';
 import 'widgets.dart';
 import 'states.dart';
@@ -44,12 +45,22 @@ class NoteEditor extends ConsumerStatefulWidget {
     this.footer,
     this.onActions,
     this.onEscape,
+    this.leading,
+    this.actions = const [],
+    this.provenance,
   });
 
-  /// Pin, attach, rename, delete — reached by long-pressing the status line.
-  ///
-  /// The status line is the note's own chrome at *both* widths; the phone's
-  /// header row does not exist at desk width, and the actions have to.
+  /// The header's start: the crumb on a desktop, "‹ parent" on a phone.
+  final Widget? leading;
+
+  /// After Read | Edit: Start session, then the width's own controls.
+  final List<Widget> actions;
+
+  /// Where the version line's provenance link goes (slice 8).
+  final Widget? provenance;
+
+  /// Pin, attach, rename, delete — reached by long-pressing the version
+  /// line, the one way in at desk width.
   final VoidCallback? onActions;
 
   /// Mentions (and anything else) that belong *inside* the scroll after the
@@ -287,12 +298,12 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     final inset = context.isExpanded
         ? kEditorInset
         : StormChrome.contentInset(context);
-    // The pane's own top padding, all of it — the shell contributes nothing
-    // at this width. Getting it wrong is visible from across the room: the
-    // version line and the sidebar's vault name are meant to share a
-    // baseline, which is what 28 here and 18-around-a-34px-badge there both
-    // land on.
+    // The pane's own top padding; the shell contributes nothing at this width.
     final topInset = context.isExpanded ? kEditorTopInset : 0.0;
+    final meta = session.meta;
+    final title = meta == null
+        ? null
+        : displayTitleFor(meta.path, session.body);
 
     return StormNoteShortcuts(
       onToggleReadEdit: _toggleReadEdit,
@@ -311,17 +322,6 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
               onPrevious: () => _stepFind(-1),
               onClose: _closeFind,
             ),
-          GestureDetector(
-            key: const Key('note-actions'),
-            onLongPress: widget.onActions,
-            behavior: HitTestBehavior.opaque,
-            child: Padding(
-              // The same inset as the prose below it: the design lines the
-              // version up with the note's first character.
-              padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 0.5),
-              child: _statusBar(session, readModeEnabled: readModeEnabled),
-            ),
-          ),
           if (editing && _isDegraded(session)) const _DegradedNotice(),
           if (session.hasConflict)
             ConflictCard(onDismiss: session.dismissNotice)
@@ -336,7 +336,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
           Expanded(
             child: Scrollbar(
               child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(inset, t.sp, inset, t.sp * 15),
+                padding: EdgeInsets.fromLTRB(inset, topInset, inset, t.sp * 15),
                 // Left, not centred. The prototype's note pane is 604px wide, so
                 // its `margin: 0 auto` inside a 640 measure never actually
                 // centres anything — the prose sits 40px from the column's left
@@ -349,6 +349,34 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        _headerRow(readModeEnabled: readModeEnabled),
+                        if (title != null)
+                          Padding(
+                            padding: EdgeInsets.only(top: t.sp * 2.75),
+                            child: Text(
+                              title,
+                              key: const Key('note-title'),
+                              style: TextStyle(
+                                fontFamily: settings.bodyFont.family,
+                                fontSize: t.displaySize,
+                                fontWeight: FontWeight.w600,
+                                height: 1.15,
+                                color: t.text,
+                              ),
+                            ),
+                          ),
+                        GestureDetector(
+                          key: const Key('note-actions'),
+                          onLongPress: widget.onActions,
+                          behavior: HitTestBehavior.opaque,
+                          child: Padding(
+                            padding: EdgeInsets.only(
+                              top: t.sp,
+                              bottom: t.sp * 2.25,
+                            ),
+                            child: _versionLine(session, settings),
+                          ),
+                        ),
                         if (editing)
                           StormEditorShortcuts(
                             controller: _controller,
@@ -569,9 +597,42 @@ class _DegradedNotice extends StatelessWidget {
 }
 
 extension on _NoteEditorState {
-  /// The tone is the meaning, and the meanings are fixed: green is the server
-  /// has it, amber is waiting, danger is it did not go, grey is in flight.
-  Widget _statusBar(NoteSession session, {required bool readModeEnabled}) {
+  Widget _headerRow({required bool readModeEnabled}) {
+    final t = context.tokens;
+    // Tighter on a phone, where the back link needs the room.
+    final gap = context.isExpanded ? t.sp * 1.25 : t.sp * 0.5;
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: t.sp * 4),
+      child: LayoutBuilder(
+        builder: (context, box) => Row(
+          key: const Key('note-header-row'),
+          spacing: gap,
+          children: [
+            Expanded(child: widget.leading ?? const SizedBox.shrink()),
+            // Shrinks rather than overflowing beside a long crumb at 900px.
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: box.maxWidth * 0.82),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  spacing: gap,
+                  children: [
+                    if (readModeEnabled)
+                      NoteModeToggle(mode: _mode, onChanged: _setMode),
+                    ...widget.actions,
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _versionLine(NoteSession session, Settings settings) {
     final (label, tone) = switch (session.saveState) {
       SaveState.idle => ('', SaveTone.working),
       SaveState.dirty => ('Unsaved', SaveTone.working),
@@ -580,21 +641,13 @@ extension on _NoteEditorState {
       SaveState.queued => ('Queued — offline', SaveTone.waiting),
       SaveState.failed => ('Failed', SaveTone.bad),
     };
-    return Row(
-      children: [
-        Expanded(
-          child: StatusBar(
-            version: session.baseVersion,
-            label: label,
-            tone: tone,
-            error: session.error,
-          ),
-        ),
-        if (readModeEnabled) ...[
-          SizedBox(width: context.tokens.sp),
-          NoteModeToggle(mode: _mode, onChanged: _setMode),
-        ],
-      ],
+    return VersionLine(
+      version: session.baseVersion,
+      label: label,
+      tone: tone,
+      noteId: settings.showNoteId ? session.meta?.id : null,
+      error: session.error,
+      provenance: widget.provenance,
     );
   }
 }
