@@ -60,12 +60,20 @@ impl Recorder {
 
     /// Waits for the one ending, and checks there is only one.
     fn wait_end(&self) -> SessionEnd {
-        let deadline = Instant::now() + WAIT;
+        self.wait_end_within(WAIT)
+    }
+
+    /// [`Self::wait_end`] with a budget of its own.
+    fn wait_end_within(&self, budget: Duration) -> SessionEnd {
+        let started = Instant::now();
+        let deadline = started + budget;
         let mut state = self.state.lock().unwrap();
         while state.1.is_empty() {
             let left = deadline
                 .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("the session never ended"));
+                .unwrap_or_else(|| {
+                    panic!("the session did not end within {:?}", started.elapsed())
+                });
             state = self.changed.wait_timeout(state, left).unwrap().0;
         }
         drop(state);
@@ -362,7 +370,15 @@ fn ended_means_the_session_is_empty() {
     ));
     let out = rec.wait_for(":ready");
     let job = pid_after(&out, "bg:");
-    assert_eq!(rec.wait_end(), SessionEnd::Completed { exit_code: Some(0) });
+    // The ending may legitimately take two graces: the agent's exit gives
+    // its group one before the SIGKILL, and the stragglers' pass may give
+    // the job another before reporting (the bound 83d documents). WAIT
+    // alone was less than that, and a slow macOS runner ran past it.
+    let budget = storm_runtime::cli::DEFAULT_GRACE * 2 + Duration::from_secs(5);
+    assert_eq!(
+        rec.wait_end_within(budget),
+        SessionEnd::Completed { exit_code: Some(0) }
+    );
     assert!(!alive(job), "the detached job outlived its session's end");
 }
 
