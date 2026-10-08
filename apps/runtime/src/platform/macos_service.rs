@@ -336,6 +336,15 @@ pub fn uninstall(options: &UninstallOptions) -> Result<()> {
     let layout = Layout::standard();
     if loaded() {
         run(LAUNCHCTL, &["bootout", &format!("system/{LABEL}")])?;
+        // `bootout` returns before launchd has let the job go (the first
+        // real-Mac run still listed it right after uninstall).
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while loaded() {
+            if std::time::Instant::now() > deadline {
+                bail!("launchd still has system/{LABEL} 20 s after bootout");
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
     let remove = |p: &Path| match std::fs::remove_file(p) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
