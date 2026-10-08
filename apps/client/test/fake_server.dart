@@ -88,6 +88,10 @@ class FakeServer {
   /// predates the setting (no `agent_writes` field).
   bool? agentWrites;
 
+  /// The last `PUT /v1/config/mcp` body, to check what the client asked for
+  /// and not only what the server made of it.
+  Map<String, dynamic>? lastMcpBody;
+
   /// The server's release version; null answers as an older server.
   String? version;
 
@@ -220,6 +224,7 @@ class FakeServer {
     // GET /v1/config exactly as it is against the real server.
     if (path == '/v1/config/mcp' && request.method == 'PUT') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
+      lastMcpBody = body;
       // Absent leaves the MCP switches alone, as the real server does.
       if (body['enabled'] case final bool enabled) {
         mcpEnabled = enabled;

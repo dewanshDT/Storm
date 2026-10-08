@@ -164,6 +164,11 @@ void main() {
 
       expect(server.mcpEnabled, isFalse);
       expect(server.mcpWritable, isFalse, reason: 'disarmed with the endpoint');
+      expect(
+        server.lastMcpBody?['writable'],
+        isFalse,
+        reason: 'the client asks for it too, not only the server',
+      );
       expect(valueOf(tester, writeSwitch()), isFalse);
       await disposeShell(tester, c);
     });
