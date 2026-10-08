@@ -202,7 +202,6 @@ class SettingsNav extends StatelessWidget {
           child: const GroupLabel('Storm', bottom: 0),
         ),
         for (final p in kSettingsPages.where((p) => p.storm)) item(p),
-        SizedBox(height: t.sp * 2),
         item(kSettingsPages.last),
       ],
     );
