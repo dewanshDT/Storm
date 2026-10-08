@@ -328,6 +328,22 @@ class StormApi {
     return Note.fromJson(json as Map<String, dynamic>);
   }
 
+  /// Note id → its latest agent write, for every note agents wrote here.
+  Future<Map<String, LatestAgentWrite>> agentWrites(String vaultId) async {
+    final json =
+        _decode(
+              await _client.get(
+                _uri(_v(vaultId, '/agent-writes')),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>;
+    return {
+      for (final e in json.entries)
+        e.key: LatestAgentWrite.fromJson(e.value as Map<String, dynamic>),
+    };
+  }
+
   Future<WriteResult> createNote({
     required String vaultId,
     required String path,

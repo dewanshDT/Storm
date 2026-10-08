@@ -44,19 +44,82 @@ class NoteMeta {
   );
 }
 
+/// The agent session that wrote a note last (`agent_write`), kept after a
+/// human edits it.
+class AgentWrite {
+  const AgentWrite({
+    required this.sessionId,
+    required this.sessionName,
+    required this.sessionDismissed,
+    required this.kind,
+    required this.version,
+    required this.at,
+  });
+
+  final String sessionId;
+  final String sessionName;
+
+  /// The session is gone from the server; its name is still the one it had.
+  final bool sessionDismissed;
+
+  /// `created` or `edited`.
+  final String kind;
+  final int version;
+  final String at;
+
+  bool get created => kind == 'created';
+
+  factory AgentWrite.fromJson(Map<String, dynamic> j) => AgentWrite(
+    sessionId: j['session_id'] as String,
+    sessionName: j['session_name'] as String? ?? '',
+    sessionDismissed: j['session_dismissed'] == true,
+    kind: j['kind'] as String? ?? 'edited',
+    version: (j['version'] as num?)?.toInt() ?? 0,
+    at: j['at'] as String? ?? '',
+  );
+}
+
+/// A note's latest agent write, from `GET …/agent-writes`.
+class LatestAgentWrite {
+  const LatestAgentWrite({
+    required this.version,
+    required this.at,
+    required this.sessionId,
+  });
+
+  final int version;
+  final String at;
+  final String sessionId;
+
+  factory LatestAgentWrite.fromJson(Map<String, dynamic> j) => LatestAgentWrite(
+    version: (j['version'] as num).toInt(),
+    at: j['at'] as String? ?? '',
+    sessionId: j['session_id'] as String? ?? '',
+  );
+}
+
 /// A note with its content.
 class Note {
-  const Note({required this.meta, required this.content});
+  const Note({required this.meta, required this.content, this.agentWrite});
 
   final NoteMeta meta;
   final String content;
+  final AgentWrite? agentWrite;
 
   /// The server flattens metadata alongside `content` in one object.
-  factory Note.fromJson(Map<String, dynamic> j) =>
-      Note(meta: NoteMeta.fromJson(j), content: j['content'] as String? ?? '');
+  factory Note.fromJson(Map<String, dynamic> j) => Note(
+    meta: NoteMeta.fromJson(j),
+    content: j['content'] as String? ?? '',
+    agentWrite: j['agent_write'] is Map<String, dynamic>
+        ? AgentWrite.fromJson(j['agent_write'] as Map<String, dynamic>)
+        : null,
+  );
 
-  Note copyWith({NoteMeta? meta, String? content}) =>
-      Note(meta: meta ?? this.meta, content: content ?? this.content);
+  Note copyWith({NoteMeta? meta, String? content}) => Note(
+    meta: meta ?? this.meta,
+    content: content ?? this.content,
+    agentWrite: agentWrite,
+  );
 }
 
 /// The vault tree plus the change-log position it was read at.

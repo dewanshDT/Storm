@@ -190,6 +190,8 @@ pub struct ContextRef {
 pub struct LaunchMeta {
     pub context: Option<store::Context>,
     pub write_vault_id: Option<String>,
+    /// Connection id → its display name now, kept with the grants.
+    pub integration_names: HashMap<String, String>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -704,6 +706,20 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            let integrations: Vec<store::SessionIntegration> = grants
+                .iter()
+                .filter(|g| g.id != crate::gateway::connections::BUILTIN_ID)
+                .map(|g| store::SessionIntegration {
+                    id: g.id.clone(),
+                    slug: g.slug.clone(),
+                    display_name: meta
+                        .integration_names
+                        .get(&g.id)
+                        .cloned()
+                        .unwrap_or_else(|| g.slug.clone()),
+                })
+                .collect();
+            store.insert_integrations(&record.id, &integrations)?;
             launch
         };
         self.live
@@ -740,6 +756,14 @@ impl AgentManager {
 
     pub fn launch_of(&self, session_id: &str) -> Result<Option<LaunchRecord>> {
         self.store.lock().unwrap().launch(session_id)
+    }
+
+    /// What a session was granted at launch, as it was named then.
+    pub fn integrations_of(&self, session_id: &str) -> Result<Vec<store::SessionIntegration>> {
+        self.store
+            .lock()
+            .unwrap()
+            .integrations_of(session_id, crate::gateway::connections::BUILTIN_ID)
     }
 
     pub fn record_write(&self, write: &WriteRecord) -> Result<()> {
@@ -1127,6 +1151,7 @@ mod tests {
                 title: title.into(),
             }),
             write_vault_id: write_vault.map(Into::into),
+            ..LaunchMeta::default()
         }
     }
 
@@ -1205,6 +1230,7 @@ mod tests {
                 title: format!("Plan {marker}"),
             }),
             write_vault_id: Some(format!("vlt_{marker}")),
+            ..LaunchMeta::default()
         };
         launch_meta(&m, None, offered(), meta).unwrap();
         let wire = serde_json::to_string(&rx.try_recv().unwrap()).unwrap();
@@ -1430,6 +1456,47 @@ mod tests {
         assert_eq!(m.revoke_grants_for("mcc_GH").unwrap(), 1);
         assert_eq!(m.grant(&r.id, "mcc_GH").unwrap(), None);
         assert_eq!(m.grants_of(&r.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_sessions_integrations_are_launch_history_named_as_at_launch() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("claude-code", true), ("shell", true)]));
+        let meta = LaunchMeta {
+            integration_names: [("mcc_GH".to_string(), "GitHub".to_string())].into(),
+            ..LaunchMeta::default()
+        };
+        let (r, _, _) = launch_meta(&m, None, offered(), meta).unwrap();
+        let want = vec![store::SessionIntegration {
+            id: "mcc_GH".into(),
+            slug: "github".into(),
+            display_name: "GitHub".into(),
+        }];
+        assert_eq!(m.integrations_of(&r.id).unwrap(), want, "storm is not one");
+        // A disconnect revokes the grant, not the history.
+        m.revoke_grants_for("mcc_GH").unwrap();
+        assert_eq!(m.integrations_of(&r.id).unwrap(), want);
+
+        let (shell, _) = launch_with(&m, Some("shell"), offered()).unwrap();
+        assert!(m.integrations_of(&shell.id).unwrap().is_empty());
+        end(&m, &r.id);
+        end(&m, &shell.id);
+
+        // A session launched before names were kept shows its grants' slugs.
+        let (old, _) = launch_with(&m, None, offered()).unwrap();
+        m.store
+            .lock()
+            .unwrap()
+            .conn
+            .execute(
+                "DELETE FROM session_integrations WHERE session_id = ?1",
+                rusqlite::params![old.id],
+            )
+            .unwrap();
+        assert_eq!(
+            m.integrations_of(&old.id).unwrap()[0].display_name,
+            "github"
+        );
     }
 
     #[test]

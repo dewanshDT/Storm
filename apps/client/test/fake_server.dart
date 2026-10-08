@@ -68,6 +68,29 @@ class FakeServer {
   /// an empty folder can exist, exactly as on the real server.
   final Map<String, Set<String>> folders = {};
 
+  /// Each note's latest agent writer (`agent_write`), per vault: note id ->
+  /// the field as `GET …/notes/{id}` serves it. Feeds `…/agent-writes` too.
+  final Map<String, Map<String, Map<String, dynamic>>> agentWriteOf = {};
+
+  /// Records [sessionId] as a note's latest agent writer.
+  void agentWrote(
+    String noteId, {
+    required String sessionId,
+    required int version,
+    String sessionName = 'gateway-spec',
+    String kind = 'edited',
+    bool dismissed = false,
+    String vaultId = primaryVault,
+    String? at,
+  }) => (agentWriteOf[vaultId] ??= {})[noteId] = {
+    'session_id': sessionId,
+    'session_name': sessionName,
+    'session_dismissed': dismissed,
+    'kind': kind,
+    'version': version,
+    'at': at ?? DateTime.now().toUtc().toIso8601String(),
+  };
+
   /// Server-recorded opens, per vault: note id -> ISO timestamp.
   final Map<String, Map<String, String>> opened = {};
 
@@ -454,6 +477,21 @@ class FakeServer {
       );
     }
 
+    if (path == '/v1/agent-writes') {
+      return http.Response(
+        jsonEncode({
+          for (final e in (agentWriteOf[vaultId] ?? const {}).entries)
+            e.key: {
+              'version': e.value['version'],
+              'at': e.value['at'],
+              'session_id': e.value['session_id'],
+            },
+        }),
+        200,
+        headers: j(''),
+      );
+    }
+
     if (path == '/v1/tree') {
       treeRequests++;
       return http.Response(
@@ -537,7 +575,11 @@ class FakeServer {
         return http.Response('{"error":"no such note"}', 404, headers: j(''));
       }
       return http.Response(
-        jsonEncode({...note.meta, 'content': note.content}),
+        jsonEncode({
+          ...note.meta,
+          'content': note.content,
+          'agent_write': ?agentWriteOf[vaultId]?[id],
+        }),
         200,
         headers: j(''),
       );

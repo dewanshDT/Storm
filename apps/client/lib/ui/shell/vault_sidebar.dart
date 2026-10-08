@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../api/models.dart';
 import '../../keyboard/storm_activators.dart' show stormChordLabel;
 import '../../router.dart';
+import '../../state/agent_writes.dart' show unseenNotesProvider;
 import '../../state/app_state.dart';
 import '../browse_screen.dart' show childrenOfFolder, showFolderActions;
 import '../controls.dart';
@@ -27,7 +28,8 @@ const kSidebarWidth = 260.0;
 class VaultSidebar extends ConsumerWidget {
   const VaultSidebar({super.key, this.unseen});
 
-  /// Whether a note changed under an agent since it was last opened here.
+  /// Whether a note changed under an agent since it was last opened here;
+  /// by default, [unseenNotesProvider] for the vault.
   final bool Function(String noteId)? unseen;
 
   @override
@@ -36,6 +38,7 @@ class VaultSidebar extends ConsumerWidget {
     final notes = ref.watch(treeProvider);
     final known = ref.watch(vaultFoldersProvider);
     final vaultId = ref.watch(activeVaultProvider);
+    final unseenIds = ref.watch(unseenNotesProvider(vaultId));
     final vaultName =
         (ref.watch(vaultsProvider).value ?? const <VaultInfo>[])
             .where((v) => v.id == vaultId)
@@ -79,7 +82,7 @@ class VaultSidebar extends ConsumerWidget {
                   data: (list) => FolderTree(
                     notes: list,
                     knownFolders: known,
-                    unseen: unseen,
+                    unseen: unseen ?? unseenIds.contains,
                   ),
                 ),
               ],

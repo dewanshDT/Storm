@@ -39,6 +39,7 @@ Map<String, dynamic> agentSession(
   int wroteCount = 0,
   String? endReason,
   int? exitCode,
+  List<Map<String, dynamic>>? integrations,
 }) => {
   'id': id,
   'host_id': hostId,
@@ -60,6 +61,7 @@ Map<String, dynamic> agentSession(
   'context': context,
   'write_vault_id': writeVaultId,
   'wrote_count': wroteCount,
+  'integrations': ?integrations,
 };
 
 class FakeAgentServer {

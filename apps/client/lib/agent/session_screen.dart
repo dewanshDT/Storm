@@ -137,6 +137,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   @override
   Widget build(BuildContext context) {
     final controller = ref.watch(sessionControllerProvider(_id));
+    // The lists' "wrote n" and the notes' dots follow this session's writes
+    // now, not at the next list poll.
+    ref.listen(sessionDetailProvider(_id).select((s) => s.value?.wroteCount), (
+      before,
+      now,
+    ) {
+      if (before != null && now != null && before != now) {
+        ref.invalidate(agentOverviewProvider);
+      }
+    });
     final detail = ref.watch(sessionDetailProvider(_id));
     final overview = ref.watch(agentOverviewProvider).value;
     return ListenableBuilder(
@@ -353,6 +363,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             : _NotePanel(
                 key: ValueKey('context-${s.context!.noteId}'),
                 at: (vaultId: s.context!.vaultId, noteId: s.context!.noteId),
+                sessionId: s.id,
                 title: s.context!.title,
               ),
       SessionTab.wrote =>
@@ -360,6 +371,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ? _NotePanel(
                 key: ValueKey('wrote-${_wroteNote!.noteId}'),
                 at: _wroteNote!,
+                sessionId: s.id,
                 onBack: () => setState(() => _wroteNote = null),
               )
             : _WroteList(
@@ -477,7 +489,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   label: '▤ ${s.context!.title}',
                   color: t.text,
                   onTap: () => context.push(
-                    Routes.note(s.context!.vaultId, s.context!.noteId),
+                    Routes.note(
+                      s.context!.vaultId,
+                      s.context!.noteId,
+                      session: s.id,
+                    ),
                   ),
                 ),
               _Chip(
@@ -608,7 +624,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           host: host,
           onOpenNote: (at) {
             Navigator.of(sheet).pop();
-            context.push(Routes.note(at.vaultId, at.noteId));
+            context.push(Routes.note(at.vaultId, at.noteId, session: s.id));
           },
           onEnd: () async {
             await _end(c);
@@ -865,15 +881,27 @@ class _BarButton extends StatelessWidget {
 /// and body (handoff §3.6). [title] is the launch snapshot for a context
 /// note; a written note shows its own.
 class _NotePanel extends ConsumerWidget {
-  const _NotePanel({super.key, required this.at, this.title, this.onBack});
+  const _NotePanel({
+    super.key,
+    required this.at,
+    required this.sessionId,
+    this.title,
+    this.onBack,
+  });
 
   final NoteRef at;
+  final String sessionId;
   final String? title;
   final VoidCallback? onBack;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
+    // A write by this session may be to this very note.
+    ref.listen(
+      sessionDetailProvider(sessionId).select((s) => s.value?.wroteCount),
+      (_, _) => ref.invalidate(agentNoteProvider(at)),
+    );
     final note = ref.watch(agentNoteProvider(at));
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
     final vault =
@@ -946,7 +974,11 @@ class _NotePanel extends ConsumerWidget {
           ),
           if (n != null) ...[
             SizedBox(height: t.sp * 1.25),
-            Text('v${n.meta.version}', style: _mono(t, t.labelSize * 1.09)),
+            Text(
+              panelVersionLine(n, sessionId),
+              key: const Key('panel-version-line'),
+              style: _mono(t, t.labelSize * 1.09),
+            ),
             SizedBox(height: t.sp * 1.25),
             StormMarkdownView(markdown: fm.split(n.content).body),
           ] else if (note.isLoading)
@@ -967,6 +999,17 @@ class _NotePanel extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// `v14`, and whether [sessionId] is the note's latest agent writer.
+String panelVersionLine(Note n, String sessionId) {
+  final w = n.agentWrite;
+  final by = w == null || w.sessionId != sessionId
+      ? ''
+      : w.created
+      ? ' · created by this session'
+      : ' · edited by this session';
+  return 'v${n.meta.version}$by';
 }
 
 /// "new", or the version a session left a note at.
@@ -1127,6 +1170,19 @@ List<(String, String)> aboutRows(
   ('Network', 'Inherits $host’s policy'),
 ];
 
+/// What the session was granted at launch (launch history); from a server
+/// that does not say, the account's connections now.
+List<String>? sessionIntegrations(WidgetRef ref, AgentSession s) {
+  if (s.integrations != null) return s.integrations;
+  final connections = ref.watch(integrationsSummaryProvider).value;
+  return connections == null
+      ? null
+      : [
+          for (final i in connections)
+            if (!i.builtin && !i.disabled) i.displayName,
+        ];
+}
+
 class _About extends ConsumerWidget {
   const _About({required this.session, required this.host});
 
@@ -1136,7 +1192,6 @@ class _About extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
-    final connections = ref.watch(integrationsSummaryProvider).value;
     return KeyValueList(
       key: const Key('session-about'),
       rows: aboutRows(
@@ -1146,12 +1201,7 @@ class _About extends ConsumerWidget {
             .where((v) => v.id == session.writeVaultId)
             .firstOrNull
             ?.name,
-        integrations: connections == null
-            ? null
-            : [
-                for (final i in connections)
-                  if (!i.builtin && !i.disabled) i.displayName,
-              ],
+        integrations: sessionIntegrations(ref, session),
       ),
     );
   }
@@ -1191,7 +1241,6 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
     final s = (record ?? widget.fallback).withLive(live?.session);
     final writes = ref.watch(sessionWritesProvider(s.id)).value;
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
-    final connections = ref.watch(integrationsSummaryProvider).value;
     final label = TextStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: t.labelSize,
@@ -1202,12 +1251,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
       s,
       host: widget.host,
       writeVault: vaults.where((v) => v.id == s.writeVaultId).firstOrNull?.name,
-      integrations: connections == null
-          ? null
-          : [
-              for (final i in connections)
-                if (!i.builtin && !i.disabled) i.displayName,
-            ],
+      integrations: sessionIntegrations(ref, s),
     );
 
     final children = <Widget>[

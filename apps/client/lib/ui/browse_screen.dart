@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
 import '../router.dart';
+import '../state/agent_writes.dart' show unseenNotesProvider;
 import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'breakpoints.dart';
@@ -30,6 +31,7 @@ class BrowseScreen extends ConsumerWidget {
     final notes = ref.watch(treeProvider);
     final vaultId = VaultGate.of(context);
     final known = ref.watch(vaultFoldersProvider);
+    final unseen = ref.watch(unseenNotesProvider(vaultId));
 
     // The sidebar is the browser at this width.
     if (context.isExpanded) return const NoNoteSelected();
@@ -121,7 +123,17 @@ class BrowseScreen extends ConsumerWidget {
                   onAction: () => NewNoteRequest.of(context)?.call(),
                 )
               else
-                for (final entry in entries) EntryTile(entry: entry),
+                for (final entry in entries)
+                  EntryTile(
+                    entry: entry,
+                    unseen: entry.isFolder
+                        ? list.any(
+                            (n) =>
+                                n.path.startsWith('${entry.path}/') &&
+                                unseen.contains(n.id),
+                          )
+                        : unseen.contains(entry.note!.id),
+                  ),
             ],
           );
         },
@@ -319,7 +331,8 @@ class EntryTile extends ConsumerWidget {
 
   final BrowseEntry entry;
 
-  /// Slice 8 feeds this from the agent-writes data.
+  /// An agent changed it, or something under it, since it was last opened
+  /// here.
   final bool unseen;
 
   @override
