@@ -314,7 +314,7 @@ impl TerminalChannel for CliTerminal {
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.ensure_running()?;
         let deadline = std::time::Instant::now() + INPUT_DEADLINE;
-        for chunk in bytes.chunks(256) {
+        for chunk in bytes.chunks(crate::platform::PTY_WRITE_CHUNK) {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if !crate::platform::wait_writable(self.writer.as_fd(), left)? {
                 return Err(io::Error::new(

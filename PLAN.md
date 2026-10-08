@@ -4374,6 +4374,13 @@ Then real-Mac acceptance, AC-M1–AC-M9.
     `FD_SETSIZE` on Apple.
   - **Guard:** `input_to_an_agent_that_never_reads_times_out_instead_of_hanging`.
     It is mutation-checked: a wait that always says "writable" makes it fail.
+  - **The first run on a real Mac (CI, `macos-latest`) still hung.** xnu's
+    `ptcselect` calls a master writable while the slave's queue is below
+    `TTYHOG - 2`, which may be room for one byte. `ptcwrite` then sleeps
+    until a whole 256-byte chunk fits. So "writable" bounds only the first
+    byte. **Fix:** `platform::PTY_WRITE_CHUNK` is 1 on macOS (256 on Linux,
+    as verified), so no write after a wait can block. The same test is the
+    guard.
 - **The default host name** read `/proc/sys/kernel/hostname` and
   `/etc/hostname`, neither of which exists on macOS. Every Mac would have
   enrolled as `runtime-host`. It now comes from `uname`'s node name, with
