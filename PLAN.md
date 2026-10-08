@@ -4731,6 +4731,17 @@ the suite there. Three rounds:
   - **AC-M9** (Linux unchanged) is the Linux CI and `agent_e2e.py` (85/85).
   - **CI is green on all seven PRs.**
 
+**Found while writing the manual checklist: git and the shared root.** Git
+refuses a repository another uid owns ("dubious ownership") and ignores
+ACLs. In AM39's shared root, the agent's git would therefore have failed in
+every checkout the operator made.
+- **The fix:** `install` adds `safe.directory = <workspaces>/*` to the
+  `_stormruntime` account's `~/.gitconfig`, once, leaving the rest of the
+  file alone.
+- **The operator's side:** `install` prints the same line for the
+  operator's own git config, which it never edits.
+- **Guards:** a pure, tested merge function, and an AC-M7 harness check.
+
 **What still needs the operator's Mac:**
 - **The four MANUAL rows**, ideally with the real Claude Code login as
   `_stormruntime`. Claude Code on macOS may keep its login in a Keychain

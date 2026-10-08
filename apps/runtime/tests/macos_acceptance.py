@@ -620,6 +620,12 @@ def main():
         check("M7", "the operator writes in the workspace", wrote is True, wrote)
         out = owner.run(sid, "cat operator.txt && echo more >> operator.txt; printf 'R%s\\n' $?")
         check("M7", "the agent reads and writes the operator's file", "from-operator" in out and re.search(r"R0\b", out) is not None, out[-200:])
+        # Git checks the owner's uid and ignores ACLs: install's safe.directory
+        # is what lets the agent's git work in a checkout the operator made.
+        rc, out = sh(["git", "init", "-q", os.path.join(WORKSPACES, WS, "op-repo")])
+        check("M7", "the operator creates a git checkout in the workspace", rc == 0, out)
+        out = owner.run(sid, "git -C op-repo status --short >/dev/null; printf 'G%s\\n' $?")
+        check("M7", "the agent's git works in the operator's checkout (safe.directory)", re.search(r"G0\b", out) is not None, out[-300:])
         documents = os.path.join(OPERATOR_HOME, "Documents")
         for label, path in [("the operator's home", OPERATOR_HOME), ("~/Documents", documents),
                             ("the server's state tree", SERVER_STATE), ("the vaults", VAULTS)]:

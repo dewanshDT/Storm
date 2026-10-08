@@ -640,6 +640,15 @@ Storm never stores or transmits what is in it. Also, a login running as
   `_stormruntime`, and one for you (the `sudo` user, or `--operator <user>`).
   A checkout made by you or by an agent stays readable and writable by both,
   and you can work in it without `sudo`.
+- **Git checks a repository's owner and ignores ACLs.** It refuses a checkout
+  another account owns ("detected dubious ownership"). `install` already
+  makes the host's git trust every workspace. Do the same for your own git,
+  once:
+
+  ```sh
+  git config --global --add safe.directory '/Library/StormRuntime/workspaces/*'
+  ```
+
 - **To put an existing project in front of an agent, clone or move it into
   the root:**
 
