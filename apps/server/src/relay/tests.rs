@@ -1193,20 +1193,10 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
         "no credential, no stream — relayed or not"
     );
 
-    let member = crate::api::tests::seed_member(&state, "member").await;
-    let member_token = crate::api::tests::session_token(&state, &member).await;
-    let refused = relay
-        .request(
-            2,
-            TunnelRequest::get(&path).header("authorization", &format!("Bearer {member_token}")),
-        )
-        .await;
-    assert_eq!(refused.status, 403, "the owner check holds over the relay");
-
     let token = crate::api::tests::session_token(&state, &owner).await;
     let streamed = relay
         .request(
-            3,
+            2,
             TunnelRequest::get(&path).header("authorization", &format!("Bearer {token}")),
         )
         .await;

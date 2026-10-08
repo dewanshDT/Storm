@@ -43,6 +43,7 @@ import os
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -389,85 +390,143 @@ check("an invented nonce is refused", status == 401, status)
 
 print("--- the device tier ---")
 
-status, _ = call("GET", "/v1/users")
-check("the user list refuses an anonymous caller", status == 401, status)
+# Single-user Storm (decision 82): there is no user list to probe the tier
+# with. Login is the device-tier route every client uses, and before setup it
+# answers a paired device with `invalid_credentials` — a credential answer,
+# which proves the tier let it through — and everyone else at the tier.
+status, _ = call("POST", "/v1/auth/login", {"password": "anything-at-all"})
+check("login refuses a caller with no device credential", status == 401, status)
 
-# A10: the legacy shared token is owner-equivalent on *session* routes and must
-# not reach the device tier. Since the cutover it reaches nothing at all, which
-# is the stronger form of the same guarantee.
-status, _ = call("GET", "/v1/users", token=RETIRED_TOKEN)
+# A10: the retired shared token reaches nothing at all.
+status, _ = call("POST", "/v1/auth/login", {"password": "anything-at-all"}, token=RETIRED_TOKEN)
 check("the retired shared token cannot reach the device tier", status == 401, status)
 
-status, users = call("GET", "/v1/users", auth=DEVICE)
-check("a paired device may list users", status == 200, (status, users))
-check("a fresh server has no accounts yet", users == [], users)
+status, before_setup = call("POST", "/v1/auth/login", {"password": "anything-at-all"}, auth=DEVICE)
+check(
+    "a paired device reaches login, and a fresh server has no account to sign into",
+    status == 401 and before_setup.get("error") == "invalid_credentials",
+    (status, before_setup),
+)
 
-print("--- POST /v1/users/first ---")
+status, _ = call("GET", "/v1/users", auth=DEVICE)
+check("the user list is gone", status != 200, status)
+status, _ = call("GET", "/v1/auth/registration", auth=DEVICE)
+check("registration is gone", status != 200, status)
+
+print("--- login rate limiting (before setup: no account, so no lockout) ---")
+
+# The throttle and the account lockout answer with the *same* 429 shape, so a
+# flood after setup could not say which one refused it. Before setup there is
+# no account (decision 82: one account, no usernames), so no lockout is
+# possible and a 429 here can only be the rate limiter.
+#
+# That is also the case the limiter exists for: every attempt still pays a
+# full Argon2id verify — deliberately, so response time cannot say whether
+# this Storm is set up — and can never trigger a lockout, which is what makes
+# it the cheapest way to take the login path down.
+#
+# **The burst has to be concurrent.** Sent one at a time, each attempt costs a
+# whole Argon2id verify (seconds, in the debug build `make test-live` uses) and
+# the bucket refills faster than the requests arrive — so the limiter correctly
+# allows every one of them and the suite proves nothing. A real flood does not
+# wait for its own responses, and neither does this.
+FLOOD = 45
+
+flood_results = []
+flood_lock = threading.Lock()
+
+
+def one_junk_login(n):
+    try:
+        result = call_full(
+            "POST",
+            "/v1/auth/login",
+            {"password": f"not-the-password-{n}"},
+            auth=DEVICE,
+        )
+    except Exception as e:  # a dropped connection is a result to report, not a crash
+        result = (None, {"error": str(e)}, {})
+    with flood_lock:
+        flood_results.append(result)
+
+
+flood = [threading.Thread(target=one_junk_login, args=(n,)) for n in range(FLOOD)]
+for thread in flood:
+    thread.start()
+for thread in flood:
+    thread.join()
+
+seen = sorted({str(status) for status, _, _ in flood_results})
+statuses = [status for status, _, _ in flood_results]
+throttled = next(
+    ((body, headers) for status, body, headers in flood_results if status == 429),
+    None,
+)
+
+check(f"a concurrent flood of {FLOOD} junk logins is throttled", throttled is not None, seen)
+check("the flood is throttled rather than refused outright", 401 in statuses, seen)
+if throttled:
+    body, headers = throttled
+    retry_header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
+    check(
+        "the throttle carries a Retry-After header",
+        retry_header is not None,
+        sorted(headers),
+    )
+    check(
+        "the throttle's Retry-After parses as seconds",
+        retry_header is not None and retry_header.isdigit() and int(retry_header) > 0,
+        retry_header,
+    )
+    check(
+        "the throttle reuses the rate_limited body",
+        body.get("error") == "rate_limited",
+        body,
+    )
+    check(
+        "and the body says how long to wait",
+        isinstance(body.get("retry_after"), int) and body["retry_after"] > 0,
+        body,
+    )
+
+# The bucket (30, refilling at 30 a minute) is empty now, and the login
+# checks below are real logins from the same address. Wait for enough of it to
+# come back that a refusal below is never the throttle's.
+time.sleep(30)
+
+print("--- POST /v1/users/first (setup) ---")
 
 PASSWORD = "a-long-enough-password"
 
-status, _ = call(
-    "POST", "/v1/users/first", {"username": "dewansh", "password": "short"}, auth=DEVICE
-)
+status, _ = call("POST", "/v1/users/first", {"password": "short"}, auth=DEVICE)
 check("a short password is refused", status == 422, status)
 
 # Refused rather than truncated: accept 200 characters, hash the first 72, and
 # every password sharing that prefix opens the account.
-status, _ = call(
-    "POST",
-    "/v1/users/first",
-    {"username": "dewansh", "password": "x" * 1100},
-    auth=DEVICE,
-)
+status, _ = call("POST", "/v1/users/first", {"password": "x" * 1100}, auth=DEVICE)
 check("an over-long password is refused, not truncated", status == 422, status)
 
-status, _ = call(
-    "POST", "/v1/users/first", {"username": "dewänsh", "password": PASSWORD}, auth=DEVICE
-)
-check("a non-ASCII username is refused", status == 422, status)
+status, _ = call("POST", "/v1/users/first", {"password": PASSWORD}, auth=DEVICE)
+check("the account is set up", status == 201, status)
 
-status, _ = call(
-    "POST", "/v1/users/first", {"username": "dewansh", "password": PASSWORD}, auth=DEVICE
-)
-check("the first account is created", status == 201, status)
-
-# The window closes and stays closed. A *different* username, so a
-# duplicate-name refusal cannot be what makes this pass — which is exactly how
-# the hole stayed open: this handler hardcodes the owner role, so a second
-# account through it is a second owner.
-status, second = call(
-    "POST",
-    "/v1/users/first",
-    {"username": "someone-else", "password": PASSWORD},
-    auth=DEVICE,
-)
-check("the bootstrap window is closed afterwards", status == 409, (status, second))
-
-status, users = call("GET", "/v1/users", auth=DEVICE)
-check("and no second account reached the table", len(users) == 1, users)
-check(
-    "the first account is an owner",
-    bool(users) and str(users[0].get("role", "")).lower() == "owner",
-    users,
-)
-check(
-    "a listed user carries no password material",
-    users and not any("hash" in k or "password" in k for k in users[0]),
-    sorted(users[0]) if users else [],
-)
+# The window closes and stays closed — with or without the username a v0.3.x
+# client still sends.
+for body in ({"password": PASSWORD}, {"username": "someone-else", "password": PASSWORD}):
+    status, second = call("POST", "/v1/users/first", body, auth=DEVICE)
+    check(f"setup is closed afterwards ({sorted(body)})", status == 409, (status, second))
 
 print("--- POST /v1/auth/login ---")
 
 status, refused = call(
     "POST",
     "/v1/auth/login",
-    {"username": "dewansh", "password": "not-the-password"},
+    {"password": "not-the-password"},
     auth=DEVICE,
 )
 check("a wrong password is refused", status == 401, (status, refused))
 
 status, session = call(
-    "POST", "/v1/auth/login", {"username": "dewansh", "password": PASSWORD}, auth=DEVICE
+    "POST", "/v1/auth/login", {"password": PASSWORD}, auth=DEVICE
 )
 check("the right password issues a session", status == 200, (status, session))
 if status != 200:
@@ -540,7 +599,7 @@ check("a replayed refresh token revokes the whole session", status == 401, statu
 print("--- logout ---")
 
 status, fresh = call(
-    "POST", "/v1/auth/login", {"username": "dewansh", "password": PASSWORD}, auth=DEVICE
+    "POST", "/v1/auth/login", {"password": PASSWORD}, auth=DEVICE
 )
 check("logging in again after the replay revocation works", status == 200, status)
 if status != 200:
@@ -565,7 +624,7 @@ for attempt in range(8):
     status, body, headers = call_full(
         "POST",
         "/v1/auth/login",
-        {"username": "dewansh", "password": "not-the-password"},
+        {"password": "not-the-password"},
         auth=DEVICE,
     )
     if status == 429:
@@ -595,85 +654,6 @@ if locked:
         body,
     )
     check("the lockout is a 429, never a 401", body.get("error") == "rate_limited", body)
-
-print("--- login rate limiting (after the lockout: it spends the bucket) ---")
-
-# The throttle and the per-user lockout answer with the *same* 429 shape, so a
-# test using a real username could not say which one refused it. Every attempt
-# below uses a username that does not exist: no account means no lockout is
-# possible, so a 429 here can only be the rate limiter.
-#
-# That is also the case the limiter exists for. A junk username still pays for
-# a full Argon2id verify — deliberately, so response time cannot enumerate
-# accounts — and can never trigger a lockout, which is what makes it the
-# cheapest way to take the login path down.
-#
-# **The burst has to be concurrent.** Sent one at a time, each attempt costs a
-# whole Argon2id verify (seconds, in the debug build `make test-live` uses) and
-# the bucket refills faster than the requests arrive — so the limiter correctly
-# allows every one of them and the suite proves nothing. A real flood does not
-# wait for its own responses, and neither does this.
-#
-# Runs last for the same reason the lockout does: it leaves the caller's bucket
-# empty for a couple of minutes.
-FLOOD = 45
-
-flood_results = []
-flood_lock = threading.Lock()
-
-
-def one_junk_login(n):
-    try:
-        result = call_full(
-            "POST",
-            "/v1/auth/login",
-            {"username": f"no-such-user-{n}", "password": "not-the-password"},
-            auth=DEVICE,
-        )
-    except Exception as e:  # a dropped connection is a result to report, not a crash
-        result = (None, {"error": str(e)}, {})
-    with flood_lock:
-        flood_results.append(result)
-
-
-flood = [threading.Thread(target=one_junk_login, args=(n,)) for n in range(FLOOD)]
-for thread in flood:
-    thread.start()
-for thread in flood:
-    thread.join()
-
-seen = sorted({str(status) for status, _, _ in flood_results})
-statuses = [status for status, _, _ in flood_results]
-throttled = next(
-    ((body, headers) for status, body, headers in flood_results if status == 429),
-    None,
-)
-
-check(f"a concurrent flood of {FLOOD} junk logins is throttled", throttled is not None, seen)
-check("the flood is throttled rather than refused outright", 401 in statuses, seen)
-if throttled:
-    body, headers = throttled
-    retry_header = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
-    check(
-        "the throttle carries a Retry-After header",
-        retry_header is not None,
-        sorted(headers),
-    )
-    check(
-        "the throttle's Retry-After parses as seconds",
-        retry_header is not None and retry_header.isdigit() and int(retry_header) > 0,
-        retry_header,
-    )
-    check(
-        "the throttle reuses the rate_limited body",
-        body.get("error") == "rate_limited",
-        body,
-    )
-    check(
-        "and the body says how long to wait",
-        isinstance(body.get("retry_after"), int) and body["retry_after"] > 0,
-        body,
-    )
 
 # What this suite cannot cover, stated rather than silently skipped: every
 # request here comes from one address, so the *global* ceiling and the

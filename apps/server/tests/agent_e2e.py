@@ -222,15 +222,6 @@ args = ["-i"]
     try:
         owner, device, _ = storm_auth.sign_in(BASE, log_path=SERVER_LOG)
 
-        # A member, to prove the routes are the owner's alone.
-        subprocess.run(
-            [SERVER_BIN, "user", "add", "member", "--role", "member", "--state", STATE, "--password-stdin"],
-            input=storm_auth.PASSWORD.encode(), check=True, capture_output=True,
-        )
-        status, login = call("POST", "/v1/auth/login",
-                             {"username": "member", "password": storm_auth.PASSWORD}, auth=device)
-        member = f"Bearer {login['access_token']}"
-
         print("\n=== enrollment ===")
         status, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)
         check("the owner issues an enrollment", status == 200, issued)
@@ -257,17 +248,18 @@ args = ["-i"]
         status, wss = call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=owner)
         check("workspaces carry live counts", status == 200 and all("live_sessions" in w for w in wss), wss)
 
-        print("\n=== the boundary (AC-S1, AC-S2) ===")
+        print("\n=== the boundary (AC-S1, AC-S2; single user since decision 82) ===")
+        # One account; what remains to prove is that only a signed-in session
+        # reaches agents. An access key acts as the account too, but only on
+        # /mcp, so every agent route refuses it at the tier.
+        key = storm_auth.mint_mcp_key(BASE, owner)
         for method, path in [("GET", "/v1/agent/hosts"), ("GET", "/v1/agent/sessions"),
                              ("GET", "/v1/config/agent"), ("POST", "/v1/agent/sessions")]:
             body = {"host_id": host_id, "workspace": "storm", "terminal": {"cols": 80, "rows": 24}} if method == "POST" else None
-            status, _ = call(method, path, body, auth=member)
-            check(f"a member gets 403 on {method} {path}", status == 403, status)
+            status, _ = call(method, path, body, auth=f"Bearer {key}")
+            check(f"an access key gets 401 on {method} {path}", status == 401, status)
         status, _ = call("GET", "/v1/runtime/whoami", auth=owner)
         check("a session token is refused on /v1/runtime/*", status == 401, status)
-        key = storm_auth.mint_mcp_key(BASE, owner)
-        status, _ = call("GET", "/v1/agent/sessions", auth=f"Bearer {key}")
-        check("an MCP key is refused on /v1/agent/*", status == 401, status)
 
         print("\n=== AC-A1: the fake provider through the manager and the link ===")
         status, rec = launch(owner, host_id, provider="fake")

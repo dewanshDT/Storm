@@ -282,14 +282,12 @@ From M19 slice 2 (users and passwords):
   characters, hash the first 72, and every password sharing that prefix opens
   the account. A test hashes 1000 bytes and checks that a variant differing at
   byte 900 fails.
-- **The first account is an owner, and the last *active* owner cannot be
-  deleted, disabled or demoted.** Disabled owners do not count: an account that
-  cannot log in cannot administer, so leaving only disabled ones is the same
-  lockout as leaving none. SQLite cannot express either rule.
-- **Usernames are ASCII and unique by casefold.** Uniqueness is decided on the
-  fold, so the fold must be unambiguous — Unicode brings locale-dependent case
-  rules and homoglyphs, and two visually identical usernames as separate rows
-  is a security bug. `display_name` is unrestricted.
+- **Storm is single-user** (decision 82). `users` is the one-row account table
+  (`only_row`), password only — no usernames, roles or status. `auth.db` v6
+  (`auth/single_user.rs`) collapsed older databases onto the oldest active
+  owner after writing `auth.db.pre-v6`, in one transaction; its invariants are
+  checked on every open. `agent.db`/`gateway.db` are reconciled on every boot
+  (`ops::reconcile_single_user`). `user_id` columns hold the account id.
 - **No `--password` flag, in any command, ever.** A password in an argument is
   in the shell history and in `ps` for every other user on the box. Prompt
   without echo, or read `--password-stdin`.
@@ -445,10 +443,9 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
 - **The data key is a file, `0600` in a `0700` directory, created with those
   modes.** A missing key at boot is not a lockout: a new key becomes active
   and the affected connections become `needs_reauth`.
-- **Integrations are the owner's alone, on the session tier** (81c). Every
-  `/v1/integrations/*` operation calls `ops::require_integration_owner`, and
-  a connection is found only among the caller's own rows (`404` otherwise).
-  No MCP tool manages one, so an `stk_` key never can.
+- **Integrations are managed on the session tier only** (81c). A connection
+  is found only among the account's own rows (`404` otherwise). No MCP tool
+  manages one, so an `stk_` key never can.
 - **A connection's URL, slug and auth kind never change after creation.** A
   credential is presented only to its own upstream (AM24); re-pointing a
   connection would hand its token to a new host. The store's update does not
@@ -468,8 +465,8 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   only. `--gateway-allow-http-upstreams` is hidden and exists for the test
   suites.
 - **Every agent call is authorized in `ops::integration_call`, per call**
-  (spec §7, 81e): host owns session, session live, live grant, owner active,
-  connection the owner's and `connected`, method permitted, tool allowed,
+  (spec §7, 81e): host owns session, session live, live grant, owner is the account,
+  connection the account's and `connected`, method permitted, tool allowed,
   and vault writes only under the launch flag **and** `mcp_writable`. A
   refusal is a JSON-RPC error with a stable code, never an HTTP error.
 - **A request the gateway did not forward is `session_unknown`, and nothing
@@ -482,7 +479,7 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
 - **The host is told connection ids and slugs, never a credential** (AM23);
   `shell` and a host without `mcp_bridge` get no grants. **Agents never see
   `delete_note`** (`mcp::NEVER_FOR_AGENTS`), and `Actor::Agent` is the
-  session owner's identity, read through `user_id()`/`role()`.
+  account's identity, read through `user_id()`.
 - **The bridge never retries, and replays `initialize` only on
   `session_unknown`** (81f, spec §11). `apps/runtime/src/bridge.rs`'s six
   rules each have a test, and `gateway_e2e.py` catches the gates' `leak_init`,

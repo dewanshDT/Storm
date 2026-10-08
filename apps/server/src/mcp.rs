@@ -720,7 +720,6 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 let mine = Actor::Session {
                     user_id: format!("usr_{i}"),
-                    role: crate::auth::users::Role::Member,
                 };
                 MCP_ACTOR
                     .scope(mine, async move {
@@ -768,7 +767,6 @@ mod tests {
     fn a_handler_with_an_identity_hands_it_over() {
         let actor = Actor::Session {
             user_id: "usr_1".into(),
-            role: crate::auth::users::Role::Member,
         };
         assert!(matches!(
             resolve_actor(Some(&actor)),

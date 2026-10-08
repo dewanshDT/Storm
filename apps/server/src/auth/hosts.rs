@@ -623,7 +623,7 @@ pub fn enrollment_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::users::{NewUser, Role, create_user};
+    use crate::auth::account::create_account;
     use ed25519_dalek::{Signer, SigningKey};
 
     const NOW: &str = "2026-10-03T12:00:00Z";
@@ -637,18 +637,8 @@ mod tests {
 
     fn db_with_owner() -> (AuthDb, String) {
         let mut db = AuthDb::open_in_memory().unwrap();
-        let user = create_user(
-            &mut db,
-            NewUser {
-                username: "owner",
-                display_name: None,
-                password_hash: "x",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-        (db, user.id)
+        let account = create_account(&mut db, "x", NOW).unwrap();
+        (db, account.id)
     }
 
     fn key() -> SigningKey {

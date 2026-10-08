@@ -149,7 +149,7 @@ class Harness:
         log(f"server up at {BASE} (state in {self.tmp})")
 
     def claim(self):
-        session, _device, _uid = storm_auth.sign_in(BASE, username=USERNAME, log_path=self.server_log)
+        session, _device, _uid = storm_auth.sign_in(BASE, log_path=self.server_log)
         self.session = session
         _, v = storm_auth._call(BASE, "GET", "/v1/vaults", auth=session)
         for vault in v["vaults"]:

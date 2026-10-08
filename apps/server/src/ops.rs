@@ -834,34 +834,6 @@ pub struct CreatedApiKey {
     pub secret: String,
 }
 
-/// The user a key operation acts on, and the refusal if the caller may not.
-///
-/// **The one authorization rule A14 adds, and it is deliberately not a policy.**
-/// A user reaches their own keys; an owner reaches anyone's. That is it — no
-/// grants, no vault scoping, no new abstraction for the authorization release
-/// to unpick. When that release lands, this becomes one of its inputs rather
-/// than a competing system.
-fn target_user<'a>(actor: &'a Actor, requested: Option<&'a str>) -> ApiResult<&'a str> {
-    // Every caller has a user since the cutover, so there is no ownerless
-    // case to refuse any more — that branch existed only for the shared token.
-    let caller = actor.user_id();
-
-    match requested {
-        None => Ok(caller),
-        Some(other) if other == caller => Ok(caller),
-        Some(other) => {
-            if actor.role() == crate::auth::users::Role::Owner {
-                Ok(other)
-            } else {
-                Err(ApiError(
-                    axum::http::StatusCode::FORBIDDEN,
-                    "you can only manage your own keys".into(),
-                ))
-            }
-        }
-    }
-}
-
 /// Mints a key for the caller (A14). The plaintext is in the return value and
 /// nowhere else.
 pub async fn create_api_key(
@@ -871,7 +843,7 @@ pub async fn create_api_key(
     expires: Option<&str>,
     created_via: Option<&str>,
 ) -> ApiResult<CreatedApiKey> {
-    let owner = target_user(actor, None)?;
+    let owner = actor.user_id();
     crate::auth::keys::validate_name(name).map_err(bad_request)?;
 
     let now = crate::index::now_rfc3339();
@@ -883,16 +855,14 @@ pub async fn create_api_key(
     Ok(CreatedApiKey { key, secret })
 }
 
-/// Lists keys. Own by default; an owner may name another user.
+/// Lists the account's keys.
 pub async fn list_api_keys(
     state: &Shared,
     actor: &Actor,
-    user: Option<&str>,
 ) -> ApiResult<Vec<crate::auth::keys::ApiKey>> {
-    let owner = target_user(actor, user)?;
     let auth_db = state.auth_db.lock().await;
     auth_db
-        .api_keys_for_user(owner)
+        .api_keys_for_user(actor.user_id())
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -906,11 +876,7 @@ pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiR
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| not_found("no such key"))?;
 
-    // **Checked against the key's real owner**, so naming someone else's key id
-    // does not reveal that it exists — the refusal is the same shape whether
-    // the id is wrong or merely not yours.
-    let allowed = target_user(actor, Some(&key.user_id));
-    if allowed.is_err() {
+    if key.user_id != actor.user_id() {
         return Err(not_found("no such key"));
     }
 
@@ -919,7 +885,7 @@ pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiR
         &mut auth_db,
         key_id,
         Some(actor.user_id()),
-        "revoked by user",
+        "revoked from the app",
         &now,
     )
     .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -932,23 +898,7 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// **The one gate on every `/v1/agent/*` operation** (AM5): agent execution and
-/// host administration are the server owner's alone until the authorization
-/// release. Anyone else gets `403` — never an empty list, which would read as
-/// "no hosts" rather than "not yours to see".
-pub fn require_owner(actor: &Actor) -> ApiResult<()> {
-    owner_only(actor, "agents are available to the server owner only")
-}
-
-fn owner_only(actor: &Actor, refusal: &str) -> ApiResult<()> {
-    if actor.role() == crate::auth::users::Role::Owner {
-        Ok(())
-    } else {
-        Err(ApiError(axum::http::StatusCode::FORBIDDEN, refusal.into()))
-    }
-}
-
-/// A host as the owner's client sees it.
+/// A host as the client sees it.
 #[derive(Debug, Clone, Serialize)]
 pub struct HostView {
     #[serde(flatten)]
@@ -992,7 +942,6 @@ pub async fn issue_host_enrollment(
     actor: &Actor,
     server_url: &str,
 ) -> ApiResult<IssuedEnrollment> {
-    require_owner(actor)?;
     crate::auth::hosts::validate_server_url(server_url).map_err(bad_request)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
@@ -1010,8 +959,7 @@ pub async fn issue_host_enrollment(
     })
 }
 
-pub async fn list_hosts(state: &Shared, actor: &Actor) -> ApiResult<Vec<HostView>> {
-    require_owner(actor)?;
+pub async fn list_hosts(state: &Shared) -> ApiResult<Vec<HostView>> {
     let auth_db = state.auth_db.lock().await;
     Ok(auth_db
         .list_hosts()
@@ -1027,7 +975,6 @@ pub async fn rename_host(
     host_id: &str,
     name: &str,
 ) -> ApiResult<HostView> {
-    require_owner(actor)?;
     crate::auth::hosts::validate_name(name).map_err(bad_request)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
@@ -1039,7 +986,6 @@ pub async fn rename_host(
 
 /// Revokes a host: its tokens die now, and it cannot authenticate again.
 pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiResult<()> {
-    require_owner(actor)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
     if !crate::auth::hosts::revoke(&mut auth_db, host_id, actor.user_id(), &now)
@@ -1197,12 +1143,7 @@ pub struct WorkspaceView {
     pub live_sessions: usize,
 }
 
-pub async fn host_workspaces(
-    state: &Shared,
-    actor: &Actor,
-    host_id: &str,
-) -> ApiResult<Vec<WorkspaceView>> {
-    require_owner(actor)?;
+pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<WorkspaceView>> {
     state.agent.refresh(host_id);
     let caps = state.agent.host_live(host_id).capabilities.ok_or_else(|| {
         ApiError(
@@ -1244,7 +1185,6 @@ pub async fn launch_session(
     actor: &Actor,
     req: crate::agent::Launch,
 ) -> ApiResult<LaunchedSession> {
-    require_owner(actor)?;
     // The host must exist and be live in auth.db, not merely connected.
     let host_name = {
         let auth_db = state.auth_db.lock().await;
@@ -1312,45 +1252,34 @@ pub async fn launch_session(
     })
 }
 
-pub async fn list_sessions(
-    state: &Shared,
-    actor: &Actor,
-) -> ApiResult<Vec<crate::agent::store::SessionRecord>> {
-    require_owner(actor)?;
+pub async fn list_sessions(state: &Shared) -> ApiResult<Vec<crate::agent::store::SessionRecord>> {
     state.agent.list().map_err(agent_error)
 }
 
 pub async fn get_session(
     state: &Shared,
-    actor: &Actor,
     id: &str,
 ) -> ApiResult<crate::agent::store::SessionRecord> {
-    require_owner(actor)?;
     state.agent.get(id).map_err(agent_error)
 }
 
-pub async fn end_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
-    require_owner(actor)?;
+pub async fn end_session(state: &Shared, id: &str) -> ApiResult<()> {
     state.agent.end(id).map_err(agent_error)
 }
 
-pub async fn dismiss_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
-    require_owner(actor)?;
+pub async fn dismiss_session(state: &Shared, id: &str) -> ApiResult<()> {
     state.agent.dismiss(id).map_err(agent_error)
 }
 
-pub async fn session_input(state: &Shared, actor: &Actor, id: &str, bytes: &[u8]) -> ApiResult<()> {
-    require_owner(actor)?;
+pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
     state.agent.input(id, bytes).map_err(agent_error)
 }
 
 pub async fn session_resize(
     state: &Shared,
-    actor: &Actor,
     id: &str,
     size: crate::agent::TerminalSize,
 ) -> ApiResult<()> {
-    require_owner(actor)?;
     state.agent.resize(id, size).map_err(agent_error)
 }
 
@@ -1359,8 +1288,7 @@ pub struct AgentConfigView {
     pub default_provider: String,
 }
 
-pub async fn agent_config(state: &Shared, actor: &Actor) -> ApiResult<AgentConfigView> {
-    require_owner(actor)?;
+pub async fn agent_config(state: &Shared) -> ApiResult<AgentConfigView> {
     Ok(AgentConfigView {
         default_provider: state.agent.default_provider(),
     })
@@ -1372,7 +1300,6 @@ pub async fn set_agent_config(
     actor: &Actor,
     default_provider: &str,
 ) -> ApiResult<AgentConfigView> {
-    require_owner(actor)?;
     let valid = (1..=32).contains(&default_provider.len())
         && !default_provider.starts_with('-')
         && default_provider
@@ -1458,21 +1385,13 @@ pub fn runtime_status(
 
 // ---- MCP Gateway: integrations (decisions 81, 81c) -------------------------
 //
-// Every operation here is the owner's alone (G-D20, AM29 `integration.manage`)
-// and acts only on the caller's own connections. There is deliberately no MCP
-// tool for any of them (spec §14), and the routes are session tier, so an
-// `stk_` key can never manage an integration.
+// No MCP tool manages an integration (spec §14) and the routes are session
+// tier, so an `stk_` key never can.
 
 use crate::gateway::connections::{
     self as conn, BUILTIN_ID, BUILTIN_SLUG, Connection, StaticCredential, auth_kind,
     credential_kind, status,
 };
-
-/// The gate on every `/v1/integrations/*` operation: `403` for anyone but an
-/// owner, never an empty list (the AM5 rule `require_owner` follows).
-pub fn require_integration_owner(actor: &Actor) -> ApiResult<()> {
-    owner_only(actor, "integrations are managed by the server owner only")
-}
 
 /// A connection as the owner's client sees it. **Never a credential**: only
 /// whether one is held.
@@ -1575,7 +1494,9 @@ fn view_of(state: &Shared, c: Connection) -> ApiResult<IntegrationView> {
 
 /// The gateway's store. A `std::sync::Mutex`: never hold the guard across an
 /// `.await` (the `agent/` rule).
-fn gateway_store(state: &Shared) -> std::sync::MutexGuard<'_, crate::gateway::store::GatewayDb> {
+pub(crate) fn gateway_store(
+    state: &Shared,
+) -> std::sync::MutexGuard<'_, crate::gateway::store::GatewayDb> {
     state.gateway.store.lock().expect("gateway store lock")
 }
 
@@ -1627,7 +1548,6 @@ fn seal_static(
 
 /// Every integration the owner has, the built-in `storm` connection first.
 pub async fn list_integrations(state: &Shared, actor: &Actor) -> ApiResult<Vec<IntegrationView>> {
-    require_integration_owner(actor)?;
     let rows = gateway_store(state)
         .connections_of(actor.user_id())
         .map_err(internal)?;
@@ -1643,7 +1563,6 @@ pub async fn get_integration(
     actor: &Actor,
     id: &str,
 ) -> ApiResult<IntegrationView> {
-    require_integration_owner(actor)?;
     if id == BUILTIN_ID {
         return Ok(builtin_view(state));
     }
@@ -1670,7 +1589,6 @@ pub async fn create_integration(
     actor: &Actor,
     req: NewIntegration,
 ) -> ApiResult<IntegrationView> {
-    require_integration_owner(actor)?;
     conn::validate_display_name(&req.display_name).map_err(bad_request)?;
     let slug = req
         .slug
@@ -1766,7 +1684,6 @@ pub async fn update_integration(
     id: &str,
     patch: IntegrationPatch,
 ) -> ApiResult<IntegrationView> {
-    require_integration_owner(actor)?;
     if id == BUILTIN_ID {
         return Err(bad_request("the built-in connection cannot be changed"));
     }
@@ -1851,7 +1768,6 @@ pub async fn update_integration(
 /// static token such as a GitHub PAT has no revocation call from Storm, and
 /// the owner revokes it upstream.
 pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
-    require_integration_owner(actor)?;
     if id == BUILTIN_ID {
         return Err(bad_request("the built-in connection cannot be deleted"));
     }
@@ -1916,7 +1832,6 @@ async fn probe_integration(
     Connection,
     Result<crate::gateway::upstream::ProbeResult, crate::gateway::upstream::UpstreamError>,
 )> {
-    require_integration_owner(actor)?;
     if id == BUILTIN_ID {
         return Err(bad_request("the built-in connection is served in process"));
     }
@@ -2065,7 +1980,6 @@ fn method_permitted(method: &str, c: Option<&Connection>) -> bool {
 /// What authorization established about a call, for the forwarding half.
 struct Authorized {
     owner: String,
-    owner_role: crate::auth::users::Role,
     /// `None` for the built-in `storm` connection.
     connection: Option<Connection>,
     /// The session's launch flag **and** `mcp_writable` (G-D5).
@@ -2154,14 +2068,13 @@ async fn authorize_call(
         .grant(session_id, connection_id)
         .map_err(|_| "not_granted".to_string())?
         .ok_or_else(|| "not_granted".to_string())?;
-    // The owner is active (the A14 check keys get).
-    let owner_role = {
+    // Keeps the stable `owner_inactive` code for a removed account's session.
+    {
         let auth_db = state.auth_db.lock().await;
-        match auth_db.user_by_id(&session.owner_user_id) {
-            Ok(Some(u)) if u.status == crate::auth::users::Status::Active => u.role,
-            _ => return Err("owner_inactive".into()),
+        if !matches!(auth_db.account_by_id(&session.owner_user_id), Ok(Some(_))) {
+            return Err("owner_inactive".into());
         }
-    };
+    }
     // The connection is the owner's, and connected.
     let connection = if connection_id == BUILTIN_ID {
         None
@@ -2188,7 +2101,6 @@ async fn authorize_call(
             .load(std::sync::atomic::Ordering::Relaxed);
     Ok(Authorized {
         owner: session.owner_user_id,
-        owner_role,
         connection,
         vault_writes,
     })
@@ -2576,7 +2488,6 @@ async fn connect_builtin(
         session_id: scope.session_id.clone(),
         host_id: scope.host_id.clone(),
         user_id: authorized.owner.clone(),
-        role: authorized.owner_role,
     };
     let handler = crate::mcp::Storm::for_agent(state.clone(), authorized.vault_writes, actor);
     tokio::spawn(async move {
@@ -2585,6 +2496,56 @@ async fn connect_builtin(
         }
     });
     Ok(relay.serve(client_io).await?)
+}
+
+/// Retires what removed accounts left in `agent.db`/`gateway.db` (decision 82,
+/// invariant I4). Runs on every boot; idempotent.
+pub async fn reconcile_single_user(state: &Shared) -> anyhow::Result<()> {
+    let account = {
+        let auth_db = state.auth_db.lock().await;
+        auth_db.account()?
+    };
+    let Some(account) = account else {
+        return Ok(());
+    };
+    let now = crate::index::now_rfc3339();
+
+    let orphaned = gateway_store(state).live_connections_not_of(&account.id)?;
+    for c in &orphaned {
+        gateway_store(state).revoke_connection(&c.id, &now)?;
+        state.agent.revoke_grants_for(&c.id)?;
+        state.gateway.sessions.close_connection(&c.id);
+        let host = c
+            .url
+            .parse::<axum::http::Uri>()
+            .ok()
+            .and_then(|u| u.host().map(str::to_string));
+        let detail = serde_json::json!({
+            "connection_id": c.id,
+            "former_owner": c.owner_user_id,
+            "upstream_host": host,
+        });
+        let auth_db = state.auth_db.lock().await;
+        auth_db.record_event(
+            "integration_removed_single_user",
+            Some(&account.id),
+            None,
+            &now,
+            &detail.to_string(),
+        )?;
+    }
+
+    let (failed, dismissed) = state.agent.retire_sessions_not_of(&account.id)?;
+    sweep_gateway_sessions(state);
+    if !orphaned.is_empty() || failed > 0 || dismissed > 0 {
+        tracing::warn!(
+            connections = orphaned.len(),
+            sessions_failed = failed,
+            sessions_dismissed = dismissed,
+            "single-user: retired what removed accounts left in agent.db and gateway.db"
+        );
+    }
+    Ok(())
 }
 
 /// Closes the upstream sessions of agent sessions that have ended (§13: a
@@ -2640,7 +2601,6 @@ pub async fn authorize_integration(
     req: AuthorizeIntegration,
 ) -> ApiResult<AuthorizationStarted> {
     use crate::gateway::oauth::{self as oauth, OAuthFailure};
-    require_integration_owner(actor)?;
     let c = own_connection(state, actor, id)?;
     if c.auth_kind != auth_kind::OAUTH {
         return Err(bad_request("only an OAuth integration is authorized here"));
@@ -2758,7 +2718,6 @@ pub async fn oauth_callback(
     req: OAuthCallback,
 ) -> ApiResult<IntegrationTest> {
     use crate::gateway::oauth::{self as oauth, OAuthFailure};
-    require_integration_owner(actor)?;
     if req.state.is_empty() || req.state.len() > 512 || req.code.is_empty() || req.code.len() > 4096
     {
         return Err(bad_request("state and code are required"));
@@ -2925,7 +2884,6 @@ mod tests {
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            allow_registration: std::sync::atomic::AtomicBool::new(false),
             bootstrap_nonce: None,
             listen_addr: "127.0.0.1:8484".into(),
             vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),

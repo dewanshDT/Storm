@@ -75,11 +75,13 @@ enum Commands {
     Status,
     /// Report what an import would change, then exit without writing.
     DryRun(VaultArgs),
-    /// Create and manage local user accounts.
-    User(UserArgs),
-    /// Set a user's password. The recovery path when one is forgotten (A11).
+    /// Set the account's password — the recovery path when it is forgotten
+    /// (A11). On a Storm not set up yet, this creates the account.
     Passwd(PasswdArgs),
-    /// Print a bootstrap pairing QR code for a fresh server (no users yet).
+    /// Choose which account a pre-v6 server keeps when it becomes single-user
+    /// (decision 82). Only needed when it has no active owner to keep.
+    SingleUser(SingleUserArgs),
+    /// Print a bootstrap pairing QR code for a fresh server (no account yet).
     Pair(PairArgs),
     /// Snapshot every vault index into DIR, then exit.
     BackupDb {
@@ -131,80 +133,34 @@ struct UpArgs {
     web: PathBuf,
 }
 
-/// Account management, on the host.
-///
-/// These run on the box rather than over the network, and that is the design
-/// rather than a limitation for now: creating a user remotely needs device auth
-/// (A8), which arrives with pairing. Until then the only way to make an account
-/// is to have shell access, which is the same trust level A11 already accepts
-/// for `passwd`.
-///
-/// **There is deliberately no `--password` flag anywhere in here.** A password
-/// in an argument is in the shell history and, while the process runs, in `ps`
-/// for every other user on the box. The password is prompted for without echo,
-/// or read from stdin with `--password-stdin` for scripts.
-#[derive(clap::Args, Debug)]
-struct UserArgs {
-    /// State directory holding auth.db.
-    ///
-    /// `global` so it reads naturally in either position — `user --state X add
-    /// name` and `user add name --state X` are the same command. Without it
-    /// clap accepts only the first, which is not where a hand reaches for it.
-    #[arg(long, default_value = "./state", global = true)]
-    state: PathBuf,
-
-    #[command(subcommand)]
-    command: UserCommand,
-}
-
-#[derive(Subcommand, Debug)]
-enum UserCommand {
-    /// Create an account. The first one on a server is always an owner.
-    Add {
-        username: String,
-
-        /// owner, admin or member. Defaults to owner for the first account on a
-        /// server and member for every one after it.
-        #[arg(long)]
-        role: Option<String>,
-
-        /// Name to show instead of the username. Unrestricted, unlike the username.
-        #[arg(long)]
-        display_name: Option<String>,
-
-        /// Read the password from stdin instead of prompting.
-        #[arg(long)]
-        password_stdin: bool,
-    },
-    /// List accounts.
-    List,
-    /// Keep the account but refuse its logins.
-    Disable { username: String },
-    /// Re-enable a disabled account.
-    Enable { username: String },
-    /// Change an account's role.
-    Role { username: String, role: String },
-    /// Delete an account, its sessions and its vault grants.
-    Delete {
-        username: String,
-
-        /// Skip the confirmation prompt.
-        #[arg(long)]
-        yes: bool,
-    },
-}
-
+/// **There is deliberately no `--password` flag anywhere.** A password in an
+/// argument is in the shell history and, while the process runs, in `ps` for
+/// every other user on the box. It is prompted for without echo, or read from
+/// stdin with `--password-stdin` for scripts.
 #[derive(clap::Args, Debug)]
 struct PasswdArgs {
     /// State directory holding auth.db.
     #[arg(long, default_value = "./state")]
     state: PathBuf,
 
-    username: String,
-
     /// Read the password from stdin instead of prompting.
     #[arg(long)]
     password_stdin: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct SingleUserArgs {
+    /// State directory holding auth.db.
+    #[arg(long, default_value = "./state")]
+    state: PathBuf,
+
+    /// Every other account is deleted; `auth.db.pre-v6` is written first.
+    #[arg(long)]
+    keep: String,
+
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -746,186 +702,74 @@ async fn confirm_stored_password(
     Ok(())
 }
 
-async fn run_user(args: UserArgs) -> Result<()> {
-    let mut db = open_auth_db(&args.state)?;
-    let now = index::now_rfc3339();
-
-    match args.command {
-        UserCommand::Add {
-            username,
-            role,
-            display_name,
-            password_stdin,
-        } => {
-            let role = match role.as_deref() {
-                Some(name) => auth::users::Role::parse(name)?,
-                // The first account must be an owner and `create_user` enforces
-                // it; defaulting the rest to member keeps "add a user" from
-                // quietly minting another administrator.
-                None if db.user_count()? == 0 => auth::users::Role::Owner,
-                None => auth::users::Role::Member,
-            };
-            // Validate the name before asking for a password: being told the
-            // username is malformed after typing a password twice is a small
-            // cruelty, and `create_user` checks it again anyway.
-            if let Err(why) = auth::users::validate_username(&username) {
-                bail!(why);
-            }
-
-            let password = read_new_password(password_stdin, "New password: ")?;
-            let hasher = auth::Hasher::new();
-            let hash = hasher.hash(password.clone()).await?;
-            let user = auth::users::create_user(
-                &mut db,
-                auth::users::NewUser {
-                    username: &username,
-                    display_name: display_name.as_deref(),
-                    password_hash: &hash,
-                    role,
-                },
-                &now,
-            )?;
-            confirm_stored_password(&db, &hasher, &user.id, password).await?;
-            println!(
-                "created {} ({}) as {}",
-                user.username,
-                user.id,
-                role.as_str()
-            );
-        }
-
-        UserCommand::List => {
-            let users = db.list_users()?;
-            if users.is_empty() {
-                println!(
-                    "no users yet — `storm-server user add <name>` creates the first, \
-                     which is always an owner"
-                );
-                return Ok(());
-            }
-            println!(
-                "{:<20} {:<7} {:<9} {:<22} {:<22} PASSWORD",
-                "USERNAME", "ROLE", "STATUS", "CREATED", "LAST LOGIN"
-            );
-            let mut outdated = 0;
-            for user in &users {
-                let password = match db.password_hash_of(&user.id)? {
-                    Some(phc) if auth::password::needs_rehash(&phc) => {
-                        outdated += 1;
-                        "outdated"
-                    }
-                    Some(_) => "current",
-                    None => "missing",
-                };
-                println!(
-                    "{:<20} {:<7} {:<9} {:<22} {:<22} {}",
-                    user.username,
-                    user.role.as_str(),
-                    user.status.as_str(),
-                    user.created,
-                    user.last_login.as_deref().unwrap_or("never"),
-                    password
-                );
-            }
-            println!(
-                "\n{} user(s), {} active owner(s)",
-                users.len(),
-                db.active_owner_count()?
-            );
-            if outdated > 0 {
-                println!(
-                    "{outdated} password(s) hashed with weaker parameters than this build uses; \
-                     they are upgraded on next login."
-                );
-            }
-        }
-
-        UserCommand::Disable { username } => {
-            let user =
-                auth::users::set_status(&mut db, &username, auth::users::Status::Disabled, &now)?;
-            println!("disabled {}", user.username);
-        }
-
-        UserCommand::Enable { username } => {
-            let user =
-                auth::users::set_status(&mut db, &username, auth::users::Status::Active, &now)?;
-            println!("enabled {}", user.username);
-        }
-
-        UserCommand::Role { username, role } => {
-            let role = auth::users::Role::parse(&role)?;
-            let user = auth::users::set_role(&mut db, &username, role, &now)?;
-            println!("{} is now {}", user.username, role.as_str());
-        }
-
-        UserCommand::Delete { username, yes } => {
-            if !yes {
-                // There is no undo, and the delete takes sessions and vault
-                // grants with it. Typing the name is cheap insurance against a
-                // mistyped argument.
-                print!(
-                    "Delete `{username}`, its sessions and its vault grants? Type the username to confirm: "
-                );
-                use std::io::Write;
-                std::io::stdout().flush().ok();
-                let mut line = String::new();
-                std::io::stdin()
-                    .read_line(&mut line)
-                    .context("reading the confirmation")?;
-                if line.trim() != username {
-                    bail!("not confirmed; nothing was deleted");
-                }
-            }
-            let user = auth::users::delete_user(&mut db, &username, &now)?;
-            println!("deleted {} ({})", user.username, user.id);
-        }
-    }
-    Ok(())
-}
-
-/// `storm-server passwd` — the recovery path (A11).
-///
-/// Deliberately a host-side bypass: root on the box can already read `auth.db`
-/// and every vault, so pretending a password reset needs more than shell access
-/// would be theatre. It writes a security event so the reset is visible.
+/// Recovery (A11) and headless setup: creates the account if there is none.
 async fn run_passwd(args: PasswdArgs) -> Result<()> {
     let mut db = open_auth_db(&args.state)?;
     let now = index::now_rfc3339();
 
-    if db.find_user(&args.username)?.is_none() {
-        bail!(
-            "no user named `{}` — `storm-server user list` shows the accounts on this server",
-            args.username
-        );
-    }
-
-    let password = read_new_password(
-        args.password_stdin,
-        &format!("New password for {}: ", args.username),
-    )?;
+    let existing = db.account()?;
+    let prompt = if existing.is_some() {
+        "New password: "
+    } else {
+        "This Storm has no account yet. Choose its password: "
+    };
+    let password = read_new_password(args.password_stdin, prompt)?;
     let hasher = auth::Hasher::new();
     let hash = hasher.hash(password.clone()).await?;
-    let user = auth::users::set_password(&mut db, &args.username, &hash, &now)?;
-    confirm_stored_password(&db, &hasher, &user.id, password).await?;
-    println!("password updated for {} ({})", user.username, user.id);
+    let account = match existing {
+        Some(_) => auth::account::set_password(&mut db, &hash, &now)?,
+        None => auth::account::create_account(&mut db, &hash, &now)?,
+    };
+    confirm_stored_password(&db, &hasher, &account.id, password).await?;
+    println!("password set for this Storm's account ({})", account.id);
+    Ok(())
+}
+
+/// `storm-server single-user --keep <username>`: keep a named account.
+fn run_single_user(args: SingleUserArgs) -> Result<()> {
+    if !args.yes {
+        print!(
+            "Keep `{}` as this Storm's only account and delete every other account, \
+             with its sign-ins and access keys? Type the username to confirm: ",
+            args.keep
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .context("reading the confirmation")?;
+        if line.trim() != args.keep {
+            bail!("not confirmed; nothing was changed");
+        }
+    }
+    let path = auth::AuthDb::path_in(&args.state);
+    let db = auth::AuthDb::open_at_keeping(&path, &auth::single_user::Keep::Username(args.keep))
+        .with_context(|| format!("migrating {}", path.display()))?;
+    match db.account()? {
+        Some(account) => println!(
+            "single-user: this Storm's account is {} (backup: {})",
+            account.id,
+            args.state.join(auth::single_user::PRE_V6_BACKUP).display()
+        ),
+        None => println!("single-user: no account yet"),
+    }
     Ok(())
 }
 
 /// `storm-server pair` — print a bootstrap pairing QR code.
 ///
-/// Only valid when the user table is empty (fresh server). The QR encodes the
-/// server's public key, a short-lived nonce, and the address the client should
-/// connect to. Scanning it with Storm Client triggers device registration and
-/// first-user creation.
+/// Only valid before setup (no account yet). The QR encodes the server's
+/// public key, a short-lived nonce, and the address the client should connect
+/// to. Scanning it with Storm Client pairs the device and sets up the account.
 fn run_pair(args: PairArgs) -> Result<()> {
     let mut db = open_auth_db(&args.state)?;
     let now = index::now_rfc3339();
 
-    let user_count = db.count_users()?;
-    if user_count > 0 {
+    if db.has_account()? {
         bail!(
-            "users already exist — use `POST /v1/pairings` from an authenticated client \
-             to add a new device"
+            "this Storm is already set up — add a device from the app \
+             (Settings › Devices & access › Add a device)"
         );
     }
 
@@ -1122,10 +966,6 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // the harness, so none of them ever read this field.
     let listen_addr = format!("{}:{}", advertised_host(&args.host), args.port);
 
-    // Mirrored out of the registry so a change applies to the next request
-    // rather than the next restart (A13).
-    let vault_set_allow_registration = vault_set.registry.allow_registration;
-
     // Taken before the registry moves into `AppState`. The boot list starts
     // the tunnels; every later save of `PUT /v1/config/relays` arrives on
     // `relays_changed` and is applied live by `relay::manage` (decision 74).
@@ -1136,12 +976,11 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     let registered_relays = vault_set.registry.registered_relays.clone();
     let tunnel_identity = identity.clone();
 
-    // Bootstrap pairing: when no users exist, create a pairing session and log
+    // Bootstrap pairing: before setup (no account), create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
     let bootstrap_nonce = {
         let now = crate::index::now_rfc3339();
-        let user_count = auth_db.count_users()?;
-        if user_count == 0 {
+        if !auth_db.has_account()? {
             let (nonce, session) = crate::auth::pairing::create(
                 &mut auth_db,
                 crate::auth::pairing::PairingPurpose::FirstUser,
@@ -1195,7 +1034,6 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-        allow_registration: std::sync::atomic::AtomicBool::new(vault_set_allow_registration),
         bootstrap_nonce,
         listen_addr,
         // The policy Storm ships: every authenticated caller reaches every
@@ -1211,6 +1049,10 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         agent,
         gateway,
     });
+
+    ops::reconcile_single_user(&state)
+        .await
+        .context("single-user sweep over agent.db and gateway.db")?;
 
     // One watcher over the whole root, attributing each event to a vault by
     // directory prefix. Adding or removing a vault then needs no watcher work
@@ -1502,8 +1344,8 @@ async fn main() -> Result<()> {
         Commands::Down => install::down(),
         Commands::Status => install::status(),
         Commands::DryRun(args) => run_dry_run(args),
-        Commands::User(args) => run_user(args).await,
         Commands::Passwd(args) => run_passwd(args).await,
+        Commands::SingleUser(args) => run_single_user(args),
         Commands::Pair(args) => run_pair(args),
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
@@ -1559,17 +1401,7 @@ mod tests {
         let mut db = auth::AuthDb::open(dir.path()).unwrap();
         let hasher = auth::Hasher::new();
         let hash = hasher.hash("correct horse battery".into()).await.unwrap();
-        let user = auth::users::create_user(
-            &mut db,
-            auth::users::NewUser {
-                username: "dewansh",
-                display_name: None,
-                password_hash: &hash,
-                role: auth::users::Role::Owner,
-            },
-            "2026-08-16T00:00:00Z",
-        )
-        .unwrap();
+        let user = auth::account::create_account(&mut db, &hash, "2026-08-16T00:00:00Z").unwrap();
 
         confirm_stored_password(&db, &hasher, &user.id, "correct horse battery".into())
             .await
@@ -1873,17 +1705,7 @@ mod tests {
         let hash = hasher.hash("correct horse battery".into()).await.unwrap();
         {
             let mut db = auth::AuthDb::open(&state).unwrap();
-            auth::users::create_user(
-                &mut db,
-                auth::users::NewUser {
-                    username: "dewansh",
-                    display_name: None,
-                    password_hash: &hash,
-                    role: auth::users::Role::Owner,
-                },
-                "2026-08-16T00:00:00Z",
-            )
-            .unwrap();
+            auth::account::create_account(&mut db, &hash, "2026-08-16T00:00:00Z").unwrap();
         }
 
         let dest = dir.path().join("snapshot");
@@ -1893,10 +1715,9 @@ mod tests {
 
         let db = auth::AuthDb::open(&state).unwrap();
         let user = db
-            .find_user("dewansh")
+            .account()
             .unwrap()
-            .expect("the restored server has no users");
-        assert_eq!(user.role, auth::users::Role::Owner);
+            .expect("the restored server has no account");
         let stored = db.password_hash_of(&user.id).unwrap().unwrap();
         assert!(
             hasher
