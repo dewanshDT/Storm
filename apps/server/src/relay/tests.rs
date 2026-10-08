@@ -1163,6 +1163,7 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
                 "terminal": {"cols": 80, "rows": 24},
             }))
             .unwrap(),
+            Default::default(),
             Vec::new(),
         )
         .unwrap()

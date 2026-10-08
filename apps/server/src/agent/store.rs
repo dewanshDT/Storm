@@ -57,6 +57,49 @@ pub struct Fallback {
     pub reason: String,
 }
 
+/// What a session was launched with, beyond the record: read back on every
+/// view, and what Run again prefills from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchRecord {
+    pub session_id: String,
+    pub name: String,
+    pub context: Option<Context>,
+    pub write_vault_id: Option<String>,
+}
+
+/// The note a session was started from. The title is a snapshot.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Context {
+    pub vault_id: String,
+    pub note_id: String,
+    pub title: String,
+}
+
+/// One note or kit script an agent session created or edited. A note has an
+/// id and a version; a script has neither, only its vault-relative path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteRecord {
+    pub session_id: String,
+    pub vault_id: String,
+    pub note_id: Option<String>,
+    pub path: Option<String>,
+    /// `created` or `edited` for a note, `script_created` or `script_edited`
+    /// for a script.
+    pub kind: String,
+    pub version: Option<i64>,
+    pub at: String,
+}
+
+impl WriteRecord {
+    fn target(&self) -> String {
+        match (&self.note_id, &self.path) {
+            (Some(id), _) => id.clone(),
+            (None, Some(path)) => format!("script:{path}"),
+            (None, None) => String::new(),
+        }
+    }
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -116,7 +159,34 @@ impl Store {
                  PRIMARY KEY (session_id, connection_id)
              );
              CREATE INDEX IF NOT EXISTS grants_by_connection
-                 ON session_mcp_grants(connection_id);",
+                 ON session_mcp_grants(connection_id);
+
+             -- What a session was launched with. Kept
+             -- when the session is dismissed, so provenance still resolves.
+             CREATE TABLE IF NOT EXISTS session_launch (
+                 session_id       TEXT PRIMARY KEY,
+                 name             TEXT NOT NULL,
+                 context_vault_id TEXT,
+                 context_note_id  TEXT,
+                 context_title    TEXT,
+                 write_vault_id   TEXT,
+                 created_at       TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS session_writes (
+                 session_id TEXT NOT NULL,
+                 vault_id   TEXT NOT NULL,
+                 -- The note id, or `script:<path>` for a kit script.
+                 target     TEXT NOT NULL,
+                 note_id    TEXT,
+                 path       TEXT,
+                 kind       TEXT NOT NULL CHECK (kind IN
+                     ('created', 'edited', 'script_created', 'script_edited')),
+                 version    INTEGER,
+                 at         TEXT NOT NULL,
+                 PRIMARY KEY (session_id, vault_id, target)
+             );
+             CREATE INDEX IF NOT EXISTS writes_by_note
+                 ON session_writes(vault_id, note_id, at);",
         )?;
         Ok(Self { conn })
     }
@@ -278,6 +348,152 @@ impl Store {
              WHERE connection_id = ?1 AND revoked_at IS NULL",
             params![connection_id, now],
         )?)
+    }
+
+    pub fn insert_launch(&self, l: &LaunchRecord, now: &str) -> Result<()> {
+        let (vault, note, title) = match &l.context {
+            Some(c) => (Some(&c.vault_id), Some(&c.note_id), Some(&c.title)),
+            None => (None, None, None),
+        };
+        self.conn.execute(
+            "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
+                 context_title, write_vault_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                l.session_id,
+                l.name,
+                vault,
+                note,
+                title,
+                l.write_vault_id,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn launch(&self, session_id: &str) -> Result<Option<LaunchRecord>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT session_id, name, context_vault_id, context_note_id, context_title,
+                     write_vault_id
+                 FROM session_launch WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    let vault: Option<String> = r.get(2)?;
+                    let note: Option<String> = r.get(3)?;
+                    Ok(LaunchRecord {
+                        session_id: r.get(0)?,
+                        name: r.get(1)?,
+                        context: vault.zip(note).map(|(vault_id, note_id)| Context {
+                            vault_id,
+                            note_id,
+                            title: r
+                                .get::<_, Option<String>>(4)
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default(),
+                        }),
+                        write_vault_id: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The names of sessions that have not ended, for de-duplication.
+    pub fn live_names(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.name FROM session_launch l JOIN sessions s ON s.id = l.session_id
+             WHERE s.status NOT IN ('completed', 'failed', 'stopped')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One row per note or script a session wrote. One it created and then
+    /// edited stays created; the version and time follow the latest write.
+    pub fn record_write(&self, w: &WriteRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_writes (session_id, vault_id, target, note_id, path, kind,
+                 version, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (session_id, vault_id, target)
+             DO UPDATE SET version = excluded.version, at = excluded.at",
+            params![
+                w.session_id,
+                w.vault_id,
+                w.target(),
+                w.note_id,
+                w.path,
+                w.kind,
+                w.version,
+                w.at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A session's writes, newest first.
+    pub fn writes_of(&self, session_id: &str) -> Result<Vec<WriteRecord>> {
+        self.writes_where(
+            "session_id = ?1 ORDER BY at DESC, rowid DESC",
+            params![session_id],
+        )
+    }
+
+    pub fn write_count(&self, session_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM session_writes WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The latest agent write to each note of a vault that agents wrote.
+    /// Versions only grow, so the highest version is the latest writer.
+    pub fn latest_writes(&self, vault_id: &str) -> Result<Vec<WriteRecord>> {
+        self.writes_where(
+            "vault_id = ?1 AND note_id IS NOT NULL AND NOT EXISTS (
+                 SELECT 1 FROM session_writes newer
+                 WHERE newer.vault_id = session_writes.vault_id
+                   AND newer.note_id = session_writes.note_id
+                   AND (newer.version > session_writes.version
+                        OR (newer.version = session_writes.version
+                            AND newer.at > session_writes.at)))
+             ORDER BY note_id",
+            params![vault_id],
+        )
+    }
+
+    pub fn latest_write(&self, vault_id: &str, note_id: &str) -> Result<Option<WriteRecord>> {
+        Ok(self
+            .writes_where(
+                "vault_id = ?1 AND note_id = ?2 ORDER BY version DESC, at DESC LIMIT 1",
+                params![vault_id, note_id],
+            )?
+            .into_iter()
+            .next())
+    }
+
+    fn writes_where(&self, clause: &str, args: impl rusqlite::Params) -> Result<Vec<WriteRecord>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT session_id, vault_id, note_id, path, kind, version, at FROM session_writes
+             WHERE {clause}"
+        ))?;
+        let rows = stmt.query_map(args, |r| {
+            Ok(WriteRecord {
+                session_id: r.get(0)?,
+                vault_id: r.get(1)?,
+                note_id: r.get(2)?,
+                path: r.get(3)?,
+                kind: r.get(4)?,
+                version: r.get(5)?,
+                at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn delete(&self, id: &str) -> Result<bool> {

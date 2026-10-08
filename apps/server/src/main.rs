@@ -935,6 +935,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         vault_set.registry.save(&state_dir)?;
     }
     let mcp_writable = mcp_enabled && vault_set.registry.mcp_writable;
+    let agent_writes = vault_set.registry.agent_writes();
     tracing::info!(
         enabled = mcp_enabled,
         writable = mcp_writable,
@@ -1033,13 +1034,11 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         relays_changed,
         mcp_enabled: std::sync::atomic::AtomicBool::new(mcp_enabled),
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
+        agent_writes: std::sync::atomic::AtomicBool::new(agent_writes),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
         bootstrap_nonce,
         listen_addr,
-        // The policy Storm ships: every authenticated caller reaches every
-        // vault, which is what the server already did. The boundary is what
-        // is new — see `auth/authz.rs`.
-        vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
+        vault_policy: Arc::new(crate::auth::authz::StormPolicy),
         // One hasher for the process, so the semaphore actually bounds
         // anything. See the field's documentation in `api.rs`.
         hasher: auth::Hasher::new(),

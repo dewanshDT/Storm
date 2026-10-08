@@ -98,7 +98,27 @@ class ProviderFallback {
   );
 }
 
-/// An agent session (freeze §7.1).
+/// The note a session was started from. [title] is the server's snapshot.
+class SessionContext {
+  const SessionContext({
+    required this.vaultId,
+    required this.noteId,
+    required this.title,
+  });
+
+  final String vaultId;
+  final String noteId;
+  final String title;
+
+  factory SessionContext.fromJson(Map<String, dynamic> j) => SessionContext(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String? ?? '',
+  );
+}
+
+/// An agent session (freeze §7.1), with what it was launched with
+/// (decision 82, slice 5).
 class AgentSession {
   AgentSession({
     required this.id,
@@ -113,8 +133,14 @@ class AgentSession {
     required this.rows,
     required this.createdAt,
     required this.fallback,
+    this.startedAt,
+    this.endedAt,
+    String? name,
+    this.context,
+    this.writeVaultId,
+    this.wroteCount = 0,
     this.launchNotice,
-  });
+  }) : name = name ?? workspace;
 
   final String id;
   final String hostId;
@@ -130,33 +156,75 @@ class AgentSession {
   final int cols;
   final int rows;
   final String createdAt;
+  final String? startedAt;
+  final String? endedAt;
   final ProviderFallback? fallback;
 
-  /// Said at launch when the session could have had integrations and does
-  /// not: its host is too old to bridge them (MCP Gateway, spec §6). Only on
-  /// the launch answer.
+  /// Assigned by the server (Q12), so it is the same on every device.
+  final String name;
+  final SessionContext? context;
+
+  /// The one vault it may write to; null is read only.
+  final String? writeVaultId;
+  final int wroteCount;
+
+  /// Said at launch when the session got less than it asked for. Only on the
+  /// launch answer.
   final String? launchNotice;
 
   bool get ended =>
       status == 'completed' || status == 'failed' || status == 'stopped';
 
-  /// What the status chip says. Plain words, never a raw code.
+  bool get isShell => provider == 'shell';
+
+  /// The handoff's status words (§3.2); why it ended is [endDetail].
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
     'running' => 'Running',
-    'completed' =>
-      exitCode == null || exitCode == 0 ? 'Finished' : 'Exited ($exitCode)',
-    'stopped' => 'Ended',
-    'unknown' => 'Host unreachable',
-    'failed' => switch (endReason) {
-      'host_restart' => 'Host restarted',
-      'host_revoked' => 'Host revoked',
-      'lost' => 'Lost',
-      'signal' => 'Killed (signal ${signal ?? '?'})',
-      _ => 'Failed to start',
-    },
+    'unknown' => 'Unknown',
+    'completed' => 'Completed',
+    'stopped' => 'Stopped',
+    'failed' => 'Failed',
     _ => status,
   };
+
+  /// Why an ended session ended, when there is more to say than its status.
+  String? get endDetail => switch (status) {
+    'failed' => switch (endReason) {
+      'host_restart' => 'host restarted',
+      'host_revoked' => 'host revoked',
+      'lost' => 'lost',
+      'signal' => 'killed (signal ${signal ?? '?'})',
+      _ => 'failed to start',
+    },
+    'completed' when exitCode != null && exitCode != 0 => 'exit $exitCode',
+    _ => null,
+  };
+
+  /// This record with the status a live stream has seen since. The stream
+  /// carries the bare record: no name, context or count.
+  AgentSession withLive(AgentSession? live) => live == null || live.id != id
+      ? this
+      : AgentSession(
+          id: id,
+          hostId: hostId,
+          workspace: workspace,
+          provider: provider,
+          status: live.status,
+          endReason: live.endReason,
+          exitCode: live.exitCode,
+          signal: live.signal,
+          cols: live.cols,
+          rows: live.rows,
+          createdAt: createdAt,
+          fallback: fallback,
+          startedAt: live.startedAt ?? startedAt,
+          endedAt: live.endedAt ?? endedAt,
+          name: name,
+          context: context,
+          writeVaultId: writeVaultId,
+          wroteCount: wroteCount,
+        );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
@@ -170,11 +238,65 @@ class AgentSession {
     cols: (j['cols'] as num?)?.toInt() ?? 80,
     rows: (j['rows'] as num?)?.toInt() ?? 24,
     createdAt: j['created_at'] as String? ?? '',
+    startedAt: j['started_at'] as String?,
+    endedAt: j['ended_at'] as String?,
     fallback: j['provider_fallback'] == null
         ? null
         : ProviderFallback.fromJson(
             j['provider_fallback'] as Map<String, dynamic>,
           ),
+    name: j['name'] as String?,
+    context: j['context'] is Map<String, dynamic>
+        ? SessionContext.fromJson(j['context'] as Map<String, dynamic>)
+        : null,
+    writeVaultId: j['write_vault_id'] as String?,
+    wroteCount: (j['wrote_count'] as num?)?.toInt() ?? 0,
     launchNotice: (j['mcp'] as Map?)?['notice'] as String?,
+  );
+}
+
+/// One thing a session wrote (`GET …/sessions/{id}/writes`): a note, or a
+/// kit script. [title] and [path] are null once a note is gone, and a row
+/// with no [noteId] has nothing to open.
+class SessionWrite {
+  const SessionWrite({
+    required this.vaultId,
+    required this.noteId,
+    required this.title,
+    required this.path,
+    required this.kind,
+    required this.version,
+    required this.at,
+  });
+
+  final String? vaultId;
+  final String? noteId;
+  final String? title;
+  final String? path;
+
+  /// `created` or `edited` for a note; `script_created` or `script_edited`
+  /// for a kit script, which has a path and no note.
+  final String kind;
+  final int? version;
+  final String at;
+
+  bool get created => kind == 'created' || kind == 'script_created';
+
+  bool get isScript => kind.startsWith('script_');
+
+  /// The note to open, if there is one.
+  ({String vaultId, String noteId})? get note =>
+      vaultId == null || noteId == null
+      ? null
+      : (vaultId: vaultId!, noteId: noteId!);
+
+  factory SessionWrite.fromJson(Map<String, dynamic> j) => SessionWrite(
+    vaultId: j['vault_id'] as String?,
+    noteId: j['note_id'] as String?,
+    title: j['title'] as String?,
+    path: j['path'] as String?,
+    kind: j['kind'] as String? ?? 'edited',
+    version: (j['version'] as num?)?.toInt(),
+    at: j['at'] as String? ?? '',
   );
 }

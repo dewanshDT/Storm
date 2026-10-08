@@ -1,280 +1,138 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../agent/integrations_api.dart';
+import '../api/models.dart';
 import '../router.dart';
+import '../state/app_state.dart';
+import '../state/health.dart' show integrationsSummaryProvider;
 import '../ui/breakpoints.dart';
-import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
+import '../ui/controls.dart';
+import '../ui/panels.dart';
+import '../ui/session_status.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
-import '../ui/widgets.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
-import 'hosts_screen.dart' show ChipTone, StatusChip;
-import 'session_controller.dart';
-import 'terminal_surface.dart';
+import 'launcher.dart';
 
-/// Agent sessions: the list, the open tabs, and the terminal (freeze §10,
-/// items 2–5; decisions 77d and 78).
+/// Agents at `/agents` (handoff §2.7, §2.8).
 ///
-/// **The phone layout is the default** (the M12 invariant): the list, with
-/// *New session* as a pill at the bottom; a session fills the screen, with a
-/// switcher sheet. At [kExpandedWidth] and wider this is only the *pane* — the
-/// list lives in `AgentsSidebar`, beside it in `AgentsShell` — and shows the
-/// tab strip over the open session. Nothing below the breakpoint changes
-/// because of what renders above it.
-class AgentsScreen extends ConsumerStatefulWidget {
+/// **The phone layout is the default** (the M12 invariant): a flat Running /
+/// Ended list with ＋ New session in the pill. At [kExpandedWidth] and wider
+/// this is only the pane beside `AgentsSidebar`: the overview of work, or the
+/// first-session and no-host states. A session is its own route,
+/// `/agents/s/:id` (`SessionScreen`).
+class AgentsScreen extends ConsumerWidget {
   const AgentsScreen({super.key});
 
   @override
-  ConsumerState<AgentsScreen> createState() => _AgentsScreenState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final o = ref.watch(agentOverviewProvider).value;
+    final wide = context.isExpanded;
+    final t = context.tokens;
 
-class _AgentsScreenState extends ConsumerState<AgentsScreen> {
-  final _controllers = <String, SessionController>{};
-
-  @override
-  void dispose() {
-    for (final c in _controllers.values) {
-      c.dispose();
-    }
-    super.dispose();
-  }
-
-  SessionController _controller(String id) => _controllers.putIfAbsent(id, () {
-    final api = agentApi(ref)!;
-    final open = ref.read(terminalStreamFactoryProvider);
-    final c = SessionController(
-      api: api,
-      sessionId: id,
-      open: open == null ? null : (offset) => open(id, offset),
-    )..start();
-    // The name the agent gives the conversation, for every list that shows
-    // this session.
-    c.terminal.title.addListener(() {
-      final name = agentChosenTitle(c.terminal.title.value);
-      if (!mounted) return;
-      final titles = ref.read(agentTitlesProvider);
-      if (titles[id] == name) return;
-      final next = {...titles};
-      name == null ? next.remove(id) : next[id] = name;
-      ref.read(agentTitlesProvider.notifier).state = next;
-    });
-    return c;
-  });
-
-  void _close(String id) {
-    ref.read(agentTabsProvider.notifier).close(id);
-    _controllers.remove(id)?.dispose();
-    final active = ref.read(activeAgentTabProvider);
-    if (active == id) {
-      final tabs = ref.read(agentTabsProvider);
-      ref.read(activeAgentTabProvider.notifier).state = tabs.isEmpty
-          ? null
-          : tabs.last;
-    }
-  }
-
-  Future<void> _dismiss(AgentSession s) async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      await api.dismiss(s.id);
-      _close(s.id);
-      await reloadAgents(ref);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
+    if (wide) {
+      final Widget body;
+      if (o == null) {
+        body = Padding(
+          padding: EdgeInsets.fromLTRB(t.sp * 5, t.sp * 3.5, t.sp * 5, 0),
+          child: const SkeletonRows(rows: 4),
+        );
+      } else if (o.unreachable) {
+        body = _Offline(onRetry: () => reloadAgents(ref));
+      } else if (o.hosts.isEmpty) {
+        body = const _NoHost(wide: true);
+      } else if (o.sessions.isEmpty) {
+        body = _FirstSession(overview: o, wide: true);
+      } else {
+        body = _Overview(overview: o);
       }
-    } finally {
-      api.dispose();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // A dismissed session drops off the strip as soon as the list says so.
-    ref.listen(agentOverviewProvider, (_, next) {
-      final o = next.value;
-      if (o != null && !o.unreachable) {
-        ref
-            .read(agentTabsProvider.notifier)
-            .reconcile(o.sessions.map((s) => s.id));
-      }
-    });
-    final overview =
-        ref.watch(agentOverviewProvider).value ??
-        const AgentOverview(sessions: [], hosts: []);
-    final tabs = ref.watch(agentTabsProvider);
-    final active = ref.watch(activeAgentTabProvider);
-    final current = active != null && tabs.contains(active) ? active : null;
-
-    if (context.isExpanded) return _pane(overview, tabs, current);
-
-    if (current != null) {
-      // Phone, a session open: it fills the screen. Back returns to the
-      // list, as the arrow in its bar does, rather than leaving the space —
-      // on Android the system back was the one way out that skipped it.
-      return PopScope(
-        canPop: false,
-        onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) ref.read(activeAgentTabProvider.notifier).state = null;
-        },
-        child: _SessionPage(
-          controller: _controller(current),
-          hostName: overview.hostName,
-          tabCount: tabs.length,
-          onSwitch: () => _showSwitcher(tabs, overview),
-          onBack: () => ref.read(activeAgentTabProvider.notifier).state = null,
-          onDismiss: _dismiss,
-        ),
+      return Scaffold(
+        backgroundColor: t.bg,
+        body: SafeArea(left: false, child: body),
       );
     }
 
+    final online = o != null && o.online.isNotEmpty;
     return Scaffold(
       body: StormChrome(
         showNav: false,
-        header: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: StormChrome.contentInset(context),
-          ),
-          child: Text(
-            'Agents',
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: context.tokens.titleSize,
-              fontWeight: FontWeight.w600,
-              color: context.tokens.text,
-            ),
-          ),
-        ),
         child: Stack(
           children: [
             Positioned.fill(
-              child: AgentSessionList(
-                onOpen: (id) => openAgentSession(ref, id),
-                onLaunch: () => launchAgentSession(context, ref),
-                onHosts: () => context.go(Routes.settingsPage('hosts')),
-                bottomClearance: StormChrome.navClearance(context),
+              child: RefreshIndicator(
+                onRefresh: () => reloadAgents(ref),
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    StormChrome.contentInset(context),
+                    0,
+                    StormChrome.contentInset(context),
+                    StormChrome.navClearance(context),
+                  ),
+                  children: [
+                    _PageTitle('Agents'),
+                    if (o == null)
+                      const SkeletonRows(rows: 4)
+                    else if (o.unreachable)
+                      _Offline(onRetry: () => reloadAgents(ref))
+                    else if (o.hosts.isEmpty)
+                      const _NoHost(wide: false)
+                    else ...[
+                      if (o.sessions.isEmpty)
+                        _FirstSession(overview: o, wide: false),
+                      _PhoneList(overview: o),
+                    ],
+                  ],
+                ),
               ),
             ),
-            // Under the thumb, in the nav bubble's grammar.
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: NewSessionPill(
-                onTap: () => launchAgentSession(context, ref),
+            if (online)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: NewSessionPill(
+                  onTap: () => launchAgentSession(context, ref),
+                ),
               ),
-            ),
           ],
         ),
       ),
     );
   }
-
-  /// The wide pane: the tab strip over the open session, or a quiet prompt.
-  Widget _pane(AgentOverview overview, List<String> tabs, String? current) {
-    final t = context.tokens;
-    return Scaffold(
-      backgroundColor: t.bg,
-      body: SafeArea(
-        left: false,
-        child: current == null
-            ? EmptyState(
-                icon: LucideIcons.square_terminal,
-                title: 'No session open',
-                detail: 'Open one from the list, or start a new one.',
-                action: overview.online.isEmpty ? null : 'New session',
-                onAction: () => launchAgentSession(context, ref),
-                fill: true,
-              )
-            : Column(
-                children: [
-                  _TabStrip(
-                    tabs: tabs,
-                    active: current,
-                    sessions: overview.sessions,
-                    onSelect: (id) =>
-                        ref.read(activeAgentTabProvider.notifier).state = id,
-                    onClose: _close,
-                  ),
-                  Expanded(
-                    child: _SessionView(
-                      key: ValueKey(current),
-                      controller: _controller(current),
-                      hostName: overview.hostName,
-                      onDismiss: _dismiss,
-                      keysRow: false,
-                    ),
-                  ),
-                ],
-              ),
-      ),
-    );
-  }
-
-  Future<void> _showSwitcher(List<String> tabs, AgentOverview overview) async {
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) {
-        final byId = {for (final s in overview.sessions) s.id: s};
-        final titles = ref.read(agentTitlesProvider);
-        return SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              for (final id in tabs)
-                ListTile(
-                  leading: Icon(
-                    providerIcon(byId[id]?.provider ?? ''),
-                    size: 18,
-                  ),
-                  title: Text(sessionDisplayTitle(byId[id], titles)),
-                  subtitle: Text(byId[id]?.statusLabel ?? ''),
-                  onTap: () => Navigator.of(context).pop(id),
-                ),
-              ListTile(
-                leading: const Icon(LucideIcons.list, size: 18),
-                title: const Text('All sessions'),
-                onTap: () => Navigator.of(context).pop(''),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-    if (picked == null) return;
-    ref.read(activeAgentTabProvider.notifier).state = picked.isEmpty
-        ? null
-        : picked;
-  }
 }
 
-/// The launcher sheet, and everything that follows a launch: the fallback
-/// announced (never silent, freeze §6), the session opened as the active tab,
-/// the list refreshed. Returns the session, or null if nothing was launched.
+/// The launcher, and everything that follows a launch: the fallback
+/// announced (never silent, freeze §6), the list refreshed, and the session
+/// opened — on its Context tab when it has a note, else About.
+///
+/// [contextNote] starts it from a note (Start session); [provider] from an
+/// agent card; [runAgain] prefills everything an ended session had.
 Future<AgentSession?> launchAgentSession(
   BuildContext context,
-  WidgetRef ref,
-) async {
+  WidgetRef ref, {
+  ({String vaultId, String noteId})? contextNote,
+  String? provider,
+  AgentSession? runAgain,
+}) async {
   final overview = ref.read(agentOverviewProvider).value;
-  final launched = await showModalBottomSheet<AgentSession>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (_) => _Launcher(hosts: overview?.hosts ?? const []),
+  final prefill = runAgain != null
+      ? LaunchPrefill.runAgain(runAgain)
+      : LaunchPrefill(context: contextNote, provider: provider);
+  final launched = await showNewSessionLauncher(
+    context,
+    hosts: overview?.hosts ?? const [],
+    wide: context.isExpanded,
+    prefill: prefill,
   );
-  if (launched == null) return null;
+  if (launched == null || !context.mounted) return launched;
   final fb = launched.fallback;
-  if (fb != null && context.mounted) {
+  if (fb != null) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -285,922 +143,786 @@ Future<AgentSession?> launchAgentSession(
       ),
     );
   }
-  openAgentSession(ref, launched.id);
   ref.invalidate(agentOverviewProvider);
+  openAgentSession(
+    context,
+    launched.id,
+    tab: launched.context != null ? SessionTab.context : SessionTab.about,
+  );
   return launched;
 }
 
-ChipTone _tone(AgentSession? s) => switch (s?.status) {
-  'running' => ChipTone.good,
-  'starting' || 'creating' || 'unknown' => ChipTone.warn,
-  'failed' => ChipTone.bad,
-  _ => ChipTone.muted,
-};
-
-/// Every session, live ones first, as the phone screen and the wide sidebar
-/// both list them.
-class AgentSessionList extends ConsumerWidget {
-  const AgentSessionList({
-    super.key,
-    required this.onOpen,
-    required this.onLaunch,
-    required this.onHosts,
-    this.dense = false,
-    this.selected,
-    this.bottomClearance = 0,
-  });
-
-  final ValueChanged<String> onOpen;
-  final VoidCallback onLaunch;
-  final VoidCallback onHosts;
-  final bool dense;
-  final String? selected;
-
-  /// Room left under the last row for whatever floats over the list.
-  final double bottomClearance;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    final o = ref.watch(agentOverviewProvider).value;
-
-    final List<Widget> children;
-    if (o == null) {
-      children = const [SkeletonRows(rows: 4)];
-    } else if (o.unreachable) {
-      // Offline is a state (the ground rule), and agents cannot run without
-      // the server — so say exactly that, calmly, with no failure text.
-      children = [
-        EmptyState(
-          icon: LucideIcons.cloud_off,
-          title: kAgentsOfflineTitle,
-          detail: kAgentsOfflineDetail,
-          action: 'Try again',
-          onAction: () => reloadAgents(ref),
-        ),
-      ];
-    } else if (o.sessions.isEmpty) {
-      children = [
-        o.hosts.isEmpty
-            ? EmptyState(
-                icon: LucideIcons.server,
-                title: 'No hosts yet',
-                detail: 'Agents run on a host. Enroll one to get started.',
-                action: 'Hosts',
-                onAction: onHosts,
-              )
-            : EmptyState(
-                icon: LucideIcons.square_terminal,
-                title: 'No sessions yet',
-                detail: 'Start an agent in a workspace on one of your hosts.',
-                action: o.online.isEmpty ? null : 'New session',
-                onAction: onLaunch,
-              ),
-      ];
-    } else {
-      Widget section(String label, List<AgentSession> list) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: EdgeInsets.fromLTRB(
-              t.sp * (dense ? 1 : 0.5),
-              t.sp,
-              0,
-              t.sp,
-            ),
-            child: SectionLabel(label),
-          ),
-          for (final s in list)
-            AgentSessionRow(
-              key: Key('session-${s.id}'),
-              session: s,
-              hostName: o.hostName(s.hostId),
-              selected: s.id == selected,
-              dense: dense,
-              onTap: () => onOpen(s.id),
-            ),
-        ],
-      );
-      children = [
-        if (o.live.isNotEmpty) section('Running', o.live),
-        if (o.ended.isNotEmpty) section('Ended', o.ended),
-      ];
-    }
-
-    return RefreshIndicator(
-      onRefresh: () => reloadAgents(ref),
-      child: ListView(
-        padding: EdgeInsets.fromLTRB(
-          t.sp * (dense ? 1 : 2),
-          t.sp * (dense ? 0.5 : 1),
-          t.sp * (dense ? 1 : 2),
-          t.sp + bottomClearance,
-        ),
-        children: children,
-      ),
-    );
-  }
-}
-
-class _TabStrip extends StatelessWidget {
-  const _TabStrip({
-    required this.tabs,
-    required this.active,
-    required this.sessions,
-    required this.onSelect,
-    required this.onClose,
-  });
-
-  final List<String> tabs;
-  final String active;
-  final List<AgentSession> sessions;
-  final ValueChanged<String> onSelect;
-  final ValueChanged<String> onClose;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final byId = {for (final s in sessions) s.id: s};
-    return Container(
-      height: 40,
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: t.border, width: t.bw),
-        ),
-      ),
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        children: [
-          for (final id in tabs)
-            InkWell(
-              key: Key('tab-$id'),
-              onTap: () => onSelect(id),
-              child: Container(
-                padding: EdgeInsets.symmetric(horizontal: t.sp * 1.5),
-                decoration: BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(
-                      color: id == active ? t.accent : Colors.transparent,
-                      width: 2,
-                    ),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Consumer(
-                      builder: (context, ref, _) => Text(
-                        sessionDisplayTitle(
-                          byId[id],
-                          ref.watch(agentTitlesProvider),
-                        ),
-                        style: TextStyle(
-                          color: id == active ? t.text : t.text2,
-                          fontWeight: id == active
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: 'Close tab',
-                      visualDensity: VisualDensity.compact,
-                      iconSize: 14,
-                      onPressed: () => onClose(id),
-                      icon: const Icon(LucideIcons.x),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A session alone on the phone screen.
-class _SessionPage extends StatelessWidget {
-  const _SessionPage({
-    required this.controller,
-    required this.hostName,
-    required this.tabCount,
-    required this.onSwitch,
-    required this.onBack,
-    required this.onDismiss,
-  });
-
-  final SessionController controller;
-  final String Function(String) hostName;
-  final int tabCount;
-  final VoidCallback onSwitch;
-  final VoidCallback onBack;
-  final ValueChanged<AgentSession> onDismiss;
-
-  @override
-  Widget build(BuildContext context) {
-    // Asked here, above the Scaffold, where the inset is still readable; the
-    // note screen does the same for its formatting bar. See keyboardIsOpen.
-    final keyboard = keyboardIsOpen(context);
-    return ListenableBuilder(
-      listenable: controller,
-      builder: (context, _) => Scaffold(
-        appBar: AppBar(
-          leading: IconButton(
-            tooltip: 'All sessions',
-            onPressed: onBack,
-            icon: const Icon(LucideIcons.arrow_left),
-          ),
-          title: Consumer(
-            builder: (context, ref, _) => Text(
-              sessionDisplayTitle(
-                controller.session,
-                ref.watch(agentTitlesProvider),
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          actions: [
-            IconButton(
-              key: const Key('switch-session'),
-              tooltip: 'Switch session',
-              onPressed: onSwitch,
-              icon: Badge(
-                label: Text('$tabCount'),
-                isLabelVisible: tabCount > 1,
-                child: const Icon(LucideIcons.layers, size: 18),
-              ),
-            ),
-          ],
-        ),
-        body: _SessionView(
-          controller: controller,
-          hostName: hostName,
-          onDismiss: onDismiss,
-          keysRow: keyboard,
-        ),
-      ),
-    );
-  }
-}
-
-class _SessionView extends StatefulWidget {
-  const _SessionView({
-    super.key,
-    required this.controller,
-    required this.hostName,
-    required this.onDismiss,
-    required this.keysRow,
-  });
-
-  final SessionController controller;
-  final String Function(String) hostName;
-  final ValueChanged<AgentSession> onDismiss;
-
-  /// The phone's extra-keys row (freeze §10). Shown only while the
-  /// on-screen keyboard is up, like the note editor's formatting bar: the
-  /// keys stand in for ones that keyboard lacks, so without it they only
-  /// take room from the terminal.
-  final bool keysRow;
-
-  @override
-  State<_SessionView> createState() => _SessionViewState();
-}
-
-class _SessionViewState extends State<_SessionView> {
-  final _focus = FocusNode();
-
-  @override
-  void initState() {
-    super.initState();
-    _focus.addListener(() {
-      if (_focus.hasFocus) widget.controller.focus();
-    });
-  }
-
-  @override
-  void dispose() {
-    _focus.dispose();
-    super.dispose();
-  }
-
-  Future<void> _confirmEnd() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('End this session?'),
-        content: const Text(
-          'The agent and everything it started are stopped on the host.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Keep running'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('End session'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) {
-      try {
-        await widget.controller.end();
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
-        }
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return ListenableBuilder(
-      listenable: widget.controller,
-      builder: (context, _) {
-        final c = widget.controller;
-        final s = c.session;
-        // The phone gives the terminal every pixel it can: a tight status
-        // row whose edges line up with the app bar's back arrow and icons,
-        // and a compact End. Wide keeps its roomier row (decision 78's pass).
-        final phone = !context.isExpanded;
-        final rowButton = phone
-            ? TextButton.styleFrom(
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                padding: EdgeInsets.symmetric(horizontal: t.sp),
-                visualDensity: VisualDensity.compact,
-              )
-            : null;
-        return Column(
-          children: [
-            Padding(
-              padding: phone
-                  // 16 px on the left meets the back arrow; the button's own
-                  // `sp` of padding puts its label 16 px from the right too.
-                  ? EdgeInsets.fromLTRB(
-                      t.sp * 2,
-                      t.sp * 0.25,
-                      t.sp,
-                      t.sp * 0.25,
-                    )
-                  : EdgeInsets.symmetric(
-                      horizontal: t.sp * 1.5,
-                      vertical: t.sp * 0.75,
-                    ),
-              child: Row(
-                children: [
-                  StatusChip(
-                    label: s?.statusLabel ?? 'Connecting',
-                    tone: _tone(s),
-                  ),
-                  SizedBox(width: t.sp),
-                  Expanded(
-                    child: Text(
-                      s == null ? '' : 'on ${widget.hostName(s.hostId)}',
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: t.labelSize, color: t.text3),
-                    ),
-                  ),
-                  if (s != null && !s.ended)
-                    TextButton(
-                      key: const Key('end-session'),
-                      style: rowButton,
-                      onPressed: _confirmEnd,
-                      child: const Text('End'),
-                    ),
-                  if (s != null && s.ended)
-                    TextButton(
-                      style: rowButton,
-                      onPressed: () => widget.onDismiss(s),
-                      child: const Text('Dismiss'),
-                    ),
-                ],
-              ),
-            ),
-            if (c.inputError != null || (c.streamError != null && !c.connected))
-              Container(
-                width: double.infinity,
-                padding: EdgeInsets.symmetric(
-                  horizontal: t.sp * 1.5,
-                  vertical: t.sp * 0.5,
-                ),
-                color: t.amberSoft,
-                child: Text(
-                  c.inputError ?? 'Reconnecting: ${c.streamError}',
-                  style: TextStyle(fontSize: t.labelSize, color: t.text),
-                ),
-              ),
-            Expanded(
-              child: StormTerminalView(
-                terminal: c.terminal,
-                focusNode: _focus,
-                // Not on the phone: focus opens the keyboard there, which
-                // should wait for a tap on the terminal.
-                autofocus: context.isExpanded,
-                readOnly: s?.ended ?? false,
-                // Edge to edge on the phone, as phone terminals are: a
-                // full-screen agent paints its own background, and the
-                // padding would frame it in the page colour.
-                padding: phone
-                    ? EdgeInsets.symmetric(vertical: t.sp * 0.5)
-                    : null,
-              ),
-            ),
-            if (widget.keysRow && !(s?.ended ?? false))
-              _ExtraKeys(terminal: c.terminal, onDone: _focus.unfocus),
-          ],
-        );
-      },
-    );
-  }
-}
-
-/// Esc, Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
-/// keyboard lacks (freeze §10, AC-F4).
-///
-/// Drawn like the note editor's formatting bar (`EditorToolbar`), so the two
-/// rows that ride on the keyboard look like one family: same surface, rule,
-/// height, quiet buttons, and a Done that puts the keyboard away.
-class _ExtraKeys extends StatelessWidget {
-  const _ExtraKeys({required this.terminal, required this.onDone});
-
-  final StormTerminal terminal;
-
-  /// Puts the keyboard away, which also hides this row.
-  final VoidCallback onDone;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final term = terminal;
-    return Material(
-      color: t.surface,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          border: Border(
-            top: BorderSide(color: t.border, width: t.bw),
-          ),
-        ),
-        child: SafeArea(
-          top: false,
-          child: SizedBox(
-            height: t.sp * 6.5,
-            // Armed modifiers light up, and go dark again when the next key
-            // consumes them, typed or tapped.
-            child: ListenableBuilder(
-              listenable: Listenable.merge([term.ctrlArmed, term.shiftArmed]),
-              builder: (context, _) => Row(
-                children: [
-                  Expanded(
-                    // Scrolls rather than squeezes, as the editor bar does.
-                    child: ListView(
-                      scrollDirection: Axis.horizontal,
-                      padding: EdgeInsets.symmetric(horizontal: t.sp * 0.75),
-                      children: [
-                        _Key(
-                          key: const Key('key-esc'),
-                          label: 'Esc',
-                          tooltip: 'Escape',
-                          onTap: term.escape,
-                        ),
-                        _Key(
-                          key: const Key('key-tab'),
-                          label: 'Tab',
-                          tooltip: 'Tab',
-                          onTap: term.tab,
-                        ),
-                        _Key(
-                          key: const Key('key-ctrl'),
-                          label: 'Ctrl',
-                          tooltip: 'Ctrl, for the next key',
-                          active: term.stickyCtrl,
-                          onTap: () => term.stickyCtrl = !term.stickyCtrl,
-                        ),
-                        _Key(
-                          key: const Key('key-shift'),
-                          icon: LucideIcons.arrow_big_up,
-                          tooltip: 'Shift, for the next key',
-                          active: term.stickyShift,
-                          onTap: () => term.stickyShift = !term.stickyShift,
-                        ),
-                        _Key(
-                          icon: LucideIcons.arrow_up,
-                          tooltip: 'Up',
-                          onTap: term.up,
-                        ),
-                        _Key(
-                          icon: LucideIcons.arrow_down,
-                          tooltip: 'Down',
-                          onTap: term.down,
-                        ),
-                        _Key(
-                          icon: LucideIcons.arrow_left,
-                          tooltip: 'Left',
-                          onTap: term.left,
-                        ),
-                        _Key(
-                          icon: LucideIcons.arrow_right,
-                          tooltip: 'Right',
-                          onTap: term.right,
-                        ),
-                        _Key(
-                          key: const Key('key-paste'),
-                          icon: LucideIcons.clipboard_paste,
-                          tooltip: 'Paste',
-                          onTap: () async {
-                            final data = await Clipboard.getData(
-                              Clipboard.kTextPlain,
-                            );
-                            final text = data?.text;
-                            if (text != null && text.isNotEmpty) {
-                              term.paste(text);
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  TextButton(
-                    key: const Key('keys-done'),
-                    onPressed: onDone,
-                    child: Text(
-                      'Done',
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.codeSize,
-                        fontWeight: FontWeight.w600,
-                        color: t.accent,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// One key, in the editor bar's button style. A word where a glyph would be
-/// cryptic (Esc, Tab, Ctrl), an icon for the rest; arrows are icons because
-/// the mono face draws their glyphs at uneven sizes.
-class _Key extends StatelessWidget {
-  const _Key({
-    super.key,
-    this.label,
-    this.icon,
-    required this.tooltip,
-    required this.onTap,
-    this.active = false,
-  }) : assert((label == null) != (icon == null));
-
-  final String? label;
-  final IconData? icon;
-  final String tooltip;
-  final VoidCallback onTap;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final color = active ? t.accent : t.text2;
-    return Tooltip(
-      message: tooltip,
-      child: InkWell(
-        // InkWell takes no focus, so the terminal keeps it and the keyboard
-        // stays up between taps.
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl * 0.8),
-        child: Container(
-          margin: EdgeInsets.symmetric(vertical: t.sp * 0.75),
-          // A shade narrower than the editor bar's 1.25: nine keys and Done
-          // then fit a 411 px phone, so Paste is never scrolled away.
-          padding: EdgeInsets.symmetric(horizontal: t.sp),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: active ? t.accentSoft : null,
-            borderRadius: BorderRadius.circular(t.rControl * 0.8),
-          ),
-          child: icon != null
-              ? Icon(icon, size: t.headingSize, color: color)
-              : Text(
-                  label!,
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.codeSize,
-                    fontWeight: FontWeight.w600,
-                    color: color,
-                  ),
-                ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Host, then workspace, then provider (freeze §10, item 2).
-class _Launcher extends ConsumerStatefulWidget {
-  const _Launcher({required this.hosts});
-
-  final List<AgentHost> hosts;
-
-  @override
-  ConsumerState<_Launcher> createState() => _LauncherState();
-}
-
-class _LauncherState extends ConsumerState<_Launcher> {
-  AgentHost? _host;
-  List<AgentWorkspace>? _workspaces;
-  AgentWorkspace? _workspace;
-  String? _provider;
-  String? _default;
-  String? _error;
-  bool _busy = false;
-
-  /// "Allow vault writes" (G-D5): off by default, for this launch only.
-  bool _allowWrites = false;
-
-  List<AgentHost> get _online => [
-    for (final h in widget.hosts)
-      if (h.online) h,
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _preselectHost();
-    _loadDefault();
-  }
-
-  /// The host this device launched on last, if it is online; otherwise the
-  /// only one there is. Most launches are then a single tap (decision 78).
-  Future<void> _preselectHost() async {
-    final online = _online;
-    final last = await lastLaunchHost();
-    if (!mounted || _host != null) return;
-    final remembered = online.where((h) => h.id == last).firstOrNull;
-    if (remembered != null) {
-      await _pickHost(remembered);
-    } else if (online.length == 1) {
-      await _pickHost(online.first);
-    }
-  }
-
-  Future<void> _loadDefault() async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      final d = await api.defaultProvider();
-      if (mounted) setState(() => _default = _provider ??= d);
-    } catch (_) {
-    } finally {
-      api.dispose();
-    }
-  }
-
-  Future<void> _pickHost(AgentHost host) async {
-    setState(() {
-      _host = host;
-      _workspaces = null;
-      _workspace = null;
-    });
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      final ws = await api.workspaces(host.id);
-      if (mounted) {
-        setState(() {
-          _workspaces = ws;
-          // One workspace is no choice at all.
-          if (ws.length == 1) _workspace = ws.first;
-        });
-      }
-    } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
-    } finally {
-      api.dispose();
-    }
-  }
-
-  Future<void> _go() async {
-    final host = _host, ws = _workspace;
-    if (host == null || ws == null) return;
-    final api = agentApi(ref);
-    if (api == null) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      final size = MediaQuery.sizeOf(context);
-      final session = await api.launch(
-        hostId: host.id,
-        workspace: ws.name,
-        provider: _provider,
-        // A first guess; the terminal sends its real size once laid out.
-        cols: (size.width / 9).clamp(40, 240).floor(),
-        rows: (size.height / 20).clamp(12, 80).floor(),
-        allowVaultWrites: _allowWrites && _provider != 'shell',
-      );
-      await rememberLaunchHost(host.id);
-      if (!mounted) return;
-      // An old host gets no integrations; the launch says so (spec §6).
-      final notice = session.launchNotice;
-      if (notice != null) {
-        ScaffoldMessenger.maybeOf(
-          context,
-        )?.showSnackBar(SnackBar(content: Text(notice)));
-      }
-      Navigator.of(context).pop(session);
-    } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
-    } finally {
-      api.dispose();
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final online = _online;
-    final host = _host;
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          t.sp * 2,
-          0,
-          t.sp * 2,
-          t.sp * 2 + MediaQuery.viewInsetsOf(context).bottom,
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'New session',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              SizedBox(height: t.sp * 2),
-              _Label('Host'),
-              if (online.isEmpty)
-                Text(
-                  'No host is online. Start storm-runtime on one, or enroll a '
-                  'host first.',
-                  style: TextStyle(color: t.text3),
-                )
-              else
-                Wrap(
-                  spacing: t.sp,
-                  runSpacing: t.sp,
-                  children: [
-                    for (final h in online)
-                      ChoiceChip(
-                        label: Text(h.name),
-                        selected: h.id == host?.id,
-                        onSelected: (_) => _pickHost(h),
-                      ),
-                  ],
-                ),
-              if (host != null) ...[
-                SizedBox(height: t.sp * 2),
-                _Label('Workspace'),
-                if (_workspaces == null)
-                  const SkeletonRows(rows: 1)
-                else if (_workspaces!.isEmpty)
-                  Text(
-                    'This host has no workspaces. Add a directory under one of '
-                    'its workspace roots.',
-                    style: TextStyle(color: t.text3),
-                  )
-                else
-                  Wrap(
-                    spacing: t.sp,
-                    runSpacing: t.sp,
-                    children: [
-                      for (final w in _workspaces!)
-                        ChoiceChip(
-                          key: Key('workspace-${w.name}'),
-                          label: Text(w.name),
-                          selected: w.name == _workspace?.name,
-                          onSelected: (_) => setState(() => _workspace = w),
-                        ),
-                    ],
-                  ),
-                if ((_workspace?.liveSessions ?? 0) > 0)
-                  Padding(
-                    padding: EdgeInsets.only(top: t.sp),
-                    child: Text(
-                      _workspace!.liveSessions == 1
-                          ? 'Another session is already working here, on the '
-                                'same files.'
-                          : '${_workspace!.liveSessions} sessions are already '
-                                'working here, on the same files.',
-                      style: TextStyle(color: t.amber),
-                    ),
-                  ),
-                SizedBox(height: t.sp * 2),
-                _Label('Provider'),
-                Wrap(
-                  spacing: t.sp,
-                  runSpacing: t.sp,
-                  children: [
-                    for (final p in host.providers)
-                      ChoiceChip(
-                        key: Key('provider-${p.id}'),
-                        label: Text(
-                          !p.available
-                              ? '${p.label} (not installed)'
-                              : p.id == _default
-                              ? '${p.label} (default)'
-                              : p.label,
-                        ),
-                        selected: p.id == _provider,
-                        onSelected: p.available
-                            ? (_) => setState(() => _provider = p.id)
-                            : null,
-                      ),
-                  ],
-                ),
-                // The MCP Gateway (G-D5, G-D9): every session but a shell can
-                // use the owner's integrations and read the vaults; writing
-                // is this launch's choice, off by default.
-                if (_provider != 'shell') ...[
-                  SizedBox(height: t.sp),
-                  SwitchListTile(
-                    key: const Key('allow-vault-writes'),
-                    contentPadding: EdgeInsets.zero,
-                    value: _allowWrites,
-                    onChanged: (v) => setState(() => _allowWrites = v),
-                    title: const Text('Allow vault writes'),
-                    subtitle: const Text(
-                      'Agents can create and edit notes. Needs MCP writes on '
-                      'in Server settings.',
-                    ),
-                  ),
-                ],
-                SizedBox(height: t.sp * 2),
-                Text(
-                  "Network: inherits ${host.name}'s policy",
-                  style: TextStyle(fontSize: t.labelSize, color: t.text3),
-                ),
-                if (_provider != 'shell')
-                  Text(
-                    'Agents here can use your integrations and read your '
-                    'vaults, with that network access (AM27).',
-                    key: const Key('egress-integrations'),
-                    style: TextStyle(fontSize: t.labelSize, color: t.text3),
-                  ),
-              ],
-              if (_error != null) ...[
-                SizedBox(height: t.sp),
-                Text(_error!, style: TextStyle(color: t.danger)),
-              ],
-              SizedBox(height: t.sp * 2),
-              Align(
-                alignment: Alignment.centerRight,
-                child: FilledButton(
-                  key: const Key('launch'),
-                  onPressed: _busy || host == null || _workspace == null
-                      ? null
-                      : _go,
-                  child: Text(_busy ? 'Starting' : 'Launch'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _Label extends StatelessWidget {
-  const _Label(this.text);
+class _PageTitle extends StatelessWidget {
+  const _PageTitle(this.text);
 
   final String text;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Padding(
-      padding: EdgeInsets.only(bottom: t.sp * 0.75),
-      child: Text(
-        text,
-        style: TextStyle(fontWeight: FontWeight.w600, color: t.text2),
+    return Text(
+      text,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.titleSize,
+        fontWeight: FontWeight.w600,
+        color: t.text,
       ),
     );
   }
 }
 
-/// The launcher, for tests.
-@visibleForTesting
-Widget launcherForTest(List<AgentHost> hosts) => _Launcher(hosts: hosts);
+class _Copy extends StatelessWidget {
+  const _Copy(this.text, {this.size});
+
+  final String text;
+  final double? size;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Text(
+      text,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: size ?? t.uiSize * 1.05,
+        height: 1.55,
+        color: t.text2,
+      ),
+    );
+  }
+}
+
+class _Offline extends StatelessWidget {
+  const _Offline({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => EmptyState(
+    icon: LucideIcons.cloud_off,
+    title: kAgentsOfflineTitle,
+    detail: kAgentsOfflineDetail,
+    action: 'Try again',
+    onAction: onRetry,
+    fill: context.isExpanded,
+  );
+}
+
+/// The desk states' frame: vertically centred, 64 from the pane's edge.
+class _Intro extends StatelessWidget {
+  const _Intro({required this.maxWidth, required this.children});
+
+  final double maxWidth;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return LayoutBuilder(
+      builder: (context, box) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: box.maxHeight),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp * 8,
+                vertical: t.sp * 4,
+              ),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxWidth),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < children.length; i++) ...[
+                      if (i > 0) SizedBox(height: t.sp * 1.75),
+                      children[i],
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// No host enrolled: where agents run, and the three steps to get one.
+class _NoHost extends StatelessWidget {
+  const _NoHost({required this.wide});
+
+  final bool wide;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final steps = NumberedSteps(
+      inline: true,
+      steps: [
+        NumberedStep(
+          'Enroll a host',
+          action: wide
+              ? StormButton.primary(
+                  key: const Key('enroll-host-step'),
+                  label: 'Enroll a host',
+                  onPressed: () => context.go(Routes.settingsPage('hosts')),
+                )
+              : null,
+        ),
+        const NumberedStep('Sign Claude Code or OpenCode in on that host'),
+        const NumberedStep('Start a session'),
+      ],
+    );
+    if (!wide) {
+      return Padding(
+        padding: EdgeInsets.only(top: t.sp),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const _Copy(
+              'Agents run on a machine you own. Sessions keep going when '
+              'this phone is off.',
+            ),
+            SizedBox(height: t.sp * 2.5),
+            steps,
+          ],
+        ),
+      );
+    }
+    return _Intro(
+      maxWidth: t.sp * 60,
+      children: [
+        const _PageTitle('Agents run on a machine you own'),
+        const _Copy(
+          'Storm keeps each session running on that machine, so you can '
+          'leave and pick it up from any device.',
+        ),
+        steps,
+      ],
+    );
+  }
+}
+
+/// "build-vm is online with Claude Code and OpenCode."
+String _onlineWith(AgentHost h) {
+  final agents = [
+    for (final p in h.providers)
+      if (p.available && p.id != 'shell') p.label,
+  ];
+  if (agents.isEmpty) return '${h.name} is online';
+  final list = agents.length == 1
+      ? agents.first
+      : '${agents.sublist(0, agents.length - 1).join(', ')} and ${agents.last}';
+  return '${h.name} is online with $list';
+}
+
+/// Hosts, no sessions: start from a recent note, or without one.
+class _FirstSession extends ConsumerWidget {
+  const _FirstSession({required this.overview, required this.wide});
+
+  final AgentOverview overview;
+  final bool wide;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final host = overview.online.firstOrNull;
+    final recents = (ref.watch(recentsProvider).value ?? const <RecentNote>[])
+        .take(3)
+        .toList();
+    void start(RecentNote? n) => launchAgentSession(
+      context,
+      ref,
+      contextNote: n == null ? null : (vaultId: n.vaultId, noteId: n.noteId),
+    );
+
+    if (!wide) {
+      return Padding(
+        padding: EdgeInsets.only(top: t.sp),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _Copy(
+              host == null
+                  ? 'No host is online. Start storm-runtime on one to begin.'
+                  : '${host.name} is online. Start from a note, or tap ＋.',
+            ),
+            if (host != null)
+              for (final n in recents)
+                _NoteStartRow(
+                  title: '▶  ${noteTitleOf(n.title, n.path)}',
+                  vault: n.vaultName,
+                  phone: true,
+                  onTap: () => start(n),
+                ),
+          ],
+        ),
+      );
+    }
+
+    return _Intro(
+      maxWidth: t.sp * 57.5,
+      children: [
+        const _PageTitle('Start your first session'),
+        _Copy(
+          host == null
+              ? 'No host is online. Start storm-runtime on one of your hosts, '
+                    'and it will appear here.'
+              : '${_onlineWith(host)}. A session runs in one of its '
+                    'workspaces and keeps going after you close Storm.',
+        ),
+        if (host != null && recents.isNotEmpty) ...[
+          Padding(
+            padding: EdgeInsets.only(top: t.sp),
+            child: const AgentsLabel('Start from a note'),
+          ),
+          for (final n in recents)
+            _NoteStartRow(
+              title: noteTitleOf(n.title, n.path),
+              vault: n.vaultName,
+              onTap: () => start(n),
+            ),
+        ],
+        if (host != null)
+          Padding(
+            padding: EdgeInsets.only(top: t.sp * 0.75),
+            child: Row(
+              children: [
+                StormButton.primary(
+                  key: const Key('first-new-session'),
+                  label: 'New session',
+                  onPressed: () => start(null),
+                ),
+                SizedBox(width: t.sp * 1.5),
+                Flexible(
+                  child: Text(
+                    'or start without a note',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.text3,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _NoteStartRow extends StatelessWidget {
+  const _NoteStartRow({
+    required this.title,
+    required this.vault,
+    required this.onTap,
+    this.phone = false,
+  });
+
+  final String title;
+  final String vault;
+  final VoidCallback onTap;
+  final bool phone;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final row = Row(
+      children: [
+        Expanded(
+          child: Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: phone ? t.uiSize * 1.05 : t.uiSize,
+              color: t.text,
+            ),
+          ),
+        ),
+        SizedBox(width: t.sp),
+        MonoTag(vault),
+      ],
+    );
+    return Semantics(
+      button: true,
+      label: 'Start from $title',
+      excludeSemantics: true,
+      onTap: onTap,
+      child: phone
+          ? InkWell(
+              onTap: onTap,
+              child: Container(
+                padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: t.border, width: t.bw),
+                  ),
+                ),
+                child: row,
+              ),
+            )
+          : _HoverCard(
+              onTap: onTap,
+              padding: EdgeInsets.symmetric(
+                horizontal: t.sp * 1.75,
+                vertical: t.sp * 1.25,
+              ),
+              child: row,
+            ),
+    );
+  }
+}
+
+/// `surface`, a hairline that turns `accent` under the pointer.
+class _HoverCard extends StatefulWidget {
+  const _HoverCard({
+    required this.onTap,
+    required this.padding,
+    required this.child,
+    this.minWidth = 0,
+  });
+
+  final VoidCallback? onTap;
+  final EdgeInsets padding;
+  final Widget child;
+  final double minWidth;
+
+  @override
+  State<_HoverCard> createState() => _HoverCardState();
+}
+
+class _HoverCardState extends State<_HoverCard> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final radius = BorderRadius.circular(t.rControl);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Material(
+        color: t.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: radius,
+          side: BorderSide(
+            color: _hover && widget.onTap != null ? t.accent : t.border,
+            width: t.bw,
+          ),
+        ),
+        child: InkWell(
+          borderRadius: radius,
+          onTap: widget.onTap,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minWidth: widget.minWidth),
+            child: Padding(padding: widget.padding, child: widget.child),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "1 of 2 hosts online · 2 integrations, 1 needs sign-in".
+String _infraLine(AgentOverview o, List<Integration>? integrations) {
+  final n = o.hosts.length;
+  final parts = ['${o.online.length} of $n host${n == 1 ? '' : 's'} online'];
+  if (integrations != null) {
+    final mine = [
+      for (final i in integrations)
+        if (!i.builtin && !i.disabled) i,
+    ];
+    final signIn = mine.where((i) => i.needsReconnect).length;
+    var text = '${mine.length} integration${mine.length == 1 ? '' : 's'}';
+    if (signIn > 0) text += ', $signIn need${signIn == 1 ? 's' : ''} sign-in';
+    parts.add(text);
+  }
+  return parts.join(' · ');
+}
+
+class _InfraLine extends ConsumerWidget {
+  const _InfraLine({required this.overview, this.phone = false});
+
+  final AgentOverview overview;
+  final bool phone;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final line = _infraLine(
+      overview,
+      ref.watch(integrationsSummaryProvider).value,
+    );
+    final style = TextStyle(
+      fontFamily: StormTokens.monoFamily,
+      fontSize: phone ? t.labelSize : t.labelSize * 1.09,
+      height: 1.6,
+      color: t.text3,
+    );
+    void go() => context.go(Routes.settingsPage('hosts'));
+    return Semantics(
+      link: true,
+      label: '$line. Settings',
+      excludeSemantics: true,
+      onTap: go,
+      child: GestureDetector(
+        key: const Key('agents-infra'),
+        behavior: HitTestBehavior.opaque,
+        onTap: go,
+        child: Text.rich(
+          TextSpan(
+            text: line,
+            children: [
+              if (!phone)
+                TextSpan(
+                  text: ' · ',
+                  children: [
+                    TextSpan(
+                      text: 'Settings ›',
+                      style: TextStyle(color: t.accent),
+                    ),
+                  ],
+                ),
+            ],
+          ),
+          style: style,
+        ),
+      ),
+    );
+  }
+}
+
+/// The desk overview: work by (workspace, host), the agents you can start,
+/// and the infrastructure line (handoff §2.7).
+class _Overview extends ConsumerWidget {
+  const _Overview({required this.overview});
+
+  final AgentOverview overview;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final o = overview;
+    final groups = <(String, String), List<AgentSession>>{};
+    for (final s in o.sessions) {
+      (groups[(s.workspace, s.hostId)] ??= []).add(s);
+    }
+
+    return SingleChildScrollView(
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: t.sp * 95),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              t.sp * 5,
+              t.sp * 3.5,
+              t.sp * 5,
+              t.sp * 7.5,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const _PageTitle('Agents'),
+                SizedBox(height: t.sp * 0.75),
+                _Copy(
+                  'What your agents are working on. Sessions keep running on '
+                  'your hosts when you close Storm.',
+                  size: t.uiSize,
+                ),
+                SizedBox(height: t.sp * 3),
+                const AgentsLabel('Work'),
+                SizedBox(height: t.sp * 1.5),
+                for (final MapEntry(key: (ws, host), value: rows)
+                    in groups.entries) ...[
+                  _WorkCard(
+                    workspace: ws,
+                    host: o.hostName(host),
+                    sessions: rows,
+                  ),
+                  SizedBox(height: t.sp * 1.5),
+                ],
+                SizedBox(height: t.sp * 1.5),
+                const AgentsLabel('Start an agent'),
+                SizedBox(height: t.sp * 1.25),
+                _AgentCards(overview: o),
+                SizedBox(height: t.sp * 3),
+                _InfraLine(overview: o),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WorkCard extends StatelessWidget {
+  const _WorkCard({
+    required this.workspace,
+    required this.host,
+    required this.sessions,
+  });
+
+  final String workspace;
+  final String host;
+  final List<AgentSession> sessions;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(
+      // Rows bleed a step past the header so their hover fill reaches
+      // toward the card's edge (handoff §2.7).
+      padding: EdgeInsets.symmetric(
+        horizontal: t.sp * 1.25,
+        vertical: t.sp * 2,
+      ),
+      decoration: BoxDecoration(
+        color: t.surface,
+        borderRadius: BorderRadius.circular(t.rCard),
+        border: Border.all(color: t.border, width: t.bw),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: EdgeInsets.only(left: t.sp, bottom: t.sp * 0.75),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  workspace,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.uiSize * 1.05,
+                    fontWeight: FontWeight.w600,
+                    color: t.text,
+                  ),
+                ),
+                SizedBox(width: t.sp),
+                Text(
+                  'on $host',
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize * 1.09,
+                    color: t.text3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          for (final s in sessions) _WorkRow(session: s),
+        ],
+      ),
+    );
+  }
+}
+
+class _WorkRow extends StatelessWidget {
+  const _WorkRow({required this.session});
+
+  final AgentSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final s = session;
+    final radius = BorderRadius.circular(t.rControl);
+    void open() => openAgentSession(context, s.id);
+    return Semantics(
+      button: true,
+      label: '${s.name}, ${s.statusLabel}',
+      excludeSemantics: true,
+      onTap: open,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: radius,
+        child: InkWell(
+          key: Key('work-${s.id}'),
+          borderRadius: radius,
+          hoverColor: t.surface2,
+          onTap: open,
+          child: Padding(
+            padding: EdgeInsets.all(t.sp),
+            child: Row(
+              children: [
+                SessionStatusDot(status: s.status),
+                SizedBox(width: t.sp * 1.25),
+                Flexible(
+                  child: Text(
+                    s.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: t.text,
+                    ),
+                  ),
+                ),
+                SizedBox(width: t.sp * 1.25),
+                Text(
+                  '${providerLabel(s.provider)} · ${sessionWhen(s)}',
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize * 1.09,
+                    color: t.text3,
+                  ),
+                ),
+                const Spacer(),
+                if (s.context != null) ...[
+                  SizedBox(width: t.sp),
+                  NoteContextChip(title: s.context!.title),
+                ],
+                if (s.wroteCount > 0) ...[
+                  SizedBox(width: t.sp * 1.25),
+                  Text(
+                    'wrote ${s.wroteCount}',
+                    style: TextStyle(
+                      fontFamily: StormTokens.monoFamily,
+                      fontSize: t.labelSize,
+                      color: t.accent,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One card per agent any host offers: where it can run, or why not.
+class _AgentCards extends ConsumerWidget {
+  const _AgentCards({required this.overview});
+
+  final AgentOverview overview;
+
+  static const _order = ['claude-code', 'opencode', 'shell'];
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final ids =
+        <String>{
+          for (final h in overview.hosts)
+            for (final p in h.providers) p.id,
+        }.toList()..sort((a, b) {
+          final ia = _order.indexOf(a), ib = _order.indexOf(b);
+          return (ia < 0 ? 99 : ia).compareTo(ib < 0 ? 99 : ib);
+        });
+    return Wrap(
+      spacing: t.sp,
+      runSpacing: t.sp,
+      children: [for (final id in ids) _agentCard(context, ref, id)],
+    );
+  }
+
+  Widget _agentCard(BuildContext context, WidgetRef ref, String id) {
+    final t = context.tokens;
+    bool offers(AgentHost h) =>
+        h.providers.any((p) => p.id == id && p.available);
+    final on = [
+      for (final h in overview.online)
+        if (offers(h)) h.name,
+    ];
+    final off = overview.hosts.where((h) => !h.online && offers(h)).length;
+    final where = on.isNotEmpty
+        ? on.join(', ')
+        : '$off host${off == 1 ? '' : 's'} offline';
+    final onTap = on.isEmpty
+        ? null
+        : () => launchAgentSession(context, ref, provider: id);
+    return Semantics(
+      button: true,
+      enabled: onTap != null,
+      label: 'Start ${providerLabel(id)}',
+      excludeSemantics: true,
+      onTap: onTap,
+      child: _HoverCard(
+        onTap: onTap,
+        minWidth: t.sp * 18.75,
+        padding: EdgeInsets.symmetric(
+          horizontal: t.sp * 1.75,
+          vertical: t.sp * 1.25,
+        ),
+        child: Column(
+          key: Key('agent-card-$id'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              providerLabel(id),
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.uiSize,
+                fontWeight: FontWeight.w500,
+                color: t.text,
+              ),
+            ),
+            SizedBox(height: t.sp * 0.25),
+            Text(
+              where,
+              style: TextStyle(
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.labelSize,
+                color: t.text3,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The phone list: Running, then Ended, then the infrastructure line. No
+/// work grouping — the rows already carry the workspace (handoff §2.8).
+class _PhoneList extends StatelessWidget {
+  const _PhoneList({required this.overview});
+
+  final AgentOverview overview;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final o = overview;
+    Widget section(String label, List<AgentSession> list, double top) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
+          child: AgentsLabel(label),
+        ),
+        for (final s in list)
+          SessionRow(
+            session: s,
+            phone: true,
+            onTap: () => openAgentSession(context, s.id),
+          ),
+      ],
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (o.live.isNotEmpty) section('Running', o.live, t.sp * 1.75),
+        if (o.ended.isNotEmpty) section('Ended', o.ended, t.sp * 2.75),
+        Padding(
+          padding: EdgeInsets.only(top: t.sp * 2.25),
+          child: _InfraLine(overview: o, phone: true),
+        ),
+      ],
+    );
+  }
+}

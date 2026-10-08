@@ -36,6 +36,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "../../../../.."))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "apps/server/tests"))
 
+import agents  # noqa: E402
 import cdp  # noqa: E402
 import shots  # noqa: E402
 import storm_auth  # noqa: E402
@@ -122,6 +123,18 @@ class Harness:
         self.tmp = tempfile.mkdtemp(prefix="storm-acceptance-")
         self.procs = []
         self.ids = {}
+        self.base = BASE
+        self.world = None
+
+    def api(self, method, path, body=None):
+        return storm_auth._call(BASE, method, path, body, auth=self.session)
+
+    def step(self, name):
+        """Moves the server's agent state on (see agents.py)."""
+        self.world = self.world or agents.AgentWorld(self)
+        {"hosts": self.world.enroll_hosts,
+         "sessions": self.world.run_sessions}[name]()
+        log(f"step {name} done")
 
     # ---- server -------------------------------------------------------
 
@@ -286,9 +299,10 @@ class Harness:
     def shoot(self, shot):
         switched = getattr(self, "current_viewport", None) != shot["viewport"]
         self.viewport(shot["viewport"])
-        if switched:
-            # A fresh load at the new size, as a device would be: flipping a
-            # live page between desktop and phone sometimes stalled Chromium.
+        if switched or shot.get("fresh"):
+            # A fresh load at the new size, as a device would be (flipping a
+            # live page between desktop and phone sometimes stalled Chromium),
+            # or with nothing left open by the shot before.
             self.page.call("Page.navigate", url=BASE + self.route(shot["route"]))
             self.wait_app()
             wait_for(lambda: self.location() not in ("/starting", "/login"), 30,
@@ -367,7 +381,9 @@ def main():
         h.start_browser()
         h.sign_in()
         for shot in shots.SETS[args.set]:
-            if shot["name"].startswith(args.only):
+            if "step" in shot:
+                h.step(shot["step"])
+            elif shot["name"].startswith(args.only):
                 h.shoot(shot)
     except Exception:
         h.debug_dump()

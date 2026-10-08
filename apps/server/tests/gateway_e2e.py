@@ -19,6 +19,10 @@ What it proves, with the real build:
   re-sent; an open elicitation is cancelled and a late answer dropped; an
   upstream restart (404) re-initializes and runs the call once;
 - disconnecting refuses the next call; `shell` gets nothing;
+- an agent writes only to its session's write vault, under `agent_writes`,
+  and every write is recorded with its provenance (decision 82, slice 5);
+- a session started from a note reads it through `session_context`, and no
+  part of the note is on any process's command line or in its environment;
 - the credential boundary (C1, C2, C4, C5, C7) on this host, with positive
   controls; C3 (the journal) is the operator's.
 
@@ -209,7 +213,7 @@ def main():
     os.makedirs(os.path.join(WORK, "vaults", "primary"))
     with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
         f.write("# Seed\n")
-    for ws in ("gw", "oc", "sh", "wr"):
+    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw"):
         os.makedirs(os.path.join(WORKSPACES, ws))
     os.makedirs(UP_STATE)
     with open(CANARY_FILE, "w") as f:
@@ -218,7 +222,7 @@ def main():
     with open(os.path.join(WORK, "runtime.toml"), "w") as f:
         f.write(f"""workspace_roots = ["{WORKSPACES}"]
 forbidden_roots = ["{STATE}", "{os.path.join(WORK, 'vaults')}"]
-max_sessions = 6
+max_sessions = 8
 
 [[providers]]
 id = "claude-code"
@@ -283,10 +287,10 @@ args = ["-i"]
         check("the daemon's socket directory is 0700", oct(os.stat(sock).st_mode & 0o777) == "0o700",
               oct(os.stat(sock).st_mode))
 
-        def launch(provider, workspace, writes=False):
+        def launch(provider, workspace, extra=None):
             status, rec = call("POST", "/v1/agent/sessions", {
                 "host_id": host_id, "workspace": workspace, "provider": provider,
-                "terminal": {"cols": 80, "rows": 24}, "allow_vault_writes": writes}, auth=owner)
+                "terminal": {"cols": 80, "rows": 24}, **(extra or {})}, auth=owner)
             assert status == 200, rec
             wait(lambda: call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1]["status"] == "running",
                  "running")
@@ -462,17 +466,78 @@ args = ["-i"]
         oc.tool(slug, 2, "echo", {"text": "oc"})
         check("OpenCode's session calls through its bridge", text_of(oc.answer(slug, 2)) == "echo: oc")
 
-        print("\n=== Phase 1's exit: an agent's write merges with a phone's (AM28) ===")
-        status, _ = call("PUT", "/v1/config/mcp", {"enabled": True, "writable": True}, auth=owner)
-        check("the owner turns MCP writes on", status in (200, 204), status)
         _, vaults = call("GET", "/v1/vaults", auth=owner)
-        vault = vaults["vaults"][0]["id"]
-        launch("claude-code", "wr", writes=True)
+        vault = next(v["id"] for v in vaults["vaults"] if v["dir"] == "primary")
+
+        print("\n=== a session started from a note (§5.3 C; the argv rule) ===")
+        prompt = "Read your context note with the storm session_context tool, then wait for my instructions."
+        mark = "ctx-marker-" + os.urandom(6).hex()
+        other_mark = "ctx-other-" + os.urandom(6).hex()
+        _, made = call("POST", f"/v1/vaults/{vault}/notes", {
+            "path": f"Context/{mark}.md", "content": f"# Brief {mark}\n\nthe body says {mark}-body\n"}, auth=owner)
+        brief = made["note"]
+        _, made = call("POST", f"/v1/vaults/{vault}/notes", {
+            "path": "Context/Other.md", "content": f"# Other\n\n{other_mark}-body\n"}, auth=owner)
+        other = made["note"]
+        rec = launch("claude-code", "ctx", {"context": {"vault_id": vault, "note_id": brief["id"]}})
+        check("the session is named from its note", rec["name"] == f"brief-{mark}", rec.get("name"))
+        check("and carries its context", rec["context"] == {"vault_id": vault, "note_id": brief["id"],
+                                                             "title": f"Brief {mark}"}, rec.get("context"))
+        c = Agent("ctx")
+        argv = wait(c.env, "the agent's record of its launch")["argv"]
+        check("Claude Code gets the fixed opening prompt, last",
+              argv[-1] == prompt and argv[-2] == "--strict-mcp-config", argv)
+        rec2 = launch("opencode", "ctx2", {"context": {"vault_id": vault, "note_id": other["id"]}})
+        c2 = Agent("ctx2")
+        argv2 = wait(c2.env, "the second agent's record of its launch")["argv"]
+        check("OpenCode gets --prompt and the same constant", argv2[-2:] == ["--prompt", prompt], argv2)
+
+        note_data = [mark, brief["id"], other_mark, other["id"]]
+        control = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", mark],
+                                   env={**os.environ, "CONTROL": brief["id"]})
+        wait(lambda: b"time.sleep" in open(f"/proc/{control.pid}/cmdline", "rb").read(),
+             "the control process to exec")
+        found = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                blob = open(f"/proc/{pid}/cmdline", "rb").read() + open(f"/proc/{pid}/environ", "rb").read()
+            except OSError:
+                continue
+            if any(d.encode() in blob for d in note_data):
+                found.append(pid)
+        check("positive control: a process carrying note data is found", str(control.pid) in found, found)
+        control.kill()
+        found = [pid for pid in found if pid != str(control.pid)]
+        check("no process's arguments or environment hold the note's title, body or id", found == [], found)
+
+        c.initialize("storm", 1)
+        c.tool("storm", 2, "session_context")
+        got = c.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("the agent reads its note through session_context",
+              f"{mark}-body" in got.get("content", "") and got.get("note_id") == brief["id"], got)
+        c2.initialize("storm", 1)
+        c2.tool("storm", 2, "session_context")
+        got2 = c2.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("a second session reads its own note, never the first one's",
+              f"{other_mark}-body" in got2.get("content", "") and mark not in json.dumps(got2), got2)
+        for sid_ in (rec["id"], rec2["id"]):
+            call("POST", f"/v1/agent/sessions/{sid_}/end", auth=owner)
+
+        print("\n=== Phase 1's exit: an agent's write merges with a phone's (AM28), in its write vault ===")
+        status, cfg = call("PUT", "/v1/config/mcp", {"agent_writes": True}, auth=owner)
+        check("the owner turns agent writes on, and MCP writes stay off",
+              status == 200 and cfg["agent_writes"] is True and cfg["mcp_writable"] is False, cfg)
+        _, elsewhere = call("POST", "/v1/vaults", {"name": "elsewhere"}, auth=owner)
+        wrec = launch("claude-code", "wr", {"write_vault_id": vault})
+        wid = wrec["id"]
+        check("the launch records its write vault", wrec["write_vault_id"] == vault, wrec)
         w = Agent("wr")
         w.initialize("storm", 1)
         w.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         wtools = [t["name"] for t in w.answer("storm", 2)["result"]["tools"]]
-        check("with both flags the agent may write, and still never delete",
+        check("with a write vault and agent writes on, the agent may write, and still never delete",
               "create_note" in wtools and "update_note" in wtools and "delete_note" not in wtools, wtools)
         w.tool("storm", 3, "create_note", {"vault": vault, "path": "Agents/Plan.md",
                                            "content": "# Plan\n\nfirst: draft\n\nsecond: draft\n"})
@@ -493,11 +558,54 @@ args = ["-i"]
         refused = w.answer("storm", 5)
         check("and the agent cannot delete it (G-D5)",
               refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
-        call("PUT", "/v1/config/mcp", {"enabled": True, "writable": False}, auth=owner)
-        w.tool("storm", 6, "update_note", {"vault": vault, "note_id": note_id, "base_version": 1,
-                                           "content": "x"})
+        w.tool("storm", 6, "create_note", {"vault": elsewhere["id"], "path": "Stray.md", "content": "x"})
         refused = w.answer("storm", 6)
-        check("switching MCP writes off refuses the live session's next write",
+        check("a write outside its write vault is refused with a stable code",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "vault_write_not_allowed", refused)
+        _, tree = call("GET", f"/v1/vaults/{elsewhere['id']}/tree", auth=owner)
+        check("and nothing was written there", "Stray" not in json.dumps(tree), tree)
+
+        _, writes = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)
+        check("the session's Wrote list has the note, once, created, at its latest version",
+              [(x["note_id"], x["kind"], x["version"], x["title"]) for x in writes] ==
+              [(note_id, "created", final["version"], "Plan")], writes)
+        _, view = call("GET", f"/v1/agent/sessions/{wid}", auth=owner)
+        check("the session counts it", view.get("wrote_count") == 1, view)
+        aw = final.get("agent_write") or {}
+        check("the note names the session that wrote it",
+              aw.get("session_id") == wid and aw.get("session_name") == wrec["name"] and aw.get("kind") == "created",
+              final)
+        _, unseen = call("GET", f"/v1/vaults/{vault}/agent-writes", auth=owner)
+        check("the vault's agent-writes map has it", unseen.get(note_id, {}).get("session_id") == wid, unseen)
+
+        print("\n=== kit scripts: written only with kit as the write vault, and in Wrote ===")
+        kit = next(v for v in call("GET", "/v1/vaults", auth=owner)[1]["vaults"] if v["dir"] == "kit")
+        before = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)[1]
+        w.tool("storm", 20, "create_script", {"name": "e2e/tool.sh", "content": "echo hi\n"})
+        refused = w.answer("storm", 20)
+        check("a script write with another write vault is refused",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "vault_write_not_allowed", refused)
+        after = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)[1]
+        check("and is not recorded", after == before, after)
+        krec = launch("claude-code", "kw", {"write_vault_id": kit["id"]})
+        k = Agent("kw")
+        k.initialize("storm", 1)
+        k.tool("storm", 2, "create_script", {"name": "e2e/tool.sh", "content": "echo hi\n"})
+        made = k.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("with kit as its write vault the agent writes a script", made.get("path") == "scripts/e2e/tool.sh", made)
+        k.tool("storm", 3, "update_script", {"name": "e2e/tool.sh", "content": "echo bye\n"})
+        k.answer("storm", 3)
+        _, kwrites = call("GET", f"/v1/agent/sessions/{krec['id']}/writes", auth=owner)
+        check("the script is in the session's Wrote list, once",
+              [(x["kind"], x["path"], x["title"], x["note_id"], x["version"]) for x in kwrites] ==
+              [("script_created", "scripts/e2e/tool.sh", "e2e/tool.sh", None, None)], kwrites)
+        check("and counts", call("GET", f"/v1/agent/sessions/{krec['id']}", auth=owner)[1]["wrote_count"] == 1)
+
+        call("PUT", "/v1/config/mcp", {"agent_writes": False}, auth=owner)
+        w.tool("storm", 7, "update_note", {"vault": vault, "note_id": note_id, "base_version": 1,
+                                           "content": "x"})
+        refused = w.answer("storm", 7)
+        check("switching agent writes off refuses the live session's next write",
               refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
 
         print("\n=== shell, and disconnecting mid-session ===")

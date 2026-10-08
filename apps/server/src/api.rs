@@ -73,6 +73,9 @@ pub struct AppState {
     /// Whether MCP may change the vault. Read per request, so the switch takes
     /// effect on the next call rather than the next restart.
     pub mcp_writable: std::sync::atomic::AtomicBool,
+    /// Whether agent sessions may write to their launch's vault. Mirrors
+    /// `Registry::agent_writes`; read per call, like `mcp_writable`.
+    pub agent_writes: std::sync::atomic::AtomicBool,
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
@@ -88,7 +91,7 @@ pub struct AppState {
     ///
     /// Behind a trait object so the RBAC slice can replace it without touching
     /// a handler — that is the whole reason the boundary exists. Today it is
-    /// `AllowAuthenticated`, which is the behaviour the server already had.
+    /// `StormPolicy`: everything, except an agent writing outside its vault.
     pub vault_policy: Arc<dyn VaultPolicy>,
     /// **The one Argon2id gate for the whole process.**
     ///
@@ -232,9 +235,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 /// being asked for.
 ///
 /// The policy is consulted **before** existence is checked, so a refusal never
-/// doubles as a probe for which vault ids are real. `AllowAuthenticated`
-/// never refuses today; the ordering is here so the answer does not change
-/// when a policy that does arrives.
+/// doubles as a probe for which vault ids are real.
 pub async fn vault_of(
     state: &Shared,
     actor: &Actor,
@@ -251,10 +252,13 @@ pub async fn vault_of(
         );
         // 403, never 404 and never an empty list: "you may not see this" has
         // to be distinguishable from "your notes are gone" (decision 25).
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "you do not have access to this vault".into(),
-        ));
+        // An agent's refusal is its stable code, which `mcp.rs` hands it.
+        let message = if reason == crate::auth::authz::AGENT_WRITE_REFUSED {
+            reason
+        } else {
+            "you do not have access to this vault"
+        };
+        return Err(ApiError(StatusCode::FORBIDDEN, message.into()));
     }
 
     let vaults = state.vaults.read().await;
@@ -393,6 +397,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/vaults/{vault}/search", get(search))
         .route("/v1/vaults/{vault}/tags", get(tags))
         .route("/v1/vaults/{vault}/tags/{tag}", get(notes_by_tag))
+        .route("/v1/vaults/{vault}/agent-writes", get(vault_agent_writes))
         .route("/v1/vaults/{vault}/attachments", get(list_attachments))
         .route(
             "/v1/vaults/{vault}/attachments/{*path}",
@@ -428,6 +433,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(agent_get_session).delete(agent_dismiss_session),
         )
         .route("/v1/agent/sessions/{id}/end", post(agent_end_session))
+        .route("/v1/agent/sessions/{id}/writes", get(agent_session_writes))
         .route(
             "/v1/agent/sessions/{id}/terminal/stream",
             get(agent_terminal_stream),
@@ -1635,15 +1641,33 @@ async fn agent_launch(
 
 async fn agent_list_sessions(
     State(state): State<Shared>,
-) -> ApiResult<Json<Vec<crate::agent::store::SessionRecord>>> {
+) -> ApiResult<Json<Vec<crate::ops::SessionView>>> {
     Ok(Json(crate::ops::list_sessions(&state).await?))
 }
 
 async fn agent_get_session(
     State(state): State<Shared>,
     Path(id): Path<String>,
-) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+) -> ApiResult<Json<crate::ops::SessionView>> {
     Ok(Json(crate::ops::get_session(&state, &id).await?))
+}
+
+async fn agent_session_writes(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crate::ops::SessionWrite>>> {
+    Ok(Json(crate::ops::session_writes(&state, &actor, &id).await?))
+}
+
+async fn vault_agent_writes(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(vault): Path<String>,
+) -> ApiResult<Json<std::collections::BTreeMap<String, crate::ops::LatestAgentWrite>>> {
+    Ok(Json(
+        crate::ops::vault_agent_writes(&state, &actor, &vault).await?,
+    ))
 }
 
 async fn agent_end_session(
@@ -2358,10 +2382,15 @@ struct ConfigResponse {
     mcp_enabled: bool,
     /// Whether MCP may create, edit and delete notes.
     mcp_writable: bool,
+    /// Whether an agent session may write to the vault chosen at its launch.
+    /// Independent of the two MCP switches.
+    agent_writes: bool,
     /// The **configured** relay URLs (SRP v1 §4.4) — not the registered set.
     /// `GET /v1/server` reports what is actually live; this is what an
     /// operator or the app set and expects to survive a restart.
     relays: Vec<String>,
+    /// This server's release version, for the client's compatibility check.
+    version: &'static str,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -2372,56 +2401,72 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         vault_count: vaults.registry.vaults.len(),
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
+        agent_writes: vaults.registry.agent_writes(),
         relays: vaults.registry.relays.clone(),
+        version: env!("CARGO_PKG_VERSION"),
     }))
 }
 
 #[derive(Deserialize)]
 struct McpBody {
-    enabled: bool,
+    /// Absent leaves both MCP switches as they are, so a client can change
+    /// `agent_writes` alone.
+    #[serde(default)]
+    enabled: Option<bool>,
     /// Absent means read-only. Callers that do not know about writes therefore
     /// cannot turn them on by omission.
     #[serde(default)]
     writable: bool,
+    /// Absent leaves it as it is: an older client toggling MCP must not
+    /// change what agents may do.
+    #[serde(default)]
+    agent_writes: Option<bool>,
 }
 
-/// Switches the MCP endpoint on or off, now and across restarts.
+/// Switches the MCP endpoint and agent writes on or off, now and across
+/// restarts.
 ///
 /// Its own route rather than a field on `PUT /v1/config`, because that one
 /// re-points the storage root — a heavyweight operation with an orphan check
 /// and a watcher respawn. Toggling a read-only endpoint should not have to send
 /// a `vault_root` it does not want to change.
 ///
-/// The atomic is set *after* the registry is saved: if the write fails the
+/// The atomics are set *after* the registry is saved: if the write fails the
 /// endpoint keeps its old state, which is the honest outcome. The other order
 /// would report success while the setting silently reverted on next boot.
 async fn put_mcp(
     State(state): State<Shared>,
     Json(body): Json<McpBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    {
+    let (enabled, writable, agent_writes) = {
         let mut vaults = state.vaults.write().await;
-        vaults.registry.mcp_enabled = body.enabled;
-        // Writes cannot outlive the endpoint being on: leaving them armed while
-        // MCP is off would mean switching MCP back on silently restores write
-        // access someone thought they had revoked.
-        vaults.registry.mcp_writable = body.enabled && body.writable;
+        if let Some(enabled) = body.enabled {
+            vaults.registry.mcp_enabled = enabled;
+            // Writes cannot outlive the endpoint being on: leaving them armed
+            // while MCP is off would mean switching MCP back on silently
+            // restores write access someone thought they had revoked.
+            vaults.registry.mcp_writable = enabled && body.writable;
+        }
+        if let Some(on) = body.agent_writes {
+            vaults.registry.set_agent_writes(on);
+        }
         vaults.registry.save(&state.state_dir)?;
-    }
+        (
+            vaults.registry.mcp_enabled,
+            vaults.registry.mcp_writable,
+            vaults.registry.agent_writes(),
+        )
+    };
     let ordering = std::sync::atomic::Ordering::Relaxed;
-    state.mcp_enabled.store(body.enabled, ordering);
-    state
-        .mcp_writable
-        .store(body.enabled && body.writable, ordering);
+    state.mcp_enabled.store(enabled, ordering);
+    state.mcp_writable.store(writable, ordering);
+    state.agent_writes.store(agent_writes, ordering);
 
-    tracing::info!(
-        enabled = body.enabled,
-        writable = body.enabled && body.writable,
-        "MCP endpoint toggled"
-    );
+    tracing::info!(enabled, writable, agent_writes, "AI access changed");
     Ok(Json(serde_json::json!({
-        "mcp_enabled": body.enabled,
-        "mcp_writable": body.enabled && body.writable,
+        "mcp_enabled": enabled,
+        "mcp_writable": writable,
+        "agent_writes": agent_writes,
     })))
 }
 
@@ -2660,9 +2705,9 @@ async fn get_note(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
-) -> ApiResult<Json<crate::ops::NoteDetail>> {
+) -> ApiResult<Json<crate::ops::NoteWithProvenance>> {
     Ok(Json(
-        crate::ops::get_note(&state, &actor, &vault, &id).await?,
+        crate::ops::get_note_with_provenance(&state, &actor, &vault, &id).await?,
     ))
 }
 
@@ -3213,8 +3258,8 @@ pub(crate) mod tests {
         (app, identity)
     }
 
-    /// A policy that refuses everything — the only way to exercise the refusal
-    /// path while the shipped policy is `AllowAuthenticated`.
+    /// A policy that refuses everything, so the refusal path is exercised
+    /// for every caller, not only an agent.
     ///
     /// Without it `Decision::Deny` would be code that first runs in production.
     /// The point of the seam is that swapping the policy is all it takes, and
@@ -3233,7 +3278,7 @@ pub(crate) mod tests {
     pub(crate) fn test_router_with_state(
         dir: &FsPath,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_with_policy(dir, Arc::new(crate::auth::authz::AllowAuthenticated))
+        test_router_with_policy(dir, Arc::new(crate::auth::authz::StormPolicy))
     }
 
     fn test_router_with_policy(
@@ -3251,11 +3296,7 @@ pub(crate) mod tests {
         dir: &FsPath,
         limiter: crate::auth::ratelimit::LoginLimiter,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_full(
-            dir,
-            Arc::new(crate::auth::authz::AllowAuthenticated),
-            limiter,
-        )
+        test_router_full(dir, Arc::new(crate::auth::authz::StormPolicy), limiter)
     }
 
     fn test_router_full(
@@ -3291,6 +3332,7 @@ pub(crate) mod tests {
             relays_changed: tokio::sync::watch::channel(Vec::new()).0,
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
@@ -3629,9 +3671,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_refused_vault_is_403_and_not_404() {
-        // The refusal path, which `AllowAuthenticated` never takes — so
-        // without a policy swap this would be code that first runs in
-        // production. It is also the claim the whole seam rests on: changing
+        // The refusal path for a caller `StormPolicy` never refuses. It is also the claim the whole seam rests on: changing
         // the policy is all it takes to change the answer.
         //
         // 403 specifically. Decision 25: "you may not see this" has to be
@@ -3740,14 +3780,14 @@ pub(crate) mod tests {
         assert_eq!(
             body["vaults"].as_array().map(|v| v.len()),
             Some(1),
-            "AllowAuthenticated must not filter anything out"
+            "StormPolicy must not filter anything out"
         );
     }
 
     #[tokio::test]
     async fn the_shipped_policy_changes_nothing_for_an_ordinary_caller() {
         // The other direction, and the reason this slice is safe to merge:
-        // with `AllowAuthenticated` the boundary is invisible. A vault that is
+        // with `StormPolicy` the boundary is invisible. A vault that is
         // simply absent still answers 404, not 403 — the seam did not turn
         // "no such vault" into "forbidden" for everyone.
         let dir = tempdir::TempDir::new("storm-authz-allow").unwrap();
@@ -5599,8 +5639,13 @@ pub(crate) mod tests {
         );
         assert_eq!(body["relays"], serde_json::json!([]));
         assert_eq!(
+            body["agent_writes"], false,
+            "fresh installs: agents read only"
+        );
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
             body.as_object().unwrap().len(),
-            6,
+            8,
             "a new key showed up that this test does not know about"
         );
     }
@@ -7023,76 +7068,656 @@ pub(crate) mod tests {
         );
     }
 
+    fn tools_of(lines: Vec<serde_json::Value>) -> Vec<String> {
+        lines[0]["message"]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn structured(lines: &[serde_json::Value]) -> serde_json::Value {
+        lines
+            .last()
+            .and_then(|l| l.pointer("/message/result/structuredContent"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn tool_error(lines: &[serde_json::Value]) -> String {
+        let result = &lines.last().unwrap()["message"]["result"];
+        assert_eq!(result["isError"], true, "{lines:?}");
+        result["structuredContent"]["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    impl GatewayFixture {
+        async fn vault(&self, name: &str) -> String {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/vaults",
+                    serde_json::json!({"name": name}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["id"].as_str().unwrap().to_string()
+        }
+
+        async fn note(&self, vault: &str, path: &str, content: &str) -> serde_json::Value {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{vault}/notes"),
+                    serde_json::json!({"path": path, "content": content}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["note"].clone()
+        }
+
+        async fn get(&self, path: &str) -> (StatusCode, serde_json::Value) {
+            send(&self.app, get_with_auth(path, &self.owner_bearer)).await
+        }
+
+        /// Launches with extra fields; the host reports it running.
+        async fn launch_body(
+            &mut self,
+            extra: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut body = serde_json::json!({
+                "host_id": self.host_id, "workspace": "storm", "provider": "claude-code",
+                "terminal": {"cols": 80, "rows": 24},
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth("/v1/agent/sessions", body, &self.owner_bearer),
+            )
+            .await;
+            if status == StatusCode::OK {
+                self.report(body["id"].as_str().unwrap(), "running").await;
+            }
+            (status, body)
+        }
+
+        async fn agent_writes(&self, on: bool) {
+            let (status, body) = send(
+                &self.app,
+                put_json_with_auth(
+                    "/v1/config/mcp",
+                    serde_json::json!({"agent_writes": on}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["agent_writes"], on);
+        }
+
+        async fn tool(
+            &self,
+            session: &str,
+            tool: &str,
+            arguments: serde_json::Value,
+        ) -> Vec<serde_json::Value> {
+            self.mcp(
+                session,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments}}),
+            )
+            .await
+        }
+    }
+
     #[tokio::test]
-    async fn the_builtin_storm_connection_reads_and_writes_only_under_both_flags_and_never_deletes()
-    {
+    async fn an_agent_writes_only_to_its_write_vault_under_agent_writes_and_never_deletes() {
         let dir = tempdir::TempDir::new("storm-gateway-builtin").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
-        let tools_of = |lines: Vec<serde_json::Value>| -> Vec<String> {
-            lines[0]["message"]["result"]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|t| t["name"].as_str().unwrap().to_string())
-                .collect()
-        };
+        let work = f.vault("Work").await;
+        let personal = f.vault("Personal").await;
+        let theirs = f.note(&personal, "Theirs.md", "# Theirs\n").await;
         let list = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
 
-        // Read only: the launch toggle is off.
-        let s1 = f.launch("claude-code", false).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let init = f.initialize(&s1, "storm").await;
-        assert_eq!(init["serverInfo"]["name"], "storm");
+        // No write vault: read only, whatever the switches say.
+        f.agent_writes(true).await;
+        let (_, s1) = f.launch_body(serde_json::json!({})).await;
+        let s1 = s1["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            f.initialize(&s1, "storm").await["serverInfo"]["name"],
+            "storm"
+        );
         let tools = tools_of(f.mcp(&s1, "storm", list.clone()).await);
         assert!(tools.contains(&"list_vaults".to_string()), "{tools:?}");
+        assert!(tools.contains(&"session_context".to_string()), "{tools:?}");
         assert!(
             !tools
                 .iter()
                 .any(|t| crate::mcp::WRITE_TOOLS.contains(&t.as_str())),
             "{tools:?}"
         );
-        let lines = f.call(&s1, "storm", "list_vaults").await;
-        assert!(lines[0]["message"]["result"].is_object(), "{lines:?}");
         assert_eq!(
             error_code(&f.call(&s1, "storm", "create_note").await).as_deref(),
             Some("tool_not_allowed")
         );
 
-        // The toggle without `mcp_writable`: still read only (G-D5).
-        let s2 = f.launch("claude-code", true).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        f.initialize(&s2, "storm").await;
-        let tools = tools_of(f.mcp(&s2, "storm", list.clone()).await);
+        // An older client's `allow_vault_writes` without a vault: read only,
+        // and the launch says so.
+        let (_, old) = f
+            .launch_body(serde_json::json!({"allow_vault_writes": true}))
+            .await;
+        assert_eq!(old["write_vault_id"], serde_json::Value::Null);
+        assert_eq!(old["mcp"]["allow_vault_writes"], false);
+        assert!(
+            old["mcp"]["notice"].as_str().unwrap().contains("read only"),
+            "{old}"
+        );
+        let s_old = old["id"].as_str().unwrap().to_string();
+        f.initialize(&s_old, "storm").await;
+        let tools = tools_of(f.mcp(&s_old, "storm", list.clone()).await);
         assert!(!tools.contains(&"create_note".to_string()), "{tools:?}");
 
-        // Both: writes, and still never `delete_note`.
-        f.state
-            .mcp_writable
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        let s3 = f.launch("claude-code", true).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        // A write vault with `agent_writes` on: writes there, refused
+        // elsewhere at the vault seam with a stable code, never deletes.
+        let (status, launched) = f
+            .launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{launched}");
+        assert_eq!(launched["write_vault_id"], work.as_str());
+        assert_eq!(launched["mcp"]["allow_vault_writes"], true);
+        assert_eq!(launched["mcp"]["notice"], serde_json::Value::Null);
+        assert_eq!(launched["name"], "storm-3");
+        let s3 = launched["id"].as_str().unwrap().to_string();
         f.initialize(&s3, "storm").await;
         let tools = tools_of(f.mcp(&s3, "storm", list.clone()).await);
         assert!(tools.contains(&"create_note".to_string()), "{tools:?}");
         assert!(!tools.contains(&"delete_note".to_string()), "{tools:?}");
+        let made = f
+            .tool(
+                &s3,
+                "create_note",
+                serde_json::json!({"vault": work, "path": "Plan.md", "content": "# Plan\n"}),
+            )
+            .await;
+        let note = structured(&made)["note"].clone();
+        let note_id = note["id"].as_str().unwrap().to_string();
+        let lines = f
+            .tool(
+                &s3,
+                "create_note",
+                serde_json::json!({"vault": personal, "path": "Stray.md", "content": "x"}),
+            )
+            .await;
+        assert_eq!(
+            error_code(&lines).as_deref(),
+            Some(crate::auth::authz::AGENT_WRITE_REFUSED),
+            "{lines:?}"
+        );
+        let lines = f
+            .tool(
+                &s3,
+                "update_note",
+                serde_json::json!({"vault": personal, "note_id": theirs["id"],
+                    "base_version": theirs["version"], "content": "# Theirs\n\nedited\n"}),
+            )
+            .await;
+        assert_eq!(
+            error_code(&lines).as_deref(),
+            Some(crate::auth::authz::AGENT_WRITE_REFUSED)
+        );
+        let (_, untouched) = f
+            .get(&format!(
+                "/v1/vaults/{personal}/notes/{}",
+                theirs["id"].as_str().unwrap()
+            ))
+            .await;
+        assert!(!untouched["content"].as_str().unwrap().contains("edited"));
+        assert!(untouched.get("agent_write").is_none(), "{untouched}");
+        let lines = f
+            .tool(
+                &s3,
+                "get_note",
+                serde_json::json!({"vault": personal, "note_id": theirs["id"]}),
+            )
+            .await;
+        assert_eq!(structured(&lines)["title"], "Theirs", "reads anywhere");
         assert_eq!(
             error_code(&f.call(&s3, "storm", "delete_note").await).as_deref(),
             Some("tool_not_allowed")
         );
-        // Switching `mcp_writable` off applies to the live session at once.
-        f.state
-            .mcp_writable
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // The MCP switches no longer touch agents, and `agent_writes` applies
+        // to the live session at once.
+        send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/mcp",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let edited = f
+            .tool(
+                &s3,
+                "update_note",
+                serde_json::json!({"vault": work, "note_id": note_id,
+                    "base_version": note["version"], "content": "# Plan\n\nv2\n"}),
+            )
+            .await;
+        assert_eq!(structured(&edited)["note"]["version"], 2, "{edited:?}");
+        f.agent_writes(false).await;
         assert_eq!(
             error_code(&f.call(&s3, "storm", "create_note").await).as_deref(),
             Some("tool_not_allowed")
         );
+        let (_, config) = f.get("/v1/config").await;
+        assert_eq!(
+            (
+                config["mcp_enabled"].clone(),
+                config["agent_writes"].clone()
+            ),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agents_writes_are_recorded_and_its_notes_carry_provenance() {
+        let dir = tempdir::TempDir::new("storm-gateway-writes").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let human = f.note(&work, "Human.md", "# Human\n").await;
+        f.agent_writes(true).await;
+        let (_, launched) = f
+            .launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        let name = launched["name"].as_str().unwrap().to_string();
+        assert_eq!(launched["wrote_count"], 0);
+        f.initialize(&session, "storm").await;
+
+        // Each write op through the gateway is one row.
+        let made = f
+            .tool(
+                &session,
+                "create_note",
+                serde_json::json!({"vault": work, "path": "Agent.md", "content": "# Agent\n"}),
+            )
+            .await;
+        let agent_note = structured(&made)["note"].clone();
+        let agent_id = agent_note["id"].as_str().unwrap().to_string();
+        let edited = f
+            .tool(
+                &session,
+                "update_note",
+                serde_json::json!({"vault": work, "note_id": human["id"],
+                    "base_version": human["version"], "content": "# Human\n\nagent was here\n"}),
+            )
+            .await;
+        assert_eq!(structured(&edited)["note"]["version"], 2, "{edited:?}");
+        let again = f
+            .tool(
+                &session,
+                "update_note",
+                serde_json::json!({"vault": work, "note_id": agent_id,
+                    "base_version": 1, "content": "# Agent\n\nmore\n"}),
+            )
+            .await;
+        assert_eq!(structured(&again)["note"]["version"], 2, "{again:?}");
+
+        // A human's own writes are not an agent's.
+        f.note(&work, "Mine.md", "# Mine\n").await;
+
+        let (status, writes) = f.get(&format!("/v1/agent/sessions/{session}/writes")).await;
+        assert_eq!(status, StatusCode::OK, "{writes}");
+        let rows: Vec<(String, String, i64)> = writes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| {
+                (
+                    w["title"].as_str().unwrap().to_string(),
+                    w["kind"].as_str().unwrap().to_string(),
+                    w["version"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Agent".to_string(), "created".to_string(), 2),
+                ("Human".to_string(), "edited".to_string(), 2)
+            ],
+            "newest write first; created stays created"
+        );
+        assert_eq!(writes[0]["vault_id"], work.as_str());
+        assert_eq!(writes[0]["path"], "Agent.md");
+        assert!(writes[0]["at"].as_str().unwrap().ends_with('Z'));
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["wrote_count"], 2);
+        assert_eq!(view["name"], name.as_str());
+        assert_eq!(view["write_vault_id"], work.as_str());
+        let (_, list) = f.get("/v1/agent/sessions").await;
+        let listed = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == session.as_str())
+            .unwrap();
+        assert_eq!(listed["wrote_count"], 2);
+
+        // Provenance on the note, which a later human edit does not clear.
+        let human_id = human["id"].as_str().unwrap();
+        let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{human_id}")).await;
+        assert_eq!(note["agent_write"]["session_id"], session.as_str());
+        assert_eq!(note["agent_write"]["session_name"], name.as_str());
+        assert_eq!(note["agent_write"]["kind"], "edited");
+        assert_eq!(note["agent_write"]["version"], 2);
+        assert_eq!(note["agent_write"]["session_dismissed"], false);
+        send(
+            &f.app,
+            put_json_with_auth(
+                &format!("/v1/vaults/{work}/notes/{human_id}"),
+                serde_json::json!({"base_version": 2, "content": "# Human\n\nme again\n"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{human_id}")).await;
+        assert_eq!(note["version"], 3);
+        assert_eq!(note["agent_write"]["version"], 2, "{note}");
+
+        let (status, map) = f.get(&format!("/v1/vaults/{work}/agent-writes")).await;
+        assert_eq!(status, StatusCode::OK);
+        let map = map.as_object().unwrap();
+        assert_eq!(map.len(), 2, "{map:?}");
+        assert_eq!(map[&agent_id]["session_id"], session.as_str());
+        assert_eq!(map[&agent_id]["version"], 2);
+        assert_eq!(map[human_id]["version"], 2);
+        let (status, _) = f.get("/v1/vaults/nope/agent-writes").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f.get("/v1/agent/sessions/ags_NOPE/writes").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // A dismissed session's writes still resolve to its name.
+        f.report(&session, "completed").await;
+        let (status, _) = send(
+            &f.app,
+            delete_with_auth(&format!("/v1/agent/sessions/{session}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{agent_id}")).await;
+        assert_eq!(note["agent_write"]["session_name"], name.as_str());
+        assert_eq!(note["agent_write"]["session_dismissed"], true);
+        assert_eq!(note["agent_write"]["kind"], "created");
+    }
+
+    #[tokio::test]
+    async fn session_context_reads_the_callers_own_note_and_the_launch_validates_it() {
+        let dir = tempdir::TempDir::new("storm-gateway-context").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let personal = f.vault("Personal").await;
+        let a = f
+            .note(
+                &personal,
+                "specs/Gateway spec.md",
+                "# Gateway spec\n\nalpha body\n",
+            )
+            .await;
+        let b = f
+            .note(&personal, "Other.md", "# Other\n\nbravo body\n")
+            .await;
+        let context = |n: &serde_json::Value| serde_json::json!({"context": {"vault_id": personal, "note_id": n["id"]}});
+
+        let (status, la) = f.launch_body(context(&a)).await;
+        assert_eq!(status, StatusCode::OK, "{la}");
+        assert_eq!(la["name"], "gateway-spec");
+        assert_eq!(la["context"]["title"], "Gateway spec");
+        assert_eq!(la["context"]["note_id"], a["id"]);
+        assert_eq!(la["context"]["vault_id"], personal.as_str());
+        let start = serde_json::to_value(f.link.try_recv().unwrap()).unwrap();
+        assert_eq!(start["context"], true);
+        let (_, lb) = f.launch_body(context(&b)).await;
+        let _ = f.link.try_recv();
+        let (_, dup) = f.launch_body(context(&a)).await;
+        assert_eq!(dup["name"], "gateway-spec-2");
+        let (_, none) = f.launch_body(serde_json::json!({})).await;
+        assert_eq!(none["context"], serde_json::Value::Null);
+
+        let (sa, sb, sn) = (
+            la["id"].as_str().unwrap().to_string(),
+            lb["id"].as_str().unwrap().to_string(),
+            none["id"].as_str().unwrap().to_string(),
+        );
+        let init = f.initialize(&sa, "storm").await;
+        assert!(
+            init["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Call session_context"),
+            "{init}"
+        );
+        let init = f.initialize(&sn, "storm").await;
+        assert!(
+            !init["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("session_context"),
+            "{init}"
+        );
+        f.initialize(&sb, "storm").await;
+
+        let got = structured(&f.call(&sa, "storm", "session_context").await);
+        assert_eq!(got["note_id"], a["id"]);
+        assert_eq!(got["title"], "Gateway spec");
+        assert_eq!(got["path"], "specs/Gateway spec.md");
+        assert!(got["content"].as_str().unwrap().contains("alpha body"));
+        let got = structured(&f.call(&sb, "storm", "session_context").await);
+        assert!(
+            got["content"].as_str().unwrap().contains("bravo body"),
+            "{got}"
+        );
+        assert!(
+            tool_error(&f.call(&sn, "storm", "session_context").await)
+                .contains("started without a note")
+        );
+
+        let a_id = a["id"].as_str().unwrap();
+        send(
+            &f.app,
+            delete_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{a_id}"),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert!(
+            tool_error(&f.call(&sa, "storm", "session_context").await).contains("no longer exists")
+        );
+
+        // The launch refuses a context or a write vault that does not resolve.
+        let (status, _) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": personal, "note_id": a_id}}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": "nope", "note_id": a_id}}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f
+            .launch_body(serde_json::json!({"write_vault_id": "nope"}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_switches_and_agent_writes_are_set_independently_and_persist() {
+        let dir = tempdir::TempDir::new("storm-ai-access").unwrap();
+        let f = gateway_fixture(dir.path()).await;
+        let put = |body: serde_json::Value| {
+            send(
+                &f.app,
+                put_json_with_auth("/v1/config/mcp", body, &f.owner_bearer),
+            )
+        };
+        let (_, body) = put(serde_json::json!({"agent_writes": true})).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"mcp_enabled": false, "mcp_writable": false, "agent_writes": true})
+        );
+        // An older client's body leaves agents alone.
+        let (_, body) = put(serde_json::json!({"enabled": true, "writable": true})).await;
+        assert_eq!(body["agent_writes"], true);
+        assert_eq!(body["mcp_writable"], true);
+        let (_, body) = put(serde_json::json!({"enabled": false})).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"mcp_enabled": false, "mcp_writable": false, "agent_writes": true})
+        );
+        let (_, body) = put(serde_json::json!({"agent_writes": false})).await;
+        assert_eq!(body["mcp_enabled"], false);
+        assert!(
+            !f.state
+                .agent_writes
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        put(serde_json::json!({"agent_writes": true})).await;
+        let reloaded =
+            Registry::load(&f.state.state_dir, std::path::Path::new("/nowhere")).unwrap();
+        assert!(reloaded.agent_writes() && !reloaded.mcp_enabled);
+        let (_, integration) = send(
+            &f.app,
+            get_with_auth(&format!("{CONNECTIONS}/storm"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(integration["vault_writes_available"], true, "{integration}");
+    }
+
+    #[tokio::test]
+    async fn a_kit_script_is_written_only_by_a_session_whose_write_vault_is_kit_and_is_in_its_wrote_list()
+     {
+        let dir = tempdir::TempDir::new("storm-gateway-kit").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let kit = f.vault("kit").await;
+        f.agent_writes(true).await;
+        let script = serde_json::json!({"name": "tool.sh", "content": "echo hi\n"});
+        for (vault, expect_ok) in [(&work, false), (&kit, true)] {
+            let (_, launched) = f
+                .launch_body(serde_json::json!({"write_vault_id": vault}))
+                .await;
+            let session = launched["id"].as_str().unwrap().to_string();
+            f.initialize(&session, "storm").await;
+            let lines = f.tool(&session, "create_script", script.clone()).await;
+            if expect_ok {
+                assert_eq!(structured(&lines)["path"], "scripts/tool.sh", "{lines:?}");
+                let lines = f
+                    .tool(
+                        &session,
+                        "update_script",
+                        serde_json::json!({"name": "tool.sh", "content": "echo bye\n"}),
+                    )
+                    .await;
+                assert_eq!(structured(&lines)["size"], 9, "{lines:?}");
+            } else {
+                assert_eq!(
+                    error_code(&lines).as_deref(),
+                    Some(crate::auth::authz::AGENT_WRITE_REFUSED),
+                    "{lines:?}"
+                );
+            }
+            let (_, writes) = f.get(&format!("/v1/agent/sessions/{session}/writes")).await;
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+            if expect_ok {
+                assert_eq!(
+                    writes,
+                    serde_json::json!([{
+                        "vault_id": kit, "note_id": null, "title": "tool.sh",
+                        "path": "scripts/tool.sh", "kind": "script_created", "version": null,
+                        "at": writes[0]["at"],
+                    }]),
+                    "one row per script; created stays created"
+                );
+                assert_eq!(view["wrote_count"], 1);
+                let (_, map) = f.get(&format!("/v1/vaults/{kit}/agent-writes")).await;
+                assert_eq!(map, serde_json::json!({}), "a script has no note id");
+            } else {
+                assert_eq!(
+                    writes,
+                    serde_json::json!([]),
+                    "a refused write is not recorded"
+                );
+                assert_eq!(view["wrote_count"], 0);
+            }
+            f.report(&session, "completed").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_launch_context_is_a_snapshot_and_session_context_follows_the_note_by_id() {
+        let dir = tempdir::TempDir::new("storm-gateway-context-rename").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let personal = f.vault("Personal").await;
+        let note = f
+            .note(
+                &personal,
+                "specs/Gateway spec.md",
+                "# Gateway spec\n\nbody\n",
+            )
+            .await;
+        let note_id = note["id"].as_str().unwrap().to_string();
+        let (_, launched) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": personal, "note_id": note_id}}))
+            .await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        let launch_context = launched["context"].clone();
+        assert_eq!(launch_context["title"], "Gateway spec");
+
+        // Moved and retitled after the launch.
+        let (status, moved) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{note_id}/move"),
+                serde_json::json!({"new_path": "archive/Renamed plan.md"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        let (status, _) = send(
+            &f.app,
+            put_json_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{note_id}"),
+                serde_json::json!({"base_version": moved["note"]["version"],
+                    "content": "# Renamed plan\n\nbody\n"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(
+            view["context"], launch_context,
+            "the launch's context is history"
+        );
+        assert_eq!(view["name"], "gateway-spec");
+        f.initialize(&session, "storm").await;
+        let got = structured(&f.call(&session, "storm", "session_context").await);
+        assert_eq!(got["note_id"], note_id.as_str());
+        assert_eq!(got["path"], "archive/Renamed plan.md");
+        assert_eq!(got["title"], "Renamed plan");
     }
 
     #[tokio::test]

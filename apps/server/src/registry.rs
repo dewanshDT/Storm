@@ -184,6 +184,11 @@ pub struct Registry {
     /// field simply being absent.
     #[serde(default)]
     pub mcp_writable: bool,
+    /// Whether an agent session may write to the vault chosen at its launch.
+    /// Separate from `mcp_writable`; absent from an older registry, it is
+    /// seeded from what agents could do then (see [`Registry::load`]).
+    #[serde(default)]
+    agent_writes: Option<bool>,
 
     /// Relay URLs this server should try to register with (SRP v1 §4.4).
     ///
@@ -224,6 +229,7 @@ impl Default for Registry {
             vaults: Vec::new(),
             mcp_enabled: false,
             mcp_writable: false,
+            agent_writes: Some(false),
             // Off. `#[derive(Default)]` would give the same answer, but this
             // Default is hand-written precisely so nobody has to check.
             relays: Vec::new(),
@@ -284,6 +290,11 @@ impl Registry {
         if registry.root.as_os_str().is_empty() {
             registry.root = first_run_root.to_path_buf();
         }
+        // Before the split, agent writes needed `mcp_writable` (which needs
+        // `mcp_enabled`), so an upgrade changes nobody's effective behaviour.
+        registry
+            .agent_writes
+            .get_or_insert(registry.mcp_enabled && registry.mcp_writable);
         Ok(registry)
     }
 
@@ -307,6 +318,14 @@ impl Registry {
         fs::rename(&tmp, &path)
             .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
         Ok(())
+    }
+
+    pub fn agent_writes(&self) -> bool {
+        self.agent_writes.unwrap_or(false)
+    }
+
+    pub fn set_agent_writes(&mut self, on: bool) {
+        self.agent_writes = Some(on);
     }
 
     pub fn get(&self, id: &str) -> Option<&VaultEntry> {
@@ -784,6 +803,47 @@ mod tests {
         assert!(reg.relays.is_empty(), "defaults to none, does not fail");
         assert!(reg.registered_relays.is_empty());
         assert!(reg.mcp_enabled, "the fields we kept must survive");
+    }
+
+    #[test]
+    fn agent_writes_is_seeded_from_what_agents_could_do_before_the_split() {
+        let f = fixture();
+        let cases = [
+            (r#""mcp_enabled":true,"mcp_writable":true"#, true),
+            (r#""mcp_enabled":true,"mcp_writable":false"#, false),
+            (r#""mcp_enabled":false,"mcp_writable":true"#, false),
+            (r#""mcp_enabled":false"#, false),
+            (
+                r#""mcp_enabled":true,"mcp_writable":true,"agent_writes":false"#,
+                false,
+            ),
+            (r#""mcp_enabled":false,"agent_writes":true"#, true),
+        ];
+        for (fields, expected) in cases {
+            fs::write(
+                f.state.join(REGISTRY_FILE),
+                format!(r#"{{"root":"/tmp/vaults","vaults":[],{fields}}}"#),
+            )
+            .unwrap();
+            let reg = Registry::load(&f.state, &f.root).unwrap();
+            assert_eq!(reg.agent_writes(), expected, "{fields}");
+            // Persisted on the next save, after which MCP no longer moves it.
+            reg.save(&f.state).unwrap();
+            let mut reg = Registry::load(&f.state, &f.root).unwrap();
+            reg.mcp_enabled = !reg.mcp_enabled;
+            reg.mcp_writable = !reg.mcp_writable;
+            reg.save(&f.state).unwrap();
+            assert_eq!(
+                Registry::load(&f.state, &f.root).unwrap().agent_writes(),
+                expected,
+                "{fields}"
+            );
+        }
+        fs::remove_file(f.state.join(REGISTRY_FILE)).unwrap();
+        assert!(
+            !Registry::load(&f.state, &f.root).unwrap().agent_writes(),
+            "a fresh install: agents read only"
+        );
     }
 
     #[test]

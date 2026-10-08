@@ -14,7 +14,7 @@ import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/agent_widgets.dart';
-import 'package:storm/agent/agents_screen.dart';
+import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/hosts_screen.dart';
 import 'package:storm/agent/session_controller.dart';
 import 'package:storm/agent/terminal_events.dart';
@@ -69,47 +69,74 @@ void main() {
     });
   });
 
-  group('the name an agent gives its session', () {
-    test('status glyphs go, the name stays', () {
-      expect(
-        agentChosenTitle('✳ Fix the login redirect'),
-        'Fix the login redirect',
-      );
-      expect(
-        agentChosenTitle('⠐ Refactor the sync engine'),
-        'Refactor the sync engine',
-      );
-      expect(agentChosenTitle('  Tidy imports  '), 'Tidy imports');
+  group('a session is called what the server named it (Q12)', () {
+    test('the name, context and write vault come from the record', () {
+      final s = AgentSession.fromJson({
+        ...session(),
+        'name': 'gateway-spec',
+        'context': {'vault_id': 'v1', 'note_id': 'n1', 'title': 'Gateway spec'},
+        'write_vault_id': 'v1',
+        'wrote_count': 2,
+      });
+      expect(s.name, 'gateway-spec');
+      expect(s.context!.title, 'Gateway spec');
+      expect((s.writeVaultId, s.wroteCount), ('v1', 2));
     });
 
-    test('a bare product name or nothing is no name', () {
-      expect(agentChosenTitle('✳ Claude Code'), isNull);
-      expect(agentChosenTitle('OpenCode'), isNull);
-      expect(agentChosenTitle('⠂ '), isNull);
-      expect(agentChosenTitle(null), isNull);
-    });
-
-    test('the list falls back to provider and workspace', () {
-      final s = AgentSession.fromJson(session());
-      expect(sessionDisplayTitle(s, const {}), 'Claude Code in storm');
-      expect(sessionDisplayTitle(s, const {'ags_1': 'Fix it'}), 'Fix it');
+    test('a session from before names is called by its workspace', () {
+      expect(AgentSession.fromJson(session()).name, 'storm');
     });
   });
 
   group('a session says what happened in plain words', () {
-    test('every status has a label, and none is a raw code', () {
-      String label(String s, {String? r, int? x}) => AgentSession.fromJson(
-        session(status: s, endReason: r, exitCode: x),
-      ).statusLabel;
-      expect(label('running'), 'Running');
-      expect(label('unknown'), 'Host unreachable');
-      expect(label('completed', x: 0), 'Finished');
-      expect(label('completed', x: 2), 'Exited (2)');
-      expect(label('failed', r: 'host_restart'), 'Host restarted');
-      expect(label('failed', r: 'host_revoked'), 'Host revoked');
-      expect(label('failed', r: 'lost'), 'Lost');
-      expect(label('stopped'), 'Ended');
+    test('the handoff status words, and why it ended beside them', () {
+      AgentSession s(String st, {String? r, int? x}) =>
+          AgentSession.fromJson(session(status: st, endReason: r, exitCode: x));
+      expect(s('starting').statusLabel, 'Starting');
+      expect(s('running').statusLabel, 'Running');
+      expect(s('unknown').statusLabel, 'Unknown');
+      expect(s('completed', x: 0).statusLabel, 'Completed');
+      expect(s('completed', x: 0).endDetail, isNull);
+      expect(s('completed', x: 2).endDetail, 'exit 2');
+      expect(s('stopped').statusLabel, 'Stopped');
+      expect(s('failed', r: 'host_restart').statusLabel, 'Failed');
+      expect(s('failed', r: 'host_restart').endDetail, 'host restarted');
+      expect(s('failed', r: 'host_revoked').endDetail, 'host revoked');
+      expect(s('failed', r: 'lost').endDetail, 'lost');
       expect(providerLabel('claude-code'), 'Claude Code');
+    });
+
+    test('the ended line says when and for how long', () {
+      final done = AgentSession.fromJson({
+        ...session(status: 'completed', exitCode: 0),
+        'started_at': '2026-10-03T12:00:00Z',
+        'ended_at': '2026-10-03T12:38:00Z',
+      });
+      expect(
+        endedLine(done),
+        matches(RegExp(r'^Completed \d\d:\d\d · ran 38 min$')),
+      );
+      final failed = AgentSession.fromJson(
+        session(status: 'failed', endReason: 'host_restart'),
+      );
+      expect(endedLine(failed), 'Failed · host restarted');
+      expect(sessionSub(failed), 'storm · Claude Code · failed');
+    });
+
+    test('a kit script in Wrote is a file under its path, not a note', () {
+      final w = SessionWrite.fromJson({
+        'vault_id': 'v-kit',
+        'note_id': null,
+        'title': 'tool.sh',
+        'path': 'scripts/tool.sh',
+        'kind': 'script_created',
+        'version': null,
+        'at': '2026-10-03T12:00:00Z',
+      });
+      expect(w.note, isNull);
+      expect((w.isScript, w.created), (true, true));
+      expect(noteTitleOf(w.title, w.path), 'tool.sh');
+      expect(noteCrumb('kit', w.path), 'kit / scripts');
     });
   });
 
@@ -378,23 +405,6 @@ void main() {
     );
   });
 
-  group('tabs are per device and follow the server', () {
-    test('a dismissed session drops off', () async {
-      SharedPreferences.setMockInitialValues({
-        'agent.tabs': ['ags_1', 'ags_gone'],
-      });
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-      container.read(agentTabsProvider);
-      await pumpEventQueue();
-      expect(container.read(agentTabsProvider), ['ags_1', 'ags_gone']);
-      container.read(agentTabsProvider.notifier).reconcile(['ags_1']);
-      expect(container.read(agentTabsProvider), ['ags_1']);
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getStringList('agent.tabs'), ['ags_1']);
-    });
-  });
-
   group('screens', () {
     final hosts = [
       {
@@ -503,19 +513,33 @@ void main() {
       await tester.pumpWidget(
         app(
           Scaffold(
-            body: launcherForTest(
-              hosts.map((h) => AgentHost.fromJson(h)).toList(),
+            body: NewSessionLauncher(
+              hosts: hosts.map((h) => AgentHost.fromJson(h)).toList(),
             ),
           ),
           server(),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text("Network: inherits build-vm's policy"), findsOneWidget);
-      final claude = tester.widget<ChoiceChip>(
-        find.byKey(const Key('provider-claude-code')),
+      expect(
+        find.textContaining('Network: inherits build-vm’s policy'),
+        findsOneWidget,
       );
-      expect(claude.onSelected, isNull, reason: 'not installed: disabled');
+      // The default is not installed here, so the one that is is chosen.
+      final agent = find.byKey(const Key('launcher-agent'));
+      expect(
+        find.descendant(of: agent, matching: find.text('Shell')),
+        findsOneWidget,
+      );
+      await tester.tap(agent);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Claude Code (not installed)'));
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(of: agent, matching: find.text('Shell')),
+        findsOneWidget,
+        reason: 'not installed: never chosen',
+      );
     });
   });
 }

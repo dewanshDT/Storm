@@ -51,7 +51,7 @@ pub async fn list_vaults(state: &Shared, actor: &Actor) -> ApiResult<Vec<VaultIn
         // A collection **filters**; it does not refuse. `403` is the right
         // answer for a named vault and the wrong one for a list — there is no
         // way to refuse half a list, and one unreachable vault must not blank
-        // the whole thing. Today `AllowAuthenticated` keeps every entry.
+        // the whole thing. `StormPolicy` lets every caller read every vault.
         if !crate::api::may_see_vault(state, actor, &entry.id) {
             continue;
         }
@@ -152,6 +152,134 @@ pub async fn get_note(
         .ok_or_else(|| not_found("no such note"))?;
     let content = ix.vault.read(&note.path)?;
     Ok(NoteDetail { note, content })
+}
+
+/// The latest agent write to a note: the session that wrote it last,
+/// even after a human edits it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentWrite {
+    pub session_id: String,
+    pub session_name: String,
+    /// The session was dismissed; its name is still the one it had.
+    pub session_dismissed: bool,
+    pub kind: String,
+    pub version: i64,
+    pub at: String,
+}
+
+/// A note as REST serves it: [`NoteDetail`] plus its provenance.
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteWithProvenance {
+    #[serde(flatten)]
+    pub detail: NoteDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_write: Option<AgentWrite>,
+}
+
+pub async fn get_note_with_provenance(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+) -> ApiResult<NoteWithProvenance> {
+    let detail = get_note(state, actor, vault, id).await?;
+    let agent_write = match state.agent.latest_write(vault, id).map_err(internal)? {
+        Some(w) if w.version.is_some() => {
+            let launch = state.agent.launch_of(&w.session_id).map_err(internal)?;
+            let session = state.agent.get(&w.session_id).ok();
+            Some(AgentWrite {
+                session_name: launch
+                    .map(|l| l.name)
+                    .or_else(|| session.as_ref().map(|s| s.workspace.clone()))
+                    .unwrap_or_default(),
+                session_dismissed: session.is_none(),
+                session_id: w.session_id,
+                kind: w.kind,
+                version: w.version.unwrap_or_default(),
+                at: w.at,
+            })
+        }
+        _ => None,
+    };
+    Ok(NoteWithProvenance {
+        detail,
+        agent_write,
+    })
+}
+
+/// The latest agent write to a note, for the unseen dots.
+#[derive(Debug, Clone, Serialize)]
+pub struct LatestAgentWrite {
+    pub version: i64,
+    pub at: String,
+    pub session_id: String,
+}
+
+/// Note id → its latest agent write, for every note in a vault an agent wrote.
+pub async fn vault_agent_writes(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+) -> ApiResult<std::collections::BTreeMap<String, LatestAgentWrite>> {
+    vault_of(state, actor, Access::Read, vault).await?;
+    Ok(state
+        .agent
+        .latest_writes(vault)
+        .map_err(internal)?
+        .into_iter()
+        .filter_map(|w| {
+            Some((
+                w.note_id?,
+                LatestAgentWrite {
+                    version: w.version?,
+                    at: w.at,
+                    session_id: w.session_id,
+                },
+            ))
+        })
+        .collect())
+}
+
+/// What `session_context` gives an agent: its session's context note, read
+/// now, through the same path every client reads.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionContext {
+    pub vault_id: String,
+    pub note_id: String,
+    pub title: String,
+    pub path: String,
+    pub version: i64,
+    pub content: String,
+}
+
+/// The calling agent's own context note. Keyed on the actor's session, which
+/// the gateway has proven is the calling host's and live, so no agent can
+/// name another session's.
+pub async fn session_context(state: &Shared, actor: &Actor) -> ApiResult<SessionContext> {
+    let Actor::Agent { session_id, .. } = actor else {
+        return Err(bad_request("only an agent session has a context note"));
+    };
+    let context = state
+        .agent
+        .launch_of(session_id)
+        .map_err(internal)?
+        .and_then(|l| l.context)
+        .ok_or_else(|| not_found("this session was started without a note"))?;
+    let note = match get_note(state, actor, &context.vault_id, &context.note_id).await {
+        Ok(note) => note,
+        Err(e) if e.0.is_client_error() => {
+            return Err(not_found("the context note no longer exists"));
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(SessionContext {
+        vault_id: context.vault_id,
+        note_id: note.note.id,
+        title: note.note.title,
+        path: note.note.path,
+        version: note.note.version,
+        content: note.content,
+    })
 }
 
 pub struct Backlinks {
@@ -329,7 +457,63 @@ pub async fn create_note(
         .create_note(path, content)
         .map_err(|e| crate::api::bad_request(e.to_string()))?;
     broadcast_latest(state, &ix, result.seq);
+    record_agent_write(state, actor, vault, &result.note, "created");
     Ok(result)
+}
+
+/// The write hook: an agent's successful write becomes a row of its
+/// session's Wrote list and the note's provenance. Never fails the write,
+/// which is already on disk.
+fn record_agent_write(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    note: &crate::db::NoteRow,
+    kind: &str,
+) {
+    let Actor::Agent { session_id, .. } = actor else {
+        return;
+    };
+    let write = crate::agent::store::WriteRecord {
+        session_id: session_id.clone(),
+        vault_id: vault.to_string(),
+        note_id: Some(note.id.clone()),
+        path: None,
+        kind: kind.to_string(),
+        version: Some(note.version),
+        at: write_stamp(),
+    };
+    if let Err(e) = state.agent.record_write(&write) {
+        tracing::warn!(error = %e, session = %session_id, "could not record an agent's write");
+    }
+}
+
+fn record_agent_script_write(state: &Shared, actor: &Actor, vault: &str, path: &str, kind: &str) {
+    let Actor::Agent { session_id, .. } = actor else {
+        return;
+    };
+    let write = crate::agent::store::WriteRecord {
+        session_id: session_id.clone(),
+        vault_id: vault.to_string(),
+        note_id: None,
+        path: Some(path.to_string()),
+        kind: kind.to_string(),
+        version: None,
+        at: write_stamp(),
+    };
+    if let Err(e) = state.agent.record_write(&write) {
+        tracing::warn!(error = %e, session = %session_id, "could not record an agent's write");
+    }
+}
+
+/// Fixed width, so the stamps order as text.
+fn write_stamp() -> String {
+    let format = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    time::OffsetDateTime::now_utc()
+        .format(&format)
+        .unwrap_or_else(|_| crate::index::now_rfc3339())
 }
 
 /// Replaces a note's content, merging against the version the caller read.
@@ -354,6 +538,7 @@ pub async fn update_note(
         .put_note(id, base_version, content, device_id)
         .map_err(|e| not_found(e.to_string()))?;
     broadcast_latest(state, &ix, result.seq);
+    record_agent_write(state, actor, vault, &result.note, "edited");
     Ok(result)
 }
 
@@ -637,13 +822,15 @@ pub async fn create_script(
     content: &str,
 ) -> ApiResult<ScriptStored> {
     let rel = script_path(name)?;
-    let handle = kit_handle(state, actor, Access::Write).await?;
+    let kit = kit_vault_id(state).await?;
+    let handle = vault_of(state, actor, Access::Write, &kit).await?;
     let mut ix = handle.indexer.lock().await;
     if ix.vault.exists(&rel) {
         return Err(conflict(format!("script “{name}” already exists")));
     }
     ix.put_attachment(&rel, content.as_bytes())
         .map_err(|e| bad_request(e.to_string()))?;
+    record_agent_script_write(state, actor, &kit, &rel, "script_created");
     Ok(ScriptStored {
         name: name.to_string(),
         path: rel,
@@ -660,13 +847,15 @@ pub async fn update_script(
     content: &str,
 ) -> ApiResult<ScriptStored> {
     let rel = script_path(name)?;
-    let handle = kit_handle(state, actor, Access::Write).await?;
+    let kit = kit_vault_id(state).await?;
+    let handle = vault_of(state, actor, Access::Write, &kit).await?;
     let mut ix = handle.indexer.lock().await;
     if !ix.vault.exists(&rel) {
         return Err(not_found("no such script"));
     }
     ix.put_attachment(&rel, content.as_bytes())
         .map_err(|e| bad_request(e.to_string()))?;
+    record_agent_script_write(state, actor, &kit, &rel, "script_edited");
     Ok(ScriptStored {
         name: name.to_string(),
         path: rel,
@@ -1162,11 +1351,43 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
         .collect())
 }
 
+/// A session as clients see it: the record plus what it was launched with
+/// and how many notes it has written.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionView {
+    #[serde(flatten)]
+    pub session: crate::agent::store::SessionRecord,
+    pub name: String,
+    pub context: Option<crate::agent::store::Context>,
+    pub write_vault_id: Option<String>,
+    pub wrote_count: i64,
+}
+
+fn session_view(
+    state: &Shared,
+    session: crate::agent::store::SessionRecord,
+) -> ApiResult<SessionView> {
+    let launch = state.agent.launch_of(&session.id).map_err(internal)?;
+    let wrote_count = state.agent.write_count(&session.id).map_err(internal)?;
+    // A session launched before names existed is called by its workspace.
+    let (name, context, write_vault_id) = match launch {
+        Some(l) => (l.name, l.context, l.write_vault_id),
+        None => (session.workspace.clone(), None, None),
+    };
+    Ok(SessionView {
+        session,
+        name,
+        context,
+        write_vault_id,
+        wrote_count,
+    })
+}
+
 /// A launched session, plus what the MCP Gateway granted it (spec §6).
 #[derive(Debug, Clone, Serialize)]
 pub struct LaunchedSession {
     #[serde(flatten)]
-    pub session: crate::agent::store::SessionRecord,
+    pub session: SessionView,
     pub mcp: LaunchMcp,
 }
 
@@ -1174,9 +1395,10 @@ pub struct LaunchedSession {
 pub struct LaunchMcp {
     /// The granted connections, the built-in `storm` among them.
     pub connections: Vec<crate::agent::store::McpGrant>,
+    /// Whether the session has a write vault; kept for older clients.
     pub allow_vault_writes: bool,
-    /// Said out loud when a session gets none it could have had (§6): the
-    /// host is too old to bridge.
+    /// Said out loud when a session gets less than it asked for: the host is
+    /// too old to bridge, or an older client asked for writes with no vault.
     pub notice: Option<String>,
 }
 
@@ -1192,6 +1414,25 @@ pub async fn launch_session(
             Some(h) if !h.is_revoked() => h.name,
             _ => return Err(not_found("no such host")),
         }
+    };
+    let context = match &req.context {
+        Some(c) => {
+            let note = get_note(state, actor, &c.vault_id, &c.note_id).await?;
+            Some(crate::agent::store::Context {
+                vault_id: c.vault_id.clone(),
+                note_id: note.note.id,
+                title: note.note.title,
+            })
+        }
+        None => None,
+    };
+    if let Some(v) = &req.write_vault_id {
+        vault_of(state, actor, Access::Write, v).await?;
+    }
+    let unhonoured_writes = req.allow_vault_writes && req.write_vault_id.is_none();
+    let meta = crate::agent::LaunchMeta {
+        context,
+        write_vault_id: req.write_vault_id.clone(),
     };
     // Every non-disabled connection of the owner, plus `storm` (spec §6,
     // G-D9). Snapshotted here; the manager drops them for `shell` and for a
@@ -1211,13 +1452,19 @@ pub async fn launch_session(
                 slug: c.slug,
             }),
     );
-    let allow_vault_writes = req.allow_vault_writes;
-    let (session, outcome) = state
+    let (session, launch, outcome) = state
         .agent
-        .launch(actor.user_id(), req, offered)
+        .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
     let (connections, notice) = match outcome {
-        crate::agent::McpOutcome::Granted(g) => (g, None),
+        crate::agent::McpOutcome::Granted(g) => (
+            g,
+            unhonoured_writes.then(|| {
+                "This app is out of date, so the session is read only. Update Storm to \
+                 choose a vault it may write to."
+                    .to_string()
+            }),
+        ),
         crate::agent::McpOutcome::Shell => (Vec::new(), None),
         crate::agent::McpOutcome::OldHost => (
             Vec::new(),
@@ -1232,7 +1479,7 @@ pub async fn launch_session(
             "session_id": session.id,
             "host_id": session.host_id,
             "connections": connections.iter().map(|g| &g.id).collect::<Vec<_>>(),
-            "allow_vault_writes": allow_vault_writes,
+            "write_vault_id": launch.write_vault_id,
         });
         let _ = auth_db.record_event(
             "integration_grant",
@@ -1243,24 +1490,89 @@ pub async fn launch_session(
         );
     }
     Ok(LaunchedSession {
-        session,
+        session: SessionView {
+            session,
+            name: launch.name,
+            context: launch.context,
+            write_vault_id: launch.write_vault_id.clone(),
+            wrote_count: 0,
+        },
         mcp: LaunchMcp {
             connections,
-            allow_vault_writes,
+            allow_vault_writes: launch.write_vault_id.is_some(),
             notice,
         },
     })
 }
 
-pub async fn list_sessions(state: &Shared) -> ApiResult<Vec<crate::agent::store::SessionRecord>> {
-    state.agent.list().map_err(agent_error)
+pub async fn list_sessions(state: &Shared) -> ApiResult<Vec<SessionView>> {
+    state
+        .agent
+        .list()
+        .map_err(agent_error)?
+        .into_iter()
+        .map(|s| session_view(state, s))
+        .collect()
 }
 
-pub async fn get_session(
+pub async fn get_session(state: &Shared, id: &str) -> ApiResult<SessionView> {
+    session_view(state, state.agent.get(id).map_err(agent_error)?)
+}
+
+/// One note a session wrote, as its Wrote list shows it. `title` and `path`
+/// are the note's current ones; `None` once the note is gone.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionWrite {
+    pub vault_id: String,
+    /// `None` for a kit script, which is a file, not a note.
+    pub note_id: Option<String>,
+    pub title: Option<String>,
+    pub path: Option<String>,
+    pub kind: String,
+    /// `None` for a kit script: scripts are not versioned.
+    pub version: Option<i64>,
+    pub at: String,
+}
+
+/// The notes and kit scripts a session created or edited, newest write first.
+pub async fn session_writes(
     state: &Shared,
+    actor: &Actor,
     id: &str,
-) -> ApiResult<crate::agent::store::SessionRecord> {
-    state.agent.get(id).map_err(agent_error)
+) -> ApiResult<Vec<SessionWrite>> {
+    state.agent.get(id).map_err(agent_error)?;
+    let writes = state.agent.writes_of(id).map_err(internal)?;
+    let mut out = Vec::with_capacity(writes.len());
+    for w in writes {
+        if !crate::api::may_see_vault(state, actor, &w.vault_id) {
+            continue;
+        }
+        let (title, path) = match (&w.note_id, &w.path) {
+            (Some(note_id), _) => {
+                let row = match state.vaults.read().await.get(&w.vault_id) {
+                    Some(handle) => handle.indexer.lock().await.db.get_note(note_id)?,
+                    None => None,
+                };
+                (row.as_ref().map(|r| r.title.clone()), row.map(|r| r.path))
+            }
+            (None, path) => (
+                path.as_deref()
+                    .and_then(|p| p.strip_prefix(&format!("{SCRIPTS_ROOT}/")))
+                    .map(str::to_string),
+                path.clone(),
+            ),
+        };
+        out.push(SessionWrite {
+            title,
+            path,
+            vault_id: w.vault_id,
+            note_id: w.note_id,
+            kind: w.kind,
+            version: w.version,
+            at: w.at,
+        });
+    }
+    Ok(out)
 }
 
 pub async fn end_session(state: &Shared, id: &str) -> ApiResult<()> {
@@ -1419,8 +1731,8 @@ pub struct IntegrationView {
     pub last_error_code: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    /// Built-in only: whether agents could write to the vault at all, which
-    /// needs `mcp_writable` as well as the launch toggle (G-D5).
+    /// Built-in only: whether agents may write at all (`agent_writes`); a
+    /// session also needs a write vault chosen at launch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_writes_available: Option<bool>,
 }
@@ -1447,7 +1759,7 @@ fn builtin_view(state: &Shared) -> IntegrationView {
         updated_at: None,
         vault_writes_available: Some(
             state
-                .mcp_writable
+                .agent_writes
                 .load(std::sync::atomic::Ordering::Relaxed),
         ),
     }
@@ -1982,8 +2294,11 @@ struct Authorized {
     owner: String,
     /// `None` for the built-in `storm` connection.
     connection: Option<Connection>,
-    /// The session's launch flag **and** `mcp_writable` (G-D5).
+    /// The session has a write vault **and** `agent_writes` is on.
     vault_writes: bool,
+    write_vault: Option<String>,
+    /// The session was started from a note.
+    has_context: bool,
 }
 
 impl Authorized {
@@ -2063,7 +2378,7 @@ async fn authorize_call(
         return Err("session_not_live".into());
     }
     // A live grant.
-    let (_, allow_vault_writes) = state
+    state
         .agent
         .grant(session_id, connection_id)
         .map_err(|_| "not_granted".to_string())?
@@ -2095,14 +2410,21 @@ async fn authorize_call(
         }
         Some(c)
     };
-    let vault_writes = allow_vault_writes
+    let launch = state
+        .agent
+        .launch_of(session_id)
+        .map_err(|_| "not_granted".to_string())?;
+    let write_vault = launch.as_ref().and_then(|l| l.write_vault_id.clone());
+    let vault_writes = write_vault.is_some()
         && state
-            .mcp_writable
+            .agent_writes
             .load(std::sync::atomic::Ordering::Relaxed);
     Ok(Authorized {
         owner: session.owner_user_id,
         connection,
         vault_writes,
+        write_vault: write_vault.filter(|_| vault_writes),
+        has_context: launch.is_some_and(|l| l.context.is_some()),
     })
 }
 
@@ -2488,8 +2810,14 @@ async fn connect_builtin(
         session_id: scope.session_id.clone(),
         host_id: scope.host_id.clone(),
         user_id: authorized.owner.clone(),
+        write_vault: authorized.write_vault.clone(),
     };
-    let handler = crate::mcp::Storm::for_agent(state.clone(), authorized.vault_writes, actor);
+    let handler = crate::mcp::Storm::for_agent(
+        state.clone(),
+        authorized.vault_writes,
+        authorized.has_context,
+        actor,
+    );
     tokio::spawn(async move {
         if let Ok(running) = handler.serve(server_io).await {
             let _ = running.waiting().await;
@@ -2883,10 +3211,11 @@ mod tests {
             relays_changed: tokio::sync::watch::channel(Vec::new()).0,
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
             bootstrap_nonce: None,
             listen_addr: "127.0.0.1:8484".into(),
-            vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
+            vault_policy: Arc::new(crate::auth::authz::StormPolicy),
             hasher: crate::auth::Hasher::new(),
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),

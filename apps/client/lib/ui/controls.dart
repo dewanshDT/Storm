@@ -430,10 +430,18 @@ class NumberedStep {
 
 /// 26px circles; only the [current] step is in `accent` (handoff §7.8).
 class NumberedSteps extends StatelessWidget {
-  const NumberedSteps({super.key, required this.steps, this.current = 0});
+  const NumberedSteps({
+    super.key,
+    required this.steps,
+    this.current = 0,
+    this.inline = false,
+  });
 
   final List<NumberedStep> steps;
   final int current;
+
+  /// The current step's action beside its text rather than under it.
+  final bool inline;
 
   @override
   Widget build(BuildContext context) {
@@ -446,7 +454,9 @@ class NumberedSteps extends StatelessWidget {
           Padding(
             padding: EdgeInsets.only(bottom: t.sp * 1.75),
             child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: inline
+                  ? CrossAxisAlignment.center
+                  : CrossAxisAlignment.start,
               children: [
                 Container(
                   key: Key('step-${i + 1}'),
@@ -470,28 +480,44 @@ class NumberedSteps extends StatelessWidget {
                   ),
                 ),
                 SizedBox(width: t.sp * 1.5),
-                Expanded(
-                  child: Padding(
-                    padding: EdgeInsets.only(top: t.sp * 0.25),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          steps[i].text,
-                          style: TextStyle(
-                            fontFamily: StormTokens.sansFamily,
-                            fontSize: t.uiSize,
-                            color: i == current ? t.text : t.text3,
-                          ),
-                        ),
-                        if (i == current && steps[i].action != null) ...[
-                          SizedBox(height: t.sp),
-                          steps[i].action!,
-                        ],
-                      ],
+                if (inline) ...[
+                  Flexible(
+                    child: Text(
+                      steps[i].text,
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.uiSize,
+                        color: i == current ? t.text : t.text3,
+                      ),
                     ),
                   ),
-                ),
+                  if (i == current && steps[i].action != null) ...[
+                    SizedBox(width: t.sp * 1.5),
+                    steps[i].action!,
+                  ],
+                ] else
+                  Expanded(
+                    child: Padding(
+                      padding: EdgeInsets.only(top: t.sp * 0.25),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            steps[i].text,
+                            style: TextStyle(
+                              fontFamily: StormTokens.sansFamily,
+                              fontSize: t.uiSize,
+                              color: i == current ? t.text : t.text3,
+                            ),
+                          ),
+                          if (i == current && steps[i].action != null) ...[
+                            SizedBox(height: t.sp),
+                            steps[i].action!,
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),

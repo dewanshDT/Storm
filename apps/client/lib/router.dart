@@ -14,6 +14,8 @@ import 'ui/gallery_screen.dart';
 import 'ui/login_screen.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
+import 'agent/agent_state.dart' show sessionTabOf;
+import 'agent/session_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
@@ -49,6 +51,10 @@ abstract final class Routes {
   static const addDevice = '/add-device';
 
   static const agents = '/agents';
+
+  /// One session, with its panel tab (`context`, `wrote` or `about`).
+  static String agentSession(String id, {String? tab}) =>
+      '/agents/s/${Uri.encodeComponent(id)}${tab == null ? '' : '?tab=$tab'}';
 
   /// The settings list on a phone; the first page at desk width.
   static const settings = '/settings';
@@ -244,11 +250,19 @@ final routerProvider = Provider<GoRouter>((ref) {
             ],
           ),
           ShellRoute(
-            builder: (_, _, child) => AgentsShell(child: child),
+            builder: (_, state, child) =>
+                AgentsShell(location: state.uri, child: child),
             routes: [
               GoRoute(
                 path: Routes.agents,
                 builder: (_, _) => const AgentsScreen(),
+              ),
+              GoRoute(
+                path: '/agents/s/:id',
+                builder: (_, state) => SessionScreen(
+                  sessionId: state.pathParameters['id']!,
+                  tab: sessionTabOf(state.uri.queryParameters['tab']),
+                ),
               ),
             ],
           ),

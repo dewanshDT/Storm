@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use cache::{OutputCache, Read};
-use store::{Fallback, McpGrant, SessionRecord, Store};
+use store::{Fallback, LaunchRecord, McpGrant, SessionRecord, Store, WriteRecord};
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
 pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
@@ -53,6 +53,10 @@ pub enum Command {
         /// anyway, which is why a launch never relies on it (§6, old hosts).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp: Vec<McpGrant>,
+        /// The session was started from a note: the runtime adds its fixed
+        /// opening prompt. A flag, never text, so no note data reaches argv.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        context: bool,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -163,9 +167,29 @@ pub struct Launch {
     #[serde(default = "terminal")]
     pub interaction: String,
     pub terminal: TerminalSize,
-    /// The launch toggle "Allow vault writes" (G-D5): off unless asked for.
+    /// The note the session starts from.
+    #[serde(default)]
+    pub context: Option<ContextRef>,
+    /// The one vault the session may write to; absent is read only.
+    #[serde(default)]
+    pub write_vault_id: Option<String>,
+    /// The pre-v2 toggle. Accepted from older clients, never honoured as
+    /// writes: without a vault it launches read only, and the launch says so.
     #[serde(default)]
     pub allow_vault_writes: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextRef {
+    pub vault_id: String,
+    pub note_id: String,
+}
+
+/// What the launch resolved before the manager runs it.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchMeta {
+    pub context: Option<store::Context>,
+    pub write_vault_id: Option<String>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -554,8 +578,9 @@ impl AgentManager {
         &self,
         owner: &str,
         req: Launch,
+        meta: LaunchMeta,
         offered_grants: Vec<McpGrant>,
-    ) -> AgentResult<(SessionRecord, McpOutcome)> {
+    ) -> AgentResult<(SessionRecord, LaunchRecord, McpOutcome)> {
         if req.interaction != "terminal" {
             return Err(AgentError::BadRequest(
                 "V1 offers the terminal interaction only".into(),
@@ -655,16 +680,32 @@ impl AgentManager {
             McpOutcome::Granted(g) => g.clone(),
             _ => Vec::new(),
         };
-        {
+        let reads_storm = grants
+            .iter()
+            .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
+        let launch = {
             let mut store = self.store.lock().unwrap();
+            let launch = LaunchRecord {
+                session_id: record.id.clone(),
+                name: session_name(
+                    meta.context.as_ref().map(|c| c.title.as_str()),
+                    &record.workspace,
+                    &store.live_names()?,
+                ),
+                context: meta.context,
+                // A session that cannot reach Storm has nothing to write with.
+                write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
+            };
             store.insert(&record)?;
             store.insert_grants(
                 &record.id,
-                req.allow_vault_writes,
+                launch.write_vault_id.is_some(),
                 &grants,
                 &record.created_at,
             )?;
-        }
+            store.insert_launch(&launch, &record.created_at)?;
+            launch
+        };
         self.live
             .lock()
             .unwrap()
@@ -680,6 +721,7 @@ impl AgentManager {
                 interaction: "terminal".into(),
                 terminal: req.terminal,
                 mcp: grants,
+                context: reads_storm && launch.context.is_some(),
             },
         );
         let mut record = record;
@@ -693,7 +735,31 @@ impl AgentManager {
         }
         self.store.lock().unwrap().update(&record)?;
         self.bump(&record.id);
-        Ok((record, outcome))
+        Ok((record, launch, outcome))
+    }
+
+    pub fn launch_of(&self, session_id: &str) -> Result<Option<LaunchRecord>> {
+        self.store.lock().unwrap().launch(session_id)
+    }
+
+    pub fn record_write(&self, write: &WriteRecord) -> Result<()> {
+        self.store.lock().unwrap().record_write(write)
+    }
+
+    pub fn writes_of(&self, session_id: &str) -> Result<Vec<WriteRecord>> {
+        self.store.lock().unwrap().writes_of(session_id)
+    }
+
+    pub fn write_count(&self, session_id: &str) -> Result<i64> {
+        self.store.lock().unwrap().write_count(session_id)
+    }
+
+    pub fn latest_write(&self, vault_id: &str, note_id: &str) -> Result<Option<WriteRecord>> {
+        self.store.lock().unwrap().latest_write(vault_id, note_id)
+    }
+
+    pub fn latest_writes(&self, vault_id: &str) -> Result<Vec<WriteRecord>> {
+        self.store.lock().unwrap().latest_writes(vault_id)
     }
 
     // ---- the MCP Gateway's view (decision 81e) ---------------------------
@@ -891,6 +957,47 @@ impl AgentManager {
     }
 }
 
+/// A session's name: the slug of its context note's title, else
+/// `{workspace}-{n}`; a name a live session holds gets `-2`, `-3`, ….
+pub fn session_name(title: Option<&str>, workspace: &str, live: &[String]) -> String {
+    let taken = |name: &str| live.iter().any(|l| l == name);
+    match title.map(slug).filter(|s| !s.is_empty()) {
+        Some(base) => {
+            if !taken(&base) {
+                return base;
+            }
+            (2..)
+                .map(|n| format!("{base}-{n}"))
+                .find(|name| !taken(name))
+                .expect("an unbounded range")
+        }
+        None => {
+            let base = Some(slug(workspace))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "session".into());
+            (1..)
+                .map(|n| format!("{base}-{n}"))
+                .find(|name| !taken(name))
+                .expect("an unbounded range")
+        }
+    }
+}
+
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.chars().count() >= 48 {
+            break;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
 /// Applies a host's report to a record. Unknown statuses are refused rather
 /// than stored: the vocabulary is fixed (freeze §7.2).
 fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()> {
@@ -986,6 +1093,15 @@ mod tests {
         provider: Option<&str>,
         grants: Vec<McpGrant>,
     ) -> AgentResult<(SessionRecord, McpOutcome)> {
+        launch_meta(m, provider, grants, LaunchMeta::default()).map(|(r, _, o)| (r, o))
+    }
+
+    fn launch_meta(
+        m: &AgentManager,
+        provider: Option<&str>,
+        grants: Vec<McpGrant>,
+        meta: LaunchMeta,
+    ) -> AgentResult<(SessionRecord, LaunchRecord, McpOutcome)> {
         m.launch(
             "usr_OWNER",
             Launch {
@@ -994,10 +1110,303 @@ mod tests {
                 provider: provider.map(Into::into),
                 interaction: "terminal".into(),
                 terminal: TerminalSize { cols: 80, rows: 24 },
+                context: None,
+                write_vault_id: None,
                 allow_vault_writes: false,
             },
+            meta,
             grants,
         )
+    }
+
+    fn with_context(title: &str, write_vault: Option<&str>) -> LaunchMeta {
+        LaunchMeta {
+            context: Some(store::Context {
+                vault_id: "vlt_PERSONAL".into(),
+                note_id: "0b5e1d2c-note".into(),
+                title: title.into(),
+            }),
+            write_vault_id: write_vault.map(Into::into),
+        }
+    }
+
+    fn end(m: &AgentManager, id: &str) {
+        m.host_status(
+            "hst_A",
+            id,
+            &StatusReport {
+                status: "completed".into(),
+                exit_code: Some(0),
+                end_reason: None,
+                signal: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_launch_record_round_trips_through_a_restart() {
+        let dir = tempdir::TempDir::new("storm-agent-launch").unwrap();
+        let (id, launched) = {
+            let m = AgentManager::open(dir.path()).unwrap();
+            let _rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+            let (r, launch, _) = launch_meta(
+                &m,
+                None,
+                offered(),
+                with_context("Gateway spec", Some("vlt_WORK")),
+            )
+            .unwrap();
+            (r.id, launch)
+        };
+        let m = AgentManager::open(dir.path()).unwrap();
+        let back = m.launch_of(&id).unwrap().unwrap();
+        assert_eq!(back, launched);
+        assert_eq!(back.name, "gateway-spec");
+        assert_eq!(back.write_vault_id.as_deref(), Some("vlt_WORK"));
+        let c = back.context.unwrap();
+        assert_eq!(
+            (c.vault_id.as_str(), c.note_id.as_str(), c.title.as_str()),
+            ("vlt_PERSONAL", "0b5e1d2c-note", "Gateway spec")
+        );
+        assert_eq!(m.launch_of("ags_NOPE").unwrap(), None);
+    }
+
+    #[test]
+    fn a_session_without_storm_has_no_write_vault_and_no_opening_prompt() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let (_, launch, outcome) = launch_meta(
+            &m,
+            Some("shell"),
+            offered(),
+            with_context("Gateway spec", Some("vlt_WORK")),
+        )
+        .unwrap();
+        assert_eq!(outcome, McpOutcome::Shell);
+        assert_eq!(launch.write_vault_id, None);
+        assert!(
+            launch.context.is_some(),
+            "the context is still the session's"
+        );
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("context").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn no_note_data_reaches_the_start_command_only_the_context_flag() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+        let marker = "MARKER-7f3a";
+        let meta = LaunchMeta {
+            context: Some(store::Context {
+                vault_id: format!("vlt_{marker}"),
+                note_id: format!("note-{marker}"),
+                title: format!("Plan {marker}"),
+            }),
+            write_vault_id: Some(format!("vlt_{marker}")),
+        };
+        launch_meta(&m, None, offered(), meta).unwrap();
+        let wire = serde_json::to_string(&rx.try_recv().unwrap()).unwrap();
+        assert!(!wire.contains(marker), "note data reached the host: {wire}");
+        assert!(!wire.to_lowercase().contains("marker"), "{wire}");
+        let wire: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(wire["context"], true);
+        let keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "cmd_seq",
+                "context",
+                "interaction",
+                "mcp",
+                "provider",
+                "session",
+                "terminal",
+                "type",
+                "workspace"
+            ],
+            "the start command grew a field"
+        );
+
+        let (_, _) = launch_with(&m, None, offered()).unwrap();
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("context").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn a_name_is_the_notes_slug_or_the_workspaces_and_a_live_duplicate_is_numbered() {
+        assert_eq!(
+            session_name(Some("Gateway spec"), "storm", &[]),
+            "gateway-spec"
+        );
+        assert_eq!(
+            session_name(Some("  Q3: Plan / Review!! "), "storm", &[]),
+            "q3-plan-review"
+        );
+        assert_eq!(session_name(Some("Café notes"), "storm", &[]), "café-notes");
+        assert_eq!(session_name(Some("???"), "storm", &[]), "storm-1");
+        assert_eq!(session_name(None, "storm", &[]), "storm-1");
+        assert_eq!(session_name(None, "My Site", &[]), "my-site-1");
+        let live = vec!["gateway-spec".to_string(), "gateway-spec-2".to_string()];
+        assert_eq!(
+            session_name(Some("Gateway spec"), "storm", &live),
+            "gateway-spec-3"
+        );
+        let live = vec!["storm-1".to_string(), "storm-3".to_string()];
+        assert_eq!(session_name(None, "storm", &live), "storm-2");
+        assert!(
+            session_name(Some(&"word ".repeat(40)), "storm", &[])
+                .chars()
+                .count()
+                <= 48
+        );
+    }
+
+    #[test]
+    fn only_a_live_session_holds_its_name() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+        let meta = || with_context("Gateway spec", None);
+        let (a, la, _) = launch_meta(&m, None, offered(), meta()).unwrap();
+        let (b, lb, _) = launch_meta(&m, None, offered(), meta()).unwrap();
+        assert_eq!(
+            (la.name.as_str(), lb.name.as_str()),
+            ("gateway-spec", "gateway-spec-2")
+        );
+        end(&m, &a.id);
+        let (_, lc, _) = launch_meta(&m, None, offered(), meta()).unwrap();
+        assert_eq!(lc.name, "gateway-spec", "an ended session frees its name");
+        end(&m, &b.id);
+        let (_, ld, _) = launch_meta(&m, None, offered(), LaunchMeta::default()).unwrap();
+        assert_eq!(ld.name, "storm-1");
+    }
+
+    #[test]
+    fn writes_keep_created_follow_the_latest_version_and_survive_a_dismissal() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+        let a = launch(&m, None).unwrap();
+        let b = launch(&m, None).unwrap();
+        let w = |session: &str, note: &str, kind: &str, version: i64, at: &str| WriteRecord {
+            session_id: session.into(),
+            vault_id: "vlt_W".into(),
+            note_id: Some(note.into()),
+            path: None,
+            kind: kind.into(),
+            version: Some(version),
+            at: at.into(),
+        };
+        let script = |session: &str, path: &str, kind: &str, at: &str| WriteRecord {
+            session_id: session.into(),
+            vault_id: "vlt_W".into(),
+            note_id: None,
+            path: Some(path.into()),
+            kind: kind.into(),
+            version: None,
+            at: at.into(),
+        };
+        m.record_write(&w(&a.id, "n1", "created", 1, "2026-10-08T10:00:00.000Z"))
+            .unwrap();
+        m.record_write(&w(&a.id, "n1", "edited", 2, "2026-10-08T10:01:00.000Z"))
+            .unwrap();
+        m.record_write(&w(&a.id, "n2", "edited", 7, "2026-10-08T10:02:00.000Z"))
+            .unwrap();
+        let mine = m.writes_of(&a.id).unwrap();
+        assert_eq!(
+            mine.iter()
+                .map(|w| (w.note_id.as_deref(), w.kind.as_str(), w.version))
+                .collect::<Vec<_>>(),
+            [
+                (Some("n2"), "edited", Some(7)),
+                (Some("n1"), "created", Some(2))
+            ],
+            "newest first, one row per note, created stays created"
+        );
+        assert_eq!(m.write_count(&a.id).unwrap(), 2);
+
+        // A kit script is one row per path, beside the notes.
+        m.record_write(&script(
+            &a.id,
+            "scripts/x.sh",
+            "script_created",
+            "2026-10-08T10:02:10.000Z",
+        ))
+        .unwrap();
+        m.record_write(&script(
+            &a.id,
+            "scripts/x.sh",
+            "script_edited",
+            "2026-10-08T10:02:20.000Z",
+        ))
+        .unwrap();
+        m.record_write(&script(
+            &a.id,
+            "scripts/y.sh",
+            "script_edited",
+            "2026-10-08T10:02:30.000Z",
+        ))
+        .unwrap();
+        let mine = m.writes_of(&a.id).unwrap();
+        assert_eq!(
+            mine.iter()
+                .take(2)
+                .map(|w| (
+                    w.path.as_deref(),
+                    w.kind.as_str(),
+                    w.note_id.as_deref(),
+                    w.version
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Some("scripts/y.sh"), "script_edited", None, None),
+                (Some("scripts/x.sh"), "script_created", None, None)
+            ]
+        );
+        assert_eq!(m.write_count(&a.id).unwrap(), 4);
+
+        // Session b edits n1 later: it is the latest writer; a still lists it.
+        m.record_write(&w(&b.id, "n1", "edited", 3, "2026-10-08T10:03:00.000Z"))
+            .unwrap();
+        assert_eq!(
+            m.latest_write("vlt_W", "n1").unwrap().unwrap().session_id,
+            b.id
+        );
+        assert_eq!(
+            m.latest_write("vlt_W", "n2").unwrap().unwrap().session_id,
+            a.id
+        );
+        assert_eq!(m.latest_write("vlt_W", "n3").unwrap(), None);
+        let latest = m.latest_writes("vlt_W").unwrap();
+        assert_eq!(
+            latest
+                .iter()
+                .map(|w| (w.note_id.as_deref(), w.session_id.as_str(), w.version))
+                .collect::<Vec<_>>(),
+            [
+                (Some("n1"), b.id.as_str(), Some(3)),
+                (Some("n2"), a.id.as_str(), Some(7))
+            ],
+            "scripts are not notes, so not provenance"
+        );
+        assert!(m.latest_writes("vlt_OTHER").unwrap().is_empty());
+        assert_eq!(m.write_count(&a.id).unwrap(), 4);
+
+        end(&m, &b.id);
+        m.dismiss(&b.id).unwrap();
+        assert_eq!(
+            m.latest_write("vlt_W", "n1").unwrap().unwrap().session_id,
+            b.id
+        );
+        assert!(
+            m.launch_of(&b.id).unwrap().is_some(),
+            "the name still resolves"
+        );
     }
 
     #[test]
@@ -1162,8 +1571,11 @@ mod tests {
                 provider: None,
                 interaction: "terminal".into(),
                 terminal: TerminalSize { cols: 80, rows: 24 },
+                context: None,
+                write_vault_id: None,
                 allow_vault_writes: false,
             },
+            LaunchMeta::default(),
             Vec::new(),
         );
         assert!(matches!(bad, Err(AgentError::BadRequest(_))));

@@ -1,94 +1,19 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:storm/agent/agent_api.dart';
-import 'package:storm/agent/agent_models.dart';
-import 'package:storm/agent/agent_state.dart';
-import 'package:storm/agent/agents_screen.dart';
 import 'package:storm/router.dart';
-import 'package:storm/ui/theme.dart';
 
+import 'agent_fakes.dart';
 import 'shell_harness.dart';
 
 /// Agents as an activity (Storm v2), on the real router and shell, at both
-/// widths.
+/// widths. Sessions are routes (`/agents/s/:id`, plan §6.1); there are no
+/// per-device tabs.
 void main() {
   const phone = Size(411, 900);
   const wide = Size(1400, 900);
-
-  Map<String, dynamic> host({
-    String id = 'hst_1',
-    String name = 'build-vm',
-    String status = 'online',
-  }) => {
-    'id': id,
-    'name': name,
-    'status': status,
-    'egress': 'host',
-    'capabilities': {
-      'providers': [
-        {'id': 'shell', 'kind': 'cli', 'available': true},
-      ],
-      'workspaces': ['storm'],
-      'max_sessions': 8,
-    },
-  };
-
-  Map<String, dynamic> session(
-    String id, {
-    String status = 'running',
-    int? exitCode,
-  }) => {
-    'id': id,
-    'host_id': 'hst_1',
-    'workspace': 'storm',
-    'provider': 'claude-code',
-    'status': status,
-    'end_reason': null,
-    'exit_code': exitCode,
-    'signal': null,
-    'cols': 80,
-    'rows': 24,
-    'created_at': DateTime.now().toUtc().toIso8601String(),
-    'provider_fallback': null,
-  };
-
-  /// An agent server. [down] answers like a server that is not there.
-  MockClient agentServer({
-    List<Map<String, dynamic>> hosts = const [],
-    List<Map<String, dynamic>> sessions = const [],
-    bool down = false,
-  }) => MockClient((req) async {
-    if (down) return http.Response('', 503);
-    final path = req.url.path;
-    if (path == '/v1/agent/hosts') {
-      return http.Response(jsonEncode(hosts), 200);
-    }
-    if (path == '/v1/agent/sessions') {
-      // The server lists oldest first; the client shows newest first.
-      return http.Response(jsonEncode(sessions.reversed.toList()), 200);
-    }
-    if (path.startsWith('/v1/agent/sessions/')) {
-      final id = path.split('/')[4];
-      final s = sessions.where((s) => s['id'] == id).firstOrNull;
-      return s == null
-          ? http.Response('{"error":"no such session"}', 404)
-          : http.Response(jsonEncode(s), 200);
-    }
-    if (path == '/v1/config/agent') {
-      return http.Response('{"default_provider":"shell"}', 200);
-    }
-    if (path.endsWith('/workspaces')) {
-      return http.Response('[{"name":"storm","live_sessions":0}]', 200);
-    }
-    return http.Response('{"error":"nope"}', 404);
-  });
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
@@ -96,17 +21,17 @@ void main() {
 
   double top(WidgetTester tester, Finder f) => tester.getTopLeft(f).dy;
 
-  group('live sessions are carried by the rail and the place picker', () {
-    MockClient running() => agentServer(
-      hosts: [host()],
-      sessions: [
-        session('ags_live'),
-        session('ags_done', status: 'completed', exitCode: 0),
-      ],
-    );
+  FakeAgentServer running() => FakeAgentServer(
+    hosts: [agentHost()],
+    sessions: [
+      agentSession('ags_done', status: 'completed', name: 'test-sweep'),
+      agentSession('ags_live', name: 'gateway-spec'),
+    ],
+  );
 
+  group('live sessions are carried by the rail and the place picker', () {
     testWidgets('wide: the rail badge counts live sessions', (tester) async {
-      final c = shellContainer(agentClient: running());
+      final c = shellContainer(agentClient: running().client);
       await pumpShell(tester, c, size: wide);
 
       final badge = find.byKey(const Key('rail-badge'));
@@ -120,12 +45,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(location(c), Routes.agents);
       expect(find.byKey(const Key('session-ags_live')), findsOneWidget);
-      expect(find.text('No session open'), findsOneWidget);
+      expect(find.text('WORK'), findsOneWidget, reason: 'the overview');
       expect(find.byKey(const Key('new-session-pill')), findsNothing);
 
       await tester.tap(find.byKey(const Key('session-ags_live')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('tab-ags_live')), findsOneWidget);
+      expect(location(c), '/agents/s/ags_live');
       expect(
         find.byKey(const Key('key-esc')),
         findsNothing,
@@ -140,10 +65,10 @@ void main() {
 
     testWidgets('no badge when nothing is live', (tester) async {
       final c = shellContainer(
-        agentClient: agentServer(
-          hosts: [host()],
-          sessions: [session('ags_old', status: 'stopped')],
-        ),
+        agentClient: FakeAgentServer(
+          hosts: [agentHost()],
+          sessions: [agentSession('ags_old', status: 'stopped')],
+        ).client,
       );
       await pumpShell(tester, c, size: wide);
       expect(find.byKey(const Key('rail-badge')), findsNothing);
@@ -151,9 +76,9 @@ void main() {
     });
 
     testWidgets(
-      'phone: the picker says what is running, and a session opens full screen',
+      'phone: the picker says what is running, and a session is a route',
       (tester) async {
-        final c = shellContainer(agentClient: running());
+        final c = shellContainer(agentClient: running().client);
         await pumpShell(tester, c, size: phone);
         final notes = location(c);
 
@@ -166,15 +91,16 @@ void main() {
 
         await tester.tap(find.byKey(const Key('session-ags_live')));
         await tester.pumpAndSettle();
-        expect(find.byKey(const Key('switch-session')), findsOneWidget);
-        expect(c.read(activeAgentTabProvider), 'ags_live');
+        expect(location(c), '/agents/s/ags_live');
+        expect(find.byKey(const Key('chip-details')), findsOneWidget);
 
-        // The keys row rides on the keyboard: absent while it is down.
-        expect(find.byKey(const Key('key-esc')), findsNothing);
-        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
-        await tester.pumpAndSettle();
+        // Live: the extra keys are there with the keyboard down, and Done
+        // comes with the keyboard.
         expect(find.byKey(const Key('key-esc')), findsOneWidget);
         expect(find.byKey(const Key('key-shift')), findsOneWidget);
+        expect(find.byKey(const Key('keys-done')), findsNothing);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
         expect(find.byKey(const Key('keys-done')), findsOneWidget);
         tester.view.resetViewInsets();
         await tester.pumpAndSettle();
@@ -192,34 +118,27 @@ void main() {
       },
     );
 
-    testWidgets('with no host, the list sends you to Hosts in Settings', (
+    testWidgets('with no host, the steps send you to Hosts in Settings', (
       tester,
     ) async {
-      final c = shellContainer(agentClient: agentServer());
-      await pumpShell(tester, c, size: phone);
+      final c = shellContainer(agentClient: FakeAgentServer().client);
+      await pumpShell(tester, c, size: wide);
       c.read(routerProvider).go(Routes.agents);
       await tester.pumpAndSettle();
-      expect(find.text('No hosts yet'), findsOneWidget);
-      await tester.tap(find.text('Hosts'));
+      expect(find.text('Agents run on a machine you own'), findsOneWidget);
+      expect(find.byKey(const Key('new-session')), findsNothing);
+      await tester.tap(find.byKey(const Key('enroll-host-step')));
       await tester.pumpAndSettle();
       expect(location(c), Routes.settingsPage('hosts'));
       await disposeShell(tester, c);
     });
   });
 
-  group('the Agents space on a phone', () {
+  group('the Agents list on a phone', () {
     testWidgets('running then ended, with New session as a pill', (
       tester,
     ) async {
-      final c = shellContainer(
-        agentClient: agentServer(
-          hosts: [host()],
-          sessions: [
-            session('ags_live'),
-            session('ags_done', status: 'completed', exitCode: 2),
-          ],
-        ),
-      );
+      final c = shellContainer(agentClient: running().client);
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).go(Routes.agents);
       await tester.pumpAndSettle();
@@ -230,9 +149,24 @@ void main() {
         top(tester, find.text('RUNNING')),
         lessThan(top(tester, find.text('ENDED'))),
       );
-      expect(find.text('Exited (2)'), findsOneWidget);
+      expect(find.text('storm · Claude Code · completed'), findsOneWidget);
       expect(find.byKey(const Key('places-bubble')), findsOneWidget);
       expect(find.byKey(const Key('rail-agents')), findsNothing);
+      expect(find.text('WORK'), findsNothing, reason: 'no grouping on a phone');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('no pill while no host is online', (tester) async {
+      final c = shellContainer(
+        agentClient: FakeAgentServer(
+          hosts: [agentHost(status: 'offline')],
+          sessions: [agentSession('ags_old', status: 'stopped')],
+        ).client,
+      );
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.agents);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('new-session-pill')), findsNothing);
       await disposeShell(tester, c);
     });
   });
@@ -240,7 +174,9 @@ void main() {
   testWidgets('Hosts are a Settings page, reached from the list', (
     tester,
   ) async {
-    final c = shellContainer(agentClient: agentServer(hosts: [host()]));
+    final c = shellContainer(
+      agentClient: FakeAgentServer(hosts: [agentHost()]).client,
+    );
     await pumpShell(tester, c, size: phone);
     c.read(routerProvider).go(Routes.settings);
     await tester.pumpAndSettle();
@@ -249,46 +185,5 @@ void main() {
     expect(location(c), Routes.settingsPage('hosts'));
     expect(find.text('Hosts & default agent'), findsOneWidget);
     await disposeShell(tester, c);
-  });
-
-  testWidgets('the launcher preselects the host this device used last', (
-    tester,
-  ) async {
-    SharedPreferences.setMockInitialValues({'agent.lastHost': 'hst_2'});
-    final client = agentServer(
-      hosts: [
-        host(),
-        host(id: 'hst_2', name: 'codebox'),
-      ],
-    );
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          agentApiFactoryProvider.overrideWithValue(
-            () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
-          ),
-        ],
-        child: MaterialApp(
-          theme: StormTheme.dark(),
-          home: Scaffold(
-            body: launcherForTest([
-              AgentHost.fromJson(host()),
-              AgentHost.fromJson(host(id: 'hst_2', name: 'codebox')),
-            ]),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    final chip = tester.widget<ChoiceChip>(
-      find.ancestor(
-        of: find.text('codebox'),
-        matching: find.byType(ChoiceChip),
-      ),
-    );
-    expect(chip.selected, isTrue);
-    // Its only workspace is chosen too, so Launch is one tap away.
-    final launch = tester.widget<FilledButton>(find.byKey(const Key('launch')));
-    expect(launch.onPressed, isNotNull);
   });
 }

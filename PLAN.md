@@ -4046,6 +4046,47 @@ client tests; recents limit, recent selection and the note pill
 mutation-checked; desktop-01..03 and phone-01/03 captured (harness: shots
 reload on a viewport switch, which sometimes stalled Chromium).
 
+**Slice 5 (server agent capabilities; `feat/v2-agent-capabilities`):**
+`agent.db` gains `session_launch` (name, context note ids and title snapshot,
+write vault) and `session_writes` (one row per note or kit script a session
+wrote: `created` stays `created`, version and time follow its latest write),
+both additive and
+kept when a session is dismissed, so provenance still names it. `POST
+/v1/agent/sessions` takes `context {vault_id, note_id}` (read through the vault
+seam, 404 if gone) and `write_vault_id` (must exist); `allow_vault_writes`
+without a vault launches read only with a notice. The server names a session:
+the slug of its note's title, else `{workspace}-{n}`, a live duplicate `-2`.
+Session views add `name`, `context`, `write_vault_id`, `wrote_count`; new
+`GET /v1/agent/sessions/{id}/writes` and `GET /v1/vaults/{v}/agent-writes`;
+`GET …/notes/{id}` adds `agent_write` (the latest agent writer, by version,
+`session_dismissed` once gone); `GET /v1/config` adds `agent_writes` and
+`version`. **`agent_writes` extends `PUT /v1/config/mcp`** rather than a new
+`/config/ai`: one handler and one persisted file, and an older client's
+`{enabled, writable}` body still means exactly what it did (`enabled` absent
+now leaves MCP alone). It is seeded on load from `mcp_enabled &&
+mcp_writable`, what agents needed before, and `mcp_writable` no longer touches
+agents. `StormPolicy` replaces `AllowAuthenticated`: an `Actor::Agent` writes
+only to its `write_vault`, refused at `vault_of` and answered as the JSON-RPC
+code `vault_write_not_allowed`; kit scripts follow the same rule. The write
+hook is in `ops::create_note`/`update_note`/`create_script`/`update_script`:
+**Wrote is every successful write a session performs** (operator, 2026-10-08),
+so a kit script is a row too — `kind: script_created|script_edited`, `note_id`
+and `version` null, `path` its vault-relative path, `title` its script name. It
+counts in `wrote_count`; it is not in a note's provenance or the vault's
+`agent-writes` map, which are keyed by note id and a script has none. A
+refused write records nothing; `move_note` is REST only, never an agent's.
+**The launch context is history** (operator, 2026-10-08): its ids, title and
+the session's name are fixed at launch and a later rename or move changes none
+of them, while `session_context` resolves the note by id. Context delivery: the built-in
+connection offers agents `session_context` and names it in its instructions;
+`start` carries `context: true`, and the runtime adds `mcp::OPENING_PROMPT`
+(`claude <prompt>`, `opencode --prompt <prompt>`, nothing for `shell`/`fake`).
+`gateway_e2e.py` scans every process's argv and environment for the note's
+title, body and ids with a positive control. Mutation-checked: the policy
+allowing every agent write, and note data sent in `start` / the prompt growing
+an argument, and a script write left unrecorded. Rust 562 + 54 tests; live 81
+(`e2e.py` unmodified) · mcp 86 · agent 78 · gateway 84 · auth 72 · client 20.
+
 **Slice 7 (Settings; `feat/v2-settings`):** the ten pages are built on real
 endpoints in `lib/ui/settings/` (`SettingsPage`: 680 column beside
 `SettingsNav` at ≥900, a pushed screen with "‹ Settings" and no AppBar
@@ -4070,6 +4111,52 @@ health is the shared health rows with actions plus a compatibility row
 `/v1/config` when it opens. `server_settings_screen.dart`,
 `client_settings_screen.dart`, `mcp_keys_screen.dart`, `ClientSettingsBody`
 and `settingsLeading` are gone.
+
+**Slice 6 (Agents; `feat/v2-agents`):** sessions are routes,
+`/agents/s/:id?tab=context|wrote|about`; `logicalParent` takes one back to
+`/agents` and `NavMemory` remembers it. `sessionControllerProvider` (an
+autoDispose family) owns each stream, so the desk split and the phone screen
+share one; `sessionDetailProvider` re-reads a live session's record every 4 s
+while it is shown (the stream's `status` event is the bare record, with no
+name, context or count) and `sessionWritesProvider` re-fetches
+`…/writes` only when `wrote_count` moves. `agentTabsProvider`,
+`activeAgentTabProvider`, `agentTitlesProvider`, the tab strip, the switcher
+sheet, the End `AlertDialog`, `AgentRow`/`AgentSessionRow`/
+`AgentSessionList`, `agentChosenTitle` and `launcherForTest` are gone; the
+name is the server's. The sidebar is on `SidebarFrame` (＋ New session only
+with a host online, Overview, RUNNING/ENDED `SessionRow`s with the §3.2 dots);
+the desk pane is the overview (work cards by (workspace, host) with the
+context chip and "wrote n", START AN AGENT cards, the infra line), or the
+first-session / no-host states (`NumberedSteps` gains an `inline` action);
+the phone is the flat list with the labelled pill. The launcher
+(`launcher.dart`) is a 460 modal at desk width and a bottom sheet below,
+keeps the old load logic (last host, workspaces, default agent, fallback and
+launch notices), and sends `context` and `write_vault_id`, never
+`allow_vault_writes`: "Can write to" defaults on when `agent_writes` is on,
+to the context note's vault (else the first), is disabled with "Off in
+Settings › AI access" when it is off, and is absent for `shell`. A launch
+opens the session on Context (with a note) or About. `launchAgentSession`
+keeps its positional signature and adds `contextNote`, `provider` and
+`runAgain`; slice 4's Start session passes the open note. Session detail:
+`SessionHeader` with End → `InlineConfirm` (desk) or the details sheet
+(phone), Run again (prefilled with context, host — falling back to an online
+one — workspace, agent and write vault; Launch still pressed) and Dismiss;
+the panel's Context shows the note read only (`StormMarkdownView`, the
+launch-snapshot title), Wrote lists writes with a "‹ Wrote" in-panel view
+(a kit-script row is a file under its path, never a link), About is a
+`KeyValueList`. Status words are Starting/Running/Unknown/Completed/Stopped/
+Failed with the reason in the meta and ended lines. `lib/ui/panels.dart`
+holds `PanelTabs`, `KeyValueList`, `InlineConfirm`, `MonoTag`. Contract
+changes in tests: `agents_navigation_test.dart` (sessions are routes; no
+tabs; "No hosts yet" → the no-host steps; Hosts test kept from slice 7) and
+`agent_test.dart` (status words, server names; the tab and terminal-title
+tests retired), `integrations_test.dart`'s launcher group (write vault, not
+the toggle). 883 client tests; mutation-checked: Wrote ignoring
+`wrote_count`, the launcher ignoring `agent_writes`, Run again dropping the
+write vault. The acceptance harness enrolls two real `storm-runtime` hosts
+and drives a scripted agent through the gateway (`harness/agents.py`); 19
+shots captured, deltas in its README. Open: the session view carries no
+grants, so About › Integrations lists the account's current connections.
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.

@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../agent/agent_state.dart' show agentOverviewProvider;
 import '../agent/agents_screen.dart' show launchAgentSession;
 import '../router.dart';
+import '../state/app_state.dart' show activeVaultProvider, openNoteIdProvider;
 import 'controls.dart';
 import 'tokens.dart';
 import 'widgets.dart' show SaveTone;
@@ -30,8 +31,17 @@ class StartSessionButton extends ConsumerWidget {
           context.go(Routes.agents);
           return;
         }
-        final launched = await launchAgentSession(context, ref);
-        if (launched != null && context.mounted) context.go(Routes.agents);
+        // The open note is the session's context; a launch opens the
+        // session on its Context tab.
+        final vault = ref.read(activeVaultProvider);
+        final note = ref.read(openNoteIdProvider);
+        await launchAgentSession(
+          context,
+          ref,
+          contextNote: vault.isEmpty || note == null
+              ? null
+              : (vaultId: vault, noteId: note),
+        );
       },
     );
   }
