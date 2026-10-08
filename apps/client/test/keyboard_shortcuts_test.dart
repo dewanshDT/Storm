@@ -130,7 +130,7 @@ void main() {
       final ctx = globalContext(tester);
       Actions.invoke(ctx, const StormNewNoteIntent());
       await tester.pumpAndSettle();
-      expect(find.text('New note'), findsOneWidget);
+      expect(find.widgetWithText(AlertDialog, 'New note'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -148,12 +148,6 @@ void main() {
   });
 
   group('the create buttons reach the chords\' callbacks', () {
-    Future<void> openNote(WidgetTester tester, ProviderContainer c) async {
-      final noteId = serverOf(c).notes.keys.first;
-      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, noteId));
-      await tester.pumpAndSettle();
-    }
-
     testWidgets('the desk-width sidebar New note button opens the dialog', (
       tester,
     ) async {
@@ -167,24 +161,25 @@ void main() {
 
       await tester.tap(find.byTooltip('New note'));
       await tester.pumpAndSettle();
-      expect(find.text('New note'), findsOneWidget);
+      expect(find.widgetWithText(AlertDialog, 'New note'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
-    testWidgets('the phone nav pill inside a note opens the dialog', (
+    testWidgets('the phone pill on a folder screen opens the dialog', (
       tester,
     ) async {
-      // The note screen used to wrap itself in an *empty* NewNoteRequest, so
-      // the pill's create button was dead exactly where a phone user makes
-      // notes from. It resolves the vault shell's callback now.
+      // The note screen has no pill (Q5); a folder screen is where a phone
+      // user makes notes, and its ＋ resolves the vault shell's callback.
       final c = shellContainer();
       await pumpShell(tester, c);
-      await openVault(tester, c);
-      await openNote(tester, c);
+      c
+          .read(routerProvider)
+          .go(Routes.folder(FakeServer.primaryVault, 'Daily'));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('New note'));
       await tester.pumpAndSettle();
-      expect(find.text('New note'), findsOneWidget);
+      expect(find.widgetWithText(AlertDialog, 'New note'), findsOneWidget);
       await disposeShell(tester, c);
     });
   });

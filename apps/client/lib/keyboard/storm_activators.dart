@@ -8,6 +8,10 @@ import 'package:flutter/widgets.dart';
 /// and so widget tests can flip it with [debugDefaultTargetPlatformOverride].
 bool get stormUsesMetaModifier => defaultTargetPlatform == TargetPlatform.macOS;
 
+/// How a [stormActivator] chord on [key] is written on this platform.
+String stormChordLabel(String key) =>
+    stormUsesMetaModifier ? '⌘$key' : 'Ctrl $key';
+
 /// Whether this platform has a physical keyboard worth arming chords for.
 ///
 /// Desktop and desktop-class web only. On a phone the global Focus would grab

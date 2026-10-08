@@ -311,7 +311,8 @@ void main() {
 
       expect(find.text('Archive'), findsNothing);
 
-      await tester.tap(find.byTooltip('New folder'));
+      // On a phone the pill's ＋ makes a folder on a long-press.
+      await tester.longPress(find.byTooltip('New note'));
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byType(TextField).last, 'Archive');
@@ -329,7 +330,7 @@ void main() {
       // The note dialog appends `.md`; reusing it unchanged would have made
       // every new folder `Archive.md`.
       final c = shellContainer();
-      await pumpShell(tester, c);
+      await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
 
       await tester.tap(find.byTooltip('New folder'));

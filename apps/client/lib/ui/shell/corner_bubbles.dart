@@ -8,7 +8,6 @@ import '../../agent/agent_state.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/client_version.dart';
-import '../../state/health.dart';
 import '../../state/nav_memory.dart';
 import '../../sync/sync_engine.dart';
 import '../accents.dart';
@@ -17,6 +16,7 @@ import '../widgets.dart';
 import '../surfaces.dart';
 import '../theme.dart';
 import '../tokens.dart';
+import 'vault_header.dart' show SyncNowLine, pickVaultAccent;
 import 'vault_tile.dart';
 
 /// Top-left on a phone: where you are (the vault, or Agents) and the place
@@ -130,18 +130,10 @@ class PlacePicker extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    final engine = ref.watch(syncEngineProvider);
     final activeId = ref.watch(activeVaultProvider);
     final vaults = ref.watch(vaultsProvider).value ?? const [];
     final accents = ref.watch(vaultAccentsProvider).value ?? const {};
     final live = ref.watch(agentOverviewProvider).value?.live.length ?? 0;
-    final status = dotStatusFor(
-      online: engine.isOnline,
-      identityFailed: engine.serverIdentityFailed,
-      syncing: engine.isSyncing,
-      pending: engine.pendingCount,
-      tier: engine.connectionTier,
-    );
     final check = Icon(LucideIcons.check, size: t.uiSize, color: t.accent);
 
     Widget row({
@@ -151,9 +143,11 @@ class PlacePicker extends ConsumerWidget {
       Widget? meta,
       bool selected = false,
       VoidCallback? onTap,
+      VoidCallback? onLongPress,
     }) => InkWell(
       key: key,
       onTap: onTap,
+      onLongPress: onLongPress,
       borderRadius: BorderRadius.circular(t.rControl),
       child: Padding(
         padding: EdgeInsets.symmetric(
@@ -200,6 +194,14 @@ class PlacePicker extends ConsumerWidget {
             label: v.name,
             selected: !inAgents && v.id == activeId,
             onTap: v.missing ? null : () => onVault(v.id),
+            onLongPress: v.missing
+                ? null
+                : () => pickVaultAccent(
+                    context,
+                    ref,
+                    v.id,
+                    accents[v.id] ?? Accent.none,
+                  ),
           ),
         const PopoverDivider(),
         row(
@@ -232,54 +234,7 @@ class PlacePicker extends ConsumerWidget {
           onTap: onAgents,
         ),
         const PopoverDivider(),
-        Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: t.sp * 0.75,
-            vertical: t.sp * 0.5,
-          ),
-          child: Row(
-            children: [
-              Flexible(
-                child: Text(
-                  syncLine(
-                    status,
-                    engine.pendingCount,
-                    engine.lastSyncedAt,
-                  ).replaceFirst('Notes synced', 'Synced'),
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.labelSize,
-                    color: t.text3,
-                  ),
-                ),
-              ),
-              Text(
-                ' · ',
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
-                ),
-              ),
-              GestureDetector(
-                key: const Key('place-sync-now'),
-                onTap: () async {
-                  await ref.read(syncEngineProvider).sync();
-                  ref.invalidate(treeProvider);
-                },
-                child: Text(
-                  'Sync now',
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.labelSize,
-                    color: t.text2,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+        const SyncNowLine(),
       ],
     );
   }

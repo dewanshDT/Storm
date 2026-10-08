@@ -4022,6 +4022,30 @@ semantics container. 804 client tests; the back contract and health rows
 mutation-checked; desktop-04 and phone-02 captured. Gap until slice 4:
 cross-vault recents (they lived on the dashboard).
 
+**Slice 4 (Notes; `feat/v2-notes`):** the desktop Notes sidebar is rebuilt on
+`SidebarFrame`: `VaultHeader` (tile, name, sync line) opening
+`VaultSwitcherPopover` (vaults with counts and ✓, "Synced … · Sync now",
+Manage vaults ›; no Server settings), "Search {vault} ⌘K" (Ctrl K off macOS),
+**RECENT** — the four newest cross-vault rows from `recentsProvider`, each with
+a `VaultTag`, which closes the slice 3 gap — then the **FOLDERS** tree
+(`SidebarRow`s, drawn twisties, no counts), and a footer of New note + folder +
+tags (gear and mentions left it). A long-press on a vault in the switcher or
+the place picker opens `AccentPicker` (Q7). The note header is crumb (phone:
+"‹ parent"), the restyled Read | Edit, a soft **Start session** (phone
+"Session") that opens the existing launcher while a host is online and Agents
+otherwise, and the drawer toggle; then the file-name title at `displaySize`
+(omitted when the body opens with its own `# heading`) and `VersionLine`
+(`v51 · Saved`, the id when asked for, a `provenance` slot for slice 8). The
+drawer is open by default with its own ×. The phone vault root is the vault
+name, RECENT ("vault · folder" and an age) and FOLDERS; a folder is "‹ parent"
+over its name; the pill is Directory / Search / ＋ / Tags (a long-press on ＋
+makes a folder) and is absent on the note (Q5); properties keep the sheet
+(Q6). `SectionLabel` is mono, as §7.2 has it. Unseen hooks only: `FolderTree`
+and `VaultSidebar` take `unseen(noteId)`, `EntryTile` an `unseen` flag. 827
+client tests; recents limit, recent selection and the note pill
+mutation-checked; desktop-01..03 and phone-01/03 captured (harness: shots
+reload on a viewport switch, which sometimes stalled Chromium).
+
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
 
