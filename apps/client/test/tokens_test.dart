@@ -218,6 +218,17 @@ void main() {
       expect(big.titleSize, closeTo(t.titleSize * 20 / 16, 1e-9));
       expect(big.uiSize, closeTo(t.uiSize * 20 / 16, 1e-9));
     });
+
+    test('note prose is about 18 with a 22 H2, and follows the text size', () {
+      final t = StormTokens.from(StormPreset.stormDark);
+      expect(t.proseSize, closeTo(18, 0.2));
+      expect(t.proseHeadingSize, closeTo(22, 0.4));
+      expect(t.proseSize, greaterThan(t.bodySize));
+      expect(t.proseHeadingSize, lessThan(t.displaySize));
+      final big = t.copyWith(fs: 20);
+      expect(big.proseSize, closeTo(t.proseSize * 20 / 16, 1e-9));
+      expect(big.proseHeadingSize, closeTo(t.proseHeadingSize * 20 / 16, 1e-9));
+    });
   });
 
   group('the theme is built from the tokens', () {

@@ -58,7 +58,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
-| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **in progress** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · **slice 0 done 2026-10-08** (#95) · **slice 1a** (#96, single-user server, `auth.db` v6) · **slice 1b** (#97, single-user client) · **slice 2** (#98, design-system additions) · **slice 3** (shell + routing) · slice 5 (server agent capabilities) in parallel · next: slice 4, Notes |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **all slices built, awaiting merge** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · slices 0–3 (#95–#98 and the shell) · 4 Notes · 5 server agent capabilities · 6 Agents · 7 Settings · 8 the loop (#104) · **9 regression + acceptance** (`feat/v2-acceptance`): every suite green, handoff §11 43 of 44 ticked (`docs/design/acceptance/storm-v2/CHECKLIST.md`; Android back on a device not run) · stacked on `feat/v2-loop`, nothing merged to `staging` yet |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3908,8 +3908,8 @@ real defects came with it:
 
 **82. Storm v2: the approved design is built as specified, Storm becomes
 single-user, and the knowledge ↔ agent loop gets real backend support.**
-*(2026-10-08; design approved by the operator, slice 0 done, nothing else
-built)*
+*(2026-10-08; design approved by the operator; slices 0–9 built, awaiting
+merge into `staging`)*
 
 **The source of truth** is `design_handoff_storm_v2/` (README, the two
 `.dc.html` prototype files, the screenshots); where its README and the
@@ -4208,6 +4208,53 @@ on Gateway spec) and its scripted agent reads the note with
 `session_context`, edits BOARD and creates a log note through the gateway
 (`agents.py` `run_loop`); desktop-01 is now shot after the BOARD session's
 write, so its provenance link is real.
+
+**Slice 9 (regression + acceptance; `feat/v2-acceptance`):** the polish
+list, then every suite and the acceptance set. **Note prose** is §7.2's
+Newsreader 18 / 1.6 with a 22 / 600 H2, in Read mode and as the editor's base
+style, through two derived steps — `proseSize = fs·√scale` (17.9 at the
+default; the step above `bodySize` that slice 2's `uiSize = fs/√scale` is
+below it, so it follows the text-size setting with no new input) and
+`proseHeadingSize = proseSize·scale` (22.4) — and `StormTokens.proseLeading`
+1.6; the editor's span tree is untouched (a test flattens it). Read-mode
+prose is now `text`, as the v2 prototype draws it (it was the M14
+prototype's `text2`). **Unseen baseline:** a device's first successful
+`agent-writes` load for a vault writes a `"<vault>/"` marker into
+`SeenVersions` and takes the agent versions it found as seen, so a new device
+does not dot every note an agent ever wrote; a failed load baselines nothing,
+and markers are never evicted by the 2000 limit (eviction would re-baseline
+and hide real dots). **phone-08:** a note pushed from a session lays its
+header out as a `Wrap` — "‹ {session}" keeps its whole width and the controls
+drop to a second line when both do not fit (they do not at 360–430 beside ⋯
+and Properties, which the prototype does not draw). **Unseen dot semantics:**
+the dot's label is a plain `Semantics` label after the row's name; Flutter web
+announced the tooltip *before* the name. **Pill:** Lucide folder / search /
+plus / hash, as the prototype draws them. **Phone inset 20** (§2):
+`StormChrome.contentInset` is `sp·2.5`, which also puts the bubbles at 20 / 20;
+the one-left-edge test asserts it and the settings list moved onto it.
+**Properties drawer:** open by default from 1200 px (the design frame), shut
+below it — between 900 and 1200 the prose column is `W − 676` (224 at 900),
+and holding it open until 640 fits (1316 px) would shut it in the 1280
+reference shots; the toggle still sticks between notes. **Accepted, not
+changed:** the tree orders notes by name, the launcher's workspace default is
+the runtime's first, vaults come in the server's order. Tests: 915 client
+(was 900); mutation-checked — the baseline never taken, the baseline taken
+every load, markers evictable, `proseSize = fs`, the editor ignoring
+`proseSize`, the dot's tooltip back in the semantics. **Regression on the
+tip:** `make check` clean (fmt, clippy `-D warnings`, `flutter analyze`);
+Rust 563 server + 112 relay + 54 runtime; client 915; `make test-live` — e2e
+81 (unmodified) · mcp 86 · agent 78 · gateway 87 · auth 72 · client live 20
+(+1 skipped); `make test-migration` 16. **Acceptance:** every v2 shot
+re-shot; the harness gained `--preset` (writes This device's `storm.theme`
+and reloads), `--desktop-width` / `--phone-width` and comma-separated
+`--only`; `presets/storm-light|slowflow-earth/` and `sweeps/d900-p360`,
+`d1100-p390`, `d1600-p430` show no overflow and every colour semantic intact
+— one finding left as is: under SlowFlow earth the low-chroma accent makes a
+running dot close to an ended one. `docs/storm-ui.md` rewritten for v2.
+**Not run here:** Android back on a device (no Android SDK, `adb` or emulator
+on this host; the contract is widget-tested) and the plan's manual Claude
+Code / OpenCode start (installed, but it would run on the operator's
+account). `CHECKLIST.md` reproduces handoff §11 with evidence per item.
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.

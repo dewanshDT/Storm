@@ -129,9 +129,9 @@ V2 = [
     # The agent's two notes are unseen here: BOARD (edited since this device
     # opened it) and the new log note, whose folder is opened to show it.
     dict(name="desktop-loop-a-unseen-dots", viewport="desktop", route=f"/v/{P}/note/{GW}",
-         fresh=True, actions=[("tap", r"(^|\n)log$")], settle=2.5),
+         fresh=True, actions=[("tap", r"^log($|\n)")], settle=2.5),
     dict(name="desktop-loop-b-edited-by-session", viewport="desktop",
-         route=f"/v/{P}/note/{GW}", actions=[("tap", r"(^|\n)BOARD$")], settle=2.5),
+         route=f"/v/{P}/note/{GW}", actions=[("tap", r"^BOARD($|\n)")], settle=2.5),
 ]
 
 DESIGN = [

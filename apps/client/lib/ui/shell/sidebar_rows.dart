@@ -82,15 +82,23 @@ class _TwistyPainter extends CustomPainter {
 class UnseenDot extends StatelessWidget {
   const UnseenDot({super.key});
 
+  static const message = 'Changed by an agent since you last opened it';
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Tooltip(
-      message: 'Changed by an agent since you last opened it',
-      child: Container(
-        width: t.sp * 0.75,
-        height: t.sp * 0.75,
-        decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
+    // A plain label rather than the tooltip's, which screen readers announce
+    // before the row's name.
+    return Semantics(
+      label: message,
+      child: Tooltip(
+        message: message,
+        excludeFromSemantics: true,
+        child: Container(
+          width: t.sp * 0.75,
+          height: t.sp * 0.75,
+          decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
+        ),
       ),
     );
   }

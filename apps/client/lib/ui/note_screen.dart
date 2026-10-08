@@ -287,7 +287,8 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     final keyboard = keyboardIsOpen(context);
     final vaultId = VaultGate.of(context);
     final wide = context.isExpanded;
-    final showProperties = ref.watch(propertiesOpenProvider);
+    final showProperties =
+        ref.watch(propertiesOpenProvider) ?? context.drawerOpensByDefault;
     final accent = Accent.parse(
       fme.findSpan(session.buffer, kColorKey)?.displayValue,
     );
@@ -300,7 +301,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
             ?.name ??
         '';
     void toggleDrawer() =>
-        ref.read(propertiesOpenProvider.notifier).update((open) => !open);
+        ref.read(propertiesOpenProvider.notifier).state = !showProperties;
 
     return Scaffold(
       backgroundColor: tint,
@@ -317,10 +318,12 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                 showToolbar: keyboard,
                 onActions: () => _noteActions(isPinned),
                 onEscape: _leaveNote,
+                leadingWins: widget.fromSession != null,
                 leading: wide
                     ? NoteCrumb(parts: [vaultName, ...folder.split('/')])
                     : Align(
                         alignment: Alignment.centerLeft,
+                        widthFactor: 1,
                         child: widget.fromSession != null
                             ? BackLink(
                                 label: _sessionName(widget.fromSession!),

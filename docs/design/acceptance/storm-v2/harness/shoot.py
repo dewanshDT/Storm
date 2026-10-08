@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Screenshots of the real Storm web client against a real server.
 
-    python3 shoot.py [--only NAME_PREFIX] [--out DIR] [--keep]
+    python3 shoot.py [--only PREFIX[,PREFIX…]] [--out DIR] [--keep]
+                     [--preset storm-light|slowflow-earth]
+                     [--desktop-width N] [--phone-width N]
 
 What it does, every run, from nothing:
 
@@ -295,6 +297,16 @@ class Harness:
         self.settle(2)
         log(f"signed in through the UI; at {self.location()}")
 
+    def use_preset(self, wire):
+        """The theme preset, as This device stores it (`storm.theme`), then a
+        reload so the app reads it as a launch would."""
+        self.page.eval(f"localStorage.setItem('flutter.storm.theme', JSON.stringify({wire!r}))")
+        self.page.call("Page.reload")
+        self.wait_app()
+        wait_for(lambda: self.location() not in ("/starting", "/login"), 30, "the app")
+        self.settle(1.5)
+        log(f"preset {wire}")
+
     # ---- shots --------------------------------------------------------
 
     def shoot(self, shot):
@@ -373,7 +385,15 @@ def main():
     ap.add_argument("--set", default="current", help="shot set in shots.py")
     ap.add_argument("--out", default=os.path.join(HERE, ".."))
     ap.add_argument("--keep", action="store_true", help="keep the temp state dir")
+    ap.add_argument("--preset", default="", help="theme preset wire name, e.g. storm-light")
+    ap.add_argument("--desktop-width", type=int, default=0, help="override 1280")
+    ap.add_argument("--phone-width", type=int, default=0, help="override 390")
     args = ap.parse_args()
+    if args.desktop_width:
+        VIEWPORTS["desktop"]["width"] = args.desktop_width
+    if args.phone_width:
+        VIEWPORTS["phone"]["width"] = args.phone_width
+    only = tuple(args.only.split(","))
 
     h = Harness(os.path.abspath(args.out), args.keep)
     try:
@@ -381,10 +401,12 @@ def main():
         h.claim()
         h.start_browser()
         h.sign_in()
+        if args.preset:
+            h.use_preset(args.preset)
         for shot in shots.SETS[args.set]:
             if "step" in shot:
                 h.step(shot["step"])
-            elif shot["name"].startswith(args.only):
+            elif shot["name"].startswith(only):
                 h.shoot(shot)
     except Exception:
         h.debug_dump()

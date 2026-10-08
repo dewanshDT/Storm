@@ -151,6 +151,16 @@ class StormTokens extends ThemeExtension<StormTokens> {
   /// UI body and rows (Storm v2): about 14.3 at the default.
   double get uiSize => fs / math.sqrt(scale);
 
+  /// Note prose (Storm v2 §7.2): about 18 at the default, the step above
+  /// [bodySize] that [uiSize] is below it, so it follows the text-size setting.
+  double get proseSize => fs * math.sqrt(scale);
+
+  /// A note's second-level heading: about 22 at the default.
+  double get proseHeadingSize => proseSize * scale;
+
+  /// Note prose line height.
+  static const double proseLeading = 1.6;
+
   /// Chrome and display. Bundled, so it is identical on every platform.
   static const String sansFamily = 'IBMPlexSans';
 

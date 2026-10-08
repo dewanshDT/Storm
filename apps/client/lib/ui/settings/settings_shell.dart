@@ -233,7 +233,9 @@ class SettingsListScreen extends StatelessWidget {
     return StormScaffold(
       showNav: false,
       child: ListView(
-        padding: EdgeInsets.symmetric(horizontal: t.cardPad),
+        padding: EdgeInsets.symmetric(
+          horizontal: StormChrome.contentInset(context),
+        ),
         children: [
           Text(
             'Settings',
