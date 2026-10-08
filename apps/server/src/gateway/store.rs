@@ -359,6 +359,16 @@ impl GatewayDb {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn live_connections_not_of(&self, account_id: &str) -> Result<Vec<Connection>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CONNECTION_COLUMNS} FROM connections
+             WHERE owner_user_id != ?1 AND status != 'revoked'
+             ORDER BY created_at, id"
+        ))?;
+        let rows = stmt.query_map(params![account_id], connection_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Writes back the mutable fields. `id`, `owner_user_id`, `slug`, `url`
     /// and `auth_kind` are never rewritten: a credential is presented only to
     /// its own upstream (AM24), so a connection cannot be re-pointed, and the

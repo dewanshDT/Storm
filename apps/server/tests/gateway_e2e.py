@@ -247,7 +247,7 @@ args = ["-i"]
     try:
         owner, device, _ = storm_auth.sign_in(BASE, log_path=SERVER_LOG)
 
-        print("\n=== an integration, the owner's alone ===")
+        print("\n=== an integration, the account's ===")
         status, conn = call("POST", "/v1/integrations/connections", {
             "display_name": "Mock", "url": f"http://127.0.0.1:{UP_PORT}/mcp", "auth_kind": "static",
             "credential": {"value": f"Bearer {CANARY}"}}, auth=owner)
@@ -255,21 +255,13 @@ args = ["-i"]
         cid, slug = conn["id"], conn["slug"]
         status, test = call("POST", f"/v1/integrations/connections/{cid}/test", {}, auth=owner)
         check("its test lists the upstream's tools", status == 200 and test["tool_count"] == 5, test)
-        subprocess.run([SERVER_BIN, "user", "add", "member", "--role", "member", "--state", STATE,
-                        "--password-stdin"], input=storm_auth.PASSWORD.encode(), check=True,
-                       capture_output=True)
-        _, login = call("POST", "/v1/auth/login", {"username": "member", "password": storm_auth.PASSWORD},
-                        auth=device)
-        member = f"Bearer {login['access_token']}"
+        key = storm_auth.mint_mcp_key(BASE, owner)
         for method, path in [("GET", "/v1/integrations/connections"),
                              ("GET", f"/v1/integrations/connections/{cid}"),
                              ("POST", f"/v1/integrations/connections/{cid}/test"),
                              ("DELETE", f"/v1/integrations/connections/{cid}")]:
-            status, _ = call(method, path, {} if method == "POST" else None, auth=member)
-            check(f"a member gets 403 on {method} {path.replace(cid, '{id}')}", status == 403, status)
-        key = storm_auth.mint_mcp_key(BASE, owner)
-        status, _ = call("GET", "/v1/integrations/connections", auth=f"Bearer {key}")
-        check("an stk_ key is refused on the integration routes", status == 401, status)
+            status, _ = call(method, path, {} if method == "POST" else None, auth=f"Bearer {key}")
+            check(f"an stk_ key gets 401 on {method} {path.replace(cid, '{id}')}", status == 401, status)
 
         print("\n=== a host that can bridge ===")
         _, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)

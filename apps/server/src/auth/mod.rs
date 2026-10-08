@@ -5,9 +5,10 @@
 //!
 //! 1. **Server identity** — the database and the keypair, plus the two
 //!    unauthenticated endpoints a client needs to pin a server ([`identity`]).
-//! 2. **Users** — accounts, roles and Argon2id passwords ([`users`],
-//!    [`password`]), reachable only from the operator CLI.
-//! 3. **Sessions** — `(user, device)`, opaque tokens, login, refresh and
+//! 2. **The account** — the one person this Storm belongs to, and an
+//!    Argon2id password ([`account`], [`password`]). Single-user since
+//!    decision 82; [`single_user`] is the migration that made it so.
+//! 3. **Sessions** — `(account, device)`, opaque tokens, login, refresh and
 //!    revocation ([`sessions`], [`token`], [`devices`]).
 //! 4. **Three-tier middleware** — `api.rs` checks credentials on every
 //!    handler; device tier for unauthenticated flows, session tier for
@@ -23,6 +24,7 @@
 //! - **`auth.db` is not derived.** Everything else in `state/` can be rebuilt
 //!   from the markdown; this cannot. See [`db`].
 
+pub mod account;
 pub mod authz;
 pub mod db;
 pub mod devices;
@@ -33,8 +35,8 @@ pub mod pairing;
 pub mod password;
 pub mod ratelimit;
 pub mod sessions;
+pub mod single_user;
 pub mod token;
-pub mod users;
 
 /// The shared SRP v1 test vectors, checked against [`identity`]'s signed bytes.
 ///

@@ -74,8 +74,10 @@ def inherited():
     return (session, device) if session else (None, None)
 
 
-def sign_in(base, username="e2e", log_path=None):
-    """Pairs a device, creates the first account if needed, and logs in.
+def sign_in(base, log_path=None):
+    """Pairs a device, sets up the account if needed, and logs in.
+
+    Single-user Storm (decision 82): no username anywhere, only the password.
 
     Returns `(session_bearer, device_header, user_id)`. Raises with a message
     that says which step failed — a suite that cannot authenticate has nothing
@@ -100,17 +102,17 @@ def sign_in(base, username="e2e", log_path=None):
         raise RuntimeError(f"pairing failed: {status} {paired}")
     device = f"StormDevice {paired['device_id']}:{paired['device_secret']}"
 
-    # The first account, if this server has none. A second run against the same
-    # server answers 409, which is correct and not a failure here.
+    # Setup, if this server has none. A second run against the same server
+    # answers 409, which is correct and not a failure here.
     status, _ = _call(
         base,
         "POST",
         "/v1/users/first",
-        {"username": username, "password": PASSWORD},
+        {"password": PASSWORD},
         auth=device,
     )
-    # 201 on success, 409 once the server has an owner. Both are fine — this
-    # helper only needs *an* account to log into, not to have made it.
+    # 201 on success, 409 once the server is set up. Both are fine — this
+    # helper only needs the account to log into, not to have made it.
     if status not in (200, 201, 409):
         raise RuntimeError(f"creating the first user failed: {status}")
 
@@ -118,7 +120,7 @@ def sign_in(base, username="e2e", log_path=None):
         base,
         "POST",
         "/v1/auth/login",
-        {"username": username, "password": PASSWORD},
+        {"password": PASSWORD},
         auth=device,
     )
     if status != 200:

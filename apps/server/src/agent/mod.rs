@@ -827,6 +827,30 @@ impl AgentManager {
         Ok(())
     }
 
+    /// Fails live and dismisses ended sessions not owned by `account_id`.
+    pub fn retire_sessions_not_of(&self, account_id: &str) -> Result<(usize, usize)> {
+        let records = self.store.lock().unwrap().list()?;
+        let (mut failed, mut dismissed) = (0, 0);
+        for mut r in records
+            .into_iter()
+            .filter(|r| r.owner_user_id != account_id)
+        {
+            if r.is_ended() {
+                self.store.lock().unwrap().delete(&r.id)?;
+                self.live.lock().unwrap().sessions.remove(&r.id);
+                dismissed += 1;
+            } else {
+                r.status = "failed".into();
+                r.end_reason = Some("owner_removed".into());
+                r.ended_at.get_or_insert_with(now);
+                self.store.lock().unwrap().update(&r)?;
+                self.bump(&r.id);
+                failed += 1;
+            }
+        }
+        Ok((failed, dismissed))
+    }
+
     /// A revoked host: its link is closed and its sessions are failed
     /// (freeze §5.6). The host ends them itself when next refused.
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {

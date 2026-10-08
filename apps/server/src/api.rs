@@ -76,13 +76,6 @@ pub struct AppState {
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
-    ///
-    /// Whether registration is open (A13), mirrored out of the registry.
-    ///
-    /// Atomic and read per request for the same reason as the switch above: an
-    /// operator who turns registration off and is still handing out accounts
-    /// until they restart has not turned it off.
-    pub allow_registration: std::sync::atomic::AtomicBool,
     /// Bootstrap pairing nonce (plaintext), if one was created at boot when
     /// the user table was empty. Needed to reconstruct the QR payload for
     /// the console log. Not read after boot — the field exists so a future
@@ -356,9 +349,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
 
     // ---- device tier: `StormDevice <id>:<secret>` -------------------------
     let device_router = Router::new()
-        .route("/v1/users", get(list_users))
-        .route("/v1/users", post(register_user))
-        .route("/v1/auth/registration", get(registration_state))
+        .route("/v1/account", get(account_state))
         .route("/v1/users/first", post(create_first_user))
         .route("/v1/auth/login", post(login_handler))
         .route("/v1/auth/refresh", post(refresh_handler))
@@ -375,7 +366,6 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/vaults/{vault}", delete(remove_vault))
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
-        .route("/v1/config/registration", put(put_registration))
         .route("/v1/config/relays", put(put_relays))
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
@@ -538,171 +528,6 @@ async fn server_challenge(
 
 // ---- device-tier endpoints ------------------------------------------------
 
-/// GET /v1/users — list all users (device tier).
-async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::auth::users::User>>> {
-    let auth_db = state.auth_db.lock().await;
-    let users = auth_db
-        .list_users()
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(users))
-}
-
-/// GET /v1/auth/registration — is registration open?
-///
-/// Device tier, because the login screen already holds a device credential by
-/// the time it needs to ask, and whether accounts can be created is policy
-/// rather than identity — which is why it is not a field on `GET /v1/server`,
-/// whose field set is asserted exactly and whose job is the identity
-/// handshake.
-///
-/// **This is UX, not a gate.** `POST /v1/users` enforces the switch itself; a
-/// client that lies to itself about this learns the truth at `403`.
-async fn registration_state(State(state): State<Shared>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": state
-            .allow_registration
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }))
-}
-
-/// POST /v1/users — create an ordinary account, when registration is open.
-///
-/// Device tier: the caller has a paired device, which after web bootstrap
-/// means anyone who can reach the web app. That is the deliberate meaning of
-/// the switch (A13), and the reason it is off until someone turns it on.
-///
-/// **Always a member.** Owner belongs to the bootstrap account; registration
-/// must not be able to mint one, or an open server would hand out the role
-/// that can disable every other account.
-async fn register_user(
-    State(state): State<Shared>,
-    Json(body): Json<FirstUserRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if !state
-        .allow_registration
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        // Explicit rather than a bare 404: a client that raced the setting —
-        // drew the button, then submitted after it was turned off — can say
-        // what happened instead of guessing.
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "registration_disabled".into(),
-        ));
-    }
-
-    if let Err(msg) = crate::auth::password::validate_password(&body.password) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
-    }
-    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
-    }
-
-    let now = crate::index::now_rfc3339();
-    let mut auth_db = state.auth_db.lock().await;
-
-    // Registration cannot be the first account. The bootstrap window is
-    // `/v1/users/first`'s alone, and `create_user` would otherwise force this
-    // one to be an owner — exactly the thing this endpoint must never mint.
-    if auth_db
-        .count_users()
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        == 0
-    {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this server has no owner yet; create the first account instead".into(),
-        ));
-    }
-
-    let hasher = &state.hasher;
-    let hash = hasher
-        .hash(body.password.clone())
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    match crate::auth::users::create_user(
-        &mut auth_db,
-        crate::auth::users::NewUser {
-            username: &body.username,
-            display_name: None,
-            password_hash: &hash,
-            role: crate::auth::users::Role::Member,
-        },
-        &now,
-    ) {
-        Ok(user) => Ok(Json(serde_json::json!({
-            "user_id": user.id,
-            "role": user.role.as_str(),
-        }))),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("UNIQUE") || msg.contains("already") {
-                Err(ApiError(StatusCode::CONFLICT, "username_taken".into()))
-            } else {
-                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
-            }
-        }
-    }
-}
-
-/// Refuses a server-wide setting to anyone but an owner (decision 80).
-///
-/// Roles are enforced against each other elsewhere but consulted for access
-/// nowhere yet, so this is one explicit check per server-wide switch rather
-/// than the start of a policy system — that is the authorization release
-/// (A9). Every `PUT /v1/config*` route calls it: registration did from the
-/// start, and the storage root, the MCP switches and the relay list were open
-/// to any member until decision 80, which is the gap this exists to close.
-fn require_owner_session(auth: &SessionAuth, what: &str) -> ApiResult<()> {
-    if auth.authenticated.user.role == crate::auth::users::Role::Owner {
-        Ok(())
-    } else {
-        Err(ApiError(
-            StatusCode::FORBIDDEN,
-            format!("only an owner can change {what}"),
-        ))
-    }
-}
-
-/// PUT /v1/config/registration — open or close registration (A13).
-///
-/// Owner only: opening a server to the world is not a thing a member should be
-/// able to do to an owner.
-async fn put_registration(
-    State(state): State<Shared>,
-    Extension(auth): Extension<SessionAuth>,
-    Json(body): Json<RegistrationBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_owner_session(&auth, "registration")?;
-
-    {
-        let mut vaults = state.vaults.write().await;
-        vaults.registry.allow_registration = body.enabled;
-        vaults.registry.save(&state.state_dir)?;
-    }
-    // Atomic, so it applies to the next request rather than the next restart.
-    state
-        .allow_registration
-        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
-
-    let auth_db = state.auth_db.lock().await;
-    let _ = auth_db.record_event(
-        "registration_changed",
-        Some(&auth.authenticated.user.id),
-        None,
-        &crate::index::now_rfc3339(),
-        &format!(r#"{{"enabled":{}}}"#, body.enabled),
-    );
-
-    Ok(Json(serde_json::json!({ "enabled": body.enabled })))
-}
-
-#[derive(Deserialize)]
-struct RegistrationBody {
-    enabled: bool,
-}
-
 /// POST /v1/keys — mint an MCP key (A14).
 ///
 /// **The response carries the plaintext, and this is the only time it exists.**
@@ -742,21 +567,12 @@ struct CreateKeyRequest {
     expires: Option<String>,
 }
 
-/// GET /v1/keys — the caller's keys, or another user's if the caller is an owner.
+/// GET /v1/keys — the account's access keys.
 async fn list_keys(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
-    Query(q): Query<ListKeysQuery>,
 ) -> ApiResult<Json<Vec<crate::auth::keys::ApiKey>>> {
-    Ok(Json(
-        crate::ops::list_api_keys(&state, &actor, q.user.as_deref()).await?,
-    ))
-}
-
-#[derive(Deserialize)]
-struct ListKeysQuery {
-    #[serde(default)]
-    user: Option<String>,
+    Ok(Json(crate::ops::list_api_keys(&state, &actor).await?))
 }
 
 /// DELETE /v1/keys/{id} — revoke a key, effective on the next request.
@@ -769,44 +585,34 @@ async fn revoke_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /v1/users/first — create the owner account, once.
-///
-/// **Registered in the *device* tier, not the `none` tier** (A8): creating a
-/// user over the network costs a paired device. The doc comment here used to
-/// say "genuinely unauthenticated", which described neither the routing nor
-/// the intent.
-///
-/// The password is hashed here and stored immediately. The caller must supply a
-/// valid password that passes `validate_password`. The operator `user add` CLI
-/// is the other path and is more ergonomic for interactive use.
+/// GET /v1/account — whether this Storm is set up. Device tier: pairing asks
+/// it to choose between setup and sign-in.
+async fn account_state(State(state): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
+    let exists = state
+        .auth_db
+        .lock()
+        .await
+        .has_account()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
+/// POST /v1/users/first — set up the account, once. Device tier (A8).
 async fn create_first_user(
     State(state): State<Shared>,
-    Json(body): Json<FirstUserRequest>,
+    Json(body): Json<SetupRequest>,
 ) -> ApiResult<StatusCode> {
     if let Err(msg) = crate::auth::password::validate_password(&body.password) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
-    }
-    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
         return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
 
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
 
-    // **The bootstrap window closes after the first account, and stays closed.**
-    // Without this, the only refusal was `create_user`'s duplicate-username
-    // check, so any paired device could pick an unused name and get another
-    // account — and this handler hardcodes `Role::Owner`, so every one of them
-    // would be an owner. That is privilege escalation the moment a server has a
-    // second user: a member's device mints an owner and logs into it.
-    //
-    // Checked before the hash on purpose. A refusal must not consume one of the
-    // two `Hasher` permits, or an attacker can hold the login path down by
-    // POSTing here.
+    // Before the hash, so a refusal never takes a `Hasher` permit.
     if auth_db
-        .count_users()
+        .has_account()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        > 0
     {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -814,37 +620,22 @@ async fn create_first_user(
         ));
     }
 
-    let hasher = &state.hasher;
-    let hash = hasher
+    let hash = state
+        .hasher
         .hash(body.password.clone())
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    match crate::auth::users::create_user(
-        &mut auth_db,
-        crate::auth::users::NewUser {
-            username: &body.username,
-            display_name: None,
-            password_hash: &hash,
-            role: crate::auth::users::Role::Owner,
-        },
-        &now,
-    ) {
-        Ok(_) => Ok(StatusCode::CREATED),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("UNIQUE") || msg.contains("already") {
-                Err(ApiError(StatusCode::CONFLICT, "username taken".into()))
-            } else {
-                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
-            }
-        }
-    }
+    crate::auth::account::create_account(&mut auth_db, &hash, &now)
+        .map(|_| StatusCode::CREATED)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))
 }
 
+/// v0.3.x clients still send a username; it is ignored.
 #[derive(Deserialize)]
-pub struct FirstUserRequest {
-    username: String,
+pub struct SetupRequest {
+    #[serde(default, rename = "username")]
+    _username: Option<String>,
     password: String,
 }
 
@@ -884,7 +675,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
     }
 }
 
-/// POST /v1/auth/login — exchange username/password for a token pair.
+/// POST /v1/auth/login — exchange the password for a token pair.
 ///
 /// The caller must present a `StormDevice` header (device tier). The device
 /// must be paired; if not the login fails with 401. After authentication the
@@ -918,18 +709,13 @@ async fn login_handler(
             CallerKey::Unattributed => None,
         };
         let auth_db = state.auth_db.lock().await;
-        // Never a secret: the submitted username is quoted verbatim because a
-        // flood of junk names is exactly what the operator needs to see.
         if let Err(e) = auth_db.record_event_from(
             crate::auth::sessions::EVENT_LOGIN_THROTTLED,
             None,
             Some(&device_id),
             remote.as_deref(),
             &now,
-            &format!(
-                r#"{{"username":{:?},"retry_after_secs":{}}}"#,
-                body.username, retry_after_secs
-            ),
+            &format!(r#"{{"retry_after_secs":{retry_after_secs}}}"#),
         ) {
             tracing::warn!(error = %e, "could not record login_throttled event");
         }
@@ -942,7 +728,6 @@ async fn login_handler(
     match crate::auth::sessions::login(
         &mut auth_db,
         hasher,
-        &body.username,
         body.password.clone(),
         &device_id,
         &now,
@@ -999,9 +784,11 @@ fn extract_device_id(headers: &HeaderMap) -> Option<String> {
     Some(id.to_string())
 }
 
+/// v0.3.x clients still send a username; it is ignored.
 #[derive(Deserialize)]
 pub struct LoginRequest {
-    username: String,
+    #[serde(default, rename = "username")]
+    _username: Option<String>,
     password: String,
 }
 
@@ -1064,7 +851,7 @@ async fn list_sessions_handler(
 ) -> ApiResult<Json<Vec<crate::auth::sessions::Session>>> {
     let auth_db = state.auth_db.lock().await;
     let sessions = auth_db
-        .list_sessions(Some(&auth.authenticated.user.id))
+        .list_sessions(Some(&auth.authenticated.account.id))
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(sessions))
@@ -1085,7 +872,7 @@ async fn revoke_session_handler(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "session not found".into()))?;
 
-    if session.user_id != auth.authenticated.user.id {
+    if session.user_id != auth.authenticated.account.id {
         return Err(ApiError(StatusCode::FORBIDDEN, "not your session".into()));
     }
 
@@ -1136,7 +923,7 @@ async fn change_password_handler(
 
     // Verify the current password before allowing the change.
     let stored_hash = auth_db
-        .password_hash_of(&auth.authenticated.user.id)
+        .password_hash_of(&auth.authenticated.account.id)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| {
             ApiError(
@@ -1159,13 +946,8 @@ async fn change_password_handler(
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    crate::auth::users::set_password(
-        &mut auth_db,
-        &auth.authenticated.user.username,
-        &new_hash,
-        &now,
-    )
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::auth::account::set_password(&mut auth_db, &new_hash, &now)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1464,7 +1246,7 @@ async fn issue_pairing_handler(
 ) -> ApiResult<Json<crate::ops::PairingQrPayload>> {
     let purpose = body.purpose.as_deref().unwrap_or("add_device");
     Ok(Json(
-        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id), None)
+        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.account.id), None)
             .await?,
     ))
 }
@@ -1591,9 +1373,8 @@ async fn runtime_whoami(Extension(auth): Extension<HostAuth>) -> Json<serde_json
 
 async fn agent_list_hosts(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
 ) -> ApiResult<Json<Vec<crate::ops::HostView>>> {
-    Ok(Json(crate::ops::list_hosts(&state, &actor).await?))
+    Ok(Json(crate::ops::list_hosts(&state).await?))
 }
 
 #[derive(Deserialize)]
@@ -1839,12 +1620,9 @@ async fn runtime_mcp(
 
 async fn agent_host_workspaces(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<crate::ops::WorkspaceView>>> {
-    Ok(Json(
-        crate::ops::host_workspaces(&state, &actor, &id).await?,
-    ))
+    Ok(Json(crate::ops::host_workspaces(&state, &id).await?))
 }
 
 async fn agent_launch(
@@ -1857,45 +1635,40 @@ async fn agent_launch(
 
 async fn agent_list_sessions(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
 ) -> ApiResult<Json<Vec<crate::agent::store::SessionRecord>>> {
-    Ok(Json(crate::ops::list_sessions(&state, &actor).await?))
+    Ok(Json(crate::ops::list_sessions(&state).await?))
 }
 
 async fn agent_get_session(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
-    Ok(Json(crate::ops::get_session(&state, &actor, &id).await?))
+    Ok(Json(crate::ops::get_session(&state, &id).await?))
 }
 
 async fn agent_end_session(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    crate::ops::end_session(&state, &actor, &id).await?;
+    crate::ops::end_session(&state, &id).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn agent_dismiss_session(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    crate::ops::dismiss_session(&state, &actor, &id).await?;
+    crate::ops::dismiss_session(&state, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST …/terminal/input — raw bytes, at most 64 KiB, at most once.
 async fn agent_input(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<StatusCode> {
-    crate::ops::session_input(&state, &actor, &id, &body).await?;
+    crate::ops::session_input(&state, &id, &body).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1913,13 +1686,11 @@ struct ResizeRequest {
 
 async fn agent_resize(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
     Json(req): Json<ResizeRequest>,
 ) -> ApiResult<StatusCode> {
     crate::ops::session_resize(
         &state,
-        &actor,
         &id,
         crate::agent::TerminalSize {
             cols: req.cols,
@@ -1954,7 +1725,6 @@ struct TerminalStream {
 /// has ended and everything retained has been sent.
 async fn agent_terminal_stream(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
     Query(q): Query<StreamQuery>,
 ) -> ApiResult<
@@ -1963,7 +1733,7 @@ async fn agent_terminal_stream(
     >,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    crate::ops::get_session(&state, &actor, &id).await?;
+    crate::ops::get_session(&state, &id).await?;
     let start = TerminalStream {
         agent: state.agent.clone(),
         rx: state.agent.watch(&id),
@@ -2025,9 +1795,8 @@ async fn agent_terminal_stream(
 
 async fn agent_get_config(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
 ) -> ApiResult<Json<crate::ops::AgentConfigView>> {
-    Ok(Json(crate::ops::agent_config(&state, &actor).await?))
+    Ok(Json(crate::ops::agent_config(&state).await?))
 }
 
 #[derive(Deserialize)]
@@ -2183,8 +1952,7 @@ async fn require_auth(
                     return tier_error("ticket_not_accepted_here", StatusCode::UNAUTHORIZED);
                 }
                 request.extensions_mut().insert(Actor::Session {
-                    user_id: authenticated.user.id.clone(),
-                    role: authenticated.user.role,
+                    user_id: authenticated.account.id.clone(),
                 });
                 request
                     .extensions_mut()
@@ -2361,8 +2129,7 @@ async fn require_auth(
 
             request.extensions_mut().insert(Actor::Key {
                 key_id: authed.key.id.clone(),
-                user_id: authed.user.id.clone(),
-                role: authed.user.role,
+                user_id: authed.account.id.clone(),
             });
             request.extensions_mut().insert(KeyAuth { authed });
             return next.run(request).await;
@@ -2375,8 +2142,7 @@ async fn require_auth(
             Ok(authenticated) => {
                 drop(auth_db);
                 request.extensions_mut().insert(Actor::Session {
-                    user_id: authenticated.user.id.clone(),
-                    role: authenticated.user.role,
+                    user_id: authenticated.account.id.clone(),
                 });
                 request
                     .extensions_mut()
@@ -2592,8 +2358,6 @@ struct ConfigResponse {
     mcp_enabled: bool,
     /// Whether MCP may create, edit and delete notes.
     mcp_writable: bool,
-    /// Whether anyone with a device credential may create an account (A13).
-    allow_registration: bool,
     /// The **configured** relay URLs (SRP v1 §4.4) — not the registered set.
     /// `GET /v1/server` reports what is actually live; this is what an
     /// operator or the app set and expects to survive a restart.
@@ -2608,7 +2372,6 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         vault_count: vaults.registry.vaults.len(),
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
-        allow_registration: vaults.registry.allow_registration,
         relays: vaults.registry.relays.clone(),
     }))
 }
@@ -2632,15 +2395,10 @@ struct McpBody {
 /// The atomic is set *after* the registry is saved: if the write fails the
 /// endpoint keeps its old state, which is the honest outcome. The other order
 /// would report success while the setting silently reverted on next boot.
-///
-/// Owner only (decision 80): a member must not be able to arm agent writes on
-/// every vault.
 async fn put_mcp(
     State(state): State<Shared>,
-    Extension(auth): Extension<SessionAuth>,
     Json(body): Json<McpBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_owner_session(&auth, "AI access")?;
     {
         let mut vaults = state.vaults.write().await;
         vaults.registry.mcp_enabled = body.enabled;
@@ -2690,15 +2448,10 @@ struct RelaysBody {
 /// caller's mistake. The whole point of rejecting the entire list on one bad
 /// URL is that the operator finds out, with a message that says which URL and
 /// why, rather than losing a relay silently.
-///
-/// Owner only (decision 80): the relay list decides where this server can be
-/// reached from.
 async fn put_relays(
     State(state): State<Shared>,
-    Extension(auth): Extension<SessionAuth>,
     Json(body): Json<RelaysBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_owner_session(&auth, "the relay list")?;
     let mut vaults = state.vaults.write().await;
     vaults
         .registry
@@ -2731,15 +2484,10 @@ struct ConfigBody {
 /// quiet: point the root at an empty directory and the server boots perfectly
 /// healthy with zero vaults, files safe on disk and invisible to every client —
 /// which reads as "my notes are gone".
-///
-/// Owner only (decision 80): re-pointing the storage root is the most
-/// disruptive setting the server has.
 async fn put_config(
     State(state): State<Shared>,
-    Extension(auth): Extension<SessionAuth>,
     Json(body): Json<ConfigBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_owner_session(&auth, "the storage root")?;
     let candidate = PathBuf::from(&body.vault_root);
     validate_root(&candidate, &state.state_dir).map_err(|e| bad_request(e.to_string()))?;
     let candidate = candidate
@@ -3544,7 +3292,6 @@ pub(crate) mod tests {
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            allow_registration: std::sync::atomic::AtomicBool::new(false),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
@@ -3670,8 +3417,7 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    /// Gives the server one active owner, so the "nobody could administer this"
-    /// guard is satisfied and the *other* guard is what a test is measuring.
+    /// Sets up the account.
     ///
     /// The stored hash is a fixed PHC string and is never verified: these tests
     /// are about the switch, not about login, and a real Argon2id hash at the
@@ -3679,14 +3425,9 @@ pub(crate) mod tests {
     /// nothing they assert.
     pub(crate) async fn seed_owner(state: &Shared) -> String {
         let mut auth_db = state.auth_db.lock().await;
-        crate::auth::users::create_user(
+        crate::auth::account::create_account(
             &mut auth_db,
-            crate::auth::users::NewUser {
-                username: "dewansh",
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                role: crate::auth::users::Role::Owner,
-            },
+            "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
             "2026-08-17T00:00:00Z",
         )
         .unwrap()
@@ -3773,23 +3514,6 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    /// A second account, so two MCP requests can carry different identities.
-    pub(crate) async fn seed_member(state: &Shared, username: &str) -> String {
-        let mut auth_db = state.auth_db.lock().await;
-        crate::auth::users::create_user(
-            &mut auth_db,
-            crate::auth::users::NewUser {
-                username,
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                role: crate::auth::users::Role::Member,
-            },
-            "2026-08-17T00:00:00Z",
-        )
-        .unwrap()
-        .id
-    }
-
     #[tokio::test]
     async fn an_mcp_call_carries_the_authenticated_user() {
         // The gap this slice closes. An MCP tool used to resolve as a generic
@@ -3836,15 +3560,6 @@ pub(crate) mod tests {
     // makes the leak observable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_mcp_calls_do_not_share_an_identity() {
-        // The property the whole mechanism rests on. rmcp builds the handler on
-        // the request task and then runs it inside a `tokio::spawn`, so the
-        // identity crosses that boundary by **ownership** — captured into the
-        // handler by the factory — rather than as ambient state a second
-        // request could overwrite.
-        //
-        // Two users, two vaults, many interleaved requests. If the identity
-        // were shared, some request would be recorded against the other user's
-        // vault.
         let dir = tempdir::TempDir::new("storm-mcp-concurrent").unwrap();
         let policy = Arc::new(RecordingPolicy::default());
         let (app, _, state) = test_router_with_policy(dir.path(), policy.clone());
@@ -3852,14 +3567,20 @@ pub(crate) mod tests {
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        let alice = seed_owner(&state).await;
-        let bob = seed_member(&state, "bob").await;
-        let alice_token = session_token(&state, &alice).await;
-        let bob_token = session_token(&state, &bob).await;
+        let owner = seed_owner(&state).await;
+        let session = format!("Bearer {}", session_token(&state, &owner).await);
+        let key = {
+            let now = crate::index::now_rfc3339();
+            let mut auth_db = state.auth_db.lock().await;
+            let (_, secret) =
+                crate::auth::keys::create(&mut auth_db, &owner, "laptop", None, None, &now)
+                    .unwrap();
+            format!("Bearer {secret}")
+        };
 
-        register_vault(&state, "Alice").await;
-        register_vault(&state, "Bob").await;
-        let (alice_vault, bob_vault) = {
+        register_vault(&state, "Session").await;
+        register_vault(&state, "Key").await;
+        let (session_vault, key_vault) = {
             let vaults = state.vaults.read().await;
             (
                 vaults.registry.vaults[0].id.clone(),
@@ -3867,29 +3588,18 @@ pub(crate) mod tests {
             )
         };
 
-        // Interleaved on purpose: alternating users maximises the chance that
-        // one request's scope is live while another's factory runs.
         let mut tasks = Vec::new();
         for i in 0..64 {
-            let (user_vault, auth) = if i % 2 == 0 {
-                (alice_vault.clone(), format!("Bearer {alice_token}"))
+            let (vault, auth) = if i % 2 == 0 {
+                (session_vault.clone(), session.clone())
             } else {
-                (bob_vault.clone(), format!("Bearer {bob_token}"))
+                (key_vault.clone(), key.clone())
             };
             let app = app.clone();
             tasks.push(tokio::spawn(async move {
-                // `list_tags`, because it makes **exactly one** authorization
-                // decision. `get_vault` also enumerates vaults to build its
-                // listing, and those filter checks legitimately ask about other
-                // users' vaults — which would make a crossed pair ambiguous
-                // rather than proof of a leak.
                 let (status, _) = send(
                     &app,
-                    mcp_call(
-                        "list_tags",
-                        serde_json::json!({ "vault": user_vault }),
-                        &auth,
-                    ),
+                    mcp_call("list_tags", serde_json::json!({ "vault": vault }), &auth),
                 )
                 .await;
                 status
@@ -3899,18 +3609,20 @@ pub(crate) mod tests {
             assert_eq!(task.await.unwrap(), StatusCode::OK);
         }
 
+        let actors = policy.actors();
         let pairs = policy.pairs();
         assert_eq!(pairs.len(), 64, "every call must have reached the policy");
-        for (who, vault) in pairs {
-            let expected = if who == alice {
-                &alice_vault
-            } else {
-                &bob_vault
+        for (actor, (_, vault)) in actors.iter().zip(pairs) {
+            let expected = match actor {
+                Actor::Key { .. } => &key_vault,
+                _ => &session_vault,
             };
             assert_eq!(
-                &vault, expected,
-                "{who} was recorded against another user's vault — identity leaked \
-                 between concurrent MCP requests"
+                &vault,
+                expected,
+                "a {} call was recorded against the other credential's vault — \
+                 identity leaked between concurrent MCP requests",
+                actor.describe()
             );
         }
     }
@@ -4310,289 +4022,124 @@ pub(crate) mod tests {
             );
         }
 
-        // And the device tier still accepts it, which is the half that matters.
-        let (status, _) = send(&app, get_with_auth("/v1/users", &device)).await;
-        assert_eq!(status, StatusCode::OK);
+        // Device tier accepts it: login is refused on the credential, not the tier.
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    // ---- registration (slice 16, A13) ------------------------------------
+    // ---- single user (decision 82) ---------------------------------------
 
-    /// A paired device plus an owner, which is what registration needs around
-    /// it: it is device tier, and it refuses to be the first account.
     async fn device_and_owner(state: &Shared) -> (String, String) {
         let device = pair_a_device(state).await;
         let owner = seed_owner(state).await;
         (device, owner)
     }
 
-    fn register(auth: &str, username: &str) -> axum::http::Request<axum::body::Body> {
-        post_json_with_auth(
-            "/v1/users",
-            serde_json::json!({"username": username, "password": "a-long-enough-password"}),
-            auth,
-        )
-    }
-
     #[tokio::test]
-    async fn registration_is_off_until_someone_turns_it_on() {
-        // The default is the decision. Turning it on composes with web
-        // bootstrap into "anyone who can reach this server can make an
-        // account", so it is never the shipped state.
-        let dir = tempdir::TempDir::new("storm-reg-default").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (device, _) = device_and_owner(&state).await;
-
-        let (status, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["enabled"], false, "registration must ship closed");
-
-        let (status, body) = send(&app, register(&device, "stranger")).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(
-            body["error"], "registration_disabled",
-            "an explicit code, so a client that raced the switch can say so"
-        );
-
-        let auth_db = state.auth_db.lock().await;
-        assert_eq!(auth_db.count_users().unwrap(), 1, "no account was created");
-    }
-
-    #[tokio::test]
-    async fn an_owner_opens_registration_and_it_applies_at_once() {
-        // No restart. A switch you cannot verify by flipping it is not a
-        // switch — the same property the legacy-token switch has.
-        let dir = tempdir::TempDir::new("storm-reg-on").unwrap();
+    async fn the_multi_user_routes_are_gone() {
+        let dir = tempdir::TempDir::new("storm-single-user-routes").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let (device, owner) = device_and_owner(&state).await;
-        let token = session_token(&state, &owner).await;
+        let token = format!("Bearer {}", session_token(&state, &owner).await);
 
-        let (status, body) = send(
+        for auth in [&device, &token] {
+            let (status, _) = send(&app, get_with_auth("/v1/users", auth)).await;
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED,
+                "GET /v1/users answered {status}"
+            );
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users",
+                serde_json::json!({"username": "newcomer", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert!(!status.is_success(), "POST /v1/users answered {status}");
+        let (status, _) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
+        assert!(
+            !status.is_success(),
+            "GET /v1/auth/registration answered {status}"
+        );
+        let (status, _) = send(
             &app,
             put_json(
                 "/v1/config/registration",
                 serde_json::json!({"enabled": true}),
-                Some(&format!("Bearer {token}")),
+                Some(&token),
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{body:?}");
-
-        // Visible immediately, on this same running server.
-        let (_, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
-        assert_eq!(body["enabled"], true);
-
-        let (status, body) = send(&app, register(&device, "newcomer")).await;
-        assert_eq!(status, StatusCode::CREATED.min(StatusCode::OK), "{body:?}");
-        assert_eq!(
-            body["role"], "member",
-            "registration mints members and nothing else"
-        );
-
-        // And it survives a reload of the registry, because it is persisted.
-        let vaults = state.vaults.read().await;
-        assert!(vaults.registry.allow_registration);
-    }
-
-    #[tokio::test]
-    async fn registration_can_never_mint_an_owner() {
-        // The guarantee that makes an open switch survivable: owner is the
-        // bootstrap account, and an open endpoint must not reach the role that
-        // can disable every other account.
-        let dir = tempdir::TempDir::new("storm-reg-role").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (device, _) = device_and_owner(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        send(&app, register(&device, "newcomer")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "PUT /v1/config/registration");
 
         let auth_db = state.auth_db.lock().await;
-        let users = auth_db.list_users().unwrap();
-        let owners: Vec<_> = users
-            .iter()
-            .filter(|u| u.role == crate::auth::users::Role::Owner)
-            .collect();
-        assert_eq!(owners.len(), 1, "still exactly one owner");
-        assert_eq!(owners[0].username, "dewansh", "and it is the bootstrap one");
-    }
-
-    #[tokio::test]
-    async fn registration_still_needs_a_device_credential() {
-        // Open does not mean unauthenticated. The device tier is what the
-        // whole design rests on, and this endpoint sits behind it like the
-        // rest.
-        let dir = tempdir::TempDir::new("storm-reg-tier").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        device_and_owner(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        let (status, _) = send(
-            &app,
-            post_json(
-                "/v1/users",
-                serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        let (status, _) = send(&app, get("/v1/auth/registration")).await;
         assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "even the question is device tier"
+            auth_db.account().unwrap().unwrap().id,
+            owner,
+            "nothing created a second person"
         );
     }
 
     #[tokio::test]
-    async fn only_an_owner_may_change_registration() {
-        let dir = tempdir::TempDir::new("storm-reg-owner").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (_, _owner) = device_and_owner(&state).await;
-
-        // A member's session must not be able to open the server to the world.
-        let member = {
-            let mut auth_db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut auth_db,
-                crate::auth::users::NewUser {
-                    username: "member",
-                    display_name: None,
-                    password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                    role: crate::auth::users::Role::Member,
-                },
-                "2026-08-19T00:00:00Z",
-            )
-            .unwrap()
-            .id
-        };
-        let token = session_token(&state, &member).await;
-
-        let (status, _) = send(
-            &app,
-            put_json(
-                "/v1/config/registration",
-                serde_json::json!({"enabled": true}),
-                Some(&format!("Bearer {token}")),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(
-            !state
-                .allow_registration
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-    }
-
-    /// Decision 80: every server-wide setting refuses a member, and refusing
-    /// it leaves the setting as it was. A loop rather than three tests,
-    /// because what it guards against is a new `PUT /v1/config*` route
-    /// shipping without the check — add the route here when you add it.
-    #[tokio::test]
-    async fn only_an_owner_may_change_server_config() {
-        let dir = tempdir::TempDir::new("storm-config-owner").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (_, owner) = device_and_owner(&state).await;
-        let member = {
-            let mut auth_db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut auth_db,
-                crate::auth::users::NewUser {
-                    username: "member",
-                    display_name: None,
-                    password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                    role: crate::auth::users::Role::Member,
-                },
-                "2026-10-04T00:00:00Z",
-            )
-            .unwrap()
-            .id
-        };
-        let member_token = session_token(&state, &member).await;
-        let owner_token = session_token(&state, &owner).await;
-        let before = send(
-            &app,
-            get_with_auth("/v1/config", &format!("Bearer {owner_token}")),
-        )
-        .await
-        .1;
-
-        let attempts = [
-            (
-                "/v1/config",
-                serde_json::json!({"vault_root": dir.path().display().to_string()}),
-            ),
-            (
-                "/v1/config/mcp",
-                serde_json::json!({"enabled": true, "writable": true}),
-            ),
-            (
-                "/v1/config/relays",
-                serde_json::json!({"relays": ["wss://relay.example"]}),
-            ),
-            (
-                "/v1/config/registration",
-                serde_json::json!({"enabled": true}),
-            ),
-        ];
-        for (path, body) in attempts {
-            let (status, _) = send(
-                &app,
-                put_json(path, body, Some(&format!("Bearer {member_token}"))),
-            )
-            .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{path} must refuse a member");
-        }
-
-        let after = send(
-            &app,
-            get_with_auth("/v1/config", &format!("Bearer {owner_token}")),
-        )
-        .await
-        .1;
-        assert_eq!(
-            before, after,
-            "a refused change must leave the config alone"
-        );
-
-        // And the owner is not caught by the same check.
-        let (status, _) = send(
-            &app,
-            put_json(
-                "/v1/config/mcp",
-                serde_json::json!({"enabled": true}),
-                Some(&format!("Bearer {owner_token}")),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn the_bootstrap_flow_is_untouched_by_registration() {
-        // `/v1/users/first` is the one-shot bootstrap and must behave exactly
-        // as before: registration being open does not reopen it, and
-        // registration cannot stand in for it on an empty server.
-        let dir = tempdir::TempDir::new("storm-reg-bootstrap").unwrap();
+    async fn setup_takes_a_password_and_happens_once() {
+        let dir = tempdir::TempDir::new("storm-setup-once").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let device = pair_a_device(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Registration refuses to be the first account.
-        let (status, _) = send(&app, register(&device, "first")).await;
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        for body in [
+            serde_json::json!({"password": "another-long-password"}),
+            serde_json::json!({"username": "another", "password": "another-long-password"}),
+        ] {
+            let (status, _) =
+                send(&app, post_json_with_auth("/v1/users/first", body, &device)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "still one-shot");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_device_can_ask_whether_setup_happened() {
+        let dir = tempdir::TempDir::new("storm-account-state").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (status, _) = send(&app, get("/v1/account")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let device = pair_a_device(&state).await;
+        let (status, body) = send(&app, get_with_auth("/v1/account", &device)).await;
         assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "an empty server has no owner; that is the bootstrap's job"
+            (status, body["exists"].clone()),
+            (StatusCode::OK, false.into())
         );
+        seed_owner(&state).await;
+        let (_, body) = send(&app, get_with_auth("/v1/account", &device)).await;
+        assert_eq!(body, serde_json::json!({"exists": true}));
+    }
 
-        // The bootstrap still works, and still closes afterwards.
+    #[tokio::test]
+    async fn an_old_clients_setup_body_still_sets_up() {
+        let dir = tempdir::TempDir::new("storm-setup-old-client").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
         let (status, _) = send(
             &app,
             post_json_with_auth(
@@ -4603,49 +4150,143 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+        assert!(state.auth_db.lock().await.has_account().unwrap());
+    }
 
+    #[tokio::test]
+    async fn a_migrated_database_serves_the_survivor_and_refuses_the_rest() {
+        use crate::auth::single_user::tests::{
+            access_token, device_secret, fake_hash, key_secret, refresh_token, v5_fixture,
+        };
+        let fixture = v5_fixture(&fake_hash());
+        let dir = tempdir::TempDir::new("storm-migrated-serves").unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        std::fs::copy(&fixture.path, dir.path().join("state/auth.db")).unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let survivor = format!("Bearer {}", access_token("ses_s1"));
+        let (status, _) = send(&app, get_with_auth("/v1/vaults", &survivor)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the account's old token must keep working"
+        );
+        let shared = format!("Bearer {}", access_token("ses_s3"));
+        let (status, _) = send(&app, get_with_auth("/v1/vaults", &shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        let revoked = format!("Bearer {}", access_token("ses_s2"));
+        let (status, _) = send(&app, get_with_auth("/v1/vaults", &revoked)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/refresh",
+                serde_json::json!({"refresh_token": refresh_token("ses_s1")}),
+                &format!(
+                    "StormDevice dev_survivor1:{}",
+                    device_secret("dev_survivor1")
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, _) = send(
+            &app,
+            mcp_request(&format!("Bearer {}", key_secret("key_s1"))),
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = send(
+            &app,
+            mcp_request(&format!("Bearer {}", key_secret("key_s2"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        for session in ["ses_a1", "ses_b1", "ses_n1"] {
+            let (status, _) = send(
+                &app,
+                get_with_auth("/v1/vaults", &format!("Bearer {}", access_token(session))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{session}");
+        }
+        for key in ["key_a1", "key_n1"] {
+            let (status, _) = send(&app, mcp_request(&format!("Bearer {}", key_secret(key)))).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{key}");
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"password": "anything at all here"}),
+                &format!("StormDevice dev_member_a:{}", device_secret("dev_member_a")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_old_clients_login_body_still_signs_in() {
+        let dir = tempdir::TempDir::new("storm-old-login").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
         let (status, _) = send(
             &app,
             post_json_with_auth(
                 "/v1/users/first",
-                serde_json::json!({"username": "another", "password": "a-long-enough-password"}),
+                serde_json::json!({"password": "a-long-enough-password"}),
                 &device,
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "still one-shot");
-    }
+        assert_eq!(status, StatusCode::CREATED);
 
-    #[tokio::test]
-    async fn closing_registration_leaves_existing_accounts_alone() {
-        let dir = tempdir::TempDir::new("storm-reg-close").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (device, owner) = device_and_owner(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        send(&app, register(&device, "newcomer")).await;
-
-        let token = session_token(&state, &owner).await;
+        for body in [
+            serde_json::json!({"username": "whatever-v0.3-had", "password": "a-long-enough-password"}),
+            serde_json::json!({"password": "a-long-enough-password"}),
+        ] {
+            let (status, issued) = send(
+                &app,
+                post_json_with_auth("/v1/auth/login", body.clone(), &device),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body} → {issued}");
+        }
         let (status, _) = send(
             &app,
-            put_json(
-                "/v1/config/registration",
-                serde_json::json!({"enabled": false}),
-                Some(&format!("Bearer {token}")),
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"username": "whatever", "password": "not-the-password!"}),
+                &device,
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 
-        // The account made while it was open is still there and still active.
-        let auth_db = state.auth_db.lock().await;
-        let users = auth_db.list_users().unwrap();
-        assert!(
-            users.iter().any(|u| u.username == "newcomer"
-                && u.status == crate::auth::users::Status::Active),
-            "closing the door must not evict the people already through it"
-        );
+    #[tokio::test]
+    async fn the_account_changes_server_config() {
+        let dir = tempdir::TempDir::new("storm-config-account").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = device_and_owner(&state).await;
+        let token = format!("Bearer {}", session_token(&state, &owner).await);
+        for (path, body) in [
+            (
+                "/v1/config/mcp",
+                serde_json::json!({"enabled": true, "writable": false}),
+            ),
+            ("/v1/config/relays", serde_json::json!({"relays": []})),
+        ] {
+            let (status, _) = send(&app, put_json(path, body, Some(&token))).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+        }
     }
 
     // ---- web bootstrap (slice 15) ----------------------------------------
@@ -4750,10 +4391,18 @@ pub(crate) mod tests {
         let secret = body["device_secret"].as_str().unwrap().to_string();
         assert!(device_id.starts_with("dev_"));
 
-        // And it is a *device tier* credential, which is the point.
+        // A device-tier credential: it can set up this fresh Storm.
         let auth = format!("StormDevice {device_id}:{secret}");
-        let (status, _) = send(&app, get_with_auth("/v1/users", &auth)).await;
-        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"password": "a-long-enough-password"}),
+                &auth,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -5148,17 +4797,12 @@ pub(crate) mod tests {
             ),
         )
         .await;
-        assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "a second account through the bootstrap endpoint is a second owner"
-        );
+        assert_eq!(status, StatusCode::CONFLICT, "setup happens once");
         assert_eq!(body["error"], "an account already exists");
 
         let auth_db = state.auth_db.lock().await;
-        assert_eq!(
-            auth_db.count_users().unwrap(),
-            1,
+        assert!(
+            auth_db.has_account().unwrap(),
             "the refusal has to be a refusal, not a 409 after the insert"
         );
 
@@ -5323,50 +4967,23 @@ pub(crate) mod tests {
     }
     // ---- A14: MCP keys ---------------------------------------------------
 
-    /// Mints a user and a key on `state`, returning `(user_id, plaintext)`.
-    async fn seed_key(
-        state: &Shared,
-        username: &str,
-        role: crate::auth::users::Role,
-    ) -> (String, String) {
+    async fn seed_key(state: &Shared) -> (String, String) {
         let mut db = state.auth_db.lock().await;
-        // The first account has to be an owner — a server whose only user is a
-        // member has nobody who can create the next one. So a member needs one
-        // ahead of it.
-        if role != crate::auth::users::Role::Owner {
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "bootstrap-owner",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Owner,
-                },
-                "2026-08-19T11:00:00Z",
-            )
-            .unwrap();
-        }
-        let user = crate::auth::users::create_user(
-            &mut db,
-            crate::auth::users::NewUser {
-                username,
-                display_name: None,
-                password_hash: "hash",
-                role,
-            },
-            "2026-08-19T12:00:00Z",
-        )
-        .unwrap();
+        let account = match db.account().unwrap() {
+            Some(account) => account,
+            None => crate::auth::account::create_account(&mut db, "hash", "2026-08-19T12:00:00Z")
+                .unwrap(),
+        };
         let (_, secret) = crate::auth::keys::create(
             &mut db,
-            &user.id,
+            &account.id,
             "a machine",
             None,
             None,
             "2026-08-19T12:00:00Z",
         )
         .unwrap();
-        (user.id, secret)
+        (account.id, secret)
     }
 
     /// A minimal, valid MCP request — enough to get past the tier check and
@@ -5394,7 +5011,7 @@ pub(crate) mod tests {
         state
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+        let (_, secret) = seed_key(&state).await;
 
         let response = app
             .clone()
@@ -5416,13 +5033,13 @@ pub(crate) mod tests {
         // was the truth.
         let dir = tempdir::TempDir::new("storm-key-scope").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
-        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+        let (_, secret) = seed_key(&state).await;
 
         for (method, uri) in [
             ("GET", "/v1/vaults"),
             ("GET", "/v1/config"),
             ("GET", "/v1/recents"),
-            ("GET", "/v1/users"),
+            ("GET", "/v1/keys"),
         ] {
             let (status, _) = send(
                 &app,
@@ -5449,7 +5066,7 @@ pub(crate) mod tests {
         state
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+        let (user_id, secret) = seed_key(&state).await;
 
         // Works first, so the refusal below cannot be a setup failure.
         let before = app
@@ -5530,71 +5147,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_member_reaches_only_their_own_keys() {
-        let dir = tempdir::TempDir::new("storm-key-scope-user").unwrap();
+    async fn a_key_from_a_removed_account_cannot_be_revoked_or_listed() {
+        let dir = tempdir::TempDir::new("storm-key-foreign").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let owner = seed_owner(&state).await;
-        let member = {
-            let mut db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "member",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Member,
-                },
-                "2026-08-19T12:00:00Z",
-            )
-            .unwrap()
-            .id
+        let auth = format!("Bearer {}", session_token(&state, &owner).await);
+        let foreign = {
+            let db = state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .unwrap();
+            db.conn_for_tests()
+                .execute(
+                    "INSERT INTO api_keys (id, user_id, name, secret_hash, created)
+                     VALUES ('key_foreign', 'usr_gone', 'left behind', x'00', '2026-08-19T12:00:00Z')",
+                    [],
+                )
+                .unwrap();
+            db.conn_for_tests()
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+            "key_foreign"
         };
-        let member_auth = format!("Bearer {}", session_token(&state, &member).await);
-        let owner_auth = format!("Bearer {}", session_token(&state, &owner).await);
-
-        // The owner mints one for themselves.
-        let (status, owners_key) = send(
-            &app,
-            post_json_with_auth(
-                "/v1/keys",
-                serde_json::json!({ "name": "owner key" }),
-                &owner_auth,
-            ),
-        )
-        .await;
+        let (status, listed) = send(&app, get_with_auth("/v1/keys", &auth)).await;
         assert_eq!(status, StatusCode::OK);
-        let owners_key_id = owners_key["id"].as_str().unwrap().to_string();
-
-        // A member may not read the owner's keys...
-        let (status, _) = send(
-            &app,
-            get_with_auth(&format!("/v1/keys?user={owner}"), &member_auth),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // ...nor revoke one. **404, not 403** — a member probing key ids must
-        // not learn which exist.
+        assert!(!listed.to_string().contains(foreign), "{listed}");
         let (status, _) = send(
             &app,
             axum::http::Request::builder()
                 .method("DELETE")
-                .uri(format!("/v1/keys/{owners_key_id}"))
-                .header("Authorization", &member_auth)
+                .uri(format!("/v1/keys/{foreign}"))
+                .header("Authorization", &auth)
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-
-        // The owner may reach the member's keys, which is the one asymmetry
-        // A14 grants and the whole of it.
-        let (status, _) = send(
-            &app,
-            get_with_auth(&format!("/v1/keys?user={member}"), &owner_auth),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -5612,7 +5200,7 @@ pub(crate) mod tests {
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         register_vault(&state, "Notes").await;
-        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Member).await;
+        let (user_id, secret) = seed_key(&state).await;
 
         // A tool that reaches a vault, so the policy is actually consulted.
         let _ = app
@@ -5634,12 +5222,7 @@ pub(crate) mod tests {
             assert_eq!(
                 actor.user_id(),
                 user_id.as_str(),
-                "an MCP key must reach the boundary as its owner"
-            );
-            assert_eq!(
-                actor.role(),
-                crate::auth::users::Role::Member,
-                "and with its owner's role, unnarrowed"
+                "an MCP key must reach the boundary as the account"
             );
             assert!(
                 actor.key_id().is_some(),
@@ -6010,11 +5593,14 @@ pub(crate) mod tests {
         assert_eq!(body["vault_count"], 0);
         assert_eq!(body["mcp_enabled"], false);
         assert_eq!(body["mcp_writable"], false);
-        assert_eq!(body["allow_registration"], false);
+        assert!(
+            body.get("allow_registration").is_none(),
+            "registration went with multi-user Storm (decision 82)"
+        );
         assert_eq!(body["relays"], serde_json::json!([]));
         assert_eq!(
             body.as_object().unwrap().len(),
-            7,
+            6,
             "a new key showed up that this test does not know about"
         );
     }
@@ -6343,32 +5929,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn host_administration_is_the_owners_alone() {
-        // AM5: 403 on every route — never an empty list, which would read as
-        // "no hosts" rather than "not yours".
-        let dir = tempdir::TempDir::new("storm-hosts-owner").unwrap();
+    async fn an_access_key_cannot_administer_hosts() {
+        let dir = tempdir::TempDir::new("storm-hosts-key").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let owner = seed_owner(&state).await;
         let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
         let (host_id, _) = enroll_a_host(&app, &owner_bearer).await;
+        let (_, secret) = seed_key(&state).await;
+        let key = format!("Bearer {secret}");
 
-        let member = seed_member(&state, "member").await;
-        let member_bearer = format!("Bearer {}", session_token(&state, &member).await);
         let path = format!("/v1/agent/hosts/{host_id}");
         let requests = [
-            get_with_auth("/v1/agent/hosts", &member_bearer),
+            get_with_auth("/v1/agent/hosts", &key),
             post_json_with_auth(
                 "/v1/agent/hosts/enrollments",
                 serde_json::json!({"server_url": "http://x"}),
-                &member_bearer,
+                &key,
             ),
-            patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &member_bearer),
-            delete_with_auth(&path, &member_bearer),
+            patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &key),
+            delete_with_auth(&path, &key),
         ];
         for request in requests {
             let uri = request.uri().to_string();
             let (status, _) = send(&app, request).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
         }
     }
 
@@ -6747,86 +6331,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn integration_management_is_the_owners_alone() {
-        // G-D20 / AM29: 403 on every route for a member, never an empty list.
-        let dir = tempdir::TempDir::new("storm-integrations-owner").unwrap();
+    async fn an_unknown_integration_is_not_found() {
+        let dir = tempdir::TempDir::new("storm-integrations-unknown").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let (_, owner) = owner_bearer(&state).await;
-        let id = create_github(&app, &owner, "ghp_x").await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let member = seed_member(&state, "member").await;
-        let member = format!("Bearer {}", session_token(&state, &member).await);
-        let path = format!("{CONNECTIONS}/{id}");
-        let requests = [
-            get_with_auth(CONNECTIONS, &member),
-            post_json_with_auth(
-                CONNECTIONS,
-                serde_json::json!({"display_name": "Mine", "url": "https://x.example/", "auth_kind": "none"}),
-                &member,
-            ),
-            get_with_auth(&path, &member),
-            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &member),
-            delete_with_auth(&path, &member),
-            post_json_with_auth(&format!("{path}/test"), serde_json::json!({}), &member),
-            get_with_auth(&format!("{path}/tools"), &member),
-        ];
-        for request in requests {
-            let uri = format!("{} {}", request.method(), request.uri());
-            let (status, _) = send(&app, request).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
-        }
-        // And nothing changed.
-        let (_, body) = send(&app, get_with_auth(&path, &owner)).await;
-        assert_eq!(body["status"], "connected");
-    }
-
-    #[tokio::test]
-    async fn another_owners_integration_is_not_found_not_forbidden() {
-        // Rows carry their owner (G-D20). A second owner probing ids learns
-        // nothing: 404, the same as an id that does not exist.
-        let dir = tempdir::TempDir::new("storm-integrations-two-owners").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (_, first) = owner_bearer(&state).await;
-        let id = create_github(&app, &first, "ghp_x").await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let second = {
-            let mut db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "second",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Owner,
-                },
-                "2026-10-05T00:00:00Z",
-            )
-            .unwrap()
-            .id
-        };
-        let second = format!("Bearer {}", session_token(&state, &second).await);
-        let path = format!("{CONNECTIONS}/{id}");
+        let path = format!("{CONNECTIONS}/mcc_nope");
         for request in [
-            get_with_auth(&path, &second),
-            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &second),
-            delete_with_auth(&path, &second),
+            get_with_auth(&path, &owner),
+            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &owner),
+            delete_with_auth(&path, &owner),
         ] {
             let (status, _) = send(&app, request).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
         }
-        let (_, list) = send(&app, get_with_auth(CONNECTIONS, &second)).await;
-        assert_eq!(
-            list.as_array().unwrap().len(),
-            1,
-            "only the built-in: {list}"
-        );
-        // The same slug is free for the second owner: unique per owner.
-        let theirs = create_github(&app, &second, "ghp_y").await;
-        assert_eq!(theirs["slug"], "github-work");
     }
 
     #[tokio::test]
@@ -7364,42 +6881,24 @@ pub(crate) mod tests {
             "called echo"
         );
 
-        // A disabled owner: every call refused (the A14 check). Another
-        // owner exists so the last-owner rule allows the disable.
+        // A session whose owner is not the account (a removed account's).
         {
-            let mut db = f.state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "backup",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Owner,
-                },
-                "2026-10-05T00:00:00Z",
-            )
-            .unwrap();
-            crate::auth::users::set_status(
-                &mut db,
-                "dewansh",
-                crate::auth::users::Status::Disabled,
-                "2026-10-05T00:00:01Z",
-            )
-            .unwrap();
+            let db = f.state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch("PRAGMA foreign_keys = OFF; UPDATE users SET id = id || '_moved';")
+                .unwrap();
         }
         assert_eq!(
             error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
             Some("owner_inactive")
         );
         {
-            let mut db = f.state.auth_db.lock().await;
-            crate::auth::users::set_status(
-                &mut db,
-                "dewansh",
-                crate::auth::users::Status::Active,
-                "2026-10-05T00:00:02Z",
-            )
-            .unwrap();
+            let db = f.state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch(
+                    "UPDATE users SET id = substr(id, 1, length(id) - 6); PRAGMA foreign_keys = ON;",
+                )
+                .unwrap();
         }
 
         // Disconnected mid-session: refused at once, and the grant is revoked.
@@ -7421,6 +6920,77 @@ pub(crate) mod tests {
             Some("session_not_live")
         );
         assert!(f.state.gateway.sessions.get(&session, "storm").is_none());
+        let _ = &f.owner;
+    }
+
+    #[tokio::test]
+    async fn the_single_user_sweep_retires_what_a_removed_account_left() {
+        let dir = tempdir::TempDir::new("storm-single-user-sweep").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let live = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ended = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.report(&ended, "completed").await;
+
+        crate::ops::reconcile_single_user(&f.state).await.unwrap();
+        assert_eq!(f.state.agent.get(&live).unwrap().status, "running");
+
+        {
+            let db = f.state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF; UPDATE users SET id = 'usr_the_survivor'; PRAGMA foreign_keys = ON;",
+                )
+                .unwrap();
+        }
+        crate::ops::reconcile_single_user(&f.state).await.unwrap();
+
+        let connection = crate::ops::gateway_store(&f.state)
+            .connection(&f.connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            connection.status, "revoked",
+            "the removed account's connection"
+        );
+        assert!(
+            !crate::ops::gateway_store(&f.state)
+                .has_credential(&f.connection)
+                .unwrap(),
+            "its sealed credential went with it"
+        );
+        let retired = f.state.agent.get(&live).unwrap();
+        assert_eq!(
+            (retired.status.as_str(), retired.end_reason.as_deref()),
+            ("failed", Some("owner_removed"))
+        );
+        assert!(
+            f.state.agent.get(&ended).is_err(),
+            "an ended one is dismissed"
+        );
+        assert_eq!(f.state.agent.grant(&live, &f.connection).unwrap(), None);
+
+        let before = f
+            .state
+            .auth_db
+            .lock()
+            .await
+            .event_count("integration_removed_single_user")
+            .unwrap();
+        crate::ops::reconcile_single_user(&f.state).await.unwrap();
+        let after = f
+            .state
+            .auth_db
+            .lock()
+            .await
+            .event_count("integration_removed_single_user")
+            .unwrap();
+        assert_eq!((before, after), (1, 1));
         let _ = &f.owner;
     }
 
@@ -8153,7 +7723,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_flow_is_spent_once_even_by_racing_callbacks_and_is_its_owners_alone() {
+    async fn a_flow_is_spent_once_even_by_racing_callbacks() {
         let dir = tempdir::TempDir::new("storm-oauth-race").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         state.gateway.set_allow_http_upstreams(true);
@@ -8173,24 +7743,7 @@ pub(crate) mod tests {
         let flow_state =
             query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
 
-        // Another owner holding the state learns nothing and spends nothing.
-        let second = {
-            let mut db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "second",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Owner,
-                },
-                "2026-10-05T00:00:00Z",
-            )
-            .unwrap()
-            .id
-        };
-        let second = format!("Bearer {}", session_token(&state, &second).await);
-        let (status, body) = callback(&app, &second, &flow_state, "good-code").await;
+        let (status, body) = callback(&app, &owner, "not-the-state", "good-code").await;
         assert_eq!(
             (status, body["error"].clone()),
             (StatusCode::BAD_REQUEST, "oauth_flow_expired_or_used".into())
@@ -8215,7 +7768,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_is_the_owners_alone_and_discovery_never_reaches_a_private_address() {
+    async fn oauth_discovery_never_reaches_a_private_address() {
         let dir = tempdir::TempDir::new("storm-oauth-boundary").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let (_, owner) = owner_bearer(&state).await;
@@ -8238,12 +7791,6 @@ pub(crate) mod tests {
         assert_eq!(body["error"], "oauth_discovery_failed");
         assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-        let member = seed_member(&state, "member").await;
-        let member = format!("Bearer {}", session_token(&state, &member).await);
-        let (status, _) = authorize(&app, &member, &id).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let (status, _) = callback(&app, &member, "x", "y").await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
         // A static integration is not authorized this way.
         let static_id = create_github(&app, &owner, "ghp_x").await["id"]
             .as_str()

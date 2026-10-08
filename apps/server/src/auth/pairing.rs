@@ -385,7 +385,6 @@ pub fn encode_qr(
 mod tests {
     use super::*;
     use crate::auth::db::{CredentialRow, ServerRow};
-    use crate::auth::users::{NewUser, Role};
     /// Seeds a server identity and active credential into an in-memory DB so
     /// that [`consume`] can return the server info the client needs to pin.
     /// This mirrors what [`super::super::identity::create`] does on first boot.
@@ -571,16 +570,11 @@ mod tests {
         let (srv, _) = seed_server_identity(&mut db);
         let now = "2026-08-16T12:00:00Z";
 
-        // The `created_by` FK references a real user. Create one so the
+        // The `created_by` FK references the account. Create it so the
         // FOREIGN KEY constraint is satisfied.
-        let user = super::super::users::create_user(
+        let user = crate::auth::account::create_account(
             &mut db,
-            NewUser {
-                username: "creator",
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$dGVzdA$dGVzdA",
-                role: Role::Owner,
-            },
+            "$argon2id$v=19$m=196608,t=1,p=1$dGVzdA$dGVzdA",
             now,
         )
         .unwrap();

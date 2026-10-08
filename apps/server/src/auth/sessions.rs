@@ -1,4 +1,7 @@
-//! Sessions: `(user, device)`, opaque tokens, revocation that takes effect now.
+//! Sessions: `(account, device)`, opaque tokens, revocation that takes effect now.
+//!
+//! `user_id` holds the account's id (decision 82); renaming the column would
+//! mean rebuilding every table that references it.
 //!
 //! A session is always a pair. A device credential never reads a note, and a
 //! session never outlives the device it was issued on — which is what makes
@@ -18,12 +21,12 @@ use rusqlite::{OptionalExtension, params};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
+use super::account::{self, Account};
 use super::db::AuthDb;
 use super::devices::Device;
 use super::identity::random_id;
 use super::password::{self, Hasher};
 use super::token;
-use super::users::{self, Status, User};
 
 /// A6. Long on purpose — see the module docs.
 pub const ACCESS_LIFETIME_DAYS: i64 = 30;
@@ -73,7 +76,6 @@ pub enum AuthFailure {
     Unknown,
     Expired,
     Revoked,
-    UserDisabled,
     DeviceRevoked,
     /// A refresh token that had already been rotated away. The session is
     /// revoked by the time this is returned.
@@ -90,7 +92,6 @@ impl AuthFailure {
             // token was ever real.
             AuthFailure::Unknown | AuthFailure::Expired => "session_expired",
             AuthFailure::Revoked | AuthFailure::ReplayedRefresh => "session_revoked",
-            AuthFailure::UserDisabled => "user_disabled",
             AuthFailure::DeviceRevoked => "device_revoked",
         }
     }
@@ -99,9 +100,8 @@ impl AuthFailure {
 /// Why a login was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginFailure {
-    /// Wrong password, or no such user. One answer for both, on purpose.
+    /// Wrong password, or no account yet. One answer for both, on purpose.
     InvalidCredentials,
-    UserDisabled,
     DeviceRevoked,
     NotPaired,
     RateLimited {
@@ -113,7 +113,6 @@ impl LoginFailure {
     pub fn code(self) -> &'static str {
         match self {
             LoginFailure::InvalidCredentials => "invalid_credentials",
-            LoginFailure::UserDisabled => "user_disabled",
             LoginFailure::DeviceRevoked => "device_revoked",
             LoginFailure::NotPaired => "not_paired",
             LoginFailure::RateLimited { .. } => "rate_limited",
@@ -192,7 +191,7 @@ impl std::fmt::Debug for IssuedSession {
 #[derive(Debug, Clone)]
 pub struct Authenticated {
     pub session: Session,
-    pub user: User,
+    pub account: Account,
     #[allow(dead_code)] // Used by future vault-level access control; tested here.
     pub device: Device,
 }
@@ -521,12 +520,12 @@ fn check(
         return Err(SessionError::Refused(AuthFailure::Expired));
     }
 
-    let user = db
-        .user_by_id(&session.user_id)?
+    // A session naming anything but the account names nobody: the account it
+    // belonged to was removed (the single-user migration deletes those rows,
+    // so this is the belt to that brace).
+    let account = db
+        .account_by_id(&session.user_id)?
         .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
-    if user.status == Status::Disabled {
-        return Err(SessionError::Refused(AuthFailure::UserDisabled));
-    }
 
     let device = db
         .find_device(&session.device_id)?
@@ -538,7 +537,7 @@ fn check(
     let _ = now;
     Ok(Authenticated {
         session: session.clone(),
-        user,
+        account,
         device,
     })
 }
@@ -587,12 +586,8 @@ pub fn refresh(
         return Err(SessionError::Refused(AuthFailure::Expired));
     }
 
-    let user = db
-        .user_by_id(&session.user_id)?
+    db.account_by_id(&session.user_id)?
         .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
-    if user.status == Status::Disabled {
-        return Err(SessionError::Refused(AuthFailure::UserDisabled));
-    }
     let device = db
         .find_device(&session.device_id)?
         .ok_or(SessionError::Refused(AuthFailure::DeviceRevoked))?;
@@ -688,17 +683,17 @@ pub fn revoke_for_user(db: &mut AuthDb, user_id: &str, reason: &str, now: &str) 
     Ok(closed)
 }
 
-/// Verifies a password and issues a session — Flow 4, in order.
+/// Verifies the password and issues a session — Flow 4, in order.
 ///
-/// The order is the design's and each step is load-bearing:
-/// device first (a revoked device gets nothing, whatever the password), then
-/// the lockout window, then the hash — and **a missing user still pays for a
-/// hash**, because otherwise the response time answers "does this account
-/// exist" for free.
+/// The order is the design's and each step is load-bearing: device first (a
+/// revoked device gets nothing, whatever the password), then the lockout
+/// window, then the hash — and **a Storm with no account yet still pays for a
+/// hash**, so the response time does not say whether setup has happened.
+///
+/// There is no username (decision 82): one account, one password.
 pub async fn login(
     db: &mut AuthDb,
     hasher: &Hasher,
-    username: &str,
     password: String,
     device_id: &str,
     now: &str,
@@ -710,14 +705,14 @@ pub async fn login(
         return Err(LoginError::Refused(LoginFailure::DeviceRevoked));
     }
 
-    let user = db.find_user(username)?;
+    let account = db.account()?;
 
-    if let Some(user) = &user
-        && let Some(remaining) = users::lockout_remaining(db, &user.id, now)?
+    if let Some(account) = &account
+        && let Some(remaining) = account::lockout_remaining(db, &account.id, now)?
     {
         db.record_event(
             EVENT_LOGIN_LOCKED,
-            Some(&user.id),
+            Some(&account.id),
             Some(&device.id),
             now,
             &format!(r#"{{"retry_after_secs":{remaining}}}"#),
@@ -729,23 +724,23 @@ pub async fn login(
 
     // Both branches run one Argon2id verify through the same bounded hasher, so
     // they cost the same and neither can exhaust memory.
-    let stored = match &user {
-        Some(user) => db
-            .password_hash_of(&user.id)?
+    let stored = match &account {
+        Some(account) => db
+            .password_hash_of(&account.id)?
             .unwrap_or_else(|| ABSENT_USER_HASH.to_string()),
         None => ABSENT_USER_HASH.to_string(),
     };
-    let matched = hasher.verify(password.clone(), stored.clone()).await? && user.is_some();
+    let matched = hasher.verify(password.clone(), stored.clone()).await? && account.is_some();
 
-    let Some(user) = user else {
+    let Some(account) = account else {
         return Err(LoginError::Refused(LoginFailure::InvalidCredentials));
     };
 
     if !matched {
-        let locked = users::note_failed_login(db, &user.id, now)?;
+        let locked = account::note_failed_login(db, &account.id, now)?;
         db.record_event(
             EVENT_LOGIN_FAIL,
-            Some(&user.id),
+            Some(&account.id),
             Some(&device.id),
             now,
             &format!(r#"{{"locked":{}}}"#, locked.is_some()),
@@ -753,34 +748,20 @@ pub async fn login(
         return Err(LoginError::Refused(LoginFailure::InvalidCredentials));
     }
 
-    // Checked *after* the verify, deliberately: answering "this account is
-    // disabled" to someone who has not proven the password would tell a
-    // stranger which accounts exist.
-    if user.status == Status::Disabled {
-        db.record_event(
-            EVENT_LOGIN_FAIL,
-            Some(&user.id),
-            Some(&device.id),
-            now,
-            r#"{"reason":"disabled"}"#,
-        )?;
-        return Err(LoginError::Refused(LoginFailure::UserDisabled));
-    }
+    account::note_successful_login(db, &account.id, now)?;
 
-    users::note_successful_login(db, &user.id, now)?;
-
-    // A1's rehash-on-login: a parameter bump reaches existing accounts the next
-    // time their owner signs in, so nobody is asked to change a password
-    // because the hardware got faster.
+    // A1's rehash-on-login: a parameter bump reaches the account the next time
+    // it signs in, so nobody is asked to change a password because the
+    // hardware got faster.
     if password::needs_rehash(&stored) {
         let upgraded = hasher.hash(password).await?;
-        users::upgrade_password_hash(db, &user.id, &upgraded, now)?;
+        account::upgrade_password_hash(db, &account.id, &upgraded, now)?;
     }
 
-    let issued = create(db, &user.id, &device.id, now)?;
+    let issued = create(db, &account.id, &device.id, now)?;
     db.record_event(
         EVENT_LOGIN_OK,
-        Some(&user.id),
+        Some(&account.id),
         Some(&device.id),
         now,
         &format!(r#"{{"session":{:?}}}"#, issued.session_id),
@@ -861,27 +842,17 @@ pub struct IssuedWsTicket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::account::create_account;
     use crate::auth::devices;
-    use crate::auth::users::{NewUser, Role};
 
     const NOW: &str = "2026-08-16T12:00:00Z";
     const PASSWORD: &str = "correct horse battery staple";
 
-    async fn fixture() -> (AuthDb, Hasher, User, Device) {
+    async fn fixture() -> (AuthDb, Hasher, Account, Device) {
         let mut db = AuthDb::open_in_memory().unwrap();
         let hasher = Hasher::new();
         let hash = hasher.hash(PASSWORD.to_string()).await.unwrap();
-        let user = crate::auth::users::create_user(
-            &mut db,
-            NewUser {
-                username: "dewansh",
-                display_name: None,
-                password_hash: &hash,
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
+        let user = create_account(&mut db, &hash, NOW).unwrap();
         let device = devices::create_synthetic(&mut db, "test device", NOW).unwrap();
         (db, hasher, user, device)
     }
@@ -919,7 +890,7 @@ mod tests {
         assert!(issued.refresh_token.starts_with("str_"));
 
         let who = authenticate(&mut db, &issued.access_token, NOW).unwrap();
-        assert_eq!(who.user.id, user.id);
+        assert_eq!(who.account.id, user.id);
         assert_eq!(who.device.id, device.id);
         assert_eq!(who.session.id, issued.session_id);
     }
@@ -1041,36 +1012,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_disabled_user_cannot_use_a_session_they_already_had() {
-        // Disabling has to reach credentials already in someone's pocket.
-        let (mut db, _, user, device) = fixture().await;
-        let issued = create(&mut db, &user.id, &device.id, NOW).unwrap();
-        crate::auth::users::create_user(
-            &mut db,
-            NewUser {
-                username: "second-owner",
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c2FsdA$aGFzaA",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-        crate::auth::users::set_status(&mut db, "dewansh", Status::Disabled, NOW).unwrap();
-
-        let err = authenticate(&mut db, &issued.access_token, NOW).unwrap_err();
-        assert!(matches!(
-            err,
-            SessionError::Refused(AuthFailure::UserDisabled)
-        ));
-        let err = refresh(&mut db, &issued.refresh_token, NOW).unwrap_err();
-        assert!(matches!(
-            err,
-            SessionError::Refused(AuthFailure::UserDisabled)
-        ));
-    }
-
-    #[tokio::test]
     async fn last_used_is_written_at_most_once_a_minute() {
         let (mut db, _, user, device) = fixture().await;
         let issued = create(&mut db, &user.id, &device.id, NOW).unwrap();
@@ -1104,26 +1045,6 @@ mod tests {
         assert_eq!(moved.as_deref(), Some(after.as_str()));
     }
 
-    #[tokio::test]
-    async fn deleting_a_user_takes_their_sessions_with_them() {
-        let (mut db, _, user, device) = fixture().await;
-        create(&mut db, &user.id, &device.id, NOW).unwrap();
-        crate::auth::users::create_user(
-            &mut db,
-            NewUser {
-                username: "second-owner",
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c2FsdA$aGFzaA",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-
-        crate::auth::users::delete_user(&mut db, "dewansh", NOW).unwrap();
-        assert!(db.list_sessions(Some(&user.id)).unwrap().is_empty());
-    }
-
     // ---- login -----------------------------------------------------------
 
     // ---- WebSocket tickets ------------------------------------------------
@@ -1132,18 +1053,11 @@ mod tests {
     // be enforced nowhere while its lookup's comment claimed otherwise.
 
     /// A session to mint tickets against.
-    async fn ticketed() -> (AuthDb, User, IssuedSession) {
+    async fn ticketed() -> (AuthDb, Account, IssuedSession) {
         let (mut db, hasher, user, device) = fixture().await;
-        let issued = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap();
+        let issued = login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap();
         (db, user, issued)
     }
 
@@ -1153,7 +1067,7 @@ mod tests {
         let t = create_ws_ticket(&mut db, &issued.session_id, NOW).unwrap();
 
         let authed = consume_ws_ticket(&mut db, &t.ticket, NOW).unwrap();
-        assert_eq!(authed.user.id, user.id);
+        assert_eq!(authed.account.id, user.id);
         assert_eq!(authed.session.id, issued.session_id);
     }
 
@@ -1223,33 +1137,19 @@ mod tests {
     #[tokio::test]
     async fn a_correct_password_logs_in() {
         let (mut db, hasher, user, device) = fixture().await;
-        let issued = login(
-            &mut db,
-            &hasher,
-            "DEWANSH",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap();
-        assert_eq!(issued.user_id, user.id, "the username fold is used");
+        let issued = login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap();
+        assert_eq!(issued.user_id, user.id, "the session is the account's");
         assert!(authenticate(&mut db, &issued.access_token, NOW).is_ok());
     }
 
     #[tokio::test]
     async fn a_wrong_password_is_refused_and_counted() {
         let (mut db, hasher, user, device) = fixture().await;
-        let err = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            "not the password".into(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap_err();
+        let err = login(&mut db, &hasher, "not the password".into(), &device.id, NOW)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             LoginError::Refused(LoginFailure::InvalidCredentials)
@@ -1267,23 +1167,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_user_still_pays_for_a_hash() {
+    async fn a_storm_with_no_account_still_pays_for_a_hash() {
         // The timing defence, tested by what it *does* rather than by a
-        // stopwatch: a wall-clock assertion would be flaky on a loaded machine
-        // and would pass on a fast one even with the defence removed.
-        let (mut db, hasher, _, device) = fixture().await;
+        // stopwatch: before setup a login must cost what a real one costs, or
+        // the response time says whether this Storm has been set up.
+        let mut db = AuthDb::open_in_memory().unwrap();
+        let hasher = Hasher::new();
+        let device = devices::create_synthetic(&mut db, "test device", NOW).unwrap();
         let before = hasher.jobs_run();
 
-        let err = login(
-            &mut db,
-            &hasher,
-            "nobody-at-all",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap_err();
+        let err = login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             LoginError::Refused(LoginFailure::InvalidCredentials)
@@ -1291,7 +1186,7 @@ mod tests {
         assert_eq!(
             hasher.jobs_run() - before,
             1,
-            "a login for a missing user must still run one verify"
+            "a login with no account must still run one verify"
         );
     }
 
@@ -1299,23 +1194,16 @@ mod tests {
     async fn five_failures_lock_the_account_and_success_clears_it() {
         let (mut db, hasher, _, device) = fixture().await;
         for _ in 0..5 {
-            let _ = login(&mut db, &hasher, "dewansh", "wrong".into(), &device.id, NOW).await;
+            let _ = login(&mut db, &hasher, "wrong".into(), &device.id, NOW).await;
         }
 
         // Even the right password is refused while the lock holds — and it is
         // refused *before* the hash, so a locked account costs an attacker
         // nothing to keep locked but costs us nothing either.
         let before = hasher.jobs_run();
-        let err = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap_err();
+        let err = login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap_err();
         match err {
             LoginError::Refused(LoginFailure::RateLimited { retry_after_secs }) => {
                 assert!(
@@ -1331,7 +1219,6 @@ mod tests {
         let issued = login(
             &mut db,
             &hasher,
-            "dewansh",
             PASSWORD.to_string(),
             &device.id,
             &later(2),
@@ -1342,11 +1229,9 @@ mod tests {
 
         let (failures, locked): (i64, Option<String>) = db
             .conn
-            .query_row(
-                "SELECT failed_count, locked_until FROM users WHERE username_fold = 'dewansh'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT failed_count, locked_until FROM users", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(failures, 0);
         assert_eq!(locked, None);
@@ -1360,8 +1245,8 @@ mod tests {
             // Step the clock past each lock so the next attempt is counted
             // rather than rejected.
             let at = later(attempt * 60);
-            let _ = login(&mut db, &hasher, "dewansh", "wrong".into(), &device.id, &at).await;
-            if let Some(remaining) = users::lockout_remaining(&db, &user.id, &at).unwrap() {
+            let _ = login(&mut db, &hasher, "wrong".into(), &device.id, &at).await;
+            if let Some(remaining) = account::lockout_remaining(&db, &user.id, &at).unwrap() {
                 windows.push(remaining / 60);
             }
         }
@@ -1373,53 +1258,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_disabled_user_cannot_log_in_even_with_the_right_password() {
-        let (mut db, hasher, _, device) = fixture().await;
-        crate::auth::users::create_user(
-            &mut db,
-            NewUser {
-                username: "second-owner",
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c2FsdA$aGFzaA",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-        crate::auth::users::set_status(&mut db, "dewansh", Status::Disabled, NOW).unwrap();
-
-        let err = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            LoginError::Refused(LoginFailure::UserDisabled)
-        ));
-    }
-
-    #[tokio::test]
     async fn a_revoked_device_cannot_log_in_at_all() {
         let (mut db, hasher, _, device) = fixture().await;
         devices::revoke(&mut db, &device.id, "lost", NOW).unwrap();
 
         let before = hasher.jobs_run();
-        let err = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap_err();
+        let err = login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap_err();
         assert!(matches!(
             err,
             LoginError::Refused(LoginFailure::DeviceRevoked)
@@ -1434,16 +1280,9 @@ mod tests {
     #[tokio::test]
     async fn an_unpaired_device_is_told_to_pair() {
         let (mut db, hasher, _, _) = fixture().await;
-        let err = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            "dev_nothing",
-            NOW,
-        )
-        .await
-        .unwrap_err();
+        let err = login(&mut db, &hasher, PASSWORD.to_string(), "dev_nothing", NOW)
+            .await
+            .unwrap_err();
         assert!(matches!(err, LoginError::Refused(LoginFailure::NotPaired)));
     }
 
@@ -1464,21 +1303,14 @@ mod tests {
                 .unwrap()
                 .to_string()
         };
-        users::upgrade_password_hash(&mut db, &user.id, &weak_hash, NOW).unwrap();
+        account::upgrade_password_hash(&mut db, &user.id, &weak_hash, NOW).unwrap();
         assert!(password::needs_rehash(
             &db.password_hash_of(&user.id).unwrap().unwrap()
         ));
 
-        login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap();
+        login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap();
 
         let stored = db.password_hash_of(&user.id).unwrap().unwrap();
         assert!(
@@ -1487,16 +1319,9 @@ mod tests {
         );
         // And the upgrade did not break the password.
         assert!(
-            login(
-                &mut db,
-                &hasher,
-                "dewansh",
-                PASSWORD.to_string(),
-                &device.id,
-                NOW
-            )
-            .await
-            .is_ok()
+            login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+                .await
+                .is_ok()
         );
     }
 
@@ -1508,7 +1333,6 @@ mod tests {
         assert_eq!(AuthFailure::Revoked.code(), "session_revoked");
         assert_eq!(AuthFailure::ReplayedRefresh.code(), "session_revoked");
         assert_eq!(AuthFailure::DeviceRevoked.code(), "device_revoked");
-        assert_eq!(AuthFailure::UserDisabled.code(), "user_disabled");
         assert_eq!(
             LoginFailure::InvalidCredentials.code(),
             "invalid_credentials"
@@ -1526,17 +1350,10 @@ mod tests {
     #[tokio::test]
     async fn a_login_writes_a_trail_and_never_a_secret() {
         let (mut db, hasher, _, device) = fixture().await;
-        let _ = login(&mut db, &hasher, "dewansh", "wrong".into(), &device.id, NOW).await;
-        let issued = login(
-            &mut db,
-            &hasher,
-            "dewansh",
-            PASSWORD.to_string(),
-            &device.id,
-            NOW,
-        )
-        .await
-        .unwrap();
+        let _ = login(&mut db, &hasher, "wrong".into(), &device.id, NOW).await;
+        let issued = login(&mut db, &hasher, PASSWORD.to_string(), &device.id, NOW)
+            .await
+            .unwrap();
 
         let mut stmt = db
             .conn

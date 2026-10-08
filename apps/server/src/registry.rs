@@ -185,19 +185,6 @@ pub struct Registry {
     #[serde(default)]
     pub mcp_writable: bool,
 
-    /// Whether anyone holding a device credential may create an account (A13).
-    ///
-    /// **Defaults off**, the same direction as the MCP switches and the
-    /// opposite of the legacy token above — the risk here is exposure rather
-    /// than lockout. Turning it on composes with web bootstrap into "anyone
-    /// who can reach this server can make themselves an account", which is a
-    /// deliberate choice on a private network and never a default.
-    ///
-    /// Registered accounts are always members; the bootstrap owner is created
-    /// by `/v1/users/first` and cannot be minted here.
-    #[serde(default)]
-    pub allow_registration: bool,
-
     /// Relay URLs this server should try to register with (SRP v1 §4.4).
     ///
     /// Here for the same reasons the MCP switches are: it has to survive a
@@ -239,7 +226,6 @@ impl Default for Registry {
             mcp_writable: false,
             // Off. `#[derive(Default)]` would give the same answer, but this
             // Default is hand-written precisely so nobody has to check.
-            allow_registration: false,
             relays: Vec::new(),
             // Registered with nothing until a tunnel client says otherwise.
             registered_relays: RegisteredRelays::default(),
