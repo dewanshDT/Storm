@@ -807,8 +807,8 @@ real Wrote rows, real provenance, no client-side simulation.
 - [x] Slice 0 — tooling + baseline + harness
 - [x] Migration plan strengthened: invariants I1–I8, fixture, 15 tests (§3.3)
 - [x] Context-note retrieval and argv rule specified with verification (§7.2)
-- [ ] Slice 1 — single-user
-- [ ] Slice 2 — design-system additions
+- [x] Slice 1 — single-user
+- [x] Slice 2 — design-system additions
 - [ ] Slice 3 — shell + routing
 - [ ] Slice 4 — Notes
 - [ ] Slice 5 — server agent capabilities

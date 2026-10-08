@@ -49,6 +49,7 @@ PASSWORD = storm_auth.PASSWORD
 VIEWPORTS = {
     "desktop": dict(width=1280, height=800, deviceScaleFactor=2, mobile=False),
     "phone": dict(width=390, height=844, deviceScaleFactor=2, mobile=True),
+    "gallery": dict(width=1180, height=4600, deviceScaleFactor=1, mobile=False),
 }
 
 # Injected once per page: find Flutter semantics nodes by their accessible

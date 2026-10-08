@@ -145,6 +145,12 @@ class StormTokens extends ThemeExtension<StormTokens> {
   double get labelSize => math.max(minStep, fs / math.pow(scale, 2).toDouble());
   double get codeSize => fs / scale;
 
+  /// Page titles (Storm v2): 25 at the default 16 / 1.25.
+  double get titleSize => fs * scale * scale;
+
+  /// UI body and rows (Storm v2): about 14.3 at the default.
+  double get uiSize => fs / math.sqrt(scale);
+
   /// Chrome and display. Bundled, so it is identical on every platform.
   static const String sansFamily = 'IBMPlexSans';
 

@@ -138,7 +138,47 @@ class PopoverDivider extends StatelessWidget {
   }
 }
 
-/// Opens a [StormPopover] anchored under [anchorKey]'s widget.
+enum PopoverSide { below, right }
+
+typedef PopoverPosition = ({
+  double? top,
+  double? bottom,
+  double? left,
+  double? right,
+});
+
+/// Where a popover goes for [anchor] inside [overlay]. Below the anchor (or
+/// beside it, for the rail), flipped to grow upward when the anchor sits low:
+/// a menu dropped off the bottom edge reads as a button that does nothing.
+PopoverPosition placePopover({
+  required Rect anchor,
+  required Size overlay,
+  required double gap,
+  PopoverSide side = PopoverSide.below,
+  bool alignRight = false,
+}) {
+  switch (side) {
+    case PopoverSide.below:
+      final below = anchor.bottom + gap;
+      final flip = overlay.height - below < overlay.height * 0.3;
+      return (
+        top: flip ? null : below,
+        bottom: flip ? overlay.height - anchor.top + gap : null,
+        left: alignRight ? null : anchor.left,
+        right: alignRight ? overlay.width - anchor.right : null,
+      );
+    case PopoverSide.right:
+      final flip = overlay.height - anchor.top < overlay.height * 0.3;
+      return (
+        top: flip ? null : anchor.top,
+        bottom: flip ? overlay.height - anchor.bottom : null,
+        left: anchor.right + gap,
+        right: null,
+      );
+  }
+}
+
+/// Opens a [StormPopover] anchored to [anchorKey]'s widget.
 ///
 /// Uses a transparent full-screen route rather than `showMenu`, which brings
 /// Material's own menu geometry and cannot be given the popover's shape.
@@ -148,6 +188,7 @@ Future<T?> showStormPopover<T>({
   required double width,
   required Widget Function(BuildContext context) builder,
   bool alignRight = false,
+  PopoverSide side = PopoverSide.below,
 }) {
   final t = context.tokens;
   final box = anchorKey.currentContext?.findRenderObject() as RenderBox?;
@@ -156,18 +197,13 @@ Future<T?> showStormPopover<T>({
   if (box == null) return Future<T?>.value();
 
   final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
-  // Below the anchor, unless there is no room below it — an anchor near the
-  // foot of the window would otherwise drop its menu off the bottom edge,
-  // where it is indistinguishable from a button that does nothing.
-  final below = origin.dy + box.size.height + t.sp;
-  final roomBelow = overlay.size.height - below;
-  final flip = roomBelow < overlay.size.height * 0.3;
-  final top = flip ? null : below;
-  final bottom = flip ? overlay.size.height - origin.dy + t.sp : null;
-  final left = alignRight ? null : origin.dx;
-  final right = alignRight
-      ? overlay.size.width - (origin.dx + box.size.width)
-      : null;
+  final (:top, :bottom, :left, :right) = placePopover(
+    anchor: origin & box.size,
+    overlay: overlay.size,
+    gap: t.sp,
+    side: side,
+    alignRight: alignRight,
+  );
 
   return Navigator.of(context).push<T>(
     PageRouteBuilder<T>(

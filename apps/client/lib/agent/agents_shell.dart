@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../router.dart';
 import '../ui/breakpoints.dart';
+import '../ui/shell/sidebar_frame.dart';
 import '../ui/shell/space_switch.dart';
 import '../ui/tokens.dart';
 import 'agent_state.dart';
@@ -33,7 +34,6 @@ class AgentsShell extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const AgentsSidebar(),
-          const VerticalDivider(width: 1),
           Expanded(child: child),
         ],
       ),
@@ -66,65 +66,51 @@ class AgentsSidebar extends ConsumerWidget {
       }
     }
 
-    // `Material`, as the vault sidebar has it: the rows ink onto the nearest
-    // Material, and a coloured box here would swallow every ripple.
-    return Material(
-      color: t.bg,
-      child: SizedBox(
-        width: context.sidebarWidth,
-        child: SafeArea(
-          right: false,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SpaceSwitch(current: StormSpace.agents),
-              SizedBox(height: t.sp * 1.5),
-              Expanded(
-                child: AgentSessionList(
-                  dense: true,
-                  selected: onHosts ? null : active,
-                  onOpen: open,
-                  onLaunch: launch,
-                  onHosts: () => context.go(Routes.agentHosts),
-                ),
-              ),
-              Divider(height: t.bw, color: t.border),
-              Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: t.sp * 1.5,
-                  vertical: t.sp * 1.25,
-                ),
-                child: Row(
-                  children: [
-                    TextButton.icon(
-                      key: const Key('new-session'),
-                      onPressed: launch,
-                      icon: Icon(LucideIcons.plus, size: t.bodySize),
-                      label: const Text('New session'),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      key: const Key('open-hosts'),
-                      icon: Icon(
-                        LucideIcons.server,
-                        size: t.bodySize,
-                        color: onHosts ? t.accent : t.text3,
-                      ),
-                      tooltip: 'Hosts',
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: BoxConstraints.tight(
-                        Size.square(t.sp * 4.75),
-                      ),
-                      onPressed: onHosts
-                          ? null
-                          : () => context.go(Routes.agentHosts),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+    return SidebarFrame(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SpaceSwitch(current: StormSpace.agents),
+          SizedBox(height: t.sp * 1.5),
+          Expanded(
+            child: AgentSessionList(
+              dense: true,
+              selected: onHosts ? null : active,
+              onOpen: open,
+              onLaunch: launch,
+              onHosts: () => context.go(Routes.agentHosts),
+            ),
           ),
+        ],
+      ),
+      footer: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: t.sp * 1.5,
+          vertical: t.sp * 1.25,
+        ),
+        child: Row(
+          children: [
+            TextButton.icon(
+              key: const Key('new-session'),
+              onPressed: launch,
+              icon: Icon(LucideIcons.plus, size: t.bodySize),
+              label: const Text('New session'),
+            ),
+            const Spacer(),
+            IconButton(
+              key: const Key('open-hosts'),
+              icon: Icon(
+                LucideIcons.server,
+                size: t.bodySize,
+                color: onHosts ? t.accent : t.text3,
+              ),
+              tooltip: 'Hosts',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
+              onPressed: onHosts ? null : () => context.go(Routes.agentHosts),
+            ),
+          ],
         ),
       ),
     );

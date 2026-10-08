@@ -4,6 +4,7 @@ Routes use `{vault:<name>}` and `{note:<vault>/<path>}` placeholders, resolved
 against the fixture server at run time (ids are UUIDs minted at boot).
 
 - `current`: the app as it is before Storm v2, for the record (`baseline/`).
+- `design`: the `/gallery` route, all three presets side by side.
 - `v2`: the approved states, named exactly as the reference screenshots in
   `design_handoff_storm_v2/screenshots/`, filled in slice by slice.
 """
@@ -29,4 +30,8 @@ CURRENT = [
 
 V2 = []
 
-SETS = {"current": CURRENT, "v2": V2}
+DESIGN = [
+    dict(name="design-system/gallery", viewport="gallery", route="/gallery", settle=2.5),
+]
+
+SETS = {"current": CURRENT, "v2": V2, "design": DESIGN}
