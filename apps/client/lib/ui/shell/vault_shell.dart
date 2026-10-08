@@ -107,10 +107,7 @@ class _VaultShellState extends ConsumerState<VaultShell> {
                     body: Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (!collapsed) ...[
-                          const VaultSidebar(),
-                          const VerticalDivider(width: 1),
-                        ],
+                        if (!collapsed) ...[const VaultSidebar()],
                         Expanded(child: widget.child),
                       ],
                     ),

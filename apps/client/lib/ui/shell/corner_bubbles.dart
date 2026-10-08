@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/client_version.dart';
+import '../controls.dart';
 import '../widgets.dart';
 import '../surfaces.dart';
 import '../theme.dart';
@@ -344,7 +345,7 @@ class ClientSettingsBody extends ConsumerWidget {
             PopoverItem(
               label: 'Read mode',
               subtitle: 'Document view with a Read / Edit switch',
-              trailing: StormSwitch(
+              trailing: StormToggle(
                 key: const Key('setting-read-mode'),
                 value: settings.readMode,
                 onChanged: (v) => notifier.save(settings.copyWith(readMode: v)),
@@ -353,7 +354,7 @@ class ClientSettingsBody extends ConsumerWidget {
             PopoverItem(
               label: 'Show note id',
               subtitle: 'UUID in the properties strip',
-              trailing: StormSwitch(
+              trailing: StormToggle(
                 value: settings.showNoteId,
                 onChanged: (v) =>
                     notifier.save(settings.copyWith(showNoteId: v)),

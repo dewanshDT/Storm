@@ -9,6 +9,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../api/models.dart';
 
+import 'controls.dart';
 import 'widgets.dart';
 import 'tokens.dart';
 
@@ -32,6 +33,8 @@ class EmptyState extends StatelessWidget {
     this.action,
     this.onAction,
     this.fill = false,
+    this.steps,
+    this.currentStep = 0,
   });
 
   final IconData icon;
@@ -39,6 +42,8 @@ class EmptyState extends StatelessWidget {
   final String? detail;
   final String? action;
   final VoidCallback? onAction;
+  final List<NumberedStep>? steps;
+  final int currentStep;
 
   /// Centre in the space given, rather than sitting at the top of it.
   ///
@@ -80,6 +85,10 @@ class EmptyState extends StatelessWidget {
                 color: t.text3,
               ),
             ),
+          ],
+          if (steps != null) ...[
+            SizedBox(height: t.sp * 2.5),
+            NumberedSteps(steps: steps!, current: currentStep),
           ],
           if (action != null && onAction != null) ...[
             SizedBox(height: t.sp * 2),

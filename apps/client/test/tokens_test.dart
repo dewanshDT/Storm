@@ -203,9 +203,20 @@ void main() {
     test('the scale still grows in the right order', () {
       final t = StormTokens.from(StormPreset.stormDark);
       expect(t.labelSize, lessThan(t.codeSize));
-      expect(t.codeSize, lessThan(t.bodySize));
+      expect(t.codeSize, lessThan(t.uiSize));
+      expect(t.uiSize, lessThan(t.bodySize));
       expect(t.bodySize, lessThan(t.headingSize));
-      expect(t.headingSize, lessThan(t.displaySize));
+      expect(t.headingSize, lessThan(t.titleSize));
+      expect(t.titleSize, lessThan(t.displaySize));
+    });
+
+    test('the v2 steps are derived, and follow the text size', () {
+      final t = StormTokens.from(StormPreset.stormDark);
+      expect(t.titleSize, closeTo(25.0, 1e-9));
+      expect(t.uiSize, closeTo(14.31, 0.01));
+      final big = t.copyWith(fs: 20);
+      expect(big.titleSize, closeTo(t.titleSize * 20 / 16, 1e-9));
+      expect(big.uiSize, closeTo(t.uiSize * 20 / 16, 1e-9));
     });
   });
 

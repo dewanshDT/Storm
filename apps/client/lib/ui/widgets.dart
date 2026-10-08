@@ -336,63 +336,6 @@ class StormInput extends StatelessWidget {
   }
 }
 
-/// 34×20, so it sits inline at the end of a settings row. Material's own
-/// `Switch` is a 52×32 slab with a hover halo.
-class StormSwitch extends StatelessWidget {
-  const StormSwitch({
-    super.key,
-    required this.value,
-    required this.onChanged,
-    this.enabled = true,
-  });
-
-  final bool value;
-  final ValueChanged<bool>? onChanged;
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final height = t.sp * 2.5;
-    final width = height * 1.7;
-    final knob = height - t.sp * 0.5;
-    final live = enabled && onChanged != null;
-
-    return Opacity(
-      opacity: live ? 1 : 0.5,
-      child: GestureDetector(
-        onTap: live ? () => onChanged!(!value) : null,
-        child: AnimatedContainer(
-          duration: t.duration,
-          curve: Curves.easeOut,
-          width: width,
-          height: height,
-          decoration: BoxDecoration(
-            color: value ? t.accent : t.border,
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: AnimatedAlign(
-            duration: t.duration,
-            curve: Curves.easeOut,
-            alignment: value ? Alignment.centerRight : Alignment.centerLeft,
-            child: Padding(
-              padding: EdgeInsets.all(t.sp * 0.25),
-              child: Container(
-                width: knob,
-                height: knob,
-                decoration: const BoxDecoration(
-                  color: Color(0xFFFFFFFF),
-                  shape: BoxShape.circle,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// A rounded square at `rControl * 0.5`. Material's own is 18px of box inside
 /// 48px of tap target, which cannot sit in a property row.
 class StormCheckbox extends StatelessWidget {

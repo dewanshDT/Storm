@@ -15,6 +15,7 @@ import '../tokens.dart';
 import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
 import 'space_switch.dart';
+import 'sidebar_frame.dart';
 import 'vault_actions.dart';
 import 'vault_gate.dart';
 
@@ -48,94 +49,82 @@ class VaultSidebar extends ConsumerWidget {
     final accent =
         ref.watch(vaultAccentsProvider).value?[vaultId] ?? Accent.none;
 
-    // `Material`, not a coloured `Container`: ListTile paints its background
-    // and ink splashes onto the nearest Material ancestor, so a plain
-    // ColoredBox here would swallow every tap ripple in the tree.
-    return Material(
-      color: t.bg,
-      child: SizedBox(
-        width: context.sidebarWidth,
-        child: SafeArea(
-          right: false,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Notes | Agents, for the server's owner only (decision 78). It
-              // draws nothing for anyone else, so the rail is unchanged.
-              const SpaceSwitch(current: StormSpace.notes),
-              _VaultSwitcher(vault: vault, accent: accent),
-              Padding(
-                padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
-                child: _SearchField(vaultId: vaultId),
-              ),
-              Expanded(
-                child: notes.when(
-                  loading: () => Padding(
-                    padding: EdgeInsets.symmetric(horizontal: t.sp * 1.5),
-                    child: const SkeletonRows(),
-                  ),
-                  error: (e, _) => EmptyState(
-                    icon: LucideIcons.cloud_off,
-                    title: 'Could not list this vault',
-                    detail: describeFailure(e),
-                  ),
-                  data: (list) => Padding(
-                    padding: EdgeInsets.symmetric(horizontal: t.sp),
-                    child: FolderTree(notes: list, knownFolders: known),
-                  ),
-                ),
-              ),
-              Divider(height: t.bw, color: t.border),
-              // The same actions the floating pill carries on a phone, drawn
-              // from the same list so the two can never offer different
-              // things — minus the two the rail already *is*. The tree is the
-              // directory and the field above is search, so repeating them
-              // here would be two buttons that do what is already on screen.
-              Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: t.sp * 1.5,
-                  vertical: t.sp * 1.25,
-                ),
-                child: Row(
-                  spacing: t.sp * 0.25,
-                  children: [
-                    for (final action in vaultActions(
-                      context,
-                      ref,
-                      uri,
-                    ).where((a) => a.inSidebar))
-                      IconButton(
-                        icon: StormIcon(
-                          action.glyph,
-                          size: t.bodySize,
-                          color: action.selected ? t.accent : t.text3,
-                        ),
-                        iconSize: t.bodySize,
-                        tooltip: action.tooltip,
-                        visualDensity: VisualDensity.compact,
-                        // A 38px square, as the design draws it. At icon-plus-
-                        // six the row read as four glyphs dropped on a border
-                        // rather than as a toolbar.
-                        padding: EdgeInsets.zero,
-                        constraints: BoxConstraints.tight(
-                          Size.square(t.sp * 4.75),
-                        ),
-                        onPressed: action.onTap,
-                      ),
-                    // Last in the row, not pushed to the far edge: the design
-                    // groups all four at the left. This is the *appearance*
-                    // menu — theme, text size, note font — which lives on the
-                    // top-right corner bubble on a phone, and the corners are
-                    // empty at this width. Server settings are in the vault
-                    // switcher, next to the vault they configure.
-                    const _SettingsButton(),
-                  ],
-                ),
-              ),
-            ],
+    return SidebarFrame(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Notes | Agents, for the server's owner only (decision 78). It
+          // draws nothing for anyone else, so the rail is unchanged.
+          const SpaceSwitch(current: StormSpace.notes),
+          _VaultSwitcher(vault: vault, accent: accent),
+          Padding(
+            padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
+            child: _SearchField(vaultId: vaultId),
           ),
-        ),
+          Expanded(
+            child: notes.when(
+              loading: () => Padding(
+                padding: EdgeInsets.symmetric(horizontal: t.sp * 1.5),
+                child: const SkeletonRows(),
+              ),
+              error: (e, _) => EmptyState(
+                icon: LucideIcons.cloud_off,
+                title: 'Could not list this vault',
+                detail: describeFailure(e),
+              ),
+              data: (list) => Padding(
+                padding: EdgeInsets.symmetric(horizontal: t.sp),
+                child: FolderTree(notes: list, knownFolders: known),
+              ),
+            ),
+          ),
+        ],
       ),
+      footer:
+          // The same actions the floating pill carries on a phone, drawn
+          // from the same list so the two can never offer different
+          // things — minus the two the rail already *is*. The tree is the
+          // directory and the field above is search, so repeating them
+          // here would be two buttons that do what is already on screen.
+          Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 1.5,
+              vertical: t.sp * 1.25,
+            ),
+            child: Row(
+              spacing: t.sp * 0.25,
+              children: [
+                for (final action in vaultActions(
+                  context,
+                  ref,
+                  uri,
+                ).where((a) => a.inSidebar))
+                  IconButton(
+                    icon: StormIcon(
+                      action.glyph,
+                      size: t.bodySize,
+                      color: action.selected ? t.accent : t.text3,
+                    ),
+                    iconSize: t.bodySize,
+                    tooltip: action.tooltip,
+                    visualDensity: VisualDensity.compact,
+                    // A 38px square, as the design draws it. At icon-plus-
+                    // six the row read as four glyphs dropped on a border
+                    // rather than as a toolbar.
+                    padding: EdgeInsets.zero,
+                    constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
+                    onPressed: action.onTap,
+                  ),
+                // Last in the row, not pushed to the far edge: the design
+                // groups all four at the left. This is the *appearance*
+                // menu — theme, text size, note font — which lives on the
+                // top-right corner bubble on a phone, and the corners are
+                // empty at this width. Server settings are in the vault
+                // switcher, next to the vault they configure.
+                const _SettingsButton(),
+              ],
+            ),
+          ),
     );
   }
 }
