@@ -180,6 +180,9 @@ def dscl(kind, name, *keys):
         return None
     rec, key = {}, None
     for line in out.splitlines():
+        # Attributes outside the standard set print as
+        # "dsAttrTypeNative:IsHidden: 1"; key them by their own name.
+        line = re.sub(r"^dsAttrType(?:Native|Standard):", "", line)
         if re.match(r"^\S[^:]*:", line):
             key, _, value = line.partition(":")
             rec[key] = value.strip()
@@ -785,6 +788,10 @@ def main():
         if os.path.exists(PLIST) or dscl("Users", ACCOUNT):
             if os.path.isdir(ARTIFACTS):
                 sh(["sh", "-c", f"cp '{LOG}' '{ARTIFACTS}/storm-runtime.log' && chmod 644 '{ARTIFACTS}/storm-runtime.log'"], sudo=True)
+                # launchd's own view: state, runs, last exit code or signal.
+                sh(["sh", "-c", f"launchctl print system/{LABEL} > '{ARTIFACTS}/launchctl-print.txt' 2>&1; "
+                    f"log show --last 15m --style compact --predicate 'process == \"launchd\" AND eventMessage CONTAINS \"{LABEL}\"' "
+                    f"> '{ARTIFACTS}/launchd-log.txt' 2>&1; chmod 644 '{ARTIFACTS}'/*.txt"], sudo=True)
             for b in (BIN, RUNTIME_BIN):
                 if sh([b, "uninstall", "--purge"], sudo=True)[0] == 0:
                     break
