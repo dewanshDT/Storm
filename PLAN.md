@@ -4293,6 +4293,34 @@ fix mutation-checked; the v2 set re-shot from both builds, differing only in
 the compatibility row and health dot; the real Claude Code smoke re-run on
 `15bb470`, scrollback clean after End.
 
+**UI polish (2026-10-08; `fix/v2-ui-polish`, stacked on the real-run
+fixes):** the operator's layout pass after testing the whole stack on the LAN
+staging, client only, no change to IA, server or agent architecture. **Session
+workspace (desk):** the header (name, status, meta, End) spans the terminal
+and the inspector; the terminal fills its column at a 10 px inset; Context /
+Wrote / About became a **Details inspector** that works like Properties —
+opens by default from 1200 px, toggled from the header and closed from inside,
+320 px, its left edge drags it between 260 and 500 while the terminal keeps
+360 — instead of a permanent column at 10/21 of the width. Its open state and
+width are in-memory providers, not persisted, as Properties and the sidebar
+are (the codebase's rule for chrome). The header's actions now sit at the far
+edge (a `Flexible` name and a `Spacer` had split the free space). **Phone
+session:** a 10 px terminal inset, and the extra keys are a keyboard accessory
+shown only while `viewInsets.bottom > 0` (animated in and out; the terminal
+takes the room back). **Notes:** the editor surface fills the space between
+sidebar and Properties — the header row spans it — and `kEditorMeasure` is
+900 (was 640), applied to the prose column only (operator's choice among
+three). **Rail foot:** the health dot and Settings share one 40 px square on
+the rail axis, 8 apart and 8 from the bottom. **End confirmation:** a compact
+banner — bold "End {name}", the message, Cancel and End session on one row
+from 560 px of banner, wrapped below; 16 / 12 padding. Tests: client 941 (was
+926), `ui_polish_test` and `inline_confirm_test` new, three tests' contracts
+changed (the extra keys are absent with the keyboard down; the end prompt is a
+title and a message); each new assertion mutation-checked. **Open, not in this
+slice:** the login hangs after a correct password in Zen (Firefox engine) on
+the operator's profile — the server signs in, Chrome works, headless Zen
+does not reproduce; logged in the vault (*Storm v2/Issue — Zen login hang*).
+
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
 
