@@ -167,6 +167,35 @@ pub fn plist(layout: &Layout, account: &str) -> String {
     out
 }
 
+/// The `safe.directory` value that lets git work in every workspace,
+/// whichever account created the checkout. Git refuses a repository owned
+/// by another uid ("dubious ownership") and ignores ACLs, so without it the
+/// agent cannot use a checkout the operator made, nor the operator one the
+/// agent made (AM39's shared root).
+pub fn git_safe_directory(layout: &Layout) -> String {
+    format!("{}/*", layout.workspaces.display())
+}
+
+/// `gitconfig` with [`git_safe_directory`] added, or `None` when it is
+/// already there. Appended as its own `[safe]` section, so the rest of the
+/// file is left exactly as it was.
+pub fn with_git_safe_directory(gitconfig: &str, layout: &Layout) -> Option<String> {
+    let value = git_safe_directory(layout);
+    let present = gitconfig.lines().any(|l| {
+        l.split_once('=')
+            .is_some_and(|(k, v)| k.trim() == "directory" && v.trim() == value)
+    });
+    if present {
+        return None;
+    }
+    let mut out = gitconfig.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("[safe]\n\tdirectory = {value}\n"));
+    Some(out)
+}
+
 /// The `runtime.toml` `install` writes when there is none (AM33, AM39). The
 /// operator's afterwards: `install` never overwrites it.
 pub fn default_config(layout: &Layout) -> String {
@@ -207,6 +236,25 @@ mod tests {
             .find(&format!("<key>{key}</key>"))
             .unwrap_or_else(|| panic!("no {key}"));
         plist[at..].lines().nth(1).unwrap().trim()
+    }
+
+    #[test]
+    fn git_trusts_the_workspace_root_once_and_leaves_the_rest_alone() {
+        let l = Layout::standard();
+        let fresh = with_git_safe_directory("", &l).unwrap();
+        assert_eq!(
+            fresh,
+            "[safe]\n\tdirectory = /Library/StormRuntime/workspaces/*\n"
+        );
+        assert_eq!(with_git_safe_directory(&fresh, &l), None, "added twice");
+        let mine = "[user]\n\tname = Agent";
+        let merged = with_git_safe_directory(mine, &l).unwrap();
+        assert!(
+            merged.starts_with("[user]\n\tname = Agent\n[safe]\n"),
+            "{merged}"
+        );
+        // A different directory is not this one.
+        assert!(with_git_safe_directory("[safe]\n\tdirectory = /elsewhere/*\n", &l).is_some());
     }
 
     #[test]

@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use super::launchd::{LABEL, Layout, NO_LOGIN_SHELL, default_config, plist};
+use super::launchd::{
+    LABEL, Layout, NO_LOGIN_SHELL, default_config, git_safe_directory, plist,
+    with_git_safe_directory,
+};
 use super::{InstallOptions, SERVICE_ACCOUNT, UninstallOptions};
 
 const DSCL: &str = "/usr/bin/dscl";
@@ -281,6 +284,13 @@ pub fn install(options: &InstallOptions) -> Result<()> {
         grant(&layout.workspaces, op)?;
     }
     dir(&layout.logs, uid, ADMIN_GID, 0o750)?;
+    // Git ignores ACLs: let the account's git work in checkouts the operator
+    // made (the operator's own git config is theirs; install prints the line).
+    let gitconfig = layout.home.join(".gitconfig");
+    let current = std::fs::read_to_string(&gitconfig).unwrap_or_default();
+    if let Some(updated) = with_git_safe_directory(&current, &layout) {
+        write_file(&gitconfig, updated.as_bytes(), uid, gid, 0o644)?;
+    }
 
     install_binary(&layout)?;
     if !layout.config.exists() {
@@ -328,6 +338,12 @@ pub fn install(options: &InstallOptions) -> Result<()> {
     }
     println!("\nLog the agent CLIs in as the host's account, once:");
     println!("  cd / && sudo -u {SERVICE_ACCOUNT} -H claude");
+    println!("\nGit refuses a checkout another account owns. To use the host's checkouts");
+    println!("with your own git (the host's account already trusts yours):");
+    println!(
+        "  git config --global --add safe.directory '{}'",
+        git_safe_directory(&layout)
+    );
     Ok(())
 }
 
