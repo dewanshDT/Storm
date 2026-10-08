@@ -59,7 +59,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
-| M23 | macOS Runtime Hosts — the same host, on launchd | **in progress** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven slices built and stacked on `feat/runtime-macos-1…7-*` (83–83g) · Linux: runtime suite + `agent_e2e.py` 85/85 · macOS: cross-checked with clippy only · **real-Mac acceptance (AC-M1–M9) not yet run**: `apps/runtime/tests/macos_acceptance.py`, CI `macos-acceptance.yml` |
+| M23 | macOS Runtime Hosts — the same host, on launchd | **in progress** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83h), CI green on all seven · **real-Mac acceptance on `macos-latest`: 97 passed, 0 failed, 5 manual** (83h) · left: the manual rows on the operator's Mac (real Claude Code / OpenCode prompt, Mac → phone, reboot, Full Disk Access inspection) |
 
 **Release state (2026-10-08).** **v0.4.0 is being cut** (decision 72's
 steps; this paragraph is the prep PR's), at the operator's request after the
@@ -4690,6 +4690,53 @@ pushes and on dispatch.
 - the harness compiles, and its parsers pass against sample macOS output.
 
 **Not yet run on a Mac.**
+
+**83h. Real-Mac acceptance: four defects only a Mac could show, and 97 of
+97 automated checks.** *(2026-10-08)*
+
+`macos_acceptance.py` ran on GitHub's `macos-latest` (dispatch on
+`acceptance/macos-runtime`), and the stack's `runtime (rust, macOS)` job ran
+the suite there. Three rounds:
+- **Round 1 (PRs as first pushed):**
+  - **Install passed in full (AC-M1).** The account, modes, owners, ACLs, the
+    plist, and launchd loaded but not running before enrollment.
+  - **The host never came up after enrolling:** an empty log and
+    `spawn scheduled`.
+  - **The suite's input-deadline test hung.**
+- **Fixes:**
+  1. **The sweep killed the host** (83d). On macOS a POSIX `kill(-1)`
+     includes the caller. The sweep now lists the account's processes.
+  2. **The PTY write still blocked** (83, slice 1). xnu reports a master
+     writable with room for one byte. The chunk is now 1 byte on macOS.
+  3. **The harness misread `dscl`'s `dsAttrTypeNative:IsHidden`.** It also
+     keeps `launchctl print` and launchd's log lines on failure now.
+- **Round 2: 96 passed, 1 failed, 5 manual.**
+  - `launchctl print` still found the job right after `uninstall --purge`,
+    because `bootout` returns early. `uninstall` now waits, up to 20 s, until
+    launchd has let the job go.
+  - The suite on slice 2 showed a macOS-only race in
+    `stopping_ends_everything_the_session_spawned`. **BSD revokes a
+    session's terminal when its leader exits**, so the master saw
+    end-of-file while a HUP-ignoring job lived. The session reported
+    `ended`, and the grace's SIGKILL was skipped.
+    - **Fixed by 83d:** a session ends only once it is empty.
+    - **On slices 1–3** the test is marked ignored on macOS, with that
+      reason. Slice 4 turns it back on.
+- **Round 3: 97 passed, 0 failed, 5 manual.**
+  - **MANUAL**, which a runner cannot do:
+    - Claude Code and OpenCode logged in and taking a prompt;
+    - the Mac → phone handoff;
+    - a reboot;
+    - the Full Disk Access inspection.
+  - **AC-M9** (Linux unchanged) is the Linux CI and `agent_e2e.py` (85/85).
+  - **CI is green on all seven PRs.**
+
+**What still needs the operator's Mac:**
+- **The four MANUAL rows**, ideally with the real Claude Code login as
+  `_stormruntime`. Claude Code on macOS may keep its login in a Keychain
+  the daemon account has no session for. The documented fallback is
+  `claude setup-token` into a `0600` `env_file`.
+- **An Intel Mac:** the universal binary includes x86_64, untested.
 
 ---
 
