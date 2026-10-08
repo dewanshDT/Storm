@@ -55,3 +55,46 @@ jobs:
           path: ${{ runner.temp }}/macos-acceptance
           if-no-files-found: ignore
           retention-days: 14
+
+  # The binary an operator installs for the manual rows (a real CLI login, the
+  # Mac → phone handoff, a reboot): built exactly as release.yml's
+  # runtime-macos job builds it, from this commit, stamped with it.
+  test-build:
+    name: macOS test build (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - name: Stamp a pre-release version from the commit
+        working-directory: apps/runtime
+        run: |
+          VERSION="0.4.0-macos.$(git rev-parse --short=7 HEAD)"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          rm Cargo.toml.bak
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Build, join and sign
+        working-directory: apps/runtime
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/storm-runtime \
+            target/x86_64-apple-darwin/release/storm-runtime \
+            -output dist/storm-runtime
+          codesign --force --sign - dist/storm-runtime
+          codesign --verify --verbose dist/storm-runtime
+          lipo -info dist/storm-runtime
+          dist/storm-runtime --version
+          cp ../../LICENSE dist/
+          shasum -a 256 dist/storm-runtime | tee dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: storm-runtime-macos-test
+          path: apps/runtime/dist/*
+          retention-days: 30
