@@ -156,3 +156,6 @@ jobs:
       - run: npm run build
       # A green build says the site compiles, not that it is true.
       - run: ./scripts/check-claims.sh
+      # The Homebrew formula (the repo is the tap) names the same release as
+      # the site, or every Mac installs the previous one (decision 83).
+      - run: ../../tools/formula-check.sh

@@ -216,6 +216,80 @@ jobs:
           name: runtime
           path: apps/runtime/dist/*
 
+  # The same Runtime Host for macOS (decision 83, AM41): a universal binary
+  # (arm64 + x86_64), ad-hoc signed like the app, in a tarball. It installs
+  # itself as a LaunchDaemon (`sudo storm-runtime install`); Homebrew users get
+  # the same binary built from this tag by Formula/storm-runtime.rb.
+  runtime-macos:
+    name: runtime (macOS universal)
+    needs: check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - name: Stamp Cargo version from tag
+        working-directory: apps/runtime
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # BSD sed: -i needs a suffix argument; .bak works on both seds.
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          rm Cargo.toml.bak
+          grep '^version' Cargo.toml
+      - name: Build universal binary
+        working-directory: apps/runtime
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist/pkg
+          lipo -create \
+            target/aarch64-apple-darwin/release/storm-runtime \
+            target/x86_64-apple-darwin/release/storm-runtime \
+            -output dist/pkg/storm-runtime
+          lipo -info dist/pkg/storm-runtime
+          # Ad-hoc, not notarized (AM41): a downloaded copy is quarantined.
+          codesign --force --sign - dist/pkg/storm-runtime
+          codesign --verify --verbose dist/pkg/storm-runtime
+          dist/pkg/storm-runtime --version
+      - name: Package tarball
+        working-directory: apps/runtime
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp ../../LICENSE dist/pkg/
+          cat > dist/pkg/README-macos.txt <<EOF
+          Storm Runtime Host ${GITHUB_REF_NAME} for macOS (universal: arm64 + x86_64)
+
+          Ad-hoc signed and not notarized. If Gatekeeper refuses it:
+            xattr -d com.apple.quarantine ./storm-runtime
+
+          Install it as a LaunchDaemon running as the _stormruntime account:
+            sudo ./storm-runtime install
+
+          In the Storm app: Settings > Agents > Hosts > Enroll a host, then paste
+          the string here (it is read from the prompt, never an argument):
+            sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
+
+          launchd starts the host by itself once it is enrolled. Workspaces are the
+          directories under /Library/StormRuntime/workspaces.
+
+          Upgrade: run the new binary's install again.
+          Remove: sudo /Library/StormRuntime/bin/storm-runtime uninstall
+          Full guide: deploy/README.md, "Runtime Hosts" > "macOS".
+          EOF
+          tar -C dist/pkg -czf "dist/storm-runtime-${VERSION}-macos-universal.tar.gz" \
+            storm-runtime LICENSE README-macos.txt
+          rm -rf dist/pkg
+          ls -la dist/
+      - name: Upload macOS runtime artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-macos
+          path: apps/runtime/dist/*
+
   android:
     name: android (apk)
     needs: check
@@ -316,7 +390,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, relay, runtime, android, macos, web]
+    needs: [server, relay, runtime, runtime-macos, android, macos, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -358,6 +432,14 @@ jobs:
           **Runtime Host (optional):** \`storm-runtime_${VERSION}-1_amd64.deb\`
           runs agent sessions for a server, on the server's machine or another.
           Setup is in \`deploy/README.md\` under "Runtime Hosts".
+
+          **Runtime Host for macOS (optional):**
+          \`storm-runtime-${VERSION}-macos-universal.tar.gz\` (arm64 + x86_64) runs
+          the same host as a LaunchDaemon under its own \`_stormruntime\` account:
+          \`sudo ./storm-runtime install\`, then enroll. Or with Homebrew:
+          \`brew tap dewanshdt/storm https://github.com/dewanshDT/Storm\` and
+          \`brew install storm-runtime\`. Ad-hoc signed and not notarized, like
+          the app. Setup is in \`deploy/README.md\` under "Runtime Hosts" > "macOS".
 
           **macOS:** the zip is ad-hoc signed and not notarized. Gatekeeper will
           quarantine a downloaded copy (arm64 only on \`macos-latest\`).

@@ -375,6 +375,10 @@ www-dev:
 www-check:
 	$(WWW)/scripts/check-claims.sh
 
+## formula-check: Formula/storm-runtime.rb builds the tag release.ts names (decision 83)
+formula-check:
+	tools/formula-check.sh
+
 ## clean: remove build output and local dev data
 clean:
 	cd $(SERVER) && cargo clean
@@ -383,6 +387,6 @@ clean:
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-client test-live test-migration test-gateway-mutations fmt \
-        dry-run server client web serve-web www www-dev www-check codegen clean \
+        dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
         deploy-web deploy-web-check \
         build-server deploy deploy-check
