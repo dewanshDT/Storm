@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../state/health.dart' show relativeTime;
 import '../ui/clipboard_copy.dart';
+import '../ui/controls.dart';
+import '../ui/settings/settings_widgets.dart';
 import '../ui/states.dart';
-import '../ui/settings/settings_shell.dart' show settingsLeading;
 import '../ui/tokens.dart';
 import 'agent_api.dart';
 import 'agent_models.dart';
@@ -127,68 +129,60 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final hosts = _hosts;
-    return Scaffold(
-      appBar: AppBar(
-        leading: settingsLeading(context),
-        automaticallyImplyLeading: false,
-        title: const Text('Hosts'),
-        actions: [
-          IconButton(
-            tooltip: 'Refresh',
-            onPressed: _loading ? null : _load,
-            icon: const Icon(LucideIcons.refresh_cw, size: 18),
+    return SettingsPage(
+      title: 'Hosts & default agent',
+      intro: 'The machines agents run on.',
+      children: [
+        if (_error != null) SettingsMuted(_error!, danger: true),
+        if (_loading && hosts == null)
+          const SkeletonRows(rows: 2)
+        else if (hosts != null && hosts.isEmpty)
+          const SettingsMuted('No hosts enrolled yet.')
+        else
+          for (final host in hosts ?? <AgentHost>[])
+            _HostTile(
+              host: host,
+              onRename: () => _rename(host),
+              onRevoke: () => _revoke(host),
+            ),
+        SettingsButtonRow(
+          child: StormButton.primary(
+            key: const Key('enroll-host'),
+            label: '＋ Enroll a host',
+            onPressed: _loading ? null : _enroll,
+          ),
+        ),
+        SizedBox(height: t.sp * 0.75),
+        Text.rich(
+          TextSpan(
+            children: [
+              const TextSpan(text: 'Enrolling shows a one-time string. Run '),
+              TextSpan(
+                text: 'storm-runtime enroll',
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  color: t.text2,
+                ),
+              ),
+              const TextSpan(text: ' on the machine and paste it.'),
+            ],
+          ),
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: t.labelSize * 1.09,
+            color: t.text3,
+            height: 1.5,
+          ),
+        ),
+        if (_defaultProvider != null) ...[
+          GroupLabel('Default agent', top: t.sp * 3, bottom: t.sp),
+          _DefaultProvider(
+            current: _defaultProvider!,
+            hosts: hosts ?? const [],
+            onChanged: _setDefault,
           ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        key: const Key('enroll-host'),
-        onPressed: _loading ? null : _enroll,
-        icon: const Icon(LucideIcons.plus),
-        label: const Text('Enroll a host'),
-      ),
-      body: RefreshIndicator(
-        onRefresh: _load,
-        child: ListView(
-          padding: EdgeInsets.all(t.sp * 2),
-          children: [
-            Text(
-              'A host is a machine that runs agents for this server, under its '
-              'own account. Agents work on its files, not on your vaults.',
-              style: TextStyle(fontSize: t.labelSize, color: t.text3),
-            ),
-            SizedBox(height: t.sp * 2),
-            if (_error != null) ...[
-              Text(_error!, style: TextStyle(color: t.danger)),
-              SizedBox(height: t.sp * 2),
-            ],
-            if (_defaultProvider != null && (hosts?.isNotEmpty ?? false))
-              _DefaultProvider(
-                current: _defaultProvider!,
-                hosts: hosts!,
-                onChanged: _setDefault,
-              ),
-            SizedBox(height: t.sp * 2),
-            if (_loading && hosts == null)
-              const SkeletonRows(rows: 3)
-            else if (hosts != null && hosts.isEmpty)
-              EmptyState(
-                icon: LucideIcons.server,
-                title: 'No hosts yet',
-                detail:
-                    'Install storm-runtime on a machine, then enroll it here.',
-                action: 'Enroll a host',
-                onAction: _enroll,
-              )
-            else
-              for (final host in hosts ?? <AgentHost>[])
-                _HostTile(
-                  host: host,
-                  onRename: () => _rename(host),
-                  onRevoke: () => _revoke(host),
-                ),
-          ],
-        ),
-      ),
+      ],
     );
   }
 }
@@ -206,7 +200,6 @@ class _DefaultProvider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
     final ids = <String>{
       'claude-code',
       'opencode',
@@ -214,24 +207,11 @@ class _DefaultProvider extends StatelessWidget {
       for (final h in hosts) ...h.providers.map((p) => p.id),
       current,
     }.toList();
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            'Default provider',
-            style: TextStyle(fontWeight: FontWeight.w600, color: t.text),
-          ),
-        ),
-        DropdownButton<String>(
-          key: const Key('default-provider'),
-          value: current,
-          onChanged: (v) => v == null ? null : onChanged(v),
-          items: [
-            for (final id in ids)
-              DropdownMenuItem(value: id, child: Text(providerLabel(id))),
-          ],
-        ),
-      ],
+    return ChoiceChips<String>(
+      key: const Key('default-provider'),
+      options: [for (final id in ids) ChoiceOption(id, providerLabel(id))],
+      selected: current,
+      onSelected: onChanged,
     );
   }
 }
@@ -251,94 +231,54 @@ class _HostTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final revoked = host.status == 'revoked';
-    final providers = host.providers.isEmpty
-        ? 'Providers appear once it connects'
+    final seen = DateTime.tryParse(host.lastSeen ?? '');
+    final state = host.online
+        ? 'online now'
+        : revoked
+        ? 'revoked'
+        : seen == null
+        ? 'offline'
+        : 'offline · last seen ${relativeTime(seen)}';
+    final agents = host.providers.isEmpty
+        ? 'agents appear once it connects'
         : host.providers
               .map((p) => p.available ? p.label : '${p.label} (not installed)')
               .join(', ');
+    // Freeze §12.2: V1 has no egress policy of its own, and says so.
     return Opacity(
       opacity: revoked ? 0.55 : 1,
-      child: Container(
-        margin: EdgeInsets.only(bottom: t.sp),
-        padding: EdgeInsets.all(t.sp * 1.5),
-        decoration: BoxDecoration(
-          color: t.surface,
-          border: Border.all(color: t.border, width: t.bw),
-          borderRadius: BorderRadius.circular(t.rCard),
+      child: SettingsRow(
+        key: Key('host-${host.id}'),
+        leading: Container(
+          width: t.sp,
+          height: t.sp,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: host.online ? t.green : t.text3,
+          ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    host.name,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+        label: host.name,
+        sub: '$state · $agents · network: host policy',
+        monoSub: true,
+        trailing: revoked
+            ? null
+            : RowActions(
+                children: [
+                  TextAction(
+                    key: Key('rename-host-${host.id}'),
+                    label: 'Rename',
+                    onTap: onRename,
                   ),
-                ),
-                StatusChip(
-                  label: switch (host.status) {
-                    'online' => 'Online',
-                    'revoked' => 'Revoked',
-                    _ => 'Offline',
-                  },
-                  tone: host.online ? ChipTone.good : ChipTone.muted,
-                ),
-                // Rename and revoke are rare, and revoke is destructive: a
-                // menu, not two equal buttons on every card.
-                if (!revoked)
-                  PopupMenuButton<String>(
-                    key: Key('host-menu-${host.id}'),
-                    tooltip: 'Host actions',
-                    icon: const Icon(LucideIcons.ellipsis_vertical, size: 18),
-                    onSelected: (v) => v == 'rename' ? onRename() : onRevoke(),
-                    itemBuilder: (_) => [
-                      const PopupMenuItem(
-                        value: 'rename',
-                        child: Text('Rename'),
-                      ),
-                      PopupMenuItem(
-                        value: 'revoke',
-                        child: Text(
-                          'Revoke',
-                          style: TextStyle(color: t.danger),
-                        ),
-                      ),
-                    ],
+                  TextAction(
+                    key: Key('revoke-host-${host.id}'),
+                    label: 'Revoke',
+                    onTap: onRevoke,
                   ),
-              ],
-            ),
-            SizedBox(height: t.sp * 0.5),
-            Text(
-              host.online || host.lastSeen == null
-                  ? providers
-                  : '$providers. Last seen ${_when(host.lastSeen!)}.',
-              style: TextStyle(fontSize: t.labelSize, color: t.text2),
-            ),
-            SizedBox(height: t.sp * 0.25),
-            // Freeze §12.2: V1 has no egress policy of its own, and says so.
-            Text(
-              "Network: inherits this host's policy",
-              style: TextStyle(fontSize: t.labelSize, color: t.text3),
-            ),
-          ],
-        ),
+                ],
+              ),
       ),
     );
   }
-}
-
-/// A timestamp as a person reads it: the time today, the date otherwise.
-String _when(String iso) {
-  final at = DateTime.tryParse(iso)?.toLocal();
-  if (at == null) return iso;
-  final now = DateTime.now();
-  final hm =
-      '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
-  return at.year == now.year && at.month == now.month && at.day == now.day
-      ? 'at $hm'
-      : 'on ${at.year}-${at.month.toString().padLeft(2, '0')}-${at.day.toString().padLeft(2, '0')}';
 }
 
 enum ChipTone { good, warn, bad, muted }

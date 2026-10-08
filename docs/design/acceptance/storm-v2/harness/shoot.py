@@ -297,12 +297,17 @@ class Harness:
     # ---- shots --------------------------------------------------------
 
     def shoot(self, shot):
+        switched = getattr(self, "current_viewport", None) != shot["viewport"]
         self.viewport(shot["viewport"])
-        if shot.get("fresh"):
-            # A new page load: nothing left open by the shot before.
+        if switched or shot.get("fresh"):
+            # A fresh load at the new size, as a device would be (flipping a
+            # live page between desktop and phone sometimes stalled Chromium),
+            # or with nothing left open by the shot before.
             self.page.call("Page.navigate", url=BASE + self.route(shot["route"]))
             self.wait_app()
-            self.settle()
+            wait_for(lambda: self.location() not in ("/starting", "/login"), 30,
+                     "the app after reload")
+            self.settle(1.5)
         self.go(self.route(shot["route"]))
         for action in shot.get("actions", []):
             kind, arg = action
@@ -312,6 +317,16 @@ class Harness:
                 self.go(self.route(arg))
             elif kind == "wait":
                 time.sleep(arg)
+            elif kind == "api":
+                # Seeds real server state (a key, a relay) through its API.
+                method, path, body = arg
+                status, _ = storm_auth._call(BASE, method, self.route(path), body=body,
+                                             auth=self.session)
+                if status >= 300:
+                    raise RuntimeError(f"seeding {method} {path} answered {status}")
+        if not any(kind == "tap" for kind, _ in shot.get("actions", [])):
+            # Park the pointer in a corner so no row is captured mid-hover.
+            self.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=1, y=1)
         self.settle(shot.get("settle", 1.5))
         png = self.page.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
         path = os.path.join(self.out, shot["name"] + ".png")

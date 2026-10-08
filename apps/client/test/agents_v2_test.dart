@@ -386,6 +386,26 @@ void main() {
     await disposeShell(tester, c);
   });
 
+  testWidgets('Start session on a note launches with it as context', (
+    tester,
+  ) async {
+    final agents = FakeAgentServer(hosts: [agentHost()]);
+    final c = await open(tester, agents, at: Routes.note(primary, 'n3'));
+    await tester.tap(find.byKey(const Key('start-session')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('launcher-context')), findsOneWidget);
+    expect(inField('launcher-write-vault', 'Primary'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('launch')));
+    await tester.pumpAndSettle();
+    expect(agents.launches.single['context'], {
+      'vault_id': primary,
+      'note_id': 'n3',
+    });
+    expect(where(c).path, startsWith('/agents/s/'));
+    expect(where(c).queryParameters['tab'], 'context');
+    await disposeShell(tester, c);
+  });
+
   group('the launcher (handoff §3.5)', () {
     Future<void> launchFrom(
       WidgetTester tester, {

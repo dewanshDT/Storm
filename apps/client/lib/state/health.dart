@@ -8,6 +8,7 @@ import '../agent/integrations_api.dart';
 import '../agent/integrations_screen.dart' show integrationsApiFactoryProvider;
 import '../ui/widgets.dart' show DotStatus, dotStatusFor;
 import 'app_state.dart';
+import 'client_version.dart';
 
 String relativeTime(DateTime? then) {
   if (then == null) return 'not yet';
@@ -73,6 +74,35 @@ String syncLine(DotStatus status, int pending, DateTime? lastSynced) =>
       DotStatus.untrusted => 'Server identity failed · not syncing',
     };
 
+/// `0.4.0+12` → `(0, 4)`; null when it does not start with two numbers.
+(int, int)? _majorMinor(String version) {
+  final m = RegExp(r'^v?(\d+)\.(\d+)').firstMatch(version.trim());
+  if (m == null) return null;
+  return (int.parse(m.group(1)!), int.parse(m.group(2)!));
+}
+
+/// Compatible means the same major.minor (plan §5.1).
+bool versionsCompatible(String client, String server) {
+  final a = _majorMinor(client);
+  return a != null && a == _majorMinor(server);
+}
+
+/// Only once the server reports its version; an older one says nothing.
+final compatibilityRowProvider = Provider.autoDispose<HealthRow?>((ref) {
+  final server = ref.watch(serverConfigProvider).value?.version;
+  final client = ref.watch(clientVersionProvider).value;
+  if (server == null || client == null) return null;
+  return versionsCompatible(client, server)
+      ? const HealthRow(
+          HealthTone.muted,
+          'This client and the server are compatible',
+        )
+      : const HealthRow(
+          HealthTone.danger,
+          'This client and the server may not be compatible',
+        );
+});
+
 /// The health rows the rail dot, its popover and About & health share.
 final healthRowsProvider = Provider.autoDispose<List<HealthRow>>((ref) {
   final engine = ref.watch(syncEngineProvider);
@@ -124,6 +154,8 @@ final healthRowsProvider = Provider.autoDispose<List<HealthRow>>((ref) {
       );
     }
   }
+  final compatibility = ref.watch(compatibilityRowProvider);
+  if (compatibility != null) rows.add(compatibility);
   return rows;
 });
 
@@ -132,4 +164,11 @@ final healthToneProvider = Provider.autoDispose<HealthTone>(
   (ref) => ref.watch(healthRowsProvider).any((r) => r.tone == HealthTone.danger)
       ? HealthTone.danger
       : HealthTone.good,
+);
+
+/// Whether a connection needs the owner: the Integrations nav dot.
+final integrationsAttentionProvider = Provider.autoDispose<bool>(
+  (ref) => (ref.watch(integrationsSummaryProvider).value ?? const []).any(
+    (i) => !i.disabled && (i.needsReconnect || i.status == 'error'),
+  ),
 );

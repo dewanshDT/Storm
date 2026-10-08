@@ -810,9 +810,9 @@ real Wrote rows, real provenance, no client-side simulation.
 - [x] Slice 1 — single-user
 - [x] Slice 2 — design-system additions
 - [x] Slice 3 — shell + routing
-- [ ] Slice 4 — Notes
+- [x] Slice 4 — Notes
 - [x] Slice 5 — server agent capabilities
-- [ ] Slice 6 — Agents
-- [ ] Slice 7 — Settings
+- [x] Slice 6 — Agents
+- [x] Slice 7 — Settings
 - [ ] Slice 8 — the loop
 - [ ] Slice 9 — regression + acceptance

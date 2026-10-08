@@ -4022,6 +4022,30 @@ semantics container. 804 client tests; the back contract and health rows
 mutation-checked; desktop-04 and phone-02 captured. Gap until slice 4:
 cross-vault recents (they lived on the dashboard).
 
+**Slice 4 (Notes; `feat/v2-notes`):** the desktop Notes sidebar is rebuilt on
+`SidebarFrame`: `VaultHeader` (tile, name, sync line) opening
+`VaultSwitcherPopover` (vaults with counts and ✓, "Synced … · Sync now",
+Manage vaults ›; no Server settings), "Search {vault} ⌘K" (Ctrl K off macOS),
+**RECENT** — the four newest cross-vault rows from `recentsProvider`, each with
+a `VaultTag`, which closes the slice 3 gap — then the **FOLDERS** tree
+(`SidebarRow`s, drawn twisties, no counts), and a footer of New note + folder +
+tags (gear and mentions left it). A long-press on a vault in the switcher or
+the place picker opens `AccentPicker` (Q7). The note header is crumb (phone:
+"‹ parent"), the restyled Read | Edit, a soft **Start session** (phone
+"Session") that opens the existing launcher while a host is online and Agents
+otherwise, and the drawer toggle; then the file-name title at `displaySize`
+(omitted when the body opens with its own `# heading`) and `VersionLine`
+(`v51 · Saved`, the id when asked for, a `provenance` slot for slice 8). The
+drawer is open by default with its own ×. The phone vault root is the vault
+name, RECENT ("vault · folder" and an age) and FOLDERS; a folder is "‹ parent"
+over its name; the pill is Directory / Search / ＋ / Tags (a long-press on ＋
+makes a folder) and is absent on the note (Q5); properties keep the sheet
+(Q6). `SectionLabel` is mono, as §7.2 has it. Unseen hooks only: `FolderTree`
+and `VaultSidebar` take `unseen(noteId)`, `EntryTile` an `unseen` flag. 827
+client tests; recents limit, recent selection and the note pill
+mutation-checked; desktop-01..03 and phone-01/03 captured (harness: shots
+reload on a viewport switch, which sometimes stalled Chromium).
+
 **Slice 5 (server agent capabilities; `feat/v2-agent-capabilities`):**
 `agent.db` gains `session_launch` (name, context note ids and title snapshot,
 write vault) and `session_writes` (one row per note or kit script a session
@@ -4062,6 +4086,31 @@ title, body and ids with a positive control. Mutation-checked: the policy
 allowing every agent write, and note data sent in `start` / the prompt growing
 an argument, and a script write left unrecorded. Rust 562 + 54 tests; live 81
 (`e2e.py` unmodified) · mcp 86 · agent 78 · gateway 84 · auth 72 · client 20.
+
+**Slice 7 (Settings; `feat/v2-settings`):** the ten pages are built on real
+endpoints in `lib/ui/settings/` (`SettingsPage`: 680 column beside
+`SettingsNav` at ≥900, a pushed screen with "‹ Settings" and no AppBar
+below). This device keeps the real preset, text-size, note-font and Read-mode
+controls; Devices & access lists `GET /v1/auth/devices` (revoke =
+`DELETE /v1/auth/devices/{id}`, which also ends its sessions; this device
+signs out) and the access keys with the shown-once dialog; Vaults draws the
+tile, count and path, a missing vault greyed and still removable, and the
+tile opens `AccentPicker` (Q7, `setVaultAccent`); AI access puts the MCP
+switches and "Storm agents" on `/v1/config` + `/v1/config/mcp`, with
+"Allow writes when chosen at launch" wired **only when `GET /v1/config`
+returns `agent_writes`** (sent alone as `{agent_writes}`, slice 5's shape) and
+otherwise disabled, "Needs a newer server"; Integrations and Hosts are
+restyled with every flow unchanged (the FABs became buttons; Integrations
+keeps `/settings/integrations` and the orphan relay, and its nav item carries
+a danger dot from `integrationsAttentionProvider`); Storage, Connection
+(address, route, pinned-key fingerprint, relays on `PUT /v1/config/relays`,
+Disconnect with a confirm) and Advanced (MCP endpoint, versions, Re-pair →
+the pairing screen in a `rePair` mode that pops itself) are new; About &
+health is the shared health rows with actions plus a compatibility row
+(same major.minor) once the server reports `version`. Each page re-reads
+`/v1/config` when it opens. `server_settings_screen.dart`,
+`client_settings_screen.dart`, `mcp_keys_screen.dart`, `ClientSettingsBody`
+and `settingsLeading` are gone.
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.

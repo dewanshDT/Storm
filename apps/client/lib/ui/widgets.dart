@@ -249,10 +249,9 @@ class SectionLabel extends StatelessWidget {
     return Text(
       text.toUpperCase(),
       style: TextStyle(
-        fontFamily: StormTokens.sansFamily,
+        fontFamily: StormTokens.monoFamily,
         fontSize: t.labelSize,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 1.1,
+        letterSpacing: t.labelSize * 0.08,
         color: t.text3,
       ),
     );

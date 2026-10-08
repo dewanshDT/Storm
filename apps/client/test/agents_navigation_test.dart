@@ -171,16 +171,19 @@ void main() {
     });
   });
 
-  testWidgets('Vaults settings link to Hosts, not to sessions', (tester) async {
+  testWidgets('Hosts are a Settings page, reached from the list', (
+    tester,
+  ) async {
     final c = shellContainer(
       agentClient: FakeAgentServer(hosts: [agentHost()]).client,
     );
     await pumpShell(tester, c, size: phone);
-    c.read(routerProvider).go(Routes.settingsPage('vaults'));
+    c.read(routerProvider).go(Routes.settings);
     await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(find.text('New vault'), 300);
-    expect(find.byKey(const Key('open-hosts')), findsOneWidget);
-    expect(find.byKey(const Key('open-agents')), findsNothing);
+    await tester.tap(find.byKey(const Key('settings-row-hosts')));
+    await tester.pumpAndSettle();
+    expect(location(c), Routes.settingsPage('hosts'));
+    expect(find.text('Hosts & default agent'), findsOneWidget);
     await disposeShell(tester, c);
   });
 }

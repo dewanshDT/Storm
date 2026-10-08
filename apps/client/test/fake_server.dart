@@ -84,6 +84,26 @@ class FakeServer {
   /// before the switch existed does.
   bool omitMcpField = false;
 
+  /// Whether agent sessions may write; null answers as a server that
+  /// predates the setting (no `agent_writes` field).
+  bool? agentWrites;
+
+  /// The last `PUT /v1/config/mcp` body, to check what the client asked for
+  /// and not only what the server made of it.
+  Map<String, dynamic>? lastMcpBody;
+
+  /// The server's release version; null answers as an older server.
+  String? version;
+
+  /// The configured relay URLs, as `PUT /v1/config/relays` stores them.
+  List<String> relays = [];
+
+  /// Paired devices, as `GET /v1/auth/devices` returns them.
+  final List<Map<String, dynamic>> devices = [];
+
+  /// Access keys, as `GET /v1/keys` returns them.
+  final List<Map<String, dynamic>> keys = [];
+
   /// Notes in the primary vault. The shorthand most tests use.
   Map<String, ServerNote> get notes => byVault[primaryVault]!;
   final List<Map<String, dynamic>> changeLog = [];
@@ -204,13 +224,73 @@ class FakeServer {
     // GET /v1/config exactly as it is against the real server.
     if (path == '/v1/config/mcp' && request.method == 'PUT') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
-      mcpEnabled = body['enabled'] as bool;
-      mcpWritable = mcpEnabled && (body['writable'] as bool? ?? false);
+      lastMcpBody = body;
+      // Absent leaves the MCP switches alone, as the real server does.
+      if (body['enabled'] case final bool enabled) {
+        mcpEnabled = enabled;
+        mcpWritable = mcpEnabled && (body['writable'] as bool? ?? false);
+      }
+      if (body['agent_writes'] case final bool on) agentWrites = on;
       return http.Response(
-        jsonEncode({'mcp_enabled': mcpEnabled, 'mcp_writable': mcpWritable}),
+        jsonEncode({
+          'mcp_enabled': mcpEnabled,
+          'mcp_writable': mcpWritable,
+          'agent_writes': ?agentWrites,
+        }),
         200,
         headers: j(''),
       );
+    }
+
+    if (path == '/v1/config/relays' && request.method == 'PUT') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      final next = [for (final r in body['relays'] as List) r as String];
+      if (next.any((r) => !r.startsWith('wss://') && !r.startsWith('ws://'))) {
+        return http.Response(
+          '{"error":"a relay URL must start with wss:// or ws://"}',
+          400,
+          headers: j(''),
+        );
+      }
+      relays = next;
+      return http.Response(jsonEncode({'relays': relays}), 200, headers: j(''));
+    }
+
+    if (path == '/v1/auth/devices' && request.method == 'GET') {
+      return http.Response(jsonEncode(devices), 200, headers: j(''));
+    }
+    if (path.startsWith('/v1/auth/devices/') && request.method == 'DELETE') {
+      final id = path.substring('/v1/auth/devices/'.length);
+      for (final d in devices) {
+        if (d['id'] == id) d['revoked'] = '2026-10-08T00:00:00Z';
+      }
+      return http.Response('', 204);
+    }
+
+    if (path == '/v1/keys' && request.method == 'GET') {
+      return http.Response(jsonEncode(keys), 200, headers: j(''));
+    }
+    if (path == '/v1/keys' && request.method == 'POST') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      final key = {
+        'id': 'key_${keys.length + 1}',
+        'user_id': 'u1',
+        'name': body['name'],
+        'created': '2026-10-08T00:00:00Z',
+      };
+      keys.add(key);
+      return http.Response(
+        jsonEncode({...key, 'secret': 'stk_theonlycopy'}),
+        200,
+        headers: j(''),
+      );
+    }
+    if (path.startsWith('/v1/keys/') && request.method == 'DELETE') {
+      final id = path.substring('/v1/keys/'.length);
+      for (final k in keys) {
+        if (k['id'] == id) k['revoked'] = '2026-10-08T00:00:00Z';
+      }
+      return http.Response('', 204);
     }
 
     if (path == '/v1/config') {
@@ -230,6 +310,9 @@ class FakeServer {
           'vault_count': vaults.length,
           if (!omitMcpField) 'mcp_enabled': mcpEnabled,
           if (!omitMcpField) 'mcp_writable': mcpWritable,
+          'relays': relays,
+          'agent_writes': ?agentWrites,
+          'version': ?version,
         }),
         200,
         headers: j(''),

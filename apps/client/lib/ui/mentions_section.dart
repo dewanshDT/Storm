@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
 import '../state/app_state.dart';
+import 'shell/sidebar_rows.dart' show Twisty;
 import 'states.dart';
 import 'tokens.dart';
-import 'widgets.dart';
 
 /// "Linked mentions" — the notes that link *to* the one being edited.
 ///
@@ -44,9 +43,14 @@ class _MentionsSectionState extends ConsumerState<MentionsSection> {
         : const AsyncValue<List<NoteMeta>>.data([]);
     final count = backlinks.value?.length ?? 0;
 
+    final quiet = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      color: t.text3,
+    );
     return Container(
-      margin: EdgeInsets.only(top: t.sp * 3),
-      padding: EdgeInsets.only(top: t.sp * 2),
+      margin: EdgeInsets.only(top: t.sp * 5),
+      padding: EdgeInsets.only(top: t.sp * 1.75),
       decoration: BoxDecoration(
         border: Border(
           top: BorderSide(color: t.border, width: t.bw),
@@ -60,18 +64,23 @@ class _MentionsSectionState extends ConsumerState<MentionsSection> {
             onTap: () => setState(() => _expanded = !_expanded),
             borderRadius: BorderRadius.circular(t.rControl),
             child: Padding(
-              padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+              padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
               child: Row(
+                spacing: t.sp,
                 children: [
-                  Icon(
-                    _expanded
-                        ? LucideIcons.chevron_down
-                        : LucideIcons.chevron_right,
-                    size: t.bodySize,
-                    color: t.text3,
+                  Flexible(
+                    child: Text(
+                      'Linked mentions',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: quiet,
+                    ),
                   ),
-                  SizedBox(width: t.sp * 0.5),
-                  SectionLabel('Mentions ($count)'),
+                  Text(
+                    '$count',
+                    style: quiet.copyWith(fontFamily: StormTokens.monoFamily),
+                  ),
+                  Twisty(open: _expanded),
                 ],
               ),
             ),

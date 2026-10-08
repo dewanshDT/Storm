@@ -9,7 +9,6 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/markdown/storm_markdown_style.dart';
 import 'package:storm/ui/markdown/storm_markdown_view.dart';
 import 'package:storm/ui/note_mode_toggle.dart';
-import 'package:storm/ui/shell/corner_bubbles.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/widgets.dart';
 
@@ -384,27 +383,15 @@ fn main() {}
     });
   });
 
-  group('client settings Read mode switch', () {
+  group('This device Read mode switch', () {
     testWidgets('toggles settings.readMode', (tester) async {
       final c = shellContainer();
-      addTearDown(c.dispose);
-      await c.read(settingsProvider.future);
+      await pumpShell(tester, c);
       expect(c.read(settingsProvider).value!.readMode, isTrue);
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: c,
-          child: MaterialApp(
-            theme: StormTheme.dark(),
-            home: const Scaffold(
-              body: SingleChildScrollView(child: ClientSettingsBody()),
-            ),
-          ),
-        ),
-      );
+      c.read(routerProvider).go(Routes.settingsPage('device'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Read mode'), findsOneWidget);
+      expect(find.text('Open notes in Read mode'), findsOneWidget);
       await tester.tap(find.byKey(const Key('setting-read-mode')));
       await tester.pumpAndSettle();
       expect(c.read(settingsProvider).value!.readMode, isFalse);
@@ -412,37 +399,7 @@ fn main() {}
       await tester.tap(find.byKey(const Key('setting-read-mode')));
       await tester.pumpAndSettle();
       expect(c.read(settingsProvider).value!.readMode, isTrue);
-    });
-
-    testWidgets('shows the client version stamp', (tester) async {
-      final c = shellContainer();
-      addTearDown(c.dispose);
-      await c.read(settingsProvider.future);
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: c,
-          child: MaterialApp(
-            theme: StormTheme.dark(),
-            home: const Scaffold(
-              body: SingleChildScrollView(child: ClientSettingsBody()),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(const Key('client-version')), findsOneWidget);
-      expect(find.text('Version 0.0.0-test'), findsOneWidget);
-
-      // Section labels uppercased by SectionLabel — grouping, not a heading.
-      expect(find.text('APPEARANCE'), findsOneWidget);
-      expect(find.text('NOTES'), findsOneWidget);
-      expect(find.text('CONNECTION'), findsOneWidget);
-      expect(find.text('ABOUT'), findsOneWidget);
-      // Note font is a field under Appearance, not a peer section.
-      expect(find.text('NOTE FONT'), findsNothing);
-      expect(find.text('Note font'), findsOneWidget);
+      await disposeShell(tester, c);
     });
   });
 }

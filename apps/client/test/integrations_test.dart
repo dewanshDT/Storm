@@ -110,7 +110,18 @@ void main() {
       ),
       oauthSupportedProvider.overrideWithValue(oauth),
     ],
-    child: MaterialApp(theme: StormTheme.light(), home: child),
+    // Desk width: the page sits beside the settings navigation there and
+    // needs no router. The phone layout is covered in the shell
+    // (settings_pages_test.dart).
+    child: MaterialApp(
+      theme: StormTheme.light(),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(size: const Size(1280, 800)),
+          child: Scaffold(body: child),
+        ),
+      ),
+    ),
   );
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -128,8 +139,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Storm vaults'), findsOneWidget);
     expect(find.text('Built in'), findsOneWidget);
-    expect(find.textContaining('read only'), findsOneWidget);
-    expect(find.text('Needs reconnecting'), findsOneWidget);
+    expect(find.textContaining('Read only'), findsOneWidget);
+    expect(find.text('Needs sign-in'), findsOneWidget);
     expect(find.textContaining('refused the credential'), findsOneWidget);
     expect(find.byKey(const Key('reconnect-mcc_GH')), findsOneWidget);
     // The built-in connection has no menu: it cannot be changed or removed.
@@ -275,9 +286,7 @@ void main() {
     final (client, seen) = server();
     await tester.pumpWidget(app(const IntegrationsScreen(), client));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('menu-mcc_GH')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Choose tools'));
+    await tester.tap(find.byKey(const Key('tools-mcc_GH')));
     await tester.pumpAndSettle();
     expect(find.text('delete_repo  (new)'), findsOneWidget);
     final off = tester.widget<CheckboxListTile>(

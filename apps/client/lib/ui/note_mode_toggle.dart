@@ -27,7 +27,8 @@ class NoteModeToggle extends StatelessWidget {
     final t = context.tokens;
     return Semantics(
       label: 'Note view mode',
-      child: DecoratedBox(
+      child: Container(
+        padding: EdgeInsets.all(t.sp * 0.375),
         decoration: BoxDecoration(
           color: t.surface2,
           borderRadius: BorderRadius.circular(t.rControl * 0.8),
@@ -72,20 +73,20 @@ class _Segment extends StatelessWidget {
     final t = context.tokens;
     return Material(
       color: selected ? t.accentSoft : Colors.transparent,
-      borderRadius: BorderRadius.circular(t.rControl * 0.7),
+      borderRadius: BorderRadius.circular(t.rControl * 0.6),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl * 0.7),
+        borderRadius: BorderRadius.circular(t.rControl * 0.6),
         child: Padding(
           padding: EdgeInsets.symmetric(
-            horizontal: t.sp * 1.25,
+            horizontal: t.sp * 1.375,
             vertical: t.sp * 0.5,
           ),
           child: Text(
             label,
             style: TextStyle(
               fontFamily: StormTokens.sansFamily,
-              fontSize: t.labelSize,
+              fontSize: t.codeSize,
               fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
               color: selected ? t.accent : t.text3,
             ),

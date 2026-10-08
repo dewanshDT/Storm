@@ -345,10 +345,18 @@ class SettingsRow extends StatelessWidget {
     this.onTap,
     this.muted = false,
     this.divider = true,
+    this.labelColor,
+    this.large = false,
   });
+
+  /// The phone settings list's 15px rows with 13px padding.
+  final bool large;
 
   final String label;
   final String? sub;
+
+  /// `danger` for a destructive row such as Disconnect.
+  final Color? labelColor;
 
   /// Metadata (a path, a key prefix) rather than a sentence.
   final bool monoSub;
@@ -362,7 +370,7 @@ class SettingsRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final row = Container(
-      padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
+      padding: EdgeInsets.symmetric(vertical: t.sp * (large ? 1.625 : 1.5)),
       decoration: divider
           ? BoxDecoration(
               border: Border(
@@ -382,8 +390,8 @@ class SettingsRow extends StatelessWidget {
                   label,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
-                    fontSize: t.uiSize,
-                    color: muted ? t.text3 : t.text,
+                    fontSize: large ? t.uiSize * 1.05 : t.uiSize,
+                    color: labelColor ?? (muted ? t.text3 : t.text),
                   ),
                 ),
                 if (sub != null) ...[
