@@ -25,7 +25,11 @@ import 'tokens.dart';
 import 'widgets.dart';
 
 class PairingScreen extends ConsumerStatefulWidget {
-  const PairingScreen({super.key});
+  const PairingScreen({super.key, this.rePair = false});
+
+  /// Pushed from Settings › Advanced on a signed-in device: closes itself
+  /// once the new pairing is saved instead of waiting for a redirect.
+  final bool rePair;
 
   @override
   ConsumerState<PairingScreen> createState() => _PairingScreenState();
@@ -178,6 +182,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
             );
         if (!mounted) return;
         setState(() => _verifying = false);
+        if (widget.rePair) Navigator.of(context).pop(true);
         return;
       }
 
@@ -311,6 +316,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               // Clear legacy token — we're paired now.
             ),
           );
+      if (widget.rePair && mounted) Navigator.of(context).pop(true);
     } on AuthApiException catch (e) {
       setState(() {
         _error = 'Login failed: ${e.message}';
@@ -417,6 +423,14 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                     onPressed: _scan,
                     icon: const Icon(Icons.qr_code_scanner),
                     label: const Text('Scan a code instead'),
+                  ),
+                ],
+                if (widget.rePair) ...[
+                  SizedBox(height: t.sp),
+                  TextButton(
+                    key: const Key('re-pair-cancel'),
+                    onPressed: () => Navigator.of(context).pop(false),
+                    child: const Text('Cancel'),
                   ),
                 ],
                 if (_error != null) ...[

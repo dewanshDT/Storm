@@ -303,6 +303,13 @@ class Harness:
                 self.go(self.route(arg))
             elif kind == "wait":
                 time.sleep(arg)
+            elif kind == "api":
+                # Seeds real server state (a key, a relay) through its API.
+                method, path, body = arg
+                status, _ = storm_auth._call(BASE, method, self.route(path), body=body,
+                                             auth=self.session)
+                if status >= 300:
+                    raise RuntimeError(f"seeding {method} {path} answered {status}")
         if not any(kind == "tap" for kind, _ in shot.get("actions", [])):
             # Park the pointer in a corner so no row is captured mid-hover.
             self.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=1, y=1)

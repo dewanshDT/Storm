@@ -230,6 +230,9 @@ class ServerConfig {
     required this.vaultCount,
     required this.mcpEnabled,
     required this.mcpWritable,
+    this.relays = const [],
+    this.agentWrites,
+    this.version,
   });
 
   final String vaultRoot;
@@ -249,12 +252,55 @@ class ServerConfig {
   /// does not know about writes must never appear to have them switched on.
   final bool mcpWritable;
 
+  /// The configured relay URLs, not the ones currently registered.
+  final List<String> relays;
+
+  /// Whether agent sessions may write to the vault chosen at launch. Null
+  /// from a server that predates the setting, which cannot be changed there.
+  final bool? agentWrites;
+
+  /// The server's release version, when it reports one.
+  final String? version;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
     vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
     mcpWritable: j['mcp_writable'] as bool? ?? false,
+    relays: [for (final r in (j['relays'] as List? ?? const [])) r as String],
+    agentWrites: j['agent_writes'] as bool?,
+    version: j['version'] as String?,
+  );
+}
+
+/// A device paired with this server (`GET /v1/auth/devices`).
+class PairedDevice {
+  const PairedDevice({
+    required this.id,
+    required this.name,
+    required this.paired,
+    this.platform,
+    this.lastSeen,
+    this.revoked,
+  });
+
+  final String id;
+  final String name;
+  final String? platform;
+  final String paired;
+  final String? lastSeen;
+  final String? revoked;
+
+  bool get isRevoked => revoked != null;
+
+  factory PairedDevice.fromJson(Map<String, dynamic> j) => PairedDevice(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? '',
+    platform: j['platform'] as String?,
+    paired: j['paired'] as String? ?? '',
+    lastSeen: j['last_seen'] as String?,
+    revoked: j['revoked'] as String?,
   );
 }
 

@@ -3,11 +3,13 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../ui/breakpoints.dart';
+import '../ui/controls.dart';
+import '../ui/session_status.dart' show StatusPill;
+import '../ui/settings/settings_widgets.dart';
 import '../ui/states.dart';
-import '../ui/settings/settings_shell.dart' show settingsLeading;
 import '../ui/tokens.dart';
 import 'agent_state.dart' show sessionCredentialsProvider;
-import 'hosts_screen.dart' show ChipTone, StatusChip;
 import 'integrations_api.dart';
 import 'oauth_flow.dart';
 import 'oauth_links.dart';
@@ -243,57 +245,44 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
     final items = _items;
-    return Scaffold(
-      appBar: AppBar(
-        leading: settingsLeading(context),
-        automaticallyImplyLeading: false,
-        title: const Text('Integrations'),
-      ),
-      floatingActionButton: items == null
-          ? null
-          : FloatingActionButton.extended(
-              key: const Key('add-integration'),
-              onPressed: _loading ? null : _add,
-              icon: const Icon(LucideIcons.plus),
-              label: const Text('Add integration'),
-            ),
-      body: RefreshIndicator(
-        onRefresh: _load,
-        child: ListView(
-          padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp, t.sp * 2, t.sp * 12),
-          children: [
-            Text(
-              'Connect a service once, here. Every agent session except a '
-              'shell can then use it, through Storm: its credential stays on '
-              'this server and never reaches a host or an agent. Sessions '
-              "have their host's network access, so anything an agent can "
-              'read, it can send elsewhere.',
-              style: TextStyle(fontSize: t.labelSize, color: t.text3),
-            ),
-            SizedBox(height: t.sp * 2),
-            if (_error != null)
-              Text(_error!, style: TextStyle(color: t.danger))
-            else if (items == null)
-              const SkeletonRows(rows: 3)
-            else
-              for (final i in items)
-                _IntegrationTile(
-                  integration: i,
-                  busy: _loading,
-                  canSignIn: ref.read(oauthSupportedProvider),
-                  onTest: () =>
-                      _with((api) async => _reportCheck(await api.test(i.id))),
-                  onTools: () => _tools(i),
-                  onReconnect: () => _reconnect(i),
-                  onToggle: () =>
-                      _with((api) => api.update(i.id, enabled: i.disabled)),
-                  onDisconnect: () => _disconnect(i),
-                ),
-          ],
+    return SettingsPage(
+      title: 'Integrations',
+      intro: 'Services your agents can use, such as Linear or GitHub.',
+      children: [
+        const InfoBox(
+          'Connect a service once, here. Every agent session except a shell '
+          'can then use it. Anything an agent can read, it can send '
+          'elsewhere.',
         ),
-      ),
+        SizedBox(height: context.tokens.sp * 0.5),
+        if (_error != null)
+          SettingsMuted(_error!, danger: true)
+        else if (items == null)
+          const SkeletonRows(rows: 3)
+        else ...[
+          for (final i in items)
+            _IntegrationTile(
+              integration: i,
+              busy: _loading,
+              canSignIn: ref.read(oauthSupportedProvider),
+              onTest: () =>
+                  _with((api) async => _reportCheck(await api.test(i.id))),
+              onTools: () => _tools(i),
+              onReconnect: () => _reconnect(i),
+              onToggle: () =>
+                  _with((api) => api.update(i.id, enabled: i.disabled)),
+              onDisconnect: () => _disconnect(i),
+            ),
+          SettingsButtonRow(
+            child: StormButton.primary(
+              key: const Key('add-integration'),
+              label: '＋ Add integration',
+              onPressed: _loading ? null : _add,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -325,35 +314,73 @@ class _IntegrationTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final i = integration;
-    final detail = i.builtin
-        ? (i.vaultWritesAvailable ?? false)
-              ? 'Your vaults. Agents read them; they write only when a '
-                    'session allows it.'
-              : 'Your vaults, read only. Turn on MCP writes to let a session '
-                    'allow writing.'
-        : [
-            i.slug,
-            switch (i.authKind) {
-              'oauth' => 'signed in',
-              'static' => 'token',
-              _ => 'no auth',
-            },
-            if (i.lastError != null && !i.disabled)
-              describeIntegrationError(i.lastError),
-          ].join(' · ');
     final attention = i.needsReconnect || i.status == 'error';
+    final detail = i.builtin
+        ? 'Built in. Read only unless a session is allowed to write.'
+        : i.disabled
+        ? 'Turned off'
+        : attention && i.lastError != null
+        ? describeIntegrationError(i.lastError)
+        : [
+            switch (i.authKind) {
+              'oauth' => 'Signed in',
+              'static' => 'Token',
+              _ => 'No sign-in',
+            },
+            if (i.status == 'connected')
+              '${i.toolAllowlist.length} '
+                  '${i.toolAllowlist.length == 1 ? 'tool' : 'tools'} on',
+          ].join(' · ');
     // An OAuth integration is reconnected by signing in, which the browser
     // cannot do (G-D13): it says where to do it instead of offering an action
     // that can only fail.
     final reconnectHere = i.authKind != 'oauth' || canSignIn;
+    final reconnectLabel = switch (i.authKind) {
+      'oauth' => 'Sign in again',
+      'static' => 'Replace token',
+      _ => 'Reconnect',
+    };
+    final (pill, pillColor) = i.builtin
+        ? ('Built in', t.text3)
+        : switch (i.status) {
+            'connected' => ('Connected', t.text2),
+            'needs_reauth' => ('Needs sign-in', t.danger),
+            'pending_auth' => ('Not signed in', t.danger),
+            'error' => ('Error', t.danger),
+            _ => (i.statusLabel, t.text3),
+          };
+
+    // Beside the text at desk width; under it on a phone, where the name
+    // and the pill together are wider than the row.
+    final wide = context.isExpanded;
+    final status = Wrap(
+      spacing: t.sp * 1.5,
+      runSpacing: t.sp * 0.5,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        StatusPill(key: Key('status-${i.id}'), label: pill, color: pillColor),
+        if (!i.builtin && attention && reconnectHere)
+          TextAction(
+            key: Key('reconnect-${i.id}'),
+            label: reconnectLabel,
+            onTap: busy ? null : onReconnect,
+          )
+        else if (!i.builtin && i.status == 'connected')
+          TextAction(
+            key: Key('tools-${i.id}'),
+            label: 'Choose tools',
+            onTap: busy ? null : onTools,
+          ),
+      ],
+    );
+
     return Container(
       key: Key('integration-${i.id}'),
-      margin: EdgeInsets.only(bottom: t.sp),
-      padding: EdgeInsets.all(t.sp * 1.5),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
       decoration: BoxDecoration(
-        color: t.surface,
-        border: Border.all(color: t.border, width: t.bw),
-        borderRadius: BorderRadius.circular(t.rCard),
+        border: Border(
+          bottom: BorderSide(color: t.border, width: t.bw),
+        ),
       ),
       child: Row(
         children: [
@@ -361,64 +388,62 @@ class _IntegrationTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        i.displayName,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    SizedBox(width: t.sp),
-                    StatusChip(
-                      key: Key('status-${i.id}'),
-                      label: i.builtin ? 'Built in' : i.statusLabel,
-                      tone: attention ? ChipTone.warn : ChipTone.muted,
-                    ),
-                  ],
+                Text(
+                  i.displayName,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.uiSize,
+                    color: t.text,
+                  ),
                 ),
                 SizedBox(height: t.sp * 0.25),
                 Text(
                   detail,
-                  style: TextStyle(fontSize: t.labelSize, color: t.text3),
-                ),
-                // On its own line, under the detail: beside the menu it took
-                // the width the integration's name needs.
-                if (!i.builtin && attention && !reconnectHere) ...[
-                  SizedBox(height: t.sp * 0.5),
-                  Text(
-                    'Reconnect from a Storm app',
-                    key: Key('reconnect-elsewhere-${i.id}'),
-                    style: TextStyle(fontSize: t.labelSize, color: t.amber),
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.codeSize,
+                    color: t.text3,
+                    height: 1.45,
                   ),
-                ],
-                // Spec §9: the owner is told, and nothing is turned on.
-                if (!i.builtin && !i.disabled && i.newTools.isNotEmpty)
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      key: Key('review-tools-${i.id}'),
-                      onPressed: busy ? null : onTools,
-                      child: Text(
-                        '${i.newTools.length} new '
-                        '${i.newTools.length == 1 ? 'tool' : 'tools'} — review',
+                ),
+                if (!i.builtin && attention && !reconnectHere)
+                  Padding(
+                    padding: EdgeInsets.only(top: t.sp * 0.5),
+                    child: Text(
+                      'Reconnect from a Storm app',
+                      key: Key('reconnect-elsewhere-${i.id}'),
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        color: t.text2,
                       ),
                     ),
                   ),
+                // Spec §9: the owner is told, and nothing is turned on.
+                if (!i.builtin && !i.disabled && i.newTools.isNotEmpty)
+                  Padding(
+                    padding: EdgeInsets.only(top: t.sp * 0.5),
+                    child: TextAction(
+                      key: Key('review-tools-${i.id}'),
+                      label:
+                          '${i.newTools.length} new '
+                          '${i.newTools.length == 1 ? 'tool' : 'tools'} — review',
+                      accent: true,
+                      onTap: busy ? null : onTools,
+                    ),
+                  ),
+                if (!wide) ...[SizedBox(height: t.sp), status],
               ],
             ),
           ),
-          if (!i.builtin && attention && reconnectHere)
-            TextButton(
-              key: Key('reconnect-${i.id}'),
-              onPressed: busy ? null : onReconnect,
-              child: const Text('Reconnect'),
-            ),
+          if (wide) ...[SizedBox(width: t.sp * 1.5), status],
           if (!i.builtin)
             PopupMenuButton<String>(
               key: Key('menu-${i.id}'),
               enabled: !busy,
+              tooltip: 'More for ${i.displayName}',
+              icon: Icon(LucideIcons.ellipsis, size: t.uiSize, color: t.text3),
               onSelected: (v) {
                 switch (v) {
                   case 'test':

@@ -10,7 +10,8 @@ import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart'
-    show integrationsApiFactoryProvider;
+    show integrationsApiFactoryProvider, oauthSupportedProvider;
+import 'package:storm/agent/oauth_links.dart';
 import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_connection.dart';
@@ -57,6 +58,7 @@ ProviderContainer shellContainer({
   http.Client? integrationsClient,
   http.Client? agentClient,
   Stream<TerminalEvent> Function(String sessionId, int offset)? terminalStream,
+  OAuthLinks? oauthLinks,
 }) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
@@ -129,6 +131,9 @@ ProviderContainer shellContainer({
       terminalStreamFactoryProvider.overrideWithValue(
         terminalStream ?? (_, _) => StreamController<TerminalEvent>().stream,
       ),
+      // Detached, so no suite reaches the native link channel.
+      oauthLinksProvider.overrideWithValue(oauthLinks ?? OAuthLinks.detached()),
+      oauthSupportedProvider.overrideWithValue(true),
     ],
   );
   _servers[container] = server;
