@@ -55,3 +55,46 @@ pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> 
     // The set holds one fd, so any readiness is its.
     Ok(ready > 0)
 }
+
+/// `proc_listallpids`, then `getsid` for each. A pid that exited in between
+/// (`ESRCH`) or is not ours to ask about (`EPERM`) is skipped; a zombie
+/// (`SZOMB`) is already gone for our purposes.
+pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
+    // SAFETY: a null buffer asks for the count only.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Room for processes started since the count.
+    let mut pids = vec![0 as libc::pid_t; count as usize + 64];
+    let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    // SAFETY: `pids` is a live buffer of exactly `bytes` bytes.
+    let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    pids.truncate(n as usize);
+    Ok(pids
+        .into_iter()
+        .filter(|&pid| pid > 0)
+        // SAFETY: getsid has no memory-safety preconditions.
+        .filter(|&pid| unsafe { libc::getsid(pid) } == sid)
+        .filter(|&pid| !zombie(pid))
+        .collect())
+}
+
+fn zombie(pid: i32) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a live `proc_bsdinfo` of `size` bytes.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    got == size && info.pbi_status == libc::SZOMB
+}

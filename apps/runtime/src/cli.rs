@@ -14,6 +14,16 @@
 //! - Either way, once the agent is gone its process group gets SIGHUP and then
 //!   SIGKILL, so nothing the session spawned outlives it, and a background job
 //!   holding the terminal cannot keep the session open forever.
+//! - **The SIGKILL reaches the whole session, not only the group.** A
+//!   job-control shell (`zsh -l`, `bash -i`) puts each `cmd &` in a process
+//!   group of its own, which `kill(-pgid)` never reaches. Every process whose
+//!   session id is the agent's pid is found by `platform::session_members`.
+//! - **`ended` means the session is empty.** Before reporting it, whatever is
+//!   still in the session (a job that ignored SIGHUP and let go of the
+//!   terminal) gets SIGHUP, then SIGKILL after the grace. A host that waits
+//!   for `ended` (its shutdown, AM37) therefore leaves nothing behind. Only a
+//!   process that called `setsid` itself has left the session; the
+//!   exclusive-account sweep ends those when the host stops.
 //! - `ended` is reported only after the output has drained, so nothing arrives
 //!   after it.
 
@@ -183,6 +193,8 @@ impl Provider for CliProvider {
             status: Mutex::new(SessionStatus::Running),
             stop_requested: AtomicBool::new(false),
             exit: (Mutex::new(None), Condvar::new()),
+            leader: group,
+            grace: Mutex::new(DEFAULT_GRACE),
         });
 
         let waiter = shared.clone();
@@ -222,6 +234,11 @@ struct Shared {
     stop_requested: AtomicBool,
     /// The agent's exit, once it has one, and a wake-up for whoever waits.
     exit: (Mutex<Option<io::Result<ExitStatus>>>, Condvar),
+    /// The agent's pid: its process group's id and its session's.
+    leader: Pid,
+    /// How long stragglers get between SIGHUP and SIGKILL: the stop's grace
+    /// when the owner asked, [`DEFAULT_GRACE`] otherwise.
+    grace: Mutex<Duration>,
 }
 
 impl Shared {
@@ -248,6 +265,34 @@ impl Shared {
             waited += step;
         }
         self.status().is_ended()
+    }
+
+    /// Ends whatever is still in the session once the terminal has closed:
+    /// SIGHUP, then SIGKILL to what remains after the grace. Returns once the
+    /// session is empty, or a second after the SIGKILL.
+    fn end_stragglers(&self) {
+        let members = || session_members(self.leader);
+        if members().is_empty() {
+            return;
+        }
+        signal_each(&members(), Signal::HUP);
+        let grace = *self.grace.lock().unwrap();
+        let step = Duration::from_millis(50);
+        let mut waited = Duration::ZERO;
+        while waited < grace {
+            if members().is_empty() {
+                return;
+            }
+            thread::sleep(step);
+            waited += step;
+        }
+        signal_each(&members(), Signal::KILL);
+        for _ in 0..20 {
+            if members().is_empty() {
+                return;
+            }
+            thread::sleep(step);
+        }
     }
 
     /// Forwards output until the terminal closes, then reports the ending —
@@ -279,6 +324,7 @@ impl Shared {
             (false, _) => SessionEnd::Completed { exit_code: None },
         };
         drop(exit);
+        self.end_stragglers();
         *self.status.lock().unwrap() = end.status();
         events.ended(end);
     }
@@ -289,8 +335,29 @@ fn hang_up(group: Pid) {
     let _ = rustix::process::kill_process_group(group, Signal::HUP);
 }
 
+/// SIGKILL to the group and to every other member of the session the agent
+/// leads (its pid is both ids): a job-control shell's jobs have groups of
+/// their own.
 fn kill(group: Pid) {
     let _ = rustix::process::kill_process_group(group, Signal::KILL);
+    signal_each(&session_members(group), Signal::KILL);
+}
+
+/// The live members of the session `leader` leads. If they cannot be listed,
+/// none: the group signals still went out.
+fn session_members(leader: Pid) -> Vec<Pid> {
+    crate::platform::session_members(leader.as_raw_nonzero().get())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(Pid::from_raw)
+        .collect()
+}
+
+fn signal_each(pids: &[Pid], signal: Signal) {
+    for &pid in pids {
+        // ESRCH just means it is already gone.
+        let _ = rustix::process::kill_process(pid, signal);
+    }
 }
 
 struct CliSession {
@@ -365,6 +432,7 @@ impl ProviderSession for CliSession {
         if shared.status().is_ended() || shared.stop_requested.swap(true, Ordering::SeqCst) {
             return;
         }
+        *shared.grace.lock().unwrap() = grace;
         hang_up(self.group);
         let (shared, group) = (shared.clone(), self.group);
         // Non-blocking: the caller is the host link, which must not stall for

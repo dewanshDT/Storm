@@ -14,9 +14,16 @@
 //! host that restarts finds them dead, and reports each one as
 //! `failed (host_restart)` in its first `hello`.
 //!
-//! **Revocation.** When the server refuses the key, every session is ended and
-//! the daemon exits non-zero (freeze §5.6). An execution plane nobody can see
-//! must not keep running agents.
+//! **Revocation.** When the server refuses the key, every session is ended,
+//! `host.json` becomes `host.json.revoked` (AM36) and the daemon exits
+//! non-zero (freeze §5.6). An execution plane nobody can see must not keep
+//! running agents.
+//!
+//! **Shutdown** (AM37). On SIGTERM or SIGINT, [`Host::shutdown`] ends every
+//! session's process group and waits for them. Their endings are **not**
+//! posted: `sessions.json` keeps them, so the next `hello` reports each as
+//! `failed (host_restart)`, exactly as after a crash (§13). Nothing a session
+//! spawned outlives the host, whichever service manager runs it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::BASE64;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -164,7 +171,16 @@ pub struct Host {
     /// `(session, connection id)`.
     subscribers: Mutex<Subscribers>,
     opencode_settings: Option<serde_json::Value>,
+    /// Set once by [`Host::shutdown`]: from then on nothing is posted, so an
+    /// ending the shutdown caused never reaches the server as `stopped`.
+    shutting_down: AtomicBool,
 }
+
+/// How long a shutdown waits for its sessions beyond their two graces (the
+/// group's, then any stragglers' in the session): output drains and the
+/// waiter reaps them. With the 5 s default that is 13 s, inside launchd's
+/// `ExitTimeOut` (20 s) and systemd's `TimeoutStopSec` (90 s).
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
@@ -200,6 +216,7 @@ impl Host {
             handles: crate::mcp::Handles::default(),
             subscribers: Mutex::new(HashMap::new()),
             opencode_settings,
+            shutting_down: AtomicBool::new(false),
         }))
     }
 
@@ -252,6 +269,9 @@ impl Host {
         body: &(impl serde::Serialize + ?Sized),
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            bail!("shutting down");
+        }
         let token = self
             .token
             .read()
@@ -288,6 +308,11 @@ impl Host {
                     );
                     self.end_all();
                     tokio::time::sleep(Duration::from_millis(500)).await;
+                    // AM36: the identity is dead. Under launchd its absence is
+                    // what stops the job being restarted.
+                    if let Err(r) = HostConfig::mark_revoked(&self.state_dir) {
+                        tracing::error!(error = %format!("{r:#}"), "could not mark the host revoked");
+                    }
                     return Err(e);
                 }
                 Err(e) => tracing::warn!(error = %format!("{e:#}"), "link down"),
@@ -295,6 +320,37 @@ impl Host {
             self.link_up.send_replace(false);
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
+        }
+    }
+
+    /// The orderly end of the host (AM37): every session's process group gets
+    /// SIGHUP, then SIGKILL after the grace; then this waits, bounded, until
+    /// each has drained and been reaped. Endings are not posted and
+    /// `sessions.json` is left as it is (§13: `host_restart` on the next
+    /// `hello`). The caller drops the link by dropping [`Host::run`].
+    pub async fn shutdown(&self, grace: Duration) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let sessions: Vec<Arc<HostSession>> =
+            self.sessions.lock().unwrap().values().cloned().collect();
+        if sessions.is_empty() {
+            return;
+        }
+        tracing::info!(
+            sessions = sessions.len(),
+            "shutting down: ending every session"
+        );
+        for s in &sessions {
+            s.session.lock().unwrap().stop(grace);
+        }
+        let deadline = tokio::time::Instant::now() + grace * 2 + SHUTDOWN_DRAIN;
+        for s in &sessions {
+            while s.events.ended.lock().unwrap().is_none() {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(session = %s.id, "did not end within the shutdown deadline");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
     }
 
@@ -607,6 +663,11 @@ impl Host {
     async fn upload(self: Arc<Self>, s: Arc<HostSession>) {
         let mut retry = Duration::from_millis(250);
         loop {
+            // A shutdown ends this session itself, and says so in the next
+            // `hello`, not here (AM37).
+            if self.shutting_down.load(Ordering::SeqCst) {
+                return;
+            }
             // Wait for the link before posting anything.
             let mut up = self.link_up.subscribe();
             while !*up.borrow_and_update() {
@@ -887,6 +948,177 @@ fn event_data(event: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in server that answers every POST `200 {}` and records it.
+    async fn recording_server() -> (String, Arc<Mutex<Vec<(String, serde_json::Value)>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let record = record.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    loop {
+                        // One request: headers, then content-length bytes.
+                        let head_end = loop {
+                            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break at + 4;
+                            }
+                            let mut chunk = [0u8; 4096];
+                            match conn.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        };
+                        let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                        let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        while buf.len() < head_end + len {
+                            let mut chunk = [0u8; 4096];
+                            match conn.read(&mut chunk).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        let body = serde_json::from_slice(&buf[head_end..head_end + len])
+                            .unwrap_or(serde_json::Value::Null);
+                        buf.drain(..head_end + len);
+                        record.lock().unwrap().push((path, body));
+                        let reply = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}";
+                        if conn.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    fn alive(pid: i32) -> bool {
+        rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
+    }
+
+    /// AM37: a shutdown ends a session and everything it spawned — here a
+    /// child that ignores SIGHUP, which only the group SIGKILL after the grace
+    /// can end — posts no ending, and leaves `sessions.json` listing it, so
+    /// the next `hello` reports `failed (host_restart)` (§13).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shutdown_ends_every_session_and_posts_no_ending() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            r#"
+workspace_roots = ["{}"]
+[[providers]]
+id = "shell"
+command = "/bin/sh"
+args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
+"#,
+            roots.path().display()
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+
+        host.clone()
+            .handle(Command::Start {
+                session: "ags_SHUTDOWN".into(),
+                workspace: "w".into(),
+                provider: "shell".into(),
+                interaction: Some("terminal".into()),
+                terminal: Size { cols: 80, rows: 24 },
+                mcp: Vec::new(),
+                context: false,
+            })
+            .await;
+        let s = host.session("ags_SHUTDOWN").expect("the session started");
+        let pid = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let out = match s.events.ring.lock().unwrap().read(0, BATCH) {
+                    Read::Data { bytes, .. } => String::from_utf8_lossy(&bytes).into_owned(),
+                    _ => String::new(),
+                };
+                if let Some(pid) = out
+                    .split("bg:")
+                    .nth(1)
+                    .and_then(|r| r.split_whitespace().next())
+                    .and_then(|p| p.parse::<i32>().ok())
+                {
+                    break pid;
+                }
+                assert!(std::time::Instant::now() < deadline, "no pid in {out:?}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        assert!(alive(pid));
+        // The uploader is live: it has reported the session running.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, b)| b["status"] == "running")
+        {
+            assert!(std::time::Instant::now() < deadline, "never posted running");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        host.shutdown(Duration::from_millis(300)).await;
+
+        assert!(
+            s.events.ended.lock().unwrap().is_some(),
+            "the session ended"
+        );
+        assert!(
+            !alive(pid),
+            "the child that ignored SIGHUP survived the shutdown"
+        );
+        // Give a stray uploader every chance to post the ending.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let endings: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, b)| b["status"].is_string() && b["status"] != "running")
+            .cloned()
+            .collect();
+        assert!(
+            endings.is_empty(),
+            "a shutdown posted an ending: {endings:?}"
+        );
+        assert_eq!(
+            read_table(state.path()).sessions,
+            vec!["ags_SHUTDOWN".to_string()],
+            "sessions.json must keep it for the next hello"
+        );
+    }
 
     #[test]
     fn sse_events_split_at_blank_lines_and_keepalives_carry_no_data() {

@@ -29,6 +29,10 @@ pub const ENROLL_PREFIX: &str = "storm-enroll:v1:";
 
 pub const IDENTITY_DIR: &str = "identity";
 pub const HOST_FILE: &str = "host.json";
+/// Where `host.json` goes when the server refuses the key (AM36): a revoked
+/// identity is dead, and its absence is what stops launchd restarting the
+/// host (AM35's `PathState`) and lets `enroll` run again without `--force`.
+pub const REVOKED_FILE: &str = "host.json.revoked";
 
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -242,6 +246,13 @@ impl HostConfig {
 
     pub fn load(state_dir: &Path) -> Result<Self> {
         let path = Self::path(state_dir);
+        if !path.exists() && state_dir.join(REVOKED_FILE).exists() {
+            anyhow::bail!(
+                "this host is not enrolled: the server revoked it ({} holds the old \
+                 enrollment). Enroll it again with `storm-runtime enroll`.",
+                state_dir.join(REVOKED_FILE).display()
+            );
+        }
         let text = fs::read_to_string(&path).with_context(|| {
             format!(
                 "reading {} — has this host been enrolled? (storm-runtime enroll)",
@@ -266,6 +277,16 @@ impl HostConfig {
         file.sync_all()?;
         fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
+    }
+
+    /// The server refused this host's key (AM36): `host.json` becomes
+    /// `host.json.revoked`, atomically, replacing any older one. Afterwards the
+    /// host is visibly unenrolled, on every platform.
+    pub fn mark_revoked(state_dir: &Path) -> Result<()> {
+        let from = Self::path(state_dir);
+        let to = state_dir.join(REVOKED_FILE);
+        fs::rename(&from, &to)
+            .with_context(|| format!("renaming {} to {}", from.display(), to.display()))
     }
 }
 
@@ -369,6 +390,29 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_revoked_host_is_unenrolled_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = HostConfig {
+            server_url: "http://127.0.0.1:1".into(),
+            server_id: "srv_X".into(),
+            server_pubkey: "k".into(),
+            host_id: "hst_X".into(),
+            key_id: "key_X".into(),
+        };
+        config.save(dir.path()).unwrap();
+        HostConfig::mark_revoked(dir.path()).unwrap();
+        assert!(
+            !HostConfig::path(dir.path()).exists(),
+            "host.json must be gone"
+        );
+        let kept: HostConfig =
+            serde_json::from_slice(&std::fs::read(dir.path().join(REVOKED_FILE)).unwrap()).unwrap();
+        assert_eq!(kept, config, "the old enrollment is kept beside it");
+        let err = format!("{:#}", HostConfig::load(dir.path()).unwrap_err());
+        assert!(err.contains("revoked"), "{err}");
     }
 
     #[test]

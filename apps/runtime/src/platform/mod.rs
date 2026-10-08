@@ -6,6 +6,7 @@
 //! whose behaviour differs (a PTY write's wait for room). Business logic asks
 //! this module; it never matches on `target_os` itself.
 
+use std::ffi::CStr;
 use std::io;
 use std::os::fd::BorrowedFd;
 use std::time::Duration;
@@ -104,9 +105,119 @@ pub(crate) fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result
     os::wait_writable(fd, timeout)
 }
 
+/// Every live (non-zombie) process whose session id is `sid`.
+///
+/// A session's leader is `setsid`'s caller, so for an agent session `sid` is
+/// the agent's pid. Ending the session's process group is not enough: a
+/// job-control shell (`zsh -l`, `bash -i`) puts each `cmd &` in a process
+/// group of its own, inside the same session. Everything still in the session
+/// is found here; only a process that called `setsid` itself leaves it, and
+/// the exclusive-account sweep covers those when the host stops (AM37).
+pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
+    os::session_members(sid)
+}
+
 fn timespec(timeout: Duration) -> rustix::event::Timespec {
     rustix::event::Timespec {
         tv_sec: timeout.as_secs() as _,
         tv_nsec: timeout.subsec_nanos() as _,
+    }
+}
+
+// ---- the exclusive account (AM37) ----------------------------------------
+
+/// Whether `serve --exclusive-account` may run as `uid`, named `name`.
+///
+/// The sweep signals every process the caller may signal. As root that is
+/// the whole machine; as a human it is their session. So it is allowed only
+/// as the platform's dedicated service account, which by construction runs
+/// nothing but this host and what this host started.
+pub fn exclusive_account_allowed(uid: u32, name: Option<&str>) -> Result<(), String> {
+    if uid == 0 {
+        return Err(
+            "--exclusive-account refuses to run as root: it would signal \
+                    every process on the machine"
+                .into(),
+        );
+    }
+    match name {
+        Some(name) if name == SERVICE_ACCOUNT => Ok(()),
+        Some(name) => Err(format!(
+            "--exclusive-account runs only as the service account {SERVICE_ACCOUNT}, \
+             not as {name}: it ends every other process of its account"
+        )),
+        None => Err(format!(
+            "--exclusive-account: uid {uid} has no account name; it runs only as \
+             {SERVICE_ACCOUNT}"
+        )),
+    }
+}
+
+/// [`exclusive_account_allowed`] for the running process.
+pub fn check_exclusive_account() -> Result<(), String> {
+    let uid = rustix::process::geteuid().as_raw();
+    exclusive_account_allowed(uid, account_name(uid).as_deref())
+}
+
+/// The login name of `uid`, from the password database (`getpwuid_r`).
+pub fn account_name(uid: u32) -> Option<String> {
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is to a live local of the right type and size;
+    // `out` is either null or points at `pwd`, whose strings live in `buf`.
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut out) };
+    if rc != 0 || out.is_null() || pwd.pw_name.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r succeeded, so `pw_name` is a NUL-terminated string
+    // inside `buf`, which is still alive.
+    Some(
+        unsafe { CStr::from_ptr(pwd.pw_name) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// Ends every other process of this account: SIGHUP, then SIGKILL after
+/// `grace`. The counterpart of systemd's control-group kill, and the only
+/// one launchd has (AM37). `kill(-1, …)` reaches every process the caller
+/// may signal except itself; **call it only after
+/// [`check_exclusive_account`] passed** — `serve` does, and nothing else
+/// calls this.
+pub fn sweep_account(grace: Duration) {
+    // SAFETY: kill(2) has no memory-safety preconditions.
+    unsafe { libc::kill(-1, libc::SIGHUP) };
+    std::thread::sleep(grace);
+    unsafe { libc::kill(-1, libc::SIGKILL) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sweep_runs_only_as_the_service_account() {
+        assert!(exclusive_account_allowed(0, Some("root")).is_err());
+        // Root is refused whatever it is called.
+        assert!(exclusive_account_allowed(0, Some(SERVICE_ACCOUNT)).is_err());
+        let human = exclusive_account_allowed(501, Some("alice")).unwrap_err();
+        assert!(human.contains(SERVICE_ACCOUNT), "{human}");
+        assert!(exclusive_account_allowed(501, None).is_err());
+        assert_eq!(
+            exclusive_account_allowed(250, Some(SERVICE_ACCOUNT)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_running_account_is_found_by_uid() {
+        let uid = rustix::process::geteuid().as_raw();
+        // Whoever runs the tests is in the password database. (It may be the
+        // service account itself — a host's own agent session runs the suite
+        // — which is why no test ever calls `sweep_account`.)
+        let name = account_name(uid).expect("the test runner's account");
+        assert!(!name.is_empty());
+        assert_eq!(account_name(0).as_deref(), Some("root"));
     }
 }
