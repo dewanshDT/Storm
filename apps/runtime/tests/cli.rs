@@ -151,16 +151,6 @@ fn the_terminal_environment_and_the_workspace_are_set() {
 }
 
 #[test]
-// Known to fail on macOS until slice 4 (PLAN.md 83d), found on the first
-// real-Mac CI run: when the session leader exits, BSD revokes the session's
-// controlling terminal, so the master sees end-of-file while a job that
-// ignores SIGHUP is still alive, the session reports `ended`, and the
-// grace's SIGKILL is skipped. Slice 4 ends a session only once it is empty,
-// and turns this test back on.
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "fixed in slice 4 (83d): BSD revokes the terminal"
-)]
 fn stopping_ends_everything_the_session_spawned() {
     // A background job in the session that ignores the hangup, so only the
     // group-wide SIGKILL after the grace can end it. Nothing the session
