@@ -58,6 +58,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **in progress** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · **slice 0 done 2026-10-08**: Flutter 3.44.8 toolchain, baseline green on `c9131b4` (`make check`, `make test-live`), 10 baseline shots · next: slice 1, single user |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3904,6 +3905,74 @@ real defects came with it:
     `/authorize` sent.
 - 773 client tests pass. The UI was reviewed as rendered screenshots before
   merging.
+
+**82. Storm v2: the approved design is built as specified, Storm becomes
+single-user, and the knowledge ↔ agent loop gets real backend support.**
+*(2026-10-08; design approved by the operator, slice 0 done, nothing else
+built)*
+
+**The source of truth** is `design_handoff_storm_v2/` (README, the two
+`.dc.html` prototype files, the screenshots); where its README and the
+prototype disagree, the prototype wins. `docs/design/STORM_UI_UX_DISCOVERY.md`
+is the discovery behind it. **The plan** — audit, design-to-code map,
+resolved questions, slice order, tests — is
+`docs/design/STORM_V2_IMPLEMENTATION_PLAN.md`; this entry records what is
+decided and points there for the rest.
+
+**Product shape:**
+- Activities, not vaults: a desktop **activity rail** (Notes, Agents, a
+  health dot, Settings) and a phone **place picker** in the left corner
+  bubble. **No Home or dashboard**; launch restores the last activity and
+  location per device. Settings is one global destination with a fixed
+  hierarchy (This device · Devices & access · Storm › Vaults, AI access,
+  Integrations, Hosts & default agent, Storage, Connection, Advanced ·
+  About & health). Infrastructure appears only as status lines that link
+  into Settings.
+- **Agent ≠ Session.** In the UI "Agent" is Claude Code / OpenCode / Shell
+  (code keeps `provider`); a session is one run, now a route
+  (`/agents/s/:id`); Work groups sessions by (workspace, host). Kit's
+  `agents/*.md` are plain notes and are never called agents.
+- **The loop:** start a session from a note (launch context), choose **one
+  vault it may write to**, see what it wrote (**Wrote**), and see on each
+  written note which session edited it (**provenance**, an unseen dot).
+
+**Storm is single-user** — not hidden, removed. One account, password-only
+sign-in; no members, roles, registration or account picker. On upgrade the
+oldest active owner becomes the account and every other account is deleted
+with an audit row; `auth.db` is snapshotted to `auth.db.pre-v6` first, the
+v6 migration runs in one transaction, and invariants I1–I8 (plan §3.3) are
+checked on every boot. Device, session, key, host and gateway boundaries are
+unchanged.
+
+**Engineering decisions recorded with their reasons in plan §5:** the route
+scheme and redirects; `/` redirects to the last location and back from
+Agents/Settings returns to Notes (the desk-width forward and its stale read,
+decision 78, go away); no pill on the phone note; vault colour from the tile
+in Settings › Vaults; running drawn in `accent`; two derived type steps
+(`fs·scale²`, `fs/√scale`); server-assigned session names; latest agent
+writer only on a note; tabs and terminal-title names retired; a separate
+`agent_writes` setting seeded from `mcp_writable` so no upgrade changes
+behaviour.
+
+**Context delivery:** the agent reads its note through the built-in `storm`
+connection (`session_context`, keyed on the caller's own session); a fixed
+opening prompt tells it to read the note and wait. **No note content, title
+or id ever enters a command line or environment** — the server sends a
+boolean, the runtime adds a compile-time constant (plan §7.2).
+
+**Amends, as the slices land** (until then those entries describe the
+code): 78 (dashboard band, space switch, owner-only Agents), 77d / 80 / 81c
+(owner-only → the one account), and the M19 invariants in `CLAUDE.md` that
+speak of owners and members.
+
+**Slice 0 (done):** Flutter 3.44.8 user-local; baseline on `c9131b4` all
+green — Rust 546 + 112 + 53 tests, clippy and fmt clean, 773 client tests,
+`flutter analyze` clean, `make test-live` 361 checks + 20 client live
+tests; `docs/design/acceptance/storm-v2/` drives the real web build against
+a real server in headless Chromium and signs in through the UI.
+
+**Revisit if** a second human user becomes a real requirement (Teams, A9):
+that is a new authorization design, not a restoration of the removed one.
 
 ---
 

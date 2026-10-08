@@ -87,6 +87,8 @@ Practical consequences worth knowing before you start:
 | `docs/storm-adaptive.md` | M12 design brief — the wide-screen layout. |
 | `docs/storm-ui.md` | What every screen does today, for designing against. |
 | `docs/design_handoff_storm_design_system/` | M14 design system + prototype. `README.md` is the brief; the two `.dc.html` files open in a browser. |
+| `design_handoff_storm_v2/` | **M22 (Storm v2) design source of truth** — activity rail, single user, the agent loop. The prototype wins over its README. |
+| `docs/design/` | v2 discovery (`STORM_UI_UX_DISCOVERY.md`), the implementation plan (`STORM_V2_IMPLEMENTATION_PLAN.md`) and the visual acceptance set + harness (`acceptance/storm-v2/`). |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
