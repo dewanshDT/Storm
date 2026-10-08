@@ -54,30 +54,11 @@ class VaultAction {
   final bool inSidebar;
 }
 
-/// The actions for the current location.
-///
-/// Outside a vault — on the dashboard — there is nothing to browse or search,
-/// so it offers what does apply there instead.
+/// The actions for the current location; none outside a vault.
 List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
   final vaultId = Routes.vaultOf(uri);
 
-  if (vaultId.isEmpty) {
-    return [
-      VaultAction(
-        glyph: StormGlyph.plus,
-        tooltip: 'New vault',
-        // Primary here too: the pill always has one filled slot, and on the
-        // dashboard making a vault is the thing it is for.
-        primary: true,
-        onTap: () => NewNoteRequest.of(context)?.call(),
-      ),
-      VaultAction(
-        glyph: StormGlyph.server,
-        tooltip: 'Server settings',
-        onTap: () => context.push(Routes.serverSettings),
-      ),
-    ];
-  }
+  if (vaultId.isEmpty) return const [];
 
   final segments = uri.pathSegments;
   // `/v/<vault>/note/<id>` — the marker is the segment after the vault.

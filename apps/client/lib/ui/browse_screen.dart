@@ -10,7 +10,7 @@ import '../state/vault_config.dart';
 import 'breakpoints.dart';
 import 'tokens.dart';
 import 'widgets.dart';
-import 'shell/corner_bubbles.dart' show relativeTime;
+import '../state/health.dart' show relativeTime;
 import 'shell/nav_bubble.dart' show NewNoteRequest;
 import 'states.dart';
 import 'shell/storm_scaffold.dart';
@@ -182,7 +182,6 @@ class _Breadcrumbs extends ConsumerWidget {
       ),
       child: Breadcrumb(
         crumbs: [
-          Crumb('Vaults', onTap: () => context.go(Routes.dashboard)),
           Crumb(name, onTap: () => context.go(Routes.browse(vaultId))),
           for (var i = 0; i < parts.length; i++)
             Crumb(

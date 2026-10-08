@@ -809,7 +809,7 @@ real Wrote rows, real provenance, no client-side simulation.
 - [x] Context-note retrieval and argv rule specified with verification (§7.2)
 - [x] Slice 1 — single-user
 - [x] Slice 2 — design-system additions
-- [ ] Slice 3 — shell + routing
+- [x] Slice 3 — shell + routing
 - [ ] Slice 4 — Notes
 - [ ] Slice 5 — server agent capabilities
 - [ ] Slice 6 — Agents

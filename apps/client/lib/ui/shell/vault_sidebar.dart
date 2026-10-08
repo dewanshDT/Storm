@@ -14,10 +14,8 @@ import '../surfaces.dart';
 import '../tokens.dart';
 import '../widgets.dart';
 import '../browse_screen.dart' show EntryTile, childrenOfFolder;
-import 'space_switch.dart';
 import 'sidebar_frame.dart';
 import 'vault_actions.dart';
-import 'vault_gate.dart';
 
 /// The sidebar's floor. Its actual width is `context.sidebarWidth`, which
 /// scales with the window — see `breakpoints.dart` for why a fixed 260 made a
@@ -53,9 +51,6 @@ class VaultSidebar extends ConsumerWidget {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Notes | Agents, for the server's owner only (decision 78). It
-          // draws nothing for anyone else, so the rail is unchanged.
-          const SpaceSwitch(current: StormSpace.notes),
           _VaultSwitcher(vault: vault, accent: accent),
           Padding(
             padding: EdgeInsets.fromLTRB(t.sp * 2, 0, t.sp * 2, t.sp * 2),
@@ -115,13 +110,6 @@ class VaultSidebar extends ConsumerWidget {
                     constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
                     onPressed: action.onTap,
                   ),
-                // Last in the row, not pushed to the far edge: the design
-                // groups all four at the left. This is the *appearance*
-                // menu — theme, text size, note font — which lives on the
-                // top-right corner bubble on a phone, and the corners are
-                // empty at this width. Server settings are in the vault
-                // switcher, next to the vault they configure.
-                const _SettingsButton(),
               ],
             ),
           ),
@@ -217,11 +205,11 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
                 },
               ),
               PopoverItem(
-                label: 'Server settings ›',
+                label: 'Manage vaults ›',
                 tone: PopoverTone.accent,
                 onTap: () {
                   Navigator.pop(popContext);
-                  context.push(Routes.serverSettingsIn(activeId));
+                  context.go(Routes.settingsPage('vaults'));
                 },
               ),
             ],
@@ -303,38 +291,6 @@ class _VaultSwitcherState extends ConsumerState<_VaultSwitcher> {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// The footer's gear: theme, text size, note font.
-///
-/// Not server settings — those are in the vault switcher, next to the vault
-/// they configure. This is the menu the phone's top-right corner bubble
-/// drops, and the corners are empty at this width.
-class _SettingsButton extends StatefulWidget {
-  const _SettingsButton();
-
-  @override
-  State<_SettingsButton> createState() => _SettingsButtonState();
-}
-
-class _SettingsButtonState extends State<_SettingsButton> {
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return IconButton(
-      icon: Icon(LucideIcons.settings, size: t.bodySize, color: t.text3),
-      iconSize: t.bodySize,
-      tooltip: 'Client settings',
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-      constraints: BoxConstraints.tight(Size.square(t.sp * 4.75)),
-      // A page, not a popover. Anchored to a button at the foot of the
-      // sidebar, a menu opens below the bottom of the window — which is what
-      // made this button look like it did nothing at all.
-      onPressed: () =>
-          context.push(Routes.clientSettingsIn(VaultGate.of(context))),
     );
   }
 }

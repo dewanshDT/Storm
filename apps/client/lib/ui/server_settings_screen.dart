@@ -8,6 +8,7 @@ import '../router.dart';
 import 'tokens.dart';
 import 'widgets.dart';
 import '../state/app_state.dart';
+import 'settings/settings_shell.dart' show settingsLeading;
 import 'states.dart';
 
 /// Where vaults live on the server, and which ones exist.
@@ -26,20 +27,8 @@ class ServerSettingsScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(LucideIcons.arrow_left),
-          onPressed: () => context.canPop()
-              ? context.pop()
-              // Mounted at two paths: the vault-scoped one goes back into the
-              // vault, the dashboard's one goes home.
-              : context.go(
-                  Routes.vaultOf(GoRouterState.of(context).uri).isEmpty
-                      ? Routes.dashboard
-                      : Routes.browse(
-                          Routes.vaultOf(GoRouterState.of(context).uri),
-                        ),
-                ),
-        ),
+        leading: settingsLeading(context),
+        automaticallyImplyLeading: false,
         title: const Text('Server settings'),
       ),
       body: ListView(
@@ -70,7 +59,7 @@ class ServerSettingsScreen extends ConsumerWidget {
               alignment: Alignment.centerLeft,
               child: OutlinedButton.icon(
                 key: const Key('manage-mcp-keys'),
-                onPressed: () => context.push(Routes.mcpKeys),
+                onPressed: () => context.go(Routes.settingsPage('access')),
                 icon: const Icon(Icons.key),
                 label: const Text('Manage MCP keys'),
               ),
@@ -82,14 +71,14 @@ class ServerSettingsScreen extends ConsumerWidget {
             _Section(label: 'Agents'),
             const _Muted(
               'The machines agents run on, and which agent starts by default. '
-              'Sessions are on the dashboard.',
+              'Sessions are in Agents.',
             ),
             const SizedBox(height: 8),
             Align(
               alignment: Alignment.centerLeft,
               child: OutlinedButton.icon(
                 key: const Key('open-hosts'),
-                onPressed: () => context.push(Routes.agentHosts),
+                onPressed: () => context.go(Routes.settingsPage('hosts')),
                 icon: const Icon(LucideIcons.server, size: 18),
                 label: const Text('Hosts'),
               ),
@@ -105,7 +94,7 @@ class ServerSettingsScreen extends ConsumerWidget {
               alignment: Alignment.centerLeft,
               child: OutlinedButton.icon(
                 key: const Key('open-integrations'),
-                onPressed: () => context.push(Routes.integrations),
+                onPressed: () => context.go(Routes.integrations),
                 icon: const Icon(LucideIcons.plug, size: 18),
                 label: const Text('Integrations'),
               ),

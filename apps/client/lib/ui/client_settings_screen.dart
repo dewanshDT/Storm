@@ -1,40 +1,22 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_lucide/flutter_lucide.dart';
-import 'package:go_router/go_router.dart';
 
-import '../router.dart';
 import 'shell/corner_bubbles.dart' show ClientSettingsBody;
-import 'shell/vault_gate.dart';
+import 'settings/settings_shell.dart' show settingsLeading;
 import 'tokens.dart';
 
-/// Theme, text size, note preferences, connection — settings for this device.
-///
-/// "Client", not "Appearance": Appearance is one section; Notes, Connection
-/// and About sit beside it. The distinction that matters to the user is which
-/// side of the wire a setting lives on. Server settings are the storage root,
-/// the vaults and MCP.
-///
-/// A page rather than a popover, because at desk width the control that opens
-/// it is the sidebar's footer gear and a menu anchored there would open below
-/// the bottom of the window. It is mounted inside the vault shell, so the
-/// sidebar stays beside it.
+/// Settings › This device.
 class ClientSettingsScreen extends StatelessWidget {
   const ClientSettingsScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final vaultId = VaultGate.of(context);
 
     return Scaffold(
       appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(LucideIcons.arrow_left),
-          onPressed: () => context.canPop()
-              ? context.pop()
-              : context.go(Routes.browse(vaultId)),
-        ),
-        title: const Text('Client settings'),
+        leading: settingsLeading(context),
+        automaticallyImplyLeading: false,
+        title: const Text('This device'),
       ),
       body: ListView(
         padding: EdgeInsets.fromLTRB(

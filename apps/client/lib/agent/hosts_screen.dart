@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../ui/clipboard_copy.dart';
 import '../ui/states.dart';
+import '../ui/settings/settings_shell.dart' show settingsLeading;
 import '../ui/tokens.dart';
 import 'agent_api.dart';
 import 'agent_models.dart';
@@ -128,6 +129,8 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
     final hosts = _hosts;
     return Scaffold(
       appBar: AppBar(
+        leading: settingsLeading(context),
+        automaticallyImplyLeading: false,
         title: const Text('Hosts'),
         actions: [
           IconButton(

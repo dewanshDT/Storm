@@ -6,23 +6,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'state/app_state.dart';
-import 'ui/browse_screen.dart';
-import 'ui/client_settings_screen.dart';
-import 'ui/gallery_screen.dart';
+import 'state/nav_memory.dart';
 import 'ui/add_device_screen.dart';
+import 'ui/breakpoints.dart';
+import 'ui/browse_screen.dart';
+import 'ui/gallery_screen.dart';
 import 'ui/login_screen.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
-import 'agent/hosts_screen.dart';
-import 'agent/integrations_screen.dart';
-import 'ui/mcp_keys_screen.dart';
-import 'ui/starting_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
-import 'ui/server_settings_screen.dart';
-import 'ui/shell/dashboard.dart';
+import 'ui/settings/settings_shell.dart';
+import 'ui/shell/app_shell.dart';
+import 'ui/shell/notes_home.dart';
 import 'ui/shell/vault_shell.dart';
+import 'ui/starting_screen.dart';
 import 'ui/tags_screen.dart';
 
 /// Where the app can be.
@@ -32,52 +31,31 @@ import 'ui/tags_screen.dart';
 /// answer. It also gives the web client working deep links, which the old
 /// single-screen shell simply didn't have.
 abstract final class Routes {
-  static const dashboard = '/';
+  /// Not a screen: redirects to this device's last location (handoff §1.5).
+  static const root = '/';
+
+  /// The Notes activity's entry: the last vault, or the no-vaults state.
+  static const notes = '/notes';
 
   /// Shown while the app decides where to send you. Never navigated to
   /// directly — the redirect holds here instead of guessing.
   static const starting = '/starting';
   static const pairing = '/pairing';
 
-  /// Sign in on a device that is already paired. Distinct from [pairing],
-  /// which is first-run only and asks for a QR nobody needs twice.
+  /// Sign in on a device that is already paired.
   static const login = '/login';
 
-  /// Reachable without a vault, from the phone's dashboard — which is the
-  /// screen you are on when there is no vault yet.
-  static const serverSettings = '/settings/server';
-
-  /// Show a pairing QR so another device can join. Session tier: only a
-  /// signed-in client can vouch for a new one.
+  /// Show a pairing QR so another device can join (from Devices & access).
   static const addDevice = '/add-device';
 
-  /// Manage the MCP keys this account holds (A14). Session tier, for the same
-  /// reason: a key belongs to a user, and minting one is the user vouching.
-  static const mcpKeys = '/settings/mcp-keys';
-
-  /// The Agents space: sessions and their tabs (decisions 77d, 78). Owner
-  /// only: every entry point exists only when the server's owner check
-  /// passes, and the redirect returns anyone else to the dashboard.
   static const agents = '/agents';
 
-  /// Runtime Hosts, enrollment and the default provider.
-  static const agentHosts = '/agents/hosts';
+  /// The settings list on a phone; the first page at desk width.
+  static const settings = '/settings';
+  static String settingsPage(String id) => '/settings/$id';
 
-  /// Settings ▸ Integrations (MCP Gateway, decision 81h). Owner only, by the
-  /// server's 403; the entry exists only when the owner check passes.
+  /// Kept at this path: the OAuth orphan relay in `main.dart` lands here.
   static const integrations = '/settings/integrations';
-
-  /// The same two screens, mounted inside the vault shell.
-  ///
-  /// Two mount points for one screen, deliberately: settings have to be
-  /// reachable *without* a vault (there may be none) and *with* the sidebar
-  /// beside them (at desk width there is nowhere else to put them). The
-  /// screens themselves do not know the difference.
-  static String serverSettingsIn(String vaultId) =>
-      '${vault(vaultId)}/settings/server';
-
-  static String clientSettingsIn(String vaultId) =>
-      '${vault(vaultId)}/settings/client';
 
   /// Every shared widget in all three themes. Not linked from the app — it is
   /// a surface for judging the token layer, reached by typing the path.
@@ -126,7 +104,7 @@ final routerProvider = Provider<GoRouter>((ref) {
   ref.onDispose(refresh.dispose);
 
   final router = GoRouter(
-    initialLocation: Routes.dashboard,
+    initialLocation: Routes.root,
     refreshListenable: refresh,
     redirect: (context, state) {
       final settings = ref.read(settingsProvider);
@@ -202,7 +180,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       final atStarting = state.matchedLocation == Routes.starting;
 
       if (configured) {
-        return (atAuthScreen || atStarting) ? Routes.dashboard : null;
+        if (atAuthScreen || atStarting) {
+          return ref.read(navMemoryProvider).launch;
+        }
+        return _shellRedirect(state, ref);
       }
 
       // Paired, but no session — signed out, or the session was revoked. This
@@ -226,91 +207,65 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: Routes.addDevice,
         builder: (_, _) => const AddDeviceScreen(),
       ),
-      GoRoute(path: Routes.mcpKeys, builder: (_, _) => const McpKeysScreen()),
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
-      // Everything else is a *child* of the dashboard, so navigating to it
-      // builds a stack with the dashboard underneath rather than replacing it.
-      // Flat routes meant `go` left exactly one route on the stack, and the
-      // Android back gesture popped it straight out of the app.
-      GoRoute(
-        path: Routes.dashboard,
-        builder: (_, _) => const DashboardScreen(),
+      ShellRoute(
+        builder: (_, state, child) =>
+            AppShell(location: state.uri.toString(), child: child),
         routes: [
-          GoRoute(
-            path: 'settings/server',
-            builder: (_, _) => const ServerSettingsScreen(),
-          ),
-          GoRoute(
-            path: 'settings/integrations',
-            builder: (_, _) => const IntegrationsScreen(),
-          ),
-          // The Agents space (decision 78): a child of the dashboard like
-          // every other destination, so Android back returns home rather than
-          // leaving the app — it used to sit at the top level, the shape
-          // decision 17 removed everywhere else. Its own shell, a sibling of
-          // `VaultShell`: at desk width the sessions list sits beside the
-          // pane, and it needs no vault.
-          ShellRoute(
-            builder: (_, _, child) => AgentsShell(child: child),
-            routes: [
-              GoRoute(
-                path: 'agents',
-                builder: (_, _) => const AgentsScreen(),
-                routes: [
-                  GoRoute(
-                    path: 'hosts',
-                    builder: (_, _) => const HostsScreen(),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          // Every vault-scoped screen sits inside `VaultShell`, which carries
-          // the `VaultGate` — making the route's vault active before its
-          // children build, since otherwise there is a frame where the
-          // providers still hold the previous vault's notes — and, on a wide
-          // screen, the folder tree beside it.
-          //
-          // A `ShellRoute` rather than wrapping each child: the shell is built
-          // once and only the pane inside it changes, which is what lets the
-          // sidebar hold its expansion state across opening a note. The paths
-          // are unchanged, so the back stack behaves exactly as decision 17
-          // describes — `back_navigation_test.dart` is the proof.
+          GoRoute(path: Routes.notes, builder: (_, _) => const NotesHome()),
+          // The vault's screens share `VaultShell`, which carries `VaultGate`
+          // (the route's vault is active before its children build) and, at
+          // desk width, the folder tree.
           ShellRoute(
             builder: (_, _, child) => VaultShell(child: child),
             routes: [
               GoRoute(
-                path: 'v/:vault/browse/:path(.*)',
+                path: '/v/:vault/browse/:path(.*)',
                 builder: (_, state) =>
                     BrowseScreen(folder: Routes.folderOf(state.uri)),
               ),
               GoRoute(
-                path: 'v/:vault/browse',
+                path: '/v/:vault/browse',
                 builder: (_, _) => const BrowseScreen(folder: ''),
               ),
               GoRoute(
-                path: 'v/:vault/note/:id',
+                path: '/v/:vault/note/:id',
                 builder: (_, state) =>
                     NoteScreen(noteId: state.pathParameters['id']!),
               ),
               GoRoute(
-                path: 'v/:vault/search',
+                path: '/v/:vault/search',
                 builder: (_, _) => const SearchScreen(),
               ),
               GoRoute(
-                path: 'v/:vault/tags',
+                path: '/v/:vault/tags',
                 builder: (_, _) => const TagsScreen(),
               ),
-              // Inside the shell, so the sidebar stays beside them. At desk
-              // width a settings screen that replaced the whole window would
-              // be the one place the tree disappears.
+            ],
+          ),
+          ShellRoute(
+            builder: (_, _, child) => AgentsShell(child: child),
+            routes: [
               GoRoute(
-                path: 'v/:vault/settings/server',
-                builder: (_, _) => const ServerSettingsScreen(),
+                path: Routes.agents,
+                builder: (_, _) => const AgentsScreen(),
+              ),
+            ],
+          ),
+          ShellRoute(
+            builder: (_, state, child) =>
+                SettingsShell(page: state.pathParameters['page'], child: child),
+            routes: [
+              GoRoute(
+                path: Routes.settings,
+                builder: (context, _) => context.isExpanded
+                    ? settingsPageFor('device')
+                    : const SettingsListScreen(),
               ),
               GoRoute(
-                path: 'v/:vault/settings/client',
-                builder: (_, _) => const ClientSettingsScreen(),
+                path: '/settings/:page',
+                builder: (_, state) =>
+                    settingsPageFor(state.pathParameters['page']!),
               ),
             ],
           ),
@@ -330,6 +285,28 @@ final routerProvider = Provider<GoRouter>((ref) {
   ref.onDispose(router.dispose);
   return router;
 });
+
+/// Retired locations, `/` and the Notes entry, for a signed-in device.
+String? _shellRedirect(GoRouterState state, Ref ref) {
+  final path = state.uri.path;
+  final seg = state.uri.pathSegments;
+  final memory = ref.read(navMemoryProvider);
+
+  if (path == Routes.root) return memory.launch;
+  if (path == Routes.notes) {
+    return memory.notes.isEmpty ? null : memory.notes;
+  }
+  if (path == '/settings/server') return Routes.settingsPage('vaults');
+  if (path == '/settings/mcp-keys') return Routes.settingsPage('access');
+  if (path == '/agents/hosts') return Routes.settingsPage('hosts');
+  if (seg.length == 4 && seg[0] == 'v' && seg[2] == 'settings') {
+    return Routes.settingsPage(seg[3] == 'client' ? 'device' : 'vaults');
+  }
+  if (seg.length == 2 && seg[0] == 'settings' && !isSettingsPage(seg[1])) {
+    return Routes.settings;
+  }
+  return null;
+}
 
 /// Nudges GoRouter to re-run its redirect without replacing the router.
 class _RouterRefresh extends ChangeNotifier {

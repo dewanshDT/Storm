@@ -3,7 +3,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../ui/icons.dart';
-import '../ui/shell/corner_bubbles.dart' show relativeTime;
+import '../state/health.dart' show relativeTime;
 import '../ui/shell/nav_bubble.dart' show PrimaryCircle, StormPill;
 import '../ui/tokens.dart';
 import '../ui/widgets.dart';

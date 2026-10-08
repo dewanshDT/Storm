@@ -28,7 +28,12 @@ CURRENT = [
     dict(name="baseline/phone-server-settings", viewport="phone", route="/settings/server"),
 ]
 
-V2 = []
+V2 = [
+    dict(name="desktop-04-health-popover", viewport="desktop", route=f"/v/{P}/note/{BOARD}",
+         actions=[("tap", "^Status$")]),
+    dict(name="phone-02-place-picker", viewport="phone", route=f"/v/{P}/browse",
+         actions=[("tap", "^Places$")]),
+]
 
 DESIGN = [
     dict(name="design-system/gallery", viewport="gallery", route="/gallery", settle=2.5),

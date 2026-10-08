@@ -241,6 +241,7 @@ class StormBubble extends StatelessWidget {
     this.onLongPress,
     this.size,
     this.tooltip,
+    this.borderColor,
   });
 
   final Widget child;
@@ -248,6 +249,7 @@ class StormBubble extends StatelessWidget {
   final VoidCallback? onLongPress;
   final double? size;
   final String? tooltip;
+  final Color? borderColor;
 
   @override
   Widget build(BuildContext context) {
@@ -259,7 +261,7 @@ class StormBubble extends StatelessWidget {
       decoration: BoxDecoration(
         color: t.surface.withValues(alpha: 0.96),
         borderRadius: radius,
-        border: Border.all(color: t.border, width: t.bw),
+        border: Border.all(color: borderColor ?? t.border, width: t.bw),
         boxShadow: t.shadow,
       ),
       child: Material(
@@ -277,6 +279,13 @@ class StormBubble extends StatelessWidget {
         ),
       ),
     );
-    return tooltip == null ? bubble : Tooltip(message: tooltip!, child: bubble);
+    if (tooltip == null) return bubble;
+    return Semantics(
+      button: true,
+      label: tooltip,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: Tooltip(message: tooltip!, child: bubble),
+    );
   }
 }

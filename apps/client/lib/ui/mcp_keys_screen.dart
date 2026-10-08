@@ -5,6 +5,7 @@ import '../api/models.dart';
 import '../api/storm_api.dart';
 import '../state/app_state.dart';
 import 'clipboard_copy.dart';
+import 'settings/settings_shell.dart' show settingsLeading;
 import 'tokens.dart';
 
 /// Manage the MCP keys this account holds (A14).
@@ -146,6 +147,8 @@ class _McpKeysScreenState extends ConsumerState<McpKeysScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        leading: settingsLeading(context),
+        automaticallyImplyLeading: false,
         title: const Text('MCP keys'),
         actions: [
           IconButton(
