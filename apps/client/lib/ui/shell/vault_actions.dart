@@ -1,22 +1,23 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
-import '../icons.dart';
 import 'nav_bubble.dart' show NewFolderRequest, NewNoteRequest;
 
 /// One slot of the phone pill.
 class VaultAction {
   const VaultAction({
-    required this.glyph,
+    required this.icon,
     required this.tooltip,
     required this.onTap,
     this.onLongPress,
     this.primary = false,
   });
 
-  final StormGlyph glyph;
+  /// Lucide's outlined set, as the v2 prototype draws the pill.
+  final IconData icon;
   final String tooltip;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
@@ -32,17 +33,17 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
 
   return [
     VaultAction(
-      glyph: StormGlyph.folder,
+      icon: LucideIcons.folder,
       tooltip: 'Directory',
       onTap: () => context.go(Routes.browse(vaultId)),
     ),
     VaultAction(
-      glyph: StormGlyph.search,
+      icon: LucideIcons.search,
       tooltip: 'Search',
       onTap: () => context.go(Routes.search(vaultId)),
     ),
     VaultAction(
-      glyph: StormGlyph.plus,
+      icon: LucideIcons.plus,
       tooltip: 'New note',
       primary: true,
       onTap: () => NewNoteRequest.of(context)?.call(),
@@ -50,7 +51,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
       onLongPress: NewFolderRequest.of(context),
     ),
     VaultAction(
-      glyph: StormGlyph.hash,
+      icon: LucideIcons.hash,
       tooltip: 'Tags',
       onTap: () => context.go(Routes.tags(vaultId)),
     ),

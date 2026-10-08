@@ -55,13 +55,14 @@ class StormMarkdownView extends ConsumerWidget {
     final settings = ref.watch(settingsProvider).value ?? const Settings();
     final connection = ref.watch(connectionProvider);
     final vaultId = ref.watch(activeVaultProvider);
-    final fontSize = settings.fontSize;
-    final checkboxSize = stormMarkdownCheckboxSize(fontSize);
+    final fontSize = context.tokens.proseSize;
+    final checkboxSize = stormMarkdownCheckboxSize(context.tokens.fs);
     // Optical centre on the first text line (prototype `align-items: center`).
-    final checkboxTop = (((fontSize * 1.65) - checkboxSize) / 2).clamp(
-      0.0,
-      12.0,
-    );
+    final checkboxTop =
+        (((fontSize * StormTokens.proseLeading) - checkboxSize) / 2).clamp(
+          0.0,
+          12.0,
+        );
 
     final style = stormMarkdownStyleSheet(
       context: context,

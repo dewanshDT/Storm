@@ -49,6 +49,12 @@ extension Layout on BuildContext {
   /// The properties drawer's share, on the same rule.
   double get drawerWidth => _column(_designDrawer, 430);
 
+  /// Open beside the note from the design frame up, where the prose column
+  /// is the prototype's own (524 at 1200). Below it the drawer would squeeze
+  /// the prose toward 224 at 900, so it starts shut there.
+  bool get drawerOpensByDefault =>
+      MediaQuery.sizeOf(this).width >= _designFrame;
+
   double _column(double atDesignFrame, double cap) {
     final width = MediaQuery.sizeOf(this).width;
     return (width * atDesignFrame / _designFrame).clamp(atDesignFrame, cap);

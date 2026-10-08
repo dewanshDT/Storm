@@ -46,12 +46,17 @@ class NoteEditor extends ConsumerStatefulWidget {
     this.onActions,
     this.onEscape,
     this.leading,
+    this.leadingWins = false,
     this.actions = const [],
     this.provenance,
   });
 
   /// The header's start: the crumb on a desktop, "‹ parent" on a phone.
   final Widget? leading;
+
+  /// The leading link keeps its whole label and the controls move to a
+  /// second line when both do not fit: a session's name is how you get back.
+  final bool leadingWins;
 
   /// After Read | Edit: Start session, then the width's own controls.
   final List<Widget> actions;
@@ -249,8 +254,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
     // user's choice; the default is the bundled serif.
     final base = TextStyle(
       fontFamily: settings.bodyFont.family,
-      fontSize: settings.fontSize,
-      height: 1.65,
+      fontSize: context.tokens.proseSize,
+      height: StormTokens.proseLeading,
       color: context.tokens.text,
     );
     _controller.theme = dark
@@ -601,6 +606,35 @@ extension on _NoteEditorState {
     final t = context.tokens;
     // Tighter on a phone, where the back link needs the room.
     final gap = context.isExpanded ? t.sp * 1.25 : t.sp * 0.5;
+    final controls = Row(
+      mainAxisSize: MainAxisSize.min,
+      spacing: gap,
+      children: [
+        if (readModeEnabled) NoteModeToggle(mode: _mode, onChanged: _setMode),
+        ...widget.actions,
+      ],
+    );
+    if (widget.leadingWins && widget.leading != null && !context.isExpanded) {
+      return LayoutBuilder(
+        builder: (context, box) => Wrap(
+          key: const Key('note-header-row'),
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: gap,
+          runSpacing: t.sp * 0.5,
+          children: [
+            ConstrainedBox(
+              constraints: BoxConstraints(minHeight: t.sp * 4),
+              child: widget.leading,
+            ),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: box.maxWidth),
+              child: FittedBox(fit: BoxFit.scaleDown, child: controls),
+            ),
+          ],
+        ),
+      );
+    }
     return ConstrainedBox(
       constraints: BoxConstraints(minHeight: t.sp * 4),
       child: LayoutBuilder(
@@ -615,15 +649,7 @@ extension on _NoteEditorState {
               child: FittedBox(
                 fit: BoxFit.scaleDown,
                 alignment: Alignment.centerRight,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  spacing: gap,
-                  children: [
-                    if (readModeEnabled)
-                      NoteModeToggle(mode: _mode, onChanged: _setMode),
-                    ...widget.actions,
-                  ],
-                ),
+                child: controls,
               ),
             ),
           ],

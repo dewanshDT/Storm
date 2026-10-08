@@ -4,12 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown/markdown.dart' as md;
 
+import 'package:storm/editor/storm_markdown_controller.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/markdown/storm_markdown_style.dart';
 import 'package:storm/ui/markdown/storm_markdown_view.dart';
 import 'package:storm/ui/note_mode_toggle.dart';
 import 'package:storm/ui/theme.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/widgets.dart';
 
 import 'fake_server.dart';
@@ -155,9 +157,27 @@ void main() {
       expect(selectable, isNotEmpty);
       expect(
         selectable.first.textSpan?.style?.fontSize,
-        22,
+        StormTokens.from(StormPreset.stormDark, fs: 22).proseSize,
         reason: 'settings.fontSize drives Read Mode body',
       );
+    });
+
+    testWidgets('note body is Newsreader 18 / 1.6 with a 22 / 600 H2 (§7.2)', (
+      tester,
+    ) async {
+      await pumpMarkdown(tester, '## Section\n\nProse.\n');
+      TextStyle? styleOf(String text) => tester
+          .widgetList<SelectableText>(find.byType(SelectableText))
+          .firstWhere((s) => s.textSpan?.toPlainText() == text)
+          .textSpan
+          ?.style;
+      final body = styleOf('Prose.')!;
+      expect(body.fontFamily, StormTokens.serifFamily);
+      expect(body.fontSize, closeTo(18, 0.2));
+      expect(body.height, 1.6);
+      final h2 = styleOf('Section')!;
+      expect(h2.fontSize, closeTo(22, 0.4));
+      expect(h2.fontWeight, FontWeight.w600);
     });
 
     testWidgets('task checkbox scales with text size', (tester) async {
@@ -335,6 +355,30 @@ fn main() {}
       await tester.tap(find.byKey(const Key('mode-read')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('note-read')), findsOneWidget);
+
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the editor writes prose at the same 18 / 1.6 (§7.2)', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+      await enterEditMode(tester);
+
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('note-body')),
+      );
+      final controller = field.controller! as StormMarkdownController;
+      expect(controller.theme.base.fontSize, closeTo(18, 0.2));
+      expect(controller.theme.base.height, 1.6);
+      final span = controller.buildTextSpan(
+        context: tester.element(find.byKey(const Key('note-body'))),
+        withComposing: false,
+      );
+      expect(span.toPlainText(), controller.text);
 
       await disposeShell(tester, c);
     });

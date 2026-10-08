@@ -68,6 +68,27 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('its slots are the prototype\'s Lucide outlines', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      await openVault(tester, c);
+      for (final (tip, icon) in [
+        ('Directory', LucideIcons.folder),
+        ('Search', LucideIcons.search),
+        ('New note', LucideIcons.plus),
+        ('Tags', LucideIcons.hash),
+      ]) {
+        expect(
+          find.descendant(of: find.byTooltip(tip), matching: find.byIcon(icon)),
+          findsOneWidget,
+          reason: tip,
+        );
+      }
+      await disposeShell(tester, c);
+    });
+
     testWidgets('hidden on a wide screen, its actions in the sidebar', (
       tester,
     ) async {
@@ -196,6 +217,7 @@ void main() {
       final back = tester.getTopLeft(find.byKey(const Key('back-link'))).dx;
       final prose = tester.getTopLeft(find.byKey(const Key('note-body'))).dx;
 
+      expect(bubble, 20, reason: 'the handoff\'s phone inset (§2)');
       expect(back, moreOrLessEquals(bubble, epsilon: 0.5));
       expect(prose, moreOrLessEquals(bubble, epsilon: 0.5));
       await disposeShell(tester, c);
@@ -509,6 +531,22 @@ void main() {
       expect(find.byType(PropertiesDrawer), findsNothing);
       await disposeShell(tester, c);
     });
+
+    for (final width in [900.0, 1100.0, 1199.0]) {
+      testWidgets('starts shut at ${width.toInt()}, where it would squeeze '
+          'the prose; the toggle still opens it', (tester) async {
+        final c = shellContainer();
+        await pumpShell(tester, c, size: Size(width, 900));
+        c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+        await tester.pumpAndSettle();
+        expect(find.byType(PropertiesDrawer), findsNothing);
+        await tester.tap(find.byTooltip('Properties'));
+        await tester.pumpAndSettle();
+        expect(find.byType(PropertiesDrawer), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await disposeShell(tester, c);
+      });
+    }
 
     testWidgets('its rule runs the full height, level with the sidebar\'s', (
       tester,

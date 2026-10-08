@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -25,16 +26,26 @@ final agentWritesProvider = FutureProvider.autoDispose
       ref.watch(agentWroteSignalProvider);
       final api = ref.watch(apiProvider);
       if (api == null || vaultId.isEmpty) return const {};
+      final Map<String, LatestAgentWrite> writes;
       try {
-        return await api.agentWrites(vaultId);
+        writes = await api.agentWrites(vaultId);
       } catch (_) {
         return const {};
       }
+      await ref.read(seenVersionsProvider.notifier).baseline(vaultId, {
+        for (final e in writes.entries) e.key: e.value.version,
+      });
+      return writes;
     });
 
 /// The newest version of each note this device has opened, as
 /// `{"<vault>/<note>": version}`. Device-local by design: what one device
 /// has seen says nothing about another.
+///
+/// `"<vault>/"` marks a vault this device has baselined: the agent versions
+/// it found on its first look count as seen, so a new device does not dot
+/// every note an agent ever wrote. Markers are never evicted, or a long
+/// reading history would re-baseline and hide real dots.
 class SeenVersions extends AsyncNotifier<Map<String, int>> {
   static const key = 'storm.seen';
 
@@ -61,9 +72,26 @@ class SeenVersions extends AsyncNotifier<Map<String, int>> {
     final next = Map<String, int>.of(current)
       ..remove(id)
       ..[id] = version;
-    while (next.length > limit) {
-      next.remove(next.keys.first);
+    await _save(next);
+  }
+
+  /// On this device's first agent-writes load for [vaultId], takes
+  /// [versions] (note id → latest agent version) as already seen.
+  Future<void> baseline(String vaultId, Map<String, int> versions) async {
+    final current = state.value ?? await future;
+    final marker = '$vaultId/';
+    if (current.containsKey(marker)) return;
+    final next = Map<String, int>.of(current)..[marker] = 1;
+    for (final e in versions.entries) {
+      final id = '$vaultId/${e.key}';
+      if ((next[id] ?? 0) < e.value) next[id] = e.value;
     }
+    await _save(next);
+  }
+
+  Future<void> _save(Map<String, int> next) async {
+    final notes = next.keys.where((k) => !k.endsWith('/')).toList();
+    notes.take(math.max(0, notes.length - limit)).forEach(next.remove);
     state = AsyncData(next);
     try {
       await (await SharedPreferences.getInstance()).setString(

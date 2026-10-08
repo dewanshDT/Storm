@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../breakpoints.dart';
-import '../icons.dart';
 import '../tokens.dart';
 import 'vault_actions.dart';
 
@@ -74,7 +73,7 @@ class _Slot extends StatelessWidget {
           onTap: action.onTap,
           onLongPress: action.onLongPress,
           customBorder: const CircleBorder(),
-          child: PrimaryCircle(glyph: action.glyph, size: t.sp * 6),
+          child: PrimaryCircle(icon: action.icon, size: t.sp * 6),
         ),
       );
     }
@@ -88,7 +87,7 @@ class _Slot extends StatelessWidget {
           width: t.sp * 5.5,
           height: t.sp * 5.5,
           child: Center(
-            child: StormIcon(action.glyph, size: t.sp * 2.5, color: t.text2),
+            child: Icon(action.icon, size: t.sp * 2.375, color: t.text2),
           ),
         ),
       ),
@@ -130,9 +129,9 @@ class StormPill extends StatelessWidget {
 
 /// The primary action: a filled accent circle standing proud of the pill.
 class PrimaryCircle extends StatelessWidget {
-  const PrimaryCircle({super.key, required this.glyph, this.size});
+  const PrimaryCircle({super.key, required this.icon, this.size});
 
-  final StormGlyph glyph;
+  final IconData icon;
   final double? size;
 
   @override
@@ -143,7 +142,7 @@ class PrimaryCircle extends StatelessWidget {
       height: size ?? t.sp * 5.5,
       alignment: Alignment.center,
       decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
-      child: StormIcon(glyph, size: t.sp * 2.75, color: t.onAccent),
+      child: Icon(icon, size: t.sp * 2.75, color: t.onAccent),
     );
   }
 }

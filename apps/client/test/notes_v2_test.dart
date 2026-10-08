@@ -459,4 +459,26 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets('a screen reader hears the note name before the dot', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SidebarRow(label: 'BOARD', unseen: true, onTap: () {}),
+        ),
+      ),
+    );
+    final node = tester.getSemantics(find.text('BOARD'));
+    // Flutter web announces a tooltip before the label.
+    expect(node.tooltip, isEmpty);
+    expect(node.label, startsWith('BOARD'));
+    expect(
+      node.label,
+      contains('Changed by an agent since you last opened it'),
+    );
+    semantics.dispose();
+  });
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,7 +19,13 @@ void main() {
   const desk = Size(1280, 900);
   const primary = FakeServer.primaryVault;
 
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // A device that has already looked at the primary vault's agent writes
+  // once, so the writes these tests make are new to it.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      SeenVersions.key: '{"$primary/":1}',
+    }),
+  );
 
   Uri where(ProviderContainer c) => c.read(routerProvider).state.uri;
 
@@ -183,7 +190,7 @@ void main() {
     testWidgets('a note opened here at the agent’s version has no dot; a '
         'newer agent write brings it back', (tester) async {
       SharedPreferences.setMockInitialValues({
-        SeenVersions.key: '{"$primary/n0":2}',
+        SeenVersions.key: '{"$primary/":1,"$primary/n0":2}',
       });
       final c = await at(
         tester,
@@ -197,6 +204,62 @@ void main() {
       await tester.pumpAndSettle();
       expect(dotOn('note:n0'), isTrue);
       await disposeShell(tester, c);
+    });
+
+    testWidgets('a fresh device baselines: no dots for what agents wrote '
+        'before it looked, a dot for a later write', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final c = await at(
+        tester,
+        Routes.browse(primary),
+        seed: (s) {
+          s.agentWrote('n0', sessionId: 'ags_1', version: 2);
+          s.agentWrote('n3', sessionId: 'ags_1', version: 1);
+        },
+      );
+      expect(dotOn('note:n0'), isFalse, reason: 'written before this device');
+      expect(dotOn('folder:Projects'), isFalse);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(SeenVersions.key), contains('"$primary/":1'));
+
+      serverOf(c).agentWrote('n3', sessionId: 'ags_1', version: 2);
+      c.invalidate(agentWritesProvider);
+      await tester.pumpAndSettle();
+      expect(dotOn('folder:Projects'), isTrue, reason: 'a later agent write');
+      expect(dotOn('note:n0'), isFalse);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the baseline is taken once, and survives a restart', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var c = await at(tester, Routes.browse(primary));
+      await disposeShell(tester, c);
+
+      c = await at(
+        tester,
+        Routes.browse(primary),
+        seed: (s) => s.agentWrote('n0', sessionId: 'ags_1', version: 1),
+      );
+      expect(dotOn('note:n0'), isTrue, reason: 'written after the baseline');
+      await disposeShell(tester, c);
+    });
+
+    test('a long reading history never evicts a baseline', () async {
+      SharedPreferences.setMockInitialValues({});
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final seen = c.read(seenVersionsProvider.notifier);
+      await c.read(seenVersionsProvider.future);
+      await seen.baseline(primary, const {});
+      for (var i = 0; i <= SeenVersions.limit; i++) {
+        await seen.markSeen(primary, 'n$i', 1);
+      }
+      final map = c.read(seenVersionsProvider).value!;
+      expect(map.containsKey('$primary/'), isTrue);
+      expect(map.containsKey('$primary/n0'), isFalse, reason: 'oldest out');
+      expect(map.length, SeenVersions.limit + 1);
     });
 
     testWidgets('what this device has seen survives a restart', (tester) async {
@@ -345,6 +408,35 @@ void main() {
       expect(where(c).path, '/agents/s/ags_1');
       await disposeShell(tester, c);
     });
+
+    for (final width in [360.0, 390.0, 430.0, 860.0]) {
+      testWidgets('phone ${width.toInt()}: the session name is never cut', (
+        tester,
+      ) async {
+        final agents = FakeAgentServer(
+          hosts: [agentHost()],
+          sessions: [agentSession('ags_1', context: design())],
+        );
+        final c = await at(
+          tester,
+          Routes.note(primary, 'n3', session: 'ags_1'),
+          size: Size(width, 844),
+          agents: agents,
+        );
+        final link = tester.renderObject<RenderParagraph>(
+          find.text('‹ gateway-spec'),
+        );
+        expect(link.didExceedMaxLines, isFalse);
+        expect(link.size.width, closeTo(link.getMaxIntrinsicWidth(0), 0.5));
+        expect(find.byTooltip('Properties'), findsOneWidget);
+        final oneLine =
+            tester.getTopLeft(find.byKey(const Key('start-session'))).dy <
+            tester.getBottomLeft(find.byKey(const Key('back-link'))).dy;
+        expect(oneLine, width > 800, reason: 'controls wrap only when cut');
+        expect(tester.takeException(), isNull);
+        await disposeShell(tester, c);
+      });
+    }
 
     testWidgets('desk: the same note keeps its crumb', (tester) async {
       final agents = FakeAgentServer(

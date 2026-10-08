@@ -15,9 +15,9 @@ entirely.
 flutter run -d macos        # or: -d linux, -d chrome
 ```
 
-On first launch you're asked for the server address and token. The connection is
-verified before it's saved, so a typo surfaces immediately rather than as an
-empty vault later.
+On first launch the device pairs with the server (the web client pairs itself
+with the server that served it) and you sign in with the one account's
+password. The server's identity is verified before anything is stored.
 
 ### Installing it on macOS
 
@@ -85,10 +85,16 @@ produces is snap packaging, and Storm isn't shipped as a snap.
 
 ## What works
 
-- A dashboard of the server's vaults, over the notes you opened most recently
-  across all of them
-- A breadcrumb directory browser, with folders you can create, rename and
-  delete
+- Storm v2's shell (decision 82): the activity rail at desk width, the corner
+  bubbles, place picker and pill on a phone; no dashboard — launch restores
+  the last location
+- Notes: a vault sidebar (switcher, cross-vault Recent, folder tree) on a
+  desk, a vault root and drill-down folders on a phone; folders you can
+  create, rename and delete
+- Agents: sessions as routes, the launcher, the terminal with its Context /
+  Wrote / About panel, and the loop — provenance on the version line and
+  device-local unseen dots
+- Settings: one global destination with ten pages on real endpoints
 - Markdown editor with live styling and a keyboard formatting toolbar (see
   `lib/editor/`)
 - Wikilink following and autocomplete
@@ -97,7 +103,7 @@ produces is snap packaging, and Storm isn't shipped as a snap.
 - Debounced autosave with merge/conflict handling
 - Offline editing with an outbox that replays on reconnect
 - Live updates pushed from other devices over a WebSocket
-- Light/dark theme, font size, and the server's storage root
+- Three theme presets, text size, note font, and the server's storage root
 
 ## Vaults
 
@@ -158,7 +164,9 @@ lib/
 ├── cache/        drift cache, outbox, recents
 ├── state/        Riverpod providers + NoteSession
 ├── sync/         SyncEngine — one per active vault
-└── ui/           connect, dashboard, browser, editor, search, server settings
+├── agent/        Agents: overview, launcher, session, hosts, integrations
+└── ui/           shell (rail, bubbles, sidebars), notes, settings pages,
+                  the token layer (tokens.dart) and shared controls
 ```
 
 `lib/editor/` began as the M0 spike. See `docs/editor-findings.md` for its
@@ -168,8 +176,8 @@ to match what is rendered character for character.
 ## Tests
 
 ```sh
-flutter test              # 326 tests, no server needed
-flutter test test_live/   # 19 tests against a real storm-server
+flutter test              # 915 tests, no server needed
+flutter test test_live/   # 20 tests against a real storm-server
 ```
 
 Or from the repo root, which starts and stops the server for you:
