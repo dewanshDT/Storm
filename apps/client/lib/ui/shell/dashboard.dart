@@ -73,9 +73,6 @@ class DashboardScreen extends ConsumerWidget {
             onRefresh: () async {
               ref.invalidate(vaultsProvider);
               ref.invalidate(recentsProvider);
-              // The owner check too: a role changed on the server shows up on
-              // a pull, rather than only after the app is restarted.
-              ref.invalidate(agentAccessProvider);
               ref.invalidate(agentOverviewProvider);
             },
             child: ListView(

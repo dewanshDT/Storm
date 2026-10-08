@@ -438,16 +438,14 @@ void main() {
       return http.Response('{"error":"nope"}', 404);
     });
 
-    Widget app(Widget child, MockClient client, {bool access = true}) =>
-        ProviderScope(
-          overrides: [
-            agentApiFactoryProvider.overrideWithValue(
-              () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
-            ),
-            agentAccessProvider.overrideWith((ref) async => access),
-          ],
-          child: MaterialApp(theme: StormTheme.light(), home: child),
-        );
+    Widget app(Widget child, MockClient client) => ProviderScope(
+      overrides: [
+        agentApiFactoryProvider.overrideWithValue(
+          () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
+        ),
+      ],
+      child: MaterialApp(theme: StormTheme.light(), home: child),
+    );
 
     setUp(() => SharedPreferences.setMockInitialValues({}));
 

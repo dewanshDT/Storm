@@ -32,7 +32,6 @@ class AgentApi {
   dynamic _decode(http.Response r) {
     if (r.statusCode < 200 || r.statusCode >= 300) {
       String message = switch (r.statusCode) {
-        403 => 'Agents are available to the server owner only.',
         503 => 'The host is offline.',
         _ => 'HTTP ${r.statusCode}',
       };
@@ -46,17 +45,6 @@ class AgentApi {
     }
     if (r.bodyBytes.isEmpty) return null;
     return jsonDecode(utf8.decode(r.bodyBytes));
-  }
-
-  /// Whether this caller may use agents at all. The server's owner check is
-  /// the answer: the client never infers a role (decision 77d).
-  Future<bool> canUseAgents() async {
-    final r = await _client.get(_uri('/v1/config/agent'), headers: _headers);
-    if (r.statusCode == 403 || r.statusCode == 401 || r.statusCode == 404) {
-      return false;
-    }
-    _decode(r);
-    return true;
   }
 
   Future<String> defaultProvider() async =>

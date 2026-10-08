@@ -230,7 +230,6 @@ class ServerConfig {
     required this.vaultCount,
     required this.mcpEnabled,
     required this.mcpWritable,
-    required this.allowRegistration,
   });
 
   final String vaultRoot;
@@ -250,16 +249,12 @@ class ServerConfig {
   /// does not know about writes must never appear to have them switched on.
   final bool mcpWritable;
 
-  /// Whether anyone with a device credential may create an account (A13).
-  final bool allowRegistration;
-
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
     vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
     mcpWritable: j['mcp_writable'] as bool? ?? false,
-    allowRegistration: (j['allow_registration'] as bool?) ?? false,
   );
 }
 

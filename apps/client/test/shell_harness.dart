@@ -97,7 +97,6 @@ ProviderContainer shellContainer({
       // Widget tests have no platform package info; keep Client settings
       // deterministic and free of MissingPluginException noise.
       clientVersionProvider.overrideWith((ref) async => '0.0.0-test'),
-      agentAccessProvider.overrideWith((ref) async => agentClient != null),
       // Null without a client, rather than the default built from the fake
       // settings, so no suite can reach a real agent request by accident.
       agentApiFactoryProvider.overrideWithValue(

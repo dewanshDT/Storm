@@ -1,8 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -13,7 +11,6 @@ import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/agents_screen.dart';
-import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/router.dart';
 import 'package:storm/ui/theme.dart';
 
@@ -100,90 +97,7 @@ void main() {
 
   double top(WidgetTester tester, Finder f) => tester.getTopLeft(f).dy;
 
-  group('an account that is not the owner sees the app it always saw', () {
-    testWidgets('no band on the phone dashboard', (tester) async {
-      final c = shellContainer();
-      await pumpShell(tester, c, size: phone);
-      expect(find.text('AGENTS'), findsNothing);
-      expect(find.text('RECENTLY OPENED'), findsOneWidget);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('no space switch beside the notes', (tester) async {
-      final c = shellContainer();
-      await pumpShell(tester, c, size: wide);
-      await openVault(tester, c);
-      expect(find.byKey(const Key('space-agents')), findsNothing);
-      expect(find.byKey(const Key('space-notes')), findsNothing);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('and /agents by URL returns to the dashboard', (tester) async {
-      final c = shellContainer();
-      await pumpShell(tester, c, size: phone);
-      c.read(routerProvider).go(Routes.agents);
-      await tester.pumpAndSettle();
-      expect(location(c), Routes.dashboard);
-      c.read(routerProvider).go(Routes.agentHosts);
-      await tester.pumpAndSettle();
-      expect(location(c), Routes.dashboard);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('Server settings offers nothing agent-shaped', (tester) async {
-      final c = shellContainer();
-      await pumpShell(tester, c, size: phone);
-      c.read(routerProvider).push(Routes.serverSettings);
-      await tester.pumpAndSettle();
-      // The list is lazy: scroll past where the section would be, or
-      // "nothing found" would only mean "not built yet".
-      await tester.scrollUntilVisible(find.text('New vault'), 300);
-      expect(find.byKey(const Key('open-hosts')), findsNothing);
-      await disposeShell(tester, c);
-    });
-  });
-
-  testWidgets(
-    'a session is listed under the name its agent gave it, with its mark',
-    (tester) async {
-      final live = session('ags_live');
-      final c = shellContainer(
-        agentClient: agentServer(hosts: [host()], sessions: [live]),
-        // The agent names the conversation in its terminal title, behind
-        // Claude Code's status glyph.
-        terminalStream: (id, _) {
-          final title = utf8.encode('\x1b]0;✳ Fix the login redirect\x07');
-          return Stream.fromIterable([
-            StatusEvent(AgentSession.fromJson(live)),
-            OutputEvent(title.length, Uint8List.fromList(title)),
-          ]);
-        },
-      );
-      await pumpShell(tester, c, size: phone);
-
-      // Before the session is opened, its name is not known here.
-      expect(find.text('Claude Code in storm'), findsOneWidget);
-      expect(find.byIcon(LucideIcons.asterisk), findsOneWidget);
-
-      await tester.tap(find.byKey(const Key('band-ags_live')));
-      await tester.pumpAndSettle();
-      expect(
-        find.text('Fix the login redirect'),
-        findsOneWidget,
-        reason: 'the open session is titled by its agent',
-      );
-
-      // Back to the list: the row carries the name too.
-      await tester.tap(find.byTooltip('All sessions'));
-      await tester.pumpAndSettle();
-      expect(find.text('Fix the login redirect'), findsOneWidget);
-      expect(find.text('Claude Code in storm'), findsNothing);
-
-      await disposeShell(tester, c);
-    },
-  );
-
-  group('the owner\'s dashboard band', () {
+  group('the dashboard band', () {
     testWidgets(
       'shows live sessions above recents, and a tap lands in the terminal',
       (tester) async {

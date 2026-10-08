@@ -40,8 +40,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   bool _verifying = false;
   String? _error;
 
-  // Step 3: create account.
-  final _usernameController = TextEditingController();
+  // Step 3: set up the account.
   final _passwordController = TextEditingController();
   bool _creatingAccount = false;
 
@@ -57,7 +56,6 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   @override
   void dispose() {
     _uriController.dispose();
-    _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -158,27 +156,13 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         version: packageInfo.version,
       );
 
-      // **Does this server already have accounts?**
-      //
-      // Pairing and first-run are not the same thing, and this screen used to
-      // assume they were: every successful pair went straight to "create the
-      // owner account". That was invisible while the only way to pair was a
-      // fresh server — and wrong the moment "Add a device" made joining an
-      // existing server normal, which is how it was found. Someone adding
-      // their phone to a server they already have an account on was asked to
-      // invent a second one.
-      //
-      // *Storm Auth Protocol* has always described this branch: the user list
-      // behind device auth is what tells a client which screen it is on.
-      final users = await authApi.listUsers(
+      // Already set up: keep the device and let /login take it from here.
+      final exists = await authApi.accountExists(
         deviceId: pairResult.deviceId,
         deviceSecret: pairResult.deviceSecret,
       );
 
-      if (users.isNotEmpty) {
-        // Keep the device credential and let the router take it from here:
-        // paired with no session is exactly what /login exists for, and it
-        // already offers the account picker this device can now fetch.
+      if (exists) {
         final current = ref.read(settingsProvider).value ?? const Settings();
         await ref
             .read(settingsProvider.notifier)
@@ -242,22 +226,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     }
   }
 
-  // ---- Step 3: create account ----
+  // ---- Step 3: set up the account ----
 
   Future<void> _createAccount() async {
-    final username = _usernameController.text.trim();
     final password = _passwordController.text;
-    if (username.isEmpty || password.isEmpty) {
-      setState(() => _error = 'Username and password are required.');
-      return;
-    }
-    if (username.length < 3) {
-      setState(() => _error = 'Username must be at least 3 characters.');
-      return;
-    }
-    // 12, matching the server's `MIN_PASSWORD_CHARS`. At 8 this screen
-    // accepted a password the server then refused with a 422, which reads as
-    // the app breaking rather than as the rule it is.
     if (password.length < 12) {
       setState(() => _error = 'Password must be at least 12 characters.');
       return;
@@ -273,19 +245,17 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       final authApi = AuthApi(baseUrl: uri.baseUrl);
       // Device tier: the credential from pairing, a step earlier in this flow.
       final pair = _pairResult!;
-      await authApi.createFirstUser(
-        username: username,
+      await authApi.setUpAccount(
         password: password,
         deviceId: pair.deviceId,
         deviceSecret: pair.deviceSecret,
       );
       if (!mounted) return;
-      // Account created — now log in.
-      await _login(username, password);
+      await _login(password);
     } on AuthApiException catch (e) {
       setState(() {
         _error = e.isConflict
-            ? 'That username is already taken.'
+            ? 'This Storm is already set up.'
             : 'Server error: ${e.message}';
         _creatingAccount = false;
       });
@@ -299,7 +269,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   // ---- Step 4: login ----
 
-  Future<void> _login(String username, String password) async {
+  Future<void> _login(String password) async {
     setState(() {
       _loggingIn = true;
       _creatingAccount = false;
@@ -313,7 +283,6 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       final tokens = await authApi.login(
         deviceId: pair.deviceId,
         deviceSecret: pair.deviceSecret,
-        username: username,
         password: password,
       );
 
@@ -504,7 +473,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 const Center(child: BrandMark(size: 44, withWordmark: true)),
                 SizedBox(height: t.sp * 2),
                 Text(
-                  'Create your account',
+                  'Set up your Storm',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
@@ -524,16 +493,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 ),
                 SizedBox(height: t.sp * 3.5),
                 StormInput(
-                  controller: _usernameController,
-                  autofocus: true,
-                  labelText: 'Username',
-                  autocorrect: false,
-                  textInputAction: TextInputAction.next,
-                ),
-                SizedBox(height: t.sp * 1.75),
-                StormInput(
+                  key: const Key('setup-password'),
                   controller: _passwordController,
-                  labelText: 'Password',
+                  autofocus: true,
+                  labelText: 'Choose a password (12+ characters)',
                   obscureText: true,
                   autocorrect: false,
                   onSubmitted: (_) => _createAccount(),
@@ -566,7 +529,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                           width: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Text('Create Account & Sign In'),
+                      : const Text('Set up & sign in'),
                 ),
               ],
             ),

@@ -30,9 +30,6 @@ class AgentsBand extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!(ref.watch(agentAccessProvider).value ?? false)) {
-      return const SizedBox.shrink();
-    }
     final t = context.tokens;
     final o = ref.watch(agentOverviewProvider).value;
 

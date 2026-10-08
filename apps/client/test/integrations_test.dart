@@ -434,7 +434,6 @@ void main() {
         agentApiFactoryProvider.overrideWithValue(
           () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
         ),
-        agentAccessProvider.overrideWith((ref) async => true),
       ],
       child: MaterialApp(
         theme: StormTheme.light(),

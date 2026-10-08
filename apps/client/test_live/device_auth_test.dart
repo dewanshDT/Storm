@@ -84,34 +84,33 @@ void main() {
     expect(paired.serverId, info.serverId);
 
     // ---- the device tier --------------------------------------------------
-    final users = await auth.listUsers(
-      deviceId: paired.deviceId,
-      deviceSecret: paired.deviceSecret,
+    expect(
+      await auth.accountExists(
+        deviceId: paired.deviceId,
+        deviceSecret: paired.deviceSecret,
+      ),
+      isFalse,
+      reason: 'a fresh server is not set up',
     );
-    expect(users, isEmpty, reason: 'a fresh server has no accounts');
 
-    const username = 'dewansh';
     const password = 'a-long-enough-password';
-
-    // Device tier too — this call used to send no credential and 401.
-    await auth.createFirstUser(
-      username: username,
+    await auth.setUpAccount(
       password: password,
       deviceId: paired.deviceId,
       deviceSecret: paired.deviceSecret,
     );
-
-    final after = await auth.listUsers(
-      deviceId: paired.deviceId,
-      deviceSecret: paired.deviceSecret,
+    expect(
+      await auth.accountExists(
+        deviceId: paired.deviceId,
+        deviceSecret: paired.deviceSecret,
+      ),
+      isTrue,
     );
-    expect(after.map((u) => u.username), contains(username));
 
     // ---- login ------------------------------------------------------------
     final session = await auth.login(
       deviceId: paired.deviceId,
       deviceSecret: paired.deviceSecret,
-      username: username,
       password: password,
     );
     expect(session.accessToken, isNotEmpty);

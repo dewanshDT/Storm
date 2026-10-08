@@ -25,7 +25,6 @@ void main() {
 
   test('launch, stream, input, resize and end through the real wire', () async {
     final api = AgentApi(baseUrl: base!, token: token!);
-    expect(await api.canUseAgents(), isTrue);
     final host = (await api.hosts()).firstWhere((h) => h.online);
     final s = await api.launch(
       hostId: host.id,

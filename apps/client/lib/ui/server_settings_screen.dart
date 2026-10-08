@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
-import '../agent/agent_state.dart';
 import '../router.dart';
 import 'tokens.dart';
 import 'widgets.dart';
@@ -63,15 +62,6 @@ class ServerSettingsScreen extends ConsumerWidget {
                 c == null ? const _Muted('Not connected') : _McpCard(config: c),
           ),
           const SizedBox(height: 24),
-          _Section(label: 'Accounts'),
-          config.when(
-            loading: () => const SkeletonRows(rows: 2),
-            error: (e, _) => _Muted(describeFailure(e)),
-            data: (c) => c == null
-                ? const _Muted('Not connected')
-                : _RegistrationCard(config: c),
-          ),
-          const SizedBox(height: 24),
           _Section(label: 'MCP keys'),
           // Only for a signed-in caller: minting is session tier, and a key
           // belongs to an account.
@@ -87,12 +77,7 @@ class ServerSettingsScreen extends ConsumerWidget {
             )
           else
             const _Muted('Sign in to create keys for MCP clients.'),
-          // Only when the server's owner check passes (decision 77d): other
-          // accounts see no agent entry point at all (AC-S1). Configuration
-          // only — the hosts and the default provider, which live on the
-          // Hosts screen. Sessions are something you *do*, so they are on the
-          // dashboard and the sidebar, not here (decision 78).
-          if (ref.watch(agentAccessProvider).value ?? false) ...[
+          ...[
             const SizedBox(height: 24),
             _Section(label: 'Agents'),
             const _Muted(
@@ -109,8 +94,6 @@ class ServerSettingsScreen extends ConsumerWidget {
                 label: const Text('Hosts'),
               ),
             ),
-            // The MCP Gateway (decision 81h): the services agents may use,
-            // connected once, here. The same owner check gates it.
             const SizedBox(height: 24),
             _Section(label: 'Integrations'),
             const _Muted(
@@ -280,86 +263,6 @@ class _McpCardState extends ConsumerState<_McpCard> {
                       'and a deleted note is gone from the vault at once.'
                 : 'Search, read and history only. Anyone holding this '
                       'server’s token can read every vault this way.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Whether this server takes new accounts (A13).
-///
-/// Off by default, and the copy says what "on" actually means rather than
-/// leaving someone to infer it: with the web client bootstrapping its own
-/// device, *anyone who can reach this server* can then create an account.
-/// That is a reasonable thing to want on a home network and a bad thing to
-/// discover afterwards.
-class _RegistrationCard extends ConsumerStatefulWidget {
-  const _RegistrationCard({required this.config});
-
-  final ServerConfig config;
-
-  @override
-  ConsumerState<_RegistrationCard> createState() => _RegistrationCardState();
-}
-
-class _RegistrationCardState extends ConsumerState<_RegistrationCard> {
-  bool? _pending;
-
-  Future<void> _set(bool enabled) async {
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    setState(() => _pending = enabled);
-    try {
-      await api.setRegistrationOpen(enabled);
-      ref.invalidate(serverConfigProvider);
-    } catch (e) {
-      // Owner-only, server-side. A member sees the refusal rather than a
-      // switch that appears to work and does not.
-      if (mounted) _toast(context, describeFailure(e));
-    } finally {
-      if (mounted) setState(() => _pending = null);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final theme = Theme.of(context);
-    final on = _pending ?? widget.config.allowRegistration;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SwitchListTile(
-          key: const Key('registration-switch'),
-          contentPadding: EdgeInsets.zero,
-          value: on,
-          onChanged: _pending == null ? _set : null,
-          title: const Text('Allow new accounts'),
-          subtitle: Text(
-            on
-                ? 'Anyone who can reach this server can sign up'
-                : 'Off — accounts are created on the server',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(0, 2, 8, 0),
-          child: Text(
-            on
-                ? 'The sign-in screen now offers "Create an account", and new '
-                      'accounts are members — they can read and write notes, '
-                      'and cannot change this setting. Turn it off when '
-                      'everyone who needs an account has one.'
-                : 'New accounts are added with `storm-server user add` on the '
-                      'machine itself. Turn this on to let people sign up from '
-                      'the app instead.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
