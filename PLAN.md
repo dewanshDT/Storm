@@ -4003,6 +4003,38 @@ sidebars now use; `placePopover`, with a `right` side for the rail. All in
 `docs/design/acceptance/storm-v2/design-system/gallery.png` (three presets);
 784 client tests.
 
+**Slice 5 (server agent capabilities; `feat/v2-agent-capabilities`):**
+`agent.db` gains `session_launch` (name, context note ids and title snapshot,
+write vault) and `session_writes` (one row per note a session wrote: `created`
+stays `created`, version and time follow its latest write), both additive and
+kept when a session is dismissed, so provenance still names it. `POST
+/v1/agent/sessions` takes `context {vault_id, note_id}` (read through the vault
+seam, 404 if gone) and `write_vault_id` (must exist); `allow_vault_writes`
+without a vault launches read only with a notice. The server names a session:
+the slug of its note's title, else `{workspace}-{n}`, a live duplicate `-2`.
+Session views add `name`, `context`, `write_vault_id`, `wrote_count`; new
+`GET /v1/agent/sessions/{id}/writes` and `GET /v1/vaults/{v}/agent-writes`;
+`GET …/notes/{id}` adds `agent_write` (the latest agent writer, by version,
+`session_dismissed` once gone); `GET /v1/config` adds `agent_writes` and
+`version`. **`agent_writes` extends `PUT /v1/config/mcp`** rather than a new
+`/config/ai`: one handler and one persisted file, and an older client's
+`{enabled, writable}` body still means exactly what it did (`enabled` absent
+now leaves MCP alone). It is seeded on load from `mcp_enabled &&
+mcp_writable`, what agents needed before, and `mcp_writable` no longer touches
+agents. `StormPolicy` replaces `AllowAuthenticated`: an `Actor::Agent` writes
+only to its `write_vault`, refused at `vault_of` and answered as the JSON-RPC
+code `vault_write_not_allowed`; kit scripts follow the same rule. The write
+hook is in `ops::create_note`/`update_note`; script writes and `move_note`
+(REST only, never an agent's) are not recorded. Context delivery: the built-in
+connection offers agents `session_context` and names it in its instructions;
+`start` carries `context: true`, and the runtime adds `mcp::OPENING_PROMPT`
+(`claude <prompt>`, `opencode --prompt <prompt>`, nothing for `shell`/`fake`).
+`gateway_e2e.py` scans every process's argv and environment for the note's
+title, body and ids with a positive control. Mutation-checked: the policy
+allowing every agent write, and note data sent in `start` / the prompt growing
+an argument. Rust 561 + 54 tests; live 81 (`e2e.py` unmodified) · mcp 86 ·
+agent 76 · gateway 79 · auth 72 · client 20.
+
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
 

@@ -533,6 +533,25 @@ check(
 )
 rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": True})
 
+print("== agent writes are their own switch ==")
+_, before = rest("GET", "/v1/config")
+status, body = rest("PUT", "/v1/config/mcp", {"agent_writes": not before.get("agent_writes")})
+check("agent_writes can be set alone", status == 200 and body.get("agent_writes") is not before.get("agent_writes"), body)
+_, cfg = rest("GET", "/v1/config")
+check("setting it leaves both MCP switches as they were",
+      (cfg.get("mcp_enabled"), cfg.get("mcp_writable")) == (True, True), cfg)
+rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": False})
+_, cfg = rest("GET", "/v1/config")
+check("MCP writes off does not touch agent writes",
+      cfg.get("agent_writes") is not before.get("agent_writes") and cfg.get("mcp_writable") is False, cfg)
+rest("PUT", "/v1/config/mcp", {"agent_writes": True})
+_, body = rpc("tools/list")
+names = {t["name"] for t in body["result"]["tools"]}
+check("agent writes on does not give /mcp the write tools", names == EXPECTED_TOOLS, sorted(names ^ EXPECTED_TOOLS))
+check("session_context is an agent session's tool, never /mcp's", "session_context" not in names, names)
+rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": True, "agent_writes": before.get("agent_writes")})
+check("the server reports its version", isinstance(cfg.get("version"), str) and cfg["version"] != "", cfg)
+
 print("== nothing leaks a filesystem path ==")
 blob = json.dumps(seen_payloads)
 check(

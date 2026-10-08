@@ -202,6 +202,31 @@ pub fn write_provider_config(
     }
 }
 
+/// The opening prompt of a session started from a note. A constant with
+/// nothing interpolated: the agent reads the note through `session_context`,
+/// so no note content, title or id is ever on a command line.
+pub const OPENING_PROMPT: &str =
+    "Read your context note with the storm session_context tool, then wait for my instructions.";
+
+/// Adds the opening prompt, as each CLI takes one, to a session started from
+/// a note. Nothing for any other provider, `shell` and `fake` included.
+pub fn with_opening_prompt(
+    mut extras: LaunchExtras,
+    provider: &str,
+    context: bool,
+) -> LaunchExtras {
+    if context {
+        match provider {
+            "claude-code" => extras.args.push(OPENING_PROMPT.into()),
+            "opencode" => extras
+                .args
+                .extend(["--prompt".into(), OPENING_PROMPT.into()]),
+            _ => {}
+        }
+    }
+    extras
+}
+
 /// A session's bridge registration on this host.
 #[derive(Debug, Clone)]
 pub struct Registration {
@@ -405,6 +430,44 @@ mod tests {
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
         assert!(!session.exists());
+    }
+
+    #[test]
+    fn a_session_from_a_note_gets_exactly_the_constant_prompt_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        for provider in ["claude-code", "opencode", "shell", "fake", "my-agent"] {
+            let config = |name: &str| {
+                write_provider_config(
+                    provider,
+                    &dir.path().join(name).join(provider),
+                    &grants(),
+                    "h",
+                    Path::new("/s"),
+                    Path::new("/x"),
+                    None,
+                )
+                .unwrap()
+            };
+            let plain = config("plain");
+            assert_eq!(with_opening_prompt(plain.clone(), provider, false), plain);
+            let with = with_opening_prompt(config("context"), provider, true);
+            assert_eq!(
+                with.env.len(),
+                plain.env.len(),
+                "{provider}: the env is unchanged"
+            );
+            let added: Vec<_> = with.args[plain.args.len()..].to_vec();
+            let expected: Vec<std::ffi::OsString> = match provider {
+                "claude-code" => vec![OPENING_PROMPT.into()],
+                "opencode" => vec!["--prompt".into(), OPENING_PROMPT.into()],
+                _ => vec![],
+            };
+            assert_eq!(added, expected, "{provider}");
+        }
+        // Nothing can ever be interpolated into it.
+        for c in ['{', '}', '$', '%', '`', '\n'] {
+            assert!(!OPENING_PROMPT.contains(c), "{c:?}");
+        }
     }
 
     #[test]

@@ -467,8 +467,18 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
 - **Every agent call is authorized in `ops::integration_call`, per call**
   (spec §7, 81e): host owns session, session live, live grant, owner is the account,
   connection the account's and `connected`, method permitted, tool allowed,
-  and vault writes only under the launch flag **and** `mcp_writable`. A
-  refusal is a JSON-RPC error with a stable code, never an HTTP error.
+  and vault writes only with a write vault chosen at launch **and**
+  `agent_writes` (not `mcp_writable`, which is `/mcp`'s alone). A refusal is
+  a JSON-RPC error with a stable code, never an HTTP error.
+- **An agent writes only to its session's write vault, refused at the vault
+  seam** (decision 82, slice 5): `StormPolicy` denies `Actor::Agent` +
+  `Access::Write` on any other vault, and `mcp.rs` turns that 403 into the
+  JSON-RPC code `vault_write_not_allowed`. An older client's
+  `allow_vault_writes` without a vault launches read only, never all-vault.
+- **No note data on a command line or in an environment** (slice 5). The
+  host's `start` carries `context: true`, never text; the runtime maps it to
+  the compile-time `mcp::OPENING_PROMPT`, and the agent reads the note
+  through `session_context`, keyed on its own session.
 - **A request the gateway did not forward is `session_unknown`, and nothing
   else is.** That is the only answer the bridge may replay `initialize` on.
   Upstream sessions live in memory so a restart produces it; closing one
@@ -522,7 +532,7 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   - PR CI never compiles the native projects; push to `acceptance/*` and
     the acceptance workflow does.
 
-  **"Allow vault writes" is off by default and absent for `shell`.**
+  **"Can write to" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 - **An agent's listings never count against its session's budget**

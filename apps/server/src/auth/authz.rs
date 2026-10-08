@@ -8,10 +8,9 @@
 //!
 //! **It is not role-based access control.** Storm is
 //! single-user (decision 82). Every caller is the one account, reached through
-//! a session, a key or an agent session. [`AllowAuthenticated`] lets each reach
-//! any vault. What the seam is *for* now is narrowing what a credential may do
-//! on the account's behalf: an agent session writing only to the vault chosen
-//! at its launch is the policy this boundary exists to carry.
+//! a session, a key or an agent session. [`StormPolicy`] lets each read any
+//! vault, and narrows what a credential may do on the account's behalf: an
+//! agent session writes only to the vault chosen at its launch.
 //!
 //! What is *not* deferred is the boundary. A handler can no longer reach a
 //! vault without saying who is asking and what for, because
@@ -54,15 +53,17 @@ pub enum Actor {
     /// 81e).
     ///
     /// **The principal is the account** (A14.3's rule, as for a key).
-    /// `session_id` and `host_id` ride along **for audit and stamping,
-    /// never for a decision** — whether the session may make the call at all
-    /// was decided in `ops::integration_call` before this actor existed.
+    /// `session_id` and `host_id` ride along for audit and the write hook;
+    /// whether the session may make the call at all was decided in
+    /// `ops::integration_call` before this actor existed.
     Agent {
-        #[allow(dead_code)] // Audit, like `Key::key_id`; read by tests.
         session_id: String,
         #[allow(dead_code)]
         host_id: String,
         user_id: String,
+        /// The one vault this session may write to, chosen at launch. `None`
+        /// is read only. [`StormPolicy`] refuses an agent's write anywhere else.
+        write_vault: Option<String>,
     },
 }
 
@@ -129,9 +130,8 @@ impl Actor {
 
 /// What the caller intends to do with the vault.
 ///
-/// Carried now even though [`AllowAuthenticated`] ignores it, because adding a
-/// parameter later means revisiting every call site to decide what each one
-/// meant — and doing that retrospectively, against handlers written without
+/// Adding this parameter later would mean revisiting every call site to decide
+/// what each one meant — and doing that retrospectively, against handlers written without
 /// the question in mind, is how a read path quietly gets labelled a write.
 /// Deciding it once, where the operation is written, is cheap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,17 +144,8 @@ pub enum Access {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    /// Nothing in the shipping binary constructs this, and that is the honest
-    /// state of the slice: [`AllowAuthenticated`] never refuses, so the only
-    /// producer today is the `DenyAll` policy in `api.rs`'s tests.
-    ///
-    /// It is not dead weight. The refusal *path* — 403 rather than 404,
-    /// consulted before the registry so it cannot double as an existence
-    /// probe, collections filtering instead — is fully exercised through that
-    /// policy, which is the point of making the policy swappable. Were this
-    /// variant absent, the RBAC slice would be writing that path for the first
-    /// time and running it for the first time in production.
-    #[allow(dead_code)]
+    /// 403 rather than 404, consulted before the registry so it cannot double
+    /// as an existence probe; collections filter instead.
     Deny(&'static str),
 }
 
@@ -173,21 +164,25 @@ pub trait VaultPolicy: Send + Sync + std::fmt::Debug {
     fn decide(&self, actor: &Actor, vault_id: &str, access: Access) -> Decision;
 }
 
-/// **The policy Storm ships today: every authenticated caller, every vault.**
-///
-/// Not a placeholder that forgot to be finished — it is the right answer for a
-/// single-user self-hosted server, and it is what the server already did.
-/// Making it explicit is the change: the permissiveness is now a policy object
-/// with a name, tested and swappable, rather than the absence of a check.
-#[derive(Debug, Clone, Copy)]
-pub struct AllowAuthenticated;
+/// The reason, and the agent's stable JSON-RPC error code, for an agent
+/// writing outside its session's write vault.
+pub const AGENT_WRITE_REFUSED: &str = "vault_write_not_allowed";
 
-impl VaultPolicy for AllowAuthenticated {
-    fn decide(&self, _actor: &Actor, _vault_id: &str, _access: Access) -> Decision {
-        // Every `Actor` variant is authenticated by construction — the
-        // middleware refuses anything else long before here — so there is
-        // nothing left to check.
-        Decision::Allow
+/// **The policy Storm ships: every authenticated caller reads and writes every
+/// vault, except that an agent writes only to its session's write vault.**
+#[derive(Debug, Clone, Copy)]
+pub struct StormPolicy;
+
+impl VaultPolicy for StormPolicy {
+    fn decide(&self, actor: &Actor, vault_id: &str, access: Access) -> Decision {
+        match (actor, access) {
+            (Actor::Agent { write_vault, .. }, Access::Write)
+                if write_vault.as_deref() != Some(vault_id) =>
+            {
+                Decision::Deny(AGENT_WRITE_REFUSED)
+            }
+            _ => Decision::Allow,
+        }
     }
 }
 
@@ -209,10 +204,15 @@ mod tests {
     }
 
     fn agent() -> Actor {
+        agent_writing(Some("vlt_work"))
+    }
+
+    fn agent_writing(write_vault: Option<&str>) -> Actor {
         Actor::Agent {
             session_id: "ags_1".into(),
             host_id: "hst_1".into(),
             user_id: "usr_1".into(),
+            write_vault: write_vault.map(Into::into),
         }
     }
 
@@ -227,19 +227,50 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_policy_allows_every_authenticated_actor() {
-        // The current answer, stated so a change to it is a visible diff
-        // rather than a behaviour someone notices in production.
-        let policy = AllowAuthenticated;
-        for actor in [session(), key(), agent()] {
+    fn a_session_and_a_key_read_and_write_every_vault() {
+        for actor in [session(), key()] {
             for access in [Access::Read, Access::Write] {
                 assert_eq!(
-                    policy.decide(&actor, "any-vault", access),
+                    StormPolicy.decide(&actor, "any-vault", access),
                     Decision::Allow,
                     "{} / {access:?}",
                     actor.describe()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn an_agent_reads_anywhere_and_writes_only_to_its_write_vault() {
+        let agent = agent();
+        for vault in ["vlt_work", "vlt_personal", "vlt_kit"] {
+            assert_eq!(
+                StormPolicy.decide(&agent, vault, Access::Read),
+                Decision::Allow
+            );
+        }
+        assert_eq!(
+            StormPolicy.decide(&agent, "vlt_work", Access::Write),
+            Decision::Allow
+        );
+        for vault in ["vlt_personal", "vlt_kit", "vlt_work2", ""] {
+            assert_eq!(
+                StormPolicy.decide(&agent, vault, Access::Write),
+                Decision::Deny(AGENT_WRITE_REFUSED),
+                "{vault}"
+            );
+        }
+        let read_only = agent_writing(None);
+        assert_eq!(
+            StormPolicy.decide(&read_only, "vlt_work", Access::Read),
+            Decision::Allow
+        );
+        for vault in ["vlt_work", "vlt_personal", ""] {
+            assert_eq!(
+                StormPolicy.decide(&read_only, vault, Access::Write),
+                Decision::Deny(AGENT_WRITE_REFUSED),
+                "{vault}"
+            );
         }
     }
 

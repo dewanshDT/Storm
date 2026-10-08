@@ -61,6 +61,9 @@ pub enum Command {
         /// The connections this session may use (AM23): ids and slugs only.
         #[serde(default)]
         mcp: Vec<crate::mcp::McpGrant>,
+        /// Started from a note: the launch gains the fixed opening prompt.
+        #[serde(default)]
+        context: bool,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -402,9 +405,18 @@ impl Host {
                 interaction,
                 terminal,
                 mcp,
+                context,
             } => {
-                self.start(session, workspace, provider, interaction, terminal, mcp)
-                    .await
+                self.start(
+                    session,
+                    workspace,
+                    provider,
+                    interaction,
+                    terminal,
+                    mcp,
+                    context,
+                )
+                .await
             }
             Command::McpMessage {
                 session,
@@ -465,6 +477,7 @@ impl Host {
         self.sessions.lock().unwrap().get(id).cloned()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start(
         self: Arc<Self>,
         id: String,
@@ -473,6 +486,7 @@ impl Host {
         interaction: Option<String>,
         size: Size,
         mcp: Vec<crate::mcp::McpGrant>,
+        context: bool,
     ) {
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
@@ -507,7 +521,7 @@ impl Host {
         // than start without `--strict-mcp-config` and load the host's own
         // MCP servers (G-D12).
         let launch = match self.mcp_launch(&id, &provider_id, &mcp) {
-            Ok(extras) => extras,
+            Ok(extras) => crate::mcp::with_opening_prompt(extras, &provider_id, context),
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
                 return self.post_start_failure(&id).await;
@@ -893,7 +907,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(env.cmd_seq, 3);
-        assert!(matches!(env.command, Command::Start { .. }));
+        assert!(matches!(env.command, Command::Start { context: false, .. }));
+        let env: Envelope = serde_json::from_str(
+            r#"{"cmd_seq":3,"type":"start","session":"ags_X","workspace":"w","provider":"claude-code","terminal":{"cols":80,"rows":24},"context":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(env.command, Command::Start { context: true, .. }));
         let env: Envelope = serde_json::from_str(
             r#"{"cmd_seq":4,"type":"terminal.input","session":"s","data":"aGk="}"#,
         )
