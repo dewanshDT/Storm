@@ -249,7 +249,6 @@ class NewSessionPill extends StatelessWidget {
                 child: Container(
                   height: t.sp * 6,
                   padding: EdgeInsets.symmetric(horizontal: t.sp * 2.75),
-                  alignment: Alignment.center,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [

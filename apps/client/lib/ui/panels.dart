@@ -163,10 +163,35 @@ class InlineConfirm extends StatelessWidget {
             onPressed: onCancel,
           ),
           SizedBox(width: t.sp * 0.75),
-          StormButton.danger(
-            key: const Key('confirm-action'),
+          Semantics(
+            button: true,
+            enabled: onConfirm != null,
             label: confirmLabel,
-            onPressed: onConfirm,
+            excludeSemantics: true,
+            onTap: onConfirm,
+            child: Material(
+              color: t.danger,
+              borderRadius: BorderRadius.circular(t.rControl),
+              child: InkWell(
+                key: const Key('confirm-action'),
+                borderRadius: BorderRadius.circular(t.rControl),
+                onTap: onConfirm,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: t.sp * 1.25,
+                    vertical: t.sp * 0.75,
+                  ),
+                  child: Text(
+                    confirmLabel,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.onAccent,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),

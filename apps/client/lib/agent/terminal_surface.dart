@@ -237,8 +237,12 @@ class StormTerminalView extends StatelessWidget {
     this.readOnly = false,
     this.padding,
     this.fontSize,
+    this.lineHeight = 1.2,
     this.surface = false,
   });
+
+  /// The handoff's terminal sets 1.7 (§3.6); xterm2's own default is 1.2.
+  final double lineHeight;
 
   final StormTerminal terminal;
   final FocusNode? focusNode;
@@ -311,6 +315,7 @@ class StormTerminalView extends StatelessWidget {
         textStyle: TerminalStyle(
           fontFamily: StormTokens.monoFamily,
           fontSize: fontSize ?? t.labelSize + 1,
+          height: lineHeight,
         ),
         keyboardAppearance: Brightness.dark,
         // Agents redraw on resize; the terminal follows its box.

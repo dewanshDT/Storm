@@ -191,6 +191,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             Expanded(
               flex: 11,
               child: DecoratedBox(
+                // Over the terminal, which paints its own background.
+                position: DecorationPosition.foreground,
                 decoration: BoxDecoration(
                   border: Border(
                     right: BorderSide(color: t.border, width: t.bw),
@@ -228,6 +230,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                               autofocus: true,
                               readOnly: s.ended,
                               fontSize: t.codeSize,
+                              lineHeight: 1.7,
                               padding: EdgeInsets.symmetric(
                                 horizontal: t.sp * 2.5,
                                 vertical: t.sp * 2,
@@ -505,8 +508,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             _Trouble(controller: c),
             Expanded(
               child: DecoratedBox(
+                position: DecorationPosition.foreground,
                 decoration: BoxDecoration(
-                  color: t.surface,
                   border: Border(
                     top: BorderSide(color: t.border, width: t.bw),
                   ),
@@ -522,6 +525,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         readOnly: s.ended,
                         surface: true,
                         fontSize: t.labelSize + 1,
+                        lineHeight: 1.7,
                         padding: EdgeInsets.symmetric(
                           horizontal: t.sp * 2,
                           vertical: t.sp * 1.5,

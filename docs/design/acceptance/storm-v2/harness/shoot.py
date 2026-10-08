@@ -36,6 +36,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "../../../../.."))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "apps/server/tests"))
 
+import agents  # noqa: E402
 import cdp  # noqa: E402
 import shots  # noqa: E402
 import storm_auth  # noqa: E402
@@ -122,6 +123,18 @@ class Harness:
         self.tmp = tempfile.mkdtemp(prefix="storm-acceptance-")
         self.procs = []
         self.ids = {}
+        self.base = BASE
+        self.world = None
+
+    def api(self, method, path, body=None):
+        return storm_auth._call(BASE, method, path, body, auth=self.session)
+
+    def step(self, name):
+        """Moves the server's agent state on (see agents.py)."""
+        self.world = self.world or agents.AgentWorld(self)
+        {"hosts": self.world.enroll_hosts,
+         "sessions": self.world.run_sessions}[name]()
+        log(f"step {name} done")
 
     # ---- server -------------------------------------------------------
 
@@ -285,6 +298,11 @@ class Harness:
 
     def shoot(self, shot):
         self.viewport(shot["viewport"])
+        if shot.get("fresh"):
+            # A new page load: nothing left open by the shot before.
+            self.page.call("Page.navigate", url=BASE + self.route(shot["route"]))
+            self.wait_app()
+            self.settle()
         self.go(self.route(shot["route"]))
         for action in shot.get("actions", []):
             kind, arg = action
@@ -348,7 +366,9 @@ def main():
         h.start_browser()
         h.sign_in()
         for shot in shots.SETS[args.set]:
-            if shot["name"].startswith(args.only):
+            if "step" in shot:
+                h.step(shot["step"])
+            elif shot["name"].startswith(args.only):
                 h.shoot(shot)
     except Exception:
         h.debug_dump()

@@ -506,7 +506,7 @@ class _ContextBox extends ConsumerWidget {
             children: [
               Icon(LucideIcons.file, size: t.uiSize, color: t.accent),
               SizedBox(width: t.sp * 1.25),
-              Expanded(
+              Flexible(
                 child: Text(
                   shown,
                   maxLines: 1,
@@ -520,9 +520,10 @@ class _ContextBox extends ConsumerWidget {
               ),
               if (note != null) ...[
                 SizedBox(width: t.sp),
-                Flexible(
+                Expanded(
                   child: Text(
                     noteCrumb(vault, note.meta.path),
+                    textAlign: TextAlign.right,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
