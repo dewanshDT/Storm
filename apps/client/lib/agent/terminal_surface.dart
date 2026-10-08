@@ -261,7 +261,6 @@ class StormTerminalView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final base = TerminalThemes.defaultTheme;
     // **Dark in both themes.** Agents and the ANSI palette assume a dark
     // background; on the light theme's white code plate, an agent's white text
     // would vanish. Both colours still come from the tokens: the light theme's
@@ -269,31 +268,11 @@ class StormTerminalView extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final background = dark ? (surface ? t.surface : t.bg) : t.text;
     final foreground = dark ? t.text : t.bg;
-    final theme = TerminalTheme(
-      cursor: foreground.withValues(alpha: 0.7),
-      selection: t.accent.withValues(alpha: 0.35),
-      foreground: foreground,
-      background: background,
-      black: base.black,
-      white: base.white,
-      red: base.red,
-      green: base.green,
-      yellow: base.yellow,
-      blue: base.blue,
-      magenta: base.magenta,
-      cyan: base.cyan,
-      brightBlack: base.brightBlack,
-      brightRed: base.brightRed,
-      brightGreen: base.brightGreen,
-      brightYellow: base.brightYellow,
-      brightBlue: base.brightBlue,
-      brightMagenta: base.brightMagenta,
-      brightCyan: base.brightCyan,
-      brightWhite: base.brightWhite,
-      searchHitBackground: base.searchHitBackground,
-      searchHitBackgroundCurrent: base.searchHitBackgroundCurrent,
-      searchHitForeground: base.searchHitForeground,
-    );
+    final theme = _themes.putIfAbsent((
+      foreground,
+      background,
+      t.accent,
+    ), () => _theme(foreground, background, t.accent));
     // **The app's chords stop here while the terminal has focus** (freeze
     // §10). The terminal handles the keys it understands before they bubble;
     // this catches the ones it leaves, so Ctrl+K reaches the agent's world or
@@ -323,4 +302,37 @@ class StormTerminalView extends StatelessWidget {
       ),
     );
   }
+}
+
+// xterm2 reports a colour-scheme change to the agent whenever the view gets a
+// theme that is not identical, and TerminalTheme has no value equality.
+final _themes = <(Color, Color, Color), TerminalTheme>{};
+
+TerminalTheme _theme(Color foreground, Color background, Color accent) {
+  final base = TerminalThemes.defaultTheme;
+  return TerminalTheme(
+    cursor: foreground.withValues(alpha: 0.7),
+    selection: accent.withValues(alpha: 0.35),
+    foreground: foreground,
+    background: background,
+    black: base.black,
+    white: base.white,
+    red: base.red,
+    green: base.green,
+    yellow: base.yellow,
+    blue: base.blue,
+    magenta: base.magenta,
+    cyan: base.cyan,
+    brightBlack: base.brightBlack,
+    brightRed: base.brightRed,
+    brightGreen: base.brightGreen,
+    brightYellow: base.brightYellow,
+    brightBlue: base.brightBlue,
+    brightMagenta: base.brightMagenta,
+    brightCyan: base.brightCyan,
+    brightWhite: base.brightWhite,
+    searchHitBackground: base.searchHitBackground,
+    searchHitBackgroundCurrent: base.searchHitBackgroundCurrent,
+    searchHitForeground: base.searchHitForeground,
+  );
 }
