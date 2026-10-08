@@ -253,47 +253,32 @@ void main() {
     });
   });
 
-  group('the dashboard', () {
-    testWidgets('shows a card per vault and lays out at phone width', (
-      tester,
-    ) async {
+  group('the place picker', () {
+    Future<void> openPicker(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('places-bubble')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('lists every vault and opens the one tapped', (tester) async {
       final c = shellContainer();
       serverOf(c).addVault('v-second', 'Work');
       await pumpShell(tester, c);
+      await openPicker(tester);
 
-      expect(find.text('Primary'), findsOneWidget);
-      expect(find.text('Work'), findsOneWidget);
-      expect(find.text('RECENTLY OPENED'), findsOneWidget);
-      // The check that caught the AppBar quietly dropping the attach button.
-      expect(tester.takeException(), isNull);
-
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('recents name the vault each note came from', (tester) async {
-      final c = shellContainer();
-      final server = serverOf(c);
-      final second = server.addVault('v-second', 'Work');
-      second['s0'] = ServerNote(
-        id: 's0',
-        path: 'Standup.md',
-        content: '# s\n',
-        version: 1,
+      expect(
+        find.byKey(const Key('place-vault-${FakeServer.primaryVault}')),
+        findsOneWidget,
       );
-      server.markOpened(FakeServer.primaryVault, 'n0', '2026-08-07T09:00:00Z');
-      server.markOpened('v-second', 's0', '2026-08-07T11:00:00Z');
+      expect(find.text('Agents'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('place-vault-v-second')));
+      await tester.pumpAndSettle();
 
-      await pumpShell(tester, c);
-
-      // Newest first, and each carries the vault — which is what tells two
-      // identically-named daily notes apart.
-      expect(find.text('Work'), findsWidgets);
-      expect(find.text('s0'), findsOneWidget);
-
+      expect(c.read(routerProvider).state.uri.path, Routes.browse('v-second'));
+      expect(tester.takeException(), isNull);
       await disposeShell(tester, c);
     });
 
-    testWidgets('a vault whose directory is gone is shown, not hidden', (
+    testWidgets('a vault whose directory is gone is shown, not opened', (
       tester,
     ) async {
       final c = shellContainer();
@@ -302,14 +287,14 @@ void main() {
       ).vaults.add(ServerVault(id: 'v-gone', name: 'Archive', missing: true));
       serverOf(c).byVault['v-gone'] = {};
       await pumpShell(tester, c);
+      await openPicker(tester);
 
       expect(find.text('Archive'), findsOneWidget);
+      await tester.tap(find.text('Archive'));
+      await tester.pumpAndSettle();
       expect(
-        find.text('Directory not found'),
-        findsOneWidget,
-        reason:
-            'a vault that vanished from the list looks like one that '
-            'never existed',
+        c.read(routerProvider).state.uri.path,
+        Routes.browse(FakeServer.primaryVault),
       );
 
       await disposeShell(tester, c);
@@ -326,7 +311,8 @@ void main() {
 
       expect(find.text('Archive'), findsNothing);
 
-      await tester.tap(find.byTooltip('New folder'));
+      // On a phone the pill's ＋ makes a folder on a long-press.
+      await tester.longPress(find.byTooltip('New note'));
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byType(TextField).last, 'Archive');
@@ -344,7 +330,7 @@ void main() {
       // The note dialog appends `.md`; reusing it unchanged would have made
       // every new folder `Archive.md`.
       final c = shellContainer();
-      await pumpShell(tester, c);
+      await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
 
       await tester.tap(find.byTooltip('New folder'));

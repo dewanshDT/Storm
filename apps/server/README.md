@@ -168,46 +168,26 @@ how to check a restore actually brought the identity back.
 Sessions and pairing are not built yet; the shared bearer token is unchanged.
 See `PLAN.md` decisions 52 / 52a / 52c.
 
-### User accounts
+### The account
 
-Accounts exist, and for now they are managed **on the host only**. Creating one
-over the network needs device authentication, which arrives with pairing — so
-until then making an account requires shell access, the same trust level the
-password-recovery command already assumes.
+Storm is single-user (decision 82): one account, password only, set up from
+the app on first pairing or on the host:
 
 ```sh
-storm-server user add dewansh --state /srv/storm/state   # prompts, no echo
-storm-server user list --state /srv/storm/state
-storm-server user role dewansh admin
-storm-server user disable dewansh        # keeps the account, refuses its logins
-storm-server user delete helper          # asks for the username back
-storm-server passwd dewansh              # the recovery path
+storm-server passwd --state /srv/storm/state   # sets up, or resets (A11); prompts, no echo
+storm-server single-user --keep <username>     # only for a pre-v6 auth.db with no active owner
 ```
 
-Run these **as the service user** (`sudo -u storm storm-server …`). The database
-is created on first use, so running as root on a server that runs as `storm`
-leaves an `auth.db` the service cannot write — which surfaces much later as a
-login that fails for no visible reason. The commands warn when they spot it.
+Run these **as the service user** (`sudo -u storm storm-server …`).
 
-The rules worth knowing before they surprise you:
-
-- **The first account is always an owner**, and the last active owner cannot be
-  deleted, disabled or demoted. Transfer ownership by promoting someone else
-  first. A disabled owner does not count as one — it cannot log in, so it cannot
-  administer.
-- **Usernames are ASCII**, 3–32 characters of letters, digits, `.`, `_` and `-`,
-  and are compared case-insensitively: `Dewansh` and `dewansh` are one account.
-  `--display-name` is unrestricted if you want something else on screen.
 - **Passwords are at least 12 characters** and are refused, never silently
   shortened, above 1024 bytes.
-- **There is no `--password` flag** and there will not be one: an argument is in
-  your shell history and visible in `ps` to everyone on the box while the command
-  runs. Pipe it with `--password-stdin` for scripts.
-- Passwords are hashed with **Argon2id at 192 MiB, t=1, p=1** — measured on the
-  deployment VM at ~174 ms per verify, not copied from a blog post. Expect
-  `user add` to take about a third of a second: it hashes, then reads the hash
-  back and verifies it, so an account nobody can log into is caught immediately
-  rather than at a login prompt weeks later.
+- **There is no `--password` flag**: use `--password-stdin` for scripts.
+- Passwords are hashed with **Argon2id at 192 MiB, t=1, p=1**, measured on the
+  deployment VM; `passwd` reads the hash back and verifies it before
+  reporting success.
+- Upgrading from v5 writes `state/auth.db.pre-v6`, keeps the oldest active
+  owner and removes every other account in one transaction.
 
 ### Vaults, folders, and the storage root
 

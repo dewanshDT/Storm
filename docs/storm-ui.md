@@ -1,261 +1,246 @@
 # Storm — what the app does today
 
 A functional inventory of every surface, written for someone designing against
-it. Read out of the built app on 2026-08-08; routes, state strings, property
-types and colour values are literal, not approximate.
+it. Rewritten for Storm v2 (M22, decision 82) on 2026-10-08 from the built app
+on `feat/v2-acceptance`; routes, state strings and copy are literal. The design
+source is `design_handoff_storm_v2/` (the prototype wins over its README);
+`docs/design/acceptance/storm-v2/` holds a screenshot of every state below.
 
-Companion to the design briefs — `storm-ui-refactor.md` (M7/M8),
-`storm-multi-vault.md` (M9/M10), `storm-properties.md` (M11),
-`storm-adaptive.md` (M12). Those say why. This says what.
+Companion to the older design briefs — `storm-multi-vault.md` (M9/M10),
+`storm-properties.md` (M11), `storm-adaptive.md` (M12). `storm-ui-refactor.md`
+(M7/M8: the dashboard and the vault bubble) describes surfaces v2 removed.
 
 ---
 
 ## 1. What Storm is
 
-A notes app that keeps your notes on **your** server. Notes are plain markdown
-files in a folder — greppable, backup-able, openable in Obsidian if Storm ever
-goes away. A small Rust server in the homelab owns the canonical copy; the
-phone, the Mac and the browser are clients that sync to it.
+A notes app that keeps your notes on **your** server, and runs coding agents
+next to them. Notes are plain markdown files in a folder — greppable,
+backup-able, openable in Obsidian if Storm ever goes away. A small Rust server
+in the homelab owns the canonical copy; the phone, the Mac and the browser are
+clients that sync to it.
 
-It replaced Obsidian + Syncthing for one person and is in daily use. That shapes
-the design brief more than anything else:
-
-- **No accounts, no onboarding funnel, no sharing, no collaboration.** One
-  person, several devices, one server, on the home network.
-- Notes live in **vaults** — separate collections, e.g. `personal`, `work`.
-  Everything below the dashboard happens inside one vault at a time.
+- **Single user.** One account, a password, several devices (decision 82). No
+  members, roles, registration or account picker.
+- **Activities, not vaults.** The app has two activities — **Notes** and
+  **Agents** — and one global **Settings**. Vaults (`personal`, `work`, the
+  server-seeded `kit`) are the context inside Notes.
+- **The loop.** Start an agent session from a note, let it write to one vault
+  you chose, see what it wrote (**Wrote**) and, on each note it touched, which
+  session did (**provenance**, an unseen dot).
 - Platforms: **macOS, Android, web, Linux.** One Flutter codebase.
 
 ---
 
 ## 2. Ground rules
 
-Six constraints that come from how it is built. Not preferences — designing past
-them means changing the architecture.
+**The vault is plain markdown, always.** Anything a feature stores goes in the
+note's frontmatter in words a human would write (`color: sage`), never a hex.
 
-**The vault is plain markdown, always.** Nothing Storm-only goes in the notes
-folder. Anything a feature needs to store goes in the note's own frontmatter in
-words a human would write: a colour is `color: sage`, never a hex value, because
-the file has to still make sense in another app.
+**Offline is a normal state, not an error.** Every Notes screen is reachable
+with no server; edits queue and replay. Agents need the server and say so.
 
-**Offline is a normal state, not an error.** Every screen is reachable with no
-server. Edits queue and replay when it returns. So every surface needs an
-offline reading, and "you are offline" must never look like "something broke".
+**The server decides, and conflicts are visible.** The server merges; when it
+can't, the conflict is written into the note as marked-up text.
 
-**The server decides, and conflicts are visible.** Two devices editing one note
-is expected. The server merges; when it can't, the conflict is written *into*
-the note as marked-up text and the person resolves it by deleting lines. No
-hidden copy, no silent overwrite.
+**One breakpoint, at 900px.** Below it the phone layout (the default); at and
+above it the activity rail and a sidebar. The same places exist on both; only
+their layout differs. Portrait tablets get the phone layout.
 
-**One breakpoint, at 900px.** Below it, the phone layout — the default, and the
-reason the project exists. At and above it, a sidebar appears beside the note.
-No tablet-specific layout; portrait tablets get the phone one, deliberately.
+**Dark first.** Three presets — Storm dark (default), Storm light, SlowFlow
+earth — all derived from one token layer (`lib/ui/tokens.dart`); no screen
+picks its own colour, size or radius (`test/token_conformance_test.dart`).
 
-**Dark first.** Dark is the default and the most used. Light is fully supported
-and must be designed, not derived by inverting.
+**There is no trash.** Deleting a note removes the file immediately.
 
-**There is no trash.** Deleting a note removes the file immediately. The server
-keeps version history so the text is recoverable by someone who knows to look,
-but nothing in the app offers it back.
+**Unseen is per device.** A dot means "an agent changed this since *this
+device* last opened it"; the server never stores it. A device's first look at
+a vault takes what agents had already written as seen, so a new device does
+not dot every note an agent ever wrote.
 
 ---
 
 ## 3. The map
 
-Every route is also the web client's URL — real, shareable deep links.
+Every route is also the web client's URL.
 
 ```
-/connect                      Connect            shown until a server is saved
-/                             Dashboard          vaults + recently opened
-│                                                (+ an owner's running agents)
-├── /settings/server          Server settings
-├── /agents                   Agents          ┐  owner only (decision 78); on a
-│   └── /agents/hosts         Hosts           ┘  wide screen the agents sidebar
-│                                                sits beside them
-├── /v/:vault/browse/…        Directory       ┐
-├── /v/:vault/note/:id        Note            │  these four share one frame:
-├── /v/:vault/search          Search          │  on a wide screen the vault
-└── /v/:vault/tags            Tags            ┘  sidebar sits beside them
+/                          not a screen: this device's last location
+/pairing · /login          pair a device · sign in (password only)
+/notes                     the last vault, or "No vaults yet"
+/v/:vault/browse[/path]    vault root / folder (phone); "Select a note" (desk)
+/v/:vault/note/:id         a note   (?session=<id>: pushed from a phone session)
+/v/:vault/search · /tags   search · tags
+/agents                    overview (desk) · Running/Ended list (phone)
+/agents/s/:id?tab=…        a session; tab = context | wrote | about
+/settings                  the list (phone) · This device (desk)
+/settings/:page            device · access · vaults · ai · integrations ·
+                           hosts · storage · connection · advanced · health
+/add-device                a pairing QR for another device
+/gallery                   the token gallery, by typed URL only
 ```
 
-Back always retraces the real path and never leaves the app from inside a vault.
+Retired routes redirect: `/settings/server`, `/settings/client`,
+`/v/:vault/settings/*`, `/settings/mcp-keys`, `/agents/hosts`. The OAuth
+return still lands on `/settings/integrations`.
+
+**Back (Q2):** the router pops first; then a note goes to its folder, a folder
+to its parent, Agents and Settings to the last Notes location; only a vault
+root exits the app. Launch restores the last activity and location.
 
 ---
 
-## 4. Surfaces
+## 4. Chrome
 
-### Connect — `/connect`
+**Desktop (≥ 900): the activity rail**, 56 wide, on every screen: Notes,
+Agents (badge = live sessions, only above 0), a spacer, the **health dot**
+(green when healthy; its popover lists sync, hosts and integrations rows that
+link into Settings) and the Settings gear. Active item: `accent` on
+`accentSoft`. The health dot and the gear share one 40 px square on the
+rail's axis, 8 apart and 8 from the bottom.
 
-First run, and the only screen shown until a server address is saved.
-
-- **Contains** — product name and one line of orientation; server address field
-  (pre-filled with a localhost example); access token field, masked; Connect
-  button.
-- **Actions** — test and save. The address is verified *before* it is stored, so
-  a typo surfaces here rather than as an empty vault later.
-- **States** — empty · testing · `The server rejected that token.` ·
-  `Couldn't reach the server. Is it running?`
-
-### Dashboard — `/` · adapts at 900px
-
-Home. Which vault, or what you were last working on.
-
-- **Contains** — a grid of vault cards (name, note count, the vault's accent
-  colour as its fill); below, **Recently opened**: full-width rows with the note
-  title and which vault it came from, merged across every vault.
-- **For the server's owner only, an Agents band** directly above Recently
-  opened, always in that place: the running sessions (provider in workspace,
-  host, age; a tap opens the terminal), or one idle row naming the next step —
-  *Set up a host* · *<host> is offline* · *No agents running · New session* ·
-  *Agents need the server*. Everyone else sees no band at all (decision 78).
-- **Actions** — open a vault · open a recent note · create a vault · set a
-  vault's colour · reach server settings.
-- **States** — loading · no vaults yet · no recents yet · `Directory not found`
-  · offline (served from cache).
-- **Wide** — cards stop stretching and flow at a fixed size; recents move to a
-  340px right-hand rail. At phone width it stays two columns.
-
-> A vault whose folder has gone is shown **greyed and labelled**, not hidden.
-> Disappearing would read as "my notes are gone".
-
-### Directory — `/v/:vault/browse/…` · adapts at 900px
-
-The folder tree, drilled into one level at a time.
-
-- **Contains** — breadcrumb of the current path; rows for folders and notes,
-  mixed, folders first.
-- **Actions** — open a folder or note · create a folder · rename or delete a
-  folder · long-press a row for its actions.
-- **States** — loading · empty folder · empty vault · offline.
-- **Wide** — replaced by the sidebar's expandable tree; the main pane shows
-  **Select a note**.
-
-### Search — `/v/:vault/search`
-
-Full-text across the current vault.
-
-- **Contains** — one field, placeholder `Search notes`; results as note title,
-  path, and a snippet with matched words marked.
-- **States** — nothing typed · no matches · search failed.
-- Server-side and fast (~1ms across the vault). Design it as instant.
-
-### Tags — `/v/:vault/tags`
-
-Browse by tag instead of by folder.
-
-- **Contains** — every tag with a count; nested tags grouped under their parent;
-  the notes under a chosen tag.
-- **States** — no tags in this vault · tag has no notes.
-
-### Note — `/v/:vault/note/:id` · adapts at 900px
-
-Where the time goes. **Reading and writing are the same screen** — there is no
-separate preview mode.
-
-Top to bottom:
-
-1. **Status bar** — the note's path, any error, the version number (`v12`), and
-   the save state.
-2. **Properties** — the note's frontmatter as a typed key/value list. Nine
-   types: `text`, `number`, `checkbox`, `date`, `datetime`, `list`, `select`,
-   `url`, `color`. `created` and `modified` are read-only and shown as friendly
-   dates; `id` is hidden unless switched on. This list is the **only** way to
-   edit frontmatter — there is no raw-YAML mode.
-3. **The editor** — markdown styled live *in the text itself*. Headings, bold,
-   italic, code, quotes, lists, task boxes, highlights, tags and wikilinks all
-   render as you type, with the syntax still present and editable.
-4. **Attachments** — a strip of files the note references.
-5. **Mentions** — other notes that link to this one.
-
-- **Formatting toolbar** — Heading · Bold · Italic · Code · Strikethrough ·
-  Highlight · Bullet list · Numbered list · Task · Quote · Link to a note.
-- **Note menu** — Keep available offline · Attach a file · Rename or move ·
-  Delete.
-- **Other behaviours** — typing `[[` suggests notes to link; tapping a wikilink
-  follows it; Enter in a list continues the list; autosave is debounced.
-- **States** — `Unsaved` · `Saving…` · `Saved` · `Queued — offline` · `Failed` ·
-  merged (server text adopted) · conflict (markers in the body) · not available
-  offline yet.
-- **Wide** — opens beside the sidebar; picking another note swaps only this pane.
-
-> **The hard one.** A conflict puts `<<<<<<<` markers into the body and shows a
-> banner. The person fixes it by editing the text. Honest and lossless, and the
-> least designed thing in the app.
-
-### Server settings — `/settings/server`
-
-Everything about the **server**, rather than about this device.
-
-- **Vault storage root** — the folder on the server holding the vaults,
-  editable.
-- **AI access** — two switches: let an assistant read the notes, and a nested
-  one to let it change them. Off by default; the second is dead while the first
-  is off.
-- **Agents** (owner only) — a link to Hosts: the machines agents run on and
-  the default provider. Sessions are not here; they are a space of their own.
-- **Vaults** — the list, with create, rename and remove.
-- **States** — not connected · "would orphan every vault" confirmation · AI
-  access off / read-only / read and write.
-
-> Two actions sound destructive and are not, and the copy says so: changing the
-> storage root never moves files, and removing a vault only forgets it.
-
-### Agents — `/agents` · adapts at 900px · owner only
-
-Running agents: Claude Code, OpenCode or a shell, in a workspace on a host
-(decisions 77d, 78).
-
-- **Phone** — the sessions, *Running* then *Ended*, with **New session** as a
-  pill at the bottom. A session fills the screen: a status line with *End*, the
-  terminal, and a row of the keys a phone keyboard lacks (Esc, Tab, Ctrl,
-  arrows, Paste). Back returns to the list. Several open sessions are tabs,
-  switched from a sheet.
-- **Wide** — the sidebar's **Notes | Agents** switch leads here. The sessions
-  list is the sidebar, with *New session* and Hosts at its foot; the pane is
-  the tab strip over the open terminal. Hosts opens in the pane.
-- **New session** — host (the last one this device used, preselected) →
-  workspace (preselected when there is only one) → provider, with the
-  network line. A fallback provider is announced, never silent.
-- **States** — loading · no hosts · no sessions · host offline · *Agents need
-  the server* (offline is a state, not an error) · a session's own *Host
-  unreachable* / *Host restarted* / *Exited (n)*.
-
-### Appearance & connection (device settings)
-
-Client settings, grouped like Server settings (section labels, no cards):
-
-- **Appearance** — theme · text size · note font (Serif = Newsreader, Sans,
-  Monospace)
-- **Notes** — Read mode (default on) · show the note `id` in properties (off)
-- **Connection** — disconnect (forget server address and token)
-- **About** — client version stamp from the release build
+**Phone: two corner bubbles** (44 × 44 at 20 / 20). Left opens the **place
+picker** — the vaults (tile, name, count, ✓), Agents with "{n} running", and
+the sync line; long-press a vault to colour it. Right opens Settings (`accent`
+while in Settings). The **pill** at the bottom is Directory · Search · ＋ New
+note · Tags on Notes screens (long-press ＋ for a folder; Lucide outlines, as
+the prototype draws them), "＋ New session" on the Agents list, and absent on
+a note (Q5). Content starts at the 20 inset the bubbles sit on.
 
 ---
 
-## 5. Always-on chrome
+## 5. Notes
 
-Three floating elements sit over every vault screen. **No bottom tab bar, no
-drawer.**
+### Sidebar (desktop)
 
-- **Vault bubble · top left** — the current vault's initial, its accent colour,
-  and a dot showing whether the server is reachable. Tap to switch vault. It
-  answers "which one am I in".
-- **Settings bubble · top right** — reaches settings from anywhere.
-- **Nav bubble · bottom centre** — a floating pill, **always expanded**, never
-  collapsed behind a kebab. Carries Directory · Search · New note · New folder ·
-  Mentions (with a count when the open note has any) · Tags.
+Vault header (tile, name, sync line) → **vault switcher** popover (vaults with
+counts and ✓, "Synced … · Sync now", Manage vaults ›). "Search {vault}" with
+⌘K / Ctrl K. **RECENT**: the four newest notes across vaults, each with a vault
+tag. **FOLDERS**: the tree (notes by name, drawn twisties). A note an agent
+changed carries a 6px `accent` **unseen dot**, and so does a *collapsed*
+folder holding one; screen readers hear the name, then "Changed by an agent
+since you last opened it". Footer: New note, New folder, Tags.
 
-At 900px and above the pill is hidden and those same actions become the toolbar
-at the top of the sidebar. Both are drawn from one list, so they can never offer
-different things.
+### Vault root and folders (phone)
 
-For the server's owner, a **Notes | Agents** switch tops the wide sidebar
-(decision 78). It draws nothing for anyone else.
+The vault's name, **RECENT** (title, "vault · folder", age) and **FOLDERS**.
+A folder is "‹ parent" over its name, then its folders and notes; rows carry
+the unseen dot.
 
-### Desktop keyboard shortcuts (M18)
+### Note
 
-Platform-aware (⌘ on macOS / Mac web, Ctrl elsewhere). Phone touch layout
-unchanged. Nested: global · note open · editor focus only.
+Header: the crumb (desk) or "‹ parent" (phone), **Read | Edit**, a soft
+**Start session** (phone "Session"), then the properties toggle (desk) or ⋯ and
+Properties (phone). Then the title (Newsreader at `displaySize`, omitted when
+the body opens with its own `# heading`), the **version line** (`v14 · Saved`,
+the id when asked for) with the **provenance link** — "Edited by session
+{name}, {age} ›" or "Created by session …" in `accent`, opening that session's
+Wrote; a dismissed session's name stays as plain text. The body is the
+existing editor (Edit) or the rendered markdown (Read): Newsreader at about 18
+(`proseSize = fs·√scale`), line height 1.6, H2 about 22 / 600. The editor
+surface fills everything between the sidebar and the Properties drawer (or the
+window's edge when it is shut): the header row spans it, and the prose wraps
+at the surface's width up to a 900 px measure. Below: attachments (Edit) and
+**Linked mentions**.
+
+Start session opens the launcher with the note as context while a host is
+online, otherwise Agents (which explains what is missing). A note pushed from a
+phone session reads "‹ {session name}" and returns to the terminal; when the
+header cannot fit it beside the controls, the controls move to a second line
+rather than cutting the name.
+
+**Properties:** a drawer (280, `surface`) beside the note at desk width — open
+by default from 1200 px, shut below it (where it would squeeze the prose), and
+a toggle that sticks between notes; a sheet on the phone (Q6). The typed
+frontmatter list (nine types; `created`/`modified` read only) is the only way
+to edit frontmatter.
+
+**States:** `Unsaved` · `Saving…` · `Saved` · `Queued — offline` · `Failed` ·
+merged · conflict (markers in the body) · not available offline yet.
+
+### Search, Tags
+
+Full-text search in the current vault (title, path, snippet with marks); tags
+with counts, nested under their parents.
+
+---
+
+## 6. Agents
+
+"Agent" is Claude Code, OpenCode or Shell; a **session** is one run of an
+agent in a workspace on a host. Kit's `agents/*.md` are notes, never agents.
+
+### Overview (desktop) and list (phone)
+
+Desk sidebar: ＋ New session (only with a host online), Overview, **RUNNING**
+and **ENDED** rows with status dots (§3.2: `accent` running, a ring while
+starting, `danger` failed, `text3` ended). The overview pane has **WORK**
+cards grouped by (workspace, host) — each row a session with its context chip
+and "wrote n" — **START AN AGENT** cards that open the launcher with that
+agent, and the infrastructure line linking to Settings › Hosts. With no host:
+the no-host steps; with hosts and no sessions: the first-session steps. The
+phone is a flat Running / Ended list (rows carry the workspace) and the
+"＋ New session" pill.
+
+### Launcher
+
+A 460 modal (desk) or bottom sheet (phone): the **CONTEXT** box when started
+from a note (× removes it); Host (online only), Workspace (with the shared
+workspace warning), Agent (default marked); **Can write to** — defaults to the
+note's vault, "Read only" when off, disabled with "Off in Settings › AI
+access" when agent writes are off, absent for Shell; the risk box. Launch
+opens the session on Context (with a note) or About.
+
+### Session
+
+Desk: the session workspace. Its header — name, status chip, the Details
+toggle and End, and a meta line — spans the whole workspace; under it the real
+xterm surface fills the width (a 10 px inset) beside an optional **Details
+inspector** with **Context | Wrote {n} | About** and a close button. The
+inspector behaves like Properties: open by default from 1200 px, shut below,
+toggled from the header; 320 px wide, its left edge drags it between 260 and
+500 while the terminal keeps at least 360; open state and width last for the
+run, not across launches. End asks inline in a compact banner — "End {name}"
+in bold, the consequence, then Cancel and the red End session on one row (the
+message wraps under the title when the banner is narrow) — and ends as
+stopped; an ended session shows its footer with **Run again** (the launcher,
+prefilled) and **Dismiss**.
+**Context** is the source note read only with "Open in Notes ›", or "Started
+without a note…". **Wrote** lists created and edited notes ("new" / "v{n}")
+and kit scripts, opening a note in the panel with "‹ Wrote"; a note this
+session last wrote says "· edited by this session". **About**: Agent,
+Workspace, Vault access, Integrations (as granted at launch), Network.
+
+Phone: a full-screen terminal (a 10 px inset), a chip row (Context, Details),
+the extra-keys row as a keyboard accessory — only while the software keyboard
+is open (`viewInsets.bottom > 0`), above it, with Done (Esc, Tab, Ctrl, ⇧,
+arrows, Paste) — the **details sheet**
+(Started from, Wrote, About, End with confirmation) and Run again / Dismiss
+bars once ended. The context note is pushed full screen.
+
+---
+
+## 7. Settings
+
+One global destination: the settings navigation in the sidebar beside a 680
+column (desk, the rail stays), or a list and pushed pages with "‹ Settings"
+and no AppBar (phone). Order (§5.1): **This device** (preset, text size, note
+font, Read mode) · **Devices & access** (signed-in devices with revoke; access
+keys, shown once) · **Storm** › **Vaults** (tile → colour, count, path; a
+missing vault greyed and removable) · **AI access** (MCP read / write, and
+"Storm agents": allow writes when chosen at launch — independent of
+`mcp_writable`) · **Integrations** (connections, tests, tools review; a
+`danger` nav dot when one needs attention) · **Hosts & default agent** ·
+**Storage** · **Connection** (address, route, pinned key, relays, Disconnect)
+· **Advanced** (MCP endpoint, versions, Re-pair) · **About & health** (the
+health rows with actions, compatibility). There is no Accounts section. A
+preset change applies at once and persists on this device.
+
+---
+
+## 8. Keyboard (desktop, M18)
+
+Platform-aware (⌘ on macOS / Mac web, Ctrl elsewhere).
 
 | Action | macOS | Win / Linux |
 |---|---|---|
@@ -269,34 +254,26 @@ unchanged. Nested: global · note open · editor focus only.
 | Bold / Italic | ⌘ B / I | Ctrl B / I |
 | Dismiss / leave | Esc | Esc |
 
-Undo/redo stay with the system text field. No ⌘/Ctrl R or W (browser-hostile).
-Deferred: shortcut overlay, command palette.
-
 ---
 
-## 6. State vocabulary
-
-The literal strings the app shows. This is the whole of its feedback language —
-worth keeping or deliberately replacing.
+## 9. State vocabulary
 
 | Shown | Means | Where |
 |---|---|---|
-| `Unsaved` | Edited, not yet sent | Note status bar |
-| `Saving…` | In flight | Note status bar |
-| `Saved` | The server has it | Note status bar |
-| `Queued — offline` | Held locally, will replay | Note status bar |
-| `Failed` | Rejected; the edit is still here | Note status bar |
-| `v12` | Which version you are editing from | Note status bar |
-| `Offline` | The server cannot be reached | Vault bubble, toasts |
-| `N unsent` | Edits waiting to sync | Vault bubble |
-| `Not connected` | No server saved yet | Settings |
-| `Directory not found` | The vault's folder is gone | Vault card |
-| `Kept available offline` | Pinned for offline reading | Note menu toast |
-| Not available offline yet | Never fetched, and no server now | Note screen |
+| `Unsaved` · `Saving…` · `Saved` | Save progress | Version line |
+| `Queued — offline` | Held locally, will replay | Version line |
+| `Failed` | Rejected; the edit is still here | Version line |
+| `v12` | Which version you are editing from | Version line |
+| Edited / Created by session {name}, {age} › | Latest agent writer | Version line |
+| unseen dot | Changed by an agent since this device opened it | Tree, folders, phone rows |
+| Starting · Running · Unknown | A live session | Status chips |
+| Completed · Stopped · Failed | An ended session | Status chips |
+| `{n} running` | Live sessions | Place picker, rail badge |
+| `Directory not found` | The vault's folder is gone | Settings › Vaults |
 
 ---
 
-## 7. Colour and type
+## 10. Colour and type
 
 ### Accents
 
@@ -324,9 +301,11 @@ The product mark is a hand-drawn tornado on a mint card: `#96F2D7` ground,
 ### Type
 
 - **Note bodies** — Newsreader, a serif, bundled with the app so it works
-  offline. The default.
+  offline. The default. About 18 / 1.6 at the default text size, H2 about
+  22 / 600 (handoff §7.2), scaling with the setting.
 - **Alternatives** — the platform's own interface face, or its monospace.
-- **App chrome** — the platform face throughout.
+- **App chrome** — IBM Plex Sans; labels, metadata and the terminal IBM Plex
+  Mono. Both bundled.
 - **Size** — adjustable, default 16.
 
 Only faces that ship with the app or the platform: downloading a font at runtime
@@ -335,31 +314,27 @@ editor's text metrics depend on the connection.
 
 ---
 
-## 8. Gaps and open questions
+## 11. Gaps and open questions
 
 Known holes, and the decisions most worth a designer's answer.
 
-**Tables don't render.** A markdown table shows as raw pipes that wrap mid-row.
-Not an oversight: the editor is one text field whose styling must map to the
-underlying characters exactly, and a table needs column layout, which that model
-cannot express. Fixing it means a separate rendered reading view.
-→ *Is reading a distinct mode with its own design, or should the editor stay the
-only view and tables just be made legible?*
+**Tables render only in Read mode.** The editor is one text field whose styling
+must map to the underlying characters exactly, so in Edit a table stays pipes.
+Read mode (the default) renders it.
 
 **Conflicts are raw.** A banner, then git-style markers to delete by hand.
 → *What should choosing between two versions look like on a phone?*
 
-**Properties crowd a small screen.** The typed list is the only way to edit
-frontmatter, and a note with many properties pushes the writing far down.
-→ *Collapse by default, or somewhere else entirely?*
+**Properties are a sheet on the phone.** The typed list is the only way to
+edit frontmatter; on a phone it is one tap away rather than above the prose.
 
 **Delete has no undo.** No trash anywhere in the product.
 → *Design a trash, or design a confirmation that earns the risk?*
 
-**AI access is a settings row.** An assistant can read, and optionally change,
-every note. Today that is two switches on a settings screen.
-→ *Should it be visible while it is on — and should a note an assistant wrote be
-marked as such? The file already records `source: ai`.*
+**Agent writes are marked per session, not per assistant.** A note a Storm
+agent session wrote carries provenance and an unseen dot; a write through an
+access key (`/mcp`) carries neither.
 
-**Empty states are unwritten.** New vault, empty folder, no search matches, no
-tags: all present, none designed.
+**Empty states follow `EmptyState`.** Agents' no-host and first-session states
+are designed (numbered steps); the Notes ones (empty folder, no matches, no
+tags) use the same voice without a design of their own.

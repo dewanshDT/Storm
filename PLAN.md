@@ -56,24 +56,28 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
-| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **in progress** | decisions 77–78 released in **v0.3.0** · on-device fixes from the operator's first tests in **v0.3.1** (#72, #73) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
+| M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
+| M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 
-**Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
-steps; this paragraph is the prep PR's): client-only fixes from the
-operator's first on-device tests of Agent Runtime V1, no server, runtime or
-packaging change. **#72**: Shift+Enter, Ctrl+Backspace and Cmd+Backspace send
-LF, Ctrl+W and Ctrl+U while the agent has not enabled the kitty keyboard
-protocol (agents never get it today, because their startup terminal queries
-are answered by the client too late or not at all; the fix for that is AM22,
-drafted in the vault). **#73**: the phone keys row rides on the keyboard and
-matches the note editor's bar, gains a sticky Shift, the phone session view
-is edge to edge with a compact status row, and session rows show the
-provider's mark and the name the agent gives the session. **v0.3.0** (PR #71,
-`df45838`) carried decisions 73–79 and the first `storm-runtime` `.deb`;
-**prod runs it** (its agent routes answer, and a runtime host is enrolled
-there), deployed by the operator, date not recorded here. v0.2.9 (PR #48,
-`f046eaf`) carried decisions 65–71; v0.2.8 (PR #37, 2026-09-02) carried
-decisions 56–64.
+**Release state (2026-10-08).** **v0.4.0 is being cut** (decision 72's
+steps; this paragraph is the prep PR's), at the operator's request after the
+Storm v2 stack merged into `staging`. It carries **M21, the MCP Gateway**
+(decisions 81, 81a–81n: integrations through Storm, encrypted upstream
+credentials, the runtime bridge, OAuth, `storm://oauth` on Android and macOS)
+and **M22, Storm v2** (decision 82: the activity rail, single user, the
+knowledge ↔ agent loop, #95–#107). **Upgrading runs `auth.db` v6** — the
+single-user migration keeps the oldest active owner and deletes every other
+account after writing `auth.db.pre-v6`; run `storm-server single-user --keep
+<name>` first to choose who survives (prod and the codebox dev server both
+have more than one owner). **Known issue:** the web client can stay on the
+spinner after a correct password in Firefox-based browsers (Zen) — the server
+signs in; Chrome works (vault: *Storm v2/Issue — Zen login hang*). **v0.3.1**
+(PR #75, `3829134`) carried client-only fixes for Agent Runtime V1 (#72,
+#73); **v0.3.0** (PR #71, `df45838`) carried decisions 73–79 and the first
+`storm-runtime` `.deb`; **prod runs v0.3.0** until the operator upgrades.
+v0.2.9 (PR #48, `f046eaf`) carried decisions 65–71; v0.2.8 (PR #37,
+2026-09-02) carried decisions 56–64.
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -2571,6 +2575,1756 @@ first run.
 **Revisit if** the backup ever runs where `storm-server` is not installed
 (a backup host pulling over the network); then it needs the root some other
 way.
+
+**80. Every server-wide setting is owner-only.** *(2026-10-04, found during
+the MCP Gateway spec review)*
+
+`PUT /v1/config/registration` refused a member from the start (A13), and its
+neighbours did not. **Any signed-in member could re-point the storage root
+(`PUT /v1/config`), switch MCP on and arm its writes (`/v1/config/mcp`), or
+replace the relay list (`/v1/config/relays`).** `AllowAuthenticated` made
+that look harmless, but these are server settings, not vault access, and A9's
+matrix never gave them to a member. A member arming `mcp_writable` matters
+more once agents use the vault (the gateway spec in the vault puts agent
+writes behind that switch).
+
+- **One helper, `require_owner_session`, called by every `PUT /v1/config*`
+  handler**, with registration's own check folded into it and its message
+  unchanged. A refusal is `403` and leaves the setting untouched.
+- **`only_an_owner_may_change_server_config` loops over the four routes**, so
+  a new config route added without the check is caught by adding it to the
+  list. That is the shape of the bug: the check existed on one route and was
+  copied to none of the others.
+- **Not here:** vault create, rename and remove are still open to a member.
+  They are vault administration, and A9's matrix gives them to admin too, so
+  they belong to the authorization release rather than to an owner check.
+  `GET /v1/config` (Q21) is also left as it is.
+
+**Revisit if** the authorization release lands: these checks become the
+policy's "server config" rule, and admin may gain them (A9's matrix says
+yes).
+
+**81. The MCP Gateway: Storm owns integration credentials, and a Runtime Host
+only forwards.** *(2026-10-04; spec approved by the operator, nothing built)*
+
+**The spec** is *MCP Gateway/V1 Specification* in the personal vault, rev 3:
+decisions G-D1 to G-D25, gate evidence in its §19. This entry records that it
+is approved and which existing decisions it amends. Where they disagree, the
+spec wins and this entry gets fixed. **It is not built.** It is its own track
+and starts after Agent Runtime V1's on-device acceptance (G-D1).
+
+**In one paragraph.**
+- The owner connects an MCP integration (Notion, Linear, GitHub…) **once, in
+  Storm**. storm-server holds its credential, encrypted in a new
+  `state/gateway/gateway.db`, and is the MCP client to the upstream.
+- An agent session reaches it through a per-session **stdio bridge**
+  (`storm-runtime mcp-bridge`). The bridge forwards to the host daemon,
+  which POSTs `/v1/runtime/sessions/{ags}/mcp/{connection}` with its
+  **existing host token**.
+- **No new credential exists.** The agent holds nothing it could use off the
+  host, and the host never sees an upstream credential.
+- Every call is authorized in `ops.rs`: host owns session, live, grant,
+  connection, owner active, method and tool allowed.
+- Storm's own vault is a **built-in connection**. This is how Roadmap Phase 1
+  (agents use the vault) arrives.
+
+**The amendments** (Agent Runtime **AM23–AM32**, D13 in *Agent
+Runtime/Decisions*; AM22 stays reserved for the terminal-protocol draft):
+
+| AM | Was | Amends | Change |
+|---|---|---|---|
+| AM23 | AM-G1 | Freeze §7.1 | The host is also told the ids and slugs of granted connections; never a credential or a user. |
+| AM24 | AM-G2 | Freeze §12.2, *Security* | "Never stores or forwards **model-provider** secrets." **Integration** credentials are stored encrypted, sent only to their own upstream, never to a host or agent. |
+| AM25 | AM-G3 | *Auth Data Model* invariant 5 | Invariant 5 is scoped to Storm's own credentials in `auth.db`. Storm may be an OAuth **client** to upstreams; that is additive under R1. |
+| AM26 | AM-G4 | **Decision 39** | storm-server's MCP surface stays HTTP only. The host's per-session bridge is stdio. rmcp gains its client features at the same `=3.1.2` pin, and **only its `*_once` methods** may send a request upstream. |
+| AM27 | AM-G5 | AM6, *Networking* | The host-inherited egress exception now also covers vault and integration data. It is shown at launch, and closed by Phase 2. |
+| AM28 | AM-G6 | *Roadmap*, freeze §2 | Phase 1 is delivered through the built-in `storm` connection. Its exit criteria are written before the track starts. |
+| AM29 | AM-G7 | *Security* scopes | `integration.manage` (owner) and `integration.use:<connection>` (a grant). |
+| AM30 | AM-G8 | *MCP Integration* | Agents in sessions reach Storm's vault through the gateway, as `Actor::Agent`, not with `stk_` keys. |
+| AM31 | AM-G9 | `authz.rs` | `Actor::Agent { session_id, host_id, user_id, role }`: the owner's identity (A14.3), with the session id for audit. |
+| AM32 | AM-G10 | Freeze §9.2; **decision 77a** "The environment" | With grants, `claude-code` gains `--mcp-config <session>/mcp.json --strict-mcp-config`. `opencode` gains `XDG_CONFIG_HOME=<session>/xdg`, `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `permission: {"<slug>_*": "ask"}`. `shell` gets nothing. |
+
+**What the gates found that a reader would otherwise re-derive** (run
+2026-10-04 on a Runtime Host, throwaway harness, evidence in the spec):
+- **OpenCode runs MCP tools without asking by default**, and its
+  `OPENCODE_CONFIG*` variables *merge* with the global config rather than
+  replacing it. Without AM32's three settings, "the provider prompts before a
+  tool" is false for OpenCode.
+- **rmcp's `call_tool` re-sends `tools/call`** to drive SEP-2322 rounds. Only
+  `call_tool_once` keeps a call at-most-once. An in-flight call whose stream
+  breaks is not re-sent, and an expired upstream session (`404`) re-initializes
+  with the call executed exactly once.
+- **Notion and Linear refuse a LAN `http` OAuth redirect** at registration,
+  and accept loopback and `storm://`. So the browser returns to the *client*,
+  which relays the code to the server. GitHub's remote MCP has no dynamic
+  registration, so it is a PAT connection in V1 (G-D24).
+- **The bridge rules were proved by breaking them.** Each mutation was
+  caught: leaking the replayed `initialize` result, retrying a failed call
+  (2 executions), and not cancelling an open elicitation. A "drop stale
+  progress" filter turned out unreachable: progress rides its call's own
+  response stream, so a failed call has no stream left to deliver it.
+- **No upstream credential reached the host.** A canary was absent from
+  62,561 host files and from 205 live processes' `environ` and `argv`, with
+  positive controls. The journal check (C3) needs an account that can read
+  the journal, and is the one item before the spec is called frozen.
+
+**Accepted, and recorded as V1 risks rather than mitigated:**
+- every non-shell session gets all of the owner's integrations and vaults,
+  with host-inherited egress;
+- sessions on one host share an OS user, so Phase 2 isolation must precede
+  any multi-user gateway;
+- a GitHub PAT is long-lived and scoped at GitHub, not by Storm.
+
+**Revisit if** OpenCode gains a strict-config flag (AM32 simplifies);
+either CLI adopts the 2026-07-28 revision (G-D25's pass-through gets an
+actor that acts on it); or a supported upstream stops accepting loopback
+redirects (G-D13).
+
+**81a. The gateway is built in eight slices, storage first and the client
+last.** *(2026-10-05; M20 accepted, so G-D1 lets the build start)*
+
+When this was decided the spec was frozen on C3, the operator's journal
+grep (it passed on 2026-10-08, printing 1). The build did not wait for it: C3 can only confirm or refute a property of the gates'
+harness, not change the design. If C3 prints anything but 1, the slices stop
+and the spec is re-opened. Each slice is one PR, stacked on the one before,
+each with its own sub-decision (81b, 81c, …). Like 77, a slice that finds a
+concrete contradiction in the spec stops and reports it; nothing is
+redesigned in code.
+
+**The slices**, in build order:
+1. **The gateway store** (81b). `apps/server/src/gateway/`: `gateway.db`
+   with the five §8 tables, created additively; XChaCha20-Poly1305 over
+   `connection_id ‖ kind`; the key file `state/gateway/keys/<key_id>.key`
+   created `0600` in a `0700` directory; `backup_all()` carries the database
+   and its keys together. No route, no network.
+2. **Connections** (81c). The connection operations in `ops.rs` and the
+   owner-only `/v1/integrations/connections` routes (§14) for `static` and
+   `none` connections. Credentials are written encrypted and never returned.
+   `security_events` gains the `integration_*` events, none with a secret.
+   The `storm` slug is reserved for the built-in connection.
+3. **The upstream client** (81d). rmcp's client features at the same `=3.1.2`
+   pin (AM26), `ring` only; **only `*_once` request methods**, enforced by a
+   test that reads the source. The SSRF rule (https; no loopback, link-local
+   or private address, checked on the resolved address). `POST …/test` and
+   `GET …/tools`, the allowlist (tools that appear later default off), the
+   `calls` audit with its retention.
+4. **The gateway route** (81e). `Actor::Agent` (AM31); grants snapshotted at
+   launch into `agent.db.session_mcp_grants` with `allow_vault_writes`;
+   `start` gains `mcp: [{id, slug}]`; `hello` gains
+   `capabilities.mcp_bridge`, and an old host gets no grants and a launch
+   notice; the Host-tier `POST /v1/runtime/sessions/{id}/mcp/{connection}`
+   with request-scoped messages on its own response stream; the per-call
+   authorization in `ops::integration_call` (§7) with stable error codes;
+   the built-in `storm` connection served in process from `mcp.rs`'s
+   router, without `delete_note`, with writes only under both flags;
+   `session_unknown` after a restart; the §9 limits; `mcp.message` for
+   unsolicited messages; disconnect revokes grants.
+5. **The runtime** (81f). `storm-runtime mcp-bridge` (bridge rules 1–6), the
+   daemon's `run/mcp.sock` in a `0700` directory, per-session directories
+   and handles, `capabilities.mcp_bridge`, and the AM32 config writers:
+   `claude-code` gets `--mcp-config <session>/mcp.json --strict-mcp-config`;
+   `opencode` gets `XDG_CONFIG_HOME=<session>/xdg`,
+   `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `permission: {"<slug>_*":
+   "ask"}`; `shell` gets nothing. The bridge's R5, R7 and R8 rules each have
+   a test and the `leak_init`, `retry` and `no_cancel` mutations as negative
+   tests.
+6. **OAuth** (81g). RFC 9728 → RFC 8414 discovery under the SSRF rule;
+   dynamic registration as a public client, else a pasted client; PKCE S256
+   flows (hashed state, encrypted verifier, single use, 10 minutes);
+   `POST …/{id}/authorize` and `POST /v1/integrations/oauth/callback`;
+   single-flight refresh that persists a rotated pair before using it;
+   RFC 7009 revocation on disconnect. rmcp's `CredentialStore` and
+   `StateStore` are implemented over `gateway.db`.
+7. **The client** (81h). Settings ▸ Integrations (owner only, by the
+   server's 403, as 77d's Agents entry), the launcher's "Allow vault writes"
+   toggle and its egress line, the old-host notice, and the OAuth flow:
+   `storm://oauth` on Android and macOS, a loopback listener on desktop,
+   static tokens only on web. **This host has no Flutter: CI is its only
+   verification.**
+8. **Acceptance** (81i). `apps/server/tests/gateway_e2e.py` against a real
+   server, a real `storm-runtime` and a mock upstream: R1–R8 with the three
+   mutations as negative tests, the credential boundary C1, C2 and C4–C7 on
+   the test host with positive controls, and the automatable §17 items
+   (member 403 everywhere, `stk_` refused, an old host's notice, disconnect
+   mid-session, URL-mode elicitation never reaching the agent). In
+   `make test-live` and CI. The gates' harness is ported, not shipped.
+
+Then on-device acceptance, the operator's: the real logins G1 deferred,
+Claude Code before OpenCode (AC-P1), a GitHub PAT, a write merged against a
+phone edit, and C3 against the real build.
+
+**Why this order.**
+- **Storage, then the things that write it, then the things that read it.**
+  Every later slice stores or reads a credential, and the encryption and
+  backup rules are the ones a regression loses data under.
+- **The upstream client before the route.** The route is the client's
+  caller. Testing the client against a mock upstream alone keeps the `*_once`
+  and SSRF rules provable without a host.
+- **The route before the runtime.** The bridge is tested against the real
+  route, the way 77c tested the host against the real link.
+- **OAuth after the whole static path works.** Static tokens are
+  first-class (G-D13), GitHub is a PAT (G-D24), and the operator deferred the
+  real logins. OAuth adds a way to obtain a credential, not a new way to use
+  one.
+- **The client last**, because it cannot be run here, and every server
+  surface it calls is then fixed.
+
+**Decisions this plan makes where the spec was open:**
+- **The AEAD is the RustCrypto `chacha20poly1305` crate's
+  `XChaCha20Poly1305`** (the spec said "to confirm"). Pure Rust, no
+  `aws-lc-rs`, builds on musl with zig. The 24-byte nonce is random per
+  write, which XChaCha's nonce size makes safe without a counter.
+- **The gateway is a module of storm-server, `src/gateway/`**, beside
+  `src/agent/`. Operations stay in `ops.rs` (decision 37). `gateway/` holds
+  storage, crypto and the upstream client, never a policy decision: those
+  are in `ops::integration_*`.
+- **`gateway.db` is opened at boot and held for the process's life**, as
+  `agent.db` is. A missing key file with ciphertexts present is a loud boot
+  warning and those connections become `needs_reauth`, never a refusal to
+  start: losing the key means reconnecting, not a lockout (§8).
+- **`tests/e2e.py` stays 81/81 unmodified** across every slice. New live
+  coverage goes in `tests/gateway_e2e.py`, as auth's went in
+  `auth_e2e.py`.
+- **Decision 80 (#76) is assumed merged before slice 4 ships.** Agent
+  writes are gated on `mcp_writable`, and until 80 a member could switch it
+  on. No slice depends on 80's code.
+
+**Revisit if** a slice finds the rmcp client cannot tell which in-flight
+call an upstream elicitation belongs to (slice 4 needs that to put it on the
+right response stream), or `chacha20poly1305` turns out to pull a C
+toolchain into the musl build.
+
+**81b. Gateway slice 1: `gateway.db`, its data key, and both in every
+backup.** *(2026-10-05)*
+
+**What exists.** `apps/server/src/gateway/`, opened at boot beside the Agent
+Manager and held in `AppState`. No route reads it yet; 81c's connection
+operations are its first caller.
+- **`gateway.db`** (`state/gateway/`): `connections`, `credentials`,
+  `oauth_clients`, `oauth_flows` and `calls` (spec §8), plus `meta` for the
+  active key id. Every statement is `CREATE … IF NOT EXISTS`, and a test
+  fails on a `DROP`, an `ALTER` or a bare `CREATE`. The OAuth tables are
+  created now, with the columns slice 6 needs (issuer metadata, the
+  `resource`, the scope), so slice 6 adds behaviour, not columns.
+- **The AEAD** is `chacha20poly1305` 0.10 (`XChaCha20Poly1305`, pure Rust; no
+  new C, no `aws-lc-rs`). A random 24-byte nonce per seal. **The AAD is
+  `id 0x00 kind`**: the spec's `connection_id ‖ kind`, with a separator so
+  `("ab","c")` and `("a","bc")` differ. A ciphertext moved to another row,
+  or to another kind, does not open.
+- **The key** is 32 raw bytes in `state/gateway/keys/gwk_<26>.key`, created
+  `0600` with `create_new` in a directory created `0700`. `meta.active_key_id`
+  names the sealing key; every key file that loads can open, because each
+  row records its key.
+- **Opened secrets are a `Plaintext`** whose `Debug` prints `<redacted>`
+  and whose buffer is overwritten on drop. `Sealed` prints its key id and
+  length only.
+- **`backup_all()` calls `gateway::backup`** right after `backup_auth`,
+  before the "no vaults" early return: `gateway.db` by `VACUUM INTO`, and the
+  key files copied and re-tightened to `0600` in `0700`. The snapshot mirrors
+  the state layout, so a restore is a plain copy.
+- **The `calls` audit** stores `at_ms` (epoch milliseconds) so the 30-day
+  retention is an exact comparison. The row type has no field for
+  arguments or results, so G-D18 is kept by the type. `prune_calls`
+  applies age first, then the 100k-row cap.
+
+**A lost key is not a lockout** (§8). If `meta.active_key_id` names a key
+file that is missing or unreadable, boot makes a new key active, marks every
+connection sealed under an unloadable key `needs_reauth` (not `revoked` or
+`disabled` ones), and logs one warning that says to restore
+`state/gateway/keys/`. The old key file, if it is merely unreadable, is left
+where it is. The notes stay online either way.
+
+**`revoked` is a connection status the spec's §5 list omits.** §13 says a
+disconnect marks the connection revoked and keeps rows for the audit, so the
+row stays as a tombstone with its credentials deleted, and the unique index
+on `(owner_user_id, slug)` excludes it, so the slug is free again. This is
+§13 read literally, not a design change.
+
+**Verified.**
+- 18 new unit tests, plus `a_backup_carries_the_gateway_store_and_its_data_key`
+  through `backup_all` on a server with no vaults. The backup test restores
+  by plain copy and opens the credential.
+- **Each guard was proved by mutation**, all seven caught: `backup_all`
+  without the gateway call; a backup without the keys; the AAD ignored;
+  plaintext stored as the ciphertext (the database and its WAL are
+  scanned for the canary); a key created `0644`; a lost key not marking
+  its connections; `Plaintext`'s `Debug` printing the secret.
+- `cargo tree -i aws-lc-rs` finds nothing. fmt, clippy `-D warnings` and
+  all 476 unit tests pass. Against a live server: `e2e.py` 81/81
+  unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**Revisit if** data-key rotation is built (it is LATER in the spec): it needs
+a re-seal pass and a rule for when an old key file may be deleted, and
+`meta.active_key_id` is where that starts.
+
+**81c. Gateway slice 2: connections, the owner's alone, and a credential
+bound to its upstream for life.** *(2026-10-05)*
+
+**The routes** (session tier, every one gated by `ops::require_integration_owner`):
+- `GET` / `POST /v1/integrations/connections`
+- `GET` / `PATCH` / `DELETE /v1/integrations/connections/{id}`
+
+A member gets `403` on all five. Another owner's connection is `404`, the
+same as an id that does not exist, so ids cannot be probed. An `stk_` key is
+`401`, because the tier refuses it (§14: no MCP tool manages integrations).
+
+**What this slice connects:**
+- `static` connections: a header, `Authorization` by default, and a value.
+  A GitHub PAT is `Bearer ghp_…` (G-D24).
+- `none` connections.
+- `oauth` is refused with `400` until its authorize flow exists (81g), so
+  no connection can sit in `pending_auth` with no way out.
+
+**Decisions:**
+- **A connection's URL, slug and auth kind never change.** PATCH has no
+  field for them, and the store's update never writes them:
+  - Re-pointing a connection would send its credential to a new host.
+    AM24 says a credential is presented only to its own upstream.
+  - The slug is what live sessions were told at launch.
+
+  Moving a connection means a new one.
+- **The built-in `storm` connection is listed first, with id and slug
+  `storm`, and is not a row.** It reports `vault_writes_available`, which
+  mirrors `mcp_writable`. PATCH and DELETE on it are `400`. Its id equals
+  its slug, so `start.mcp` and the gateway route name it like any `mcc_`
+  connection.
+- **Slugs are `[a-z0-9-]`, 1–32 characters, with no leading or trailing
+  `-`, and never `storm`.** They are derived from the display name when
+  omitted. A slug becomes OpenCode's `"<slug>_*"` permission glob (AM32), so
+  `_` is refused: one slug's glob must not match another's tools.
+  Uniqueness is per owner, decided by the unique index (`409`), not by a
+  read-then-write. A disconnected slug is free again.
+- **No private-range check on a static connection's URL.** It must be
+  absolute `https`, with no userinfo and no fragment. §10's SSRF rule
+  applies to OAuth discovery, whose URLs come from an upstream's metadata
+  (81g). A static URL is typed by the owner, and a homelab's own MCP server
+  on the LAN is a main use.
+- **A static credential cannot inject a header.** The value is printable
+  ASCII with no CR or LF. Names the transport owns (`Host`,
+  `Mcp-Session-Id`, `Content-Type` …) are refused.
+- **Disconnect** turns the row into the `revoked` tombstone and deletes its
+  ciphertexts in one transaction (§13). Upstream revocation arrives with
+  OAuth (81g). A PAT has no revocation call from Storm.
+- **Insert is one transaction with its credential**, so there is never a row
+  whose credential failed to land.
+
+**Audit.** The `security_events` kinds are `integration_created`,
+`integration_reauthorized` (a rotated static token), `integration_disabled`,
+`integration_enabled` and `integration_deleted`:
+- `integration_enabled` is the inverse §14 did not name. It is additive.
+- The detail is the id, the slug, the auth kind and the upstream's **host
+  only**: an owner can paste a URL with a key in its query string.
+
+**Verified.**
+- Six route tests: the full flow (create, list, disable, re-enable, rotate,
+  allowlist, delete, slug reuse, ciphertexts deleted); member `403` on every
+  route; a second owner's `404` and an independent slug space; `stk_`
+  `401`; ten bad inputs; and canaries in a credential and in a URL's query,
+  absent from every response and every event.
+- Unit tests for slugs, URLs, static headers and a redacted `Debug`.
+- **Mutation-proved, all 8 caught:**
+  - the owner check removed
+  - rows not scoped to their owner
+  - the audit recording the full URL
+  - disconnect keeping ciphertexts
+  - CR/LF allowed in a value
+  - `http` allowed
+  - `storm` claimable
+- fmt, clippy `-D warnings`, 486 unit tests.
+- Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**Not yet:** `POST …/test` and `GET …/tools` need the upstream client
+(81d), and so does `known_tools`. The allowlist is stored as given until
+then.
+
+**81d. Gateway slice 3: the upstream client, `*_once` only, and the
+owner's test.** *(2026-10-05)*
+
+**rmcp gains its client features at the same `=3.1.2` pin** (AM26):
+`client`, `transport-streamable-http-client-reqwest` and
+`reqwest-tls-no-provider`. `cargo tree -i aws-lc-rs` still finds nothing.
+- **`only_the_once_methods_send_a_request_upstream`** reads `ops.rs` and every
+  file in `src/gateway/`, and fails on `.call_tool(`, `.get_prompt(`,
+  `.read_resource(` or their `_with_mrtr_max_rounds` forms.
+- `list_all_tools` is allowed: it pages with cursors and re-sends nothing.
+
+**The HTTP client is the gateway's own**, handed to rmcp's transport with
+`with_client`:
+- **No redirects followed.** A test points an upstream at a 307 to a second
+  server and asserts the credential header never arrives there.
+- **rustls on `ring` with the bundled webpki roots,** passed as a
+  preconfigured config. It does not depend on `/etc/ssl` (static musl), nor
+  on the process default provider having been installed first, which unit
+  tests never do.
+- **A connect timeout, and no whole-request timeout.** A whole-request
+  timeout would also cut the standalone SSE stream. Each operation carries
+  its own deadline: 30 s for the owner's probe here, and the spec's 60 s per
+  agent call in slice 4.
+- **`reinit_on_expired_session(true)` is set by name**, so it is not
+  tidied off (G3, R3b).
+
+**The credential reaches the transport as a header and nowhere else.**
+`Gateway::target` opens the sealed value per call. It becomes a
+`HeaderValue` marked sensitive. `Target`'s `Debug` names header names only.
+A static credential uses rmcp's `custom_headers`, not `auth_header`, because
+the owner stores the whole value (`Bearer ghp_…`, or an `X-Api-Key`).
+
+**Errors are stable codes, never upstream text** (§12):
+- `upstream_unauthorized`: 401, or 403 with a challenge. It sets the
+  connection to `needs_reauth`.
+- `upstream_rate_limited`
+- `upstream_unavailable`
+- `upstream_protocol_error`
+- `integration_needs_reauth`: the credential cannot be opened.
+
+rmcp formats a non-success answer as `HTTP <status>: <body>`, and only the
+status is read. **Neither `ClientInitializeError::TransportError` nor
+`ServiceError::TransportSend` marks its transport error as a `source`**, so
+the classifier steps into them by hand. Found by a failing test, which first
+read a 401 as unavailable.
+
+**The owner's routes:**
+- `POST /v1/integrations/connections/{id}/test` and `GET …/tools` open one
+  short-lived session with no capabilities, list every tool, and close.
+- They record `last_ok` or `last_error_code`, and one `calls` row with
+  method `tools/list` and no session.
+- A disabled connection is `409`, and the built-in one is `400`.
+- `tools` answers a failure with `502` and the code only.
+
+**The allowlist rule (G-D16), in `reconcile_tools`:**
+- The first listing turns every tool on and records them in `known_tools`.
+- After that, a tool not in `known_tools` stays off and is reported once as
+  `new`. That report is the owner's notice: `new_tools` on `test`, and
+  `new: true` on `tools`.
+- `known_tools` only grows, so a tool that vanishes and returns keeps the
+  owner's decision.
+- Only the owner's listings update it. An agent's listing (slice 4) will
+  filter by the allowlist and record nothing.
+
+**The call audit** is written through `Gateway::record_call`, which never
+fails the call it describes. It prunes to 30 days and 100k rows at boot and
+every 1000 rows.
+
+**`--gateway-allow-http-upstreams`, a hidden `serve` flag, for the test
+suites only.** It lets a mock upstream on loopback be `http://`, and logs a
+warning when set. Nothing in a deployment sets it.
+
+**The elicitation question in 81a is answered.** rmcp 3.1.2 tags an inbound
+upstream request with `InboundStreamOrigin::OutboundRequest(<request id>)`,
+the id of the POST whose response stream carried it (SEP-2260). Slice 4 can
+put an elicitation on the right agent call's stream with no workaround.
+
+**Verified.**
+- Seven upstream tests against a real rmcp server in process: a probe with
+  its credential; a refused credential; an unreachable port; the redirect;
+  the allowlist rule; the source guard; the redacted `Debug`.
+- Three route tests: the owner's test turns everything on and a later tool
+  stays off; a refusal sets `needs_reauth` until the token is rotated; `http`
+  needs the flag, and disabled or built-in connections are not probed. The
+  member test now covers `test` and `tools`.
+- **Mutation-proved, all 7 caught:**
+  - a `.call_tool(` in the gateway
+  - redirects followed
+  - new tools on by default
+  - 401 read as unavailable
+  - a refusal not setting `needs_reauth`
+  - `http` without the flag
+  - the probe not audited
+- **Real TLS:** `a_real_https_upstream_answers_through_ring_and_the_bundled_roots`
+  is ignored in CI because it needs the network. Run here, Notion's MCP
+  endpoint answered `Unauthorized` over TLS through `ring` and the bundled
+  roots.
+- fmt, clippy `-D warnings`, 496 unit tests. Live: `e2e.py` 81/81
+  unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**Not verified here:** the musl/zig release build with the new dependencies
+(no zig on this host). G3 built the same rmcp feature set as a static musl
+binary with system gcc. The release job is the check.
+
+**81e. Gateway slice 4: the gateway route — grants at launch, per-call
+authorization, the built-in `storm` connection.** *(2026-10-05)*
+
+**Grants (spec §6).**
+- `POST /v1/agent/sessions` gains `allow_vault_writes`, off by default.
+- At launch, `ops::launch_session` offers the built-in `storm` connection
+  plus every non-disabled connection of the owner.
+- The Agent Manager drops all of them for `shell` (G-D9), and for a host
+  whose capabilities lack `mcp_bridge`. For that host, the launch answer
+  carries `mcp.notice`: "<host> can't use integrations — update
+  storm-runtime".
+- The grants are written to `agent.db` before `start` goes out:
+  - `session_mcp` holds the session's write flag;
+  - `session_mcp_grants` holds one row per connection, with `revoked_at`
+    for §13.
+  - Both are new tables, created additively, and `sessions` is untouched.
+- `start` gains `mcp: [{id, slug}]`. The field is omitted when empty, so a
+  session without grants sends the same bytes as before.
+- The launch answer is the session record flattened, plus `mcp:
+  {connections, allow_vault_writes, notice}`.
+- `integration_grant` is audited with ids only.
+- An old `storm-runtime` ignores `mcp` in `start`, and logs and skips an
+  unknown `mcp.message`, so nothing breaks. Its sessions just have no
+  grants.
+
+**`Actor::Agent { session_id, host_id, user_id, role }`** (AM31) carries the
+owner's identity. `describe()` is `agent`. Every policy reads `user_id()`
+and `role()`, so it needs no special case.
+
+**The route, `POST /v1/runtime/sessions/{id}/mcp/{connection}`** (Host tier):
+- The body is one JSON-RPC message from the bridge.
+- The answer is `application/x-ndjson`: lines of `{"message": <JSON-RPC>}`,
+  or the one bridge signal `{"storm_error": "session_unknown"}`.
+- Every refusal is one JSON-RPC error with code `-32001`, the stable code as
+  its `message`, and `data.storm_error`. Never an HTTP error once the host
+  is authenticated.
+- The codes are §12's (`not_granted`,
+  `integration_needs_reauth:<slug>`, `upstream_unavailable`,
+  `upstream_rate_limited`, `gateway_rate_limited`) and five additive ones:
+  `not_your_session`, `session_not_live`, `owner_inactive`,
+  `method_not_permitted`, `tool_not_allowed`, plus `response_too_large`
+  for the 1 MiB cap.
+
+**`ops::integration_call`** runs §7's checks in order: the host owns the
+session; the session is `starting`/`running`; a live grant exists; the owner
+is active; the connection is the owner's and `connected`; the method is in
+§9's list (resources and prompts follow the owner's switches); the tool is
+in the allowlist; and for the vault, writes need the launch flag **and**
+`mcp_writable`, read per call.
+
+**Upstream sessions (`gateway::session`).**
+- One per (agent session, connection), opened by the agent's `initialize`
+  and held in memory only. A restart loses them, so the next request is
+  answered `session_unknown` without being forwarded (G-D19).
+- The agent's capabilities go upstream minus `sampling`, `roots` and
+  `elicitation.url`. URL-only means no elicitation at all.
+- The agent's `initialize` answer is the upstream's, with `resources` and
+  `prompts` hidden when the owner switched them off.
+- **Request-scoped messages ride their call's response stream:**
+  - Progress is rewritten to the agent's own token, and only sent if the
+    agent asked for it.
+  - A form elicitation is found by rmcp's
+    `InboundStreamOrigin::OutboundRequest` and sent as `storm-elicit-<n>`.
+    The agent answers it with a second POST to the same route.
+  - When a call ends, its route and pending elicitations are dropped, so a
+    late answer is never sent upstream and a stale message has nowhere to
+    go.
+  - A URL elicitation is declined and audited as `url_elicitation_declined`
+    (G-D23).
+- **Unsolicited messages** (`list_changed`, `resources/updated`) go down the
+  link as `mcp.message` (at most once).
+- **Closing is cancelling.** A disconnect, a disable, a credential rotation,
+  a replaced `initialize` or a session that ended cancels the upstream
+  session. A call in flight on it fails at once, once, and is never re-sent.
+  A test holds a call in flight, closes the session, and counts one
+  upstream execution.
+- **Limits** (§9) refuse rather than queue: per session 4 concurrent calls
+  and 10 per second; per connection 8 concurrent.
+- Ended sessions' upstream sessions are swept whenever a host reports or is
+  revoked.
+
+**Requests are sent with `send_cancellable_request`, not the `*_once`
+helpers.** This is an interpretation of AM26, not a change to it:
+- The helpers are one-line wrappers over the same single send. The gateway
+  must know the request's id and rmcp's progress token at send time, to
+  route its stream, and the helpers hide both.
+- AM26's purpose, at most one upstream execution per agent call, is
+  unchanged.
+- The source guard still forbids the re-sending helpers.
+
+The operator should confirm this reading.
+
+**The built-in `storm` connection** is `mcp.rs`'s own handler,
+`Storm::for_agent`, served in process over a `tokio::io::duplex` pipe as
+`Actor::Agent`, and reached through the same client path as any upstream:
+- **`delete_note` is never offered** (`NEVER_FOR_AGENTS`).
+- Write tools are listed and callable only under both flags.
+- **It does not require `/mcp` to be enabled.** That switch governs the HTTP
+  surface for `stk_` keys. The built-in is reached only by a session's own
+  grant.
+
+**Not here:**
+- The owner is not notified when an agent's listing shows a new tool
+  (§9). The tool stays off, which is the safety property, and the owner
+  sees it as `new` on the next test. The client (81h) surfaces that.
+- An upstream 404 re-initializing transparently is rmcp's
+  (`reinit_on_expired_session`, proved by G3). It is re-checked against the
+  real build in acceptance (81i).
+
+**Verified.**
+- Six route tests through the real router, with a real enrolled host and a
+  real rmcp upstream:
+  - the full flow: the host sees ids and slugs and no canary;
+    `session_unknown` before `initialize` with zero upstream calls; the
+    allowlist on listing and calling; the stripped capabilities upstream;
+    the audit; a user credential gets `401`;
+  - every §7 refusal, a second host's token included;
+  - `shell` and an old host get nothing, and the notice is shown;
+  - the built-in under each flag combination, never deleting;
+  - progress, a form elicitation answered and a late answer dropped, a URL
+    elicitation declined and audited;
+  - an in-flight call failing once with no re-send.
+- Manager tests: grants and `start`, `shell` and old hosts, `mcp.message`.
+- Unit tests: capability stripping and the limits.
+- **Mutation-proved, all 16 caught:**
+  - each of the seven authorization checks removed;
+  - `delete_note` offered;
+  - `mcp_writable` ignored;
+  - sampling forwarded;
+  - URL elicitation forwarded or delivered;
+  - the progress token not rewritten;
+  - forwarding without a session;
+  - close not cancelling;
+  - disconnect leaving grants;
+  - `shell` granted.
+- fmt, clippy `-D warnings`, 508 unit tests.
+- Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61.
+
+**81f. Gateway slice 5: the runtime — `storm-runtime mcp-bridge`, the daemon
+socket, and the AM32 config writers.** *(2026-10-05)*
+
+**The host forwards and never authorizes.** It learns ids and slugs from
+`start.mcp`, and holds no credential, because none exists on the host.
+
+**What `storm-runtime` does:**
+- **`hello` and `inventory` report `mcp_bridge: true`.**
+- **On a `start` with grants,** it writes the provider's config into
+  `sessions/<ags>/` (`0700`, files `0600`, created with those modes). It
+  mints a random 256-bit session handle and registers it against the
+  session's slugs → connection ids. A config that cannot be written fails
+  the start, rather than launching without `--strict-mcp-config` (G-D12).
+- **The writers (AM32, exactly):**
+  - **`claude-code`** gets `--mcp-config <session>/mcp.json
+    --strict-mcp-config`, with one stdio server per slug:
+    `storm-runtime mcp-bridge <slug>`, its env holding only
+    `STORM_MCP_HANDLE` and `STORM_MCP_SOCK`.
+  - **`opencode`** gets `XDG_CONFIG_HOME=<session>/xdg`, with the config in
+    `xdg/opencode/opencode.json`, plus `OPENCODE_DISABLE_PROJECT_CONFIG=1`
+    and `permission: {"<slug>_*": "ask"}` for every connection. That
+    permission is set last, so no setting relaxes it.
+  - **Anything else** (`shell`, `fake`, a custom id) gets nothing, and no
+    directory is created.
+- **`runtime.toml`'s provider entry gains `settings`** (G-D22): it is
+  merged into OpenCode's session config, since the host's global OpenCode
+  settings no longer load. Its `mcp` key is replaced, so a setting can never
+  add an MCP server.
+- **The provider contract stays MCP-free (AM20).** `SessionSpec` gains a
+  generic `launch: LaunchExtras { args, env }`. A `cli` provider appends the
+  args after its own and the env after everything else, so the session's
+  values win over an env file.
+- **The daemon socket** is `run/mcp.sock`: `0600`, in a `0700` directory,
+  and the unit already allows `AF_UNIX`.
+  - **A bridge connects per message:** one line `{handle, connection,
+    message}` in, the server's NDJSON streamed back verbatim.
+  - **While the link is down,** the answer is `{"storm_error":
+    "storm_unreachable"}`. Never queued, never retried. A `401` asks the
+    link to re-authenticate.
+  - **An unknown handle** gets `not_granted`.
+  - **A second kind of connection, `subscribe: true`,** stays open and
+    carries the link's `mcp.message` (unsolicited messages) to that
+    session's bridges.
+- **Cleanup.** When a session ends or fails to start, its handle stops
+  working, its subscribers go, and its directory is deleted. At boot every
+  `sessions/` directory is removed, because they belonged to sessions that
+  died with the previous process.
+
+**The bridge (`src/bridge.rs`)** implements spec §11's six rules over a
+`Daemon` trait (the socket, or a test's script):
+- It keeps the agent's `initialize`.
+- On `session_unknown`, it replays `initialize` under `storm-reinit-N`,
+  swallows the answer, sends `notifications/initialized`, then resends the
+  original request once.
+- Any other failure, including a stream that ends without a response, is
+  one JSON-RPC error and is never retried.
+- When a call ends, every upstream request it opened toward the agent that
+  is still unanswered is cancelled with `notifications/cancelled`.
+- An answer to an unknown or closed elicitation is dropped.
+- Stdout has one writer task, so lines never interleave. It logs nothing,
+  because stdout is the MCP stream.
+
+**Found on the way, and fixed on the server:** elicitation ids were
+`storm-elicit-<n>` per upstream session, so after a restart the first new one
+reused `storm-elicit-1`. A late answer to the old elicitation could then have
+answered the new one. Ids are now `storm-elicit-<random>-<n>`, unique per
+upstream session. `gateway_e2e.py`'s R8 check found it.
+
+**`apps/server/tests/gateway_e2e.py`** (in `make test-live`, 50 checks, about
+a minute) runs a real server, a real `storm-runtime`, a mock upstream and a
+scripted agent:
+- The mock upstream and the scripted agent (`tests/gateway_support/`) are
+  ported from the gates. They are fixtures, not shipped code.
+- The runtime launches the scripted agent as `claude-code` and as
+  `opencode`, with exactly the config it would give the real CLIs. The agent
+  starts the bridges from that config.
+- It checks:
+  - the owner-only routes, and `stk_` refused;
+  - the AM32 launch for both providers;
+  - calls, the allowlist and the built-in `storm` connection;
+  - capabilities stripped upstream;
+  - progress, form elicitation, and URL elicitation never reaching the
+    agent;
+  - **R2–R8 for real:** a server restart re-initializes with exactly one
+    initialize result; an in-flight call during a `SIGKILL` fails once and
+    is executed upstream once; an open elicitation is cancelled and a late
+    answer never reaches upstream; an upstream restart (404) re-initializes
+    transparently and runs once;
+  - `shell` has no grants, and a disconnect refuses the next call;
+  - **the credential boundary on this host:**
+    - C1, C5, C7: every file under the suite's directory except the
+      upstream's own and the server's state, which holds the credential
+      only sealed;
+    - C2, C4: every readable process's `environ` and `cmdline`;
+    - the spellings raw, `Bearer`, base64 and base64url;
+    - two positive controls: the canary file, and a planted process.
+
+**Verified.**
+- Runtime unit tests: both writers, shell and unknown providers, handles,
+  and the bridge's R5, R7, R8 and timely-answer rules.
+- **Mutation-proved in the unit tests, 7/7 caught:** `leak_init`, `retry`,
+  `no_cancel`, a late answer forwarded, no `--strict-mcp-config`, no
+  OpenCode `ask`, project config allowed.
+- **The gates' three mutations against the real build**, each caught by
+  `gateway_e2e.py` (R5, R7 and R8 failing respectively):
+  - `leak_init`;
+  - `retry`, which retries until the server is back and re-initializes;
+  - `no_cancel`.
+
+  Run by rebuilding `storm-runtime` with each mutation; the runner is not
+  shipped.
+- A naive retry without re-initializing is refused by the gateway itself
+  (`session_unknown`), so it cannot double-execute. Only the gates' full
+  mutation can.
+- fmt and clippy `-D warnings` on both crates, and `cargo tree -i aws-lc-rs`
+  finds nothing. Server 508 unit tests.
+- Live: `e2e.py` 81/81 unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py`
+  61/61, `gateway_e2e.py` 50/50.
+
+**Not here:** the real Claude Code and OpenCode against the real build is
+on-device acceptance (G2 proved the configs with the gates' harness). C3, the
+journal, stays the operator's.
+
+**81g. Gateway slice 6: OAuth — Storm as the client, the browser back to the
+app, and the tokens sealed.** *(2026-10-05)*
+
+**rmcp's `auth` feature does the protocol.** That is
+`AuthorizationManager`: RFC 9728 → 8414 discovery, RFC 7591 registration as
+a public client (`token_endpoint_auth_method: none`), PKCE S256, RFC 8707
+`resource`, the code exchange and the refresh. Storm owns every seam it
+exposes. `cargo tree -i aws-lc-rs` still finds nothing.
+- **`SsrfHttp`** (rmcp's `OAuthHttpClient`) is the only HTTP client it gets:
+  - **https only**;
+  - every URL and **every redirect hop** is resolved, and refused unless
+    **all** its addresses are public (loopback, RFC 1918, link-local,
+    CGNAT, ULA and v4-mapped are all refused);
+  - then it connects to exactly those addresses (`resolve_to_addrs`), so a
+    second DNS answer cannot change the target;
+  - redirects are followed by hand, with `Authorization` dropped across
+    origins.
+- **`TokenStore`** (`CredentialStore`): the token set is sealed under kind
+  `oauth_tokens`. rmcp saves a refreshed pair through it before returning
+  the new access token, so a rotated refresh token is persisted before use.
+- **`FlowStore`** (`StateStore`) over `oauth_flows`:
+  - the `state` is stored as its blake3 hash, and the PKCE state sealed (AAD
+    = hash, `pkce_verifier`);
+  - ten minutes;
+  - **loading claims**: one `UPDATE … WHERE used_at IS NULL`, so of two
+    racing callbacks exactly one exchanges the code.
+- **Discovery must be published.** rmcp's legacy fallback (synthesized
+  `/authorize`, `/token`) is refused as `oauth_not_offered`.
+
+**The routes (owner only, session tier):**
+- **`POST …/connections/{id}/authorize`** `{redirect_uri, client_id?,
+  client_secret?, scopes?}`:
+  - **the redirect URI must be an `http` loopback or `storm://oauth`**
+    (G-D13, G1), never a LAN or public URL;
+  - the client is a pasted one (its secret sealed), else one already
+    registered for this owner, issuer and redirect, else a new dynamic
+    registration, else `oauth_client_required`;
+  - the answer is the authorization URL.
+- **`POST /v1/integrations/oauth/callback`** `{state, code, iss?}`:
+  - another owner's state reads exactly like a spent one;
+  - the code is exchanged, the connection becomes `connected`, live
+    upstream sessions close so the next `initialize` uses the new tokens,
+    and the integration is tested;
+  - audited `integration_authorized`, or `_reauthorized` when it already
+    had tokens.
+- Every failure is a stable code (`oauth_discovery_failed`,
+  `oauth_registration_failed`, `oauth_exchange_failed`,
+  `oauth_flow_expired_or_used` …), never the upstream's text.
+
+**Using the tokens:**
+- `Gateway::target` is now async. For `oauth` it presents `Bearer <access>`,
+  refreshing first when the token is within a minute of expiry.
+- **Refresh is single flight**: one lock per connection is held across the
+  refresh, and the token set is re-read under it.
+- An upstream `401` at `initialize`, or on the owner's listing, gets one
+  forced refresh and one retry. Neither executes anything an agent asked
+  for, so this is not a retry of a call.
+- A refresh the authorization server **rejects** makes the connection
+  `needs_reauth` and records `integration_refresh_failed`. A transient
+  failure is `upstream_unavailable`.
+
+**A new `oauth` connection starts `pending_auth`** and stays so until it is
+authorized; a failed test does not move it to `needs_reauth`.
+**Disconnecting** reads what RFC 7009 revocation needs before the
+ciphertexts go, then POSTs it to the advertised `revocation_endpoint`, best
+effort, under the SSRF rule, and nothing waits on it.
+
+**Additive schema:** `connection_oauth` records which client a connection
+was authorized with, so a refresh uses it. The `oauth_clients` row (81b) now
+also holds the discovered metadata, which is where the revocation endpoint
+comes from.
+
+**Not the spec's literal shape, by design (recorded, not a contradiction):**
+- A loopback redirect with a new port per desktop launch registers a new
+  dynamic client per port. That is harmless, and it is what Notion's
+  post-login redirect check will need.
+- The `resource` sent on a refresh comes from re-running discovery, because
+  rmcp keeps the discovered resource private. A refresh therefore costs a
+  discovery round trip, which is rare.
+
+**Verified.**
+- A mock authorization server and protected MCP resource (axum, in process):
+  - the full flow: `pending_auth`; a LAN redirect refused; S256, `resource`
+    and a registered public client in the URL; the client reused; the state
+    never stored raw; the exchange carries the verifier and `resource`;
+    `connected` with tools; replay and expiry refused; no token in
+    `gateway.db`, its WAL or `security_events`;
+  - refresh: two concurrent callers refresh once; the rotated refresh
+    token is what is stored; a rejected refresh means `needs_reauth` and
+    `integration_refresh_failed`; re-authorizing restores it as
+    `_reauthorized`; disconnect revokes the latest refresh token;
+  - racing callbacks exchange once, and another owner's state is
+    refused;
+  - discovery against an `https://127.0.0.1` integration never connects;
+    a member gets `403`; a static integration is refused.
+- Unit tests for the address rules, `check_target`, the client refusing
+  before connecting, and redirect URIs.
+- **Mutation-proved, 7/7 caught:**
+  - the SSRF check off
+  - the claim not single use
+  - the refresh lock removed
+  - LAN redirects allowed
+  - the flow-owner check removed
+  - no revocation
+  - a rejected refresh treated as transient
+- **Real discovery** (an ignored network test, run here): Notion, Linear
+  and GitHub's remote MCP resolve through `SsrfHttp`. Notion and Linear
+  offer registration; GitHub does not (G-D24).
+- fmt, clippy `-D warnings`, 516 unit tests. Live: `e2e.py` 81/81
+  unmodified, `mcp_e2e.py` 80/80, `agent_e2e.py` 61/61, `gateway_e2e.py`
+  50/50.
+
+**Not verified:** a real login, token exchange, refresh rotation and
+revocation at Notion or Linear. G1's logins were deferred by the operator
+into acceptance, and they stay there.
+
+**81h. Gateway slice 7: the client — Settings ▸ Integrations, the launcher
+toggle, and a loopback sign-in.** *(2026-10-07)*
+
+**Settings ▸ Integrations** (`lib/agent/integrations_screen.dart`, route
+`/settings/integrations`):
+- **Entry and access.** The entry appears in Server settings beside Hosts,
+  under the same owner check. The screen itself shows the server's `403`
+  text, never an empty list (the 77d rule).
+- **The list.** The built-in `Storm vaults` comes first, with whether
+  writes are possible at all. Each integration shows its status in plain
+  words (`Needs reconnecting`, …) and its last error from the §12 codes;
+  never upstream text.
+- **Actions:**
+  - Test.
+  - Choose tools: new tools are marked and start off (G-D16).
+  - Sign in again, or Replace token.
+  - Enable or Disable.
+  - Disconnect. For a token, the confirmation says Storm cannot revoke it;
+    for OAuth, that Storm asks the service to.
+- **Add.** Sign in (OAuth), Token, or None, over https only.
+  - A token for `Authorization` is sent as `Bearer <token>` unless it
+    already carries a scheme. It is sent once and never shown again.
+  - The GitHub PAT advice from risk 6 is shown.
+  - On the web there is no Sign in (G-D13); the dialog says so.
+- **The intro states the blast radius** (spec risk 1): every non-shell
+  session can use these, with its host's network.
+
+**The launcher (G-D5, G-D9, AM27):**
+- For every provider but `shell`, an **"Allow vault writes" switch, off by
+  default**, sends `allow_vault_writes`.
+- A second line under the unchanged "Network: inherits <host>'s policy"
+  says agents can use the integrations and read the vaults with that
+  network access.
+- A launch answer's `mcp.notice` (an old host) is shown as a snackbar.
+
+**The sign-in uses a loopback listener on every native platform**
+(`oauth_flow_io.dart`; the web build gets `oauth_flow_web.dart`, which
+refuses):
+- It binds `127.0.0.1` on an OS-chosen port, **listening before** the
+  browser opens, asks the server to authorize with
+  `http://127.0.0.1:<port>/oauth/callback`, and opens the system browser.
+- It answers only that path with a `state` or `error`. A stray request (a
+  favicon) gets `404` and does not end the sign-in.
+- It relays `{state, code, iss}` to `/v1/integrations/oauth/callback` and
+  closes. It never sees a token.
+- macOS's sandbox needs `com.apple.security.network.server` in
+  `Release.entitlements` (`DebugProfile` already had it). The entitlements
+  test guards it.
+
+**A deviation from §10 step 4, recorded here and in the report.** The spec
+allows `storm://oauth` on Android and macOS, and that is **not built**:
+- It needs an intent filter, a URL type and native glue, and only a release
+  build on each platform can prove them. CLAUDE.md's Android-plugin rule is
+  the warning.
+- Loopback is what G1 found Notion and Linear accept, and Linear on any
+  port, so one plugin-free path serves macOS, Linux and Android.
+- **Risk on Android:** the app is backgrounded while the browser is open,
+  and the redirect must reach it while it still runs. That is the device
+  pass's first check. If it fails there, `storm://oauth` is the fix the
+  spec already allows.
+
+**The test found a bug.** The first version started listening only after
+the browser call returned, so a redirect that arrived first waited forever.
+Now the listener runs before the browser opens.
+
+**Verified — locally, with Flutter 3.44.8 (CI's version), installed for this
+slice:**
+- `dart format`, `flutter analyze` (no issues) and the full `flutter test`:
+  761 tests, all passing.
+- `integrations_test.dart` (10 tests):
+  - the list and its statuses, with no menu on the built-in;
+  - a member's `403`;
+  - a token sent once as `Bearer` and then tested, never on screen after;
+  - `http` refused before any request;
+  - the web is token-only;
+  - new tools off, and the allowlist PATCH;
+  - the disconnect wording and its DELETE;
+  - the launcher toggle off by default and sent when on;
+  - `shell` with no toggle and no integrations line;
+  - the old-host notice parsed from the launch answer.
+- `oauth_flow_test.dart` (2 tests): the redirect is caught on loopback (a
+  stray request ignored) and relayed, and the port is closed afterwards; a
+  cancelled sign-in relays nothing.
+- **Mutation-proved, 6/6 caught:** writes on by default, the toggle shown
+  for `shell`, listening after opening, a stray request ending the sign-in,
+  `http` accepted, the `network.server` entitlement removed.
+
+**Not verified:** a real browser sign-in on any device, and the Android
+background case above. Both are on-device acceptance.
+
+**81i. Gateway slice 8: acceptance — what can be automated is, and the rest
+is the operator's.** *(2026-10-07)*
+
+**`tests/gateway_e2e.py` (81f) grows to 58 checks.** It runs in `make
+test-live` and CI against a real server, a real `storm-runtime`, a mock
+upstream and the scripted agent. This slice adds **Phase 1's exit (AM28)**:
+- the owner turns MCP writes on;
+- a session launched with "Allow vault writes" sees `create_note` and
+  `update_note`, and never `delete_note`;
+- the agent creates a note, a "phone" (REST) edits it, and the agent's
+  stale `update_note` comes back **merged**, with both edits in the note;
+- a `delete_note` is `tool_not_allowed`;
+- switching MCP writes off refuses the same live session's next write.
+
+**The gates' three mutations, as negative tests:**
+- `make test-gateway-mutations` (`tests/gateway_mutations.py`) rebuilds
+  `storm-runtime` with the bridge broken three ways (`leak_init`, `retry`
+  and `no_cancel`, the gates' own), runs the suite against each, and
+  requires the matching R5, R7 or R8 check to fail. It always restores the
+  source.
+- Not in `make test-live`: three rebuilds take minutes.
+- Run here: **3 of 3 caught**.
+
+**The spec's §17 acceptance list, item by item:**
+
+| §17 item | Where it is proved |
+|---|---|
+| Connect, authorize, launch, use | `gateway_e2e.py` (static); route tests (OAuth, 81g) |
+| An agent write merges against a phone edit | `gateway_e2e.py`, this slice |
+| Disconnect mid-session refuses the next call | `gateway_e2e.py` |
+| R1–R8 against the real build, with the 3 mutations | `gateway_e2e.py` + `make test-gateway-mutations` |
+| No token on the host: files, environment, argv, bridge config, scrollback | `gateway_e2e.py` (C1, C2, C4, C5, C7, positive controls) |
+| OpenCode asks, and loads only the session's servers | config proved in `gateway_e2e.py`; the real prompt is the operator's |
+| No `elicitation.url` upstream, and URL mode never reaches the agent | `gateway_e2e.py` |
+| An old host's launch announces the degrade | route test (81e), client test (81h) |
+| A member gets 403 everywhere | route tests; `gateway_e2e.py` |
+| An `stk_` key is refused on the integration routes | route test; `gateway_e2e.py` |
+| `e2e.py` 81/81 unmodified | every slice |
+
+**Left for the operator (on-device acceptance):**
+- **C3**: passed 2026-10-08 (the grep printed 1: the planted control line
+  and no credential). The window held the real build's local test runs,
+  but those servers log to files, not the journal, so the grep is repeated
+  once the gateway runs under systemd after a deploy.
+- **G1's real logins:** Notion and Linear sign-in, exchange, refresh
+  rotation and revocation, through the app's loopback sign-in (81h), on
+  macOS, Linux and **Android**. Android is the case to watch, because the
+  app is backgrounded while the browser is open.
+- **A GitHub PAT** connection making a real tool call.
+- **Real Claude Code, then real OpenCode** (AC-P1):
+  - a gateway tool prompts before it runs;
+  - only the session's servers load;
+  - an agent writes a note while a phone edits it.
+- **Releases.** Neither the musl/zig release build nor the native app
+  builds have been run with these changes.
+
+**Status 2026-10-08, on the staging environment** (dew-omarchy, build
+`dcb0a80`, signed acceptance APK `acfa4d9`):
+- **Real Claude Code 2.1.292: passed.**
+  - It launches with `--mcp-config <session>/mcp.json --strict-mcp-config`.
+  - `/mcp` shows only the session's servers, none of the host's own.
+  - It asks before every gateway tool.
+  - An agent's write against a phone edit kept both edits. The edit
+    overlapped, so it came back `conflict` with markers.
+- **Real OpenCode: passed.**
+  - Its config matches AM32 exactly.
+  - It used Notion through the gateway and got real data.
+  - Its live prompt was blocked by its model quota at first, then exercised
+    on the phone.
+- **Android native OAuth (G1's real logins): passed** for Notion and
+  Linear.
+  - Both came back to the app through `storm://oauth/callback` (81l).
+  - Disconnecting Notion refused the next call with `not_granted`, and
+    Linear kept working.
+- **Also passed:**
+  - a real TLS upstream (DeepWiki), and a disconnect mid-session;
+  - the released v0.3.1 host's launch announcing it can't use integrations;
+  - a member getting 403 and an `stk_` key 401 on every integration route;
+  - no canary in any process, file or scrollback, with a live session.
+- **Found and fixed on the way:**
+  - the per-session limit against Claude Code's startup (AM-G11, 81m);
+  - releases never upload-key signed (81m);
+  - the web Add-integration UI (81n).
+- **Left:**
+  - macOS native OAuth;
+  - a GitHub PAT tool call;
+  - the journal grep against the real build (`journalctl -t
+    storm-staging-server`, expect 1, the control line);
+  - the release builds and the release.
+
+**Verified.** `gateway_e2e.py` 58/58 here; the mutation runner 3/3 caught.
+
+**81j. A simplify pass over the gateway stack: no behaviour changes, and
+five findings left open on purpose.** *(2026-10-07)*
+
+A reuse, simplification, efficiency and altitude review of 81b–81i. **What
+changed, with behaviour held fixed:**
+
+*One copy of each rule:*
+- **"May this agent call this tool"** is `Authorized::may_call`. It is used
+  by both the `tools/call` gate and the `tools/list` filter, so neither can
+  drift from the other.
+- **The `integration_needs_reauth:<slug>` code** is spelled in one place
+  (`needs_reauth_code`). Every upstream failure maps to the agent's code
+  through `upstream_failure`.
+- **The OAuth refresh-once rule** is `Gateway::with_target`, used by the
+  owner's probe and by an agent's `initialize`. `target()` never fails with
+  `Unauthorized`, so this matches both old copies exactly.
+- **OAuth manager setup** is `Gateway::configure_client`, with
+  `FlowStore::new` and `TokenStore::new`. A connection's OAuth client is
+  `oauth_client_of`.
+- **The SSRF-pinned reqwest client** is `pinned_client`.
+- **Key files** use one set of helpers in `auth::identity`
+  (`write_key_file`, `create_private_dir`, `warn_if_readable_by_others`,
+  `copy_key_dir`). `backup_auth` and the gateway's backup share the key copy.
+- **Owner gates** share a single predicate (`owner_only`).
+- **JSON through the keyring** is `Keyring::seal_json` / `open_json`.
+- **The REST bodies** are the `ops` input structs, as `agent_launch` already
+  did.
+- **The runtime's authenticated POST** is one path, `post_for_response`, so
+  the 401 → reauth rule exists once.
+- **In the client:** one `sessionCredentialsProvider`; the tile status is a
+  `StatusChip`; the token dialog returns only the credential; two unread
+  fields are removed.
+
+*Cheaper paths:*
+- **A result's size** is counted, not built as a string.
+- **An agent's params** are moved, not deep-copied.
+- **The TLS config** is built once.
+- **Call-audit pruning** walks the primary key instead of building a
+  100,000-row `NOT IN` set, which it did under the gateway's lock.
+- **Listing integrations** costs one `EXISTS` per row.
+- **The bridge** takes each message out of its line instead of cloning it.
+- **The host forwards a bridge's message as raw JSON**
+  (`serde_json/raw_value`).
+
+*Leaks and dead code:*
+- **An upstream session's event hook** now holds the agent manager and a
+  `Weak` gateway. It used to capture `AppState` whole, a reference cycle
+  through `gateway.sessions`.
+- **Removed:** the `Storm.for_agent` flag (now read off the actor), the
+  never-written `oauth_flows.scope` column (the schema is unreleased), and
+  `ops::integration_call`'s `Result`, which never returned an error.
+
+**Left open: each changes behaviour or is a redesign.**
+1. **Session cleanup is polled.** `sweep_gateway_sessions` runs after a host
+   reports, not when a session ends, and `end_session` doesn't call it. The
+   deeper fix is for the agent manager to publish a session's end.
+2. **The connection status rules differ by path.** `note_upstream_failure`
+   marks `needs_reauth` only from `connected`; the probe does so from
+   anything but `pending_auth`; `status::ERROR` is read and never set. The
+   fix is a `Status` enum with transitions, and it changes which
+   transitions happen.
+3. **No shared test vectors.** The gateway's NDJSON line format and error
+   shape are re-derived in both crates, and the messages differ (`<code>` vs
+   `storm: <code>`). The fix is a `docs/gateway-vectors.json`.
+4. **AM26 is enforced by grepping source.** A wrapper type that hides rmcp's
+   `Peer` would make the type system enforce it.
+5. **A spent OAuth flow is recognised by rmcp's error text.**
+   `FlowStore::load` could record the outcome instead.
+
+**Also not done:**
+- Refresh still rediscovers OAuth metadata. Reusing the stored copy would
+  refresh against stale endpoints after an upstream moves them.
+- The rate limiter and the elicitation route wait are as they were.
+- `gateway_e2e.py` still copies `agent_e2e.py`'s helpers; a shared harness
+  means rewriting that older suite too.
+
+**Verified.**
+- `make check`: clippy `-D warnings` and `flutter analyze` clean; the server's
+  516 unit tests and the client's 761 pass.
+- `make test-live`: `e2e.py` 81/81 **unmodified**, `mcp_e2e.py` 80/80,
+  `agent_e2e.py` 61/61, `gateway_e2e.py` 58/58, `auth_e2e.py` 74/74, and the
+  client integration suite.
+- `make test-gateway-mutations`: 3 of 3 caught after the bridge changes.
+
+
+**81k. New upstream tools: recorded, off, and announced to the owner (spec
+§9, built to the frozen spec).** *(2026-10-08)*
+
+Spec §9 says tools added after the allowlist was set default off, **"and
+the owner is notified."** 81d–81i built the first half: the allowlist names
+tools explicitly, so a new tool was already off. The notice existed only in
+the owner's next manual test, and only once, because that test marked the
+tool known. The operator chose to build the spec as frozen, without an
+amendment (2026-10-08).
+
+- **What records a new tool:**
+  - *Any listing.* The owner's test, the owner's tool listing, and **an
+    agent's `tools/list`** all record names not in `known_tools` into a
+    new `new_tools` table. It's a table, not a column, so an observation
+    is an `INSERT OR IGNORE` that no rewrite of the connection row can
+    clobber (the `note_access` precedent).
+  - *Only the owner's first test is a baseline* (G-D16, unchanged). An
+    agent's listing never is, so nothing an agent does can enable a tool.
+  - *Only valid names* are recorded (`valid_tool_name`: the allowlist's
+    rule), and at most 200 stay pending per connection, because the
+    upstream controls both.
+- **What the owner sees:** "N new tools — review" on the integration's row,
+  opening the tool chooser with those marked *(new)*.
+  - **Saving the tool list is the review:** the pending tools become known,
+    on or off exactly as the list says. Nothing else changes the allowlist.
+  - The client shows upstream names through `displayToolName`: control,
+    format (bidi, zero-width) and line-separator characters removed,
+    whitespace collapsed, at most 64 characters. Display only; the allowlist
+    keeps the raw name.
+- **Not done, by the operator's decision:** push or email notification. That
+  would be an amendment, proposed separately.
+- **`known_tools` has its own writers** (`observe_tools`, `review_tools`), and
+  `update_connection` no longer writes it, so a stale copy of the row cannot
+  undo a review.
+
+**Verified:**
+- Store tests:
+  - the first-test baseline;
+  - an agent's listing that never baselines;
+  - a review that enables nothing;
+  - an older row copy that can't undo a review;
+  - invalid names, and the 200 cap;
+  - a disconnect forgetting pending tools.
+- `gateway_e2e.py` 65/65, adding seven checks for a tool the mock upstream
+  adds mid-session:
+  - hidden from the agent;
+  - recorded, valid name only;
+  - refused if called;
+  - cleared by a review while staying off;
+  - enabled only by the owner.
+- Client tests: the review button (plural and singular), a review that sends
+  no new tool, and name cleaning.
+
+
+**81l. `storm://oauth` on Android and macOS, loopback on Linux and Windows
+(spec §10.4, built to the frozen spec).** *(2026-10-08)*
+
+81h signed in through loopback on every native platform and left
+`storm://oauth` for later. That contradicted the frozen spec §10.4: a
+loopback listener on desktop, and a newly registered `storm://oauth` on
+Android and macOS. The operator chose to build the spec, not amend it
+(2026-10-08).
+
+**Why the split matters:**
+- On Android the listener lives inside an app that is backgrounded during
+  the login, so an app frozen or killed meanwhile loses the sign-in.
+- A loopback port changes on every sign-in, so each one registered a new
+  OAuth client upstream.
+- A scheme hands the redirect to the app and brings it to the front. One
+  fixed redirect URI reuses one client per authorization server.
+
+**What it is:**
+- **The redirect:** `storm://oauth/callback` (`appRedirect`) on Android and
+  macOS (`usesAppScheme`); the 81h loopback listener, unchanged, on Linux and
+  Windows. The server's `validate_redirect` already accepted both.
+- **Native side:** no third-party plugin, by the Kotlin-plugin rule.
+  - Android: a `VIEW`/`BROWSABLE` intent filter for `storm://oauth` only, with
+    `flutter_deeplinking_enabled=false` so the link never becomes a router
+    page.
+  - macOS: `CFBundleURLTypes` for `storm`, and `application(_:open:)`.
+  - Both buffer links until Dart calls `takeLinks` on the `storm/links`
+    channel, then forward them as `link` calls, so a link that launched the
+    app is not lost.
+- **Dart (`OAuthLinks`):**
+  - A redirect goes to the sign-in waiting for its `state`, which the client
+    reads from the authorization URL.
+  - Anything but `storm://oauth` with a `state` is ignored, because the
+    scheme is public.
+  - **A link no sign-in in this process is waiting for is an orphan**: the
+    app root opens Integrations, which relays it. The flow, PKCE and all,
+    lives on the server, so any instance can finish it.
+- **Android's launch mode is unchanged** (`singleTop`, `taskAffinity=""`).
+  Whether a browser's link reaches the running instance or a fresh one is
+  for on-device acceptance to show. Both paths are handled: the fresh
+  instance relays the orphan, and a sign-in still waiting learns on resume
+  that its integration became connected, instead of waiting out the deadline.
+- **macOS Release drops `network.server`**: the release app listens on no
+  port now. The debug build keeps the template's grant.
+- **Native builds:** `.github/workflows/acceptance.yml` builds the APK
+  (debug-signed, no secrets) and the macOS app on a push to `acceptance/*`.
+  It never releases. It's the first place this Kotlin and Swift compile:
+  PR CI does not build native projects.
+
+**Verified:**
+- Dart tests:
+  - the scheme redirect is matched by `state` and relayed;
+  - another sign-in's redirect and a non-oauth `storm://` link don't finish
+    it;
+  - a cancel relays nothing;
+  - a sign-in finished by another instance completes on resume;
+  - links buffered before Dart listens are taken at start;
+  - the Integrations screen relays an orphan.
+- Registration guards for the manifest, Info.plist, `MainActivity` and the
+  macOS delegate.
+- The Release entitlements no longer grant `network.server`.
+
+**Not verified here:** the Kotlin and Swift compile only on the acceptance
+workflow, and their behaviour on a device is on-device acceptance.
+
+
+**81m. An agent's listings don't count against its session budget
+(amendment AM-G11, approved by the operator).** *(2026-10-08)*
+
+**Found in acceptance on staging.**
+- Real Claude Code 2.1.292 lists every server's tools, prompts and
+  resources in parallel as it starts.
+- The per-session limit (§9's operational defaults: 4 concurrent, 10/s,
+  shared by all of a session's connections) refuses rather than waits.
+- With the built-in connection and two integrations, one integration's
+  `tools/list` and `prompts/list` came back `gateway_rate_limited`, and
+  Claude Code showed "tools fetch failed": that integration had no tools for
+  the whole session. With the operator's real setup (Notion, Linear, GitHub
+  and `storm`) it would happen at nearly every launch.
+
+**Decided:**
+- **Option A, recorded in the frozen spec as AM-G11**, not edited silently:
+  listings (`tools/list`, `prompts/list`, `resources/list`,
+  `resources/templates/list`) take only their connection's slot (8
+  concurrent).
+- The session budget stays on execution: `tools/call`, `resources/read`,
+  subscriptions, `prompts/get` and `completion/complete`.
+- §12 is unchanged: a limit that is hit is refused, never queued.
+
+**Rejected:**
+- *Raising the numbers:* that still breaks as integrations are added, and
+  loosens the bound on real calls.
+- *Queueing:* it contradicts §12 and adds latency to every call.
+
+**Verified:**
+- Unit tests:
+  - Claude Code's startup pattern (3 connections × 3 listings) succeeds
+    while the session budget is spent, and takes nothing from it;
+  - listings are still capped per connection;
+  - exactly the four listing methods are exempt.
+- **On staging:** the same real Claude Code startup that failed made 10
+  gateway calls with 0 refused. `/mcp` shows all three servers with tools
+  (canary 3, deepwiki 3, storm 11).
+
+**Also found while preparing the Android acceptance build: no release has
+ever been signed with an upload key.** `release.yml` reads
+`STORM_UPLOAD_STORE_BASE64` and `STORM_UPLOAD_*`; none of those secrets
+exist, and the v0.3.1 run logged "APK will be debug-signed". So every
+released APK is signed by a throwaway key from its own CI run: no release
+installs as an update over another, and no new build can update an
+installed release.
+- `acceptance.yml` now takes the same secrets the same way, when they
+  exist, and stamps the latest release's run number as the build number, so
+  a correctly signed acceptance APK installs as an update.
+- Creating the upload keystore is the operator's; it is Storm's Android
+  identity from then on.
+- **Created 2026-10-08.** The operator ran `storm-signing-setup.sh` on
+  dew-omarchy:
+  - The key: PKCS12, RSA 4096, alias `storm`, subject `CN=Storm Android
+    upload key`, SHA-256 `C0:90:38:74:…:5C:12:AB:4E`.
+  - It lives in the operator's home, which the `storm-runtime` account (every
+    agent on the host) cannot read. It is backed up off the machine.
+  - The four `STORM_UPLOAD_*` secrets are set. The acceptance APK `acfa4d9`
+    is verified signed with it, its v2 block read directly.
+  - **v0.3.1 and earlier were signed with throwaway keys**, so the first
+    install of an upload-key-signed build needs one uninstall. Every build
+    after it updates in place.
+
+
+**81n. The Add-integration dialog says how Storm connects; the web shows
+sign-in as unavailable (UI amendment, approved by the operator).**
+*(2026-10-08)*
+
+Found in acceptance: on the web, the dialog offered only "Token | None",
+and the one sentence explaining why sat at the bottom, under the GitHub
+text. That is the spec's behaviour, not a bug: G-D13 and §10.7 make the web
+token-only, because a browser can't receive a redirect (a LAN `http`
+redirect is refused upstream, G1). But it read like a missing feature. Two
+real defects came with it:
+- On the web, an OAuth integration's **Reconnect** and **Sign in again**
+  could only fail.
+- The failure was reported as "Could not reach the server".
+
+**Client only; the architecture and the spec are unchanged:**
+- **A labelled section, "How Storm connects",** directly under the address:
+  - the selector stretched to the fields' width;
+  - one help line for the chosen option;
+  - on the web, the explanation directly under it.
+- **The same three choices everywhere: Sign in · Token · No sign-in**
+  ("None" renamed).
+  - On the web, Sign in is disabled and visibly so: greyed by the disabled
+    state, a lock icon, and the tooltip "Available in the Storm apps".
+  - No check mark, and single-line compact labels, so nothing wraps at phone
+    width.
+- **On the web, an OAuth integration needing reconnection** says "Reconnect
+  from a Storm app" on its own line, and its "Sign in again from a Storm
+  app" menu item is disabled. An `UnsupportedError` reports its own message,
+  never "Could not reach the server".
+- **Not done, by the operator's decision:** collapsing the Header field.
+
+**Verified:**
+- Widget tests:
+  - the web's disabled Sign in, the token default and the adjacent note;
+  - the help line per option;
+  - the web OAuth row: no reconnect action, the menu item disabled, no
+    `/authorize` sent.
+- 773 client tests pass. The UI was reviewed as rendered screenshots before
+  merging.
+
+**82. Storm v2: the approved design is built as specified, Storm becomes
+single-user, and the knowledge ↔ agent loop gets real backend support.**
+*(2026-10-08; design approved by the operator; slices 0–9 built, awaiting
+merge into `staging`)*
+
+**The source of truth** is `design_handoff_storm_v2/` (README, the two
+`.dc.html` prototype files, the screenshots); where its README and the
+prototype disagree, the prototype wins. `docs/design/STORM_UI_UX_DISCOVERY.md`
+is the discovery behind it. **The plan** — audit, design-to-code map,
+resolved questions, slice order, tests — is
+`docs/design/STORM_V2_IMPLEMENTATION_PLAN.md`; this entry records what is
+decided and points there for the rest.
+
+**Product shape:**
+- Activities, not vaults: a desktop **activity rail** (Notes, Agents, a
+  health dot, Settings) and a phone **place picker** in the left corner
+  bubble. **No Home or dashboard**; launch restores the last activity and
+  location per device. Settings is one global destination with a fixed
+  hierarchy (This device · Devices & access · Storm › Vaults, AI access,
+  Integrations, Hosts & default agent, Storage, Connection, Advanced ·
+  About & health). Infrastructure appears only as status lines that link
+  into Settings.
+- **Agent ≠ Session.** In the UI "Agent" is Claude Code / OpenCode / Shell
+  (code keeps `provider`); a session is one run, now a route
+  (`/agents/s/:id`); Work groups sessions by (workspace, host). Kit's
+  `agents/*.md` are plain notes and are never called agents.
+- **The loop:** start a session from a note (launch context), choose **one
+  vault it may write to**, see what it wrote (**Wrote**), and see on each
+  written note which session edited it (**provenance**, an unseen dot).
+
+**Storm is single-user** — not hidden, removed. One account, password-only
+sign-in; no members, roles, registration or account picker. On upgrade the
+oldest active owner becomes the account and every other account is deleted
+with an audit row; `auth.db` is snapshotted to `auth.db.pre-v6` first, the
+v6 migration runs in one transaction, and invariants I1–I8 (plan §3.3) are
+checked on every boot. Device, session, key, host and gateway boundaries are
+unchanged.
+
+**Engineering decisions recorded with their reasons in plan §5:** the route
+scheme and redirects; `/` redirects to the last location and back from
+Agents/Settings returns to Notes (the desk-width forward and its stale read,
+decision 78, go away); no pill on the phone note; vault colour from the tile
+in Settings › Vaults; running drawn in `accent`; two derived type steps
+(`fs·scale²`, `fs/√scale`); server-assigned session names; latest agent
+writer only on a note; tabs and terminal-title names retired; a separate
+`agent_writes` setting seeded from `mcp_writable` so no upgrade changes
+behaviour.
+
+**Context delivery:** the agent reads its note through the built-in `storm`
+connection (`session_context`, keyed on the caller's own session); a fixed
+opening prompt tells it to read the note and wait. **No note content, title
+or id ever enters a command line or environment** — the server sends a
+boolean, the runtime adds a compile-time constant (plan §7.2).
+
+**Amends, as the slices land** (until then those entries describe the
+code): 78 (dashboard band, space switch, owner-only Agents), 77d / 80 / 81c
+(owner-only → the one account), and the M19 invariants in `CLAUDE.md` that
+speak of owners and members.
+
+**Slice 0 (done):** Flutter 3.44.8 user-local; baseline on `c9131b4` all
+green — Rust 546 + 112 + 53 tests, clippy and fmt clean, 773 client tests,
+`flutter analyze` clean, `make test-live` 361 checks + 20 client live
+tests; `docs/design/acceptance/storm-v2/` drives the real web build against
+a real server in headless Chromium and signs in through the UI.
+
+**Slice 1a (single user, server; `feat/single-user-server`):** built.
+`auth/account.rs` replaces `auth/users.rs`; `auth/single_user.rs` is the v6
+migration with its boot-time invariant check and `storm-server single-user
+--keep`; `Role`, every owner check, registration, `GET|POST /v1/users` and the
+`user` CLI are gone (`passwd` sets up or resets the account); login and setup
+take `{password}`, a v0.3.x `username` is ignored; `ops::reconcile_single_user`
+sweeps `agent.db`/`gateway.db` on every boot. A v0.3.x login screen that finds
+no `/v1/users` falls back to a username field, so no compatibility route was
+kept. Tests: the plan's 15 migration tests plus the sweep, mutation-checked
+three ways; `cli_account.rs` replaces `cli_users.rs`; `make test-migration`
+builds the pre-v6 binary to make a real v5 database. In the live suites,
+member checks became access-key checks, and `auth_e2e`'s throttle flood now
+runs before setup (no account, so a 429 can only be the limiter).
+
+**Slice 1b (single user, client; `feat/single-user-client`):** the sign-in
+and pairing screens take only a password and choose between setup and sign-in
+from `GET /v1/account`; signup, the account picker, the registration switch,
+`AuthUser`, `agentAccessProvider` and every owner gate are gone. 767 client
+tests pass; the Dart live auth test runs password-only against the new server.
+
+**Slice 2 (design-system additions; `feat/v2-design-system`):** two derived
+type steps on `StormTokens` (`titleSize = fs·scale²`, `uiSize = fs/√scale`; no
+new inputs); `controls.dart` — `StormButton` (primary, outline, soft, danger,
+text), `StormToggle` (replaces `StormSwitch`), `ChoiceChips`, `SettingsRow`,
+`NumberedSteps` (also on `EmptyState`); `session_status.dart` — the §3.2
+status drawing (`SessionStatusDot`, `SessionStatusChip`, `StatusPill`); the
+shared `SidebarFrame` (`surface`, right hairline), which the Notes and Agents
+sidebars now use; `placePopover`, with a `right` side for the rail. All in
+`lib/ui/`, so the conformance scan covers them. Gallery shot
+`docs/design/acceptance/storm-v2/design-system/gallery.png` (three presets);
+784 client tests.
+
+**Slice 3 (shell + routing; `feat/v2-shell-routing`):** `AppShell` wraps every
+signed-in route: the activity rail at ≥900 (Notes, Agents with a live-session
+badge, the health dot and its popover, Settings), the phone's places bubble
+(place picker) and settings gear below it. `/` is a redirect to the device's
+last location (`NavMemory`, prefs `storm.nav.*`, read once by
+`SettingsNotifier` and owned by `navMemoryProvider` after); `/notes` opens the
+last vault or the no-vaults state; retired routes redirect (`/settings/server`,
+`/v/:v/settings/*`, `/settings/mcp-keys`, `/agents/hosts`). System back follows
+Q2 through a `BackButtonListener`: the router pops first, then
+`logicalParent` (note → folder → parent; Agents/Settings → last Notes
+location); a vault root exits. The dashboard, the space switch, the agents
+band and the "A" appearance popover are gone; until slice 7 the settings
+pages mount the old screens in the new shell. Found on the way: each nested
+navigator's modal barrier carries `BlockSemantics`, which hid the rail and the
+sidebars from screen readers; `PaneSemantics` puts each pane in its own
+semantics container. 804 client tests; the back contract and health rows
+mutation-checked; desktop-04 and phone-02 captured. Gap until slice 4:
+cross-vault recents (they lived on the dashboard).
+
+**Slice 4 (Notes; `feat/v2-notes`):** the desktop Notes sidebar is rebuilt on
+`SidebarFrame`: `VaultHeader` (tile, name, sync line) opening
+`VaultSwitcherPopover` (vaults with counts and ✓, "Synced … · Sync now",
+Manage vaults ›; no Server settings), "Search {vault} ⌘K" (Ctrl K off macOS),
+**RECENT** — the four newest cross-vault rows from `recentsProvider`, each with
+a `VaultTag`, which closes the slice 3 gap — then the **FOLDERS** tree
+(`SidebarRow`s, drawn twisties, no counts), and a footer of New note + folder +
+tags (gear and mentions left it). A long-press on a vault in the switcher or
+the place picker opens `AccentPicker` (Q7). The note header is crumb (phone:
+"‹ parent"), the restyled Read | Edit, a soft **Start session** (phone
+"Session") that opens the existing launcher while a host is online and Agents
+otherwise, and the drawer toggle; then the file-name title at `displaySize`
+(omitted when the body opens with its own `# heading`) and `VersionLine`
+(`v51 · Saved`, the id when asked for, a `provenance` slot for slice 8). The
+drawer is open by default with its own ×. The phone vault root is the vault
+name, RECENT ("vault · folder" and an age) and FOLDERS; a folder is "‹ parent"
+over its name; the pill is Directory / Search / ＋ / Tags (a long-press on ＋
+makes a folder) and is absent on the note (Q5); properties keep the sheet
+(Q6). `SectionLabel` is mono, as §7.2 has it. Unseen hooks only: `FolderTree`
+and `VaultSidebar` take `unseen(noteId)`, `EntryTile` an `unseen` flag. 827
+client tests; recents limit, recent selection and the note pill
+mutation-checked; desktop-01..03 and phone-01/03 captured (harness: shots
+reload on a viewport switch, which sometimes stalled Chromium).
+
+**Slice 5 (server agent capabilities; `feat/v2-agent-capabilities`):**
+`agent.db` gains `session_launch` (name, context note ids and title snapshot,
+write vault) and `session_writes` (one row per note or kit script a session
+wrote: `created` stays `created`, version and time follow its latest write),
+both additive and
+kept when a session is dismissed, so provenance still names it. `POST
+/v1/agent/sessions` takes `context {vault_id, note_id}` (read through the vault
+seam, 404 if gone) and `write_vault_id` (must exist); `allow_vault_writes`
+without a vault launches read only with a notice. The server names a session:
+the slug of its note's title, else `{workspace}-{n}`, a live duplicate `-2`.
+Session views add `name`, `context`, `write_vault_id`, `wrote_count`; new
+`GET /v1/agent/sessions/{id}/writes` and `GET /v1/vaults/{v}/agent-writes`;
+`GET …/notes/{id}` adds `agent_write` (the latest agent writer, by version,
+`session_dismissed` once gone); `GET /v1/config` adds `agent_writes` and
+`version`. **`agent_writes` extends `PUT /v1/config/mcp`** rather than a new
+`/config/ai`: one handler and one persisted file, and an older client's
+`{enabled, writable}` body still means exactly what it did (`enabled` absent
+now leaves MCP alone). It is seeded on load from `mcp_enabled &&
+mcp_writable`, what agents needed before, and `mcp_writable` no longer touches
+agents. `StormPolicy` replaces `AllowAuthenticated`: an `Actor::Agent` writes
+only to its `write_vault`, refused at `vault_of` and answered as the JSON-RPC
+code `vault_write_not_allowed`; kit scripts follow the same rule. The write
+hook is in `ops::create_note`/`update_note`/`create_script`/`update_script`:
+**Wrote is every successful write a session performs** (operator, 2026-10-08),
+so a kit script is a row too — `kind: script_created|script_edited`, `note_id`
+and `version` null, `path` its vault-relative path, `title` its script name. It
+counts in `wrote_count`; it is not in a note's provenance or the vault's
+`agent-writes` map, which are keyed by note id and a script has none. A
+refused write records nothing; `move_note` is REST only, never an agent's.
+**The launch context is history** (operator, 2026-10-08): its ids, title and
+the session's name are fixed at launch and a later rename or move changes none
+of them, while `session_context` resolves the note by id. Context delivery: the built-in
+connection offers agents `session_context` and names it in its instructions;
+`start` carries `context: true`, and the runtime adds `mcp::OPENING_PROMPT`
+(`claude <prompt>`, `opencode --prompt <prompt>`, nothing for `shell`/`fake`).
+`gateway_e2e.py` scans every process's argv and environment for the note's
+title, body and ids with a positive control. Mutation-checked: the policy
+allowing every agent write, and note data sent in `start` / the prompt growing
+an argument, and a script write left unrecorded. Rust 562 + 54 tests; live 81
+(`e2e.py` unmodified) · mcp 86 · agent 78 · gateway 84 · auth 72 · client 20.
+
+**Slice 7 (Settings; `feat/v2-settings`):** the ten pages are built on real
+endpoints in `lib/ui/settings/` (`SettingsPage`: 680 column beside
+`SettingsNav` at ≥900, a pushed screen with "‹ Settings" and no AppBar
+below). This device keeps the real preset, text-size, note-font and Read-mode
+controls; Devices & access lists `GET /v1/auth/devices` (revoke =
+`DELETE /v1/auth/devices/{id}`, which also ends its sessions; this device
+signs out) and the access keys with the shown-once dialog; Vaults draws the
+tile, count and path, a missing vault greyed and still removable, and the
+tile opens `AccentPicker` (Q7, `setVaultAccent`); AI access puts the MCP
+switches and "Storm agents" on `/v1/config` + `/v1/config/mcp`, with
+"Allow writes when chosen at launch" wired **only when `GET /v1/config`
+returns `agent_writes`** (sent alone as `{agent_writes}`, slice 5's shape) and
+otherwise disabled, "Needs a newer server"; Integrations and Hosts are
+restyled with every flow unchanged (the FABs became buttons; Integrations
+keeps `/settings/integrations` and the orphan relay, and its nav item carries
+a danger dot from `integrationsAttentionProvider`); Storage, Connection
+(address, route, pinned-key fingerprint, relays on `PUT /v1/config/relays`,
+Disconnect with a confirm) and Advanced (MCP endpoint, versions, Re-pair →
+the pairing screen in a `rePair` mode that pops itself) are new; About &
+health is the shared health rows with actions plus a compatibility row
+(same major.minor) once the server reports `version`. Each page re-reads
+`/v1/config` when it opens. `server_settings_screen.dart`,
+`client_settings_screen.dart`, `mcp_keys_screen.dart`, `ClientSettingsBody`
+and `settingsLeading` are gone.
+
+**Slice 6 (Agents; `feat/v2-agents`):** sessions are routes,
+`/agents/s/:id?tab=context|wrote|about`; `logicalParent` takes one back to
+`/agents` and `NavMemory` remembers it. `sessionControllerProvider` (an
+autoDispose family) owns each stream, so the desk split and the phone screen
+share one; `sessionDetailProvider` re-reads a live session's record every 4 s
+while it is shown (the stream's `status` event is the bare record, with no
+name, context or count) and `sessionWritesProvider` re-fetches
+`…/writes` only when `wrote_count` moves. `agentTabsProvider`,
+`activeAgentTabProvider`, `agentTitlesProvider`, the tab strip, the switcher
+sheet, the End `AlertDialog`, `AgentRow`/`AgentSessionRow`/
+`AgentSessionList`, `agentChosenTitle` and `launcherForTest` are gone; the
+name is the server's. The sidebar is on `SidebarFrame` (＋ New session only
+with a host online, Overview, RUNNING/ENDED `SessionRow`s with the §3.2 dots);
+the desk pane is the overview (work cards by (workspace, host) with the
+context chip and "wrote n", START AN AGENT cards, the infra line), or the
+first-session / no-host states (`NumberedSteps` gains an `inline` action);
+the phone is the flat list with the labelled pill. The launcher
+(`launcher.dart`) is a 460 modal at desk width and a bottom sheet below,
+keeps the old load logic (last host, workspaces, default agent, fallback and
+launch notices), and sends `context` and `write_vault_id`, never
+`allow_vault_writes`: "Can write to" defaults on when `agent_writes` is on,
+to the context note's vault (else the first), is disabled with "Off in
+Settings › AI access" when it is off, and is absent for `shell`. A launch
+opens the session on Context (with a note) or About. `launchAgentSession`
+keeps its positional signature and adds `contextNote`, `provider` and
+`runAgain`; slice 4's Start session passes the open note. Session detail:
+`SessionHeader` with End → `InlineConfirm` (desk) or the details sheet
+(phone), Run again (prefilled with context, host — falling back to an online
+one — workspace, agent and write vault; Launch still pressed) and Dismiss;
+the panel's Context shows the note read only (`StormMarkdownView`, the
+launch-snapshot title), Wrote lists writes with a "‹ Wrote" in-panel view
+(a kit-script row is a file under its path, never a link), About is a
+`KeyValueList`. Status words are Starting/Running/Unknown/Completed/Stopped/
+Failed with the reason in the meta and ended lines. `lib/ui/panels.dart`
+holds `PanelTabs`, `KeyValueList`, `InlineConfirm`, `MonoTag`. Contract
+changes in tests: `agents_navigation_test.dart` (sessions are routes; no
+tabs; "No hosts yet" → the no-host steps; Hosts test kept from slice 7) and
+`agent_test.dart` (status words, server names; the tab and terminal-title
+tests retired), `integrations_test.dart`'s launcher group (write vault, not
+the toggle). 883 client tests; mutation-checked: Wrote ignoring
+`wrote_count`, the launcher ignoring `agent_writes`, Run again dropping the
+write vault. The acceptance harness enrolls two real `storm-runtime` hosts
+and drives a scripted agent through the gateway (`harness/agents.py`); 19
+shots captured, deltas in its README. Open: the session view carries no
+grants, so About › Integrations lists the account's current connections.
+
+**Slice 8 (the loop; `feat/v2-loop`):** a note's version line carries the
+provenance link — "Edited by session {name}, {age} ›" / "Created by session
+…", from `GET …/notes/{id}`'s `agent_write`, opening
+`/agents/s/{id}?tab=wrote`; it is fetched (`noteProvenanceProvider`) only for
+a note in the vault's `agent-writes` map, and again only when that note's
+latest agent version moves. A later human edit keeps it (Q13). **A dismissed
+session's name stays, as plain `text3` text with no ›**: its route is a 404
+("This session is gone"), so there is nothing to link to. **Unseen is
+device-local and never on the server** (`SeenVersions`, prefs `storm.seen`,
+`{"<vault>/<note>": version}`, the newest 2000): the note screen records
+whatever version it has on screen, including one adopted from sync while
+open, and a note is unseen when its latest agent write version (`GET
+…/agent-writes`, `agentWritesProvider`) is above that. The map is re-read with
+the vault's sync (`vaultRevisionProvider`) and whenever the sessions' summed
+`wrote_count` moves in the overview the rail and bubbles already poll. Dots:
+desktop tree note rows and a collapsed folder holding one (an open folder
+does not roll up), phone folder and note rows. **Not on RECENT**: the
+prototype draws none there (desktop or phone, loop-a's reference agrees), and
+the prototype wins over the brief. The session panel's version line adds "·
+edited/created by this session" when this session is the note's latest agent
+writer (Context and a Wrote note opened in-panel); the panel re-reads its
+note when the session's `wrote_count` moves, and the session screen
+invalidates the overview then, so the sidebar's and overview's "wrote n"
+follow within the 4 s detail poll rather than the 15 s list poll. A note
+pushed from a phone session carries `?session=<id>` (`Routes.note(…,
+session:)`) and its back link reads "‹ {session name}", back to the session;
+the desk keeps the crumb. **Server (additive):** session views gain
+`integrations: [{id, slug, display_name}]` — what the session was granted at
+launch, named as then, Storm itself excluded — from a new `agent.db` table
+`session_integrations` written in the launch's store transaction from the
+connections offered (`LaunchMeta.integration_names`); a rename or disconnect
+changes none of it (orchestrator: grants are launch history, like the
+context). A session from before the table falls back to its
+`session_mcp_grants` slugs; `shell` and an old host have none. About ›
+Integrations uses it, and the account's current connections only from a
+server that does not send it. Tests: `loop_v2_test.dart` (17: provenance
+created/edited/dismissed/after a human edit at both widths, unseen rollup /
+clear-on-open / version / per-device persistence, the panel lines, About,
+phone-08 at both widths, and a widget-level loop from Start session to the
+provenance link back to Wrote); Rust
+`a_sessions_integrations_are_launch_history_named_as_at_launch` and the
+gateway-writes API test (rename after launch); `gateway_e2e.py` +3. 900
+client tests. Mutation-checked: unseen ignoring the version, the folder
+rollup off, the provenance link opening Context, "by this session" ignoring
+the session id, and the integrations never stored. The acceptance harness
+launches the core loop's session **through the UI** (Start session → Launch
+on Gateway spec) and its scripted agent reads the note with
+`session_context`, edits BOARD and creates a log note through the gateway
+(`agents.py` `run_loop`); desktop-01 is now shot after the BOARD session's
+write, so its provenance link is real.
+
+**Slice 9 (regression + acceptance; `feat/v2-acceptance`):** the polish
+list, then every suite and the acceptance set. **Note prose** is §7.2's
+Newsreader 18 / 1.6 with a 22 / 600 H2, in Read mode and as the editor's base
+style, through two derived steps — `proseSize = fs·√scale` (17.9 at the
+default; the step above `bodySize` that slice 2's `uiSize = fs/√scale` is
+below it, so it follows the text-size setting with no new input) and
+`proseHeadingSize = proseSize·scale` (22.4) — and `StormTokens.proseLeading`
+1.6; the editor's span tree is untouched (a test flattens it). Read-mode
+prose is now `text`, as the v2 prototype draws it (it was the M14
+prototype's `text2`). **Unseen baseline:** a device's first successful
+`agent-writes` load for a vault writes a `"<vault>/"` marker into
+`SeenVersions` and takes the agent versions it found as seen, so a new device
+does not dot every note an agent ever wrote; a failed load baselines nothing,
+and markers are never evicted by the 2000 limit (eviction would re-baseline
+and hide real dots). **phone-08:** a note pushed from a session lays its
+header out as a `Wrap` — "‹ {session}" keeps its whole width and the controls
+drop to a second line when both do not fit (they do not at 360–430 beside ⋯
+and Properties, which the prototype does not draw). **Unseen dot semantics:**
+the dot's label is a plain `Semantics` label after the row's name; Flutter web
+announced the tooltip *before* the name. **Pill:** Lucide folder / search /
+plus / hash, as the prototype draws them. **Phone inset 20** (§2):
+`StormChrome.contentInset` is `sp·2.5`, which also puts the bubbles at 20 / 20;
+the one-left-edge test asserts it and the settings list moved onto it.
+**Properties drawer:** open by default from 1200 px (the design frame), shut
+below it — between 900 and 1200 the prose column is `W − 676` (224 at 900),
+and holding it open until 640 fits (1316 px) would shut it in the 1280
+reference shots; the toggle still sticks between notes. **Accepted, not
+changed:** the tree orders notes by name, the launcher's workspace default is
+the runtime's first, vaults come in the server's order. Tests: 915 client
+(was 900); mutation-checked — the baseline never taken, the baseline taken
+every load, markers evictable, `proseSize = fs`, the editor ignoring
+`proseSize`, the dot's tooltip back in the semantics. **Regression on the
+tip:** `make check` clean (fmt, clippy `-D warnings`, `flutter analyze`);
+Rust 563 server + 112 relay + 54 runtime; client 915; `make test-live` — e2e
+81 (unmodified) · mcp 86 · agent 78 · gateway 87 · auth 72 · client live 20
+(+1 skipped); `make test-migration` 16. **Acceptance:** every v2 shot
+re-shot; the harness gained `--preset` (writes This device's `storm.theme`
+and reloads), `--desktop-width` / `--phone-width` and comma-separated
+`--only`; `presets/storm-light|slowflow-earth/` and `sweeps/d900-p360`,
+`d1100-p390`, `d1600-p430` show no overflow and every colour semantic intact
+— one finding left as is: under SlowFlow earth the low-chroma accent makes a
+running dot close to an ended one. `docs/storm-ui.md` rewritten for v2.
+**Not run here:** Android back on a device (no Android SDK, `adb` or emulator
+on this host; the contract is widget-tested) and the plan's manual Claude
+Code / OpenCode start (installed, but it would run on the operator's
+account). `CHECKLIST.md` reproduces handoff §11 with evidence per item.
+
+**Real-run fixes (2026-10-08; `fix/v2-acceptance-findings`, stacked on
+slice 9):** the operator's real Claude Code run on `c63eacd` passed all eight
+checks and surfaced three implementation bugs, fixed before merge, with no
+design or contract change. **Compatibility:** release CI stamps the client and
+every crate from the tag, but a source build reported pubspec's `1.0.0`
+against the server crate's `0.1.0`, so every unreleased build read "may not be
+compatible". The pubspec placeholder is now `0.1.0+1`, the same major.minor as
+`apps/server/Cargo.toml`; `version_compat_test` fails if they drift, and the
+major.minor check itself is unchanged. **Accessibility (web):** Read mode drew
+every block as `SelectableText`, a read-only text field whose text Flutter web
+never writes into the DOM (`SemanticTextField` sets `aria-label` only), so the
+note body was absent from the accessibility tree. It is now plain text in a
+`SelectionArea`, pixel-identical in the acceptance set, with selection and
+links intact; links in prose became real links. The provenance link is its own
+semantics node (it had absorbed `v51 · Saved` into its label), the note title
+is a heading, and `SettingsRow` names a trailing `StormToggle` by the row's
+label with the sub-line as hint (AI access and This device). Verified in
+Chromium's own accessibility tree on the real build. **Terminal:** xterm2
+reports the colour scheme (`CSI ? 997 ; Ps n`) whenever `TerminalView` gets a
+theme that is not identical while the agent has DEC 2031 on, and
+`TerminalTheme` has no value equality, so every session-screen rebuild sent
+Claude Code a report. Claude Code restores echo about 0.25 s after `/exit` or
+End and exits about 0.5 s later; a report landing in that window is echoed by
+the PTY as `^[[?997;1n` (reproduced under a local PTY with 2.1.283). The theme
+is now one instance per colour set; a real theme change still reports. A
+theme switch in that half second can still echo once: that is the PTY's
+behaviour with any late input, left as is. **Kept as is:** About still lists
+a session's integrations as granted at launch after a disconnect (launch
+history; calls are refused `not_granted`). **Deployment:** a Runtime Host must
+run under its own OS account, never one that can reach the vaults
+(`deploy/README.md`); the real-run staging, one Unix user for everything,
+could edit vault files around Storm. Tests: client 926 (was 915); `make
+check`, `make test-live` and `make test-migration` unchanged otherwise; every
+fix mutation-checked; the v2 set re-shot from both builds, differing only in
+the compatibility row and health dot; the real Claude Code smoke re-run on
+`15bb470`, scrollback clean after End.
+
+**UI polish (2026-10-08; `fix/v2-ui-polish`, stacked on the real-run
+fixes):** the operator's layout pass after testing the whole stack on the LAN
+staging, client only, no change to IA, server or agent architecture. **Session
+workspace (desk):** the header (name, status, meta, End) spans the terminal
+and the inspector; the terminal fills its column at a 10 px inset; Context /
+Wrote / About became a **Details inspector** that works like Properties —
+opens by default from 1200 px, toggled from the header and closed from inside,
+320 px, its left edge drags it between 260 and 500 while the terminal keeps
+360 — instead of a permanent column at 10/21 of the width. Its open state and
+width are in-memory providers, not persisted, as Properties and the sidebar
+are (the codebase's rule for chrome). The header's actions now sit at the far
+edge (a `Flexible` name and a `Spacer` had split the free space). **Phone
+session:** a 10 px terminal inset, and the extra keys are a keyboard accessory
+shown only while `viewInsets.bottom > 0` (animated in and out; the terminal
+takes the room back). **Notes:** the editor surface fills the space between
+sidebar and Properties — the header row spans it — and `kEditorMeasure` is
+900 (was 640), applied to the prose column only (operator's choice among
+three). **Rail foot:** the health dot and Settings share one 40 px square on
+the rail axis, 8 apart and 8 from the bottom. **End confirmation:** a compact
+banner — bold "End {name}", the message, Cancel and End session on one row
+from 560 px of banner, wrapped below; 16 / 12 padding. Tests: client 941 (was
+926), `ui_polish_test` and `inline_confirm_test` new, three tests' contracts
+changed (the extra keys are absent with the keyboard down; the end prompt is a
+title and a message); each new assertion mutation-checked. **Open, not in this
+slice:** the login hangs after a correct password in Zen (Firefox engine) on
+the operator's profile — the server signs in, Chrome works, headless Zen
+does not reproduce; logged in the vault (*Storm v2/Issue — Zen login hang*).
+
+**Revisit if** a second human user becomes a real requirement (Teams, A9):
+that is a new authorization design, not a restoration of the removed one.
 
 ---
 

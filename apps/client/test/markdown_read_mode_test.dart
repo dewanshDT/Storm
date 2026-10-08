@@ -4,13 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:markdown/markdown.dart' as md;
 
+import 'package:storm/editor/storm_markdown_controller.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/markdown/storm_markdown_style.dart';
 import 'package:storm/ui/markdown/storm_markdown_view.dart';
 import 'package:storm/ui/note_mode_toggle.dart';
-import 'package:storm/ui/shell/corner_bubbles.dart';
 import 'package:storm/ui/theme.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/widgets.dart';
 
 import 'fake_server.dart';
@@ -145,7 +146,7 @@ void main() {
 
       expect(find.textContaining('Prose at the chosen size'), findsOneWidget);
       final selectable = tester
-          .widgetList<SelectableText>(find.byType(SelectableText))
+          .widgetList<Text>(find.byType(Text))
           .where(
             (s) =>
                 s.textSpan?.toPlainText().contains(
@@ -156,9 +157,32 @@ void main() {
       expect(selectable, isNotEmpty);
       expect(
         selectable.first.textSpan?.style?.fontSize,
-        22,
+        StormTokens.from(StormPreset.stormDark, fs: 22).proseSize,
         reason: 'settings.fontSize drives Read Mode body',
       );
+    });
+
+    testWidgets('note body is Newsreader 18 / 1.6 with a 22 / 600 H2 (§7.2)', (
+      tester,
+    ) async {
+      await pumpMarkdown(tester, '## Section\n\nProse.\n');
+      TextStyle? styleOf(String text) => tester
+          .widgetList<Text>(find.byType(Text))
+          .firstWhere((s) => s.textSpan?.toPlainText() == text)
+          .textSpan
+          ?.style;
+      final body = styleOf('Prose.')!;
+      expect(body.fontFamily, StormTokens.serifFamily);
+      expect(body.fontSize, closeTo(18, 0.2));
+      expect(body.height, 1.6);
+      expect(
+        body.color,
+        StormTokens.from(StormPreset.stormDark).text,
+        reason: 'the v2 prototype draws prose in text',
+      );
+      final h2 = styleOf('Section')!;
+      expect(h2.fontSize, closeTo(22, 0.4));
+      expect(h2.fontWeight, FontWeight.w600);
     });
 
     testWidgets('task checkbox scales with text size', (tester) async {
@@ -340,6 +364,30 @@ fn main() {}
       await disposeShell(tester, c);
     });
 
+    testWidgets('the editor writes prose at the same 18 / 1.6 (§7.2)', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
+      await tester.pumpAndSettle();
+      await enterEditMode(tester);
+
+      final field = tester.widget<TextField>(
+        find.byKey(const Key('note-body')),
+      );
+      final controller = field.controller! as StormMarkdownController;
+      expect(controller.theme.base.fontSize, closeTo(18, 0.2));
+      expect(controller.theme.base.height, 1.6);
+      final span = controller.buildTextSpan(
+        context: tester.element(find.byKey(const Key('note-body'))),
+        withComposing: false,
+      );
+      expect(span.toPlainText(), controller.text);
+
+      await disposeShell(tester, c);
+    });
+
     testWidgets('Read Mode reflects unsaved Edit Mode text', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c);
@@ -384,27 +432,15 @@ fn main() {}
     });
   });
 
-  group('client settings Read mode switch', () {
+  group('This device Read mode switch', () {
     testWidgets('toggles settings.readMode', (tester) async {
       final c = shellContainer();
-      addTearDown(c.dispose);
-      await c.read(settingsProvider.future);
+      await pumpShell(tester, c);
       expect(c.read(settingsProvider).value!.readMode, isTrue);
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: c,
-          child: MaterialApp(
-            theme: StormTheme.dark(),
-            home: const Scaffold(
-              body: SingleChildScrollView(child: ClientSettingsBody()),
-            ),
-          ),
-        ),
-      );
+      c.read(routerProvider).go(Routes.settingsPage('device'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Read mode'), findsOneWidget);
+      expect(find.text('Open notes in Read mode'), findsOneWidget);
       await tester.tap(find.byKey(const Key('setting-read-mode')));
       await tester.pumpAndSettle();
       expect(c.read(settingsProvider).value!.readMode, isFalse);
@@ -412,37 +448,7 @@ fn main() {}
       await tester.tap(find.byKey(const Key('setting-read-mode')));
       await tester.pumpAndSettle();
       expect(c.read(settingsProvider).value!.readMode, isTrue);
-    });
-
-    testWidgets('shows the client version stamp', (tester) async {
-      final c = shellContainer();
-      addTearDown(c.dispose);
-      await c.read(settingsProvider.future);
-
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: c,
-          child: MaterialApp(
-            theme: StormTheme.dark(),
-            home: const Scaffold(
-              body: SingleChildScrollView(child: ClientSettingsBody()),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(const Key('client-version')), findsOneWidget);
-      expect(find.text('Version 0.0.0-test'), findsOneWidget);
-
-      // Section labels uppercased by SectionLabel — grouping, not a heading.
-      expect(find.text('APPEARANCE'), findsOneWidget);
-      expect(find.text('NOTES'), findsOneWidget);
-      expect(find.text('CONNECTION'), findsOneWidget);
-      expect(find.text('ABOUT'), findsOneWidget);
-      // Note font is a field under Appearance, not a peer section.
-      expect(find.text('NOTE FONT'), findsNothing);
-      expect(find.text('Note font'), findsOneWidget);
+      await disposeShell(tester, c);
     });
   });
 }

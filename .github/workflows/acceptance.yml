@@ -1,0 +1,105 @@
+name: Acceptance builds
+
+# The native apps of a branch, for on-device acceptance, **without a
+# release**: push the commit to `acceptance/<anything>` and download the
+# artifacts. Nothing here creates a GitHub Release, touches the apt repo or
+# moves `main` (decision 45: only a tag makes a release).
+#
+# This is also the only place the app's own Kotlin and Swift get compiled
+# before a release: PR CI runs `flutter analyze` and the Dart tests, which
+# never build the native projects (decision 81l).
+#
+# The APK is signed exactly as a release's would be: with the upload
+# keystore when its secrets (STORM_UPLOAD_*) exist, debug-signed otherwise
+# (decision 81m: as of 2026-10-08 they do not). Its build number is the
+# latest release's, so with the same key it installs as an update over that
+# release, and the next release still updates over it.
+
+on:
+  push:
+    branches: ["acceptance/**"]
+
+permissions:
+  contents: read
+  actions: read   # the latest release's run number
+
+jobs:
+  android:
+    name: android (apk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # The release workflow's step, unchanged: the values go to the build's
+      # environment, which Actions masks; nothing here prints them.
+      - name: Decode keystore
+        env:
+          STORE_B64: ${{ secrets.STORM_UPLOAD_STORE_BASE64 }}
+        run: |
+          if [ -z "$STORE_B64" ]; then
+            echo "::warning::STORM_UPLOAD_STORE_BASE64 is not set: this APK is debug-signed and will not install over a release"
+            exit 0
+          fi
+          echo "$STORE_B64" | base64 -d > "$RUNNER_TEMP/storm-upload.jks"
+          echo "STORM_UPLOAD_STORE_FILE=$RUNNER_TEMP/storm-upload.jks" >> "$GITHUB_ENV"
+          echo "STORM_UPLOAD_STORE_PASSWORD=${{ secrets.STORM_UPLOAD_STORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "STORM_UPLOAD_KEY_ALIAS=${{ secrets.STORM_UPLOAD_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "STORM_UPLOAD_KEY_PASSWORD=${{ secrets.STORM_UPLOAD_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+      - name: The latest release's build number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?status=success&per_page=1" \
+                --jq '.workflow_runs[0].run_number')
+          echo "RELEASE_BUILD_NUMBER=${n:-1}" >> "$GITHUB_ENV"
+      - name: Build APK
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build apk --release --build-number="${RELEASE_BUILD_NUMBER}"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "dist/storm-acceptance-${GITHUB_SHA::7}.apk"
+      - name: Forget the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/storm-upload.jks"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-acceptance
+          path: apps/client/dist/*
+          retention-days: 14
+
+  macos:
+    name: macos (app)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: Build macOS app
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build macos --release --build-number="${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          APP="build/macos/Build/Products/Release/Storm.app"
+          test -d "$APP"
+          # Ad-hoc signed and unnotarized, like a release's.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" \
+            "dist/Storm-acceptance-${GITHUB_SHA::7}-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-acceptance
+          path: apps/client/dist/*
+          retention-days: 14

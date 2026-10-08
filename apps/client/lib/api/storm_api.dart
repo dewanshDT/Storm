@@ -171,6 +171,53 @@ class StormApi {
     );
   }
 
+  /// Sets whether agent sessions may write to their launch vault, leaving
+  /// both MCP switches as they are.
+  Future<void> setAgentWrites(bool on) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/mcp'),
+        headers: _headers,
+        body: jsonEncode({'agent_writes': on}),
+      ),
+    );
+  }
+
+  /// Replaces the configured relay list. The server refuses the whole list
+  /// on one bad URL.
+  Future<List<String>> setRelays(List<String> relays) async {
+    final json = _decode(
+      await _client.put(
+        _uri('/v1/config/relays'),
+        headers: _headers,
+        body: jsonEncode({'relays': relays}),
+      ),
+    );
+    return [for (final r in (json['relays'] as List? ?? const [])) r as String];
+  }
+
+  // ---- devices ----------------------------------------------------------
+
+  Future<List<PairedDevice>> devices() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/auth/devices'), headers: _headers),
+    );
+    return (json as List)
+        .map((e) => PairedDevice.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Revokes a device and every session it holds.
+  Future<void> revokeDevice(String id) async {
+    final r = await _client.delete(
+      _uri('/v1/auth/devices/${Uri.encodeComponent(id)}'),
+      headers: _headers,
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    }
+  }
+
   // ---- MCP keys (A14) ---------------------------------------------------
 
   /// Mints an MCP key. **The secret in the response is the only copy.**
@@ -279,6 +326,22 @@ class StormApi {
       await _client.get(_uri(_v(vaultId, '/notes/$id')), headers: _headers),
     );
     return Note.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Note id → its latest agent write, for every note agents wrote here.
+  Future<Map<String, LatestAgentWrite>> agentWrites(String vaultId) async {
+    final json =
+        _decode(
+              await _client.get(
+                _uri(_v(vaultId, '/agent-writes')),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>;
+    return {
+      for (final e in json.entries)
+        e.key: LatestAgentWrite.fromJson(e.value as Map<String, dynamic>),
+    };
   }
 
   Future<WriteResult> createNote({
@@ -440,20 +503,6 @@ class StormApi {
   /// `POST /v1/auth/logout` — revoke the current session.
   Future<void> logout() async {
     await _client.post(_uri('/v1/auth/logout'), headers: _headers);
-  }
-
-  /// `PUT /v1/config/registration` — open or close registration (A13).
-  ///
-  /// Owner only, enforced server-side. Off by default: with web bootstrap in
-  /// play, on means anyone who can reach this server can make an account.
-  Future<void> setRegistrationOpen(bool enabled) async {
-    _decode(
-      await _client.put(
-        _uri('/v1/config/registration'),
-        headers: _headers,
-        body: jsonEncode({'enabled': enabled}),
-      ),
-    );
   }
 
   /// `POST /v1/pairings` — mint a pairing invite for a **new** device.

@@ -6,25 +6,19 @@
 //!
 //! # What this is not
 //!
-//! **It is not role-based access control.** [`AllowAuthenticated`] — the policy
-//! Storm ships — lets any authenticated caller reach any vault, which is the
-//! correct behaviour for a single-user self-hosted server and exactly what the
-//! server did before this module existed. Roles, `vault_grants`, per-vault
-//! access levels and the MCP capability rules are all deliberately deferred:
-//! deciding a whole permission model before Storm has real multi-user
-//! behaviour to shape it would mean redesigning it later, with 24 call sites
-//! already depending on the first guess.
+//! **It is not role-based access control.** Storm is
+//! single-user (decision 82). Every caller is the one account, reached through
+//! a session, a key or an agent session. [`StormPolicy`] lets each read any
+//! vault, and narrows what a credential may do on the account's behalf: an
+//! agent session writes only to the vault chosen at its launch.
 //!
 //! What is *not* deferred is the boundary. A handler can no longer reach a
 //! vault without saying who is asking and what for, because
 //! [`crate::api::vault_of`] will not hand one over without both. When the
 //! policy grows up, it replaces [`VaultPolicy`] — and nothing else moves.
 //!
-//! See *Auth Authorization Review (A9)* in the personal vault for the
-//! measurements this shape came from, and Q19–Q25 for what the real policy
-//! still has to settle.
-
-use super::users::Role;
+//! *Auth Authorization Review (A9)* in the personal vault is where this shape
+//! came from; its role questions (Q19–Q25) were retired by decision 82.
 
 /// Who is asking.
 ///
@@ -34,13 +28,8 @@ use super::users::Role;
 /// reaches a handler at all.
 #[derive(Debug, Clone)]
 pub enum Actor {
-    /// A logged-in user on a paired device: the ordinary case.
-    Session {
-        #[allow(dead_code)] // The policy that reads these is the next slice.
-        user_id: String,
-        #[allow(dead_code)]
-        role: Role,
-    },
+    /// The account, signed in on a paired device: the ordinary case.
+    Session { user_id: String },
     /// An MCP key (A14): a machine acting **as the user who minted it**.
     ///
     /// Note what this is not. It is not a principal of its own — the identity
@@ -54,14 +43,27 @@ pub enum Actor {
     /// to answer the same question for users anyway.
     Key {
         /// Which key acted. **For the audit trail, never for a decision** —
-        /// see [`Actor::key_id`]. Unread by the shipping binary today for the
-        /// same reason `Session`'s fields were before the boundary landed:
-        /// the consumer is the authorization release, and inventing a caller
-        /// now to satisfy the linter would be worse than saying so.
+        /// see [`Actor::key_id`].
         #[allow(dead_code)]
         key_id: String,
         user_id: String,
-        role: Role,
+    },
+    /// An agent in an Agent Runtime session, reaching Storm's vault through
+    /// the MCP Gateway's built-in `storm` connection (AM30, AM31; decision
+    /// 81e).
+    ///
+    /// **The principal is the account** (A14.3's rule, as for a key).
+    /// `session_id` and `host_id` ride along for audit and the write hook;
+    /// whether the session may make the call at all was decided in
+    /// `ops::integration_call` before this actor existed.
+    Agent {
+        session_id: String,
+        #[allow(dead_code)]
+        host_id: String,
+        user_id: String,
+        /// The one vault this session may write to, chosen at launch. `None`
+        /// is read only. [`StormPolicy`] refuses an agent's write anywhere else.
+        write_vault: Option<String>,
     },
 }
 
@@ -86,10 +88,11 @@ impl Actor {
         match self {
             Actor::Session { .. } => "session",
             Actor::Key { .. } => "mcp-key",
+            Actor::Agent { .. } => "agent",
         }
     }
 
-    /// The user this caller acts as, if there is one.
+    /// The account this caller acts as — always the one account.
     ///
     /// **This is the accessor a permission model must read, not the variant.**
     /// A session and a key are the same principal reached two ways, and a
@@ -103,17 +106,9 @@ impl Actor {
     /// removed the only `None`, and the type says so now.
     pub fn user_id(&self) -> &str {
         match self {
-            Actor::Session { user_id, .. } | Actor::Key { user_id, .. } => user_id,
-        }
-    }
-
-    /// The role this caller acts with — see [`Actor::user_id`] for why this is
-    /// an accessor rather than a match.
-    ///
-    /// A key carries its **owner's** role, unnarrowed (A14).
-    pub fn role(&self) -> Role {
-        match self {
-            Actor::Session { role, .. } | Actor::Key { role, .. } => *role,
+            Actor::Session { user_id, .. }
+            | Actor::Key { user_id, .. }
+            | Actor::Agent { user_id, .. } => user_id,
         }
     }
 
@@ -135,9 +130,8 @@ impl Actor {
 
 /// What the caller intends to do with the vault.
 ///
-/// Carried now even though [`AllowAuthenticated`] ignores it, because adding a
-/// parameter later means revisiting every call site to decide what each one
-/// meant — and doing that retrospectively, against handlers written without
+/// Adding this parameter later would mean revisiting every call site to decide
+/// what each one meant — and doing that retrospectively, against handlers written without
 /// the question in mind, is how a read path quietly gets labelled a write.
 /// Deciding it once, where the operation is written, is cheap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,17 +144,8 @@ pub enum Access {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
-    /// Nothing in the shipping binary constructs this, and that is the honest
-    /// state of the slice: [`AllowAuthenticated`] never refuses, so the only
-    /// producer today is the `DenyAll` policy in `api.rs`'s tests.
-    ///
-    /// It is not dead weight. The refusal *path* — 403 rather than 404,
-    /// consulted before the registry so it cannot double as an existence
-    /// probe, collections filtering instead — is fully exercised through that
-    /// policy, which is the point of making the policy swappable. Were this
-    /// variant absent, the RBAC slice would be writing that path for the first
-    /// time and running it for the first time in production.
-    #[allow(dead_code)]
+    /// 403 rather than 404, consulted before the registry so it cannot double
+    /// as an existence probe; collections filter instead.
     Deny(&'static str),
 }
 
@@ -179,21 +164,25 @@ pub trait VaultPolicy: Send + Sync + std::fmt::Debug {
     fn decide(&self, actor: &Actor, vault_id: &str, access: Access) -> Decision;
 }
 
-/// **The policy Storm ships today: every authenticated caller, every vault.**
-///
-/// Not a placeholder that forgot to be finished — it is the right answer for a
-/// single-user self-hosted server, and it is what the server already did.
-/// Making it explicit is the change: the permissiveness is now a policy object
-/// with a name, tested and swappable, rather than the absence of a check.
-#[derive(Debug, Clone, Copy)]
-pub struct AllowAuthenticated;
+/// The reason, and the agent's stable JSON-RPC error code, for an agent
+/// writing outside its session's write vault.
+pub const AGENT_WRITE_REFUSED: &str = "vault_write_not_allowed";
 
-impl VaultPolicy for AllowAuthenticated {
-    fn decide(&self, _actor: &Actor, _vault_id: &str, _access: Access) -> Decision {
-        // Every `Actor` variant is authenticated by construction — the
-        // middleware refuses anything else long before here — so there is
-        // nothing left to check.
-        Decision::Allow
+/// **The policy Storm ships: every authenticated caller reads and writes every
+/// vault, except that an agent writes only to its session's write vault.**
+#[derive(Debug, Clone, Copy)]
+pub struct StormPolicy;
+
+impl VaultPolicy for StormPolicy {
+    fn decide(&self, actor: &Actor, vault_id: &str, access: Access) -> Decision {
+        match (actor, access) {
+            (Actor::Agent { write_vault, .. }, Access::Write)
+                if write_vault.as_deref() != Some(vault_id) =>
+            {
+                Decision::Deny(AGENT_WRITE_REFUSED)
+            }
+            _ => Decision::Allow,
+        }
     }
 }
 
@@ -204,7 +193,6 @@ mod tests {
     fn session() -> Actor {
         Actor::Session {
             user_id: "usr_1".into(),
-            role: Role::Member,
         }
     }
 
@@ -212,19 +200,38 @@ mod tests {
         Actor::Key {
             key_id: "key_1".into(),
             user_id: "usr_1".into(),
-            role: Role::Member,
+        }
+    }
+
+    fn agent() -> Actor {
+        agent_writing(Some("vlt_work"))
+    }
+
+    fn agent_writing(write_vault: Option<&str>) -> Actor {
+        Actor::Agent {
+            session_id: "ags_1".into(),
+            host_id: "hst_1".into(),
+            user_id: "usr_1".into(),
+            write_vault: write_vault.map(Into::into),
         }
     }
 
     #[test]
-    fn the_shipped_policy_allows_every_authenticated_actor() {
-        // The current answer, stated so a change to it is a visible diff
-        // rather than a behaviour someone notices in production.
-        let policy = AllowAuthenticated;
+    fn an_agent_acts_as_the_account() {
+        // AM31: the account's identity, read through the accessor a policy
+        // uses — never the variant.
+        let a = agent();
+        assert_eq!(a.user_id(), "usr_1");
+        assert_eq!(a.describe(), "agent");
+        assert_eq!(a.key_id(), None);
+    }
+
+    #[test]
+    fn a_session_and_a_key_read_and_write_every_vault() {
         for actor in [session(), key()] {
             for access in [Access::Read, Access::Write] {
                 assert_eq!(
-                    policy.decide(&actor, "any-vault", access),
+                    StormPolicy.decide(&actor, "any-vault", access),
                     Decision::Allow,
                     "{} / {access:?}",
                     actor.describe()
@@ -234,17 +241,36 @@ mod tests {
     }
 
     #[test]
-    fn a_role_does_not_change_the_answer_yet() {
-        // Guards the boundary between this slice and the next: if someone
-        // starts consulting roles here without replacing the policy, the
-        // permission model has been decided by accident.
-        let policy = AllowAuthenticated;
-        for role in [Role::Owner, Role::Admin, Role::Member] {
-            let actor = Actor::Session {
-                user_id: "usr_1".into(),
-                role,
-            };
-            assert!(policy.decide(&actor, "vault", Access::Write).is_allowed());
+    fn an_agent_reads_anywhere_and_writes_only_to_its_write_vault() {
+        let agent = agent();
+        for vault in ["vlt_work", "vlt_personal", "vlt_kit"] {
+            assert_eq!(
+                StormPolicy.decide(&agent, vault, Access::Read),
+                Decision::Allow
+            );
+        }
+        assert_eq!(
+            StormPolicy.decide(&agent, "vlt_work", Access::Write),
+            Decision::Allow
+        );
+        for vault in ["vlt_personal", "vlt_kit", "vlt_work2", ""] {
+            assert_eq!(
+                StormPolicy.decide(&agent, vault, Access::Write),
+                Decision::Deny(AGENT_WRITE_REFUSED),
+                "{vault}"
+            );
+        }
+        let read_only = agent_writing(None);
+        assert_eq!(
+            StormPolicy.decide(&read_only, "vlt_work", Access::Read),
+            Decision::Allow
+        );
+        for vault in ["vlt_work", "vlt_personal", ""] {
+            assert_eq!(
+                StormPolicy.decide(&read_only, vault, Access::Write),
+                Decision::Deny(AGENT_WRITE_REFUSED),
+                "{vault}"
+            );
         }
     }
 
@@ -252,7 +278,7 @@ mod tests {
     fn an_actor_never_describes_itself_with_a_secret() {
         // `describe()` goes into logs and `security_events`, so it has to stay
         // a fixed label rather than anything derived from a credential.
-        for actor in [session(), key()] {
+        for actor in [session(), key(), agent()] {
             let described = actor.describe();
             assert!(!described.contains("testtoken"));
             assert!(

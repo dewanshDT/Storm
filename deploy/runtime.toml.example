@@ -25,3 +25,14 @@ scrollback_bytes = 4194304
 # [[providers]]
 # id = "opencode"
 # env_file = "/etc/storm-runtime/opencode.env"
+#
+# A session with integrations runs OpenCode with a config directory of its
+# own (MCP Gateway, decision 81f), so ~/.config/opencode is not loaded. Put
+# the OpenCode settings sessions need here; they are merged into each
+# session's config. An `mcp` key here is ignored: only Storm's integrations
+# are ever offered to an agent.
+#
+# [[providers]]
+# id = "opencode"
+# [providers.settings]
+# model = "anthropic/claude-sonnet-4-5"

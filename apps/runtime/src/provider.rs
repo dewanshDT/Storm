@@ -133,6 +133,19 @@ pub struct SessionSpec {
     /// The workspace directory, already resolved inside a configured root.
     pub workspace: PathBuf,
     pub interaction: InteractionSpec,
+    /// What this session's launch gains beyond the provider's own (AM32: the
+    /// MCP Gateway's per-session config). A `cli` provider appends the
+    /// arguments after its own and the environment after everything else;
+    /// a provider with nothing to launch ignores it.
+    pub launch: LaunchExtras,
+}
+
+/// Per-session launch additions. Generic on purpose: the contract carries
+/// arguments and variables, and knows nothing of MCP (AM20).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchExtras {
+    pub args: Vec<std::ffi::OsString>,
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
 /// Where a session's output and its ending go. The runtime implements it.

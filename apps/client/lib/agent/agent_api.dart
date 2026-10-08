@@ -32,7 +32,6 @@ class AgentApi {
   dynamic _decode(http.Response r) {
     if (r.statusCode < 200 || r.statusCode >= 300) {
       String message = switch (r.statusCode) {
-        403 => 'Agents are available to the server owner only.',
         503 => 'The host is offline.',
         _ => 'HTTP ${r.statusCode}',
       };
@@ -46,17 +45,6 @@ class AgentApi {
     }
     if (r.bodyBytes.isEmpty) return null;
     return jsonDecode(utf8.decode(r.bodyBytes));
-  }
-
-  /// Whether this caller may use agents at all. The server's owner check is
-  /// the answer: the client never infers a role (decision 77d).
-  Future<bool> canUseAgents() async {
-    final r = await _client.get(_uri('/v1/config/agent'), headers: _headers);
-    if (r.statusCode == 403 || r.statusCode == 401 || r.statusCode == 404) {
-      return false;
-    }
-    _decode(r);
-    return true;
   }
 
   Future<String> defaultProvider() async =>
@@ -155,6 +143,8 @@ class AgentApi {
     String? provider,
     required int cols,
     required int rows,
+    ({String vaultId, String noteId})? context,
+    String? writeVaultId,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -166,11 +156,37 @@ class AgentApi {
               'provider': ?provider,
               'interaction': 'terminal',
               'terminal': {'cols': cols, 'rows': rows},
+              if (context != null)
+                'context': {
+                  'vault_id': context.vaultId,
+                  'note_id': context.noteId,
+                },
+              // Absent is read only (decision 82); `allow_vault_writes` is
+              // the pre-v2 field and is never sent.
+              'write_vault_id': ?writeVaultId,
             }),
           ),
         )
         as Map<String, dynamic>,
   );
+
+  /// The notes a session created or edited, newest write first.
+  Future<List<SessionWrite>> writes(String id) async {
+    final json = _decode(
+      await _client.get(_uri('${_s(id)}/writes'), headers: _headers),
+    );
+    return [
+      for (final w in json as List)
+        SessionWrite.fromJson(w as Map<String, dynamic>),
+    ];
+  }
+
+  /// Settings › AI access › "Allow writes when chosen at launch". Absent
+  /// (an older server) reads as off.
+  Future<bool> agentWrites() async =>
+      (_decode(await _client.get(_uri('/v1/config'), headers: _headers))
+          as Map)['agent_writes'] ==
+      true;
 
   Future<void> end(String id) async {
     _decode(await _client.post(_uri('${_s(id)}/end'), headers: _headers));

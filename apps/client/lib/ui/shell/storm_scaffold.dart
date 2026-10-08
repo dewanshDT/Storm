@@ -83,7 +83,10 @@ class StormChrome extends StatelessWidget {
   /// They used to be `cardPad`, `cardPad` and `sp * 2.5` — close enough to
   /// look like a mistake rather than a decision, which is exactly what a
   /// three-pixel stagger down the left margin reads as.
-  static double contentInset(BuildContext context) => context.tokens.cardPad;
+  ///
+  /// 20, the handoff's phone inset (§2), which is also where the corner
+  /// bubbles sit.
+  static double contentInset(BuildContext context) => context.tokens.sp * 2.5;
 
   /// How far a 44px icon button's *box* extends past the glyph inside it.
   ///
@@ -152,7 +155,7 @@ class StormChrome extends StatelessWidget {
             Positioned(
               top: bubbleTopInset(context),
               left: contentInset(context),
-              child: const VaultBubble(),
+              child: const PlacesBubble(),
             ),
             Positioned(
               top: bubbleTopInset(context),

@@ -298,7 +298,15 @@ pub struct Storm {
     /// letting it try and refusing — and it makes the refusal impossible to
     /// forget in one tool's body.
     writable: bool,
+    /// An agent session started from a note: its instructions say so.
+    context: bool,
 }
+
+/// Tools an agent is never offered, whatever its write flags (G-D5).
+pub const NEVER_FOR_AGENTS: &[&str] = &["delete_note"];
+
+/// Tools only an agent session is offered.
+pub const ONLY_FOR_AGENTS: &[&str] = &["session_context"];
 
 /// Renders an operation's result as a tool result.
 ///
@@ -338,6 +346,18 @@ fn respond<T: serde::Serialize>(
             Ok(CallToolResult::structured(object))
         }
         Err(e) if e.0.is_server_error() => Err(ErrorData::internal_error(e.1, None)),
+        // The write-vault refusal is a JSON-RPC error with the gateway's
+        // stable-code shape, not a tool error the model may retry around.
+        Err(e)
+            if e.0 == axum::http::StatusCode::FORBIDDEN
+                && e.1 == crate::auth::authz::AGENT_WRITE_REFUSED =>
+        {
+            Err(ErrorData::new(
+                rmcp::model::ErrorCode(-32001),
+                e.1.clone(),
+                Some(serde_json::json!({ "storm_error": e.1 })),
+            ))
+        }
         Err(e) => Ok(CallToolResult::structured_error(
             serde_json::json!({ "error": e.1 }),
         )),
@@ -358,7 +378,27 @@ impl Storm {
             state,
             writable,
             actor,
+            context: false,
         }
+    }
+
+    /// The built-in `storm` connection's handler: the same tools, served in
+    /// process to the gateway as `Actor::Agent`, never with `delete_note`.
+    pub fn for_agent(state: Shared, writable: bool, context: bool, actor: Actor) -> Self {
+        Self {
+            state,
+            writable,
+            actor: Some(actor),
+            context,
+        }
+    }
+
+    /// Built for an agent in a session, as the MCP Gateway's built-in `storm`
+    /// connection (spec §5, decision 81e). Read off the actor, so the two can
+    /// never disagree. **`delete_note` is never offered to an agent** (G-D5),
+    /// writable or not.
+    fn is_agent(&self) -> bool {
+        matches!(self.actor, Some(Actor::Agent { .. }))
     }
 
     /// The authenticated caller, or a refusal.
@@ -379,6 +419,14 @@ impl Storm {
             for name in WRITE_TOOLS {
                 router.remove_route(name);
             }
+        }
+        let removed = if self.is_agent() {
+            NEVER_FOR_AGENTS
+        } else {
+            ONLY_FOR_AGENTS
+        };
+        for name in removed {
+            router.remove_route(name);
         }
         router
     }
@@ -508,6 +556,13 @@ impl Storm {
             crate::ops::note_version(&self.state, self.actor()?, &vault, &note_id, version).await,
             Some("content"),
         )
+    }
+
+    #[tool(
+        description = "Read the note this agent session was started from: its vault and note ids, title, path, version and full markdown. Takes no arguments."
+    )]
+    async fn session_context(&self) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::session_context(&self.state, self.actor()?).await)
     }
 
     // ---- scripts (kit vault) ------------------------------------------
@@ -642,9 +697,17 @@ impl ServerHandler for Storm {
         // The instructions follow the mode, because they are the first thing
         // the model reads: telling it the tools are read-only when they are not
         // would be worse than saying nothing.
-        info.instructions = Some(
-            if self.writable {
-                "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+        let mut instructions = String::from(if self.writable && self.is_agent() {
+            "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+                 addressed by vault id and note id — never by file path. Start with \
+                 list_vaults, then search to find notes and get_note to read one. You may \
+                 also create and update notes: always read a note before updating it and \
+                 send back its base_version, so a change made on another device is merged \
+                 rather than overwritten. You may write only to the vault this session \
+                 was given; a write anywhere else is refused. Notes cannot be deleted \
+                 from here."
+        } else if self.writable {
+            "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
                  addressed by vault id and note id — never by file path. Start with \
                  list_vaults, then search to find notes and get_note to read one. You may \
                  also create, update and delete notes: always read a note before updating it \
@@ -653,15 +716,19 @@ impl ServerHandler for Storm {
                  from the vault immediately. Canonical scripts live in the kit vault: \
                  list_scripts, then get_script to read one, and create_script or \
                  update_script to store one there — nowhere else."
-            } else {
-                "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
+        } else {
+            "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
                  addressed by vault id and note id — never by file path. Start with \
                  list_vaults, then search to find notes and get_note to read one. Canonical \
                  scripts in the kit vault are readable with list_scripts and get_script. \
                  These tools are read-only: this server does not allow changes."
-            }
-            .into(),
-        );
+        });
+        if self.context {
+            instructions.push_str(
+                " This session was started from a note. Call session_context to read it.",
+            );
+        }
+        info.instructions = Some(instructions);
         info
     }
 }
@@ -687,7 +754,6 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 let mine = Actor::Session {
                     user_id: format!("usr_{i}"),
-                    role: crate::auth::users::Role::Member,
                 };
                 MCP_ACTOR
                     .scope(mine, async move {
@@ -735,7 +801,6 @@ mod tests {
     fn a_handler_with_an_identity_hands_it_over() {
         let actor = Actor::Session {
             user_id: "usr_1".into(),
-            role: crate::auth::users::Role::Member,
         };
         assert!(matches!(
             resolve_actor(Some(&actor)),

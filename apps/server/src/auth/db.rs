@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::single_user::Keep;
+
 /// The database's name inside the state directory. Used by the backup path too,
 /// so the snapshot lands under the same name and a restore is a plain copy.
 pub const AUTH_DB_FILE: &str = "auth.db";
@@ -36,11 +38,13 @@ pub const AUTH_DB_FILE: &str = "auth.db";
 /// **3** — `ws_tickets` (slice 4).
 /// **4** — `pairing_sessions.peer_ip` + the `web_bootstrap` purpose (slice 15).
 /// **5** — `api_keys` (A14).
-const SCHEMA_VERSION: i64 = 5;
+/// **6** — single user (decision 82): `users` rebuilt as the one-row account
+///   table, `vault_grants` dropped. See [`super::single_user`].
+const SCHEMA_VERSION: i64 = super::single_user::SINGLE_USER_VERSION;
 
 pub struct AuthDb {
     /// Visible to the rest of `auth` so each area keeps its own SQL beside its
-    /// own rules — users in `users.rs`, identity here — rather than growing one
+    /// own rules — the account in `account.rs`, identity here — rather than growing one
     /// module that knows every table.
     pub(super) conn: Connection,
 }
@@ -74,27 +78,41 @@ impl AuthDb {
     }
 
     pub fn open_at(path: &Path) -> Result<Self> {
+        Self::open_at_keeping(path, &Keep::OldestActiveOwner)
+    }
+
+    pub fn open_at_keeping(path: &Path, keep: &Keep) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating state dir {}", parent.display()))?;
         }
         let conn = Connection::open(path)
             .with_context(|| format!("opening auth database {}", path.display()))?;
-        Self::from_connection(conn)
+        Self::from_connection(conn, Some(path), keep)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conn_for_tests(&self) -> &Connection {
+        &self.conn
     }
 
     /// A throwaway database that touches no disk. Tests only.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(
+            Connection::open_in_memory()?,
+            None,
+            &Keep::OldestActiveOwner,
+        )
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(conn: Connection, path: Option<&Path>, keep: &Keep) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let db = Self { conn };
-        db.migrate()?;
+        db.migrate(path, keep)?;
+        super::single_user::check(&db.conn).context("auth.db failed a single-user invariant")?;
         Ok(db)
     }
 
@@ -151,7 +169,20 @@ impl AuthDb {
         Ok(exists)
     }
 
-    fn migrate(&self) -> Result<()> {
+    fn migrate(&self, path: Option<&Path>, keep: &Keep) -> Result<()> {
+        let has_users: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'users'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !has_users {
+            self.conn
+                .execute_batch(&super::single_user::users_table_sql("users"))?;
+        }
         self.conn.execute_batch(
             r#"
             -- One row, always. The CHECK is the enforcement: SQLite has no
@@ -176,21 +207,6 @@ impl AuthDb {
                 retired         TEXT,   -- superseded, still verifiable
                 revoked         TEXT,   -- compromised, never trust again
                 revoked_reason  TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS users (
-                id             TEXT PRIMARY KEY,
-                username       TEXT NOT NULL,
-                username_fold  TEXT NOT NULL UNIQUE,
-                display_name   TEXT,
-                password_hash  TEXT NOT NULL,
-                role           TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
-                status         TEXT NOT NULL CHECK (status IN ('active','disabled')),
-                created        TEXT NOT NULL,
-                updated        TEXT NOT NULL,
-                last_login     TEXT,
-                failed_count   INTEGER NOT NULL DEFAULT 0,
-                locked_until   TEXT
             );
 
             -- An app installation, not a person. Deliberately not `devices`:
@@ -239,16 +255,6 @@ impl AuthDb {
                 consumed     TEXT,
                 consumed_by  TEXT REFERENCES client_devices(id),
                 attempts     INTEGER NOT NULL DEFAULT 0
-            );
-
-            -- No foreign key on vault_id: vaults live in vaults.json, not here.
-            CREATE TABLE IF NOT EXISTS vault_grants (
-                user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                vault_id   TEXT NOT NULL,
-                access     TEXT NOT NULL CHECK (access IN ('read','write')),
-                granted    TEXT NOT NULL,
-                granted_by TEXT REFERENCES users(id),
-                PRIMARY KEY (user_id, vault_id)
             );
 
             CREATE TABLE IF NOT EXISTS security_events (
@@ -391,6 +397,9 @@ impl AuthDb {
                 rebuilt?;
             }
 
+            // v5→v6: single user (decision 82).
+            super::single_user::migrate(&self.conn, path, keep, &crate::index::now_rfc3339())?;
+
             // v4→v5: `api_keys` (A14). **Deliberately nothing to do here.**
             // The table is created by the `CREATE TABLE IF NOT EXISTS` batch
             // above, which runs on every open, so a v4 database gains it
@@ -531,6 +540,17 @@ impl AuthDb {
             [kind],
             |r| r.get(0),
         )?)
+    }
+
+    /// Every event's kind and detail, oldest first — for the tests that
+    /// assert no secret reaches the audit trail.
+    #[cfg(test)]
+    pub fn all_events(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT kind, COALESCE(detail, '') FROM security_events ORDER BY seq")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The address recorded on the most recent event of `kind`.
@@ -775,12 +795,6 @@ impl AuthDb {
             .optional()?)
     }
 
-    pub fn count_users(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?)
-    }
-
     pub fn mark_pairing_consumed(&self, id: &str, consumed_by: &str, now: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE pairing_sessions SET consumed = ?2, consumed_by = ?3 WHERE id = ?1",
@@ -857,7 +871,6 @@ mod tests {
             "server_credentials",
             "sessions",
             "users",
-            "vault_grants",
             "ws_tickets",
         ] {
             assert!(
@@ -865,6 +878,8 @@ mod tests {
                 "auth.db is missing `{expected}`; have {names:?}"
             );
         }
+        // And the A9 placeholder is gone for good (decision 82).
+        assert!(!names.iter().any(|n| n == "vault_grants"), "{names:?}");
     }
 
     #[test]
@@ -1022,14 +1037,9 @@ mod tests {
         {
             let db = AuthDb::open(dir.path()).unwrap();
             db.conn.execute_batch("PRAGMA user_version = 4;").unwrap();
-            crate::auth::users::create_user(
+            crate::auth::account::create_account(
                 &mut AuthDb::open(dir.path()).unwrap(),
-                crate::auth::users::NewUser {
-                    username: "dewansh",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Owner,
-                },
+                "hash",
                 "2026-01-01T00:00:00Z",
             )
             .unwrap();
@@ -1066,7 +1076,7 @@ mod tests {
             .unwrap();
         assert_eq!(fk_on, 1);
         let mut db = db;
-        let user = db.find_user("dewansh").unwrap().unwrap();
+        let user = db.account().unwrap().unwrap();
         let (_, secret) = crate::auth::keys::create(
             &mut db,
             &user.id,

@@ -16,13 +16,11 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
 }) {
   final t = context.tokens;
 
-  // Prototype phone: 16 / 1.65; wide: 17 / 1.7. Keep the user's size, match the
-  // leading and the softer prose colour.
   final body = TextStyle(
     fontFamily: bodyFamily,
     fontSize: fontSize,
-    height: 1.65,
-    color: t.text2,
+    height: StormTokens.proseLeading,
+    color: t.text,
   );
 
   TextStyle heading(double size, {FontWeight weight = FontWeight.w600}) =>
@@ -45,7 +43,7 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
   // line up. The gap is listBulletPadding — custom checkboxBuilder must
   // apply the same right pad or the package's tight column width stretches
   // the box into a pill that eats the gap (and the label).
-  final checkboxSide = stormMarkdownCheckboxSize(fontSize);
+  final checkboxSide = stormMarkdownCheckboxSize(t.fs);
 
   return MarkdownStyleSheet(
     a: body.copyWith(
@@ -93,7 +91,7 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
       border: Border.all(color: t.border, width: t.bw),
     ),
     listIndent: checkboxSide,
-    listBullet: body.copyWith(color: t.text2),
+    listBullet: body,
     listBulletPadding: const EdgeInsets.only(right: kStormMarkdownCheckboxGap),
     checkbox: body.copyWith(color: t.accent),
     // Inserted between *every* sibling, including list items. Prototype

@@ -43,6 +43,15 @@ void main() {
         expect(text, _grants('com.apple.security.app-sandbox'));
       });
 
+      // The release app listens on no port: integration sign-ins come back
+      // as `storm://oauth` links (decision 81l). The debug build keeps the
+      // template's grant, which Flutter's tooling uses.
+      if (name == 'Release') {
+        test('does not grant network.server', () {
+          expect(text, isNot(_grants('com.apple.security.network.server')));
+        });
+      }
+
       for (final entry in required.entries) {
         test('grants ${entry.key}', () {
           expect(

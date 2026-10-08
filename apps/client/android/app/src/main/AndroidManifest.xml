@@ -35,6 +35,21 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Integration sign-ins come back here (spec §10.4, decision
+                 81l): the browser opens storm://oauth/callback?state=…&code=…
+                 and MainActivity hands it to Dart on the storm/links channel.
+                 Only the oauth host: nothing else is routed into the app. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="storm" android:host="oauth"/>
+            </intent-filter>
+            <!-- Flutter's own deep linking would push the link into the router
+                 as a page route; the storm/links channel handles it instead. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"/>
         </activity>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

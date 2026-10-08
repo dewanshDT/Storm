@@ -72,6 +72,7 @@ Practical consequences worth knowing before you start:
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/relay/` | `storm-relay` — the SRP v1 relay. Standalone crate; **no workspace** (R6). |
+| `apps/server/src/gateway/` | The MCP Gateway's store, data key and upstream client (M21, decision 81). Policy stays in `ops.rs`. |
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
@@ -86,6 +87,8 @@ Practical consequences worth knowing before you start:
 | `docs/storm-adaptive.md` | M12 design brief — the wide-screen layout. |
 | `docs/storm-ui.md` | What every screen does today, for designing against. |
 | `docs/design_handoff_storm_design_system/` | M14 design system + prototype. `README.md` is the brief; the two `.dc.html` files open in a browser. |
+| `design_handoff_storm_v2/` | **M22 (Storm v2) design source of truth** — activity rail, single user, the agent loop. The prototype wins over its README. |
+| `docs/design/` | v2 discovery (`STORM_UI_UX_DISCOVERY.md`), the implementation plan (`STORM_V2_IMPLEMENTATION_PLAN.md`) and the visual acceptance set + harness (`acceptance/storm-v2/`). |
 
 Read `docs/editor-findings.md` before changing anything in
 `apps/client/lib/editor/`. It records the constraint the whole editor rests on
@@ -208,6 +211,29 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   There is one breakpoint (900px, `lib/ui/breakpoints.dart`). A change that
   alters what renders below it is a defect, not a design choice — every
   adaptive test asserts both sides for that reason.
+- **Every pane beside the rail or a sidebar sits in `PaneSemantics`** (Storm
+  v2). The pane is a nested navigator whose route carries a modal barrier
+  with `BlockSemantics`, which otherwise removes every sibling painted before
+  it — the rail, the sidebar — from screen readers.
+- **`/` is not a screen** (Storm v2). It redirects to the device's last
+  location (`NavMemory`), and system back follows `logicalParent` in
+  `AppShell` once the router has nothing to pop; only a vault root exits.
+- **Unseen is device-local and never stored on the server** (Storm v2,
+  slice 8): the last version each device opened is in its prefs
+  (`SeenVersions`), compared with the server's `agent-writes` map. A server
+  copy would clear a phone's dot because the laptop opened the note. A
+  device's first successful `agent-writes` load for a vault records a
+  `"<vault>/"` baseline marker and takes the versions it found as seen
+  (slice 9); markers are never evicted, or a long history would re-baseline
+  and hide real dots.
+- **Prose is never `SelectableText` on the open note** (Storm v2). Flutter
+  web leaves a read-only text field's text out of the DOM, so the note body
+  vanished from screen readers; Read mode is plain text in a `SelectionArea`.
+  `test/semantics_test.dart` holds it, with the provenance link's own node.
+- **The terminal's theme is one instance per colour set** (Storm v2). xterm2
+  reports the colour scheme to the agent on every non-identical theme while
+  DEC 2031 is on; a report after the agent restored echo prints as
+  `^[[?997;1n` in the scrollback.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose
@@ -279,14 +305,12 @@ From M19 slice 2 (users and passwords):
   characters, hash the first 72, and every password sharing that prefix opens
   the account. A test hashes 1000 bytes and checks that a variant differing at
   byte 900 fails.
-- **The first account is an owner, and the last *active* owner cannot be
-  deleted, disabled or demoted.** Disabled owners do not count: an account that
-  cannot log in cannot administer, so leaving only disabled ones is the same
-  lockout as leaving none. SQLite cannot express either rule.
-- **Usernames are ASCII and unique by casefold.** Uniqueness is decided on the
-  fold, so the fold must be unambiguous — Unicode brings locale-dependent case
-  rules and homoglyphs, and two visually identical usernames as separate rows
-  is a security bug. `display_name` is unrestricted.
+- **Storm is single-user** (decision 82). `users` is the one-row account table
+  (`only_row`), password only — no usernames, roles or status. `auth.db` v6
+  (`auth/single_user.rs`) collapsed older databases onto the oldest active
+  owner after writing `auth.db.pre-v6`, in one transaction; its invariants are
+  checked on every open. `agent.db`/`gateway.db` are reconciled on every boot
+  (`ops::reconcile_single_user`). `user_id` columns hold the account id.
 - **No `--password` flag, in any command, ever.** A password in an argument is
   in the shell history and in `ps` for every other user on the box. Prompt
   without echo, or read `--password-stdin`.
@@ -425,6 +449,130 @@ decision 77):
   fell behind gets an explicit gap.** Never a short read and never
   `Last-Event-ID`: resume has to be exact, and it has to cross the relay
   (SRP §5.3).
+
+From M21 (the MCP Gateway — the spec is the vault's *MCP Gateway/V1
+Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
+
+- **`state/gateway/gateway.db` and `state/gateway/keys/` cannot be rebuilt,
+  and travel together** (81b). `backup_all()` carries both, before the "no
+  vaults" early return. Ciphertexts without their key restore a gateway that
+  can authenticate nothing.
+- **An upstream credential is never in the clear at rest.** It is sealed with
+  XChaCha20-Poly1305 (`chacha20poly1305`, pure Rust) under an AAD of
+  `<id> 0x00 <kind>`, so a ciphertext moved to another row does not open. An
+  opened secret is a `Plaintext`, whose `Debug` is redacted. Say plainly what
+  this buys: protection against a leak of the database alone, not against
+  root or a full backup.
+- **The data key is a file, `0600` in a `0700` directory, created with those
+  modes.** A missing key at boot is not a lockout: a new key becomes active
+  and the affected connections become `needs_reauth`.
+- **Integrations are managed on the session tier only** (81c). A connection
+  is found only among the account's own rows (`404` otherwise). No MCP tool
+  manages one, so an `stk_` key never can.
+- **A connection's URL, slug and auth kind never change after creation.** A
+  credential is presented only to its own upstream (AM24); re-pointing a
+  connection would hand its token to a new host. The store's update does not
+  write those columns.
+- **An integration's audit row names the upstream's host, never its URL** —
+  a pasted URL can carry a key in its query string — and never a credential.
+- **Only rmcp's `*_once` request methods send anything upstream** (AM26,
+  81d). `call_tool`, `get_prompt` and `read_resource` re-send their request
+  to drive SEP-2322 rounds, so one agent call would execute several times.
+  `only_the_once_methods_send_a_request_upstream` reads `ops.rs` and
+  `src/gateway/` and fails on them.
+- **The gateway's HTTP client never follows a redirect**, so a credential
+  header is never replayed to a host it was not configured for, and its TLS
+  is `ring` with the bundled roots, configured on the client itself.
+- **An upstream's error text never leaves `gateway::upstream`.** Failures are
+  the stable §12 codes; rmcp's `HTTP <status>: <body>` is read for the status
+  only. `--gateway-allow-http-upstreams` is hidden and exists for the test
+  suites.
+- **Every agent call is authorized in `ops::integration_call`, per call**
+  (spec §7, 81e): host owns session, session live, live grant, owner is the account,
+  connection the account's and `connected`, method permitted, tool allowed,
+  and vault writes only with a write vault chosen at launch **and**
+  `agent_writes` (not `mcp_writable`, which is `/mcp`'s alone). A refusal is
+  a JSON-RPC error with a stable code, never an HTTP error.
+- **An agent writes only to its session's write vault, refused at the vault
+  seam** (decision 82, slice 5): `StormPolicy` denies `Actor::Agent` +
+  `Access::Write` on any other vault, and `mcp.rs` turns that 403 into the
+  JSON-RPC code `vault_write_not_allowed`. An older client's
+  `allow_vault_writes` without a vault launches read only, never all-vault.
+- **No note data on a command line or in an environment** (slice 5). The
+  host's `start` carries `context: true`, never text; the runtime maps it to
+  the compile-time `mcp::OPENING_PROMPT`, and the agent reads the note
+  through `session_context`, keyed on its own session.
+- **A request the gateway did not forward is `session_unknown`, and nothing
+  else is.** That is the only answer the bridge may replay `initialize` on.
+  Upstream sessions live in memory so a restart produces it; closing one
+  cancels it, so an in-flight call fails once and is never re-sent.
+- **Request-scoped messages ride their call's own response stream**;
+  only unsolicited ones use the link's `mcp.message`. A call's progress and
+  elicitations die with it.
+- **The host is told connection ids and slugs, never a credential** (AM23);
+  `shell` and a host without `mcp_bridge` get no grants. **Agents never see
+  `delete_note`** (`mcp::NEVER_FOR_AGENTS`), and `Actor::Agent` is the
+  account's identity, read through `user_id()`.
+- **The bridge never retries, and replays `initialize` only on
+  `session_unknown`** (81f, spec §11). `apps/runtime/src/bridge.rs`'s six
+  rules each have a test, and `gateway_e2e.py` catches the gates' `leak_init`,
+  `retry` and `no_cancel` mutations against the real build. A late answer to
+  an elicitation is dropped, and elicitation ids are unique per upstream
+  session so one can never answer another.
+- **A session's MCP config is AM32 exactly**: `claude-code` gets
+  `--mcp-config … --strict-mcp-config`; `opencode` gets its own
+  `XDG_CONFIG_HOME`, `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `"<slug>_*":
+  "ask"`; everything else gets nothing. A config that cannot be written fails
+  the start rather than launching unconfined. It holds a handle and a socket
+  path, never a credential.
+- **OAuth discovery never reaches a private address** (81g, §10). rmcp's
+  OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
+  every URL and redirect hop resolved and refused unless all its addresses
+  are public, then connected to exactly those addresses.
+- **An OAuth flow is single use by SQL, not by code order**: loading it
+  claims it with one `UPDATE … WHERE used_at IS NULL`. The state is stored
+  only as a hash; the redirect URI is loopback or `storm://oauth`, never LAN.
+- **A refresh is single flight per connection, and a rotated pair is
+  persisted before it is used**; a rejected refresh is `needs_reauth`, never
+  retried in a loop.
+- **The client's sign-in redirect is the spec's, per platform** (§10.4,
+  81l): **`storm://oauth/callback` on Android and macOS, a loopback listener
+  on Linux and Windows.** Never loopback everywhere: that is the design the
+  spec rejected for Android, where the app is backgrounded during the login.
+  Either way the client relays only `{state, code}` and never sees a token.
+  - The loopback listener listens before it opens the browser, answers only
+    its redirect path, and closes after one sign-in.
+  - A `storm://oauth` link is buffered by the native side
+    (`MainActivity.kt`, `AppDelegate.swift`) until Dart calls `takeLinks`.
+  - A link no sign-in in this process is waiting for is an **orphan, relayed
+    by the Integrations screen, never dropped**: Android may deliver it to a
+    fresh instance, and the flow lives on the server.
+  - The registrations are configuration that fails silently, and
+    `test/oauth_scheme_registration_test.dart` guards them. Flutter's own
+    deep linking is off on Android, so the link never becomes a page route.
+  - The macOS Release app no longer grants `network.server`, and the
+    entitlements test holds that.
+  - PR CI never compiles the native projects; push to `acceptance/*` and
+    the acceptance workflow does.
+
+  **"Can write to" is off by default and absent for `shell`.**
+- **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
+  `DROP` or `ALTER`; a test reads the schema to enforce it.
+- **An agent's listings never count against its session's budget**
+  (AM-G11, 81m). `tools/list`, `prompts/list`, `resources/list` and
+  `resources/templates/list` take only their connection's slot
+  (`counts_against_session`). An agent CLI lists every server in parallel as
+  it starts, and refusing that silently leaves an integration with no tools
+  for the session. Execution keeps the full budget, and a limit hit is still
+  refused, never queued (§12).
+- **A new upstream tool is recorded, never enabled** (spec §9, 81k). Only
+  the owner's *first* test turns tools on (G-D16). After that, any listing,
+  the owner's or an agent's, records unknown names in `new_tools`, and the
+  owner sees "N new tools — review" until they save the tool list. Nothing
+  but that save changes the allowlist. `known_tools` is written only by
+  `observe_tools` and `review_tools`, never by `update_connection`, so an
+  older copy of the row cannot undo a review. Tool names are the upstream's:
+  the client shows them through `displayToolName`.
 
 ## Style
 

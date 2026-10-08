@@ -24,7 +24,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiError, ApiResult, Shared, bad_request, conflict, not_found, vault_of};
 use crate::auth::authz::{Access, Actor};
@@ -51,7 +51,7 @@ pub async fn list_vaults(state: &Shared, actor: &Actor) -> ApiResult<Vec<VaultIn
         // A collection **filters**; it does not refuse. `403` is the right
         // answer for a named vault and the wrong one for a list — there is no
         // way to refuse half a list, and one unreachable vault must not blank
-        // the whole thing. Today `AllowAuthenticated` keeps every entry.
+        // the whole thing. `StormPolicy` lets every caller read every vault.
         if !crate::api::may_see_vault(state, actor, &entry.id) {
             continue;
         }
@@ -152,6 +152,134 @@ pub async fn get_note(
         .ok_or_else(|| not_found("no such note"))?;
     let content = ix.vault.read(&note.path)?;
     Ok(NoteDetail { note, content })
+}
+
+/// The latest agent write to a note: the session that wrote it last,
+/// even after a human edits it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentWrite {
+    pub session_id: String,
+    pub session_name: String,
+    /// The session was dismissed; its name is still the one it had.
+    pub session_dismissed: bool,
+    pub kind: String,
+    pub version: i64,
+    pub at: String,
+}
+
+/// A note as REST serves it: [`NoteDetail`] plus its provenance.
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteWithProvenance {
+    #[serde(flatten)]
+    pub detail: NoteDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_write: Option<AgentWrite>,
+}
+
+pub async fn get_note_with_provenance(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+) -> ApiResult<NoteWithProvenance> {
+    let detail = get_note(state, actor, vault, id).await?;
+    let agent_write = match state.agent.latest_write(vault, id).map_err(internal)? {
+        Some(w) if w.version.is_some() => {
+            let launch = state.agent.launch_of(&w.session_id).map_err(internal)?;
+            let session = state.agent.get(&w.session_id).ok();
+            Some(AgentWrite {
+                session_name: launch
+                    .map(|l| l.name)
+                    .or_else(|| session.as_ref().map(|s| s.workspace.clone()))
+                    .unwrap_or_default(),
+                session_dismissed: session.is_none(),
+                session_id: w.session_id,
+                kind: w.kind,
+                version: w.version.unwrap_or_default(),
+                at: w.at,
+            })
+        }
+        _ => None,
+    };
+    Ok(NoteWithProvenance {
+        detail,
+        agent_write,
+    })
+}
+
+/// The latest agent write to a note, for the unseen dots.
+#[derive(Debug, Clone, Serialize)]
+pub struct LatestAgentWrite {
+    pub version: i64,
+    pub at: String,
+    pub session_id: String,
+}
+
+/// Note id → its latest agent write, for every note in a vault an agent wrote.
+pub async fn vault_agent_writes(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+) -> ApiResult<std::collections::BTreeMap<String, LatestAgentWrite>> {
+    vault_of(state, actor, Access::Read, vault).await?;
+    Ok(state
+        .agent
+        .latest_writes(vault)
+        .map_err(internal)?
+        .into_iter()
+        .filter_map(|w| {
+            Some((
+                w.note_id?,
+                LatestAgentWrite {
+                    version: w.version?,
+                    at: w.at,
+                    session_id: w.session_id,
+                },
+            ))
+        })
+        .collect())
+}
+
+/// What `session_context` gives an agent: its session's context note, read
+/// now, through the same path every client reads.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionContext {
+    pub vault_id: String,
+    pub note_id: String,
+    pub title: String,
+    pub path: String,
+    pub version: i64,
+    pub content: String,
+}
+
+/// The calling agent's own context note. Keyed on the actor's session, which
+/// the gateway has proven is the calling host's and live, so no agent can
+/// name another session's.
+pub async fn session_context(state: &Shared, actor: &Actor) -> ApiResult<SessionContext> {
+    let Actor::Agent { session_id, .. } = actor else {
+        return Err(bad_request("only an agent session has a context note"));
+    };
+    let context = state
+        .agent
+        .launch_of(session_id)
+        .map_err(internal)?
+        .and_then(|l| l.context)
+        .ok_or_else(|| not_found("this session was started without a note"))?;
+    let note = match get_note(state, actor, &context.vault_id, &context.note_id).await {
+        Ok(note) => note,
+        Err(e) if e.0.is_client_error() => {
+            return Err(not_found("the context note no longer exists"));
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(SessionContext {
+        vault_id: context.vault_id,
+        note_id: note.note.id,
+        title: note.note.title,
+        path: note.note.path,
+        version: note.note.version,
+        content: note.content,
+    })
 }
 
 pub struct Backlinks {
@@ -329,7 +457,63 @@ pub async fn create_note(
         .create_note(path, content)
         .map_err(|e| crate::api::bad_request(e.to_string()))?;
     broadcast_latest(state, &ix, result.seq);
+    record_agent_write(state, actor, vault, &result.note, "created");
     Ok(result)
+}
+
+/// The write hook: an agent's successful write becomes a row of its
+/// session's Wrote list and the note's provenance. Never fails the write,
+/// which is already on disk.
+fn record_agent_write(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    note: &crate::db::NoteRow,
+    kind: &str,
+) {
+    let Actor::Agent { session_id, .. } = actor else {
+        return;
+    };
+    let write = crate::agent::store::WriteRecord {
+        session_id: session_id.clone(),
+        vault_id: vault.to_string(),
+        note_id: Some(note.id.clone()),
+        path: None,
+        kind: kind.to_string(),
+        version: Some(note.version),
+        at: write_stamp(),
+    };
+    if let Err(e) = state.agent.record_write(&write) {
+        tracing::warn!(error = %e, session = %session_id, "could not record an agent's write");
+    }
+}
+
+fn record_agent_script_write(state: &Shared, actor: &Actor, vault: &str, path: &str, kind: &str) {
+    let Actor::Agent { session_id, .. } = actor else {
+        return;
+    };
+    let write = crate::agent::store::WriteRecord {
+        session_id: session_id.clone(),
+        vault_id: vault.to_string(),
+        note_id: None,
+        path: Some(path.to_string()),
+        kind: kind.to_string(),
+        version: None,
+        at: write_stamp(),
+    };
+    if let Err(e) = state.agent.record_write(&write) {
+        tracing::warn!(error = %e, session = %session_id, "could not record an agent's write");
+    }
+}
+
+/// Fixed width, so the stamps order as text.
+fn write_stamp() -> String {
+    let format = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    time::OffsetDateTime::now_utc()
+        .format(&format)
+        .unwrap_or_else(|_| crate::index::now_rfc3339())
 }
 
 /// Replaces a note's content, merging against the version the caller read.
@@ -354,6 +538,7 @@ pub async fn update_note(
         .put_note(id, base_version, content, device_id)
         .map_err(|e| not_found(e.to_string()))?;
     broadcast_latest(state, &ix, result.seq);
+    record_agent_write(state, actor, vault, &result.note, "edited");
     Ok(result)
 }
 
@@ -637,13 +822,15 @@ pub async fn create_script(
     content: &str,
 ) -> ApiResult<ScriptStored> {
     let rel = script_path(name)?;
-    let handle = kit_handle(state, actor, Access::Write).await?;
+    let kit = kit_vault_id(state).await?;
+    let handle = vault_of(state, actor, Access::Write, &kit).await?;
     let mut ix = handle.indexer.lock().await;
     if ix.vault.exists(&rel) {
         return Err(conflict(format!("script “{name}” already exists")));
     }
     ix.put_attachment(&rel, content.as_bytes())
         .map_err(|e| bad_request(e.to_string()))?;
+    record_agent_script_write(state, actor, &kit, &rel, "script_created");
     Ok(ScriptStored {
         name: name.to_string(),
         path: rel,
@@ -660,13 +847,15 @@ pub async fn update_script(
     content: &str,
 ) -> ApiResult<ScriptStored> {
     let rel = script_path(name)?;
-    let handle = kit_handle(state, actor, Access::Write).await?;
+    let kit = kit_vault_id(state).await?;
+    let handle = vault_of(state, actor, Access::Write, &kit).await?;
     let mut ix = handle.indexer.lock().await;
     if !ix.vault.exists(&rel) {
         return Err(not_found("no such script"));
     }
     ix.put_attachment(&rel, content.as_bytes())
         .map_err(|e| bad_request(e.to_string()))?;
+    record_agent_script_write(state, actor, &kit, &rel, "script_edited");
     Ok(ScriptStored {
         name: name.to_string(),
         path: rel,
@@ -834,34 +1023,6 @@ pub struct CreatedApiKey {
     pub secret: String,
 }
 
-/// The user a key operation acts on, and the refusal if the caller may not.
-///
-/// **The one authorization rule A14 adds, and it is deliberately not a policy.**
-/// A user reaches their own keys; an owner reaches anyone's. That is it — no
-/// grants, no vault scoping, no new abstraction for the authorization release
-/// to unpick. When that release lands, this becomes one of its inputs rather
-/// than a competing system.
-fn target_user<'a>(actor: &'a Actor, requested: Option<&'a str>) -> ApiResult<&'a str> {
-    // Every caller has a user since the cutover, so there is no ownerless
-    // case to refuse any more — that branch existed only for the shared token.
-    let caller = actor.user_id();
-
-    match requested {
-        None => Ok(caller),
-        Some(other) if other == caller => Ok(caller),
-        Some(other) => {
-            if actor.role() == crate::auth::users::Role::Owner {
-                Ok(other)
-            } else {
-                Err(ApiError(
-                    axum::http::StatusCode::FORBIDDEN,
-                    "you can only manage your own keys".into(),
-                ))
-            }
-        }
-    }
-}
-
 /// Mints a key for the caller (A14). The plaintext is in the return value and
 /// nowhere else.
 pub async fn create_api_key(
@@ -871,7 +1032,7 @@ pub async fn create_api_key(
     expires: Option<&str>,
     created_via: Option<&str>,
 ) -> ApiResult<CreatedApiKey> {
-    let owner = target_user(actor, None)?;
+    let owner = actor.user_id();
     crate::auth::keys::validate_name(name).map_err(bad_request)?;
 
     let now = crate::index::now_rfc3339();
@@ -883,16 +1044,14 @@ pub async fn create_api_key(
     Ok(CreatedApiKey { key, secret })
 }
 
-/// Lists keys. Own by default; an owner may name another user.
+/// Lists the account's keys.
 pub async fn list_api_keys(
     state: &Shared,
     actor: &Actor,
-    user: Option<&str>,
 ) -> ApiResult<Vec<crate::auth::keys::ApiKey>> {
-    let owner = target_user(actor, user)?;
     let auth_db = state.auth_db.lock().await;
     auth_db
-        .api_keys_for_user(owner)
+        .api_keys_for_user(actor.user_id())
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -906,11 +1065,7 @@ pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiR
         .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| not_found("no such key"))?;
 
-    // **Checked against the key's real owner**, so naming someone else's key id
-    // does not reveal that it exists — the refusal is the same shape whether
-    // the id is wrong or merely not yours.
-    let allowed = target_user(actor, Some(&key.user_id));
-    if allowed.is_err() {
+    if key.user_id != actor.user_id() {
         return Err(not_found("no such key"));
     }
 
@@ -919,7 +1074,7 @@ pub async fn revoke_api_key(state: &Shared, actor: &Actor, key_id: &str) -> ApiR
         &mut auth_db,
         key_id,
         Some(actor.user_id()),
-        "revoked by user",
+        "revoked from the app",
         &now,
     )
     .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -932,22 +1087,7 @@ fn internal(e: impl std::fmt::Display) -> ApiError {
     ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// **The one gate on every `/v1/agent/*` operation** (AM5): agent execution and
-/// host administration are the server owner's alone until the authorization
-/// release. Anyone else gets `403` — never an empty list, which would read as
-/// "no hosts" rather than "not yours to see".
-pub fn require_owner(actor: &Actor) -> ApiResult<()> {
-    if actor.role() == crate::auth::users::Role::Owner {
-        Ok(())
-    } else {
-        Err(ApiError(
-            axum::http::StatusCode::FORBIDDEN,
-            "agents are available to the server owner only".into(),
-        ))
-    }
-}
-
-/// A host as the owner's client sees it.
+/// A host as the client sees it.
 #[derive(Debug, Clone, Serialize)]
 pub struct HostView {
     #[serde(flatten)]
@@ -991,7 +1131,6 @@ pub async fn issue_host_enrollment(
     actor: &Actor,
     server_url: &str,
 ) -> ApiResult<IssuedEnrollment> {
-    require_owner(actor)?;
     crate::auth::hosts::validate_server_url(server_url).map_err(bad_request)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
@@ -1009,8 +1148,7 @@ pub async fn issue_host_enrollment(
     })
 }
 
-pub async fn list_hosts(state: &Shared, actor: &Actor) -> ApiResult<Vec<HostView>> {
-    require_owner(actor)?;
+pub async fn list_hosts(state: &Shared) -> ApiResult<Vec<HostView>> {
     let auth_db = state.auth_db.lock().await;
     Ok(auth_db
         .list_hosts()
@@ -1026,7 +1164,6 @@ pub async fn rename_host(
     host_id: &str,
     name: &str,
 ) -> ApiResult<HostView> {
-    require_owner(actor)?;
     crate::auth::hosts::validate_name(name).map_err(bad_request)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
@@ -1038,7 +1175,6 @@ pub async fn rename_host(
 
 /// Revokes a host: its tokens die now, and it cannot authenticate again.
 pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiResult<()> {
-    require_owner(actor)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
     if !crate::auth::hosts::revoke(&mut auth_db, host_id, actor.user_id(), &now)
@@ -1050,6 +1186,7 @@ pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     // Its link closes and its sessions fail now (freeze §5.6); the host ends
     // them itself when it is next refused.
     state.agent.revoke_host(host_id).map_err(internal)?;
+    sweep_gateway_sessions(state);
     Ok(())
 }
 
@@ -1195,12 +1332,7 @@ pub struct WorkspaceView {
     pub live_sessions: usize,
 }
 
-pub async fn host_workspaces(
-    state: &Shared,
-    actor: &Actor,
-    host_id: &str,
-) -> ApiResult<Vec<WorkspaceView>> {
-    require_owner(actor)?;
+pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<WorkspaceView>> {
     state.agent.refresh(host_id);
     let caps = state.agent.host_live(host_id).capabilities.ok_or_else(|| {
         ApiError(
@@ -1219,65 +1351,260 @@ pub async fn host_workspaces(
         .collect())
 }
 
+/// A session as clients see it: the record plus what it was launched with
+/// and how many notes it has written.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionView {
+    #[serde(flatten)]
+    pub session: crate::agent::store::SessionRecord,
+    pub name: String,
+    pub context: Option<crate::agent::store::Context>,
+    pub write_vault_id: Option<String>,
+    pub wrote_count: i64,
+    /// What it was granted at launch, named as then; Storm itself is not one.
+    pub integrations: Vec<crate::agent::store::SessionIntegration>,
+}
+
+fn session_view(
+    state: &Shared,
+    session: crate::agent::store::SessionRecord,
+) -> ApiResult<SessionView> {
+    let launch = state.agent.launch_of(&session.id).map_err(internal)?;
+    let wrote_count = state.agent.write_count(&session.id).map_err(internal)?;
+    let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
+    // A session launched before names existed is called by its workspace.
+    let (name, context, write_vault_id) = match launch {
+        Some(l) => (l.name, l.context, l.write_vault_id),
+        None => (session.workspace.clone(), None, None),
+    };
+    Ok(SessionView {
+        session,
+        name,
+        context,
+        write_vault_id,
+        wrote_count,
+        integrations,
+    })
+}
+
+/// A launched session, plus what the MCP Gateway granted it (spec §6).
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchedSession {
+    #[serde(flatten)]
+    pub session: SessionView,
+    pub mcp: LaunchMcp,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchMcp {
+    /// The granted connections, the built-in `storm` among them.
+    pub connections: Vec<crate::agent::store::McpGrant>,
+    /// Whether the session has a write vault; kept for older clients.
+    pub allow_vault_writes: bool,
+    /// Said out loud when a session gets less than it asked for: the host is
+    /// too old to bridge, or an older client asked for writes with no vault.
+    pub notice: Option<String>,
+}
+
 pub async fn launch_session(
     state: &Shared,
     actor: &Actor,
     req: crate::agent::Launch,
-) -> ApiResult<crate::agent::store::SessionRecord> {
-    require_owner(actor)?;
+) -> ApiResult<LaunchedSession> {
     // The host must exist and be live in auth.db, not merely connected.
-    {
+    let host_name = {
         let auth_db = state.auth_db.lock().await;
         match auth_db.host_by_id(&req.host_id).map_err(internal)? {
-            Some(h) if !h.is_revoked() => {}
+            Some(h) if !h.is_revoked() => h.name,
             _ => return Err(not_found("no such host")),
         }
+    };
+    let context = match &req.context {
+        Some(c) => {
+            let note = get_note(state, actor, &c.vault_id, &c.note_id).await?;
+            Some(crate::agent::store::Context {
+                vault_id: c.vault_id.clone(),
+                note_id: note.note.id,
+                title: note.note.title,
+            })
+        }
+        None => None,
+    };
+    if let Some(v) = &req.write_vault_id {
+        vault_of(state, actor, Access::Write, v).await?;
     }
+    let unhonoured_writes = req.allow_vault_writes && req.write_vault_id.is_none();
+    // Every non-disabled connection of the owner, plus `storm` (spec §6,
+    // G-D9). Snapshotted here; the manager drops them for `shell` and for a
+    // host that cannot bridge.
+    let connections = gateway_store(state)
+        .connections_of(actor.user_id())
+        .map_err(internal)?
+        .into_iter()
+        .filter(|c| c.status != status::DISABLED)
+        .collect::<Vec<_>>();
+    let meta = crate::agent::LaunchMeta {
+        context,
+        write_vault_id: req.write_vault_id.clone(),
+        integration_names: connections
+            .iter()
+            .map(|c| (c.id.clone(), c.display_name.clone()))
+            .collect(),
+    };
+    let mut offered = vec![crate::agent::store::McpGrant {
+        id: BUILTIN_ID.into(),
+        slug: BUILTIN_SLUG.into(),
+    }];
+    offered.extend(
+        connections
+            .into_iter()
+            .map(|c| crate::agent::store::McpGrant {
+                id: c.id,
+                slug: c.slug,
+            }),
+    );
+    let (session, launch, outcome) = state
+        .agent
+        .launch(actor.user_id(), req, meta, offered)
+        .map_err(agent_error)?;
+    let (connections, notice) = match outcome {
+        crate::agent::McpOutcome::Granted(g) => (
+            g,
+            unhonoured_writes.then(|| {
+                "This app is out of date, so the session is read only. Update Storm to \
+                 choose a vault it may write to."
+                    .to_string()
+            }),
+        ),
+        crate::agent::McpOutcome::Shell => (Vec::new(), None),
+        crate::agent::McpOutcome::OldHost => (
+            Vec::new(),
+            Some(format!(
+                "{host_name} can't use integrations — update storm-runtime"
+            )),
+        ),
+    };
+    if !connections.is_empty() {
+        let auth_db = state.auth_db.lock().await;
+        let detail = serde_json::json!({
+            "session_id": session.id,
+            "host_id": session.host_id,
+            "connections": connections.iter().map(|g| &g.id).collect::<Vec<_>>(),
+            "write_vault_id": launch.write_vault_id,
+        });
+        let _ = auth_db.record_event(
+            "integration_grant",
+            Some(actor.user_id()),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        );
+    }
+    let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
+    Ok(LaunchedSession {
+        session: SessionView {
+            session,
+            name: launch.name,
+            context: launch.context,
+            write_vault_id: launch.write_vault_id.clone(),
+            wrote_count: 0,
+            integrations,
+        },
+        mcp: LaunchMcp {
+            connections,
+            allow_vault_writes: launch.write_vault_id.is_some(),
+            notice,
+        },
+    })
+}
+
+pub async fn list_sessions(state: &Shared) -> ApiResult<Vec<SessionView>> {
     state
         .agent
-        .launch(actor.user_id(), req)
-        .map_err(agent_error)
+        .list()
+        .map_err(agent_error)?
+        .into_iter()
+        .map(|s| session_view(state, s))
+        .collect()
 }
 
-pub async fn list_sessions(
-    state: &Shared,
-    actor: &Actor,
-) -> ApiResult<Vec<crate::agent::store::SessionRecord>> {
-    require_owner(actor)?;
-    state.agent.list().map_err(agent_error)
+pub async fn get_session(state: &Shared, id: &str) -> ApiResult<SessionView> {
+    session_view(state, state.agent.get(id).map_err(agent_error)?)
 }
 
-pub async fn get_session(
+/// One note a session wrote, as its Wrote list shows it. `title` and `path`
+/// are the note's current ones; `None` once the note is gone.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionWrite {
+    pub vault_id: String,
+    /// `None` for a kit script, which is a file, not a note.
+    pub note_id: Option<String>,
+    pub title: Option<String>,
+    pub path: Option<String>,
+    pub kind: String,
+    /// `None` for a kit script: scripts are not versioned.
+    pub version: Option<i64>,
+    pub at: String,
+}
+
+/// The notes and kit scripts a session created or edited, newest write first.
+pub async fn session_writes(
     state: &Shared,
     actor: &Actor,
     id: &str,
-) -> ApiResult<crate::agent::store::SessionRecord> {
-    require_owner(actor)?;
-    state.agent.get(id).map_err(agent_error)
+) -> ApiResult<Vec<SessionWrite>> {
+    state.agent.get(id).map_err(agent_error)?;
+    let writes = state.agent.writes_of(id).map_err(internal)?;
+    let mut out = Vec::with_capacity(writes.len());
+    for w in writes {
+        if !crate::api::may_see_vault(state, actor, &w.vault_id) {
+            continue;
+        }
+        let (title, path) = match (&w.note_id, &w.path) {
+            (Some(note_id), _) => {
+                let row = match state.vaults.read().await.get(&w.vault_id) {
+                    Some(handle) => handle.indexer.lock().await.db.get_note(note_id)?,
+                    None => None,
+                };
+                (row.as_ref().map(|r| r.title.clone()), row.map(|r| r.path))
+            }
+            (None, path) => (
+                path.as_deref()
+                    .and_then(|p| p.strip_prefix(&format!("{SCRIPTS_ROOT}/")))
+                    .map(str::to_string),
+                path.clone(),
+            ),
+        };
+        out.push(SessionWrite {
+            title,
+            path,
+            vault_id: w.vault_id,
+            note_id: w.note_id,
+            kind: w.kind,
+            version: w.version,
+            at: w.at,
+        });
+    }
+    Ok(out)
 }
 
-pub async fn end_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
-    require_owner(actor)?;
+pub async fn end_session(state: &Shared, id: &str) -> ApiResult<()> {
     state.agent.end(id).map_err(agent_error)
 }
 
-pub async fn dismiss_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
-    require_owner(actor)?;
+pub async fn dismiss_session(state: &Shared, id: &str) -> ApiResult<()> {
     state.agent.dismiss(id).map_err(agent_error)
 }
 
-pub async fn session_input(state: &Shared, actor: &Actor, id: &str, bytes: &[u8]) -> ApiResult<()> {
-    require_owner(actor)?;
+pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
     state.agent.input(id, bytes).map_err(agent_error)
 }
 
 pub async fn session_resize(
     state: &Shared,
-    actor: &Actor,
     id: &str,
     size: crate::agent::TerminalSize,
 ) -> ApiResult<()> {
-    require_owner(actor)?;
     state.agent.resize(id, size).map_err(agent_error)
 }
 
@@ -1286,8 +1613,7 @@ pub struct AgentConfigView {
     pub default_provider: String,
 }
 
-pub async fn agent_config(state: &Shared, actor: &Actor) -> ApiResult<AgentConfigView> {
-    require_owner(actor)?;
+pub async fn agent_config(state: &Shared) -> ApiResult<AgentConfigView> {
     Ok(AgentConfigView {
         default_provider: state.agent.default_provider(),
     })
@@ -1299,7 +1625,6 @@ pub async fn set_agent_config(
     actor: &Actor,
     default_provider: &str,
 ) -> ApiResult<AgentConfigView> {
-    require_owner(actor)?;
     let valid = (1..=32).contains(&default_provider.len())
         && !default_provider.starts_with('-')
         && default_provider
@@ -1340,7 +1665,9 @@ pub async fn runtime_hello(
         let auth_db = state.auth_db.lock().await;
         let _ = auth_db.touch_host(host_id, &crate::index::now_rfc3339());
     }
-    state.agent.hello(host_id, hello).map_err(agent_error)
+    state.agent.hello(host_id, hello).map_err(agent_error)?;
+    sweep_gateway_sessions(state);
+    Ok(())
 }
 
 pub fn runtime_inventory(
@@ -1376,7 +1703,1430 @@ pub fn runtime_status(
     state
         .agent
         .host_status(host_id, session, report)
-        .map_err(agent_error)
+        .map_err(agent_error)?;
+    sweep_gateway_sessions(state);
+    Ok(())
+}
+
+// ---- MCP Gateway: integrations (decisions 81, 81c) -------------------------
+//
+// No MCP tool manages an integration (spec §14) and the routes are session
+// tier, so an `stk_` key never can.
+
+use crate::gateway::connections::{
+    self as conn, BUILTIN_ID, BUILTIN_SLUG, Connection, StaticCredential, auth_kind,
+    credential_kind, status,
+};
+
+/// A connection as the owner's client sees it. **Never a credential**: only
+/// whether one is held.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationView {
+    pub id: String,
+    pub slug: String,
+    pub display_name: String,
+    /// `None` for the built-in connection, which has no network hop.
+    pub url: Option<String>,
+    pub auth_kind: String,
+    pub status: String,
+    pub builtin: bool,
+    pub has_credential: bool,
+    pub tool_allowlist: Vec<String>,
+    pub known_tools: Option<Vec<String>>,
+    /// Tools that appeared since the owner last reviewed this connection's
+    /// tools: off, and shown as "N new tools — review" (spec §9). Upstream
+    /// names, so a client cleans them before display.
+    pub new_tools: Vec<String>,
+    pub expose_resources: bool,
+    pub expose_prompts: bool,
+    pub upstream_account_label: Option<String>,
+    pub last_ok: Option<String>,
+    pub last_error_code: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// Built-in only: whether agents may write at all (`agent_writes`); a
+    /// session also needs a write vault chosen at launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault_writes_available: Option<bool>,
+}
+
+fn builtin_view(state: &Shared) -> IntegrationView {
+    IntegrationView {
+        id: BUILTIN_ID.into(),
+        slug: BUILTIN_SLUG.into(),
+        display_name: "Storm vaults".into(),
+        url: None,
+        auth_kind: auth_kind::NONE.into(),
+        status: status::CONNECTED.into(),
+        builtin: true,
+        has_credential: false,
+        tool_allowlist: Vec::new(),
+        known_tools: None,
+        new_tools: Vec::new(),
+        expose_resources: false,
+        expose_prompts: false,
+        upstream_account_label: None,
+        last_ok: None,
+        last_error_code: None,
+        created_at: None,
+        updated_at: None,
+        vault_writes_available: Some(
+            state
+                .agent_writes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+    }
+}
+
+fn integration_view(
+    c: Connection,
+    has_credential: bool,
+    new_tools: Vec<String>,
+) -> IntegrationView {
+    IntegrationView {
+        id: c.id,
+        slug: c.slug,
+        display_name: c.display_name,
+        url: Some(c.url),
+        auth_kind: c.auth_kind,
+        status: c.status,
+        builtin: false,
+        has_credential,
+        tool_allowlist: c.tool_allowlist,
+        known_tools: c.known_tools,
+        new_tools,
+        expose_resources: c.expose_resources,
+        expose_prompts: c.expose_prompts,
+        upstream_account_label: c.upstream_account_label,
+        last_ok: c.last_ok,
+        last_error_code: c.last_error_code,
+        created_at: Some(c.created_at),
+        updated_at: Some(c.updated_at),
+        vault_writes_available: None,
+    }
+}
+
+fn view_of(state: &Shared, c: Connection) -> ApiResult<IntegrationView> {
+    let (held, new_tools) = {
+        let store = gateway_store(state);
+        (
+            store.has_credential(&c.id).map_err(internal)?,
+            store.new_tools(&c.id).map_err(internal)?,
+        )
+    };
+    Ok(integration_view(c, held, new_tools))
+}
+
+/// The gateway's store. A `std::sync::Mutex`: never hold the guard across an
+/// `.await` (the `agent/` rule).
+pub(crate) fn gateway_store(
+    state: &Shared,
+) -> std::sync::MutexGuard<'_, crate::gateway::store::GatewayDb> {
+    state.gateway.store.lock().expect("gateway store lock")
+}
+
+/// The caller's own live connection, or `404` — for someone else's too, so an
+/// owner probing ids learns nothing about another owner's integrations.
+fn own_connection(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Connection> {
+    let store = gateway_store(state);
+    match store.connection(id).map_err(internal)? {
+        Some(c) if c.owner_user_id == actor.user_id() && c.status != status::REVOKED => Ok(c),
+        _ => Err(not_found("no such integration")),
+    }
+}
+
+/// The audit detail for an integration event: ids, slug, kind and the
+/// upstream's **host only**. Never the URL — an owner can paste one with a key
+/// in its query string — and never a credential.
+fn integration_event(
+    state_auth: &crate::auth::AuthDb,
+    kind: &str,
+    actor: &Actor,
+    c: &Connection,
+    now: &str,
+) {
+    let host = c
+        .url
+        .parse::<axum::http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(str::to_string));
+    let detail = serde_json::json!({
+        "connection_id": c.id,
+        "slug": c.slug,
+        "auth_kind": c.auth_kind,
+        "upstream_host": host,
+    });
+    let _ = state_auth.record_event(kind, Some(actor.user_id()), None, now, &detail.to_string());
+}
+
+fn seal_static(
+    state: &Shared,
+    id: &str,
+    credential: &StaticCredential,
+) -> ApiResult<crate::gateway::crypto::Sealed> {
+    state
+        .gateway
+        .keys
+        .seal_json(id, credential_kind::STATIC, credential)
+        .map_err(internal)
+}
+
+/// Every integration the owner has, the built-in `storm` connection first.
+pub async fn list_integrations(state: &Shared, actor: &Actor) -> ApiResult<Vec<IntegrationView>> {
+    let rows = gateway_store(state)
+        .connections_of(actor.user_id())
+        .map_err(internal)?;
+    let mut out = vec![builtin_view(state)];
+    for c in rows {
+        out.push(view_of(state, c)?);
+    }
+    Ok(out)
+}
+
+pub async fn get_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<IntegrationView> {
+    if id == BUILTIN_ID {
+        return Ok(builtin_view(state));
+    }
+    let c = own_connection(state, actor, id)?;
+    view_of(state, c)
+}
+
+/// The request body of `POST /v1/integrations/connections`, as is.
+#[derive(Deserialize)]
+pub struct NewIntegration {
+    pub display_name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+    pub url: String,
+    pub auth_kind: String,
+    #[serde(default)]
+    pub credential: Option<StaticCredential>,
+}
+
+/// Connects an integration. V1 here takes `static` (a header, G-D24's PAT)
+/// and `none`; `oauth` arrives with its authorize flow (81g).
+pub async fn create_integration(
+    state: &Shared,
+    actor: &Actor,
+    req: NewIntegration,
+) -> ApiResult<IntegrationView> {
+    conn::validate_display_name(&req.display_name).map_err(bad_request)?;
+    let slug = req
+        .slug
+        .clone()
+        .unwrap_or_else(|| conn::slug_from(&req.display_name));
+    conn::validate_slug(&slug).map_err(bad_request)?;
+    conn::validate_url(&req.url, state.gateway.allow_http_upstreams()).map_err(bad_request)?;
+    match (req.auth_kind.as_str(), &req.credential) {
+        (auth_kind::STATIC, Some(c)) => {
+            conn::validate_static(&c.header, &c.value).map_err(bad_request)?
+        }
+        (auth_kind::STATIC, None) => {
+            return Err(bad_request("a static integration needs a credential"));
+        }
+        (auth_kind::NONE, None) => {}
+        (auth_kind::NONE, Some(_)) => {
+            return Err(bad_request(
+                "an integration without auth takes no credential",
+            ));
+        }
+        (auth_kind::OAUTH, None) => {}
+        (auth_kind::OAUTH, Some(_)) => {
+            return Err(bad_request(
+                "an OAuth integration is authorized, not given a credential",
+            ));
+        }
+        _ => return Err(bad_request("auth_kind is static or none")),
+    }
+
+    let now = crate::index::now_rfc3339();
+    let c = Connection {
+        id: crate::auth::identity::random_id("mcc_"),
+        owner_user_id: actor.user_id().to_string(),
+        slug,
+        display_name: req.display_name.trim().to_string(),
+        url: req.url,
+        // An OAuth connection waits for its authorization (§8 lifecycle).
+        status: if req.auth_kind == auth_kind::OAUTH {
+            status::PENDING_AUTH.into()
+        } else {
+            status::CONNECTED.into()
+        },
+        auth_kind: req.auth_kind,
+        tool_allowlist: Vec::new(),
+        known_tools: None,
+        expose_resources: true,
+        expose_prompts: true,
+        upstream_account_label: None,
+        last_ok: None,
+        last_error_code: None,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    let sealed = match &req.credential {
+        Some(credential) => Some(seal_static(state, &c.id, credential)?),
+        None => None,
+    };
+    gateway_store(state)
+        .insert_connection(&c, sealed.as_ref().map(|s| (credential_kind::STATIC, s)))
+        .map_err(|e| match e {
+            crate::gateway::store::InsertError::SlugTaken => conflict(e.to_string()),
+            crate::gateway::store::InsertError::Other(e) => internal(e),
+        })?;
+    {
+        let auth_db = state.auth_db.lock().await;
+        integration_event(&auth_db, "integration_created", actor, &c, &now);
+    }
+    Ok(integration_view(c, sealed.is_some(), Vec::new()))
+}
+
+/// The request body of `PATCH /v1/integrations/connections/{id}`; every
+/// field optional.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct IntegrationPatch {
+    pub display_name: Option<String>,
+    /// `false` disables (every call refused at once, §6); `true` re-enables.
+    pub enabled: Option<bool>,
+    pub tool_allowlist: Option<Vec<String>>,
+    pub expose_resources: Option<bool>,
+    pub expose_prompts: Option<bool>,
+    /// A replacement static credential (a rotated PAT).
+    pub credential: Option<StaticCredential>,
+}
+
+/// Changes what may change. **Never the URL, the slug or the auth kind**: a
+/// credential is presented only to its own upstream (AM24), so re-pointing a
+/// connection would hand its token to a new host, and live sessions were told
+/// the slug at launch.
+pub async fn update_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    patch: IntegrationPatch,
+) -> ApiResult<IntegrationView> {
+    if id == BUILTIN_ID {
+        return Err(bad_request("the built-in connection cannot be changed"));
+    }
+    let mut c = own_connection(state, actor, id)?;
+    if let Some(name) = &patch.display_name {
+        conn::validate_display_name(name).map_err(bad_request)?;
+        c.display_name = name.trim().to_string();
+    }
+    if let Some(tools) = &patch.tool_allowlist {
+        conn::validate_allowlist(tools).map_err(bad_request)?;
+        let mut tools = tools.clone();
+        tools.sort();
+        tools.dedup();
+        c.tool_allowlist = tools;
+    }
+    if let Some(on) = patch.expose_resources {
+        c.expose_resources = on;
+    }
+    if let Some(on) = patch.expose_prompts {
+        c.expose_prompts = on;
+    }
+    let mut events: Vec<&str> = Vec::new();
+    let sealed = match &patch.credential {
+        Some(credential) => {
+            if c.auth_kind != auth_kind::STATIC {
+                return Err(bad_request("only a static integration takes a credential"));
+            }
+            conn::validate_static(&credential.header, &credential.value).map_err(bad_request)?;
+            if c.status == status::NEEDS_REAUTH || c.status == status::ERROR {
+                c.status = status::CONNECTED.into();
+            }
+            events.push("integration_reauthorized");
+            Some(seal_static(state, &c.id, credential)?)
+        }
+        None => None,
+    };
+    match patch.enabled {
+        Some(false) if c.status != status::DISABLED => {
+            c.status = status::DISABLED.into();
+            events.push("integration_disabled");
+        }
+        Some(true) if c.status == status::DISABLED => {
+            c.status = status::CONNECTED.into();
+            events.push("integration_enabled");
+        }
+        _ => {}
+    }
+
+    let now = crate::index::now_rfc3339();
+    c.updated_at = now.clone();
+    {
+        let mut store = gateway_store(state);
+        if let Some(sealed) = &sealed {
+            store
+                .put_credential(&c.id, credential_kind::STATIC, sealed, None, &now)
+                .map_err(internal)?;
+        }
+        store.update_connection(&c).map_err(internal)?;
+        // Saving the tool list is the owner's review of the new tools (§9):
+        // they become known, on or off exactly as the list says.
+        if patch.tool_allowlist.is_some() {
+            store.review_tools(&c.id).map_err(internal)?;
+        }
+    }
+    // A disabled connection, or one whose credential just changed, keeps no
+    // live upstream session: the next call opens one with the new state.
+    if c.status == status::DISABLED || sealed.is_some() {
+        state.gateway.sessions.close_connection(&c.id);
+    }
+    if !events.is_empty() {
+        let auth_db = state.auth_db.lock().await;
+        for kind in events {
+            integration_event(&auth_db, kind, actor, &c, &now);
+        }
+    }
+    view_of(state, c)
+}
+
+/// Disconnects (§13): the connection becomes a `revoked` tombstone and its
+/// ciphertexts are deleted at once, so every later call is refused. Upstream
+/// revocation (RFC 7009) is best effort and arrives with OAuth (81g); a
+/// static token such as a GitHub PAT has no revocation call from Storm, and
+/// the owner revokes it upstream.
+pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
+    if id == BUILTIN_ID {
+        return Err(bad_request("the built-in connection cannot be deleted"));
+    }
+    let c = own_connection(state, actor, id)?;
+    // Read before the ciphertexts go: what an RFC 7009 revocation would send.
+    let revocation = if c.auth_kind == auth_kind::OAUTH {
+        state.gateway.revocation_for(&c).await
+    } else {
+        None
+    };
+    let now = crate::index::now_rfc3339();
+    gateway_store(state)
+        .revoke_connection(&c.id, &now)
+        .map_err(internal)?;
+    // Best effort, upstream (§13); the connection is already gone here.
+    if let Some(r) = revocation {
+        let gateway = state.gateway.clone();
+        tokio::spawn(async move { gateway.revoke(r).await });
+    }
+    // Its grants die with it (§13; the rows stay for the audit), and its live
+    // upstream sessions close, so the next call is refused at once.
+    state.agent.revoke_grants_for(&c.id).map_err(internal)?;
+    state.gateway.sessions.close_connection(&c.id);
+    let auth_db = state.auth_db.lock().await;
+    integration_event(&auth_db, "integration_deleted", actor, &c, &now);
+    Ok(())
+}
+
+/// What the owner's `test` learns. **Never the upstream's error text**: only
+/// the stable code (§12).
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationTest {
+    pub ok: bool,
+    pub error_code: Option<&'static str>,
+    pub server_name: Option<String>,
+    pub server_version: Option<String>,
+    pub tool_count: usize,
+    /// Tools awaiting the owner's review: off until the owner turns them on
+    /// (G-D16), and listed here until the owner saves the tool list (§9).
+    pub new_tools: Vec<String>,
+    pub integration: IntegrationView,
+}
+
+/// One upstream tool as the owner's allowlist editor sees it.
+#[derive(Debug, Clone, Serialize)]
+pub struct IntegrationTool {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub allowed: bool,
+    pub new: bool,
+}
+
+/// Runs the owner's probe against a connection and records what it found:
+/// `last_ok` or `last_error_code`, `needs_reauth` on a refused credential,
+/// the allowlist rule for new tools, and one metadata-only audit row.
+async fn probe_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<(
+    Connection,
+    Result<crate::gateway::upstream::ProbeResult, crate::gateway::upstream::UpstreamError>,
+)> {
+    if id == BUILTIN_ID {
+        return Err(bad_request("the built-in connection is served in process"));
+    }
+    let mut c = own_connection(state, actor, id)?;
+    if c.status == status::DISABLED {
+        return Err(conflict("the integration is disabled; enable it first"));
+    }
+    let started = std::time::Instant::now();
+    // A listing executes nothing, so the refresh-once rule may apply.
+    let result = state
+        .gateway
+        .with_target(&c, crate::gateway::upstream::probe)
+        .await;
+    let now = crate::index::now_rfc3339();
+    match &result {
+        Ok(_) => {
+            c.last_ok = Some(now.clone());
+            c.last_error_code = None;
+            if c.status == status::NEEDS_REAUTH || c.status == status::ERROR {
+                c.status = status::CONNECTED.into();
+            }
+        }
+        Err(e) => {
+            c.last_error_code = Some(e.code().to_string());
+            // A connection still waiting for its first authorization stays
+            // `pending_auth`: there was nothing to lose.
+            if e.needs_reauth() && c.status != status::PENDING_AUTH {
+                if c.auth_kind == auth_kind::OAUTH && c.status == status::CONNECTED {
+                    record_refresh_failed(state, &c);
+                }
+                c.status = status::NEEDS_REAUTH.into();
+            }
+        }
+    }
+    c.updated_at = now.clone();
+    {
+        let mut store = gateway_store(state);
+        store.update_connection(&c).map_err(internal)?;
+        // The owner's own listing: the baseline on the first test, and after
+        // it new tools recorded and left off (G-D16, §9).
+        if let Ok(found) = &result {
+            let names: Vec<String> = found.tools.iter().map(|t| t.name.to_string()).collect();
+            store
+                .observe_tools(&c.id, &names, true, &now)
+                .map_err(internal)?;
+        }
+        if let Some(fresh) = store.connection(&c.id).map_err(internal)? {
+            c = fresh;
+        }
+    }
+    state
+        .gateway
+        .record_call(crate::gateway::store::CallRecord {
+            at_ms: crate::gateway::now_ms(),
+            owner_user_id: c.owner_user_id.clone(),
+            connection_id: c.id.clone(),
+            session_id: None,
+            host_id: None,
+            method: "tools/list".into(),
+            tool: None,
+            outcome: if result.is_ok() { "ok" } else { "error" }.into(),
+            error_code: result.as_ref().err().map(|e| e.code().to_string()),
+            duration_ms: Some(started.elapsed().as_millis() as i64),
+            response_bytes: None,
+        });
+    Ok((c, result))
+}
+
+/// `POST /v1/integrations/connections/{id}/test` (§14).
+pub async fn test_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<IntegrationTest> {
+    let (c, result) = probe_integration(state, actor, id).await?;
+    let integration = view_of(state, c)?;
+    let (ok, error_code, server_name, server_version, tool_count) = match &result {
+        Ok(found) => (
+            true,
+            None,
+            Some(found.server_name.clone()),
+            Some(found.server_version.clone()),
+            found.tools.len(),
+        ),
+        Err(e) => (false, Some(e.code()), None, None, 0),
+    };
+    Ok(IntegrationTest {
+        ok,
+        error_code,
+        server_name,
+        server_version,
+        tool_count,
+        new_tools: integration.new_tools.clone(),
+        integration,
+    })
+}
+
+/// `GET /v1/integrations/connections/{id}/tools` (§14): the upstream's tools
+/// now, each with whether agents may call it. A failure is `502` with the
+/// stable code, never the upstream's text.
+pub async fn integration_tools(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<Vec<IntegrationTool>> {
+    let (c, result) = probe_integration(state, actor, id).await?;
+    let new_tools = gateway_store(state).new_tools(&c.id).map_err(internal)?;
+    let found =
+        result.map_err(|e| ApiError(axum::http::StatusCode::BAD_GATEWAY, e.code().to_string()))?;
+    let mut tools: Vec<IntegrationTool> = found
+        .tools
+        .into_iter()
+        .map(|t| {
+            let name = t.name.to_string();
+            IntegrationTool {
+                allowed: c.tool_allowlist.contains(&name),
+                new: new_tools.contains(&name),
+                title: t.title.clone(),
+                description: t.description.as_ref().map(|d| d.to_string()),
+                name,
+            }
+        })
+        .collect();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(tools)
+}
+
+// ---- MCP Gateway: an agent's call (decision 81e, spec §7) ------------------
+
+/// Methods an agent may send (spec §9). Anything else is refused.
+fn method_permitted(method: &str, c: Option<&Connection>) -> bool {
+    let resources = c.is_none_or(|c| c.expose_resources);
+    let prompts = c.is_none_or(|c| c.expose_prompts);
+    match method {
+        "initialize" | "ping" | "tools/list" | "tools/call" | "completion/complete" => true,
+        "resources/list"
+        | "resources/templates/list"
+        | "resources/read"
+        | "resources/subscribe"
+        | "resources/unsubscribe" => resources,
+        "prompts/list" | "prompts/get" => prompts,
+        _ => false,
+    }
+}
+
+/// What authorization established about a call, for the forwarding half.
+struct Authorized {
+    owner: String,
+    /// `None` for the built-in `storm` connection.
+    connection: Option<Connection>,
+    /// The session has a write vault **and** `agent_writes` is on.
+    vault_writes: bool,
+    write_vault: Option<String>,
+    /// The session was started from a note.
+    has_context: bool,
+}
+
+impl Authorized {
+    /// Whether the agent may call tool `name` (G-D16, G-D5). **One rule for
+    /// the `tools/call` gate and the `tools/list` filter**, so an agent is
+    /// never shown a tool it cannot call, nor able to call one it was not shown.
+    fn may_call(&self, name: &str) -> bool {
+        match &self.connection {
+            Some(c) => c.tool_allowlist.iter().any(|a| a == name),
+            None => {
+                !crate::mcp::NEVER_FOR_AGENTS.contains(&name)
+                    && (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+            }
+        }
+    }
+}
+
+/// Which agent call an audit row describes. `owner` is known once the call
+/// is authorized; a refused call is audited without one.
+#[derive(Clone)]
+struct CallScope {
+    owner: Option<String>,
+    session_id: String,
+    host_id: String,
+    connection_id: String,
+}
+
+impl CallScope {
+    /// One metadata-only audit row (G-D18).
+    fn audit(
+        &self,
+        gateway: &crate::gateway::Gateway,
+        method: Option<&str>,
+        tool: Option<&str>,
+        outcome: Result<(), &str>,
+        duration_ms: i64,
+        response_bytes: Option<i64>,
+    ) {
+        gateway.record_call(crate::gateway::store::CallRecord {
+            at_ms: crate::gateway::now_ms(),
+            owner_user_id: self.owner.clone().unwrap_or_default(),
+            connection_id: self.connection_id.clone(),
+            session_id: Some(self.session_id.clone()),
+            host_id: Some(self.host_id.clone()),
+            method: method.unwrap_or("response").to_string(),
+            tool: tool.map(str::to_string),
+            outcome: if outcome.is_ok() { "ok" } else { "refused" }.into(),
+            error_code: outcome.err().map(str::to_string),
+            duration_ms: Some(duration_ms),
+            response_bytes,
+        });
+    }
+}
+
+/// The code an agent gets for a connection the owner must reconnect. The
+/// bridge and the client parse it, so it is spelled here only.
+fn needs_reauth_code(slug: &str) -> String {
+    format!("integration_needs_reauth:{slug}")
+}
+
+/// Every check in spec §7, in order. A refusal is a stable code.
+async fn authorize_call(
+    state: &Shared,
+    host_id: &str,
+    session_id: &str,
+    connection_id: &str,
+) -> Result<Authorized, String> {
+    // The host owns the session, and it is live.
+    let session = state
+        .agent
+        .get(session_id)
+        .map_err(|_| "not_your_session".to_string())?;
+    if session.host_id != host_id {
+        return Err("not_your_session".into());
+    }
+    if !matches!(session.status.as_str(), "starting" | "running") {
+        return Err("session_not_live".into());
+    }
+    // A live grant.
+    state
+        .agent
+        .grant(session_id, connection_id)
+        .map_err(|_| "not_granted".to_string())?
+        .ok_or_else(|| "not_granted".to_string())?;
+    // Keeps the stable `owner_inactive` code for a removed account's session.
+    {
+        let auth_db = state.auth_db.lock().await;
+        if !matches!(auth_db.account_by_id(&session.owner_user_id), Ok(Some(_))) {
+            return Err("owner_inactive".into());
+        }
+    }
+    // The connection is the owner's, and connected.
+    let connection = if connection_id == BUILTIN_ID {
+        None
+    } else {
+        let c = gateway_store(state)
+            .connection(connection_id)
+            .map_err(|_| "not_granted".to_string())?
+            .ok_or_else(|| "not_granted".to_string())?;
+        if c.owner_user_id != session.owner_user_id {
+            return Err("not_granted".into());
+        }
+        match c.status.as_str() {
+            status::CONNECTED => {}
+            status::NEEDS_REAUTH | status::ERROR => {
+                return Err(needs_reauth_code(&c.slug));
+            }
+            _ => return Err("not_granted".into()),
+        }
+        Some(c)
+    };
+    let launch = state
+        .agent
+        .launch_of(session_id)
+        .map_err(|_| "not_granted".to_string())?;
+    let write_vault = launch.as_ref().and_then(|l| l.write_vault_id.clone());
+    let vault_writes = write_vault.is_some()
+        && state
+            .agent_writes
+            .load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Authorized {
+        owner: session.owner_user_id,
+        connection,
+        vault_writes,
+        write_vault: write_vault.filter(|_| vault_writes),
+        has_context: launch.is_some_and(|l| l.context.is_some()),
+    })
+}
+
+/// `POST /v1/runtime/sessions/{id}/mcp/{connection}` (spec §14): one JSON-RPC
+/// message from a session's bridge. The answer is a stream of lines — the
+/// request-scoped messages, then the final response — or nothing for a
+/// notification or an agent's answer to an elicitation.
+///
+/// **At most once.** Nothing here retries, and a request the gateway did not
+/// forward is answered `session_unknown`, which is the only case the bridge
+/// may replay `initialize` and resend.
+pub async fn integration_call(
+    state: &Shared,
+    host_id: &str,
+    session_id: &str,
+    connection_id: &str,
+    message: serde_json::Value,
+) -> tokio::sync::mpsc::Receiver<serde_json::Value> {
+    use crate::gateway::session::{error_line, message_line};
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let id = crate::gateway::session::agent_id(&message);
+    let method = message
+        .get("method")
+        .and_then(|m| m.as_str())
+        .map(str::to_string);
+    let is_request = method.is_some() && message.get("id").is_some();
+    let mut scope = CallScope {
+        owner: None,
+        session_id: session_id.to_string(),
+        host_id: host_id.to_string(),
+        connection_id: connection_id.to_string(),
+    };
+
+    let authorized = match authorize_call(state, host_id, session_id, connection_id).await {
+        Ok(a) => a,
+        Err(code) => {
+            if is_request {
+                let _ = tx.send(error_line(&id, &code)).await;
+            }
+            scope.audit(&state.gateway, method.as_deref(), None, Err(&code), 0, None);
+            return rx;
+        }
+    };
+    scope.owner = Some(authorized.owner.clone());
+
+    let Some(method) = method else {
+        // The agent answering an upstream request (an elicitation). Dropped
+        // when nothing waits for it — a late answer is never sent upstream.
+        if let (Some(up), Some(agent_id)) = (
+            state.gateway.sessions.get(session_id, connection_id),
+            message.get("id").and_then(|v| v.as_str()),
+        ) {
+            up.relay.answer(agent_id, &message);
+        }
+        return rx;
+    };
+    if !is_request {
+        // A notification. `initialized` is rmcp's to send, and it already
+        // did; `cancelled` and the rest go upstream when a session exists.
+        if method != "notifications/initialized"
+            && let Some(up) = state.gateway.sessions.get(session_id, connection_id)
+            && let Ok(n) = serde_json::from_value::<rmcp::model::ClientNotification>(
+                serde_json::json!({"method": method, "params": message.get("params")}),
+            )
+        {
+            up.notify(n).await;
+        }
+        return rx;
+    }
+
+    if !method_permitted(&method, authorized.connection.as_ref()) {
+        let _ = tx.send(error_line(&id, "method_not_permitted")).await;
+        return rx;
+    }
+    let tool = (method == "tools/call")
+        .then(|| {
+            message
+                .pointer("/params/name")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .flatten();
+    if let Some(name) = &tool
+        && !authorized.may_call(name)
+    {
+        let _ = tx.send(error_line(&id, "tool_not_allowed")).await;
+        scope.audit(
+            &state.gateway,
+            Some(&method),
+            tool.as_deref(),
+            Err("tool_not_allowed"),
+            0,
+            None,
+        );
+        return rx;
+    }
+
+    let state = state.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let outcome = run_call(&state, &authorized, &scope, &method, message, tx.clone()).await;
+        let (result, bytes) = match outcome {
+            Ok(result) => {
+                // Measured, not built: the line is serialized once, on the way out.
+                let bytes = crate::gateway::session::serialized_len(&result);
+                if bytes > crate::gateway::session::RESPONSE_CAP {
+                    let _ = tx.send(error_line(&id, "response_too_large")).await;
+                    (Err("response_too_large".to_string()), Some(bytes as i64))
+                } else {
+                    let _ = tx
+                        .send(message_line(
+                            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                        ))
+                        .await;
+                    (Ok(()), Some(bytes as i64))
+                }
+            }
+            Err(CallFailure::Code(code)) => {
+                if code == "session_unknown" {
+                    // Not forwarded, so the bridge may replay `initialize`.
+                    let _ = tx
+                        .send(serde_json::json!({"storm_error": "session_unknown"}))
+                        .await;
+                } else {
+                    let _ = tx.send(error_line(&id, &code)).await;
+                }
+                (Err(code), None)
+            }
+            Err(CallFailure::Rpc(e)) => {
+                let _ = tx
+                    .send(message_line(
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "error": e}),
+                    ))
+                    .await;
+                (Err("upstream_error".to_string()), None)
+            }
+        };
+        scope.audit(
+            &state.gateway,
+            Some(&method),
+            tool.as_deref(),
+            result.as_ref().map(|_| ()).map_err(|e| e.as_str()),
+            started.elapsed().as_millis() as i64,
+            bytes,
+        );
+    });
+    rx
+}
+
+enum CallFailure {
+    Code(String),
+    Rpc(rmcp::ErrorData),
+}
+
+async fn run_call(
+    state: &Shared,
+    authorized: &Authorized,
+    scope: &CallScope,
+    method: &str,
+    mut message: serde_json::Value,
+    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+) -> Result<serde_json::Value, CallFailure> {
+    if method == "initialize" {
+        return open_upstream(state, authorized, scope, message).await;
+    }
+    let (session_id, connection_id) = (&scope.session_id, &scope.connection_id);
+    let Some(upstream) = state.gateway.sessions.get(session_id, connection_id) else {
+        return Err(CallFailure::Code("session_unknown".into()));
+    };
+    if method == "ping" {
+        return Ok(serde_json::json!({}));
+    }
+    let Some(_permit) = state
+        .gateway
+        .sessions
+        .permit(session_id, connection_id, method)
+    else {
+        return Err(CallFailure::Code("gateway_rate_limited".into()));
+    };
+    let agent_progress = message.pointer("/params/_meta/progressToken").cloned();
+    // Moved, not copied: the params are the agent's tool arguments.
+    let params = message
+        .get_mut("params")
+        .map(serde_json::Value::take)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let request: rmcp::model::ClientRequest =
+        serde_json::from_value(serde_json::json!({ "method": method, "params": params }))
+            .map_err(|_| CallFailure::Code("invalid_request".into()))?;
+    let mut result = upstream
+        .forward(request, agent_progress, tx)
+        .await
+        .map_err(|e| match e {
+            crate::gateway::session::ForwardError::Rpc(e) => CallFailure::Rpc(e),
+            crate::gateway::session::ForwardError::Upstream(e) => {
+                upstream_failure(state, authorized.connection.as_ref(), e)
+            }
+        })?;
+    if method == "tools/list"
+        && let Some(tools) = result.get_mut("tools").and_then(|t| t.as_array_mut())
+    {
+        // A tool the owner has not seen is recorded for review before it is
+        // filtered out (§9): "N new tools — review" appears without the
+        // owner having to run a test. Never a baseline, so never enabling.
+        if let Some(c) = &authorized.connection {
+            let names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect();
+            if let Err(e) = gateway_store(state).observe_tools(
+                &c.id,
+                &names,
+                false,
+                &crate::index::now_rfc3339(),
+            ) {
+                tracing::warn!(error = %e, "could not record an upstream's new tools");
+            }
+        }
+        // The agent sees only what it may call (G-D16, G-D5).
+        tools.retain(|t| authorized.may_call(t.get("name").and_then(|n| n.as_str()).unwrap_or("")));
+    }
+    Ok(result)
+}
+
+/// An upstream failure as the agent sees it, recorded for the owner first.
+/// One mapping for every path that talks to an upstream (§12).
+fn upstream_failure(
+    state: &Shared,
+    connection: Option<&Connection>,
+    e: crate::gateway::upstream::UpstreamError,
+) -> CallFailure {
+    note_upstream_failure(state, connection, e);
+    CallFailure::Code(if e.needs_reauth() {
+        needs_reauth_code(connection.map_or(BUILTIN_SLUG, |c| &c.slug))
+    } else {
+        e.code().to_string()
+    })
+}
+
+/// An upstream that refused the credential is `needs_reauth` from now on
+/// (§12); one that is down records its code for the owner.
+fn note_upstream_failure(
+    state: &Shared,
+    connection: Option<&Connection>,
+    e: crate::gateway::upstream::UpstreamError,
+) {
+    let Some(c) = connection else { return };
+    let store = gateway_store(state);
+    if let Ok(Some(mut row)) = store.connection(&c.id) {
+        row.last_error_code = Some(e.code().to_string());
+        if e.needs_reauth() && row.status == status::CONNECTED {
+            row.status = status::NEEDS_REAUTH.into();
+            if row.auth_kind == auth_kind::OAUTH {
+                record_refresh_failed(state, &row);
+            }
+        }
+        row.updated_at = crate::index::now_rfc3339();
+        let _ = store.update_connection(&row);
+    }
+}
+
+/// An OAuth connection whose refresh failed for good: audited (§14), never
+/// with a token. Spawned because the callers hold the gateway's sync lock.
+fn record_refresh_failed(state: &Shared, c: &Connection) {
+    let state = state.clone();
+    let detail = serde_json::json!({
+        "connection_id": c.id, "slug": c.slug, "auth_kind": c.auth_kind,
+    });
+    let owner = c.owner_user_id.clone();
+    tokio::spawn(async move {
+        let auth_db = state.auth_db.lock().await;
+        let _ = auth_db.record_event(
+            "integration_refresh_failed",
+            Some(&owner),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        );
+    });
+}
+
+/// The agent's `initialize`: a fresh upstream session (replacing any old one)
+/// presenting the agent's capabilities minus what is never forwarded.
+async fn open_upstream(
+    state: &Shared,
+    authorized: &Authorized,
+    scope: &CallScope,
+    mut message: serde_json::Value,
+) -> Result<serde_json::Value, CallFailure> {
+    let agent_caps = message
+        .pointer_mut("/params/capabilities")
+        .map(serde_json::Value::take)
+        .unwrap_or_else(|| serde_json::json!({}));
+    // The relay lives inside the upstream session, which the gateway holds:
+    // it keeps only what it uses, and the gateway weakly, so the session
+    // never keeps the server's whole state (or itself) alive.
+    let events = {
+        let agent = state.agent.clone();
+        let gateway = std::sync::Arc::downgrade(&state.gateway);
+        let scope = scope.clone();
+        move |event: crate::gateway::session::RelayEvent| match event {
+            crate::gateway::session::RelayEvent::Unsolicited(m) => {
+                agent.mcp_message(&scope.session_id, &scope.connection_id, m);
+            }
+            crate::gateway::session::RelayEvent::UrlElicitationDeclined => {
+                if let Some(gateway) = gateway.upgrade() {
+                    scope.audit(
+                        &gateway,
+                        Some("elicitation/create"),
+                        None,
+                        Err("url_elicitation_declined"),
+                        0,
+                        None,
+                    );
+                }
+            }
+        }
+    };
+    let relay = crate::gateway::session::Relay::new(&agent_caps, events);
+    let service = match &authorized.connection {
+        // Nothing the agent asked for has run at `initialize`, so the
+        // refresh-once rule may apply.
+        Some(c) => state
+            .gateway
+            .with_target(c, |target| {
+                crate::gateway::upstream::connect(target, relay.clone())
+            })
+            .await
+            .map_err(|e| upstream_failure(state, Some(c), e))?,
+        None => connect_builtin(state, authorized, scope, relay)
+            .await
+            .map_err(|_| CallFailure::Code("upstream_unavailable".into()))?,
+    };
+    let info = service
+        .peer_info()
+        .map(|i| serde_json::to_value(&*i).unwrap_or_default())
+        .unwrap_or_default();
+    let mut result = info;
+    // What the agent is told the server offers follows the owner's switches
+    // (G-D17): a hidden capability is one the agent never tries.
+    if let (Some(c), Some(caps)) = (
+        &authorized.connection,
+        result
+            .get_mut("capabilities")
+            .and_then(|c| c.as_object_mut()),
+    ) {
+        if !c.expose_resources {
+            caps.remove("resources");
+        }
+        if !c.expose_prompts {
+            caps.remove("prompts");
+        }
+    }
+    if let Some(obj) = result.as_object_mut()
+        && !obj.contains_key("serverInfo")
+    {
+        obj.insert(
+            "serverInfo".into(),
+            serde_json::json!({"name": authorized.connection.as_ref().map_or(BUILTIN_SLUG, |c| &c.slug), "version": ""}),
+        );
+    }
+    state.gateway.sessions.put(
+        &scope.session_id,
+        &scope.connection_id,
+        crate::gateway::session::Upstream::new(service),
+    );
+    Ok(result)
+}
+
+/// The built-in `storm` connection: `mcp.rs`'s own handler, served in process
+/// over an in-memory pipe as `Actor::Agent` (spec §5). No network, no
+/// credential, and the same client path as any upstream.
+async fn connect_builtin(
+    state: &Shared,
+    authorized: &Authorized,
+    scope: &CallScope,
+    relay: crate::gateway::session::Relay,
+) -> anyhow::Result<
+    rmcp::service::RunningService<rmcp::service::RoleClient, crate::gateway::session::Relay>,
+> {
+    use rmcp::ServiceExt;
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let actor = Actor::Agent {
+        session_id: scope.session_id.clone(),
+        host_id: scope.host_id.clone(),
+        user_id: authorized.owner.clone(),
+        write_vault: authorized.write_vault.clone(),
+    };
+    let handler = crate::mcp::Storm::for_agent(
+        state.clone(),
+        authorized.vault_writes,
+        authorized.has_context,
+        actor,
+    );
+    tokio::spawn(async move {
+        if let Ok(running) = handler.serve(server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    Ok(relay.serve(client_io).await?)
+}
+
+/// Retires what removed accounts left in `agent.db`/`gateway.db` (decision 82,
+/// invariant I4). Runs on every boot; idempotent.
+pub async fn reconcile_single_user(state: &Shared) -> anyhow::Result<()> {
+    let account = {
+        let auth_db = state.auth_db.lock().await;
+        auth_db.account()?
+    };
+    let Some(account) = account else {
+        return Ok(());
+    };
+    let now = crate::index::now_rfc3339();
+
+    let orphaned = gateway_store(state).live_connections_not_of(&account.id)?;
+    for c in &orphaned {
+        gateway_store(state).revoke_connection(&c.id, &now)?;
+        state.agent.revoke_grants_for(&c.id)?;
+        state.gateway.sessions.close_connection(&c.id);
+        let host = c
+            .url
+            .parse::<axum::http::Uri>()
+            .ok()
+            .and_then(|u| u.host().map(str::to_string));
+        let detail = serde_json::json!({
+            "connection_id": c.id,
+            "former_owner": c.owner_user_id,
+            "upstream_host": host,
+        });
+        let auth_db = state.auth_db.lock().await;
+        auth_db.record_event(
+            "integration_removed_single_user",
+            Some(&account.id),
+            None,
+            &now,
+            &detail.to_string(),
+        )?;
+    }
+
+    let (failed, dismissed) = state.agent.retire_sessions_not_of(&account.id)?;
+    sweep_gateway_sessions(state);
+    if !orphaned.is_empty() || failed > 0 || dismissed > 0 {
+        tracing::warn!(
+            connections = orphaned.len(),
+            sessions_failed = failed,
+            sessions_dismissed = dismissed,
+            "single-user: retired what removed accounts left in agent.db and gateway.db"
+        );
+    }
+    Ok(())
+}
+
+/// Closes the upstream sessions of agent sessions that have ended (§13: a
+/// session's grants die with it). Called whenever a host reports.
+pub fn sweep_gateway_sessions(state: &Shared) {
+    for session in state.gateway.sessions.sessions() {
+        let ended = state.agent.get(&session).map_or(true, |r| r.is_ended());
+        if ended {
+            state.gateway.sessions.close_session(&session);
+        }
+    }
+}
+
+// ---- MCP Gateway: OAuth (decision 81g, spec §10) ----------------------------
+
+#[derive(Deserialize)]
+pub struct AuthorizeIntegration {
+    pub redirect_uri: String,
+    /// A client the owner registered by hand, when the server offers no
+    /// dynamic registration (§10 step 2).
+    #[serde(default)]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorizationStarted {
+    /// The URL the client opens in the system browser.
+    pub authorization_url: String,
+    pub expires: String,
+}
+
+fn oauth_refusal(f: crate::gateway::oauth::OAuthFailure) -> ApiError {
+    use crate::gateway::oauth::OAuthFailure as F;
+    let status = match f {
+        F::NeedsClient | F::FlowSpent => axum::http::StatusCode::BAD_REQUEST,
+        F::NoOAuth => axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        _ => axum::http::StatusCode::BAD_GATEWAY,
+    };
+    ApiError(status, f.code().into())
+}
+
+/// `POST /v1/integrations/connections/{id}/authorize`: discovery, a client
+/// (reused, registered dynamically, or pasted), and the PKCE authorization
+/// URL. The flow is recorded hashed and sealed, for ten minutes.
+pub async fn authorize_integration(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    req: AuthorizeIntegration,
+) -> ApiResult<AuthorizationStarted> {
+    use crate::gateway::oauth::{self as oauth, OAuthFailure};
+    let c = own_connection(state, actor, id)?;
+    if c.auth_kind != auth_kind::OAUTH {
+        return Err(bad_request("only an OAuth integration is authorized here"));
+    }
+    if c.status == status::DISABLED {
+        return Err(conflict("the integration is disabled; enable it first"));
+    }
+    oauth::validate_redirect(&req.redirect_uri).map_err(bad_request)?;
+    if let Some(client_id) = &req.client_id
+        && (client_id.is_empty()
+            || client_id.len() > 512
+            || client_id.chars().any(char::is_control))
+    {
+        return Err(bad_request("a client id is 1–512 printable characters"));
+    }
+    let (mut manager, metadata) = oauth::discovered_manager(&state.gateway, &c.url)
+        .await
+        .map_err(oauth_refusal)?;
+    let issuer = metadata
+        .issuer
+        .clone()
+        .unwrap_or_else(|| metadata.authorization_endpoint.clone());
+    let now = crate::index::now_rfc3339();
+    let metadata_json = serde_json::to_string(&metadata).ok();
+
+    let existing = gateway_store(state)
+        .oauth_client_for(actor.user_id(), &issuer, &req.redirect_uri)
+        .map_err(internal)?;
+    let client = match (&req.client_id, existing) {
+        // A pasted client always wins: the owner is telling us which one.
+        (Some(client_id), _) => {
+            let row_id = crate::auth::identity::random_id("oac_");
+            let secret = match &req.client_secret {
+                Some(s) => Some(
+                    state
+                        .gateway
+                        .keys
+                        .seal(&row_id, "client_secret", s.as_bytes())
+                        .map_err(internal)?,
+                ),
+                None => None,
+            };
+            crate::gateway::store::OAuthClientRow {
+                id: row_id,
+                owner_user_id: actor.user_id().into(),
+                issuer: issuer.clone(),
+                client_id: client_id.clone(),
+                redirect_uri: req.redirect_uri.clone(),
+                registered: false,
+                metadata: metadata_json.clone(),
+                secret,
+                created_at: now.clone(),
+            }
+        }
+        (None, Some(row)) => crate::gateway::store::OAuthClientRow {
+            metadata: metadata_json.clone(),
+            ..row
+        },
+        (None, None) => {
+            if metadata.registration_endpoint.is_none() {
+                return Err(oauth_refusal(OAuthFailure::NeedsClient));
+            }
+            let scopes: Vec<&str> = req.scopes.iter().map(String::as_str).collect();
+            let registered = manager
+                .register_client("Storm", &req.redirect_uri, &scopes)
+                .await
+                .map_err(|_| oauth_refusal(OAuthFailure::Registration))?;
+            crate::gateway::store::OAuthClientRow {
+                id: crate::auth::identity::random_id("oac_"),
+                owner_user_id: actor.user_id().into(),
+                issuer: issuer.clone(),
+                client_id: registered.client_id,
+                redirect_uri: req.redirect_uri.clone(),
+                registered: true,
+                metadata: metadata_json.clone(),
+                secret: None,
+                created_at: now.clone(),
+            }
+        }
+    };
+    gateway_store(state)
+        .insert_oauth_client(&client)
+        .map_err(internal)?;
+    state
+        .gateway
+        .configure_client(&mut manager, &client)
+        .map_err(|_| oauth_refusal(OAuthFailure::Discovery))?;
+    manager.set_state_store(oauth::FlowStore::new(&state.gateway, &c, &client));
+    let scopes: Vec<&str> = req.scopes.iter().map(String::as_str).collect();
+    let authorization_url = manager
+        .get_authorization_url(&scopes)
+        .await
+        .map_err(|_| oauth_refusal(OAuthFailure::Discovery))?;
+    Ok(AuthorizationStarted {
+        authorization_url,
+        expires: crate::gateway::rfc3339_in(oauth::FLOW_TTL_SECS),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct OAuthCallback {
+    pub state: String,
+    pub code: String,
+    /// RFC 9207's `iss`, when the redirect carried one.
+    #[serde(default)]
+    pub iss: Option<String>,
+}
+
+/// `POST /v1/integrations/oauth/callback` (§10 step 5): the client relays
+/// what the browser brought back. The flow is single use and the caller's
+/// own; the code is exchanged, the tokens sealed, and the integration tested.
+pub async fn oauth_callback(
+    state: &Shared,
+    actor: &Actor,
+    req: OAuthCallback,
+) -> ApiResult<IntegrationTest> {
+    use crate::gateway::oauth::{self as oauth, OAuthFailure};
+    if req.state.is_empty() || req.state.len() > 512 || req.code.is_empty() || req.code.len() > 4096
+    {
+        return Err(bad_request("state and code are required"));
+    }
+    let hash = oauth::state_hash(&req.state);
+    let flow = gateway_store(state)
+        .live_flow(&hash, &crate::index::now_rfc3339())
+        .map_err(internal)?
+        .ok_or_else(|| oauth_refusal(OAuthFailure::FlowSpent))?;
+    // Another owner's flow reads exactly like a spent one.
+    if flow.owner_user_id != actor.user_id() {
+        return Err(oauth_refusal(OAuthFailure::FlowSpent));
+    }
+    let c = own_connection(state, actor, &flow.connection_id)?;
+    let client = gateway_store(state)
+        .oauth_client(&flow.oauth_client)
+        .map_err(internal)?
+        .ok_or_else(|| oauth_refusal(OAuthFailure::FlowSpent))?;
+    let (mut manager, _) = oauth::discovered_manager(&state.gateway, &c.url)
+        .await
+        .map_err(oauth_refusal)?;
+    state
+        .gateway
+        .configure_client(&mut manager, &client)
+        .map_err(|_| oauth_refusal(OAuthFailure::Exchange))?;
+    manager.set_state_store(oauth::FlowStore::new(&state.gateway, &c, &client));
+    manager.set_credential_store(oauth::TokenStore::new(&state.gateway, &c));
+    // The flow store's `load` claims the flow, so a replayed callback — or a
+    // second one racing this — finds nothing and exchanges nothing.
+    let had_tokens = gateway_store(state)
+        .credential(&c.id, credential_kind::OAUTH_TOKENS)
+        .map_err(internal)?
+        .is_some();
+    manager
+        .exchange_code_for_token_with_issuer(&req.code, &req.state, req.iss.as_deref())
+        .await
+        .map_err(|e| match e {
+            rmcp::transport::auth::AuthError::InternalError(m) if m.contains("state not found") => {
+                oauth_refusal(OAuthFailure::FlowSpent)
+            }
+            _ => oauth_refusal(OAuthFailure::Exchange),
+        })?;
+
+    let now = crate::index::now_rfc3339();
+    let mut c = c;
+    c.status = status::CONNECTED.into();
+    c.last_error_code = None;
+    c.updated_at = now.clone();
+    {
+        let store = gateway_store(state);
+        store
+            .set_connection_oauth(&c.id, &client.id, &now)
+            .map_err(internal)?;
+        store.update_connection(&c).map_err(internal)?;
+    }
+    // Live sessions pick the new tokens up on their next initialize.
+    state.gateway.sessions.close_connection(&c.id);
+    {
+        let auth_db = state.auth_db.lock().await;
+        let kind = if had_tokens {
+            "integration_reauthorized"
+        } else {
+            "integration_authorized"
+        };
+        integration_event(&auth_db, kind, actor, &c, &now);
+    }
+    // §10 step 6: a test listing, which also turns every tool on.
+    test_integration(state, actor, &c.id).await
 }
 
 #[cfg(test)]
@@ -1474,15 +3224,16 @@ mod tests {
             relays_changed: tokio::sync::watch::channel(Vec::new()).0,
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            allow_registration: std::sync::atomic::AtomicBool::new(false),
             bootstrap_nonce: None,
             listen_addr: "127.0.0.1:8484".into(),
-            vault_policy: Arc::new(crate::auth::authz::AllowAuthenticated),
+            vault_policy: Arc::new(crate::auth::authz::StormPolicy),
             hasher: crate::auth::Hasher::new(),
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
+            gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
         })
     }
 

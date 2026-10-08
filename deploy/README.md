@@ -251,30 +251,22 @@ journalctl -u storm-server -f
 
 `make deploy` restarts the service and fails loudly if it doesn't come back.
 
-## User accounts
+## The account
 
-Accounts are managed on the host — there is no network path to create one yet,
-because that needs device authentication and arrives with pairing.
+Storm has one account (decision 82). You normally set it up from the app on
+first pairing; on a headless box, or to reset a forgotten password:
 
 ```sh
-sudo -u storm storm-server user add dewansh --state /srv/storm/state
-sudo -u storm storm-server user list --state /srv/storm/state
-sudo -u storm storm-server passwd dewansh --state /srv/storm/state
+sudo -u storm storm-server passwd --state /srv/storm/state
 ```
 
-**Run them as `storm`, not as root.** `auth.db` is created on first use, so
-`sudo storm-server user add` leaves a root-owned database that the service
-cannot write — and the symptom arrives much later, as a login that fails with
-nothing useful in the journal. The commands print a warning if they notice, but
-`sudo -u storm` avoids the situation entirely.
+**Run it as `storm`, not as root**: `auth.db` is created on first use, and a
+root-owned one is a database the service cannot write.
 
-The first account created is always an owner, and the last active owner cannot
-be deleted, disabled or demoted — promote a second owner first if you need to
-retire the first. `storm-server user --help` lists the rest.
-
-Nothing authenticates against these accounts yet: the shared bearer token is
-still what clients send. Creating them now is safe and is what the sessions
-slice will build on.
+Upgrading a 0.3.x server keeps its oldest active owner and removes every
+other account, after writing `state/auth.db.pre-v6`. If it has no active owner
+it refuses to start; name the account to keep with
+`sudo -u storm storm-server single-user --keep <username> --state /srv/storm/state`.
 
 ## Backups
 
@@ -486,6 +478,17 @@ What the package guarantees (decision 77e):
   `MemoryDenyWriteExecute`, under which OpenCode cannot start.
 - **A revoked host exits 3, and the unit does not restart it.** Enroll it
   again to bring it back.
+
+**Never run a Runtime Host under the server's account, or under any account
+that can read or write the vaults.** Storm enforces what a session may do
+(read only, its one write vault, never delete) in the server, on the tools
+it offers. An agent is a process: it can also do anything its OS account can
+do to files. A host running as the server's user, or as a member of its group,
+can edit or delete vault files on disk and bypass all of that. The 2026-10-08
+real-run staging had server, vaults and host under one Unix user, and Claude
+offered to edit a note's file directly from a read-only session. Filesystem
+permissions are the only boundary there. On a shared machine, check it with
+`sudo -u storm-runtime ls /srv/storm`, which must be refused.
 
 ## Security
 

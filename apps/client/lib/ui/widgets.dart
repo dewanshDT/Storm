@@ -249,10 +249,9 @@ class SectionLabel extends StatelessWidget {
     return Text(
       text.toUpperCase(),
       style: TextStyle(
-        fontFamily: StormTokens.sansFamily,
+        fontFamily: StormTokens.monoFamily,
         fontSize: t.labelSize,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 1.1,
+        letterSpacing: t.labelSize * 0.08,
         color: t.text3,
       ),
     );
@@ -331,63 +330,6 @@ class StormInput extends StatelessWidget {
             ? null
             : BoxConstraints(minWidth: t.sp * 4.5, minHeight: t.sp * 2),
         suffixIcon: suffix,
-      ),
-    );
-  }
-}
-
-/// 34×20, so it sits inline at the end of a settings row. Material's own
-/// `Switch` is a 52×32 slab with a hover halo.
-class StormSwitch extends StatelessWidget {
-  const StormSwitch({
-    super.key,
-    required this.value,
-    required this.onChanged,
-    this.enabled = true,
-  });
-
-  final bool value;
-  final ValueChanged<bool>? onChanged;
-  final bool enabled;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final height = t.sp * 2.5;
-    final width = height * 1.7;
-    final knob = height - t.sp * 0.5;
-    final live = enabled && onChanged != null;
-
-    return Opacity(
-      opacity: live ? 1 : 0.5,
-      child: GestureDetector(
-        onTap: live ? () => onChanged!(!value) : null,
-        child: AnimatedContainer(
-          duration: t.duration,
-          curve: Curves.easeOut,
-          width: width,
-          height: height,
-          decoration: BoxDecoration(
-            color: value ? t.accent : t.border,
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: AnimatedAlign(
-            duration: t.duration,
-            curve: Curves.easeOut,
-            alignment: value ? Alignment.centerRight : Alignment.centerLeft,
-            child: Padding(
-              padding: EdgeInsets.all(t.sp * 0.25),
-              child: Container(
-                width: knob,
-                height: knob,
-                decoration: const BoxDecoration(
-                  color: Color(0xFFFFFFFF),
-                  shape: BoxShape.circle,
-                ),
-              ),
-            ),
-          ),
-        ),
       ),
     );
   }

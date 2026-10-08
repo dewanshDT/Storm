@@ -203,9 +203,31 @@ void main() {
     test('the scale still grows in the right order', () {
       final t = StormTokens.from(StormPreset.stormDark);
       expect(t.labelSize, lessThan(t.codeSize));
-      expect(t.codeSize, lessThan(t.bodySize));
+      expect(t.codeSize, lessThan(t.uiSize));
+      expect(t.uiSize, lessThan(t.bodySize));
       expect(t.bodySize, lessThan(t.headingSize));
-      expect(t.headingSize, lessThan(t.displaySize));
+      expect(t.headingSize, lessThan(t.titleSize));
+      expect(t.titleSize, lessThan(t.displaySize));
+    });
+
+    test('the v2 steps are derived, and follow the text size', () {
+      final t = StormTokens.from(StormPreset.stormDark);
+      expect(t.titleSize, closeTo(25.0, 1e-9));
+      expect(t.uiSize, closeTo(14.31, 0.01));
+      final big = t.copyWith(fs: 20);
+      expect(big.titleSize, closeTo(t.titleSize * 20 / 16, 1e-9));
+      expect(big.uiSize, closeTo(t.uiSize * 20 / 16, 1e-9));
+    });
+
+    test('note prose is about 18 with a 22 H2, and follows the text size', () {
+      final t = StormTokens.from(StormPreset.stormDark);
+      expect(t.proseSize, closeTo(18, 0.2));
+      expect(t.proseHeadingSize, closeTo(22, 0.4));
+      expect(t.proseSize, greaterThan(t.bodySize));
+      expect(t.proseHeadingSize, lessThan(t.displaySize));
+      final big = t.copyWith(fs: 20);
+      expect(big.proseSize, closeTo(t.proseSize * 20 / 16, 1e-9));
+      expect(big.proseHeadingSize, closeTo(t.proseHeadingSize * 20 / 16, 1e-9));
     });
   });
 

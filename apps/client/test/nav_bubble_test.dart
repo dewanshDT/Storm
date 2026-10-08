@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -10,9 +11,8 @@ import 'fake_server.dart';
 
 /// The navigation bubble.
 ///
-/// Its whole design rests on two claims: expansion is widget-local, and the
-/// Context slot derives from the route rather than a parallel flag. Both are
-/// easy to break silently, so both are asserted here.
+/// The phone pill: four slots on the vault root and folder screens (handoff
+/// §2.4), none on the note screen (Q5).
 void main() {
   group('the bar is always open', () {
     testWidgets('every slot is reachable without a tap first', (tester) async {
@@ -38,7 +38,7 @@ void main() {
       await tester.tap(find.byTooltip('Directory'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Vaults'), findsOneWidget);
+      expect(find.text('Primary'), findsOneWidget);
       expect(find.byTooltip('Directory'), findsOneWidget);
       await disposeShell(tester, c);
     });
@@ -52,12 +52,10 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  testWidgets('trades places with the formatting toolbar in a note', (
+  testWidgets('is not on the note screen; the toolbar still rises', (
     tester,
   ) async {
-    // Both read the same signal, so they must never be on screen together and
-    // never both absent. Toolbar exists only in Edit Mode — Read Mode has no
-    // keyboard chrome to trade with.
+    // Q5: the phone note has no pill. The formatting toolbar is unaffected.
     final c = shellContainer();
     await pumpShell(tester, c);
     c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
@@ -65,7 +63,7 @@ void main() {
     await enterEditMode(tester);
 
     expect(find.byType(EditorToolbar), findsNothing);
-    expect(find.byType(NavBubble), findsOneWidget);
+    expect(find.byType(NavBubble), findsNothing);
 
     await pumpShell(tester, c, keyboard: 320);
     await tester.pumpAndSettle();
@@ -75,30 +73,27 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  group('the context slot', () {
-    testWidgets('keeps mentions and tags visible outside a note', (
-      tester,
-    ) async {
-      final c = shellContainer();
-      await pumpShell(tester, c);
-      await openVault(tester, c);
+  testWidgets('has four slots: Directory, Search, New note, Tags', (
+    tester,
+  ) async {
+    final c = shellContainer();
+    await pumpShell(tester, c);
+    await openVault(tester, c);
 
-      expect(find.byTooltip('Mentions'), findsOneWidget);
-      expect(find.byTooltip('Tags'), findsOneWidget);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('shows the linked-mentions count inside a note', (
-      tester,
-    ) async {
-      final c = shellContainer();
-      await pumpShell(tester, c);
-
-      c.read(routerProvider).go(Routes.note(FakeServer.primaryVault, 'n0'));
-      await tester.pumpAndSettle();
-      expect(find.byTooltip('0 linked mentions'), findsOneWidget);
-      expect(find.byTooltip('Tags'), findsOneWidget);
-      await disposeShell(tester, c);
-    });
+    final pill = find.byType(NavBubble);
+    for (final slot in ['Directory', 'Search', 'New note', 'Tags']) {
+      expect(
+        find.descendant(of: pill, matching: find.byTooltip(slot)),
+        findsOneWidget,
+        reason: slot,
+      );
+    }
+    expect(find.byTooltip('Mentions'), findsNothing);
+    expect(find.byTooltip('New folder'), findsNothing);
+    expect(
+      find.descendant(of: pill, matching: find.byType(Tooltip)),
+      findsNWidgets(4),
+    );
+    await disposeShell(tester, c);
   });
 }

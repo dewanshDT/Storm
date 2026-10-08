@@ -44,19 +44,82 @@ class NoteMeta {
   );
 }
 
+/// The agent session that wrote a note last (`agent_write`), kept after a
+/// human edits it.
+class AgentWrite {
+  const AgentWrite({
+    required this.sessionId,
+    required this.sessionName,
+    required this.sessionDismissed,
+    required this.kind,
+    required this.version,
+    required this.at,
+  });
+
+  final String sessionId;
+  final String sessionName;
+
+  /// The session is gone from the server; its name is still the one it had.
+  final bool sessionDismissed;
+
+  /// `created` or `edited`.
+  final String kind;
+  final int version;
+  final String at;
+
+  bool get created => kind == 'created';
+
+  factory AgentWrite.fromJson(Map<String, dynamic> j) => AgentWrite(
+    sessionId: j['session_id'] as String,
+    sessionName: j['session_name'] as String? ?? '',
+    sessionDismissed: j['session_dismissed'] == true,
+    kind: j['kind'] as String? ?? 'edited',
+    version: (j['version'] as num?)?.toInt() ?? 0,
+    at: j['at'] as String? ?? '',
+  );
+}
+
+/// A note's latest agent write, from `GET …/agent-writes`.
+class LatestAgentWrite {
+  const LatestAgentWrite({
+    required this.version,
+    required this.at,
+    required this.sessionId,
+  });
+
+  final int version;
+  final String at;
+  final String sessionId;
+
+  factory LatestAgentWrite.fromJson(Map<String, dynamic> j) => LatestAgentWrite(
+    version: (j['version'] as num).toInt(),
+    at: j['at'] as String? ?? '',
+    sessionId: j['session_id'] as String? ?? '',
+  );
+}
+
 /// A note with its content.
 class Note {
-  const Note({required this.meta, required this.content});
+  const Note({required this.meta, required this.content, this.agentWrite});
 
   final NoteMeta meta;
   final String content;
+  final AgentWrite? agentWrite;
 
   /// The server flattens metadata alongside `content` in one object.
-  factory Note.fromJson(Map<String, dynamic> j) =>
-      Note(meta: NoteMeta.fromJson(j), content: j['content'] as String? ?? '');
+  factory Note.fromJson(Map<String, dynamic> j) => Note(
+    meta: NoteMeta.fromJson(j),
+    content: j['content'] as String? ?? '',
+    agentWrite: j['agent_write'] is Map<String, dynamic>
+        ? AgentWrite.fromJson(j['agent_write'] as Map<String, dynamic>)
+        : null,
+  );
 
-  Note copyWith({NoteMeta? meta, String? content}) =>
-      Note(meta: meta ?? this.meta, content: content ?? this.content);
+  Note copyWith({NoteMeta? meta, String? content}) => Note(
+    meta: meta ?? this.meta,
+    content: content ?? this.content,
+    agentWrite: agentWrite,
+  );
 }
 
 /// The vault tree plus the change-log position it was read at.
@@ -230,7 +293,9 @@ class ServerConfig {
     required this.vaultCount,
     required this.mcpEnabled,
     required this.mcpWritable,
-    required this.allowRegistration,
+    this.relays = const [],
+    this.agentWrites,
+    this.version,
   });
 
   final String vaultRoot;
@@ -250,8 +315,15 @@ class ServerConfig {
   /// does not know about writes must never appear to have them switched on.
   final bool mcpWritable;
 
-  /// Whether anyone with a device credential may create an account (A13).
-  final bool allowRegistration;
+  /// The configured relay URLs, not the ones currently registered.
+  final List<String> relays;
+
+  /// Whether agent sessions may write to the vault chosen at launch. Null
+  /// from a server that predates the setting, which cannot be changed there.
+  final bool? agentWrites;
+
+  /// The server's release version, when it reports one.
+  final String? version;
 
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
@@ -259,7 +331,39 @@ class ServerConfig {
     vaultCount: (j['vault_count'] as num?)?.toInt() ?? 0,
     mcpEnabled: j['mcp_enabled'] as bool? ?? false,
     mcpWritable: j['mcp_writable'] as bool? ?? false,
-    allowRegistration: (j['allow_registration'] as bool?) ?? false,
+    relays: [for (final r in (j['relays'] as List? ?? const [])) r as String],
+    agentWrites: j['agent_writes'] as bool?,
+    version: j['version'] as String?,
+  );
+}
+
+/// A device paired with this server (`GET /v1/auth/devices`).
+class PairedDevice {
+  const PairedDevice({
+    required this.id,
+    required this.name,
+    required this.paired,
+    this.platform,
+    this.lastSeen,
+    this.revoked,
+  });
+
+  final String id;
+  final String name;
+  final String? platform;
+  final String paired;
+  final String? lastSeen;
+  final String? revoked;
+
+  bool get isRevoked => revoked != null;
+
+  factory PairedDevice.fromJson(Map<String, dynamic> j) => PairedDevice(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? '',
+    platform: j['platform'] as String?,
+    paired: j['paired'] as String? ?? '',
+    lastSeen: j['last_seen'] as String?,
+    revoked: j['revoked'] as String?,
   );
 }
 

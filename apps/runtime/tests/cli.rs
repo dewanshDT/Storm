@@ -91,6 +91,7 @@ fn start(provider: &CliProvider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
         session_id: "ags_CLI".into(),
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
+        launch: Default::default(),
     };
     let session = provider.start(spec, rec.clone()).expect("start");
     (session, rec)
@@ -215,6 +216,7 @@ fn a_missing_binary_is_not_installed_and_will_not_start() {
         session_id: "ags_GHOST".into(),
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
+        launch: Default::default(),
     };
     assert!(matches!(
         provider.start(spec, rec.clone()),

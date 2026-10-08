@@ -236,7 +236,13 @@ class StormTerminalView extends StatelessWidget {
     this.autofocus = false,
     this.readOnly = false,
     this.padding,
+    this.fontSize,
+    this.lineHeight = 1.2,
+    this.surface = false,
   });
+
+  /// The handoff's terminal sets 1.7 (§3.6); xterm2's own default is 1.2.
+  final double lineHeight;
 
   final StormTerminal terminal;
   final FocusNode? focusNode;
@@ -247,43 +253,26 @@ class StormTerminalView extends StatelessWidget {
   /// drawn in the view's colour, not the agent's, so a full-screen agent that
   /// paints its own background (OpenCode) shows it as a frame.
   final EdgeInsets? padding;
+  final double? fontSize;
+
+  /// On `surface` rather than `bg` (the phone's session, handoff §3.6).
+  final bool surface;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final base = TerminalThemes.defaultTheme;
     // **Dark in both themes.** Agents and the ANSI palette assume a dark
     // background; on the light theme's white code plate, an agent's white text
     // would vanish. Both colours still come from the tokens: the light theme's
     // off-black text and off-white page, swapped.
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final background = dark ? t.bg : t.text;
+    final background = dark ? (surface ? t.surface : t.bg) : t.text;
     final foreground = dark ? t.text : t.bg;
-    final theme = TerminalTheme(
-      cursor: foreground.withValues(alpha: 0.7),
-      selection: t.accent.withValues(alpha: 0.35),
-      foreground: foreground,
-      background: background,
-      black: base.black,
-      white: base.white,
-      red: base.red,
-      green: base.green,
-      yellow: base.yellow,
-      blue: base.blue,
-      magenta: base.magenta,
-      cyan: base.cyan,
-      brightBlack: base.brightBlack,
-      brightRed: base.brightRed,
-      brightGreen: base.brightGreen,
-      brightYellow: base.brightYellow,
-      brightBlue: base.brightBlue,
-      brightMagenta: base.brightMagenta,
-      brightCyan: base.brightCyan,
-      brightWhite: base.brightWhite,
-      searchHitBackground: base.searchHitBackground,
-      searchHitBackgroundCurrent: base.searchHitBackgroundCurrent,
-      searchHitForeground: base.searchHitForeground,
-    );
+    final theme = _themes.putIfAbsent((
+      foreground,
+      background,
+      t.accent,
+    ), () => _theme(foreground, background, t.accent));
     // **The app's chords stop here while the terminal has focus** (freeze
     // §10). The terminal handles the keys it understands before they bubble;
     // this catches the ones it leaves, so Ctrl+K reaches the agent's world or
@@ -304,7 +293,8 @@ class StormTerminalView extends StatelessWidget {
         padding: padding ?? EdgeInsets.all(t.sp),
         textStyle: TerminalStyle(
           fontFamily: StormTokens.monoFamily,
-          fontSize: t.labelSize + 1,
+          fontSize: fontSize ?? t.labelSize + 1,
+          height: lineHeight,
         ),
         keyboardAppearance: Brightness.dark,
         // Agents redraw on resize; the terminal follows its box.
@@ -312,4 +302,37 @@ class StormTerminalView extends StatelessWidget {
       ),
     );
   }
+}
+
+// xterm2 reports a colour-scheme change to the agent whenever the view gets a
+// theme that is not identical, and TerminalTheme has no value equality.
+final _themes = <(Color, Color, Color), TerminalTheme>{};
+
+TerminalTheme _theme(Color foreground, Color background, Color accent) {
+  final base = TerminalThemes.defaultTheme;
+  return TerminalTheme(
+    cursor: foreground.withValues(alpha: 0.7),
+    selection: accent.withValues(alpha: 0.35),
+    foreground: foreground,
+    background: background,
+    black: base.black,
+    white: base.white,
+    red: base.red,
+    green: base.green,
+    yellow: base.yellow,
+    blue: base.blue,
+    magenta: base.magenta,
+    cyan: base.cyan,
+    brightBlack: base.brightBlack,
+    brightRed: base.brightRed,
+    brightGreen: base.brightGreen,
+    brightYellow: base.brightYellow,
+    brightBlue: base.brightBlue,
+    brightMagenta: base.brightMagenta,
+    brightCyan: base.brightCyan,
+    brightWhite: base.brightWhite,
+    searchHitBackground: base.searchHitBackground,
+    searchHitBackgroundCurrent: base.searchHitBackgroundCurrent,
+    searchHitForeground: base.searchHitForeground,
+  );
 }

@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../breakpoints.dart';
-import '../icons.dart';
 import '../tokens.dart';
 import 'vault_actions.dart';
 
@@ -26,48 +25,31 @@ import 'vault_actions.dart';
 bool keyboardIsOpen(BuildContext context) =>
     MediaQuery.viewInsetsOf(context).bottom > 0;
 
-/// The floating navigation bubble.
-///
-/// Directory, Search, New note, New folder and Context, always shown. It used
-/// to collapse to a single `…` until tapped, which cost a tap before every
-/// navigation and hid where you could go — the bar is small enough that
-/// hiding it bought nothing.
-///
-/// A phone shape. On a wide screen the same actions live in the sidebar's
-/// toolbar instead, so this hides itself rather than floating in the middle of
-/// a 2000px window. Both draw [vaultActions], so the two placements cannot
-/// drift into offering different things.
-class NavBubble extends ConsumerStatefulWidget {
+/// The phone pill: Directory, Search, New note and Tags. The note screen
+/// hides it (Q5); the sidebar footer carries the same actions at desk width.
+class NavBubble extends ConsumerWidget {
   const NavBubble({super.key});
 
   @override
-  ConsumerState<NavBubble> createState() => _NavBubbleState();
-}
-
-class _NavBubbleState extends ConsumerState<NavBubble> {
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final uri = GoRouterState.of(context).uri;
 
-    // The sidebar carries these on a wide screen.
     if (context.isExpanded) return const SizedBox.shrink();
 
     return SafeArea(
-      minimum: EdgeInsets.only(bottom: t.sp * 2.5),
+      minimum: EdgeInsets.only(bottom: t.sp * 3.25),
       child: Align(
         alignment: Alignment.bottomCenter,
-        child: AnimatedSize(
-          duration: t.duration,
-          curve: Curves.easeOutCubic,
-          child: StormPill(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final action in vaultActions(context, ref, uri))
-                  _Slot(action: action),
-              ],
-            ),
+        child: StormPill(
+          padding: EdgeInsets.all(t.sp * 0.75),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            spacing: t.sp * 0.5,
+            children: [
+              for (final action in vaultActions(context, ref, uri))
+                _Slot(action: action),
+            ],
           ),
         ),
       ),
@@ -84,16 +66,14 @@ class _Slot extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
 
-    // The primary action is a filled circle standing proud of the pill, not a
-    // sixth equal icon: on a notes app "write something" is not one option
-    // among six.
     if (action.primary) {
       return Tooltip(
         message: action.tooltip,
         child: InkWell(
           onTap: action.onTap,
+          onLongPress: action.onLongPress,
           customBorder: const CircleBorder(),
-          child: PrimaryCircle(glyph: action.glyph),
+          child: PrimaryCircle(icon: action.icon, size: t.sp * 6),
         ),
       );
     }
@@ -104,51 +84,10 @@ class _Slot extends StatelessWidget {
         onTap: action.onTap,
         customBorder: const CircleBorder(),
         child: SizedBox(
-          // Every slot is the same 44px square, filled or not, so the pill's
-          // rhythm does not change when the primary one moves.
           width: t.sp * 5.5,
           height: t.sp * 5.5,
-          child: Stack(
-            alignment: Alignment.center,
-            clipBehavior: Clip.none,
-            children: [
-              StormIcon(
-                action.glyph,
-                size: t.sp * 2.5,
-                color: action.selected ? t.accent : t.text,
-              ),
-              // Amber, and carrying the count. Mentions are the one slot whose
-              // value is a number, and a bare dot threw that away.
-              if ((action.badge ?? 0) > 0)
-                Positioned(
-                  right: t.sp * 0.25,
-                  top: t.sp * 0.5,
-                  child: Container(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: t.sp * 0.5,
-                      vertical: t.sp * 0.125,
-                    ),
-                    constraints: BoxConstraints(minWidth: t.labelSize * 1.6),
-                    decoration: BoxDecoration(
-                      color: t.amber,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      '${action.badge}',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontFamily: StormTokens.monoFamily,
-                        // The 11px floor applies here too: a count nobody can
-                        // read is not a count.
-                        fontSize: t.labelSize,
-                        height: 1.2,
-                        fontWeight: FontWeight.w600,
-                        color: t.bg,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
+          child: Center(
+            child: Icon(action.icon, size: t.sp * 2.375, color: t.text2),
           ),
         ),
       ),
@@ -190,19 +129,20 @@ class StormPill extends StatelessWidget {
 
 /// The primary action: a filled accent circle standing proud of the pill.
 class PrimaryCircle extends StatelessWidget {
-  const PrimaryCircle({super.key, required this.glyph});
+  const PrimaryCircle({super.key, required this.icon, this.size});
 
-  final StormGlyph glyph;
+  final IconData icon;
+  final double? size;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return Container(
-      width: t.sp * 5.5,
-      height: t.sp * 5.5,
+      width: size ?? t.sp * 5.5,
+      height: size ?? t.sp * 5.5,
       alignment: Alignment.center,
       decoration: BoxDecoration(color: t.accent, shape: BoxShape.circle),
-      child: StormIcon(glyph, size: t.sp * 2.75, color: t.onAccent),
+      child: Icon(icon, size: t.sp * 2.75, color: t.onAccent),
     );
   }
 }
@@ -241,22 +181,4 @@ class NewFolderRequest extends InheritedWidget {
 
   @override
   bool updateShouldNotify(NewFolderRequest old) => false;
-}
-
-/// Same, for the Context slot inside a note.
-class NoteContextRequest extends InheritedWidget {
-  const NoteContextRequest({
-    super.key,
-    required this.onRequest,
-    required super.child,
-  });
-
-  final VoidCallback onRequest;
-
-  static VoidCallback? of(BuildContext context) => context
-      .dependOnInheritedWidgetOfExactType<NoteContextRequest>()
-      ?.onRequest;
-
-  @override
-  bool updateShouldNotify(NoteContextRequest old) => false;
 }

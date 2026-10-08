@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import 'accents.dart';
+import 'controls.dart';
+import 'session_status.dart';
 import 'states.dart';
 import 'theme.dart';
 import 'tokens.dart';
@@ -125,9 +127,9 @@ class _Column extends StatelessWidget {
                   SizedBox(height: t.gap),
                   Row(
                     children: [
-                      StormSwitch(value: true, onChanged: (_) {}),
+                      StormToggle(value: true, onChanged: (_) {}),
                       SizedBox(width: t.gap),
-                      StormSwitch(value: false, onChanged: (_) {}),
+                      StormToggle(value: false, onChanged: (_) {}),
                       SizedBox(width: t.gap),
                       StormCheckbox(value: true, onChanged: (_) {}),
                       SizedBox(width: t.gap),
@@ -153,6 +155,108 @@ class _Column extends StatelessWidget {
                       ),
                     ],
                   ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · buttons',
+              child: Wrap(
+                spacing: t.sp,
+                runSpacing: t.sp,
+                children: [
+                  StormButton.primary(label: '＋ New vault', onPressed: () {}),
+                  StormButton.outline(
+                    label: '＋ Add a device',
+                    onPressed: () {},
+                  ),
+                  StormButton.soft(
+                    label: 'Start session',
+                    icon: LucideIcons.play,
+                    onPressed: () {},
+                  ),
+                  StormButton.danger(label: 'End session', onPressed: () {}),
+                  StormButton.text(label: 'Revoke', onPressed: () {}),
+                  const StormButton.primary(label: 'Disabled', onPressed: null),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · choice chips · settings rows',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ChoiceChips<String>(
+                    options: const [
+                      ChoiceOption('claude', 'Claude Code'),
+                      ChoiceOption('opencode', 'OpenCode'),
+                      ChoiceOption('shell', 'Shell'),
+                    ],
+                    selected: 'claude',
+                    onSelected: (_) {},
+                  ),
+                  SizedBox(height: t.gap),
+                  SettingsRow(
+                    label: 'Let AI apps read your notes',
+                    sub: 'Serves your vaults to apps that hold an access key.',
+                    trailing: StormToggle(value: true, onChanged: (_) {}),
+                  ),
+                  SettingsRow(
+                    label: 'Let AI apps write',
+                    sub: 'Edits merge like any other device.',
+                    trailing: StormToggle(value: false, onChanged: (_) {}),
+                  ),
+                  SettingsRow(
+                    label: 'laptop-claude',
+                    sub: 'stk_••••3f9a · used 1h ago',
+                    monoSub: true,
+                    trailing: StormButton.text(
+                      label: 'Revoke',
+                      onPressed: () {},
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · session status',
+              child: Wrap(
+                spacing: t.sp,
+                runSpacing: t.sp,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  for (final s in const [
+                    'starting',
+                    'running',
+                    'unknown',
+                    'completed',
+                    'stopped',
+                    'failed',
+                  ]) ...[
+                    SessionStatusDot(status: s),
+                    SessionStatusChip(status: s),
+                  ],
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · numbered steps',
+              child: NumberedSteps(
+                steps: [
+                  NumberedStep(
+                    'Enroll a host',
+                    action: StormButton.primary(
+                      label: 'Enroll a host',
+                      onPressed: () {},
+                    ),
+                  ),
+                  const NumberedStep(
+                    'Sign Claude Code or OpenCode in on that host',
+                  ),
+                  const NumberedStep('Start a session'),
                 ],
               ),
             ),

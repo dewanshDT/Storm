@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""MCP Gateway V1, end to end (PLAN.md decisions 81, 81f; spec §17).
+
+A real storm-server, a real storm-runtime, a mock upstream MCP server and a
+scripted agent that the runtime launches exactly as it would Claude Code or
+OpenCode. The agent talks MCP to `storm-runtime mcp-bridge`, which forwards
+through the host daemon and the host link to the gateway, which is the only
+thing that holds the upstream credential.
+
+What it proves, with the real build:
+- the launch gives the agent Storm's servers only (AM32), and the host never
+  sees a credential;
+- calls work, the allowlist and the built-in `storm` connection apply, and
+  `sampling`, `roots` and `elicitation.url` never reach the upstream;
+- progress and a form elicitation ride their call; a URL elicitation never
+  reaches the agent;
+- R2–R8: a server restart re-initializes transparently with exactly one
+  initialize result for the agent; an in-flight call fails once and is not
+  re-sent; an open elicitation is cancelled and a late answer dropped; an
+  upstream restart (404) re-initializes and runs the call once;
+- disconnecting refuses the next call; `shell` gets nothing;
+- an agent writes only to its session's write vault, under `agent_writes`,
+  and every write is recorded with its provenance (decision 82, slice 5);
+- a session started from a note reads it through `session_context`, and no
+  part of the note is on any process's command line or in its environment;
+- the credential boundary (C1, C2, C4, C5, C7) on this host, with positive
+  controls; C3 (the journal) is the operator's.
+
+    SERVER_BIN=… RUNTIME_BIN=… python3 gateway_e2e.py
+"""
+
+import base64
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import storm_auth  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SERVER_BIN = os.path.abspath(os.environ.get("SERVER_BIN", "target/debug/storm-server"))
+RUNTIME_BIN = os.path.abspath(os.environ.get("RUNTIME_BIN", "../runtime/target/debug/storm-runtime"))
+
+ok = 0
+fail = 0
+
+
+def check(name, cond, detail=""):
+    global ok, fail
+    if cond:
+        ok += 1
+        print(f"  PASS  {name}")
+    else:
+        fail += 1
+        print(f"  FAIL  {name}   {str(detail)[:600]}")
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
+UP_PORT = free_port()
+BASE = f"http://127.0.0.1:{PORT}"
+WORK = tempfile.mkdtemp(prefix="storm-gateway-e2e-")
+STATE = os.path.join(WORK, "state")
+HOST_STATE = os.path.join(WORK, "host")
+WORKSPACES = os.path.join(WORK, "workspaces")
+UP_STATE = os.path.join(WORK, "upstream")
+SERVER_LOG = os.path.join(WORK, "server.log")
+RUNTIME_LOG = os.path.join(WORK, "runtime.log")
+UP_LOG = os.path.join(UP_STATE, "calls.jsonl")
+CANARY_FILE = os.path.join(UP_STATE, "canary")
+CANARY = "upstream-canary-" + os.urandom(12).hex()
+
+
+def call(method, path, body=None, auth=None, timeout=15):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"{BASE}{path}", data=data, method=method)
+    if body is not None:
+        req.add_header("content-type", "application/json")
+    if auth:
+        req.add_header("authorization", auth)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = r.read()
+            return r.status, (json.loads(text) if text else None)
+    except urllib.error.HTTPError as e:
+        text = e.read()
+        try:
+            return e.code, json.loads(text)
+        except Exception:
+            return e.code, text
+
+
+def wait(predicate, what, timeout=30):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = predicate()
+        if last:
+            return last
+        time.sleep(0.2)
+    raise RuntimeError(f"timed out waiting for {what} (last: {str(last)[:300]})")
+
+
+def start_server():
+    log = open(SERVER_LOG, "a")
+    p = subprocess.Popen(
+        [SERVER_BIN, "serve", "--vault-root", os.path.join(WORK, "vaults"), "--state", STATE,
+         "--port", str(PORT), "--gateway-allow-http-upstreams"],
+        stdout=log, stderr=subprocess.STDOUT,
+    )
+    wait(lambda: _health(), "the server")
+    return p
+
+
+def _health():
+    try:
+        return call("GET", "/v1/health")[0] == 200
+    except Exception:
+        return False
+
+
+def start_upstream():
+    p = subprocess.Popen([sys.executable, os.path.join(HERE, "gateway_support", "upstream.py"),
+                          str(UP_PORT), CANARY_FILE, UP_LOG],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def up():
+        try:
+            socket.create_connection(("127.0.0.1", UP_PORT), timeout=0.5).close()
+            return True
+        except OSError:
+            return False
+    wait(up, "the upstream")
+    return p
+
+
+def upstream_log():
+    if not os.path.exists(UP_LOG):
+        return []
+    return [json.loads(line) for line in open(UP_LOG) if line.strip()]
+
+
+class Agent:
+    """The scripted agent of one session, through its workspace files."""
+
+    def __init__(self, workspace):
+        self.dir = os.path.join(WORKSPACES, workspace)
+        self.n = 0
+
+    def send(self, slug, message):
+        self.n += 1
+        inbox = os.path.join(self.dir, "inbox")
+        tmp = os.path.join(inbox, f"{self.n:05d}.tmp")
+        with open(tmp, "w") as f:
+            json.dump({"slug": slug, "message": message}, f)
+        os.rename(tmp, os.path.join(inbox, f"{self.n:05d}.json"))
+
+    def transcript(self, slug):
+        path = os.path.join(self.dir, f"transcript-{slug}.jsonl")
+        if not os.path.exists(path):
+            return []
+        return [json.loads(line) for line in open(path) if line.strip()]
+
+    def answer(self, slug, rid, timeout=30):
+        return wait(lambda: next((m for m in self.transcript(slug) if m.get("id") == rid and
+                                  ("result" in m or "error" in m)), None),
+                    f"the answer to {rid} on {slug}", timeout)
+
+    def env(self):
+        path = os.path.join(self.dir, "agent-env.json")
+        return json.load(open(path)) if os.path.exists(path) else None
+
+    def initialize(self, slug, rid):
+        self.send(slug, {"jsonrpc": "2.0", "id": rid, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"roots": {"listChanged": True}, "sampling": {},
+                             "elicitation": {"form": {}, "url": {}}},
+            "clientInfo": {"name": "scripted-agent", "version": "1"}}})
+        result = self.answer(slug, rid)
+        self.send(slug, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+        return result
+
+    def tool(self, slug, rid, name, args=None, meta=None):
+        params = {"name": name, "arguments": args or {}}
+        if meta:
+            params["_meta"] = meta
+        self.send(slug, {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": params})
+
+
+def text_of(answer):
+    try:
+        return answer["result"]["content"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def main():
+    os.makedirs(os.path.join(WORK, "vaults", "primary"))
+    with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
+        f.write("# Seed\n")
+    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw"):
+        os.makedirs(os.path.join(WORKSPACES, ws))
+    os.makedirs(UP_STATE)
+    with open(CANARY_FILE, "w") as f:
+        f.write(CANARY)
+    agent_py = os.path.join(HERE, "gateway_support", "agent.py")
+    with open(os.path.join(WORK, "runtime.toml"), "w") as f:
+        f.write(f"""workspace_roots = ["{WORKSPACES}"]
+forbidden_roots = ["{STATE}", "{os.path.join(WORK, 'vaults')}"]
+max_sessions = 8
+
+[[providers]]
+id = "claude-code"
+command = "{sys.executable}"
+args = ["{agent_py}"]
+
+[[providers]]
+id = "opencode"
+command = "{sys.executable}"
+args = ["{agent_py}"]
+
+[providers.settings]
+model = "opencode/big-pickle"
+
+[[providers]]
+id = "shell"
+command = "/bin/sh"
+args = ["-i"]
+""")
+    os.environ.pop("STORM_SESSION", None)
+    os.environ.pop("STORM_DEVICE", None)
+
+    upstream = start_upstream()
+    server = start_server()
+    runtime = None
+    try:
+        owner, device, _ = storm_auth.sign_in(BASE, log_path=SERVER_LOG)
+
+        print("\n=== an integration, the account's ===")
+        status, conn = call("POST", "/v1/integrations/connections", {
+            "display_name": "Mock", "url": f"http://127.0.0.1:{UP_PORT}/mcp", "auth_kind": "static",
+            "credential": {"value": f"Bearer {CANARY}"}}, auth=owner)
+        check("the owner connects a static integration", status == 201, conn)
+        cid, slug = conn["id"], conn["slug"]
+        status, test = call("POST", f"/v1/integrations/connections/{cid}/test", {}, auth=owner)
+        check("its test lists the upstream's tools", status == 200 and test["tool_count"] == 5, test)
+        key = storm_auth.mint_mcp_key(BASE, owner)
+        for method, path in [("GET", "/v1/integrations/connections"),
+                             ("GET", f"/v1/integrations/connections/{cid}"),
+                             ("POST", f"/v1/integrations/connections/{cid}/test"),
+                             ("DELETE", f"/v1/integrations/connections/{cid}")]:
+            status, _ = call(method, path, {} if method == "POST" else None, auth=f"Bearer {key}")
+            check(f"an stk_ key gets 401 on {method} {path.replace(cid, '{id}')}", status == 401, status)
+
+        print("\n=== a host that can bridge ===")
+        _, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)
+        enrolled = subprocess.run([RUNTIME_BIN, "enroll", "--state", HOST_STATE, "--name", "gw-host"],
+                                  input=(issued["enrollment"] + "\n").encode(), capture_output=True)
+        check("storm-runtime enrolls", enrolled.returncode == 0, enrolled.stderr.decode())
+        host_id = json.load(open(os.path.join(HOST_STATE, "host.json")))["host_id"]
+        runtime = subprocess.Popen(
+            [RUNTIME_BIN, "serve", "--state", HOST_STATE, "--config", os.path.join(WORK, "runtime.toml")],
+            stdout=open(RUNTIME_LOG, "a"), stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"})
+
+        def host_online():
+            _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
+            h = next((h for h in hosts or [] if h["id"] == host_id), None)
+            return h if h and h["status"] == "online" and h.get("capabilities") else None
+        host = wait(host_online, "the host")
+        check("the host reports mcp_bridge", host["capabilities"].get("mcp_bridge") is True, host)
+        sock = os.path.join(HOST_STATE, "run")
+        check("the daemon's socket directory is 0700", oct(os.stat(sock).st_mode & 0o777) == "0o700",
+              oct(os.stat(sock).st_mode))
+
+        def launch(provider, workspace, extra=None):
+            status, rec = call("POST", "/v1/agent/sessions", {
+                "host_id": host_id, "workspace": workspace, "provider": provider,
+                "terminal": {"cols": 80, "rows": 24}, **(extra or {})}, auth=owner)
+            assert status == 200, rec
+            wait(lambda: call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1]["status"] == "running",
+                 "running")
+            return rec
+
+        print("\n=== Claude Code's launch (AM32) ===")
+        rec = launch("claude-code", "gw")
+        sid = rec["id"]
+        granted = sorted(g["slug"] for g in rec["mcp"]["connections"])
+        check("the launch grants storm and the integration", granted == sorted(["storm", slug]), rec["mcp"])
+        launch_integrations = [{"id": cid, "slug": slug, "display_name": "Mock"}]
+        check("the session view names its integrations as launched, Storm not among them",
+              rec.get("integrations") == launch_integrations, rec)
+        a = Agent("gw")
+        env = wait(a.env, "the agent's record of its launch")
+        argv = env["argv"]
+        check("it gets --mcp-config <session>/mcp.json --strict-mcp-config",
+              "--strict-mcp-config" in argv and argv[argv.index("--mcp-config") + 1].endswith(f"{sid}/mcp.json"),
+              argv)
+        cfg_path = argv[argv.index("--mcp-config") + 1]
+        cfg = json.load(open(cfg_path))
+        check("its config holds a bridge per granted connection, and nothing else",
+              sorted(cfg["mcpServers"]) == sorted(["storm", slug]) and
+              all(s["args"][0] == "mcp-bridge" for s in cfg["mcpServers"].values()), cfg)
+        check("the session directory is 0700",
+              oct(os.stat(os.path.dirname(cfg_path)).st_mode & 0o777) == "0o700")
+
+        print("\n=== calls through the bridge ===")
+        init = a.initialize(slug, 1)
+        check("initialize answers with the upstream's server", init.get("result", {}).get("serverInfo", {})
+              .get("name") == "mock-upstream", init)
+        a.send(slug, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        tools = sorted(t["name"] for t in a.answer(slug, 2)["result"]["tools"])
+        check("tools/list shows the allowlist", tools == ["ask", "ask_url", "caps", "echo", "slow"], tools)
+        a.tool(slug, 3, "echo", {"text": "hi"})
+        check("a tool call runs upstream", text_of(a.answer(slug, 3)) == "echo: hi")
+        a.tool(slug, 4, "caps")
+        upcaps = json.loads(text_of(a.answer(slug, 4)))
+        check("sampling, roots and elicitation.url never reach the upstream (R1, G-D23)",
+              upcaps == {"elicitation": {"form": {}}}, upcaps)
+        a.tool(slug, 5, "slow", {"call_id": "p1", "seconds": 2}, meta={"progressToken": "tok-1"})
+        a.answer(slug, 5)
+        progress = [m for m in a.transcript(slug) if m.get("method") == "notifications/progress"]
+        check("progress arrives with the agent's own token",
+              len(progress) >= 2 and all(p["params"]["progressToken"] == "tok-1" for p in progress), progress)
+        a.tool(slug, 6, "ask", {"wait": 20})
+        ask = wait(lambda: next((m for m in a.transcript(slug) if m.get("method") == "elicitation/create"),
+                                None), "the elicitation")
+        a.send(slug, {"jsonrpc": "2.0", "id": ask["id"], "result": {"action": "accept", "content": {"answer": "rust"}}})
+        got = text_of(a.answer(slug, 6))
+        check("a form elicitation is answered by the agent", '"rust"' in got and "accept" in got, got)
+        a.tool(slug, 7, "ask_url", {"wait": 2})
+        got = text_of(a.answer(slug, 7))
+        url_reached = [m for m in a.transcript(slug) if m.get("method") == "elicitation/create"
+                       and m.get("params", {}).get("mode") == "url"]
+        check("a URL elicitation never reaches the agent (G-D23)", not url_reached and "decline" in got, got)
+
+        a.initialize("storm", 101)
+        a.send("storm", {"jsonrpc": "2.0", "id": 102, "method": "tools/list"})
+        stools = [t["name"] for t in a.answer("storm", 102)["result"]["tools"]]
+        check("the built-in storm connection is read-only without the flags, and never deletes",
+              "list_vaults" in stools and "create_note" not in stools and "delete_note" not in stools, stools)
+        a.tool("storm", 103, "list_vaults")
+        check("an agent reads the vault through the gateway", "result" in a.answer("storm", 103))
+
+        print("\n=== new upstream tools: recorded, off, and shown until reviewed (§9, 81k) ===")
+        allowlist = sorted(call("GET", f"/v1/integrations/connections/{cid}", auth=owner)[1]["tool_allowlist"])
+        with open(os.path.join(UP_STATE, "extra_tools.json"), "w") as f:
+            json.dump(["added_later", "bad\u0007name"], f)
+        a.send(slug, {"jsonrpc": "2.0", "id": 110, "method": "tools/list"})
+        listed = [t["name"] for t in a.answer(slug, 110)["result"]["tools"]]
+        check("an agent never sees a tool that appeared later", "added_later" not in listed, listed)
+        _, view = call("GET", f"/v1/integrations/connections/{cid}", auth=owner)
+        check("the agent's listing records it for the owner, and only the valid name",
+              view["new_tools"] == ["added_later"], view.get("new_tools"))
+        check("recording it enabled nothing", sorted(view["tool_allowlist"]) == allowlist, view["tool_allowlist"])
+        a.tool(slug, 111, "added_later")
+        refused = a.answer(slug, 111)
+        check("a call to it is refused", refused.get("error", {}).get("data", {}).get("storm_error")
+              == "tool_not_allowed", refused)
+        status, view = call("PATCH", f"/v1/integrations/connections/{cid}", {"tool_allowlist": allowlist},
+                            auth=owner)
+        check("saving the tool list unchanged is the review: the notice clears and the tool stays off",
+              status == 200 and view["new_tools"] == [] and "added_later" not in view["tool_allowlist"], view)
+        a.send(slug, {"jsonrpc": "2.0", "id": 112, "method": "tools/list"})
+        a.answer(slug, 112)
+        _, view = call("GET", f"/v1/integrations/connections/{cid}", auth=owner)
+        check("a reviewed tool is not new again", view["new_tools"] == [], view.get("new_tools"))
+        call("PATCH", f"/v1/integrations/connections/{cid}", {"tool_allowlist": allowlist + ["added_later"]},
+             auth=owner)
+        a.send(slug, {"jsonrpc": "2.0", "id": 113, "method": "tools/list"})
+        listed = [t["name"] for t in a.answer(slug, 113)["result"]["tools"]]
+        check("only the owner turns it on", "added_later" in listed, listed)
+        call("PATCH", f"/v1/integrations/connections/{cid}", {"tool_allowlist": allowlist}, auth=owner)
+        os.remove(os.path.join(UP_STATE, "extra_tools.json"))
+
+        print("\n=== R2–R6: the server restarts ===")
+        inits_before = len([e for e in upstream_log() if e["kind"] == "initialize"])
+        server.send_signal(signal.SIGTERM)
+        server.wait(10)
+        server = start_server()
+        wait(host_online, "the host to reconnect")
+        wait(lambda: call("GET", f"/v1/agent/sessions/{sid}", auth=owner)[1]["status"] == "running",
+             "the session to be running again")
+        a.tool(slug, 20, "echo", {"text": "after-restart"})
+        check("after a restart the next call succeeds (R6)", text_of(a.answer(slug, 20)) == "echo: after-restart")
+        init_results = [m for m in a.transcript(slug) if m.get("result", {}).get("serverInfo")]
+        check("the agent saw exactly one initialize result (R5)", len(init_results) == 1, len(init_results))
+        inits_after = len([e for e in upstream_log() if e["kind"] == "initialize"])
+        check("a new upstream session was opened (R4)", inits_after == inits_before + 1, (inits_before, inits_after))
+        echoes = [e for e in upstream_log() if e.get("kind") == "tools/call" and e.get("tool") == "echo"]
+        check("it executed once", len(echoes) == 2, echoes)
+
+        print("\n=== R7: an in-flight call when the server restarts ===")
+        a.tool(slug, 30, "slow", {"call_id": "r7", "seconds": 6})
+        wait(lambda: any(e.get("call_id") == "r7" for e in upstream_log()), "the slow call upstream")
+        server.send_signal(signal.SIGKILL)
+        server.wait(10)
+        # Straight back up: a bridge that retried "until the server is back"
+        # (the gates' `retry` mutation) would now run the call a second time.
+        server = start_server()
+        wait(host_online, "the host to reconnect")
+        answer = a.answer(slug, 30, timeout=60)
+        check("the in-flight call fails once", "error" in answer, answer)
+        time.sleep(8)  # longer than the call; a retry would have run by now
+        r7 = [e for e in upstream_log() if e.get("kind") == "tools/call" and e.get("call_id") == "r7"]
+        check("the upstream executed it once, never retried (R7)", len(r7) == 1, r7)
+        errors = [m for m in a.transcript(slug) if m.get("id") == 30]
+        check("the agent got one answer for it", len(errors) == 1, errors)
+
+        print("\n=== R8: an open elicitation when the server restarts ===")
+        wait(lambda: call("GET", f"/v1/agent/sessions/{sid}", auth=owner)[1]["status"] == "running", "running")
+        seen = {m["id"] for m in a.transcript(slug) if m.get("method") == "elicitation/create"}
+        a.tool(slug, 40, "ask", {"wait": 30})
+        ask = wait(lambda: next((m for m in a.transcript(slug) if m.get("method") == "elicitation/create"
+                                 and m["id"] not in seen), None), "the second elicitation")
+        server.send_signal(signal.SIGKILL)
+        server.wait(10)
+        a.answer(slug, 40, timeout=30)
+        cancelled = [m for m in a.transcript(slug) if m.get("method") == "notifications/cancelled"
+                     and m["params"]["requestId"] == ask["id"]]
+        check("the open elicitation is cancelled toward the agent (R8)", len(cancelled) == 1, cancelled)
+        server = start_server()
+        wait(host_online, "the host to reconnect")
+        responses_before = len([e for e in upstream_log() if e["kind"] == "client_response"])
+        a.send(slug, {"jsonrpc": "2.0", "id": ask["id"], "result": {"action": "accept", "content": {"answer": "late"}}})
+        time.sleep(2)
+        responses_after = len([e for e in upstream_log() if e["kind"] == "client_response"])
+        check("a late answer is dropped, never sent upstream", responses_after == responses_before)
+
+        print("\n=== R3b: the upstream restarts (404) ===")
+        wait(lambda: call("GET", f"/v1/agent/sessions/{sid}", auth=owner)[1]["status"] == "running", "running")
+        a.tool(slug, 50, "echo", {"text": "warm"})
+        a.answer(slug, 50)
+        upstream.send_signal(signal.SIGTERM)
+        upstream.wait(10)
+        upstream = start_upstream()
+        a.tool(slug, 51, "echo", {"text": "after-404"})
+        check("the call succeeds through a transparent re-init", text_of(a.answer(slug, 51)) == "echo: after-404")
+        after = [e for e in upstream_log() if e.get("kind") == "tools/call" and e.get("tool") == "echo"]
+        check("and runs once", len(after) == 4 and
+              len([m for m in a.transcript(slug) if m.get("id") == 51]) == 1, after)
+
+        print("\n=== OpenCode's launch (AM32) ===")
+        oc = Agent("oc")
+        rec = launch("opencode", "oc")
+        env = wait(oc.env, "the agent's record of its launch")
+        xdg = env["env"]["XDG_CONFIG_HOME"]
+        check("it gets XDG_CONFIG_HOME=<session>/xdg", xdg and xdg.endswith(f"{rec['id']}/xdg"), env)
+        check("it gets OPENCODE_DISABLE_PROJECT_CONFIG=1", env["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1")
+        occfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json")))
+        check("every connection asks before a tool",
+              occfg["permission"].get(f"{slug}_*") == "ask" and occfg["permission"].get("storm_*") == "ask", occfg)
+        check("the host's settings are merged in", occfg.get("model") == "opencode/big-pickle", occfg)
+        oc.initialize(slug, 1)
+        oc.tool(slug, 2, "echo", {"text": "oc"})
+        check("OpenCode's session calls through its bridge", text_of(oc.answer(slug, 2)) == "echo: oc")
+
+        _, vaults = call("GET", "/v1/vaults", auth=owner)
+        vault = next(v["id"] for v in vaults["vaults"] if v["dir"] == "primary")
+
+        print("\n=== a session started from a note (§5.3 C; the argv rule) ===")
+        prompt = "Read your context note with the storm session_context tool, then wait for my instructions."
+        mark = "ctx-marker-" + os.urandom(6).hex()
+        other_mark = "ctx-other-" + os.urandom(6).hex()
+        _, made = call("POST", f"/v1/vaults/{vault}/notes", {
+            "path": f"Context/{mark}.md", "content": f"# Brief {mark}\n\nthe body says {mark}-body\n"}, auth=owner)
+        brief = made["note"]
+        _, made = call("POST", f"/v1/vaults/{vault}/notes", {
+            "path": "Context/Other.md", "content": f"# Other\n\n{other_mark}-body\n"}, auth=owner)
+        other = made["note"]
+        rec = launch("claude-code", "ctx", {"context": {"vault_id": vault, "note_id": brief["id"]}})
+        check("the session is named from its note", rec["name"] == f"brief-{mark}", rec.get("name"))
+        check("and carries its context", rec["context"] == {"vault_id": vault, "note_id": brief["id"],
+                                                             "title": f"Brief {mark}"}, rec.get("context"))
+        c = Agent("ctx")
+        argv = wait(c.env, "the agent's record of its launch")["argv"]
+        check("Claude Code gets the fixed opening prompt, last",
+              argv[-1] == prompt and argv[-2] == "--strict-mcp-config", argv)
+        rec2 = launch("opencode", "ctx2", {"context": {"vault_id": vault, "note_id": other["id"]}})
+        c2 = Agent("ctx2")
+        argv2 = wait(c2.env, "the second agent's record of its launch")["argv"]
+        check("OpenCode gets --prompt and the same constant", argv2[-2:] == ["--prompt", prompt], argv2)
+
+        note_data = [mark, brief["id"], other_mark, other["id"]]
+        control = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", mark],
+                                   env={**os.environ, "CONTROL": brief["id"]})
+        wait(lambda: b"time.sleep" in open(f"/proc/{control.pid}/cmdline", "rb").read(),
+             "the control process to exec")
+        found = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                blob = open(f"/proc/{pid}/cmdline", "rb").read() + open(f"/proc/{pid}/environ", "rb").read()
+            except OSError:
+                continue
+            if any(d.encode() in blob for d in note_data):
+                found.append(pid)
+        check("positive control: a process carrying note data is found", str(control.pid) in found, found)
+        control.kill()
+        found = [pid for pid in found if pid != str(control.pid)]
+        check("no process's arguments or environment hold the note's title, body or id", found == [], found)
+
+        c.initialize("storm", 1)
+        c.tool("storm", 2, "session_context")
+        got = c.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("the agent reads its note through session_context",
+              f"{mark}-body" in got.get("content", "") and got.get("note_id") == brief["id"], got)
+        c2.initialize("storm", 1)
+        c2.tool("storm", 2, "session_context")
+        got2 = c2.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("a second session reads its own note, never the first one's",
+              f"{other_mark}-body" in got2.get("content", "") and mark not in json.dumps(got2), got2)
+        for sid_ in (rec["id"], rec2["id"]):
+            call("POST", f"/v1/agent/sessions/{sid_}/end", auth=owner)
+
+        print("\n=== Phase 1's exit: an agent's write merges with a phone's (AM28), in its write vault ===")
+        status, cfg = call("PUT", "/v1/config/mcp", {"agent_writes": True}, auth=owner)
+        check("the owner turns agent writes on, and MCP writes stay off",
+              status == 200 and cfg["agent_writes"] is True and cfg["mcp_writable"] is False, cfg)
+        _, elsewhere = call("POST", "/v1/vaults", {"name": "elsewhere"}, auth=owner)
+        wrec = launch("claude-code", "wr", {"write_vault_id": vault})
+        wid = wrec["id"]
+        check("the launch records its write vault", wrec["write_vault_id"] == vault, wrec)
+        w = Agent("wr")
+        w.initialize("storm", 1)
+        w.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        wtools = [t["name"] for t in w.answer("storm", 2)["result"]["tools"]]
+        check("with a write vault and agent writes on, the agent may write, and still never delete",
+              "create_note" in wtools and "update_note" in wtools and "delete_note" not in wtools, wtools)
+        w.tool("storm", 3, "create_note", {"vault": vault, "path": "Agents/Plan.md",
+                                           "content": "# Plan\n\nfirst: draft\n\nsecond: draft\n"})
+        made = w.answer("storm", 3)["result"].get("structuredContent", {})
+        note_id, version = made["note"]["id"], made["note"]["version"]
+        check("the agent creates a note through the gateway", bool(note_id), made)
+        status, phone = call("PUT", f"/v1/vaults/{vault}/notes/{note_id}", {
+            "base_version": version, "content": "# Plan\n\nfirst: from the phone\n\nsecond: draft\n"}, auth=owner)
+        check("a phone edits it meanwhile", status == 200, phone)
+        w.tool("storm", 4, "update_note", {"vault": vault, "note_id": note_id, "base_version": version,
+                                           "content": "# Plan\n\nfirst: draft\n\nsecond: from the agent\n"})
+        merged = w.answer("storm", 4)["result"].get("structuredContent", {})
+        check("the agent's stale write is merged, not overwritten", merged.get("merged") is True, merged)
+        _, final = call("GET", f"/v1/vaults/{vault}/notes/{note_id}", auth=owner)
+        body = final.get("content", "")
+        check("both edits are in the note", "from the phone" in body and "from the agent" in body, body)
+        w.tool("storm", 5, "delete_note", {"vault": vault, "note_id": note_id})
+        refused = w.answer("storm", 5)
+        check("and the agent cannot delete it (G-D5)",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
+        w.tool("storm", 6, "create_note", {"vault": elsewhere["id"], "path": "Stray.md", "content": "x"})
+        refused = w.answer("storm", 6)
+        check("a write outside its write vault is refused with a stable code",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "vault_write_not_allowed", refused)
+        _, tree = call("GET", f"/v1/vaults/{elsewhere['id']}/tree", auth=owner)
+        check("and nothing was written there", "Stray" not in json.dumps(tree), tree)
+
+        _, writes = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)
+        check("the session's Wrote list has the note, once, created, at its latest version",
+              [(x["note_id"], x["kind"], x["version"], x["title"]) for x in writes] ==
+              [(note_id, "created", final["version"], "Plan")], writes)
+        _, view = call("GET", f"/v1/agent/sessions/{wid}", auth=owner)
+        check("the session counts it", view.get("wrote_count") == 1, view)
+        aw = final.get("agent_write") or {}
+        check("the note names the session that wrote it",
+              aw.get("session_id") == wid and aw.get("session_name") == wrec["name"] and aw.get("kind") == "created",
+              final)
+        _, unseen = call("GET", f"/v1/vaults/{vault}/agent-writes", auth=owner)
+        check("the vault's agent-writes map has it", unseen.get(note_id, {}).get("session_id") == wid, unseen)
+
+        print("\n=== kit scripts: written only with kit as the write vault, and in Wrote ===")
+        kit = next(v for v in call("GET", "/v1/vaults", auth=owner)[1]["vaults"] if v["dir"] == "kit")
+        before = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)[1]
+        w.tool("storm", 20, "create_script", {"name": "e2e/tool.sh", "content": "echo hi\n"})
+        refused = w.answer("storm", 20)
+        check("a script write with another write vault is refused",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "vault_write_not_allowed", refused)
+        after = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)[1]
+        check("and is not recorded", after == before, after)
+        krec = launch("claude-code", "kw", {"write_vault_id": kit["id"]})
+        k = Agent("kw")
+        k.initialize("storm", 1)
+        k.tool("storm", 2, "create_script", {"name": "e2e/tool.sh", "content": "echo hi\n"})
+        made = k.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("with kit as its write vault the agent writes a script", made.get("path") == "scripts/e2e/tool.sh", made)
+        k.tool("storm", 3, "update_script", {"name": "e2e/tool.sh", "content": "echo bye\n"})
+        k.answer("storm", 3)
+        _, kwrites = call("GET", f"/v1/agent/sessions/{krec['id']}/writes", auth=owner)
+        check("the script is in the session's Wrote list, once",
+              [(x["kind"], x["path"], x["title"], x["note_id"], x["version"]) for x in kwrites] ==
+              [("script_created", "scripts/e2e/tool.sh", "e2e/tool.sh", None, None)], kwrites)
+        check("and counts", call("GET", f"/v1/agent/sessions/{krec['id']}", auth=owner)[1]["wrote_count"] == 1)
+
+        call("PUT", "/v1/config/mcp", {"agent_writes": False}, auth=owner)
+        w.tool("storm", 7, "update_note", {"vault": vault, "note_id": note_id, "base_version": 1,
+                                           "content": "x"})
+        refused = w.answer("storm", 7)
+        check("switching agent writes off refuses the live session's next write",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
+
+        print("\n=== shell, and disconnecting mid-session ===")
+        rec = launch("shell", "sh")
+        check("shell gets no grants (G-D9)", rec["mcp"]["connections"] == [], rec["mcp"])
+        check("and no session directory", not os.path.exists(os.path.join(HOST_STATE, "sessions", rec["id"])))
+        status, _ = call("DELETE", f"/v1/integrations/connections/{cid}", auth=owner)
+        check("the owner disconnects", status == 204, status)
+        a.tool(slug, 60, "echo", {"text": "after-disconnect"})
+        answer = a.answer(slug, 60)
+        check("the next call is refused", answer.get("error", {}).get("data", {}).get("storm_error") == "not_granted",
+              answer)
+        _, view = call("GET", f"/v1/agent/sessions/{sid}", auth=owner)
+        check("and the session still shows it was granted at launch (history)",
+              view.get("integrations") == launch_integrations, view)
+        _, view = call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)
+        check("a shell session lists no integrations", view.get("integrations") == [], view)
+
+        print("\n=== the credential boundary (C1, C2, C4, C5, C7) ===")
+        spellings = [CANARY, f"Bearer {CANARY}"]
+        spellings += [base64.b64encode(s.encode()).decode() for s in list(spellings)]
+        spellings += [base64.urlsafe_b64encode(s.encode()).decode().rstrip("=") for s in spellings[:2]]
+
+        def scan_tree(root, skip=()):
+            hits = []
+            for dirpath, _, files in os.walk(root):
+                if any(dirpath.startswith(s) for s in skip):
+                    continue
+                for name in files:
+                    path = os.path.join(dirpath, name)
+                    try:
+                        data = open(path, "rb").read()
+                    except OSError:
+                        continue
+                    if any(s.encode() in data for s in spellings):
+                        hits.append(path)
+            return hits
+
+        check("positive control: the scanner finds the canary where it is",
+              scan_tree(UP_STATE) == [CANARY_FILE], scan_tree(UP_STATE))
+        # Everything under the suite's directory except the two places the
+        # credential is meant to be: the upstream's own files, and the server's
+        # state (where it is sealed — checked separately below).
+        hits = [h for h in scan_tree(WORK) if not h.startswith(UP_STATE) and not h.startswith(STATE)]
+        check("C1/C5/C7: no host file, session config, transcript or log holds it", hits == [], hits)
+        check("and the server's own state holds it only sealed (gateway.db)",
+              scan_tree(STATE) == [], scan_tree(STATE))
+
+        # A planted control: a process carrying the canary in its environment
+        # and its arguments, which the scan must find.
+        control = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", CANARY],
+                                   env={**os.environ, "CONTROL": CANARY})
+        wait(lambda: b"time.sleep" in open(f"/proc/{control.pid}/cmdline", "rb").read(),
+             "the control process to exec")
+        mine = []
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                environ = open(f"/proc/{pid}/environ", "rb").read()
+                cmdline = open(f"/proc/{pid}/cmdline", "rb").read()
+            except OSError:
+                continue
+            mine.append((pid, environ, cmdline))
+        names = [c.split(b"\0")[0] for _, _, c in mine]
+        check("positive control: the bridges are among the processes read",
+              any(b"storm-runtime" in n for n in names))
+        leaked = [pid for pid, environ, cmdline in mine
+                  if any(s.encode() in environ or s.encode() in cmdline for s in spellings)
+                  and pid != str(upstream.pid)]
+        check("positive control: the planted process is found", str(control.pid) in leaked, leaked)
+        control.kill()
+        leaked = [pid for pid in leaked if pid != str(control.pid)]
+        check("C2/C4: no other process's environment or arguments hold it", leaked == [], leaked)
+
+        sessions_dir = os.path.join(HOST_STATE, "sessions")
+        call("POST", f"/v1/agent/sessions/{sid}/end", auth=owner)
+        wait(lambda: not os.path.exists(os.path.join(sessions_dir, sid)), "the session directory to go")
+        check("an ended session's directory is removed", True)
+    finally:
+        for p in (runtime, server, upstream):
+            if p and p.poll() is None:
+                p.send_signal(signal.SIGTERM)
+                try:
+                    p.wait(10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+
+    print(f"\n{'=' * 52}\n  {ok} passed, {fail} failed\n{'=' * 52}")
+    if fail:
+        print(f"  logs kept in {WORK}")
+        sys.exit(1)
+    shutil.rmtree(WORK, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -5,6 +5,7 @@ import 'package:storm/api/auth_api.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 
+import 'fake_server.dart';
 import 'shell_harness.dart';
 
 /// Signing in on a device that is already paired.
@@ -55,7 +56,7 @@ void main() {
 
       c.read(routerProvider).go(Routes.login);
       await tester.pumpAndSettle();
-      expect(pathOf(c), Routes.dashboard);
+      expect(pathOf(c), Routes.browse(FakeServer.primaryVault));
       await disposeShell(tester, c);
     });
 
@@ -91,7 +92,6 @@ void main() {
         'session_revoked',
         'device_revoked',
         'not_paired',
-        'user_disabled',
         'forbidden',
         'already_initialized',
         'pairing_consumed',

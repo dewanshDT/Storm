@@ -80,19 +80,22 @@ class AuthApi {
     return PairingResult.fromJson(json as Map<String, dynamic>);
   }
 
-  /// `POST /v1/users/first` — create the owner account, once.
-  ///
-  /// **Device tier, not unauthenticated** (A8): creating an account over the
-  /// network costs a paired device, and the legacy shared token deliberately
-  /// cannot reach it (A10). This said "unauthenticated" and sent no
-  /// `Authorization` header, which every real server answers `401` — so the
-  /// first run could pair and then fail to create the owner. The server's own
-  /// doc comment carried the same wrong claim until slice 12.
-  ///
-  /// Only works when the user table is empty; afterwards the server answers
-  /// `409` and keeps doing so.
-  Future<void> createFirstUser({
-    required String username,
+  /// `GET /v1/account` (device tier): whether this Storm is set up.
+  Future<bool> accountExists({
+    required String deviceId,
+    required String deviceSecret,
+  }) async {
+    final json = _decode(
+      await _client.get(
+        _uri('/v1/account'),
+        headers: {'Authorization': 'StormDevice $deviceId:$deviceSecret'},
+      ),
+    );
+    return (json as Map)['exists'] == true;
+  }
+
+  /// `POST /v1/users/first` (device tier): set up the account, once.
+  Future<void> setUpAccount({
     required String password,
     required String deviceId,
     required String deviceSecret,
@@ -103,82 +106,13 @@ class AuthApi {
         'Content-Type': 'application/json',
         'Authorization': 'StormDevice $deviceId:$deviceSecret',
       },
-      body: jsonEncode({'username': username, 'password': password}),
+      body: jsonEncode({'password': password}),
     );
     if (r.statusCode < 200 || r.statusCode >= 300) {
       final body = jsonDecode(r.body);
       final error = body is Map ? '${body['error']}' : 'HTTP ${r.statusCode}';
       throw AuthApiException(r.statusCode, error);
     }
-  }
-
-  /// `GET /v1/users` — the accounts on this server, for the login picker.
-  ///
-  /// Device tier: paired devices may see who exists, strangers on the LAN may
-  /// not (A7/A8).
-  Future<List<AuthUser>> listUsers({
-    required String deviceId,
-    required String deviceSecret,
-  }) async {
-    final json = _decode(
-      await _client.get(
-        _uri('/v1/users'),
-        headers: {'Authorization': 'StormDevice $deviceId:$deviceSecret'},
-      ),
-    );
-    return (json as List)
-        .map((u) => AuthUser.fromJson(u as Map<String, dynamic>))
-        .toList();
-  }
-
-  /// `GET /v1/auth/registration` — may this server take new accounts? (A13)
-  ///
-  /// Device tier, like the calls around it. **This is UX only**: the server
-  /// enforces the switch on `register`, so a client that gets this wrong finds
-  /// out at `403` rather than creating something it should not have.
-  ///
-  /// Any failure answers `false`. Not being able to ask is not permission, and
-  /// a login screen that quietly hides a button is better than one offering a
-  /// door that is not there.
-  Future<bool> registrationOpen({
-    required String deviceId,
-    required String deviceSecret,
-  }) async {
-    try {
-      final json = _decode(
-        await _client.get(
-          _uri('/v1/auth/registration'),
-          headers: {'Authorization': 'StormDevice $deviceId:$deviceSecret'},
-        ),
-      );
-      return (json as Map)['enabled'] == true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /// `POST /v1/users` — create an ordinary account, when registration is open.
-  ///
-  /// Always a member; the owner is the bootstrap account and registration
-  /// cannot mint one. Throws `registration_disabled` when the switch is off,
-  /// which is the case a client that raced the setting has to be able to
-  /// report honestly.
-  Future<void> register({
-    required String deviceId,
-    required String deviceSecret,
-    required String username,
-    required String password,
-  }) async {
-    _decode(
-      await _client.post(
-        _uri('/v1/users'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'StormDevice $deviceId:$deviceSecret',
-        },
-        body: jsonEncode({'username': username, 'password': password}),
-      ),
-    );
   }
 
   /// `POST /v1/auth/login` — exchange device credentials + password for
@@ -188,7 +122,6 @@ class AuthApi {
   Future<SessionTokens> login({
     required String deviceId,
     required String deviceSecret,
-    required String username,
     required String password,
   }) async {
     final json = _decode(
@@ -198,7 +131,7 @@ class AuthApi {
           'Content-Type': 'application/json',
           'Authorization': 'StormDevice $deviceId:$deviceSecret',
         },
-        body: jsonEncode({'username': username, 'password': password}),
+        body: jsonEncode({'password': password}),
       ),
     );
     return SessionTokens.fromJson(json as Map<String, dynamic>);
@@ -283,7 +216,7 @@ bool isDeviceRejected(AuthApiException e) =>
 String authFailureMessage(AuthApiException e) {
   switch (e.message) {
     case 'invalid_credentials':
-      return 'Wrong username or password.';
+      return 'Wrong password.';
     case 'session_expired':
       return 'Signed out — sign in again.';
     case 'session_revoked':
@@ -292,14 +225,8 @@ String authFailureMessage(AuthApiException e) {
       return "This device's access was removed. Pair with the server again.";
     case 'not_paired':
       return 'Pair with the server first.';
-    case 'user_disabled':
-      return 'This account is disabled.';
     case 'forbidden':
       return "You don't have access to this vault.";
-    case 'registration_disabled':
-      return 'This server is not accepting new accounts.';
-    case 'username_taken':
-      return 'That username is taken.';
     case 'already_initialized':
       return 'This server already has an account.';
     case 'pairing_consumed':

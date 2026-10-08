@@ -10,6 +10,7 @@ import '../breakpoints.dart';
 import '../browse_screen.dart' show createFolder;
 import '../new_note_dialog.dart';
 import 'nav_bubble.dart';
+import 'sidebar_frame.dart';
 import 'vault_gate.dart';
 import 'vault_sidebar.dart';
 
@@ -107,11 +108,8 @@ class _VaultShellState extends ConsumerState<VaultShell> {
                     body: Row(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        if (!collapsed) ...[
-                          const VaultSidebar(),
-                          const VerticalDivider(width: 1),
-                        ],
-                        Expanded(child: widget.child),
+                        if (!collapsed) ...[const VaultSidebar()],
+                        Expanded(child: PaneSemantics(child: widget.child)),
                       ],
                     ),
                   )

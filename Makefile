@@ -87,6 +87,27 @@ test-runtime:
 test-client:
 	cd $(CLIENT) && flutter test
 
+## test-gateway-mutations: rebuild the bridge broken three ways; gateway_e2e.py must catch each
+test-gateway-mutations:
+	@cd $(SERVER) && cargo build --quiet
+	@python3 $(SERVER)/tests/gateway_mutations.py
+
+## test-migration: boot this build on a v5 auth.db made by the pre-v6 server (decision 82)
+# Builds PRE_V6_REF in .dev/pre-v6 (kept between runs) to make the v5 database.
+PRE_V6_REF ?= c9131b4
+test-migration:
+	@cd $(SERVER) && cargo build --quiet
+	@set -e; \
+	ROOT="$$PWD"; \
+	if [ ! -d "$$ROOT/.dev/pre-v6" ]; then \
+		git worktree add --detach "$$ROOT/.dev/pre-v6" $(PRE_V6_REF); \
+	fi; \
+	(cd "$$ROOT/.dev/pre-v6/apps/server" && \
+		CARGO_TARGET_DIR="$$ROOT/.dev/pre-v6-target" cargo build --quiet); \
+	OLD_SERVER_BIN="$$ROOT/.dev/pre-v6-target/debug/storm-server" \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+		python3 "$$ROOT/$(SERVER)/tests/migration_e2e.py"
+
 ## test-live: integration suites against a real server, started and torn down
 test-live:
 	@cd $(SERVER) && cargo build --quiet
@@ -128,6 +149,10 @@ test-live:
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
 		python3 "$$ROOT/$(SERVER)/tests/agent_e2e.py"; \
+	echo "--- MCP gateway e2e (its own server, host and mock upstream; decision 81f) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 "$$ROOT/$(SERVER)/tests/gateway_e2e.py"; \
 	echo "--- auth e2e + client device tier (each needs a virgin server) ---"; \
 	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
 	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \
@@ -357,7 +382,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-client test-live fmt \
+.PHONY: help check lint test test-server test-client test-live test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check codegen clean \
         deploy-web deploy-web-check \
         build-server deploy deploy-check

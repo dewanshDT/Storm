@@ -26,8 +26,9 @@ const _designDrawer = 280.0;
 /// in the prototype.
 const kEditorInset = 40.0;
 
-/// The measure. Long-form text stops growing here however wide the window is.
-const kEditorMeasure = 640.0;
+/// The measure. Long-form text stops growing here however wide the window is;
+/// the editor surface and its header row are not bound by it.
+const kEditorMeasure = 900.0;
 
 /// The note pane's top padding, which is what puts the version line on the
 /// same baseline as the sidebar's vault name.
@@ -48,6 +49,12 @@ extension Layout on BuildContext {
 
   /// The properties drawer's share, on the same rule.
   double get drawerWidth => _column(_designDrawer, 430);
+
+  /// Open beside the note from the design frame up, where the prose column
+  /// is the prototype's own (524 at 1200). Below it the drawer would squeeze
+  /// the prose toward 224 at 900, so it starts shut there.
+  bool get drawerOpensByDefault =>
+      MediaQuery.sizeOf(this).width >= _designFrame;
 
   double _column(double atDesignFrame, double cap) {
     final width = MediaQuery.sizeOf(this).width;

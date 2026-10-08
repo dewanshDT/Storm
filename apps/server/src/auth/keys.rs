@@ -1,4 +1,5 @@
-//! MCP keys: a credential a user mints for a machine (A14).
+//! Access keys (formerly "MCP keys"): a credential the account mints for an
+//! AI app outside Storm (A14).
 //!
 //! Design: *Storm MCP Keys* in the personal vault. The short version:
 //!
@@ -8,18 +9,16 @@
 //! - It is accepted on `/mcp` and nowhere else (A14.2). A session token lives
 //!   in a platform keychain; a key lives in a plaintext config file on someone's
 //!   disk, and the two do not deserve the same reach.
-//! - It resolves to its **owner's** identity (A14.3). There is no separate
-//!   principal here and there must not be — `authz.rs` records why the
-//!   `Actor::Mcp` variant was removed, and a key with an identity of its own
-//!   would put that mistake back under a new name.
+//! - It resolves to **the account** (A14.3). There is no separate principal
+//!   here and there must not be — `authz.rs` records why the `Actor::Mcp`
+//!   variant was removed, and a key with an identity of its own would put that
+//!   mistake back under a new name.
 //!
-//! **A key carries the user's authority, and A14 adds no way to narrow it.**
-//! Per-vault scoping is a real and useful thing to want; it is also the same
-//! question the authorization model has to answer, so it is deferred there
-//! rather than guessed at twice. An owner's key is therefore an owner-powered
-//! bearer credential sitting in a config file. That is a documented,
-//! deliberate property of this release — not an oversight — and it is the
-//! strongest argument for the per-vault scoping work landing with RBAC.
+//! **A key carries the account's authority, and nothing narrows it.** That is
+//! a documented, deliberate property: a key is the account speaking from a
+//! config file, so what it may do is governed by the server's switches
+//! (`mcp_enabled`, `mcp_writable`), not by the key. Per-vault scoping stays a
+//! possible future addition, not a missing piece of single-user Storm.
 //!
 //! Hashing is blake3, not Argon2id: a key is 256 bits of randomness with
 //! nothing to guess, so a memory-hard KDF would cost ~173 ms per MCP call to
@@ -29,9 +28,9 @@ use anyhow::{Context, Result};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use super::account::Account;
 use super::db::AuthDb;
 use super::token;
-use super::users::{Status, User};
 
 /// How long a key's `last_used` may lag before another write is worth it.
 ///
@@ -40,7 +39,7 @@ use super::users::{Status, User};
 /// path uses, for the same reason.
 pub const LAST_USED_THROTTLE_SECS: i64 = 60;
 
-/// The most live keys one user may hold at once.
+/// The most live keys the account may hold at once.
 ///
 /// A bound on a table that a script could otherwise fill, not a statement about
 /// how many machines someone may own — revoke one to mint another past this.
@@ -74,11 +73,11 @@ impl ApiKey {
     }
 }
 
-/// A key that authenticated, and the user behind it.
+/// A key that authenticated, and the account behind it.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedKey {
     pub key: ApiKey,
-    pub user: User,
+    pub account: Account,
 }
 
 /// Why a key that looked live is not usable.
@@ -91,8 +90,6 @@ pub enum KeyFailure {
     Unknown,
     Revoked,
     Expired,
-    /// The key is fine; its owner cannot log in.
-    UserDisabled,
 }
 
 impl KeyFailure {
@@ -107,7 +104,6 @@ impl KeyFailure {
             KeyFailure::Unknown => "unknown",
             KeyFailure::Revoked => "revoked",
             KeyFailure::Expired => "expired",
-            KeyFailure::UserDisabled => "user_disabled",
         }
     }
 }
@@ -204,12 +200,8 @@ pub fn create(
     Ok((key, secret))
 }
 
-/// Resolves a presented `stk_…` secret to its key and owner.
-///
-/// **Four refusal grounds, and the owner's status is one of them.** A key that
-/// outlives its owner's ability to log in is a back door around `set_status`:
-/// disabling an account has to disable everything that speaks for it, and
-/// SQLite cannot express that any more than it can express the last-owner rule.
+/// Resolves a presented `stk_…` secret to its key and the account it speaks
+/// for. A key whose `user_id` is not the account's speaks for nobody.
 pub fn authenticate(
     db: &mut AuthDb,
     secret: &str,
@@ -231,13 +223,10 @@ pub fn authenticate(
         return Err(KeyError::Refused(KeyFailure::Expired));
     }
 
-    let user = db
-        .user_by_id(&key.user_id)
+    let account = db
+        .account_by_id(&key.user_id)
         .map_err(KeyError::Internal)?
         .ok_or(KeyError::Refused(KeyFailure::Unknown))?;
-    if user.status == Status::Disabled {
-        return Err(KeyError::Refused(KeyFailure::UserDisabled));
-    }
 
     let due = match &key.last_used {
         None => true,
@@ -250,13 +239,12 @@ pub fn authenticate(
         db.touch_api_key(&key.id, now).map_err(KeyError::Internal)?;
     }
 
-    Ok(AuthenticatedKey { key, user })
+    Ok(AuthenticatedKey { key, account })
 }
 
 /// Revokes a key. Idempotent: revoking an already-revoked key is not an error.
 ///
-/// `by` is who asked, for the audit row — not necessarily the owner, since an
-/// owner may revoke anyone's key (A14).
+/// `by` is who asked, for the audit row.
 pub fn revoke(
     db: &mut AuthDb,
     key_id: &str,
@@ -280,24 +268,14 @@ pub fn revoke(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::users::{NewUser, Role, create_user};
+    use crate::auth::account::create_account;
 
     const NOW: &str = "2026-08-19T12:00:00Z";
 
-    fn db_with_user() -> (AuthDb, User) {
+    fn db_with_user() -> (AuthDb, Account) {
         let mut db = AuthDb::open_in_memory().unwrap();
-        let user = create_user(
-            &mut db,
-            NewUser {
-                username: "dewansh",
-                display_name: None,
-                password_hash: "x",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-        (db, user)
+        let account = create_account(&mut db, "x", NOW).unwrap();
+        (db, account)
     }
 
     #[test]
@@ -307,13 +285,8 @@ mod tests {
 
         assert!(secret.starts_with(token::KEY_PREFIX), "{secret}");
         let authed = authenticate(&mut db, &secret, NOW).unwrap();
-        assert_eq!(authed.user.id, user.id);
+        assert_eq!(authed.account.id, user.id);
         assert_eq!(authed.key.id, key.id);
-        assert_eq!(
-            authed.user.role,
-            Role::Owner,
-            "a key carries its owner's role"
-        );
     }
 
     #[test]
@@ -373,84 +346,23 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_owner_disables_the_key() {
-        // The back door this closes: disabling an account has to disable
-        // everything that speaks for it, or `set_status` is advisory.
+    fn a_key_left_from_a_removed_account_speaks_for_nobody() {
+        // The single-user migration deletes a removed account's keys; this is
+        // the floor under it. A row naming anyone but the account is refused,
+        // never resolved to the account.
         let (mut db, user) = db_with_user();
-        let (_, secret) = create(&mut db, &user.id, "laptop", None, None, NOW).unwrap();
-        assert!(authenticate(&mut db, &secret, NOW).is_ok());
-
-        // A second owner, because the last *active* owner cannot be disabled —
-        // the rule that exists so a server cannot be left unadministrable.
-        create_user(
-            &mut db,
-            NewUser {
-                username: "second",
-                display_name: None,
-                password_hash: "x",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-        crate::auth::users::set_status(&mut db, "dewansh", Status::Disabled, NOW).unwrap();
-        assert!(matches!(
-            authenticate(&mut db, &secret, NOW),
-            Err(KeyError::Refused(KeyFailure::UserDisabled))
-        ));
-    }
-
-    #[test]
-    fn deleting_the_user_takes_the_keys() {
-        // The `ON DELETE CASCADE` half of "a key belongs to a user".
-        let (mut db, user) = db_with_user();
-        // A second owner, so the last-active-owner rule permits the delete.
-        create_user(
-            &mut db,
-            NewUser {
-                username: "second",
-                display_name: None,
-                password_hash: "x",
-                role: Role::Owner,
-            },
-            NOW,
-        )
-        .unwrap();
-        let (_, secret) = create(&mut db, &user.id, "laptop", None, None, NOW).unwrap();
-
-        crate::auth::users::delete_user(&mut db, "dewansh", NOW).unwrap();
+        let (key, secret) = create(&mut db, &user.id, "laptop", None, None, NOW).unwrap();
+        db.conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        db.conn
+            .execute(
+                "UPDATE api_keys SET user_id = 'usr_gone' WHERE id = ?1",
+                rusqlite::params![key.id],
+            )
+            .unwrap();
         assert!(matches!(
             authenticate(&mut db, &secret, NOW),
             Err(KeyError::Refused(KeyFailure::Unknown))
         ));
-    }
-
-    #[test]
-    fn one_users_key_never_resolves_to_another_user() {
-        let (mut db, first) = db_with_user();
-        let second = create_user(
-            &mut db,
-            NewUser {
-                username: "second",
-                display_name: None,
-                password_hash: "x",
-                role: Role::Member,
-            },
-            NOW,
-        )
-        .unwrap();
-
-        let (_, a) = create(&mut db, &first.id, "a", None, None, NOW).unwrap();
-        let (_, b) = create(&mut db, &second.id, "b", None, None, NOW).unwrap();
-
-        assert_eq!(authenticate(&mut db, &a, NOW).unwrap().user.id, first.id);
-        let authed_b = authenticate(&mut db, &b, NOW).unwrap();
-        assert_eq!(authed_b.user.id, second.id);
-        assert_eq!(
-            authed_b.user.role,
-            Role::Member,
-            "a member's key must not carry an owner's role"
-        );
     }
 
     #[test]

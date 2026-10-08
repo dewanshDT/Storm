@@ -70,6 +70,7 @@ fn spec() -> SessionSpec {
         session_id: "ags_TEST".into(),
         workspace: PathBuf::from("/work/storm"),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
+        launch: Default::default(),
     }
 }
 

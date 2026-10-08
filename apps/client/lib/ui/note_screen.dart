@@ -7,9 +7,12 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../agent/agent_state.dart' show agentOverviewProvider;
 import '../cache/cache_db.dart';
 import '../router.dart';
+import '../state/agent_writes.dart' show seenVersionsProvider;
 import '../state/app_state.dart';
+import '../state/note_session.dart' show NoteSession;
 import '../editor/frontmatter_edit.dart' as fme;
 import '../state/vault_config.dart';
 import '../state/wikilinks.dart';
@@ -22,7 +25,10 @@ import 'mentions_section.dart';
 import 'properties_panel.dart';
 import 'breakpoints.dart';
 import 'note_editor.dart';
-import 'shell/nav_bubble.dart';
+import 'shell/nav_bubble.dart' show keyboardIsOpen;
+import 'browse_screen.dart' show BackLink, leaveTo;
+import 'note_header.dart';
+import '../api/models.dart' show VaultInfo;
 import 'shell/storm_scaffold.dart';
 import 'shell/vault_gate.dart';
 
@@ -31,21 +37,34 @@ import 'shell/vault_gate.dart';
 /// The route owns which note is open: navigating here loads it, so a deep
 /// link and a tap land in exactly the same state.
 class NoteScreen extends ConsumerStatefulWidget {
-  const NoteScreen({super.key, required this.noteId});
+  const NoteScreen({super.key, required this.noteId, this.fromSession});
 
   final String noteId;
+
+  /// The agent session this note was pushed from (phone), whose name the
+  /// back link carries.
+  final String? fromSession;
 
   @override
   ConsumerState<NoteScreen> createState() => _NoteScreenState();
 }
 
 class _NoteScreenState extends ConsumerState<NoteScreen> {
-  bool _showContext = false;
-
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  /// Whatever version of this note is on screen counts as seen here, which
+  /// is what clears its unseen dot.
+  void _markSeen(NoteSession s) {
+    if (s.noteId != widget.noteId || s.baseVersion <= 0) return;
+    final vaultId = ref.read(activeVaultProvider);
+    if (vaultId.isEmpty) return;
+    ref
+        .read(seenVersionsProvider.notifier)
+        .markSeen(vaultId, widget.noteId, s.baseVersion);
   }
 
   @override
@@ -69,7 +88,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     });
   }
 
-  /// Tells the server this note was opened, for the dashboard's recents.
+  /// Tells the server this note was opened, for the cross-vault recents.
   ///
   /// Fire-and-forget, and never surfaced: failing to record an open is not
   /// worth a message, and must not stop the note from being read.
@@ -79,7 +98,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     if (api == null || vaultId.isEmpty) return;
 
     // Mirrored locally first so it shows immediately and survives being
-    // offline; the server's copy wins at the next dashboard refresh.
+    // offline; the server's copy wins at the next refresh.
     final meta = ref.read(noteSessionProvider).meta;
     if (meta != null) {
       await ref
@@ -99,6 +118,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     } catch (_) {
       // Offline. The local mirror already carries it.
     }
+    if (mounted) ref.invalidate(recentsProvider);
   }
 
   void _toast(String message) {
@@ -236,112 +256,128 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       ref.read(noteSessionProvider).close();
       ref.read(openNoteIdProvider.notifier).state = null;
       ref.invalidate(treeProvider);
-      if (mounted) context.go(Routes.dashboard);
+      if (mounted) context.go(Routes.browse(ref.read(activeVaultProvider)));
     } catch (e) {
       _toast('$e');
     }
   }
 
-  /// Leave the open note: pop the stack, or fall back into the vault's
-  /// browse pane when there is nothing to pop (a deep link). The header's
-  /// back arrow and Esc share this one answer, so the two cannot drift into
-  /// leaving a note differently. Browse, not dashboard, is the fallback —
-  /// the same one search and tags use.
+  String _sessionName(String id) =>
+      ref.watch(agentOverviewProvider).value?.byId(id)?.name ?? 'Session';
+
+  /// Back to where the note was opened from, else its folder.
   void _leaveNote() {
-    if (context.canPop()) {
-      context.pop();
-    } else {
-      context.go(Routes.browse(VaultGate.of(context)));
-    }
+    final folder = ref.read(noteSessionProvider).meta?.folder ?? '';
+    final vaultId = VaultGate.of(context);
+    leaveTo(
+      context,
+      folder.isEmpty ? Routes.browse(vaultId) : Routes.folder(vaultId, folder),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     ref.watch(syncListenerProvider);
+    ref.listen(noteSessionProvider, (_, s) => _markSeen(s));
     final session = ref.watch(noteSessionProvider);
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     final isPinned = pinned.contains(widget.noteId);
-    // Asked here, above the Scaffold, where the inset is still readable and
-    // depending on it still rebuilds. See keyboardIsOpen.
+    // Read above the Scaffold, where the inset is still visible; see
+    // keyboardIsOpen.
     final keyboard = keyboardIsOpen(context);
     final vaultId = VaultGate.of(context);
-    // Survives opening another note: the drawer is a pane at this width, not
-    // a thing belonging to one note's screen.
-    final showProperties = ref.watch(propertiesOpenProvider);
-    // The note's own colour, from its `color:` property. A wash rather than
-    // the full card tint: this sits behind a screen of prose, and the card
-    // colour at full strength fights the text.
+    final wide = context.isExpanded;
+    final showProperties =
+        ref.watch(propertiesOpenProvider) ?? context.drawerOpensByDefault;
     final accent = Accent.parse(
       fme.findSpan(session.buffer, kColorKey)?.displayValue,
     );
     final tint = accent.isNone ? null : accent.wash(context.tokens);
+    final folder = session.meta?.folder ?? '';
+    final vaultName =
+        (ref.watch(vaultsProvider).value ?? const <VaultInfo>[])
+            .where((v) => v.id == vaultId)
+            .firstOrNull
+            ?.name ??
+        '';
+    void toggleDrawer() =>
+        ref.read(propertiesOpenProvider.notifier).state = !showProperties;
 
-    // Global chords and create callbacks come from VaultShell, which wraps
-    // every vault route — this screen only tints its own background, so it
-    // builds its Scaffold rather than using StormScaffold.
-    return NoteContextRequest(
-      onRequest: () => setState(() => _showContext = !_showContext),
-      child: Scaffold(
-        backgroundColor: tint,
-        body: StormChrome(
-          showNav: !keyboard,
-          // No header at desk width: the sidebar already says where the
-          // note lives and offers the way back, and the design's note pane
-          // starts at `v12 · Saved`.
-          header: context.isExpanded
-              ? null
-              : _Header(
-                  key: const Key('note-header'),
-                  folder: session.meta?.folder ?? '',
-                  onBack: _leaveNote,
-                  onUp: () => context.go(
-                    Routes.folder(vaultId, session.meta?.folder ?? ''),
-                  ),
-                  onProperties: () => PropertiesPanel.showSheet(
-                    context,
-                    content: session.buffer,
-                    onChanged: session.editProperties,
-                  ),
-                  onActions: () => _noteActions(isPinned),
+    return Scaffold(
+      backgroundColor: tint,
+      body: StormChrome(
+        // No pill on the phone note (Q5).
+        showNav: false,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: NoteEditor(
+                key: ValueKey(widget.noteId),
+                onFollowLink: _followLink,
+                showToolbar: keyboard,
+                onActions: () => _noteActions(isPinned),
+                onEscape: _leaveNote,
+                leadingWins: widget.fromSession != null,
+                leading: wide
+                    ? NoteCrumb(parts: [vaultName, ...folder.split('/')])
+                    : Align(
+                        alignment: Alignment.centerLeft,
+                        widthFactor: 1,
+                        child: widget.fromSession != null
+                            ? BackLink(
+                                label: _sessionName(widget.fromSession!),
+                                onTap: () => leaveTo(
+                                  context,
+                                  Routes.agentSession(widget.fromSession!),
+                                ),
+                              )
+                            : BackLink(
+                                label: folder.isEmpty
+                                    ? vaultName
+                                    : folder.split('/').last,
+                                onTap: _leaveNote,
+                              ),
+                      ),
+                provenance: NoteProvenance(
+                  vaultId: vaultId,
+                  noteId: widget.noteId,
                 ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: NoteEditor(
-                  key: ValueKey(widget.noteId),
-                  onFollowLink: _followLink,
-                  showToolbar: keyboard,
-                  onActions: () => _noteActions(isPinned),
-                  onEscape: _leaveNote,
-                  // Image thumbnails live inside NoteEditor (Edit Mode only).
-                  // Read Mode renders images inline via StormMarkdownView.
-                  footer: MentionsSection(
-                    noteId: widget.noteId,
-                    initiallyExpanded: _showContext,
-                    onOpen: (note) =>
-                        context.push(Routes.note(vaultId, note.id)),
-                  ),
+                actions: [
+                  StartSessionButton(compact: !wide),
+                  if (wide)
+                    DrawerToggle(open: showProperties, onTap: toggleDrawer)
+                  else ...[
+                    _HeaderButton(
+                      icon: LucideIcons.ellipsis,
+                      tooltip: 'Note actions',
+                      onTap: () => _noteActions(isPinned),
+                    ),
+                    _HeaderButton(
+                      icon: LucideIcons.sliders_horizontal,
+                      tooltip: 'Properties',
+                      onTap: () => PropertiesPanel.showSheet(
+                        context,
+                        content: session.buffer,
+                        onChanged: session.editProperties,
+                      ),
+                    ),
+                  ],
+                ],
+                footer: MentionsSection(
+                  noteId: widget.noteId,
+                  onOpen: (note) => context.push(Routes.note(vaultId, note.id)),
                 ),
               ),
-              // The rail carries the properties toggle at desk width, where
-              // the sheet would cover a note that has room beside it.
-              if (context.isExpanded)
-                _PropertiesRail(
-                  open: showProperties,
-                  onToggle: () => ref
-                      .read(propertiesOpenProvider.notifier)
-                      .update((open) => !open),
-                ),
-              if (context.isExpanded && showProperties)
-                PropertiesDrawer(
-                  content: session.buffer,
-                  onChanged: session.editProperties,
-                  onClose: () =>
-                      ref.read(propertiesOpenProvider.notifier).state = false,
-                ),
-            ],
-          ),
+            ),
+            if (wide && showProperties)
+              PropertiesDrawer(
+                content: session.buffer,
+                onChanged: session.editProperties,
+                onClose: () =>
+                    ref.read(propertiesOpenProvider.notifier).state = false,
+              ),
+          ],
         ),
       ),
     );
@@ -406,109 +442,15 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
   }
 }
 
-/// Back, where the note lives, and the way into its properties.
-class _Header extends StatelessWidget {
-  const _Header({
-    super.key,
-    required this.folder,
-    required this.onBack,
-    required this.onUp,
-    required this.onProperties,
-    required this.onActions,
-  });
-
-  final String folder;
-  final VoidCallback onBack;
-  final VoidCallback onUp;
-  final VoidCallback onProperties;
-  final VoidCallback onActions;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    // Hand-rolled hit targets rather than IconButton: its 8px padding plus a
-    // 48px minimum pushed the chevron well inboard of the header's own inset
-    // and made the row twice the height the design draws. The tap area is
-    // still 44 — it is the *box* that shrinks, not the target.
-    //
-    // Every button is the same 44 square with its glyph centred, and the row
-    // hangs past the content inset by exactly half the difference. Aligning
-    // the *boxes* instead left the first glyph twelve pixels right of the
-    // prose below it, and the gaps between the three uneven, because one was
-    // left-aligned in its box, one centred and one right-aligned.
-    final overhang = StormChrome.buttonOverhang(context);
-
-    return GestureDetector(
-      onLongPress: onActions,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: StormChrome.contentInset(context) - overhang,
-        ),
-        child: SizedBox(
-          height: t.sp * 5.5,
-          child: Row(
-            key: const Key('note-header-row'),
-            children: [
-              _HeaderButton(
-                icon: LucideIcons.chevron_left,
-                tooltip: 'Back',
-                color: t.text2,
-                onTap: onBack,
-              ),
-              Expanded(
-                child: GestureDetector(
-                  onTap: folder.isEmpty ? null : onUp,
-                  child: Padding(
-                    // Back onto the inset, since the button beside it is
-                    // hanging off the edge.
-                    padding: EdgeInsets.only(left: overhang),
-                    child: Text(
-                      folder.isEmpty ? 'Vault root' : folder,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: StormTokens.monoFamily,
-                        fontSize: t.codeSize,
-                        color: t.text3,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              // Attach, pin, rename and delete were long-press only, which is
-              // no way to find "keep offline". The long-press still works.
-              _HeaderButton(
-                icon: LucideIcons.ellipsis,
-                tooltip: 'Note actions',
-                color: t.text3,
-                onTap: onActions,
-              ),
-              _HeaderButton(
-                icon: LucideIcons.sliders_horizontal,
-                tooltip: 'Properties',
-                color: t.accent,
-                onTap: onProperties,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _HeaderButton extends StatelessWidget {
   const _HeaderButton({
     required this.icon,
     required this.tooltip,
-    required this.color,
     required this.onTap,
   });
 
   final IconData icon;
   final String tooltip;
-  final Color color;
   final VoidCallback onTap;
 
   @override
@@ -520,69 +462,12 @@ class _HeaderButton extends StatelessWidget {
         onTap: onTap,
         customBorder: const CircleBorder(),
         child: SizedBox(
-          width: t.sp * 5.5,
-          height: t.sp * 5.5,
-          // Centre rather than letting the SizedBox stretch the Icon to fill
-          // it: an Icon given tight 44px constraints reports a 44px box and
-          // draws the glyph in the middle of it, which makes every alignment
-          // measurement — including a test's — off by the difference.
+          width: t.sp * 4,
+          height: t.sp * 4,
           child: Center(
-            // One size for all three, so the space between glyphs is the
-            // space between boxes and not a function of which icon is in them.
-            child: Icon(icon, size: t.headingSize, color: color),
+            child: Icon(icon, size: t.headingSize, color: t.text3),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// The narrow strip between the note and its properties at desk width.
-class _PropertiesRail extends StatelessWidget {
-  const _PropertiesRail({required this.open, required this.onToggle});
-
-  final bool open;
-  final VoidCallback onToggle;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Container(
-      width: t.sp * 7,
-      decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(color: t.border, width: t.bw),
-        ),
-      ),
-      child: Column(
-        children: [
-          // 16 from the pane top, as the prototype's rail has it.
-          SizedBox(height: t.sp * 2),
-          Tooltip(
-            message: 'Properties',
-            child: InkWell(
-              onTap: onToggle,
-              borderRadius: BorderRadius.circular(t.rControl * 0.8),
-              child: Container(
-                width: t.sp * 4,
-                height: t.sp * 4,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  // Filled either way — the design draws it as a button, and
-                  // an outline-less transparent square reads as an icon that
-                  // happens to be there.
-                  color: open ? t.accentSoft : t.surface2,
-                  borderRadius: BorderRadius.circular(t.rControl * 0.8),
-                ),
-                child: Icon(
-                  LucideIcons.sliders_horizontal,
-                  size: t.bodySize,
-                  color: open ? t.accent : t.text2,
-                ),
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }

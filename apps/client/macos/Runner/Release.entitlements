@@ -15,5 +15,7 @@
 	     for it here, so the picker would open and the read would fail. -->
 	<key>com.apple.security.files.user-selected.read-only</key>
 	<true/>
+	<!-- No network.server: integration sign-ins come back as storm://oauth
+	     links (decision 81l), so the release app listens on no port. -->
 </dict>
 </plist>

@@ -58,6 +58,12 @@ pub enum Command {
         #[serde(default)]
         interaction: Option<String>,
         terminal: Size,
+        /// The connections this session may use (AM23): ids and slugs only.
+        #[serde(default)]
+        mcp: Vec<crate::mcp::McpGrant>,
+        /// Started from a note: the launch gains the fixed opening prompt.
+        #[serde(default)]
+        context: bool,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -73,6 +79,13 @@ pub enum Command {
     Replay { session: String, from: u64 },
     #[serde(rename = "refresh")]
     Refresh,
+    /// An unsolicited upstream message for a session's bridge (spec §9).
+    #[serde(rename = "mcp.message")]
+    McpMessage {
+        session: String,
+        connection: String,
+        message: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -121,6 +134,9 @@ struct HostSession {
     input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
 }
 
+/// Bridges listening for unsolicited messages, by `(session, connection id)`.
+type Subscribers = HashMap<(String, String), Vec<tokio::sync::mpsc::Sender<serde_json::Value>>>;
+
 /// The table that survives a restart: which sessions this host was running.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SessionTable {
@@ -142,6 +158,12 @@ pub struct Host {
     last_cmd_seq: Mutex<u64>,
     /// An uploader saw the token refused: reconnect and re-authenticate.
     reauth: Notify,
+    /// The MCP Gateway's session handles (decision 81f).
+    handles: crate::mcp::Handles,
+    /// Bridges listening for a session's unsolicited messages, by
+    /// `(session, connection id)`.
+    subscribers: Mutex<Subscribers>,
+    opencode_settings: Option<serde_json::Value>,
 }
 
 impl Host {
@@ -150,6 +172,10 @@ impl Host {
         let key = HostKey::load(state_dir, &identity.key_id)?;
         let client = ServerClient::for_host(&identity)?;
         let providers = config.providers()?;
+        let opencode_settings = config.opencode_settings();
+        // Every session directory belongs to a session that died with the
+        // previous process: its handle is gone, so its bridge config is too.
+        let _ = std::fs::remove_dir_all(state_dir.join(crate::mcp::SESSIONS_DIR));
         // Every session the table lists died with the previous process.
         let died = read_table(state_dir).sessions;
         if !died.is_empty() {
@@ -171,6 +197,9 @@ impl Host {
             died: Mutex::new(died),
             last_cmd_seq: Mutex::new(0),
             reauth: Notify::new(),
+            handles: crate::mcp::Handles::default(),
+            subscribers: Mutex::new(HashMap::new()),
+            opencode_settings,
         }))
     }
 
@@ -192,6 +221,9 @@ impl Host {
             "providers": providers,
             "workspaces": list_workspaces(&self.config.workspace_roots),
             "max_sessions": self.config.max_sessions,
+            // This host runs `storm-runtime mcp-bridge` (spec §6). A host
+            // that does not say so gets no grants.
+            "mcp_bridge": true,
         })
     }
 
@@ -209,28 +241,43 @@ impl Host {
     }
 
     async fn post(&self, path: &str, body: &serde_json::Value) -> Result<reqwest::StatusCode> {
+        Ok(self.post_for_response(path, body, None).await?.status())
+    }
+
+    /// A POST on the host token. A `401` wakes re-authentication, whoever
+    /// made the call: the token is the link's, not the caller's.
+    async fn post_for_response(
+        &self,
+        path: &str,
+        body: &(impl serde::Serialize + ?Sized),
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response> {
         let token = self
             .token
             .read()
             .await
             .clone()
             .ok_or_else(|| anyhow!("no token yet"))?;
-        let response = self
+        let mut request = self
             .client
             .http()
             .post(format!("{}{path}", self.client.base()))
             .bearer_auth(token)
-            .json(body)
-            .send()
-            .await?;
+            .json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = request.send().await?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             self.reauth.notify_one();
         }
-        Ok(response.status())
+        Ok(response)
     }
 
     /// Runs until revoked. Returns the refusal that ended it.
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        let listener = self.bind_socket()?;
+        tokio::spawn(self.clone().serve_socket(listener));
         let mut backoff = Duration::from_secs(1);
         loop {
             match self.clone().connect_once().await {
@@ -357,9 +404,35 @@ impl Host {
                 provider,
                 interaction,
                 terminal,
+                mcp,
+                context,
             } => {
-                self.start(session, workspace, provider, interaction, terminal)
-                    .await
+                self.start(
+                    session,
+                    workspace,
+                    provider,
+                    interaction,
+                    terminal,
+                    mcp,
+                    context,
+                )
+                .await
+            }
+            Command::McpMessage {
+                session,
+                connection,
+                message,
+            } => {
+                let senders = self
+                    .subscribers
+                    .lock()
+                    .unwrap()
+                    .get(&(session, connection))
+                    .cloned()
+                    .unwrap_or_default();
+                for tx in senders {
+                    let _ = tx.try_send(json!({ "message": message }));
+                }
             }
             Command::End { session } => {
                 if let Some(s) = self.session(&session) {
@@ -404,6 +477,7 @@ impl Host {
         self.sessions.lock().unwrap().get(id).cloned()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start(
         self: Arc<Self>,
         id: String,
@@ -411,6 +485,8 @@ impl Host {
         provider_id: String,
         interaction: Option<String>,
         size: Size,
+        mcp: Vec<crate::mcp::McpGrant>,
+        context: bool,
     ) {
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
@@ -440,6 +516,17 @@ impl Host {
             refuse("bad size");
             return self.post_start_failure(&id).await;
         };
+        // The provider's MCP config (AM32). Written before the agent starts;
+        // a session whose config cannot be written does not start, rather
+        // than start without `--strict-mcp-config` and load the host's own
+        // MCP servers (G-D12).
+        let launch = match self.mcp_launch(&id, &provider_id, &mcp) {
+            Ok(extras) => crate::mcp::with_opening_prompt(extras, &provider_id, context),
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
+                return self.post_start_failure(&id).await;
+            }
+        };
         let events = Arc::new(Events {
             ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
             ended: Mutex::new(None),
@@ -449,6 +536,7 @@ impl Host {
             session_id: id.clone(),
             workspace: dir,
             interaction: InteractionSpec::Terminal(size),
+            launch,
         };
         let started = {
             let events: Arc<dyn SessionEvents> = events.clone();
@@ -505,6 +593,7 @@ impl Host {
     }
 
     async fn post_start_failure(&self, id: &str) {
+        self.forget_mcp(id);
         let _ = self
             .post(
                 &format!("/v1/runtime/sessions/{id}/status"),
@@ -582,6 +671,7 @@ impl Host {
                 {
                     Ok(st) if st.is_success() => {
                         self.sessions.lock().unwrap().remove(&s.id);
+                        self.forget_mcp(&s.id);
                         self.write_table();
                         tracing::info!(session = %s.id, status = body["status"].as_str().unwrap_or(""), "session ended");
                         return;
@@ -597,6 +687,152 @@ impl Host {
             // Nothing to send: wait for more, then let a burst gather.
             s.events.wake.notified().await;
             tokio::time::sleep(COALESCE).await;
+        }
+    }
+}
+
+// ---- the MCP Gateway (decision 81f) ---------------------------------------
+
+/// The host-side bound on a forwarded call: the server's own deadline (60 s)
+/// plus room for the stream to finish. Never a retry.
+const MCP_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
+/// The longest line a bridge may send.
+const MCP_LINE_MAX: u64 = 4 * 1024 * 1024;
+
+impl Host {
+    /// Writes a session's provider config and registers its handle.
+    fn mcp_launch(
+        &self,
+        session: &str,
+        provider: &str,
+        grants: &[crate::mcp::McpGrant],
+    ) -> Result<crate::mcp::LaunchExtras> {
+        if grants.is_empty() {
+            return Ok(Default::default());
+        }
+        let handle = crate::mcp::new_handle();
+        let exe = std::env::current_exe().context("finding this binary for the bridge")?;
+        let extras = crate::mcp::write_provider_config(
+            provider,
+            &crate::mcp::session_dir(&self.state_dir, session),
+            grants,
+            &handle,
+            &crate::mcp::socket_path(&self.state_dir),
+            &exe,
+            self.opencode_settings.as_ref(),
+        )?;
+        if extras != crate::mcp::LaunchExtras::default() {
+            self.handles.register(&handle, session, grants);
+        }
+        Ok(extras)
+    }
+
+    /// A session ended: its handle stops working and its directory goes.
+    fn forget_mcp(&self, session: &str) {
+        self.handles.forget_session(session);
+        self.subscribers
+            .lock()
+            .unwrap()
+            .retain(|(s, _), _| s != session);
+        let _ = std::fs::remove_dir_all(crate::mcp::session_dir(&self.state_dir, session));
+    }
+
+    /// `run/mcp.sock`, in a `0700` directory: only this account's processes
+    /// (the bridges it launched) can connect.
+    fn bind_socket(&self) -> Result<tokio::net::UnixListener> {
+        let path = crate::mcp::socket_path(&self.state_dir);
+        crate::mcp::private_dir(path.parent().expect("socket has a parent"))?;
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path)
+            .with_context(|| format!("binding {}", path.display()))?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(listener)
+    }
+
+    async fn serve_socket(self: Arc<Self>, listener: tokio::net::UnixListener) {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    tokio::spawn(self.clone().bridge_connection(stream));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "mcp socket accept failed");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+
+    /// One bridge connection: a message to forward, or a subscription.
+    async fn bridge_connection(self: Arc<Self>, stream: tokio::net::UnixStream) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let (read, mut write) = stream.into_split();
+        let mut line = String::new();
+        let mut reader = tokio::io::BufReader::new(read.take(MCP_LINE_MAX));
+        if reader.read_line(&mut line).await.is_err() {
+            return;
+        }
+        let Ok(request) = serde_json::from_str::<crate::mcp::BridgeLine>(&line) else {
+            return;
+        };
+        let send = |v: serde_json::Value| {
+            let mut bytes = serde_json::to_vec(&v).unwrap_or_default();
+            bytes.push(b'\n');
+            bytes
+        };
+        let Some((session, connection)) =
+            self.handles.resolve(&request.handle, &request.connection)
+        else {
+            let _ = write
+                .write_all(&send(json!({"storm_error": "not_granted"})))
+                .await;
+            return;
+        };
+        if request.subscribe {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            self.subscribers
+                .lock()
+                .unwrap()
+                .entry((session, connection))
+                .or_default()
+                .push(tx);
+            while let Some(v) = rx.recv().await {
+                if write.write_all(&send(v)).await.is_err() {
+                    break;
+                }
+            }
+            return;
+        }
+        let Some(message) = request.message else {
+            return;
+        };
+        // At most once: no link, no call — never queued, never retried.
+        let response = if *self.link_up.borrow() {
+            self.post_for_response(
+                &format!("/v1/runtime/sessions/{session}/mcp/{connection}"),
+                &*message,
+                Some(MCP_FORWARD_TIMEOUT),
+            )
+            .await
+            .ok()
+            .filter(|r| r.status().is_success())
+        } else {
+            None
+        };
+        let Some(response) = response else {
+            let _ = write
+                .write_all(&send(json!({"storm_error": "storm_unreachable"})))
+                .await;
+            return;
+        };
+        // The server's lines go through as they arrive. If the stream breaks,
+        // the bridge sees no final response and fails the call once.
+        let mut body = response.bytes_stream();
+        while let Some(Ok(chunk)) = body.next().await {
+            if write.write_all(&chunk).await.is_err() {
+                return;
+            }
         }
     }
 }
@@ -671,7 +907,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(env.cmd_seq, 3);
-        assert!(matches!(env.command, Command::Start { .. }));
+        assert!(matches!(env.command, Command::Start { context: false, .. }));
+        let env: Envelope = serde_json::from_str(
+            r#"{"cmd_seq":3,"type":"start","session":"ags_X","workspace":"w","provider":"claude-code","terminal":{"cols":80,"rows":24},"context":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(env.command, Command::Start { context: true, .. }));
         let env: Envelope = serde_json::from_str(
             r#"{"cmd_seq":4,"type":"terminal.input","session":"s","data":"aGk="}"#,
         )

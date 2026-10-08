@@ -1,129 +1,179 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../ui/icons.dart';
-import '../ui/shell/corner_bubbles.dart' show relativeTime;
-import '../ui/shell/nav_bubble.dart' show PrimaryCircle, StormPill;
+import '../ui/session_status.dart';
+import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
-import '../ui/widgets.dart';
 import 'agent_models.dart';
-import 'agent_state.dart' show agentTitlesProvider;
 
-/// The pieces every agent surface draws a session with (decision 78).
-///
-/// The dashboard band, the phone list and the wide sidebar all show the same
-/// row, so a session reads the same wherever it is met.
-
-/// "Claude Code in storm": what is running, and where.
-String sessionTitle(AgentSession? s) =>
-    s == null ? 'Session' : '${providerLabel(s.provider)} in ${s.workspace}';
+/// The pieces every agent surface draws a session with: the sidebar, the
+/// overview, the phone list and the session itself say the same words.
 
 /// Agents cannot run without the server, and saying so is a state, not an
 /// error (the offline ground rule). One wording wherever it appears.
 const kAgentsOfflineTitle = 'Agents need the server';
 const kAgentsOfflineDetail = "Nothing to show until it's back.";
 
-/// A live session's dot, in the one dot vocabulary: green is good, amber is
-/// work in progress, grey is out of reach. Ended sessions get no dot — their
-/// status is said in words instead, because a red dot already means "a server
-/// that failed to prove who it is" and must not mean two things.
-DotStatus? sessionDot(AgentSession s) => switch (s.status) {
-  'running' => DotStatus.synced,
-  'creating' || 'starting' => DotStatus.syncing,
-  'unknown' => DotStatus.offline,
-  _ => null,
-};
+/// "personal / projects / storm": a note's vault and folders.
+String noteCrumb(String vaultName, String? path) {
+  final cut = path?.lastIndexOf('/') ?? -1;
+  final folder = cut < 0 ? '' : path!.substring(0, cut);
+  return [
+    vaultName,
+    ...folder.split('/').where((s) => s.isNotEmpty),
+  ].join(' / ');
+}
 
-/// The row every agent list is made of: a lead column (a dot or an icon), a
-/// title over one line of detail, and whatever trails. The band's idle line
-/// and a session use the same frame, so their titles share one left edge.
-class AgentRow extends StatelessWidget {
-  const AgentRow({
+/// A note's title, or its file name without `.md` when it has none.
+String noteTitleOf(String? title, String? path) {
+  if (title != null && title.isNotEmpty) return title;
+  final name = path?.split('/').last ?? '';
+  return name.endsWith('.md') ? name.substring(0, name.length - 3) : name;
+}
+
+/// "now", "40m", "3h", "2d": how long ago, as the lists say it.
+String shortAge(String? iso, {DateTime? now}) {
+  final then = iso == null ? null : DateTime.tryParse(iso);
+  if (then == null) return '';
+  final d = (now ?? DateTime.now()).difference(then);
+  if (d.inMinutes < 1) return 'now';
+  if (d.inHours < 1) return '${d.inMinutes}m';
+  if (d.inDays < 1) return '${d.inHours}h';
+  return '${d.inDays}d';
+}
+
+/// "38 min", "2 h 5 min": how long a session ran.
+String _ran(Duration d) {
+  if (d.inMinutes < 1) return '${d.inSeconds} s';
+  if (d.inHours < 1) return '${d.inMinutes} min';
+  final m = d.inMinutes % 60;
+  return m == 0 ? '${d.inHours} h' : '${d.inHours} h $m min';
+}
+
+String _clock(DateTime t) {
+  final l = t.toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(l.hour)}:${two(l.minute)}';
+}
+
+/// A live session's age, or an ended one's status in lower case.
+String sessionWhen(AgentSession s) =>
+    s.ended ? s.statusLabel.toLowerCase() : shortAge(s.createdAt);
+
+/// "storm · Claude Code · 40m": the sidebar and phone rows' sub-line.
+String sessionSub(AgentSession s) =>
+    '${s.workspace} · ${providerLabel(s.provider)} · ${sessionWhen(s)}';
+
+/// "Completed 14:02 · ran 38 min", "Failed · host restarted".
+String endedLine(AgentSession s) {
+  final ended = s.endedAt == null ? null : DateTime.tryParse(s.endedAt!);
+  final started = DateTime.tryParse(s.startedAt ?? s.createdAt);
+  return [
+    ended == null || s.status == 'failed'
+        ? s.statusLabel
+        : '${s.statusLabel} ${_clock(ended)}',
+    ?s.endDetail,
+    if (ended != null && started != null && s.status != 'failed')
+      'ran ${_ran(ended.difference(started))}',
+  ].join(' · ');
+}
+
+/// "Claude Code · storm on build-vm · started 40m ago", or the ended line.
+String sessionMeta(AgentSession s, String hostName) {
+  final age = shortAge(s.createdAt);
+  final when = s.ended
+      ? endedLine(s)
+      : age == 'now'
+      ? 'started now'
+      : 'started $age ago';
+  return '${providerLabel(s.provider)} · ${s.workspace} on $hostName · $when';
+}
+
+/// One session in a list: its dot, its name, and a mono line under it. The
+/// sidebar's rows are tighter and fill when selected; the phone's are
+/// separated by hairlines (handoff §2.6, §2.8).
+class SessionRow extends StatelessWidget {
+  const SessionRow({
     super.key,
-    required this.title,
+    required this.session,
     required this.onTap,
-    this.lead,
-    this.detail,
-    this.trailing,
-    this.muted = false,
     this.selected = false,
-    this.dense = false,
+    this.phone = false,
   });
 
-  final String title;
+  final AgentSession session;
   final VoidCallback onTap;
-  final Widget? lead;
-  final String? detail;
-  final Widget? trailing;
-
-  /// An ended session's title steps back a shade.
-  final bool muted;
   final bool selected;
-
-  /// The sidebar's tighter rhythm.
-  final bool dense;
+  final bool phone;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Padding(
-      padding: EdgeInsets.only(bottom: t.sp * (dense ? 0.25 : 0.5)),
+    final s = session;
+    final radius = BorderRadius.circular(phone ? 0 : t.rControl);
+    final content = Row(
+      children: [
+        SessionStatusDot(status: s.status),
+        SizedBox(width: t.sp * (phone ? 1.5 : 1.25)),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                s.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: phone ? t.uiSize : t.codeSize,
+                  color: s.ended ? t.text2 : t.text,
+                ),
+              ),
+              SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
+              Text(
+                sessionSub(s),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  color: t.text3,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: '${s.name}, ${s.statusLabel}',
+      excludeSemantics: true,
+      onTap: onTap,
       child: Material(
-        color: selected ? t.accentSoft : Colors.transparent,
-        borderRadius: BorderRadius.circular(t.rControl),
+        color: selected ? t.surface2 : Colors.transparent,
+        borderRadius: radius,
         child: InkWell(
-          borderRadius: BorderRadius.circular(t.rControl),
+          key: Key('session-${s.id}'),
+          borderRadius: radius,
           onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * (dense ? 1 : 0.5),
-              vertical: t.sp * (dense ? 0.9 : 1.25),
-            ),
-            child: Row(
-              children: [
-                // The same column whether or not there is a lead, so titles
-                // line up down the list.
-                SizedBox(
-                  width: t.sp * 2.75,
-                  child: lead == null
-                      ? null
-                      : Align(alignment: Alignment.centerLeft, child: lead),
-                ),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: dense ? t.codeSize : t.bodySize,
-                          fontWeight: FontWeight.w600,
-                          color: muted ? t.text2 : t.text,
-                        ),
-                      ),
-                      if (detail != null) ...[
-                        SizedBox(height: t.sp * 0.25),
-                        Text(
-                          detail!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontFamily: StormTokens.sansFamily,
-                            fontSize: dense ? t.labelSize : t.codeSize,
-                            color: t.text3,
-                          ),
-                        ),
-                      ],
-                    ],
+          child: Container(
+            padding: phone
+                ? EdgeInsets.symmetric(vertical: t.sp * 1.5)
+                : EdgeInsets.symmetric(
+                    horizontal: t.sp,
+                    vertical: t.sp * 0.875,
                   ),
-                ),
-                if (trailing != null) ...[SizedBox(width: t.sp), trailing!],
-              ],
-            ),
+            decoration: phone
+                ? BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(color: t.border, width: t.bw),
+                    ),
+                  )
+                : null,
+            child: content,
           ),
         ),
       ),
@@ -131,105 +181,46 @@ class AgentRow extends StatelessWidget {
   }
 }
 
-/// The name an agent gave its conversation, from a raw terminal title, or
-/// null when the title says nothing a list does not already say.
-///
-/// Claude Code prefixes its title with a status glyph (`✳`, or a braille
-/// spinner while working) and both CLIs start on their own product name, so
-/// leading symbols are dropped and a bare product name counts as no name.
-String? agentChosenTitle(String? raw) {
-  if (raw == null) return null;
-  final name = raw.replaceFirst(RegExp(r'^[^\p{L}\p{N}]+', unicode: true), '');
-  final trimmed = name.trim();
-  const generic = {'claude code', 'claude', 'opencode', 'open code'};
-  if (trimmed.isEmpty || generic.contains(trimmed.toLowerCase())) return null;
-  return trimmed;
-}
+/// The note a session started from: a file icon and its title, outlined.
+class NoteContextChip extends StatelessWidget {
+  const NoteContextChip({super.key, required this.title});
 
-/// A provider's mark. Lucide has no brand logos, so each gets the glyph
-/// nearest its own identity: Claude Code titles itself with an asterisk.
-IconData providerIcon(String provider) => switch (provider) {
-  'claude-code' => LucideIcons.asterisk,
-  'opencode' => LucideIcons.square_code,
-  'shell' => LucideIcons.square_terminal,
-  _ => LucideIcons.bot,
-};
-
-/// The title a session is shown under: the agent's own name for it when
-/// this device has seen one, else "Claude Code in storm".
-String sessionDisplayTitle(AgentSession? s, Map<String, String> titles) =>
-    (s == null ? null : titles[s.id]) ?? sessionTitle(s);
-
-/// One session: its agent, its name, host and age, and its status at the
-/// end of the row.
-class AgentSessionRow extends ConsumerWidget {
-  const AgentSessionRow({
-    super.key,
-    required this.session,
-    required this.hostName,
-    required this.onTap,
-    this.selected = false,
-    this.dense = false,
-  });
-
-  final AgentSession session;
-  final String hostName;
-  final VoidCallback onTap;
-  final bool selected;
-  final bool dense;
+  final String title;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final t = context.tokens;
-    final s = session;
-    final dot = sessionDot(s);
-    final titles = ref.watch(agentTitlesProvider);
-    // Running says itself with the dot; anything else is said in words,
-    // because an ended session has no dot (see sessionDot).
-    final words = s.status == 'running' ? null : s.statusLabel;
-    return AgentRow(
-      title: sessionDisplayTitle(s, titles),
-      // The same age wording as Recently opened, directly below the band.
-      detail:
-          '$hostName · '
-          '${relativeTime(DateTime.tryParse(s.createdAt)?.toLocal())}',
-      lead: Tooltip(
-        message: providerLabel(s.provider),
-        child: Icon(
-          providerIcon(s.provider),
-          size: dense ? t.bodySize : t.headingSize,
-          color: s.ended ? t.text3 : t.text2,
-        ),
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.25),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(t.rControl),
+        border: Border.all(color: t.border, width: t.bw),
       ),
-      trailing: words != null
-          ? Text(
-              words,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(LucideIcons.file, size: t.labelSize, color: t.text2),
+          SizedBox(width: t.sp * 0.625),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: t.sp * 20),
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontFamily: StormTokens.sansFamily,
-                fontSize: t.labelSize,
-                color: s.status == 'failed' ? t.danger : t.text3,
+                fontSize: t.labelSize * 1.09,
+                color: t.text2,
               ),
-            )
-          // Colour alone is not a status: the dot carries its word too.
-          : Semantics(
-              label: s.statusLabel,
-              child: StatusDot(status: dot ?? DotStatus.synced),
             ),
-      muted: s.ended,
-      selected: selected,
-      dense: dense,
-      onTap: onTap,
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// *New session*, as a pill floating at the bottom of the phone list.
-///
-/// The nav bubble's own [StormPill] and [PrimaryCircle], because the Agents
-/// space is a *space*, a peer of the vault screens, and should read as part of
-/// the same app (decision 78). Settings-shaped screens (Hosts, MCP keys) keep
-/// their extended FAB: that is the pattern for a page you visit to configure
-/// something.
+/// *＋ New session*, the phone list's one labelled primary in the pill.
 class NewSessionPill extends StatelessWidget {
   const NewSessionPill({super.key, required this.onTap});
 
@@ -239,44 +230,71 @@ class NewSessionPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     return SafeArea(
-      minimum: EdgeInsets.only(bottom: t.sp * 2.5),
+      minimum: EdgeInsets.only(bottom: t.sp * 3.25),
       child: Align(
         alignment: Alignment.bottomCenter,
         child: StormPill(
-          padding: EdgeInsets.zero,
-          child: Material(
-            type: MaterialType.transparency,
-            child: InkWell(
-              key: const Key('new-session-pill'),
-              customBorder: const StadiumBorder(),
-              onTap: onTap,
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  t.sp * 0.625,
-                  t.sp * 0.625,
-                  t.sp * 2.5,
-                  t.sp * 0.625,
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const PrimaryCircle(glyph: StormGlyph.plus),
-                    SizedBox(width: t.sp * 1.5),
-                    Text(
-                      'New session',
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.bodySize,
-                        fontWeight: FontWeight.w600,
-                        color: t.text,
+          child: Semantics(
+            button: true,
+            label: 'New session',
+            excludeSemantics: true,
+            onTap: onTap,
+            child: Material(
+              color: t.accent,
+              shape: const StadiumBorder(),
+              child: InkWell(
+                key: const Key('new-session-pill'),
+                customBorder: const StadiumBorder(),
+                onTap: onTap,
+                child: Container(
+                  height: t.sp * 6,
+                  padding: EdgeInsets.symmetric(horizontal: t.sp * 2.75),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        LucideIcons.plus,
+                        size: t.bodySize,
+                        color: t.onAccent,
                       ),
-                    ),
-                  ],
+                      SizedBox(width: t.sp),
+                      Text(
+                        'New session',
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.bodySize,
+                          fontWeight: FontWeight.w500,
+                          color: t.onAccent,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// A heading in the Agents pane's own rhythm: mono, spaced, `text3`.
+class AgentsLabel extends StatelessWidget {
+  const AgentsLabel(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Text(
+      text.toUpperCase(),
+      style: TextStyle(
+        fontFamily: StormTokens.monoFamily,
+        fontSize: t.labelSize,
+        letterSpacing: t.labelSize * 0.08,
+        color: t.text3,
       ),
     );
   }

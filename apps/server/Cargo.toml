@@ -12,6 +12,10 @@ anyhow = "1.0.104"
 argon2 = "0.5.3"
 axum = { version = "0.8.9", features = ["ws"] }
 blake3 = "1.8.5"
+# The MCP Gateway's credential encryption (decision 81a): XChaCha20-Poly1305,
+# pure Rust. Never a C-backed AEAD: the musl/zig release build cannot compile
+# one, which is the same reason rustls runs on `ring` below.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.5", features = ["derive", "env"] }
 data-encoding = "2.11.1"
 # Renders the pairing URI as a scannable block for `storm-server pair --qr`.
@@ -26,7 +30,33 @@ ed25519-dalek = "3.0.0"
 futures-util = { version = "0.3", default-features = false }
 notify = "8.2.0"
 rand = "0.10.2"
-rmcp = { version = "=3.1.2", features = ["server", "transport-streamable-http-server", "macros"] }
+# Server features for `/mcp` (decision 39); client features for the MCP
+# Gateway's upstream calls (AM26, decision 81d), at the same exact pin.
+# `reqwest-tls-no-provider`, never `reqwest`: that one pulls aws-lc-rs.
+# **Only the `*_once` request methods may send an upstream request** —
+# `gateway::upstream`'s tests read the source to keep it so.
+rmcp = { version = "=3.1.2", features = [
+    "server",
+    "transport-streamable-http-server",
+    "macros",
+    "client",
+    "transport-streamable-http-client-reqwest",
+    "reqwest-tls-no-provider",
+    # OAuth discovery, registration, PKCE and refresh (decision 81g), driven
+    # through the gateway's own SSRF-checked HTTP client and its own stores.
+    "auth",
+] }
+# The gateway's HTTP client to upstreams, handed to rmcp's transport so its
+# redirects, timeouts and TLS roots are ours. Same version and TLS choice as
+# apps/runtime: rustls with no default provider, configured with `ring` and
+# the bundled roots in `gateway::upstream`.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+webpki-roots = "1.0.9"
+# For rmcp's OAuth stores (decision 81g): its traits are `async_trait`, and
+# `oauth2` is named only for its `TokenResponse` trait, at rmcp's own version.
+async-trait = "0.1"
+oauth2 = { version = "5.0.0", default-features = false }
+url = "2"
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1"

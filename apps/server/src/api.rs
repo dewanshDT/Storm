@@ -73,16 +73,12 @@ pub struct AppState {
     /// Whether MCP may change the vault. Read per request, so the switch takes
     /// effect on the next call rather than the next restart.
     pub mcp_writable: std::sync::atomic::AtomicBool,
+    /// Whether agent sessions may write to their launch's vault. Mirrors
+    /// `Registry::agent_writes`; read per call, like `mcp_writable`.
+    pub agent_writes: std::sync::atomic::AtomicBool,
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
-    ///
-    /// Whether registration is open (A13), mirrored out of the registry.
-    ///
-    /// Atomic and read per request for the same reason as the switch above: an
-    /// operator who turns registration off and is still handing out accounts
-    /// until they restart has not turned it off.
-    pub allow_registration: std::sync::atomic::AtomicBool,
     /// Bootstrap pairing nonce (plaintext), if one was created at boot when
     /// the user table was empty. Needed to reconstruct the QR payload for
     /// the console log. Not read after boot — the field exists so a future
@@ -95,7 +91,7 @@ pub struct AppState {
     ///
     /// Behind a trait object so the RBAC slice can replace it without touching
     /// a handler — that is the whole reason the boundary exists. Today it is
-    /// `AllowAuthenticated`, which is the behaviour the server already had.
+    /// `StormPolicy`: everything, except an agent writing outside its vault.
     pub vault_policy: Arc<dyn VaultPolicy>,
     /// **The one Argon2id gate for the whole process.**
     ///
@@ -135,6 +131,9 @@ pub struct AppState {
     pub host_limiter: crate::auth::ratelimit::LoginLimiter,
     /// The Agent Manager: the only session authority (decision 77c).
     pub agent: Arc<crate::agent::AgentManager>,
+    /// The MCP Gateway's store and data key (decision 81b). Opened at boot so
+    /// the key exists before the first backup.
+    pub gateway: Arc<crate::gateway::Gateway>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -236,9 +235,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 /// being asked for.
 ///
 /// The policy is consulted **before** existence is checked, so a refusal never
-/// doubles as a probe for which vault ids are real. `AllowAuthenticated`
-/// never refuses today; the ordering is here so the answer does not change
-/// when a policy that does arrives.
+/// doubles as a probe for which vault ids are real.
 pub async fn vault_of(
     state: &Shared,
     actor: &Actor,
@@ -255,10 +252,13 @@ pub async fn vault_of(
         );
         // 403, never 404 and never an empty list: "you may not see this" has
         // to be distinguishable from "your notes are gone" (decision 25).
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "you do not have access to this vault".into(),
-        ));
+        // An agent's refusal is its stable code, which `mcp.rs` hands it.
+        let message = if reason == crate::auth::authz::AGENT_WRITE_REFUSED {
+            reason
+        } else {
+            "you do not have access to this vault"
+        };
+        return Err(ApiError(StatusCode::FORBIDDEN, message.into()));
     }
 
     let vaults = state.vaults.read().await;
@@ -339,6 +339,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(runtime_output),
         )
         .route("/v1/runtime/sessions/{id}/status", post(runtime_status))
+        // The MCP Gateway (decision 81e): a session's bridge traffic, carried
+        // by the host's existing token — no new credential (G-D3).
+        .route(
+            "/v1/runtime/sessions/{id}/mcp/{connection}",
+            post(runtime_mcp),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -347,9 +353,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
 
     // ---- device tier: `StormDevice <id>:<secret>` -------------------------
     let device_router = Router::new()
-        .route("/v1/users", get(list_users))
-        .route("/v1/users", post(register_user))
-        .route("/v1/auth/registration", get(registration_state))
+        .route("/v1/account", get(account_state))
         .route("/v1/users/first", post(create_first_user))
         .route("/v1/auth/login", post(login_handler))
         .route("/v1/auth/refresh", post(refresh_handler))
@@ -366,7 +370,6 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/vaults/{vault}", delete(remove_vault))
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
-        .route("/v1/config/registration", put(put_registration))
         .route("/v1/config/relays", put(put_relays))
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
@@ -394,6 +397,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/vaults/{vault}/search", get(search))
         .route("/v1/vaults/{vault}/tags", get(tags))
         .route("/v1/vaults/{vault}/tags/{tag}", get(notes_by_tag))
+        .route("/v1/vaults/{vault}/agent-writes", get(vault_agent_writes))
         .route("/v1/vaults/{vault}/attachments", get(list_attachments))
         .route(
             "/v1/vaults/{vault}/attachments/{*path}",
@@ -429,6 +433,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(agent_get_session).delete(agent_dismiss_session),
         )
         .route("/v1/agent/sessions/{id}/end", post(agent_end_session))
+        .route("/v1/agent/sessions/{id}/writes", get(agent_session_writes))
         .route(
             "/v1/agent/sessions/{id}/terminal/stream",
             get(agent_terminal_stream),
@@ -441,6 +446,34 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route(
             "/v1/config/agent",
             get(agent_get_config).put(agent_put_config),
+        )
+        // MCP Gateway integrations (decision 81c) — owner only, checked in
+        // ops. **Session tier**, so an `stk_` key can never manage one (§14).
+        .route(
+            "/v1/integrations/connections",
+            get(integrations_list).post(integrations_create),
+        )
+        .route(
+            "/v1/integrations/connections/{id}",
+            get(integrations_get)
+                .patch(integrations_patch)
+                .delete(integrations_delete),
+        )
+        .route(
+            "/v1/integrations/connections/{id}/test",
+            post(integrations_test),
+        )
+        .route(
+            "/v1/integrations/connections/{id}/tools",
+            get(integrations_tools),
+        )
+        .route(
+            "/v1/integrations/connections/{id}/authorize",
+            post(integrations_authorize),
+        )
+        .route(
+            "/v1/integrations/oauth/callback",
+            post(integrations_callback),
         )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
@@ -501,159 +534,6 @@ async fn server_challenge(
 
 // ---- device-tier endpoints ------------------------------------------------
 
-/// GET /v1/users — list all users (device tier).
-async fn list_users(State(state): State<Shared>) -> ApiResult<Json<Vec<crate::auth::users::User>>> {
-    let auth_db = state.auth_db.lock().await;
-    let users = auth_db
-        .list_users()
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(users))
-}
-
-/// GET /v1/auth/registration — is registration open?
-///
-/// Device tier, because the login screen already holds a device credential by
-/// the time it needs to ask, and whether accounts can be created is policy
-/// rather than identity — which is why it is not a field on `GET /v1/server`,
-/// whose field set is asserted exactly and whose job is the identity
-/// handshake.
-///
-/// **This is UX, not a gate.** `POST /v1/users` enforces the switch itself; a
-/// client that lies to itself about this learns the truth at `403`.
-async fn registration_state(State(state): State<Shared>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": state
-            .allow_registration
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }))
-}
-
-/// POST /v1/users — create an ordinary account, when registration is open.
-///
-/// Device tier: the caller has a paired device, which after web bootstrap
-/// means anyone who can reach the web app. That is the deliberate meaning of
-/// the switch (A13), and the reason it is off until someone turns it on.
-///
-/// **Always a member.** Owner belongs to the bootstrap account; registration
-/// must not be able to mint one, or an open server would hand out the role
-/// that can disable every other account.
-async fn register_user(
-    State(state): State<Shared>,
-    Json(body): Json<FirstUserRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if !state
-        .allow_registration
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        // Explicit rather than a bare 404: a client that raced the setting —
-        // drew the button, then submitted after it was turned off — can say
-        // what happened instead of guessing.
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "registration_disabled".into(),
-        ));
-    }
-
-    if let Err(msg) = crate::auth::password::validate_password(&body.password) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
-    }
-    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
-    }
-
-    let now = crate::index::now_rfc3339();
-    let mut auth_db = state.auth_db.lock().await;
-
-    // Registration cannot be the first account. The bootstrap window is
-    // `/v1/users/first`'s alone, and `create_user` would otherwise force this
-    // one to be an owner — exactly the thing this endpoint must never mint.
-    if auth_db
-        .count_users()
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        == 0
-    {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "this server has no owner yet; create the first account instead".into(),
-        ));
-    }
-
-    let hasher = &state.hasher;
-    let hash = hasher
-        .hash(body.password.clone())
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    match crate::auth::users::create_user(
-        &mut auth_db,
-        crate::auth::users::NewUser {
-            username: &body.username,
-            display_name: None,
-            password_hash: &hash,
-            role: crate::auth::users::Role::Member,
-        },
-        &now,
-    ) {
-        Ok(user) => Ok(Json(serde_json::json!({
-            "user_id": user.id,
-            "role": user.role.as_str(),
-        }))),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("UNIQUE") || msg.contains("already") {
-                Err(ApiError(StatusCode::CONFLICT, "username_taken".into()))
-            } else {
-                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
-            }
-        }
-    }
-}
-
-/// PUT /v1/config/registration — open or close registration (A13).
-///
-/// Owner only. Roles are enforced against each other elsewhere but consulted
-/// for access nowhere yet, so this is one explicit check rather than the start
-/// of a policy system: opening a server to the world is not a thing a member
-/// should be able to do to an owner.
-async fn put_registration(
-    State(state): State<Shared>,
-    Extension(auth): Extension<SessionAuth>,
-    Json(body): Json<RegistrationBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if auth.authenticated.user.role != crate::auth::users::Role::Owner {
-        return Err(ApiError(
-            StatusCode::FORBIDDEN,
-            "only an owner can change registration".into(),
-        ));
-    }
-
-    {
-        let mut vaults = state.vaults.write().await;
-        vaults.registry.allow_registration = body.enabled;
-        vaults.registry.save(&state.state_dir)?;
-    }
-    // Atomic, so it applies to the next request rather than the next restart.
-    state
-        .allow_registration
-        .store(body.enabled, std::sync::atomic::Ordering::Relaxed);
-
-    let auth_db = state.auth_db.lock().await;
-    let _ = auth_db.record_event(
-        "registration_changed",
-        Some(&auth.authenticated.user.id),
-        None,
-        &crate::index::now_rfc3339(),
-        &format!(r#"{{"enabled":{}}}"#, body.enabled),
-    );
-
-    Ok(Json(serde_json::json!({ "enabled": body.enabled })))
-}
-
-#[derive(Deserialize)]
-struct RegistrationBody {
-    enabled: bool,
-}
-
 /// POST /v1/keys — mint an MCP key (A14).
 ///
 /// **The response carries the plaintext, and this is the only time it exists.**
@@ -693,21 +573,12 @@ struct CreateKeyRequest {
     expires: Option<String>,
 }
 
-/// GET /v1/keys — the caller's keys, or another user's if the caller is an owner.
+/// GET /v1/keys — the account's access keys.
 async fn list_keys(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
-    Query(q): Query<ListKeysQuery>,
 ) -> ApiResult<Json<Vec<crate::auth::keys::ApiKey>>> {
-    Ok(Json(
-        crate::ops::list_api_keys(&state, &actor, q.user.as_deref()).await?,
-    ))
-}
-
-#[derive(Deserialize)]
-struct ListKeysQuery {
-    #[serde(default)]
-    user: Option<String>,
+    Ok(Json(crate::ops::list_api_keys(&state, &actor).await?))
 }
 
 /// DELETE /v1/keys/{id} — revoke a key, effective on the next request.
@@ -720,44 +591,34 @@ async fn revoke_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /v1/users/first — create the owner account, once.
-///
-/// **Registered in the *device* tier, not the `none` tier** (A8): creating a
-/// user over the network costs a paired device. The doc comment here used to
-/// say "genuinely unauthenticated", which described neither the routing nor
-/// the intent.
-///
-/// The password is hashed here and stored immediately. The caller must supply a
-/// valid password that passes `validate_password`. The operator `user add` CLI
-/// is the other path and is more ergonomic for interactive use.
+/// GET /v1/account — whether this Storm is set up. Device tier: pairing asks
+/// it to choose between setup and sign-in.
+async fn account_state(State(state): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
+    let exists = state
+        .auth_db
+        .lock()
+        .await
+        .has_account()
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
+/// POST /v1/users/first — set up the account, once. Device tier (A8).
 async fn create_first_user(
     State(state): State<Shared>,
-    Json(body): Json<FirstUserRequest>,
+    Json(body): Json<SetupRequest>,
 ) -> ApiResult<StatusCode> {
     if let Err(msg) = crate::auth::password::validate_password(&body.password) {
-        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
-    }
-    if let Err(msg) = crate::auth::users::validate_username(&body.username) {
         return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
 
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
 
-    // **The bootstrap window closes after the first account, and stays closed.**
-    // Without this, the only refusal was `create_user`'s duplicate-username
-    // check, so any paired device could pick an unused name and get another
-    // account — and this handler hardcodes `Role::Owner`, so every one of them
-    // would be an owner. That is privilege escalation the moment a server has a
-    // second user: a member's device mints an owner and logs into it.
-    //
-    // Checked before the hash on purpose. A refusal must not consume one of the
-    // two `Hasher` permits, or an attacker can hold the login path down by
-    // POSTing here.
+    // Before the hash, so a refusal never takes a `Hasher` permit.
     if auth_db
-        .count_users()
+        .has_account()
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        > 0
     {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -765,37 +626,22 @@ async fn create_first_user(
         ));
     }
 
-    let hasher = &state.hasher;
-    let hash = hasher
+    let hash = state
+        .hasher
         .hash(body.password.clone())
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    match crate::auth::users::create_user(
-        &mut auth_db,
-        crate::auth::users::NewUser {
-            username: &body.username,
-            display_name: None,
-            password_hash: &hash,
-            role: crate::auth::users::Role::Owner,
-        },
-        &now,
-    ) {
-        Ok(_) => Ok(StatusCode::CREATED),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("UNIQUE") || msg.contains("already") {
-                Err(ApiError(StatusCode::CONFLICT, "username taken".into()))
-            } else {
-                Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg))
-            }
-        }
-    }
+    crate::auth::account::create_account(&mut auth_db, &hash, &now)
+        .map(|_| StatusCode::CREATED)
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))
 }
 
+/// v0.3.x clients still send a username; it is ignored.
 #[derive(Deserialize)]
-pub struct FirstUserRequest {
-    username: String,
+pub struct SetupRequest {
+    #[serde(default, rename = "username")]
+    _username: Option<String>,
     password: String,
 }
 
@@ -835,7 +681,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for MaybePeer {
     }
 }
 
-/// POST /v1/auth/login — exchange username/password for a token pair.
+/// POST /v1/auth/login — exchange the password for a token pair.
 ///
 /// The caller must present a `StormDevice` header (device tier). The device
 /// must be paired; if not the login fails with 401. After authentication the
@@ -869,18 +715,13 @@ async fn login_handler(
             CallerKey::Unattributed => None,
         };
         let auth_db = state.auth_db.lock().await;
-        // Never a secret: the submitted username is quoted verbatim because a
-        // flood of junk names is exactly what the operator needs to see.
         if let Err(e) = auth_db.record_event_from(
             crate::auth::sessions::EVENT_LOGIN_THROTTLED,
             None,
             Some(&device_id),
             remote.as_deref(),
             &now,
-            &format!(
-                r#"{{"username":{:?},"retry_after_secs":{}}}"#,
-                body.username, retry_after_secs
-            ),
+            &format!(r#"{{"retry_after_secs":{retry_after_secs}}}"#),
         ) {
             tracing::warn!(error = %e, "could not record login_throttled event");
         }
@@ -893,7 +734,6 @@ async fn login_handler(
     match crate::auth::sessions::login(
         &mut auth_db,
         hasher,
-        &body.username,
         body.password.clone(),
         &device_id,
         &now,
@@ -950,9 +790,11 @@ fn extract_device_id(headers: &HeaderMap) -> Option<String> {
     Some(id.to_string())
 }
 
+/// v0.3.x clients still send a username; it is ignored.
 #[derive(Deserialize)]
 pub struct LoginRequest {
-    username: String,
+    #[serde(default, rename = "username")]
+    _username: Option<String>,
     password: String,
 }
 
@@ -1015,7 +857,7 @@ async fn list_sessions_handler(
 ) -> ApiResult<Json<Vec<crate::auth::sessions::Session>>> {
     let auth_db = state.auth_db.lock().await;
     let sessions = auth_db
-        .list_sessions(Some(&auth.authenticated.user.id))
+        .list_sessions(Some(&auth.authenticated.account.id))
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(sessions))
@@ -1036,7 +878,7 @@ async fn revoke_session_handler(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "session not found".into()))?;
 
-    if session.user_id != auth.authenticated.user.id {
+    if session.user_id != auth.authenticated.account.id {
         return Err(ApiError(StatusCode::FORBIDDEN, "not your session".into()));
     }
 
@@ -1087,7 +929,7 @@ async fn change_password_handler(
 
     // Verify the current password before allowing the change.
     let stored_hash = auth_db
-        .password_hash_of(&auth.authenticated.user.id)
+        .password_hash_of(&auth.authenticated.account.id)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or_else(|| {
             ApiError(
@@ -1110,13 +952,8 @@ async fn change_password_handler(
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    crate::auth::users::set_password(
-        &mut auth_db,
-        &auth.authenticated.user.username,
-        &new_hash,
-        &now,
-    )
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::auth::account::set_password(&mut auth_db, &new_hash, &now)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1415,7 +1252,7 @@ async fn issue_pairing_handler(
 ) -> ApiResult<Json<crate::ops::PairingQrPayload>> {
     let purpose = body.purpose.as_deref().unwrap_or("add_device");
     Ok(Json(
-        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.user.id), None)
+        crate::ops::issue_pairing_qr(&state, purpose, Some(&auth.authenticated.account.id), None)
             .await?,
     ))
 }
@@ -1542,9 +1379,8 @@ async fn runtime_whoami(Extension(auth): Extension<HostAuth>) -> Json<serde_json
 
 async fn agent_list_hosts(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
 ) -> ApiResult<Json<Vec<crate::ops::HostView>>> {
-    Ok(Json(crate::ops::list_hosts(&state, &actor).await?))
+    Ok(Json(crate::ops::list_hosts(&state).await?))
 }
 
 #[derive(Deserialize)]
@@ -1586,6 +1422,95 @@ async fn agent_revoke_host(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     crate::ops::revoke_host(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- MCP Gateway: integrations (decision 81c) — owner only, in ops ---------
+
+async fn integrations_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::ops::IntegrationView>>> {
+    Ok(Json(crate::ops::list_integrations(&state, &actor).await?))
+}
+
+async fn integrations_create(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::NewIntegration>,
+) -> ApiResult<(StatusCode, Json<crate::ops::IntegrationView>)> {
+    let view = crate::ops::create_integration(&state, &actor, body).await?;
+    Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn integrations_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::IntegrationView>> {
+    Ok(Json(
+        crate::ops::get_integration(&state, &actor, &id).await?,
+    ))
+}
+
+async fn integrations_patch(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::ops::IntegrationPatch>,
+) -> ApiResult<Json<crate::ops::IntegrationView>> {
+    Ok(Json(
+        crate::ops::update_integration(&state, &actor, &id, body).await?,
+    ))
+}
+
+async fn integrations_test(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::IntegrationTest>> {
+    Ok(Json(
+        crate::ops::test_integration(&state, &actor, &id).await?,
+    ))
+}
+
+async fn integrations_tools(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crate::ops::IntegrationTool>>> {
+    Ok(Json(
+        crate::ops::integration_tools(&state, &actor, &id).await?,
+    ))
+}
+
+async fn integrations_authorize(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::ops::AuthorizeIntegration>,
+) -> ApiResult<Json<crate::ops::AuthorizationStarted>> {
+    Ok(Json(
+        crate::ops::authorize_integration(&state, &actor, &id, body).await?,
+    ))
+}
+
+async fn integrations_callback(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::OAuthCallback>,
+) -> ApiResult<Json<crate::ops::IntegrationTest>> {
+    Ok(Json(
+        crate::ops::oauth_callback(&state, &actor, body).await?,
+    ))
+}
+
+async fn integrations_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::delete_integration(&state, &actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1677,65 +1602,97 @@ async fn runtime_status(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// One JSON-RPC message from a session's bridge; the answer streams back as
+/// newline-delimited JSON lines (`{"message": …}` or `{"storm_error": …}`).
+async fn runtime_mcp(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path((id, connection)): Path<(String, String)>,
+    Json(message): Json<serde_json::Value>,
+) -> ApiResult<axum::response::Response> {
+    use futures_util::StreamExt;
+    let rx = crate::ops::integration_call(&state, &auth.host.id, &id, &connection, message).await;
+    let lines = tokio_stream::wrappers::ReceiverStream::new(rx).map(|line| {
+        let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
+        bytes.push(b'\n');
+        Ok::<_, std::convert::Infallible>(bytes)
+    });
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/x-ndjson")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from_stream(lines))
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 async fn agent_host_workspaces(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<crate::ops::WorkspaceView>>> {
-    Ok(Json(
-        crate::ops::host_workspaces(&state, &actor, &id).await?,
-    ))
+    Ok(Json(crate::ops::host_workspaces(&state, &id).await?))
 }
 
 async fn agent_launch(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Json(req): Json<crate::agent::Launch>,
-) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
+) -> ApiResult<Json<crate::ops::LaunchedSession>> {
     Ok(Json(crate::ops::launch_session(&state, &actor, req).await?))
 }
 
 async fn agent_list_sessions(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
-) -> ApiResult<Json<Vec<crate::agent::store::SessionRecord>>> {
-    Ok(Json(crate::ops::list_sessions(&state, &actor).await?))
+) -> ApiResult<Json<Vec<crate::ops::SessionView>>> {
+    Ok(Json(crate::ops::list_sessions(&state).await?))
 }
 
 async fn agent_get_session(
     State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::SessionView>> {
+    Ok(Json(crate::ops::get_session(&state, &id).await?))
+}
+
+async fn agent_session_writes(
+    State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
-) -> ApiResult<Json<crate::agent::store::SessionRecord>> {
-    Ok(Json(crate::ops::get_session(&state, &actor, &id).await?))
+) -> ApiResult<Json<Vec<crate::ops::SessionWrite>>> {
+    Ok(Json(crate::ops::session_writes(&state, &actor, &id).await?))
+}
+
+async fn vault_agent_writes(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(vault): Path<String>,
+) -> ApiResult<Json<std::collections::BTreeMap<String, crate::ops::LatestAgentWrite>>> {
+    Ok(Json(
+        crate::ops::vault_agent_writes(&state, &actor, &vault).await?,
+    ))
 }
 
 async fn agent_end_session(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    crate::ops::end_session(&state, &actor, &id).await?;
+    crate::ops::end_session(&state, &id).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
 async fn agent_dismiss_session(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    crate::ops::dismiss_session(&state, &actor, &id).await?;
+    crate::ops::dismiss_session(&state, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// POST …/terminal/input — raw bytes, at most 64 KiB, at most once.
 async fn agent_input(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<StatusCode> {
-    crate::ops::session_input(&state, &actor, &id, &body).await?;
+    crate::ops::session_input(&state, &id, &body).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1753,13 +1710,11 @@ struct ResizeRequest {
 
 async fn agent_resize(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
     Json(req): Json<ResizeRequest>,
 ) -> ApiResult<StatusCode> {
     crate::ops::session_resize(
         &state,
-        &actor,
         &id,
         crate::agent::TerminalSize {
             cols: req.cols,
@@ -1794,7 +1749,6 @@ struct TerminalStream {
 /// has ended and everything retained has been sent.
 async fn agent_terminal_stream(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
     Query(q): Query<StreamQuery>,
 ) -> ApiResult<
@@ -1803,7 +1757,7 @@ async fn agent_terminal_stream(
     >,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    crate::ops::get_session(&state, &actor, &id).await?;
+    crate::ops::get_session(&state, &id).await?;
     let start = TerminalStream {
         agent: state.agent.clone(),
         rx: state.agent.watch(&id),
@@ -1865,9 +1819,8 @@ async fn agent_terminal_stream(
 
 async fn agent_get_config(
     State(state): State<Shared>,
-    Extension(actor): Extension<Actor>,
 ) -> ApiResult<Json<crate::ops::AgentConfigView>> {
-    Ok(Json(crate::ops::agent_config(&state, &actor).await?))
+    Ok(Json(crate::ops::agent_config(&state).await?))
 }
 
 #[derive(Deserialize)]
@@ -2023,8 +1976,7 @@ async fn require_auth(
                     return tier_error("ticket_not_accepted_here", StatusCode::UNAUTHORIZED);
                 }
                 request.extensions_mut().insert(Actor::Session {
-                    user_id: authenticated.user.id.clone(),
-                    role: authenticated.user.role,
+                    user_id: authenticated.account.id.clone(),
                 });
                 request
                     .extensions_mut()
@@ -2201,8 +2153,7 @@ async fn require_auth(
 
             request.extensions_mut().insert(Actor::Key {
                 key_id: authed.key.id.clone(),
-                user_id: authed.user.id.clone(),
-                role: authed.user.role,
+                user_id: authed.account.id.clone(),
             });
             request.extensions_mut().insert(KeyAuth { authed });
             return next.run(request).await;
@@ -2215,8 +2166,7 @@ async fn require_auth(
             Ok(authenticated) => {
                 drop(auth_db);
                 request.extensions_mut().insert(Actor::Session {
-                    user_id: authenticated.user.id.clone(),
-                    role: authenticated.user.role,
+                    user_id: authenticated.account.id.clone(),
                 });
                 request
                     .extensions_mut()
@@ -2432,12 +2382,15 @@ struct ConfigResponse {
     mcp_enabled: bool,
     /// Whether MCP may create, edit and delete notes.
     mcp_writable: bool,
-    /// Whether anyone with a device credential may create an account (A13).
-    allow_registration: bool,
+    /// Whether an agent session may write to the vault chosen at its launch.
+    /// Independent of the two MCP switches.
+    agent_writes: bool,
     /// The **configured** relay URLs (SRP v1 §4.4) — not the registered set.
     /// `GET /v1/server` reports what is actually live; this is what an
     /// operator or the app set and expects to survive a restart.
     relays: Vec<String>,
+    /// This server's release version, for the client's compatibility check.
+    version: &'static str,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -2448,57 +2401,72 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         vault_count: vaults.registry.vaults.len(),
         mcp_enabled: vaults.registry.mcp_enabled,
         mcp_writable: vaults.registry.mcp_writable,
-        allow_registration: vaults.registry.allow_registration,
+        agent_writes: vaults.registry.agent_writes(),
         relays: vaults.registry.relays.clone(),
+        version: env!("CARGO_PKG_VERSION"),
     }))
 }
 
 #[derive(Deserialize)]
 struct McpBody {
-    enabled: bool,
+    /// Absent leaves both MCP switches as they are, so a client can change
+    /// `agent_writes` alone.
+    #[serde(default)]
+    enabled: Option<bool>,
     /// Absent means read-only. Callers that do not know about writes therefore
     /// cannot turn them on by omission.
     #[serde(default)]
     writable: bool,
+    /// Absent leaves it as it is: an older client toggling MCP must not
+    /// change what agents may do.
+    #[serde(default)]
+    agent_writes: Option<bool>,
 }
 
-/// Switches the MCP endpoint on or off, now and across restarts.
+/// Switches the MCP endpoint and agent writes on or off, now and across
+/// restarts.
 ///
 /// Its own route rather than a field on `PUT /v1/config`, because that one
 /// re-points the storage root — a heavyweight operation with an orphan check
 /// and a watcher respawn. Toggling a read-only endpoint should not have to send
 /// a `vault_root` it does not want to change.
 ///
-/// The atomic is set *after* the registry is saved: if the write fails the
+/// The atomics are set *after* the registry is saved: if the write fails the
 /// endpoint keeps its old state, which is the honest outcome. The other order
 /// would report success while the setting silently reverted on next boot.
 async fn put_mcp(
     State(state): State<Shared>,
     Json(body): Json<McpBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    {
+    let (enabled, writable, agent_writes) = {
         let mut vaults = state.vaults.write().await;
-        vaults.registry.mcp_enabled = body.enabled;
-        // Writes cannot outlive the endpoint being on: leaving them armed while
-        // MCP is off would mean switching MCP back on silently restores write
-        // access someone thought they had revoked.
-        vaults.registry.mcp_writable = body.enabled && body.writable;
+        if let Some(enabled) = body.enabled {
+            vaults.registry.mcp_enabled = enabled;
+            // Writes cannot outlive the endpoint being on: leaving them armed
+            // while MCP is off would mean switching MCP back on silently
+            // restores write access someone thought they had revoked.
+            vaults.registry.mcp_writable = enabled && body.writable;
+        }
+        if let Some(on) = body.agent_writes {
+            vaults.registry.set_agent_writes(on);
+        }
         vaults.registry.save(&state.state_dir)?;
-    }
+        (
+            vaults.registry.mcp_enabled,
+            vaults.registry.mcp_writable,
+            vaults.registry.agent_writes(),
+        )
+    };
     let ordering = std::sync::atomic::Ordering::Relaxed;
-    state.mcp_enabled.store(body.enabled, ordering);
-    state
-        .mcp_writable
-        .store(body.enabled && body.writable, ordering);
+    state.mcp_enabled.store(enabled, ordering);
+    state.mcp_writable.store(writable, ordering);
+    state.agent_writes.store(agent_writes, ordering);
 
-    tracing::info!(
-        enabled = body.enabled,
-        writable = body.enabled && body.writable,
-        "MCP endpoint toggled"
-    );
+    tracing::info!(enabled, writable, agent_writes, "AI access changed");
     Ok(Json(serde_json::json!({
-        "mcp_enabled": body.enabled,
-        "mcp_writable": body.enabled && body.writable,
+        "mcp_enabled": enabled,
+        "mcp_writable": writable,
+        "agent_writes": agent_writes,
     })))
 }
 
@@ -2737,9 +2705,9 @@ async fn get_note(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
-) -> ApiResult<Json<crate::ops::NoteDetail>> {
+) -> ApiResult<Json<crate::ops::NoteWithProvenance>> {
     Ok(Json(
-        crate::ops::get_note(&state, &actor, &vault, &id).await?,
+        crate::ops::get_note_with_provenance(&state, &actor, &vault, &id).await?,
     ))
 }
 
@@ -3290,8 +3258,8 @@ pub(crate) mod tests {
         (app, identity)
     }
 
-    /// A policy that refuses everything — the only way to exercise the refusal
-    /// path while the shipped policy is `AllowAuthenticated`.
+    /// A policy that refuses everything, so the refusal path is exercised
+    /// for every caller, not only an agent.
     ///
     /// Without it `Decision::Deny` would be code that first runs in production.
     /// The point of the seam is that swapping the policy is all it takes, and
@@ -3310,7 +3278,7 @@ pub(crate) mod tests {
     pub(crate) fn test_router_with_state(
         dir: &FsPath,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_with_policy(dir, Arc::new(crate::auth::authz::AllowAuthenticated))
+        test_router_with_policy(dir, Arc::new(crate::auth::authz::StormPolicy))
     }
 
     fn test_router_with_policy(
@@ -3328,11 +3296,7 @@ pub(crate) mod tests {
         dir: &FsPath,
         limiter: crate::auth::ratelimit::LoginLimiter,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_full(
-            dir,
-            Arc::new(crate::auth::authz::AllowAuthenticated),
-            limiter,
-        )
+        test_router_full(dir, Arc::new(crate::auth::authz::StormPolicy), limiter)
     }
 
     fn test_router_full(
@@ -3354,6 +3318,8 @@ pub(crate) mod tests {
         let (root_changed, _) = broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
         let agent = Arc::new(crate::agent::AgentManager::open(&state_dir).unwrap());
+        let gateway =
+            Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -3366,8 +3332,8 @@ pub(crate) mod tests {
             relays_changed: tokio::sync::watch::channel(Vec::new()).0,
             mcp_enabled: std::sync::atomic::AtomicBool::new(false),
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
+            agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            allow_registration: std::sync::atomic::AtomicBool::new(false),
             bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
@@ -3375,6 +3341,7 @@ pub(crate) mod tests {
             login_limiter,
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             agent,
+            gateway,
         });
         (
             router(
@@ -3492,8 +3459,7 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    /// Gives the server one active owner, so the "nobody could administer this"
-    /// guard is satisfied and the *other* guard is what a test is measuring.
+    /// Sets up the account.
     ///
     /// The stored hash is a fixed PHC string and is never verified: these tests
     /// are about the switch, not about login, and a real Argon2id hash at the
@@ -3501,14 +3467,9 @@ pub(crate) mod tests {
     /// nothing they assert.
     pub(crate) async fn seed_owner(state: &Shared) -> String {
         let mut auth_db = state.auth_db.lock().await;
-        crate::auth::users::create_user(
+        crate::auth::account::create_account(
             &mut auth_db,
-            crate::auth::users::NewUser {
-                username: "dewansh",
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                role: crate::auth::users::Role::Owner,
-            },
+            "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
             "2026-08-17T00:00:00Z",
         )
         .unwrap()
@@ -3595,23 +3556,6 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    /// A second account, so two MCP requests can carry different identities.
-    pub(crate) async fn seed_member(state: &Shared, username: &str) -> String {
-        let mut auth_db = state.auth_db.lock().await;
-        crate::auth::users::create_user(
-            &mut auth_db,
-            crate::auth::users::NewUser {
-                username,
-                display_name: None,
-                password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                role: crate::auth::users::Role::Member,
-            },
-            "2026-08-17T00:00:00Z",
-        )
-        .unwrap()
-        .id
-    }
-
     #[tokio::test]
     async fn an_mcp_call_carries_the_authenticated_user() {
         // The gap this slice closes. An MCP tool used to resolve as a generic
@@ -3658,15 +3602,6 @@ pub(crate) mod tests {
     // makes the leak observable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_mcp_calls_do_not_share_an_identity() {
-        // The property the whole mechanism rests on. rmcp builds the handler on
-        // the request task and then runs it inside a `tokio::spawn`, so the
-        // identity crosses that boundary by **ownership** — captured into the
-        // handler by the factory — rather than as ambient state a second
-        // request could overwrite.
-        //
-        // Two users, two vaults, many interleaved requests. If the identity
-        // were shared, some request would be recorded against the other user's
-        // vault.
         let dir = tempdir::TempDir::new("storm-mcp-concurrent").unwrap();
         let policy = Arc::new(RecordingPolicy::default());
         let (app, _, state) = test_router_with_policy(dir.path(), policy.clone());
@@ -3674,14 +3609,20 @@ pub(crate) mod tests {
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        let alice = seed_owner(&state).await;
-        let bob = seed_member(&state, "bob").await;
-        let alice_token = session_token(&state, &alice).await;
-        let bob_token = session_token(&state, &bob).await;
+        let owner = seed_owner(&state).await;
+        let session = format!("Bearer {}", session_token(&state, &owner).await);
+        let key = {
+            let now = crate::index::now_rfc3339();
+            let mut auth_db = state.auth_db.lock().await;
+            let (_, secret) =
+                crate::auth::keys::create(&mut auth_db, &owner, "laptop", None, None, &now)
+                    .unwrap();
+            format!("Bearer {secret}")
+        };
 
-        register_vault(&state, "Alice").await;
-        register_vault(&state, "Bob").await;
-        let (alice_vault, bob_vault) = {
+        register_vault(&state, "Session").await;
+        register_vault(&state, "Key").await;
+        let (session_vault, key_vault) = {
             let vaults = state.vaults.read().await;
             (
                 vaults.registry.vaults[0].id.clone(),
@@ -3689,29 +3630,18 @@ pub(crate) mod tests {
             )
         };
 
-        // Interleaved on purpose: alternating users maximises the chance that
-        // one request's scope is live while another's factory runs.
         let mut tasks = Vec::new();
         for i in 0..64 {
-            let (user_vault, auth) = if i % 2 == 0 {
-                (alice_vault.clone(), format!("Bearer {alice_token}"))
+            let (vault, auth) = if i % 2 == 0 {
+                (session_vault.clone(), session.clone())
             } else {
-                (bob_vault.clone(), format!("Bearer {bob_token}"))
+                (key_vault.clone(), key.clone())
             };
             let app = app.clone();
             tasks.push(tokio::spawn(async move {
-                // `list_tags`, because it makes **exactly one** authorization
-                // decision. `get_vault` also enumerates vaults to build its
-                // listing, and those filter checks legitimately ask about other
-                // users' vaults — which would make a crossed pair ambiguous
-                // rather than proof of a leak.
                 let (status, _) = send(
                     &app,
-                    mcp_call(
-                        "list_tags",
-                        serde_json::json!({ "vault": user_vault }),
-                        &auth,
-                    ),
+                    mcp_call("list_tags", serde_json::json!({ "vault": vault }), &auth),
                 )
                 .await;
                 status
@@ -3721,27 +3651,27 @@ pub(crate) mod tests {
             assert_eq!(task.await.unwrap(), StatusCode::OK);
         }
 
+        let actors = policy.actors();
         let pairs = policy.pairs();
         assert_eq!(pairs.len(), 64, "every call must have reached the policy");
-        for (who, vault) in pairs {
-            let expected = if who == alice {
-                &alice_vault
-            } else {
-                &bob_vault
+        for (actor, (_, vault)) in actors.iter().zip(pairs) {
+            let expected = match actor {
+                Actor::Key { .. } => &key_vault,
+                _ => &session_vault,
             };
             assert_eq!(
-                &vault, expected,
-                "{who} was recorded against another user's vault — identity leaked \
-                 between concurrent MCP requests"
+                &vault,
+                expected,
+                "a {} call was recorded against the other credential's vault — \
+                 identity leaked between concurrent MCP requests",
+                actor.describe()
             );
         }
     }
 
     #[tokio::test]
     async fn a_refused_vault_is_403_and_not_404() {
-        // The refusal path, which `AllowAuthenticated` never takes — so
-        // without a policy swap this would be code that first runs in
-        // production. It is also the claim the whole seam rests on: changing
+        // The refusal path for a caller `StormPolicy` never refuses. It is also the claim the whole seam rests on: changing
         // the policy is all it takes to change the answer.
         //
         // 403 specifically. Decision 25: "you may not see this" has to be
@@ -3850,14 +3780,14 @@ pub(crate) mod tests {
         assert_eq!(
             body["vaults"].as_array().map(|v| v.len()),
             Some(1),
-            "AllowAuthenticated must not filter anything out"
+            "StormPolicy must not filter anything out"
         );
     }
 
     #[tokio::test]
     async fn the_shipped_policy_changes_nothing_for_an_ordinary_caller() {
         // The other direction, and the reason this slice is safe to merge:
-        // with `AllowAuthenticated` the boundary is invisible. A vault that is
+        // with `StormPolicy` the boundary is invisible. A vault that is
         // simply absent still answers 404, not 403 — the seam did not turn
         // "no such vault" into "forbidden" for everyone.
         let dir = tempdir::TempDir::new("storm-authz-allow").unwrap();
@@ -4132,205 +4062,124 @@ pub(crate) mod tests {
             );
         }
 
-        // And the device tier still accepts it, which is the half that matters.
-        let (status, _) = send(&app, get_with_auth("/v1/users", &device)).await;
-        assert_eq!(status, StatusCode::OK);
+        // Device tier accepts it: login is refused on the credential, not the tier.
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    // ---- registration (slice 16, A13) ------------------------------------
+    // ---- single user (decision 82) ---------------------------------------
 
-    /// A paired device plus an owner, which is what registration needs around
-    /// it: it is device tier, and it refuses to be the first account.
     async fn device_and_owner(state: &Shared) -> (String, String) {
         let device = pair_a_device(state).await;
         let owner = seed_owner(state).await;
         (device, owner)
     }
 
-    fn register(auth: &str, username: &str) -> axum::http::Request<axum::body::Body> {
-        post_json_with_auth(
-            "/v1/users",
-            serde_json::json!({"username": username, "password": "a-long-enough-password"}),
-            auth,
-        )
-    }
-
     #[tokio::test]
-    async fn registration_is_off_until_someone_turns_it_on() {
-        // The default is the decision. Turning it on composes with web
-        // bootstrap into "anyone who can reach this server can make an
-        // account", so it is never the shipped state.
-        let dir = tempdir::TempDir::new("storm-reg-default").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (device, _) = device_and_owner(&state).await;
-
-        let (status, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["enabled"], false, "registration must ship closed");
-
-        let (status, body) = send(&app, register(&device, "stranger")).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(
-            body["error"], "registration_disabled",
-            "an explicit code, so a client that raced the switch can say so"
-        );
-
-        let auth_db = state.auth_db.lock().await;
-        assert_eq!(auth_db.count_users().unwrap(), 1, "no account was created");
-    }
-
-    #[tokio::test]
-    async fn an_owner_opens_registration_and_it_applies_at_once() {
-        // No restart. A switch you cannot verify by flipping it is not a
-        // switch — the same property the legacy-token switch has.
-        let dir = tempdir::TempDir::new("storm-reg-on").unwrap();
+    async fn the_multi_user_routes_are_gone() {
+        let dir = tempdir::TempDir::new("storm-single-user-routes").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let (device, owner) = device_and_owner(&state).await;
-        let token = session_token(&state, &owner).await;
+        let token = format!("Bearer {}", session_token(&state, &owner).await);
 
-        let (status, body) = send(
+        for auth in [&device, &token] {
+            let (status, _) = send(&app, get_with_auth("/v1/users", auth)).await;
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::UNAUTHORIZED,
+                "GET /v1/users answered {status}"
+            );
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users",
+                serde_json::json!({"username": "newcomer", "password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert!(!status.is_success(), "POST /v1/users answered {status}");
+        let (status, _) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
+        assert!(
+            !status.is_success(),
+            "GET /v1/auth/registration answered {status}"
+        );
+        let (status, _) = send(
             &app,
             put_json(
                 "/v1/config/registration",
                 serde_json::json!({"enabled": true}),
-                Some(&format!("Bearer {token}")),
+                Some(&token),
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{body:?}");
-
-        // Visible immediately, on this same running server.
-        let (_, body) = send(&app, get_with_auth("/v1/auth/registration", &device)).await;
-        assert_eq!(body["enabled"], true);
-
-        let (status, body) = send(&app, register(&device, "newcomer")).await;
-        assert_eq!(status, StatusCode::CREATED.min(StatusCode::OK), "{body:?}");
-        assert_eq!(
-            body["role"], "member",
-            "registration mints members and nothing else"
-        );
-
-        // And it survives a reload of the registry, because it is persisted.
-        let vaults = state.vaults.read().await;
-        assert!(vaults.registry.allow_registration);
-    }
-
-    #[tokio::test]
-    async fn registration_can_never_mint_an_owner() {
-        // The guarantee that makes an open switch survivable: owner is the
-        // bootstrap account, and an open endpoint must not reach the role that
-        // can disable every other account.
-        let dir = tempdir::TempDir::new("storm-reg-role").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (device, _) = device_and_owner(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        send(&app, register(&device, "newcomer")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "PUT /v1/config/registration");
 
         let auth_db = state.auth_db.lock().await;
-        let users = auth_db.list_users().unwrap();
-        let owners: Vec<_> = users
-            .iter()
-            .filter(|u| u.role == crate::auth::users::Role::Owner)
-            .collect();
-        assert_eq!(owners.len(), 1, "still exactly one owner");
-        assert_eq!(owners[0].username, "dewansh", "and it is the bootstrap one");
-    }
-
-    #[tokio::test]
-    async fn registration_still_needs_a_device_credential() {
-        // Open does not mean unauthenticated. The device tier is what the
-        // whole design rests on, and this endpoint sits behind it like the
-        // rest.
-        let dir = tempdir::TempDir::new("storm-reg-tier").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        device_and_owner(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        let (status, _) = send(
-            &app,
-            post_json(
-                "/v1/users",
-                serde_json::json!({"username": "nobody", "password": "a-long-enough-password"}),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        let (status, _) = send(&app, get("/v1/auth/registration")).await;
         assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "even the question is device tier"
+            auth_db.account().unwrap().unwrap().id,
+            owner,
+            "nothing created a second person"
         );
     }
 
     #[tokio::test]
-    async fn only_an_owner_may_change_registration() {
-        let dir = tempdir::TempDir::new("storm-reg-owner").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (_, _owner) = device_and_owner(&state).await;
-
-        // A member's session must not be able to open the server to the world.
-        let member = {
-            let mut auth_db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut auth_db,
-                crate::auth::users::NewUser {
-                    username: "member",
-                    display_name: None,
-                    password_hash: "$argon2id$v=19$m=196608,t=1,p=1$c29tZXNhbHQ$bm90YXJlYWxoYXNo",
-                    role: crate::auth::users::Role::Member,
-                },
-                "2026-08-19T00:00:00Z",
-            )
-            .unwrap()
-            .id
-        };
-        let token = session_token(&state, &member).await;
-
-        let (status, _) = send(
-            &app,
-            put_json(
-                "/v1/config/registration",
-                serde_json::json!({"enabled": true}),
-                Some(&format!("Bearer {token}")),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(
-            !state
-                .allow_registration
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-    }
-
-    #[tokio::test]
-    async fn the_bootstrap_flow_is_untouched_by_registration() {
-        // `/v1/users/first` is the one-shot bootstrap and must behave exactly
-        // as before: registration being open does not reopen it, and
-        // registration cannot stand in for it on an empty server.
-        let dir = tempdir::TempDir::new("storm-reg-bootstrap").unwrap();
+    async fn setup_takes_a_password_and_happens_once() {
+        let dir = tempdir::TempDir::new("storm-setup-once").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let device = pair_a_device(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Registration refuses to be the first account.
-        let (status, _) = send(&app, register(&device, "first")).await;
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"password": "a-long-enough-password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        for body in [
+            serde_json::json!({"password": "another-long-password"}),
+            serde_json::json!({"username": "another", "password": "another-long-password"}),
+        ] {
+            let (status, _) =
+                send(&app, post_json_with_auth("/v1/users/first", body, &device)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "still one-shot");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paired_device_can_ask_whether_setup_happened() {
+        let dir = tempdir::TempDir::new("storm-account-state").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (status, _) = send(&app, get("/v1/account")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let device = pair_a_device(&state).await;
+        let (status, body) = send(&app, get_with_auth("/v1/account", &device)).await;
         assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "an empty server has no owner; that is the bootstrap's job"
+            (status, body["exists"].clone()),
+            (StatusCode::OK, false.into())
         );
+        seed_owner(&state).await;
+        let (_, body) = send(&app, get_with_auth("/v1/account", &device)).await;
+        assert_eq!(body, serde_json::json!({"exists": true}));
+    }
 
-        // The bootstrap still works, and still closes afterwards.
+    #[tokio::test]
+    async fn an_old_clients_setup_body_still_sets_up() {
+        let dir = tempdir::TempDir::new("storm-setup-old-client").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
         let (status, _) = send(
             &app,
             post_json_with_auth(
@@ -4341,49 +4190,143 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+        assert!(state.auth_db.lock().await.has_account().unwrap());
+    }
 
+    #[tokio::test]
+    async fn a_migrated_database_serves_the_survivor_and_refuses_the_rest() {
+        use crate::auth::single_user::tests::{
+            access_token, device_secret, fake_hash, key_secret, refresh_token, v5_fixture,
+        };
+        let fixture = v5_fixture(&fake_hash());
+        let dir = tempdir::TempDir::new("storm-migrated-serves").unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        std::fs::copy(&fixture.path, dir.path().join("state/auth.db")).unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state
+            .mcp_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let survivor = format!("Bearer {}", access_token("ses_s1"));
+        let (status, _) = send(&app, get_with_auth("/v1/vaults", &survivor)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the account's old token must keep working"
+        );
+        let shared = format!("Bearer {}", access_token("ses_s3"));
+        let (status, _) = send(&app, get_with_auth("/v1/vaults", &shared)).await;
+        assert_eq!(status, StatusCode::OK);
+        let revoked = format!("Bearer {}", access_token("ses_s2"));
+        let (status, _) = send(&app, get_with_auth("/v1/vaults", &revoked)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/refresh",
+                serde_json::json!({"refresh_token": refresh_token("ses_s1")}),
+                &format!(
+                    "StormDevice dev_survivor1:{}",
+                    device_secret("dev_survivor1")
+                ),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, _) = send(
+            &app,
+            mcp_request(&format!("Bearer {}", key_secret("key_s1"))),
+        )
+        .await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = send(
+            &app,
+            mcp_request(&format!("Bearer {}", key_secret("key_s2"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        for session in ["ses_a1", "ses_b1", "ses_n1"] {
+            let (status, _) = send(
+                &app,
+                get_with_auth("/v1/vaults", &format!("Bearer {}", access_token(session))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{session}");
+        }
+        for key in ["key_a1", "key_n1"] {
+            let (status, _) = send(&app, mcp_request(&format!("Bearer {}", key_secret(key)))).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{key}");
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"password": "anything at all here"}),
+                &format!("StormDevice dev_member_a:{}", device_secret("dev_member_a")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_old_clients_login_body_still_signs_in() {
+        let dir = tempdir::TempDir::new("storm-old-login").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let device = pair_a_device(&state).await;
         let (status, _) = send(
             &app,
             post_json_with_auth(
                 "/v1/users/first",
-                serde_json::json!({"username": "another", "password": "a-long-enough-password"}),
+                serde_json::json!({"password": "a-long-enough-password"}),
                 &device,
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "still one-shot");
-    }
+        assert_eq!(status, StatusCode::CREATED);
 
-    #[tokio::test]
-    async fn closing_registration_leaves_existing_accounts_alone() {
-        let dir = tempdir::TempDir::new("storm-reg-close").unwrap();
-        let (app, _, state) = test_router_with_state(dir.path());
-        let (device, owner) = device_and_owner(&state).await;
-        state
-            .allow_registration
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        send(&app, register(&device, "newcomer")).await;
-
-        let token = session_token(&state, &owner).await;
+        for body in [
+            serde_json::json!({"username": "whatever-v0.3-had", "password": "a-long-enough-password"}),
+            serde_json::json!({"password": "a-long-enough-password"}),
+        ] {
+            let (status, issued) = send(
+                &app,
+                post_json_with_auth("/v1/auth/login", body.clone(), &device),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body} → {issued}");
+        }
         let (status, _) = send(
             &app,
-            put_json(
-                "/v1/config/registration",
-                serde_json::json!({"enabled": false}),
-                Some(&format!("Bearer {token}")),
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"username": "whatever", "password": "not-the-password!"}),
+                &device,
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 
-        // The account made while it was open is still there and still active.
-        let auth_db = state.auth_db.lock().await;
-        let users = auth_db.list_users().unwrap();
-        assert!(
-            users.iter().any(|u| u.username == "newcomer"
-                && u.status == crate::auth::users::Status::Active),
-            "closing the door must not evict the people already through it"
-        );
+    #[tokio::test]
+    async fn the_account_changes_server_config() {
+        let dir = tempdir::TempDir::new("storm-config-account").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = device_and_owner(&state).await;
+        let token = format!("Bearer {}", session_token(&state, &owner).await);
+        for (path, body) in [
+            (
+                "/v1/config/mcp",
+                serde_json::json!({"enabled": true, "writable": false}),
+            ),
+            ("/v1/config/relays", serde_json::json!({"relays": []})),
+        ] {
+            let (status, _) = send(&app, put_json(path, body, Some(&token))).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+        }
     }
 
     // ---- web bootstrap (slice 15) ----------------------------------------
@@ -4488,10 +4431,18 @@ pub(crate) mod tests {
         let secret = body["device_secret"].as_str().unwrap().to_string();
         assert!(device_id.starts_with("dev_"));
 
-        // And it is a *device tier* credential, which is the point.
+        // A device-tier credential: it can set up this fresh Storm.
         let auth = format!("StormDevice {device_id}:{secret}");
-        let (status, _) = send(&app, get_with_auth("/v1/users", &auth)).await;
-        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/users/first",
+                serde_json::json!({"password": "a-long-enough-password"}),
+                &auth,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]
@@ -4886,17 +4837,12 @@ pub(crate) mod tests {
             ),
         )
         .await;
-        assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "a second account through the bootstrap endpoint is a second owner"
-        );
+        assert_eq!(status, StatusCode::CONFLICT, "setup happens once");
         assert_eq!(body["error"], "an account already exists");
 
         let auth_db = state.auth_db.lock().await;
-        assert_eq!(
-            auth_db.count_users().unwrap(),
-            1,
+        assert!(
+            auth_db.has_account().unwrap(),
             "the refusal has to be a refusal, not a 409 after the insert"
         );
 
@@ -5061,50 +5007,23 @@ pub(crate) mod tests {
     }
     // ---- A14: MCP keys ---------------------------------------------------
 
-    /// Mints a user and a key on `state`, returning `(user_id, plaintext)`.
-    async fn seed_key(
-        state: &Shared,
-        username: &str,
-        role: crate::auth::users::Role,
-    ) -> (String, String) {
+    async fn seed_key(state: &Shared) -> (String, String) {
         let mut db = state.auth_db.lock().await;
-        // The first account has to be an owner — a server whose only user is a
-        // member has nobody who can create the next one. So a member needs one
-        // ahead of it.
-        if role != crate::auth::users::Role::Owner {
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "bootstrap-owner",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Owner,
-                },
-                "2026-08-19T11:00:00Z",
-            )
-            .unwrap();
-        }
-        let user = crate::auth::users::create_user(
-            &mut db,
-            crate::auth::users::NewUser {
-                username,
-                display_name: None,
-                password_hash: "hash",
-                role,
-            },
-            "2026-08-19T12:00:00Z",
-        )
-        .unwrap();
+        let account = match db.account().unwrap() {
+            Some(account) => account,
+            None => crate::auth::account::create_account(&mut db, "hash", "2026-08-19T12:00:00Z")
+                .unwrap(),
+        };
         let (_, secret) = crate::auth::keys::create(
             &mut db,
-            &user.id,
+            &account.id,
             "a machine",
             None,
             None,
             "2026-08-19T12:00:00Z",
         )
         .unwrap();
-        (user.id, secret)
+        (account.id, secret)
     }
 
     /// A minimal, valid MCP request — enough to get past the tier check and
@@ -5132,7 +5051,7 @@ pub(crate) mod tests {
         state
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+        let (_, secret) = seed_key(&state).await;
 
         let response = app
             .clone()
@@ -5154,13 +5073,13 @@ pub(crate) mod tests {
         // was the truth.
         let dir = tempdir::TempDir::new("storm-key-scope").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
-        let (_, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+        let (_, secret) = seed_key(&state).await;
 
         for (method, uri) in [
             ("GET", "/v1/vaults"),
             ("GET", "/v1/config"),
             ("GET", "/v1/recents"),
-            ("GET", "/v1/users"),
+            ("GET", "/v1/keys"),
         ] {
             let (status, _) = send(
                 &app,
@@ -5187,7 +5106,7 @@ pub(crate) mod tests {
         state
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Owner).await;
+        let (user_id, secret) = seed_key(&state).await;
 
         // Works first, so the refusal below cannot be a setup failure.
         let before = app
@@ -5268,71 +5187,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_member_reaches_only_their_own_keys() {
-        let dir = tempdir::TempDir::new("storm-key-scope-user").unwrap();
+    async fn a_key_from_a_removed_account_cannot_be_revoked_or_listed() {
+        let dir = tempdir::TempDir::new("storm-key-foreign").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let owner = seed_owner(&state).await;
-        let member = {
-            let mut db = state.auth_db.lock().await;
-            crate::auth::users::create_user(
-                &mut db,
-                crate::auth::users::NewUser {
-                    username: "member",
-                    display_name: None,
-                    password_hash: "hash",
-                    role: crate::auth::users::Role::Member,
-                },
-                "2026-08-19T12:00:00Z",
-            )
-            .unwrap()
-            .id
+        let auth = format!("Bearer {}", session_token(&state, &owner).await);
+        let foreign = {
+            let db = state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .unwrap();
+            db.conn_for_tests()
+                .execute(
+                    "INSERT INTO api_keys (id, user_id, name, secret_hash, created)
+                     VALUES ('key_foreign', 'usr_gone', 'left behind', x'00', '2026-08-19T12:00:00Z')",
+                    [],
+                )
+                .unwrap();
+            db.conn_for_tests()
+                .execute_batch("PRAGMA foreign_keys = ON;")
+                .unwrap();
+            "key_foreign"
         };
-        let member_auth = format!("Bearer {}", session_token(&state, &member).await);
-        let owner_auth = format!("Bearer {}", session_token(&state, &owner).await);
-
-        // The owner mints one for themselves.
-        let (status, owners_key) = send(
-            &app,
-            post_json_with_auth(
-                "/v1/keys",
-                serde_json::json!({ "name": "owner key" }),
-                &owner_auth,
-            ),
-        )
-        .await;
+        let (status, listed) = send(&app, get_with_auth("/v1/keys", &auth)).await;
         assert_eq!(status, StatusCode::OK);
-        let owners_key_id = owners_key["id"].as_str().unwrap().to_string();
-
-        // A member may not read the owner's keys...
-        let (status, _) = send(
-            &app,
-            get_with_auth(&format!("/v1/keys?user={owner}"), &member_auth),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-
-        // ...nor revoke one. **404, not 403** — a member probing key ids must
-        // not learn which exist.
+        assert!(!listed.to_string().contains(foreign), "{listed}");
         let (status, _) = send(
             &app,
             axum::http::Request::builder()
                 .method("DELETE")
-                .uri(format!("/v1/keys/{owners_key_id}"))
-                .header("Authorization", &member_auth)
+                .uri(format!("/v1/keys/{foreign}"))
+                .header("Authorization", &auth)
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-
-        // The owner may reach the member's keys, which is the one asymmetry
-        // A14 grants and the whole of it.
-        let (status, _) = send(
-            &app,
-            get_with_auth(&format!("/v1/keys?user={member}"), &owner_auth),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -5350,7 +5240,7 @@ pub(crate) mod tests {
             .mcp_enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         register_vault(&state, "Notes").await;
-        let (user_id, secret) = seed_key(&state, "dewansh", crate::auth::users::Role::Member).await;
+        let (user_id, secret) = seed_key(&state).await;
 
         // A tool that reaches a vault, so the policy is actually consulted.
         let _ = app
@@ -5372,12 +5262,7 @@ pub(crate) mod tests {
             assert_eq!(
                 actor.user_id(),
                 user_id.as_str(),
-                "an MCP key must reach the boundary as its owner"
-            );
-            assert_eq!(
-                actor.role(),
-                crate::auth::users::Role::Member,
-                "and with its owner's role, unnarrowed"
+                "an MCP key must reach the boundary as the account"
             );
             assert!(
                 actor.key_id().is_some(),
@@ -5748,11 +5633,19 @@ pub(crate) mod tests {
         assert_eq!(body["vault_count"], 0);
         assert_eq!(body["mcp_enabled"], false);
         assert_eq!(body["mcp_writable"], false);
-        assert_eq!(body["allow_registration"], false);
+        assert!(
+            body.get("allow_registration").is_none(),
+            "registration went with multi-user Storm (decision 82)"
+        );
         assert_eq!(body["relays"], serde_json::json!([]));
         assert_eq!(
+            body["agent_writes"], false,
+            "fresh installs: agents read only"
+        );
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
             body.as_object().unwrap().len(),
-            7,
+            8,
             "a new key showed up that this test does not know about"
         );
     }
@@ -6081,33 +5974,2472 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn host_administration_is_the_owners_alone() {
-        // AM5: 403 on every route — never an empty list, which would read as
-        // "no hosts" rather than "not yours".
-        let dir = tempdir::TempDir::new("storm-hosts-owner").unwrap();
+    async fn an_access_key_cannot_administer_hosts() {
+        let dir = tempdir::TempDir::new("storm-hosts-key").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let owner = seed_owner(&state).await;
         let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
         let (host_id, _) = enroll_a_host(&app, &owner_bearer).await;
+        let (_, secret) = seed_key(&state).await;
+        let key = format!("Bearer {secret}");
 
-        let member = seed_member(&state, "member").await;
-        let member_bearer = format!("Bearer {}", session_token(&state, &member).await);
         let path = format!("/v1/agent/hosts/{host_id}");
         let requests = [
-            get_with_auth("/v1/agent/hosts", &member_bearer),
+            get_with_auth("/v1/agent/hosts", &key),
             post_json_with_auth(
                 "/v1/agent/hosts/enrollments",
                 serde_json::json!({"server_url": "http://x"}),
-                &member_bearer,
+                &key,
             ),
-            patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &member_bearer),
-            delete_with_auth(&path, &member_bearer),
+            patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &key),
+            delete_with_auth(&path, &key),
         ];
         for request in requests {
             let uri = request.uri().to_string();
             let (status, _) = send(&app, request).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
         }
+    }
+
+    // ---- MCP Gateway: integrations (decision 81c) ------------------------
+
+    const CONNECTIONS: &str = "/v1/integrations/connections";
+
+    async fn owner_bearer(state: &Shared) -> (String, String) {
+        let owner = seed_owner(state).await;
+        let bearer = format!("Bearer {}", session_token(state, &owner).await);
+        (owner, bearer)
+    }
+
+    async fn create_github(app: &Router, bearer: &str, pat: &str) -> serde_json::Value {
+        let (status, body) = send(
+            app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({
+                    "display_name": "GitHub (work)",
+                    "url": "https://api.example.com/mcp/",
+                    "auth_kind": "static",
+                    "credential": {"value": format!("Bearer {pat}")},
+                }),
+                bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body
+    }
+
+    #[tokio::test]
+    async fn an_owner_connects_changes_and_disconnects_an_integration() {
+        let dir = tempdir::TempDir::new("storm-integrations-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, bearer) = owner_bearer(&state).await;
+
+        let created = create_github(&app, &bearer, "ghp_first").await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("mcc_"), "{id}");
+        assert_eq!(created["slug"], "github-work");
+        assert_eq!(created["status"], "connected");
+        assert_eq!(created["has_credential"], true);
+        assert_eq!(created["builtin"], false);
+
+        // The built-in connection is always listed first, and cannot go.
+        let (status, list) = send(&app, get_with_auth(CONNECTIONS, &bearer)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list[0]["id"], "storm");
+        assert_eq!(list[0]["builtin"], true);
+        assert_eq!(list[1]["id"], id);
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("{CONNECTIONS}/storm"), &bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Disable, re-enable, rotate the token, narrow the allowlist.
+        let path = format!("{CONNECTIONS}/{id}");
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &bearer),
+        )
+        .await;
+        assert_eq!(
+            (status, body["status"].clone()),
+            (StatusCode::OK, "disabled".into())
+        );
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({
+                    "enabled": true,
+                    "credential": {"value": "Bearer ghp_second"},
+                    "tool_allowlist": ["search", "search", "get_issue"],
+                    "expose_prompts": false,
+                }),
+                &bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "connected");
+        assert_eq!(
+            body["tool_allowlist"],
+            serde_json::json!(["get_issue", "search"])
+        );
+        assert_eq!(body["expose_prompts"], false);
+        // The rotated token is what is sealed now.
+        {
+            let (sealed, _) = state
+                .gateway
+                .store
+                .lock()
+                .unwrap()
+                .credential(&id, "static")
+                .unwrap()
+                .unwrap();
+            let opened = state.gateway.keys.open(&id, "static", &sealed).unwrap();
+            let credential: crate::gateway::connections::StaticCredential =
+                serde_json::from_slice(opened.expose()).unwrap();
+            assert_eq!(credential.header, "Authorization");
+            assert_eq!(credential.value, "Bearer ghp_second");
+        }
+
+        // Re-pointing a connection would hand its token to a new host: the
+        // URL is not a field PATCH accepts, so it is unchanged.
+        let (_, body) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"url": "https://evil.example/"}),
+                &bearer,
+            ),
+        )
+        .await;
+        assert_eq!(body["url"], "https://api.example.com/mcp/");
+
+        // Disconnect: gone from the list, 404 by id, ciphertexts deleted, and
+        // the slug is free for a new connection.
+        let (status, _) = send(&app, delete_with_auth(&path, &bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, list) = send(&app, get_with_auth(CONNECTIONS, &bearer)).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        let (status, _) = send(&app, get_with_auth(&path, &bearer)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            state
+                .gateway
+                .store
+                .lock()
+                .unwrap()
+                .credential(&id, "static")
+                .unwrap()
+                .is_none()
+        );
+        let again = create_github(&app, &bearer, "ghp_third").await;
+        assert_eq!(again["slug"], "github-work");
+        assert_ne!(again["id"], id);
+    }
+
+    async fn create_against(app: &Router, bearer: &str, url: &str, value: &str) -> String {
+        let (status, body) = send(
+            app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({
+                    "display_name": "Mock",
+                    "url": url,
+                    "auth_kind": "static",
+                    "credential": {"header": "X-Api-Key", "value": value},
+                }),
+                bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn the_owners_test_turns_every_tool_on_and_later_tools_stay_off() {
+        // G-D16 over the real routes, against a real MCP upstream.
+        let dir = tempdir::TempDir::new("storm-integrations-probe").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let up = crate::gateway::upstream::tests::mock(&["search", "get_issue"]);
+        let url = crate::gateway::upstream::tests::serve_mock(
+            up.clone(),
+            Some(("x-api-key", "upstream-canary-probe".into())),
+        )
+        .await;
+        let id = create_against(&app, &owner, &url, "upstream-canary-probe").await;
+
+        let (status, test) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        assert_eq!(test["ok"], true);
+        assert_eq!(test["server_name"], "mock-upstream");
+        assert_eq!(test["tool_count"], 2);
+        assert_eq!(test["new_tools"], serde_json::json!([]));
+        assert_eq!(
+            test["integration"]["tool_allowlist"],
+            serde_json::json!(["get_issue", "search"])
+        );
+        assert!(test["integration"]["last_ok"].is_string());
+
+        // A tool appears upstream: listed, new, and off.
+        up.tools.lock().unwrap().push("delete_repo".into());
+        let tools_path = format!("{CONNECTIONS}/{id}/tools");
+        let (status, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
+        assert_eq!(status, StatusCode::OK, "{tools}");
+        let by_name = |name: &str| {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(by_name("delete_repo")["allowed"], false);
+        assert_eq!(by_name("delete_repo")["new"], true);
+        assert_eq!(by_name("search")["allowed"], true);
+        assert_eq!(by_name("search")["new"], false);
+        // Spec §9: it stays new — and the integration says so — until the
+        // owner reviews it. Listing it again is not a review.
+        let delete_repo = |tools: &serde_json::Value| {
+            let t = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == "delete_repo")
+                .unwrap()
+                .clone();
+            (t["allowed"].clone(), t["new"].clone())
+        };
+        let (_, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
+        assert_eq!(delete_repo(&tools), (false.into(), true.into()));
+        let (_, view) = send(&app, get_with_auth(&format!("{CONNECTIONS}/{id}"), &owner)).await;
+        assert_eq!(view["new_tools"], serde_json::json!(["delete_repo"]));
+        // Saving the tool list is the review: no longer new, and still off.
+        let (status, view) = send(
+            &app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{id}"),
+                serde_json::json!({"tool_allowlist": ["get_issue", "search"]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["new_tools"], serde_json::json!([]));
+        let (_, tools) = send(&app, get_with_auth(&tools_path, &owner)).await;
+        assert_eq!(delete_repo(&tools), (false.into(), false.into()));
+
+        // Probes never call a tool, and each one left a metadata-only audit row.
+        assert_eq!(up.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let calls = state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(10)
+            .unwrap();
+        // The test, and three tool listings.
+        assert_eq!(calls.len(), 4);
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.method == "tools/list" && c.outcome == "ok" && c.connection_id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_credential_marks_the_integration_needs_reauth_until_rotated() {
+        let dir = tempdir::TempDir::new("storm-integrations-reauth").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let url = crate::gateway::upstream::tests::serve_mock(
+            crate::gateway::upstream::tests::mock(&["search"]),
+            Some(("x-api-key", "k-right".into())),
+        )
+        .await;
+        let id = create_against(&app, &owner, &url, "k-wrong").await;
+        let test_path = format!("{CONNECTIONS}/{id}/test");
+
+        let (status, test) = send(
+            &app,
+            post_json_with_auth(&test_path, serde_json::json!({}), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(test["ok"], false);
+        assert_eq!(test["error_code"], "upstream_unauthorized");
+        assert_eq!(test["integration"]["status"], "needs_reauth");
+        assert_eq!(
+            test["integration"]["last_error_code"],
+            "upstream_unauthorized"
+        );
+        // The tool listing says the same, as a 502 carrying only the code.
+        let (status, body) = send(
+            &app,
+            get_with_auth(&format!("{CONNECTIONS}/{id}/tools"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "upstream_unauthorized");
+
+        // Rotating the token and testing again reconnects it.
+        let path = format!("{CONNECTIONS}/{id}");
+        let (_, patched) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"credential": {"header": "X-Api-Key", "value": "k-right"}}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(patched["status"], "connected");
+        let (_, test) = send(
+            &app,
+            post_json_with_auth(&test_path, serde_json::json!({}), &owner),
+        )
+        .await;
+        assert_eq!(test["ok"], true, "{test}");
+        assert_eq!(
+            test["integration"]["last_error_code"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn an_http_upstream_needs_the_test_only_flag_and_a_disabled_one_is_not_probed() {
+        let dir = tempdir::TempDir::new("storm-integrations-http").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Plain", "url": "http://127.0.0.1:9/mcp", "auth_kind": "none"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "http must need the flag");
+
+        let id = create_github(&app, &owner, "ghp_x").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        send(
+            &app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{id}"),
+                serde_json::json!({"enabled": false}),
+                &owner,
+            ),
+        )
+        .await;
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/storm/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_integration_is_not_found() {
+        let dir = tempdir::TempDir::new("storm-integrations-unknown").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let path = format!("{CONNECTIONS}/mcc_nope");
+        for request in [
+            get_with_auth(&path, &owner),
+            patch_json_with_auth(&path, serde_json::json!({"enabled": false}), &owner),
+            delete_with_auth(&path, &owner),
+        ] {
+            let (status, _) = send(&app, request).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_mcp_key_cannot_reach_the_integration_routes() {
+        // §14: session tier, so a key can never manage an integration.
+        let dir = tempdir::TempDir::new("storm-integrations-key").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (_, key) = send(
+            &app,
+            post_json_with_auth("/v1/keys", serde_json::json!({"name": "agent"}), &owner),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for request in [
+            get_with_auth(CONNECTIONS, &key),
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "X", "url": "https://x.example/", "auth_kind": "none"}),
+                &key,
+            ),
+        ] {
+            let (status, _) = send(&app, request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_integration_is_refused_when_its_input_is_wrong() {
+        let dir = tempdir::TempDir::new("storm-integrations-input").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        create_github(&app, &owner, "ghp_x").await;
+        let cases = [
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "oauth", "credential": {"value": "x"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "static"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "none", "credential": {"value": "x"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "http://x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://u:p@x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "Storm", "url": "https://x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "slug": "storm", "url": "https://x.example/", "auth_kind": "none"}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "static", "credential": {"header": "Host", "value": "x"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "N", "url": "https://x.example/", "auth_kind": "static", "credential": {"value": "a\r\nX-Evil: 1"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"display_name": "GitHub (work)", "url": "https://x.example/", "auth_kind": "none"}),
+                StatusCode::CONFLICT,
+            ),
+        ];
+        for (body, want) in cases {
+            let (status, answer) =
+                send(&app, post_json_with_auth(CONNECTIONS, body.clone(), &owner)).await;
+            assert_eq!(status, want, "{body} -> {answer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_integration_secret_reaches_a_response_or_the_security_events() {
+        // The invariant every auth area holds, for the gateway: a credential
+        // is sealed, never returned, never in `security_events`. A URL can
+        // carry a key in its query string, so the audit records its host only.
+        let dir = tempdir::TempDir::new("storm-integrations-secrets").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let mut seen = Vec::new();
+        let (status, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({
+                    "display_name": "Linear",
+                    "url": "https://mcp.example.com/mcp?api_key=upstream-canary-url",
+                    "auth_kind": "static",
+                    "credential": {"header": "X-Api-Key", "value": "upstream-canary-one"},
+                }),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        seen.push(created.clone());
+        let path = format!("{CONNECTIONS}/{}", created["id"].as_str().unwrap());
+        let (_, patched) = send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"credential": {"header": "X-Api-Key", "value": "upstream-canary-two"}, "enabled": false}),
+                &owner,
+            ),
+        )
+        .await;
+        seen.push(patched);
+        seen.push(send(&app, get_with_auth(&path, &owner)).await.1);
+        seen.push(send(&app, get_with_auth(CONNECTIONS, &owner)).await.1);
+        let (status, _) = send(&app, delete_with_auth(&path, &owner)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        for body in &seen {
+            let text = body.to_string();
+            assert!(!text.contains("upstream-canary-one"), "{text}");
+            assert!(!text.contains("upstream-canary-two"), "{text}");
+        }
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        let kinds: Vec<&str> = events.iter().map(|(k, _)| k.as_str()).collect();
+        for kind in [
+            "integration_created",
+            "integration_reauthorized",
+            "integration_disabled",
+            "integration_deleted",
+        ] {
+            assert!(kinds.contains(&kind), "{kind} missing from {kinds:?}");
+        }
+        for (kind, detail) in &events {
+            assert!(!detail.contains("upstream-canary"), "{kind}: {detail}");
+        }
+        let created_detail = &events
+            .iter()
+            .find(|(k, _)| k == "integration_created")
+            .unwrap()
+            .1;
+        assert!(
+            created_detail.contains("mcp.example.com"),
+            "{created_detail}"
+        );
+    }
+
+    // ---- MCP Gateway: the host-tier route (decision 81e) -----------------
+
+    struct GatewayFixture {
+        app: Router,
+        state: Shared,
+        owner: String,
+        owner_bearer: String,
+        host_id: String,
+        host_bearer: String,
+        /// The host's link, so tests can see what was sent down it.
+        link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+        up: crate::gateway::upstream::tests::MockUpstream,
+        connection: String,
+    }
+
+    fn host_caps(bridge: bool) -> serde_json::Value {
+        serde_json::json!({
+            "providers": [
+                {"id": "claude-code", "kind": "cli", "interactions": ["terminal"], "available": true},
+                {"id": "shell", "kind": "cli", "interactions": ["terminal"], "available": true},
+            ],
+            "workspaces": ["storm"],
+            "max_sessions": 8,
+            "mcp_bridge": bridge,
+        })
+    }
+
+    /// An owner, a mock upstream connected as a static integration with every
+    /// tool allowed, and an enrolled host that is online and can bridge.
+    async fn gateway_fixture(dir: &FsPath) -> GatewayFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        state.gateway.set_allow_http_upstreams(true);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let up = crate::gateway::upstream::tests::mock(&[
+            "echo", "slow", "ask", "ask_url", "caps", "hang", "secret",
+        ]);
+        let url = crate::gateway::upstream::tests::serve_mock(
+            up.clone(),
+            Some(("x-api-key", "upstream-canary-route".into())),
+        )
+        .await;
+        let connection = create_against(&app, &owner_bearer, &url, "upstream-canary-route").await;
+        // The owner's test turns every tool on; then `secret` is turned off.
+        let (_, test) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{connection}/test"),
+                serde_json::json!({}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(test["ok"], true, "{test}");
+        send(
+            &app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{connection}"),
+                serde_json::json!({"tool_allowlist": ["echo", "slow", "ask", "ask_url", "caps", "hang"]}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        let (host_id, token) = enroll_a_host(&app, &owner_bearer).await;
+        let (_, link) = state.agent.connect_host(&host_id);
+        state
+            .agent
+            .hello(&host_id, serde_json::from_value(host_caps(true)).unwrap())
+            .unwrap();
+        GatewayFixture {
+            app,
+            state,
+            owner,
+            owner_bearer,
+            host_id,
+            host_bearer: format!("Bearer {token}"),
+            link,
+            up,
+            connection,
+        }
+    }
+
+    impl GatewayFixture {
+        /// Launches a session and has the host report it running.
+        async fn launch(&mut self, provider: &str, allow_vault_writes: bool) -> serde_json::Value {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/agent/sessions",
+                    serde_json::json!({
+                        "host_id": self.host_id, "workspace": "storm", "provider": provider,
+                        "terminal": {"cols": 80, "rows": 24},
+                        "allow_vault_writes": allow_vault_writes,
+                    }),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let id = body["id"].as_str().unwrap().to_string();
+            self.report(&id, "running").await;
+            body
+        }
+
+        async fn report(&self, session: &str, status: &str) {
+            let (code, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{session}/status"),
+                    serde_json::json!({"status": status}),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success(), "{code} {body}");
+        }
+
+        /// One bridge message; every line of the answer.
+        async fn mcp(
+            &self,
+            session: &str,
+            connection: &str,
+            message: serde_json::Value,
+        ) -> Vec<serde_json::Value> {
+            mcp_as(&self.app, &self.host_bearer, session, connection, message).await
+        }
+
+        async fn initialize(&self, session: &str, connection: &str) -> serde_json::Value {
+            let lines = self
+                .mcp(
+                    session,
+                    connection,
+                    serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {"roots": {"listChanged": true}, "sampling": {}, "elicitation": {"form": {}, "url": {}}},
+                        "clientInfo": {"name": "claude-code", "version": "2.1.289"},
+                    }}),
+                )
+                .await;
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            lines[0]["message"]["result"].clone()
+        }
+
+        async fn call(
+            &self,
+            session: &str,
+            connection: &str,
+            tool: &str,
+        ) -> Vec<serde_json::Value> {
+            self.mcp(
+                session,
+                connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": tool, "arguments": {}}}),
+            )
+            .await
+        }
+
+        fn upstream_calls(&self) -> usize {
+            self.up.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn gateway_request(
+        bearer: &str,
+        session: &str,
+        connection: &str,
+        message: &serde_json::Value,
+    ) -> axum::http::Request<axum::body::Body> {
+        post_json_with_auth(
+            &format!("/v1/runtime/sessions/{session}/mcp/{connection}"),
+            message.clone(),
+            bearer,
+        )
+    }
+
+    async fn mcp_as(
+        app: &Router,
+        bearer: &str,
+        session: &str,
+        connection: &str,
+        message: serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        let response = app
+            .clone()
+            .oneshot(gateway_request(bearer, session, connection, &message))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn error_code(lines: &[serde_json::Value]) -> Option<String> {
+        lines
+            .last()
+            .and_then(|l| l.pointer("/message/error/data/storm_error"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    fn tool_text(lines: &[serde_json::Value]) -> String {
+        lines
+            .last()
+            .and_then(|l| l.pointer("/message/result/content/0/text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn an_agent_reaches_an_integration_through_the_host_link_and_only_its_allowlist() {
+        let dir = tempdir::TempDir::new("storm-gateway-route").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let launched = f.launch("claude-code", false).await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        // The launch granted the owner's connection and `storm`, and told the
+        // host ids and slugs only (AM23).
+        let granted: Vec<&str> = launched["mcp"]["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(granted, vec!["storm", f.connection.as_str()]);
+        let start = serde_json::to_string(&f.link.try_recv().unwrap()).unwrap();
+        assert!(start.contains("\"mcp\""), "{start}");
+        assert!(
+            !start.contains("upstream-canary"),
+            "a credential reached the host: {start}"
+        );
+
+        // Before `initialize`, the gateway forwards nothing (G-D19).
+        let lines = f.call(&session, &f.connection, "echo").await;
+        assert_eq!(
+            lines,
+            vec![serde_json::json!({"storm_error": "session_unknown"})]
+        );
+        assert_eq!(
+            f.upstream_calls(),
+            0,
+            "a session_unknown request was forwarded"
+        );
+
+        let init = f.initialize(&session, &f.connection).await;
+        assert_eq!(init["serverInfo"]["name"], "mock-upstream");
+
+        // The agent sees only the allowlist, and calls exactly once.
+        let lines = f
+            .mcp(
+                &session,
+                &f.connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .await;
+        let names: Vec<String> = lines[0]["message"]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!names.contains(&"secret".to_string()), "{names:?}");
+        assert!(names.contains(&"echo".to_string()));
+        let lines = f.call(&session, &f.connection, "echo").await;
+        assert_eq!(tool_text(&lines), "called echo");
+        assert_eq!(lines[0]["message"]["id"], 7);
+        assert_eq!(f.upstream_calls(), 1);
+        let lines = f.call(&session, &f.connection, "secret").await;
+        assert_eq!(error_code(&lines).as_deref(), Some("tool_not_allowed"));
+        assert_eq!(f.upstream_calls(), 1, "a disallowed tool reached upstream");
+
+        // What went upstream: no sampling, no roots, no URL elicitation (§9).
+        let caps: serde_json::Value =
+            serde_json::from_str(&tool_text(&f.call(&session, &f.connection, "caps").await))
+                .unwrap();
+        assert_eq!(caps, serde_json::json!({"elicitation": {"form": {}}}));
+
+        // Every call left a metadata-only audit row with its session.
+        let calls = f
+            .state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(20)
+            .unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.session_id.as_deref() == Some(session.as_str())
+                    && c.tool.as_deref() == Some("echo")
+                    && c.outcome == "ok")
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.error_code.as_deref() == Some("tool_not_allowed"))
+        );
+
+        // A user credential cannot reach the route; it is the host's tier.
+        let response = f
+            .app
+            .clone()
+            .oneshot(gateway_request(
+                &f.owner_bearer,
+                &session,
+                &f.connection,
+                &serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn every_authorization_check_refuses_with_a_stable_code() {
+        // Spec §7, one check at a time.
+        let dir = tempdir::TempDir::new("storm-gateway-authz").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+
+        // A connection added after launch is not granted (§6: fixed grants).
+        let later = create_github(&f.app, &f.owner_bearer, "ghp_later").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error_code(&f.call(&session, &later, "echo").await).as_deref(),
+            Some("not_granted")
+        );
+        // An unknown session, and a session that is not this host's: another
+        // enrolled host's valid token reaches the route and is refused.
+        assert_eq!(
+            error_code(&f.call("ags_NOPE", &f.connection, "echo").await).as_deref(),
+            Some("not_your_session")
+        );
+        let (_, other) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let lines = mcp_as(&f.app, &format!("Bearer {other}"), &session, &f.connection,
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": {}}})).await;
+        assert_eq!(error_code(&lines).as_deref(), Some("not_your_session"));
+        // Disabled: refused at once on the live session.
+        let path = format!("{CONNECTIONS}/{}", f.connection);
+        send(
+            &f.app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("not_granted")
+        );
+        send(
+            &f.app,
+            patch_json_with_auth(&path, serde_json::json!({"enabled": true}), &f.owner_bearer),
+        )
+        .await;
+        // Disabling closed the upstream session: the bridge must re-initialize.
+        assert_eq!(
+            f.call(&session, &f.connection, "echo").await,
+            vec![serde_json::json!({"storm_error": "session_unknown"})]
+        );
+        f.initialize(&session, &f.connection).await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+
+        // A session whose owner is not the account (a removed account's).
+        {
+            let db = f.state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch("PRAGMA foreign_keys = OFF; UPDATE users SET id = id || '_moved';")
+                .unwrap();
+        }
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("owner_inactive")
+        );
+        {
+            let db = f.state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch(
+                    "UPDATE users SET id = substr(id, 1, length(id) - 6); PRAGMA foreign_keys = ON;",
+                )
+                .unwrap();
+        }
+
+        // Disconnected mid-session: refused at once, and the grant is revoked.
+        let before = f.upstream_calls();
+        let (status, _) = send(&f.app, delete_with_auth(&path, &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("not_granted")
+        );
+        assert_eq!(f.upstream_calls(), before);
+        assert_eq!(f.state.agent.grant(&session, &f.connection).unwrap(), None);
+
+        // An ended session: refused, and its upstream sessions are gone.
+        f.initialize(&session, "storm").await;
+        f.report(&session, "completed").await;
+        assert_eq!(
+            error_code(&f.call(&session, "storm", "list_vaults").await).as_deref(),
+            Some("session_not_live")
+        );
+        assert!(f.state.gateway.sessions.get(&session, "storm").is_none());
+        let _ = &f.owner;
+    }
+
+    #[tokio::test]
+    async fn the_single_user_sweep_retires_what_a_removed_account_left() {
+        let dir = tempdir::TempDir::new("storm-single-user-sweep").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let live = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ended = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.report(&ended, "completed").await;
+
+        crate::ops::reconcile_single_user(&f.state).await.unwrap();
+        assert_eq!(f.state.agent.get(&live).unwrap().status, "running");
+
+        {
+            let db = f.state.auth_db.lock().await;
+            db.conn_for_tests()
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF; UPDATE users SET id = 'usr_the_survivor'; PRAGMA foreign_keys = ON;",
+                )
+                .unwrap();
+        }
+        crate::ops::reconcile_single_user(&f.state).await.unwrap();
+
+        let connection = crate::ops::gateway_store(&f.state)
+            .connection(&f.connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            connection.status, "revoked",
+            "the removed account's connection"
+        );
+        assert!(
+            !crate::ops::gateway_store(&f.state)
+                .has_credential(&f.connection)
+                .unwrap(),
+            "its sealed credential went with it"
+        );
+        let retired = f.state.agent.get(&live).unwrap();
+        assert_eq!(
+            (retired.status.as_str(), retired.end_reason.as_deref()),
+            ("failed", Some("owner_removed"))
+        );
+        assert!(
+            f.state.agent.get(&ended).is_err(),
+            "an ended one is dismissed"
+        );
+        assert_eq!(f.state.agent.grant(&live, &f.connection).unwrap(), None);
+
+        let before = f
+            .state
+            .auth_db
+            .lock()
+            .await
+            .event_count("integration_removed_single_user")
+            .unwrap();
+        crate::ops::reconcile_single_user(&f.state).await.unwrap();
+        let after = f
+            .state
+            .auth_db
+            .lock()
+            .await
+            .event_count("integration_removed_single_user")
+            .unwrap();
+        assert_eq!((before, after), (1, 1));
+        let _ = &f.owner;
+    }
+
+    #[tokio::test]
+    async fn shell_gets_nothing_and_an_old_host_is_announced() {
+        let dir = tempdir::TempDir::new("storm-gateway-shell").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let shell = f.launch("shell", false).await;
+        assert_eq!(shell["mcp"]["connections"], serde_json::json!([]));
+        assert_eq!(shell["mcp"]["notice"], serde_json::Value::Null);
+        let session = shell["id"].as_str().unwrap();
+        assert_eq!(
+            error_code(&f.call(session, "storm", "list_vaults").await).as_deref(),
+            Some("not_granted")
+        );
+
+        // The same host, reporting no bridge: no grants, and the launch says why.
+        f.state
+            .agent
+            .hello(
+                &f.host_id,
+                serde_json::from_value(host_caps(false)).unwrap(),
+            )
+            .unwrap();
+        let old = f.launch("claude-code", false).await;
+        assert_eq!(old["mcp"]["connections"], serde_json::json!([]));
+        assert_eq!(
+            old["mcp"]["notice"],
+            "build-vm can't use integrations — update storm-runtime"
+        );
+    }
+
+    fn tools_of(lines: Vec<serde_json::Value>) -> Vec<String> {
+        lines[0]["message"]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn structured(lines: &[serde_json::Value]) -> serde_json::Value {
+        lines
+            .last()
+            .and_then(|l| l.pointer("/message/result/structuredContent"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn tool_error(lines: &[serde_json::Value]) -> String {
+        let result = &lines.last().unwrap()["message"]["result"];
+        assert_eq!(result["isError"], true, "{lines:?}");
+        result["structuredContent"]["error"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    impl GatewayFixture {
+        async fn vault(&self, name: &str) -> String {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/vaults",
+                    serde_json::json!({"name": name}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["id"].as_str().unwrap().to_string()
+        }
+
+        async fn note(&self, vault: &str, path: &str, content: &str) -> serde_json::Value {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{vault}/notes"),
+                    serde_json::json!({"path": path, "content": content}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["note"].clone()
+        }
+
+        async fn get(&self, path: &str) -> (StatusCode, serde_json::Value) {
+            send(&self.app, get_with_auth(path, &self.owner_bearer)).await
+        }
+
+        /// Launches with extra fields; the host reports it running.
+        async fn launch_body(
+            &mut self,
+            extra: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut body = serde_json::json!({
+                "host_id": self.host_id, "workspace": "storm", "provider": "claude-code",
+                "terminal": {"cols": 80, "rows": 24},
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth("/v1/agent/sessions", body, &self.owner_bearer),
+            )
+            .await;
+            if status == StatusCode::OK {
+                self.report(body["id"].as_str().unwrap(), "running").await;
+            }
+            (status, body)
+        }
+
+        async fn agent_writes(&self, on: bool) {
+            let (status, body) = send(
+                &self.app,
+                put_json_with_auth(
+                    "/v1/config/mcp",
+                    serde_json::json!({"agent_writes": on}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["agent_writes"], on);
+        }
+
+        async fn tool(
+            &self,
+            session: &str,
+            tool: &str,
+            arguments: serde_json::Value,
+        ) -> Vec<serde_json::Value> {
+            self.mcp(
+                session,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments}}),
+            )
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_writes_only_to_its_write_vault_under_agent_writes_and_never_deletes() {
+        let dir = tempdir::TempDir::new("storm-gateway-builtin").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let personal = f.vault("Personal").await;
+        let theirs = f.note(&personal, "Theirs.md", "# Theirs\n").await;
+        let list = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+        // No write vault: read only, whatever the switches say.
+        f.agent_writes(true).await;
+        let (_, s1) = f.launch_body(serde_json::json!({})).await;
+        let s1 = s1["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            f.initialize(&s1, "storm").await["serverInfo"]["name"],
+            "storm"
+        );
+        let tools = tools_of(f.mcp(&s1, "storm", list.clone()).await);
+        assert!(tools.contains(&"list_vaults".to_string()), "{tools:?}");
+        assert!(tools.contains(&"session_context".to_string()), "{tools:?}");
+        assert!(
+            !tools
+                .iter()
+                .any(|t| crate::mcp::WRITE_TOOLS.contains(&t.as_str())),
+            "{tools:?}"
+        );
+        assert_eq!(
+            error_code(&f.call(&s1, "storm", "create_note").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+
+        // An older client's `allow_vault_writes` without a vault: read only,
+        // and the launch says so.
+        let (_, old) = f
+            .launch_body(serde_json::json!({"allow_vault_writes": true}))
+            .await;
+        assert_eq!(old["write_vault_id"], serde_json::Value::Null);
+        assert_eq!(old["mcp"]["allow_vault_writes"], false);
+        assert!(
+            old["mcp"]["notice"].as_str().unwrap().contains("read only"),
+            "{old}"
+        );
+        let s_old = old["id"].as_str().unwrap().to_string();
+        f.initialize(&s_old, "storm").await;
+        let tools = tools_of(f.mcp(&s_old, "storm", list.clone()).await);
+        assert!(!tools.contains(&"create_note".to_string()), "{tools:?}");
+
+        // A write vault with `agent_writes` on: writes there, refused
+        // elsewhere at the vault seam with a stable code, never deletes.
+        let (status, launched) = f
+            .launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{launched}");
+        assert_eq!(launched["write_vault_id"], work.as_str());
+        assert_eq!(launched["mcp"]["allow_vault_writes"], true);
+        assert_eq!(launched["mcp"]["notice"], serde_json::Value::Null);
+        assert_eq!(launched["name"], "storm-3");
+        let s3 = launched["id"].as_str().unwrap().to_string();
+        f.initialize(&s3, "storm").await;
+        let tools = tools_of(f.mcp(&s3, "storm", list.clone()).await);
+        assert!(tools.contains(&"create_note".to_string()), "{tools:?}");
+        assert!(!tools.contains(&"delete_note".to_string()), "{tools:?}");
+        let made = f
+            .tool(
+                &s3,
+                "create_note",
+                serde_json::json!({"vault": work, "path": "Plan.md", "content": "# Plan\n"}),
+            )
+            .await;
+        let note = structured(&made)["note"].clone();
+        let note_id = note["id"].as_str().unwrap().to_string();
+        let lines = f
+            .tool(
+                &s3,
+                "create_note",
+                serde_json::json!({"vault": personal, "path": "Stray.md", "content": "x"}),
+            )
+            .await;
+        assert_eq!(
+            error_code(&lines).as_deref(),
+            Some(crate::auth::authz::AGENT_WRITE_REFUSED),
+            "{lines:?}"
+        );
+        let lines = f
+            .tool(
+                &s3,
+                "update_note",
+                serde_json::json!({"vault": personal, "note_id": theirs["id"],
+                    "base_version": theirs["version"], "content": "# Theirs\n\nedited\n"}),
+            )
+            .await;
+        assert_eq!(
+            error_code(&lines).as_deref(),
+            Some(crate::auth::authz::AGENT_WRITE_REFUSED)
+        );
+        let (_, untouched) = f
+            .get(&format!(
+                "/v1/vaults/{personal}/notes/{}",
+                theirs["id"].as_str().unwrap()
+            ))
+            .await;
+        assert!(!untouched["content"].as_str().unwrap().contains("edited"));
+        assert!(untouched.get("agent_write").is_none(), "{untouched}");
+        let lines = f
+            .tool(
+                &s3,
+                "get_note",
+                serde_json::json!({"vault": personal, "note_id": theirs["id"]}),
+            )
+            .await;
+        assert_eq!(structured(&lines)["title"], "Theirs", "reads anywhere");
+        assert_eq!(
+            error_code(&f.call(&s3, "storm", "delete_note").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+
+        // The MCP switches no longer touch agents, and `agent_writes` applies
+        // to the live session at once.
+        send(
+            &f.app,
+            put_json_with_auth(
+                "/v1/config/mcp",
+                serde_json::json!({"enabled": false}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let edited = f
+            .tool(
+                &s3,
+                "update_note",
+                serde_json::json!({"vault": work, "note_id": note_id,
+                    "base_version": note["version"], "content": "# Plan\n\nv2\n"}),
+            )
+            .await;
+        assert_eq!(structured(&edited)["note"]["version"], 2, "{edited:?}");
+        f.agent_writes(false).await;
+        assert_eq!(
+            error_code(&f.call(&s3, "storm", "create_note").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+        let (_, config) = f.get("/v1/config").await;
+        assert_eq!(
+            (
+                config["mcp_enabled"].clone(),
+                config["agent_writes"].clone()
+            ),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agents_writes_are_recorded_and_its_notes_carry_provenance() {
+        let dir = tempdir::TempDir::new("storm-gateway-writes").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let human = f.note(&work, "Human.md", "# Human\n").await;
+        f.agent_writes(true).await;
+        let (_, launched) = f
+            .launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        let name = launched["name"].as_str().unwrap().to_string();
+        assert_eq!(launched["wrote_count"], 0);
+        let granted = serde_json::json!([
+            {"id": f.connection, "slug": launched["mcp"]["connections"][1]["slug"], "display_name": "Mock"}
+        ]);
+        assert_eq!(launched["integrations"], granted, "{launched}");
+        // Launch history: a later rename of the connection changes nothing.
+        let (status, _) = send(
+            &f.app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{}", f.connection),
+                serde_json::json!({"display_name": "Renamed"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["integrations"], granted, "{view}");
+        f.initialize(&session, "storm").await;
+
+        // Each write op through the gateway is one row.
+        let made = f
+            .tool(
+                &session,
+                "create_note",
+                serde_json::json!({"vault": work, "path": "Agent.md", "content": "# Agent\n"}),
+            )
+            .await;
+        let agent_note = structured(&made)["note"].clone();
+        let agent_id = agent_note["id"].as_str().unwrap().to_string();
+        let edited = f
+            .tool(
+                &session,
+                "update_note",
+                serde_json::json!({"vault": work, "note_id": human["id"],
+                    "base_version": human["version"], "content": "# Human\n\nagent was here\n"}),
+            )
+            .await;
+        assert_eq!(structured(&edited)["note"]["version"], 2, "{edited:?}");
+        let again = f
+            .tool(
+                &session,
+                "update_note",
+                serde_json::json!({"vault": work, "note_id": agent_id,
+                    "base_version": 1, "content": "# Agent\n\nmore\n"}),
+            )
+            .await;
+        assert_eq!(structured(&again)["note"]["version"], 2, "{again:?}");
+
+        // A human's own writes are not an agent's.
+        f.note(&work, "Mine.md", "# Mine\n").await;
+
+        let (status, writes) = f.get(&format!("/v1/agent/sessions/{session}/writes")).await;
+        assert_eq!(status, StatusCode::OK, "{writes}");
+        let rows: Vec<(String, String, i64)> = writes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| {
+                (
+                    w["title"].as_str().unwrap().to_string(),
+                    w["kind"].as_str().unwrap().to_string(),
+                    w["version"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Agent".to_string(), "created".to_string(), 2),
+                ("Human".to_string(), "edited".to_string(), 2)
+            ],
+            "newest write first; created stays created"
+        );
+        assert_eq!(writes[0]["vault_id"], work.as_str());
+        assert_eq!(writes[0]["path"], "Agent.md");
+        assert!(writes[0]["at"].as_str().unwrap().ends_with('Z'));
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["wrote_count"], 2);
+        assert_eq!(view["name"], name.as_str());
+        assert_eq!(view["write_vault_id"], work.as_str());
+        let (_, list) = f.get("/v1/agent/sessions").await;
+        let listed = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == session.as_str())
+            .unwrap();
+        assert_eq!(listed["wrote_count"], 2);
+
+        // Provenance on the note, which a later human edit does not clear.
+        let human_id = human["id"].as_str().unwrap();
+        let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{human_id}")).await;
+        assert_eq!(note["agent_write"]["session_id"], session.as_str());
+        assert_eq!(note["agent_write"]["session_name"], name.as_str());
+        assert_eq!(note["agent_write"]["kind"], "edited");
+        assert_eq!(note["agent_write"]["version"], 2);
+        assert_eq!(note["agent_write"]["session_dismissed"], false);
+        send(
+            &f.app,
+            put_json_with_auth(
+                &format!("/v1/vaults/{work}/notes/{human_id}"),
+                serde_json::json!({"base_version": 2, "content": "# Human\n\nme again\n"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{human_id}")).await;
+        assert_eq!(note["version"], 3);
+        assert_eq!(note["agent_write"]["version"], 2, "{note}");
+
+        let (status, map) = f.get(&format!("/v1/vaults/{work}/agent-writes")).await;
+        assert_eq!(status, StatusCode::OK);
+        let map = map.as_object().unwrap();
+        assert_eq!(map.len(), 2, "{map:?}");
+        assert_eq!(map[&agent_id]["session_id"], session.as_str());
+        assert_eq!(map[&agent_id]["version"], 2);
+        assert_eq!(map[human_id]["version"], 2);
+        let (status, _) = f.get("/v1/vaults/nope/agent-writes").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f.get("/v1/agent/sessions/ags_NOPE/writes").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // A dismissed session's writes still resolve to its name.
+        f.report(&session, "completed").await;
+        let (status, _) = send(
+            &f.app,
+            delete_with_auth(&format!("/v1/agent/sessions/{session}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{agent_id}")).await;
+        assert_eq!(note["agent_write"]["session_name"], name.as_str());
+        assert_eq!(note["agent_write"]["session_dismissed"], true);
+        assert_eq!(note["agent_write"]["kind"], "created");
+    }
+
+    #[tokio::test]
+    async fn session_context_reads_the_callers_own_note_and_the_launch_validates_it() {
+        let dir = tempdir::TempDir::new("storm-gateway-context").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let personal = f.vault("Personal").await;
+        let a = f
+            .note(
+                &personal,
+                "specs/Gateway spec.md",
+                "# Gateway spec\n\nalpha body\n",
+            )
+            .await;
+        let b = f
+            .note(&personal, "Other.md", "# Other\n\nbravo body\n")
+            .await;
+        let context = |n: &serde_json::Value| serde_json::json!({"context": {"vault_id": personal, "note_id": n["id"]}});
+
+        let (status, la) = f.launch_body(context(&a)).await;
+        assert_eq!(status, StatusCode::OK, "{la}");
+        assert_eq!(la["name"], "gateway-spec");
+        assert_eq!(la["context"]["title"], "Gateway spec");
+        assert_eq!(la["context"]["note_id"], a["id"]);
+        assert_eq!(la["context"]["vault_id"], personal.as_str());
+        let start = serde_json::to_value(f.link.try_recv().unwrap()).unwrap();
+        assert_eq!(start["context"], true);
+        let (_, lb) = f.launch_body(context(&b)).await;
+        let _ = f.link.try_recv();
+        let (_, dup) = f.launch_body(context(&a)).await;
+        assert_eq!(dup["name"], "gateway-spec-2");
+        let (_, none) = f.launch_body(serde_json::json!({})).await;
+        assert_eq!(none["context"], serde_json::Value::Null);
+
+        let (sa, sb, sn) = (
+            la["id"].as_str().unwrap().to_string(),
+            lb["id"].as_str().unwrap().to_string(),
+            none["id"].as_str().unwrap().to_string(),
+        );
+        let init = f.initialize(&sa, "storm").await;
+        assert!(
+            init["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Call session_context"),
+            "{init}"
+        );
+        let init = f.initialize(&sn, "storm").await;
+        assert!(
+            !init["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("session_context"),
+            "{init}"
+        );
+        f.initialize(&sb, "storm").await;
+
+        let got = structured(&f.call(&sa, "storm", "session_context").await);
+        assert_eq!(got["note_id"], a["id"]);
+        assert_eq!(got["title"], "Gateway spec");
+        assert_eq!(got["path"], "specs/Gateway spec.md");
+        assert!(got["content"].as_str().unwrap().contains("alpha body"));
+        let got = structured(&f.call(&sb, "storm", "session_context").await);
+        assert!(
+            got["content"].as_str().unwrap().contains("bravo body"),
+            "{got}"
+        );
+        assert!(
+            tool_error(&f.call(&sn, "storm", "session_context").await)
+                .contains("started without a note")
+        );
+
+        let a_id = a["id"].as_str().unwrap();
+        send(
+            &f.app,
+            delete_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{a_id}"),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert!(
+            tool_error(&f.call(&sa, "storm", "session_context").await).contains("no longer exists")
+        );
+
+        // The launch refuses a context or a write vault that does not resolve.
+        let (status, _) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": personal, "note_id": a_id}}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": "nope", "note_id": a_id}}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f
+            .launch_body(serde_json::json!({"write_vault_id": "nope"}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_switches_and_agent_writes_are_set_independently_and_persist() {
+        let dir = tempdir::TempDir::new("storm-ai-access").unwrap();
+        let f = gateway_fixture(dir.path()).await;
+        let put = |body: serde_json::Value| {
+            send(
+                &f.app,
+                put_json_with_auth("/v1/config/mcp", body, &f.owner_bearer),
+            )
+        };
+        let (_, body) = put(serde_json::json!({"agent_writes": true})).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"mcp_enabled": false, "mcp_writable": false, "agent_writes": true})
+        );
+        // An older client's body leaves agents alone.
+        let (_, body) = put(serde_json::json!({"enabled": true, "writable": true})).await;
+        assert_eq!(body["agent_writes"], true);
+        assert_eq!(body["mcp_writable"], true);
+        let (_, body) = put(serde_json::json!({"enabled": false})).await;
+        assert_eq!(
+            body,
+            serde_json::json!({"mcp_enabled": false, "mcp_writable": false, "agent_writes": true})
+        );
+        let (_, body) = put(serde_json::json!({"agent_writes": false})).await;
+        assert_eq!(body["mcp_enabled"], false);
+        assert!(
+            !f.state
+                .agent_writes
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        put(serde_json::json!({"agent_writes": true})).await;
+        let reloaded =
+            Registry::load(&f.state.state_dir, std::path::Path::new("/nowhere")).unwrap();
+        assert!(reloaded.agent_writes() && !reloaded.mcp_enabled);
+        let (_, integration) = send(
+            &f.app,
+            get_with_auth(&format!("{CONNECTIONS}/storm"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(integration["vault_writes_available"], true, "{integration}");
+    }
+
+    #[tokio::test]
+    async fn a_kit_script_is_written_only_by_a_session_whose_write_vault_is_kit_and_is_in_its_wrote_list()
+     {
+        let dir = tempdir::TempDir::new("storm-gateway-kit").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let kit = f.vault("kit").await;
+        f.agent_writes(true).await;
+        let script = serde_json::json!({"name": "tool.sh", "content": "echo hi\n"});
+        for (vault, expect_ok) in [(&work, false), (&kit, true)] {
+            let (_, launched) = f
+                .launch_body(serde_json::json!({"write_vault_id": vault}))
+                .await;
+            let session = launched["id"].as_str().unwrap().to_string();
+            f.initialize(&session, "storm").await;
+            let lines = f.tool(&session, "create_script", script.clone()).await;
+            if expect_ok {
+                assert_eq!(structured(&lines)["path"], "scripts/tool.sh", "{lines:?}");
+                let lines = f
+                    .tool(
+                        &session,
+                        "update_script",
+                        serde_json::json!({"name": "tool.sh", "content": "echo bye\n"}),
+                    )
+                    .await;
+                assert_eq!(structured(&lines)["size"], 9, "{lines:?}");
+            } else {
+                assert_eq!(
+                    error_code(&lines).as_deref(),
+                    Some(crate::auth::authz::AGENT_WRITE_REFUSED),
+                    "{lines:?}"
+                );
+            }
+            let (_, writes) = f.get(&format!("/v1/agent/sessions/{session}/writes")).await;
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+            if expect_ok {
+                assert_eq!(
+                    writes,
+                    serde_json::json!([{
+                        "vault_id": kit, "note_id": null, "title": "tool.sh",
+                        "path": "scripts/tool.sh", "kind": "script_created", "version": null,
+                        "at": writes[0]["at"],
+                    }]),
+                    "one row per script; created stays created"
+                );
+                assert_eq!(view["wrote_count"], 1);
+                let (_, map) = f.get(&format!("/v1/vaults/{kit}/agent-writes")).await;
+                assert_eq!(map, serde_json::json!({}), "a script has no note id");
+            } else {
+                assert_eq!(
+                    writes,
+                    serde_json::json!([]),
+                    "a refused write is not recorded"
+                );
+                assert_eq!(view["wrote_count"], 0);
+            }
+            f.report(&session, "completed").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_launch_context_is_a_snapshot_and_session_context_follows_the_note_by_id() {
+        let dir = tempdir::TempDir::new("storm-gateway-context-rename").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let personal = f.vault("Personal").await;
+        let note = f
+            .note(
+                &personal,
+                "specs/Gateway spec.md",
+                "# Gateway spec\n\nbody\n",
+            )
+            .await;
+        let note_id = note["id"].as_str().unwrap().to_string();
+        let (_, launched) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": personal, "note_id": note_id}}))
+            .await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        let launch_context = launched["context"].clone();
+        assert_eq!(launch_context["title"], "Gateway spec");
+
+        // Moved and retitled after the launch.
+        let (status, moved) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{note_id}/move"),
+                serde_json::json!({"new_path": "archive/Renamed plan.md"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        let (status, _) = send(
+            &f.app,
+            put_json_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{note_id}"),
+                serde_json::json!({"base_version": moved["note"]["version"],
+                    "content": "# Renamed plan\n\nbody\n"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(
+            view["context"], launch_context,
+            "the launch's context is history"
+        );
+        assert_eq!(view["name"], "gateway-spec");
+        f.initialize(&session, "storm").await;
+        let got = structured(&f.call(&session, "storm", "session_context").await);
+        assert_eq!(got["note_id"], note_id.as_str());
+        assert_eq!(got["path"], "archive/Renamed plan.md");
+        assert_eq!(got["title"], "Renamed plan");
+    }
+
+    #[tokio::test]
+    async fn request_scoped_messages_ride_their_calls_stream() {
+        // Progress with the agent's own token, a form elicitation answered by
+        // the agent, and a URL elicitation that never reaches it (G-D23).
+        let dir = tempdir::TempDir::new("storm-gateway-stream").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+
+        let lines = f
+            .mcp(&session, &f.connection, serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "slow", "arguments": {}, "_meta": {"progressToken": "agent-tok"}}}))
+            .await;
+        let progress: Vec<&serde_json::Value> = lines
+            .iter()
+            .filter(|l| {
+                l.pointer("/message/method") == Some(&serde_json::json!("notifications/progress"))
+            })
+            .collect();
+        assert_eq!(progress.len(), 2, "{lines:?}");
+        assert!(
+            progress
+                .iter()
+                .all(|p| p.pointer("/message/params/progressToken")
+                    == Some(&serde_json::json!("agent-tok")))
+        );
+        assert_eq!(tool_text(&lines), "slow done");
+
+        // A form elicitation: read the stream until it arrives, answer it on
+        // a second POST, then read the final result.
+        use futures_util::StreamExt;
+        let response = f
+            .app
+            .clone()
+            .oneshot(gateway_request(&f.host_bearer, &session, &f.connection, &serde_json::json!(
+                {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "ask", "arguments": {}}})))
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut buffer = String::new();
+        let elicitation = loop {
+            let chunk = body.next().await.unwrap().unwrap();
+            buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+            if let Some(line) = buffer.lines().next() {
+                break serde_json::from_str::<serde_json::Value>(line).unwrap();
+            }
+        };
+        assert_eq!(elicitation["message"]["method"], "elicitation/create");
+        let elicit_id = elicitation["message"]["id"].as_str().unwrap().to_string();
+        assert!(elicit_id.starts_with("storm-elicit-"));
+        let answered = f
+            .mcp(
+                &session,
+                &f.connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": elicit_id,
+                "result": {"action": "accept", "content": {"answer": "rust"}}}),
+            )
+            .await;
+        assert!(answered.is_empty());
+        let mut rest = String::new();
+        while let Some(chunk) = body.next().await {
+            rest.push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+        }
+        let last: serde_json::Value = serde_json::from_str(rest.lines().last().unwrap()).unwrap();
+        let text = last
+            .pointer("/message/result/content/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(text.contains("accept") && text.contains("rust"), "{text}");
+        // A late second answer to the same elicitation is dropped.
+        assert!(
+            f.mcp(
+                &session,
+                &f.connection,
+                serde_json::json!({"jsonrpc": "2.0", "id": elicit_id,
+            "result": {"action": "accept"}})
+            )
+            .await
+            .is_empty()
+        );
+
+        // URL mode: declined by the gateway, never on the agent's stream.
+        let lines = f.call(&session, &f.connection, "ask_url").await;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(tool_text(&lines).contains("decline"), "{lines:?}");
+        let calls = f
+            .state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(50)
+            .unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.error_code.as_deref() == Some("url_elicitation_declined"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_call_fails_once_when_its_upstream_session_is_lost_and_is_not_retried() {
+        // R7 at the gateway: a call whose upstream session goes away (as on a
+        // server restart) ends with one error, upstream executed it once, and
+        // the next request is `session_unknown` — never a silent resend.
+        let dir = tempdir::TempDir::new("storm-gateway-inflight").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+        let app = f.app.clone();
+        let bearer = f.host_bearer.clone();
+        let (s, c) = (session.clone(), f.connection.clone());
+        let call = tokio::spawn(async move {
+            mcp_as(
+                &app,
+                &bearer,
+                &s,
+                &c,
+                serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                "params": {"name": "hang", "arguments": {}}}),
+            )
+            .await
+        });
+        for _ in 0..100 {
+            if f.upstream_calls() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(f.upstream_calls(), 1);
+        f.state.gateway.sessions.close_session(&session);
+        let lines = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(error_code(&lines).is_some(), "{lines:?}");
+        assert_eq!(f.upstream_calls(), 1, "the in-flight call was re-sent");
+        assert_eq!(
+            f.call(&session, &f.connection, "echo").await,
+            vec![serde_json::json!({"storm_error": "session_unknown"})]
+        );
+        assert_eq!(f.upstream_calls(), 1);
+    }
+
+    // ---- MCP Gateway: OAuth (decision 81g) --------------------------------
+
+    /// A mock authorization server and protected MCP resource on one port.
+    #[derive(Default)]
+    struct MockAs {
+        access: std::sync::Mutex<String>,
+        refresh: std::sync::Mutex<String>,
+        n: std::sync::atomic::AtomicUsize,
+        expires_in: std::sync::atomic::AtomicU64,
+        reject_refresh: std::sync::atomic::AtomicBool,
+        registrations: std::sync::Mutex<Vec<serde_json::Value>>,
+        token_requests: std::sync::Mutex<Vec<HashMap<String, String>>>,
+        revoked: std::sync::Mutex<Vec<String>>,
+        hits: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockAs {
+        fn refreshes(&self) -> usize {
+            self.token_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.get("grant_type").map(String::as_str) == Some("refresh_token"))
+                .count()
+        }
+
+        fn issue(&self) -> serde_json::Value {
+            let n = self.n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            *self.access.lock().unwrap() = format!("upstream-canary-at-{n}");
+            *self.refresh.lock().unwrap() = format!("upstream-canary-rt-{n}");
+            serde_json::json!({
+                "access_token": format!("upstream-canary-at-{n}"),
+                "refresh_token": format!("upstream-canary-rt-{n}"),
+                "token_type": "Bearer",
+                "expires_in": self.expires_in.load(std::sync::atomic::Ordering::SeqCst),
+            })
+        }
+    }
+
+    async fn serve_oauth_upstream(tools: &[&str]) -> (String, Arc<MockAs>) {
+        use axum::response::IntoResponse;
+        let mock = Arc::new(MockAs::default());
+        mock.expires_in
+            .store(3600, std::sync::atomic::Ordering::SeqCst);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let up = crate::gateway::upstream::tests::mock(tools);
+        let mcp = rmcp::transport::streamable_http_server::StreamableHttpService::new(
+            move || Ok(up.clone()),
+            Arc::new(rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default()),
+            rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+                .disable_allowed_hosts(),
+        );
+        let gate_mock = mock.clone();
+        let gate_base = base.clone();
+        let gate = move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let mock = gate_mock.clone();
+            let base = gate_base.clone();
+            async move {
+                let want = format!("Bearer {}", mock.access.lock().unwrap());
+                let ok = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v == want && !mock.access.lock().unwrap().is_empty());
+                if !ok {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        [(
+                            "www-authenticate",
+                            format!(
+                                "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\""
+                            ),
+                        )],
+                    )
+                        .into_response();
+                }
+                next.run(request).await
+            }
+        };
+        let m = mock.clone();
+        let b = base.clone();
+        let prm = move || {
+            let b = b.clone();
+            m.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                Json(
+                    serde_json::json!({"resource": format!("{b}/mcp"), "authorization_servers": [b]}),
+                )
+            }
+        };
+        let b = base.clone();
+        let asm = move || {
+            let b = b.clone();
+            async move {
+                Json(serde_json::json!({
+                    "issuer": b,
+                    "authorization_endpoint": format!("{b}/authorize"),
+                    "token_endpoint": format!("{b}/token"),
+                    "registration_endpoint": format!("{b}/register"),
+                    "revocation_endpoint": format!("{b}/revoke"),
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                }))
+            }
+        };
+        let m = mock.clone();
+        let register = move |Json(body): Json<serde_json::Value>| {
+            let m = m.clone();
+            async move {
+                m.registrations.lock().unwrap().push(body.clone());
+                (
+                    StatusCode::CREATED,
+                    Json(
+                        serde_json::json!({"client_id": "dcr-client", "redirect_uris": body["redirect_uris"]}),
+                    ),
+                )
+            }
+        };
+        let m = mock.clone();
+        let token =
+            move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
+                let m = m.clone();
+                async move {
+                    m.token_requests.lock().unwrap().push(form.clone());
+                    let bad = || {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error": "invalid_grant"})),
+                        )
+                            .into_response()
+                    };
+                    match form.get("grant_type").map(String::as_str) {
+                        Some("authorization_code")
+                            if form.get("code").map(String::as_str) == Some("good-code")
+                                && form.get("code_verifier").is_some_and(|v| v.len() >= 43)
+                                && form.contains_key("resource") =>
+                        {
+                            Json(m.issue()).into_response()
+                        }
+                        Some("refresh_token")
+                            if !m.reject_refresh.load(std::sync::atomic::Ordering::SeqCst)
+                                && form.get("refresh_token")
+                                    == Some(&m.refresh.lock().unwrap().clone()) =>
+                        {
+                            Json(m.issue()).into_response()
+                        }
+                        _ => bad(),
+                    }
+                }
+            };
+        let m = mock.clone();
+        let revoke =
+            move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
+                let m = m.clone();
+                async move {
+                    m.revoked
+                        .lock()
+                        .unwrap()
+                        .push(form.get("token").cloned().unwrap_or_default());
+                    StatusCode::OK
+                }
+            };
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(prm.clone()),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource",
+                axum::routing::get(prm),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                axum::routing::get(asm),
+            )
+            .route("/register", axum::routing::post(register))
+            .route("/token", axum::routing::post(token))
+            .route("/revoke", axum::routing::post(revoke))
+            .nest_service(
+                "/mcp",
+                axum::Router::new()
+                    .fallback_service(mcp)
+                    .layer(axum::middleware::from_fn(gate)),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, mock)
+    }
+
+    fn query_param(url: &str, name: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).unwrap();
+        parsed
+            .query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.to_string())
+    }
+
+    async fn authorize(app: &Router, bearer: &str, id: &str) -> (StatusCode, serde_json::Value) {
+        send(
+            app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/authorize"),
+                serde_json::json!({"redirect_uri": "http://127.0.0.1:53682/callback"}),
+                bearer,
+            ),
+        )
+        .await
+    }
+
+    async fn callback(
+        app: &Router,
+        bearer: &str,
+        state: &str,
+        code: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            app,
+            post_json_with_auth(
+                "/v1/integrations/oauth/callback",
+                serde_json::json!({"state": state, "code": code}),
+                bearer,
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_oauth_integration_is_authorized_through_the_client_and_its_tokens_sealed() {
+        let dir = tempdir::TempDir::new("storm-oauth-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        let (status, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Notion", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(created["status"], "pending_auth");
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Only a loopback or storm:// redirect (G-D13).
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/authorize"),
+                serde_json::json!({"redirect_uri": "http://192.168.1.51:8484/oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, started) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let url = started["authorization_url"].as_str().unwrap().to_string();
+        assert!(url.starts_with(&format!("{base}/authorize")), "{url}");
+        assert_eq!(
+            query_param(&url, "code_challenge_method").as_deref(),
+            Some("S256")
+        );
+        assert_eq!(
+            query_param(&url, "client_id").as_deref(),
+            Some("dcr-client")
+        );
+        assert!(query_param(&url, "resource").is_some(), "{url}");
+        let flow_state = query_param(&url, "state").unwrap();
+        // Registered dynamically, as a public client.
+        let reg = mock.registrations.lock().unwrap().clone();
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg[0]["token_endpoint_auth_method"], "none");
+        // A second authorization reuses that client.
+        let (_, again) = authorize(&app, &owner, &id).await;
+        assert_eq!(mock.registrations.lock().unwrap().len(), 1);
+        let spare_state =
+            query_param(again["authorization_url"].as_str().unwrap(), "state").unwrap();
+
+        // The state is stored only as its hash.
+        let flows: i64 = state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_flows WHERE state_hash = ?1",
+                rusqlite::params![flow_state],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flows, 0, "a raw state was stored");
+
+        // The browser comes back to the client; the client relays it.
+        let (status, test) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        assert_eq!(test["ok"], true, "{test}");
+        assert_eq!(test["integration"]["status"], "connected");
+        assert_eq!(test["integration"]["has_credential"], true);
+        assert_eq!(
+            test["integration"]["tool_allowlist"],
+            serde_json::json!(["search"])
+        );
+        let exchange = mock.token_requests.lock().unwrap()[0].clone();
+        assert!(exchange.contains_key("resource") && exchange.contains_key("code_verifier"));
+
+        // Single use: the same state again exchanges nothing.
+        let (status, body) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "oauth_flow_expired_or_used".into())
+        );
+        assert_eq!(mock.token_requests.lock().unwrap().len(), 1);
+        // An expired flow is refused too.
+        state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE oauth_flows SET expires_at = '2000-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        let (status, _) = callback(&app, &owner, &spare_state, "good-code").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The tokens are sealed: not in the database, not in any event.
+        let bytes = std::fs::read(crate::gateway::db_path(&state.state_dir)).unwrap();
+        let wal = std::fs::read(format!(
+            "{}-wal",
+            crate::gateway::db_path(&state.state_dir).display()
+        ))
+        .unwrap_or_default();
+        for b in [&bytes, &wal] {
+            assert!(
+                !b.windows(16).any(|w| w == b"upstream-canary-"),
+                "a token is in gateway.db"
+            );
+        }
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        assert!(events.iter().any(|(k, _)| k == "integration_authorized"));
+        assert!(events.iter().all(|(_, d)| !d.contains("upstream-canary")));
+    }
+
+    #[tokio::test]
+    async fn tokens_refresh_once_under_concurrency_persist_rotated_and_a_rejected_refresh_needs_reauth()
+     {
+        let dir = tempdir::TempDir::new("storm-oauth-refresh").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        let (_, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Linear", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        // Tokens that are always within a minute of expiry.
+        mock.expires_in
+            .store(30, std::sync::atomic::Ordering::SeqCst);
+        let (_, started) = authorize(&app, &owner, &id).await;
+        let flow_state =
+            query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
+        let (_, test) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(test["ok"], true, "{test}");
+
+        // Two calls at once find the stored token stale: one refresh between
+        // them, and the fresh token (an hour long) serves the second.
+        mock.expires_in
+            .store(3600, std::sync::atomic::Ordering::SeqCst);
+        let before = mock.refreshes();
+        let c = state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .connection(&id)
+            .unwrap()
+            .unwrap();
+        let (a, b) = tokio::join!(
+            state.gateway.target(&c, false),
+            state.gateway.target(&c, false)
+        );
+        assert!(a.is_ok() && b.is_ok());
+        assert_eq!(
+            mock.refreshes(),
+            before + 1,
+            "the refresh was not single-flight"
+        );
+        // The rotated pair is what is stored, before anything used it.
+        let stored = crate::gateway::oauth::TokenStore {
+            gateway: state.gateway.clone(),
+            connection: id.clone(),
+        };
+        let saved = rmcp::transport::auth::CredentialStore::load(&stored)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            use oauth2::TokenResponse;
+            let t = saved.token_response.unwrap();
+            assert_eq!(
+                t.refresh_token().unwrap().secret(),
+                &*mock.refresh.lock().unwrap()
+            );
+        }
+
+        // A rejected refresh: the integration needs reconnecting, audited.
+        // Its stored token is made stale again, so the test must refresh.
+        mock.expires_in
+            .store(30, std::sync::atomic::Ordering::SeqCst);
+        state.gateway.target(&c, true).await.unwrap();
+        mock.reject_refresh
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, test) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/test"),
+                serde_json::json!({}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(test["ok"], false);
+        assert_eq!(test["integration"]["status"], "needs_reauth", "{test}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(k, _)| k == "integration_refresh_failed"),
+            "{events:?}"
+        );
+
+        // Reconnecting through a new authorization restores it.
+        mock.reject_refresh
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        mock.expires_in
+            .store(3600, std::sync::atomic::Ordering::SeqCst);
+        let (_, started) = authorize(&app, &owner, &id).await;
+        let flow_state =
+            query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
+        let (_, test) = callback(&app, &owner, &flow_state, "good-code").await;
+        assert_eq!(test["integration"]["status"], "connected", "{test}");
+        let events = state.auth_db.lock().await.all_events().unwrap();
+        assert!(events.iter().any(|(k, _)| k == "integration_reauthorized"));
+
+        // Disconnecting revokes upstream, best effort (RFC 7009).
+        let latest = mock.refresh.lock().unwrap().clone();
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("{CONNECTIONS}/{id}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        for _ in 0..50 {
+            if !mock.revoked.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(*mock.revoked.lock().unwrap(), vec![latest]);
+    }
+
+    #[tokio::test]
+    async fn a_flow_is_spent_once_even_by_racing_callbacks() {
+        let dir = tempdir::TempDir::new("storm-oauth-race").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        let (_, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Race", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let (_, started) = authorize(&app, &owner, &id).await;
+        let flow_state =
+            query_param(started["authorization_url"].as_str().unwrap(), "state").unwrap();
+
+        let (status, body) = callback(&app, &owner, "not-the-state", "good-code").await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "oauth_flow_expired_or_used".into())
+        );
+        assert!(mock.token_requests.lock().unwrap().is_empty());
+
+        // Two callbacks at once: exactly one exchanges the code.
+        let (a, b) = tokio::join!(
+            callback(&app, &owner, &flow_state, "good-code"),
+            callback(&app, &owner, &flow_state, "good-code")
+        );
+        let oks = [a.0, b.0].iter().filter(|s| **s == StatusCode::OK).count();
+        assert_eq!(oks, 1, "{a:?} {b:?}");
+        let exchanges = mock
+            .token_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("grant_type").map(String::as_str) == Some("authorization_code"))
+            .count();
+        assert_eq!(exchanges, 1, "a flow was spent twice");
+    }
+
+    #[tokio::test]
+    async fn oauth_discovery_never_reaches_a_private_address() {
+        let dir = tempdir::TempDir::new("storm-oauth-boundary").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_upstream(&["search"]).await;
+        // https on a loopback address: a URL the owner may save, and one
+        // discovery must refuse to touch (no test switch here).
+        let loopback = base.replace("http://", "https://");
+        let (_, created) = send(
+            &app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Sneaky", "url": format!("{loopback}/mcp"), "auth_kind": "oauth"}),
+                &owner,
+            ),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let (status, body) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(body["error"], "oauth_discovery_failed");
+        assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // A static integration is not authorized this way.
+        let static_id = create_github(&app, &owner, "ghp_x").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (status, _) = authorize(&app, &owner, &static_id).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

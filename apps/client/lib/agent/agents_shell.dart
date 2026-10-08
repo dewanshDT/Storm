@@ -5,24 +5,30 @@ import 'package:go_router/go_router.dart';
 
 import '../router.dart';
 import '../ui/breakpoints.dart';
-import '../ui/shell/space_switch.dart';
+import '../ui/controls.dart';
+import '../ui/shell/sidebar_frame.dart';
 import '../ui/tokens.dart';
+import 'agent_models.dart';
 import 'agent_state.dart';
+import 'agent_widgets.dart';
 import 'agents_screen.dart';
 
-/// The frame every Agents screen sits in (decision 78).
+/// The session a location shows, or null on the overview.
+String? sessionIdOf(Uri location) {
+  final seg = location.pathSegments;
+  return seg.length == 3 && seg[0] == 'agents' && seg[1] == 's' ? seg[2] : null;
+}
+
+/// The frame every Agents screen sits in.
 ///
 /// On a phone it is nothing at all: the child is the screen. On a wide
-/// screen it puts [AgentsSidebar] beside it, as `VaultShell` puts the folder
-/// tree beside a note. A sibling of that shell rather than a mode of it,
-/// because `VaultShell` carries `VaultGate` and its sidebar needs a vault —
-/// and an agent has none.
-///
-/// Built by a `ShellRoute`, so the sidebar keeps its state while the pane
-/// moves between the sessions and Hosts.
+/// screen it puts [AgentsSidebar] beside it. Built by a `ShellRoute`, so the
+/// sidebar keeps its state while the pane moves between the overview and
+/// sessions.
 class AgentsShell extends StatelessWidget {
-  const AgentsShell({super.key, required this.child});
+  const AgentsShell({super.key, required this.location, required this.child});
 
+  final Uri location;
   final Widget child;
 
   @override
@@ -32,98 +38,156 @@ class AgentsShell extends StatelessWidget {
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const AgentsSidebar(),
-          const VerticalDivider(width: 1),
-          Expanded(child: child),
+          AgentsSidebar(selected: sessionIdOf(location)),
+          Expanded(child: PaneSemantics(child: child)),
         ],
       ),
     );
   }
 }
 
-/// The Agents side of the wide sidebar: the space switch, every session,
-/// and the actions at the foot — the order the Notes side uses, so the eye
-/// finds the same thing in the same place on both.
+/// Title, ＋ New session while a host is online, Overview, then RUNNING and
+/// ENDED (handoff §2.6).
 class AgentsSidebar extends ConsumerWidget {
-  const AgentsSidebar({super.key});
+  const AgentsSidebar({super.key, this.selected});
+
+  /// The open session, if any.
+  final String? selected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    final active = ref.watch(activeAgentTabProvider);
-    final onHosts = GoRouterState.of(context).uri.path == Routes.agentHosts;
+    final o = ref.watch(agentOverviewProvider).value;
+    final sessions = o?.sessions ?? const <AgentSession>[];
+    final live = o?.live ?? const <AgentSession>[];
+    final ended = o?.ended ?? const <AgentSession>[];
+    final overview = selected == null;
 
-    // Selecting a session from Hosts has to bring the sessions pane back.
-    void open(String id) {
-      openAgentSession(ref, id);
-      if (onHosts) context.go(Routes.agents);
-    }
+    Widget section(String label, List<AgentSession> list, double top) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(t.sp, top, t.sp, t.sp * 0.75),
+          child: AgentsLabel(label),
+        ),
+        for (final s in list)
+          SessionRow(
+            session: s,
+            selected: s.id == selected,
+            onTap: () => openAgentSession(context, s.id),
+          ),
+      ],
+    );
 
-    Future<void> launch() async {
-      final launched = await launchAgentSession(context, ref);
-      if (launched != null && onHosts && context.mounted) {
-        context.go(Routes.agents);
-      }
-    }
-
-    // `Material`, as the vault sidebar has it: the rows ink onto the nearest
-    // Material, and a coloured box here would swallow every ripple.
-    return Material(
-      color: t.bg,
-      child: SizedBox(
-        width: context.sidebarWidth,
-        child: SafeArea(
-          right: false,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SpaceSwitch(current: StormSpace.agents),
-              SizedBox(height: t.sp * 1.5),
-              Expanded(
-                child: AgentSessionList(
-                  dense: true,
-                  selected: onHosts ? null : active,
-                  onOpen: open,
-                  onLaunch: launch,
-                  onHosts: () => context.go(Routes.agentHosts),
-                ),
-              ),
-              Divider(height: t.bw, color: t.border),
-              Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: t.sp * 1.5,
-                  vertical: t.sp * 1.25,
-                ),
-                child: Row(
-                  children: [
-                    TextButton.icon(
-                      key: const Key('new-session'),
-                      onPressed: launch,
-                      icon: Icon(LucideIcons.plus, size: t.bodySize),
-                      label: const Text('New session'),
+    return SidebarFrame(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              t.sp * 1.5,
+              t.sp * 2,
+              t.sp * 1.5,
+              t.sp,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    t.sp,
+                    t.sp * 0.75,
+                    t.sp,
+                    t.sp * 0.5,
+                  ),
+                  child: Text(
+                    'Agents',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      fontWeight: FontWeight.w600,
+                      color: t.text,
                     ),
-                    const Spacer(),
-                    IconButton(
-                      key: const Key('open-hosts'),
-                      icon: Icon(
-                        LucideIcons.server,
-                        size: t.bodySize,
-                        color: onHosts ? t.accent : t.text3,
-                      ),
-                      tooltip: 'Hosts',
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: BoxConstraints.tight(
-                        Size.square(t.sp * 4.75),
-                      ),
-                      onPressed: onHosts
-                          ? null
-                          : () => context.go(Routes.agentHosts),
-                    ),
-                  ],
+                  ),
                 ),
+                if (o != null && o.online.isNotEmpty) ...[
+                  SizedBox(height: t.sp * 0.75),
+                  StormButton.primary(
+                    key: const Key('new-session'),
+                    label: 'New session',
+                    icon: LucideIcons.plus,
+                    expand: true,
+                    onPressed: () => launchAgentSession(context, ref),
+                  ),
+                ],
+                SizedBox(height: t.sp * 0.75),
+                _OverviewRow(
+                  selected: overview && sessions.isNotEmpty,
+                  current: overview,
+                  onTap: () => context.go(Routes.agents),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.fromLTRB(t.sp, 0, t.sp, t.sp * 1.5),
+              children: [
+                if (live.isNotEmpty) section('Running', live, t.sp * 1.5),
+                if (ended.isNotEmpty) section('Ended', ended, t.sp * 2),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OverviewRow extends StatelessWidget {
+  const _OverviewRow({
+    required this.selected,
+    required this.current,
+    required this.onTap,
+  });
+
+  /// Filled: the overview is showing and has something on it.
+  final bool selected;
+
+  /// In `text`: no session is open.
+  final bool current;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final radius = BorderRadius.circular(t.rControl);
+    return Semantics(
+      button: true,
+      selected: current,
+      label: 'Overview',
+      excludeSemantics: true,
+      onTap: onTap,
+      child: Material(
+        color: selected ? t.surface2 : Colors.transparent,
+        borderRadius: radius,
+        child: InkWell(
+          key: const Key('agents-overview'),
+          borderRadius: radius,
+          onTap: onTap,
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 1.25,
+              vertical: t.sp * 0.875,
+            ),
+            child: Text(
+              'Overview',
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.codeSize,
+                color: current ? t.text : t.text2,
               ),
-            ],
+            ),
           ),
         ),
       ),
