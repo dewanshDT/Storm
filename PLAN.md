@@ -4594,6 +4594,40 @@ writable by both. An existing checkout is cloned or moved into the root.
 operator really can write what the agent wrote. That is AC-M7, in the
 acceptance harness (83g).
 
+**83f. Slice 6: the enroll sheet is per platform (AM40).** *(2026-10-08)*
+
+**The problem.** The sheet showed only Linux commands (`sudo -u storm-runtime
+…`, `systemctl`). The machine being enrolled is not necessarily the client.
+
+**The fix.** The sheet offers Linux and macOS through the existing
+`ChoiceChips`. It preselects macOS when `defaultTargetPlatform` is macOS
+(native or web), and Linux elsewhere. Each platform shows only its own
+commands, each with a copy button:
+- **Linux:** `apt install`, `sudo -u storm-runtime storm-runtime enroll`,
+  `systemctl enable --now`.
+- **macOS:**
+  - `brew tap dewanshdt/storm …`;
+  - `brew install storm-runtime`;
+  - `sudo "$(brew --prefix)/bin/storm-runtime" install`;
+  - `sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll`.
+
+  The install step uses the full path because `sudo` need not search
+  Homebrew's prefix. The formula's caveats and `deploy/README.md` use the
+  same form (83g).
+
+A footnote names where the host runs and where its workspaces are. The
+enrollment-string box is unchanged.
+
+**Tests.** The step lists are pure functions (`enrollSteps`,
+`enrollFootnote`). Tests assert that neither platform ever shows the other's
+commands, that the string is never an argument, that the default follows
+the client's platform, and that switching works.
+
+**Not run locally.** There is no Flutter SDK in the build box, and its disk
+has no room for one. CI's `client` job is the first run. The APIs the sheet
+uses (`ChoiceChips`, `ChoiceOption`, `copyToClipboard`) were checked against
+their definitions.
+
 ---
 
 ## Data model
