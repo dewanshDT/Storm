@@ -293,6 +293,65 @@ args = ["-i"]
         status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/input", auth=owner, raw=b"x")
         check("input to an ended session is refused", status == 409, status)
 
+        print("\n=== the launch record: name, context, write vault (decision 82, slice 5) ===")
+        _, cfg = call("GET", "/v1/config", auth=owner)
+        check("the server reports its version", isinstance(cfg.get("version"), str) and cfg["version"], cfg)
+        check("agents are read only on a fresh install", cfg.get("agent_writes") is False, cfg)
+        _, vaults = call("GET", "/v1/vaults", auth=owner)
+        vault = vaults["vaults"][0]["id"]
+        _, made = call("POST", f"/v1/vaults/{vault}/notes",
+                       {"path": "Specs/Gateway spec.md", "content": "# Gateway spec\n"}, auth=owner)
+        note = made["note"]
+        ctx = {"context": {"vault_id": vault, "note_id": note["id"]}, "write_vault_id": vault}
+
+        def launch_with(extra):
+            body = {"host_id": host_id, "workspace": "storm", "provider": "fake",
+                    "terminal": {"cols": 80, "rows": 24}, **extra}
+            return call("POST", "/v1/agent/sessions", body, auth=owner)
+
+        status, first = launch_with(ctx)
+        check("a launch with a context note and a write vault is accepted", status == 200, first)
+        check("it is named from the note", first["name"] == "gateway-spec", first.get("name"))
+        check("it carries the note's ids and title",
+              first["context"] == {"vault_id": vault, "note_id": note["id"], "title": "Gateway spec"}, first)
+        check("and its write vault", first["write_vault_id"] == vault and first["mcp"]["allow_vault_writes"] is True,
+              first)
+        running(owner, first["id"])
+        view = session(owner, first["id"])
+        check("the session view reads it all back",
+              (view["name"], view["context"]["note_id"], view["write_vault_id"], view["wrote_count"]) ==
+              ("gateway-spec", note["id"], vault, 0), view)
+        status, second = launch_with(ctx)
+        check("a live duplicate name is numbered", second.get("name") == "gateway-spec-2", second)
+        status, plain = launch_with({})
+        check("without a note it is {workspace}-{n}", plain.get("name") == "storm-1" and plain["context"] is None,
+              plain)
+        status, old = launch_with({"allow_vault_writes": True})
+        check("an older client's write toggle without a vault launches read only, and says so",
+              status == 200 and old["write_vault_id"] is None and old["mcp"]["allow_vault_writes"] is False
+              and "read only" in (old["mcp"]["notice"] or ""), old)
+        _, listed = call("GET", "/v1/agent/sessions", auth=owner)
+        names = {s["id"]: s["name"] for s in listed}
+        check("the list carries every name", names.get(second["id"]) == "gateway-spec-2", names)
+        status, writes = call("GET", f"/v1/agent/sessions/{first['id']}/writes", auth=owner)
+        check("a session that wrote nothing has an empty Wrote list", status == 200 and writes == [], writes)
+        status, _ = call("GET", "/v1/agent/sessions/ags_NOPE/writes", auth=owner)
+        check("an unknown session's writes are 404", status == 404, status)
+        status, _ = launch_with({"context": {"vault_id": vault, "note_id": "no-such-note"}})
+        check("a context note that does not exist is refused", status == 404, status)
+        status, _ = launch_with({"write_vault_id": "no-such-vault"})
+        check("a write vault that does not exist is refused", status == 404, status)
+        for rec in (first, second, plain, old):
+            running(owner, rec["id"])
+            call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
+        wait(lambda: all(session(owner, r["id"])["status"] == "stopped" for r in (first, second, plain, old)),
+             "the launch-record sessions to stop")
+        status, again = launch_with(ctx)
+        check("an ended session frees its name", again.get("name") == "gateway-spec", again)
+        running(owner, again["id"])
+        call("POST", f"/v1/agent/sessions/{again['id']}/end", auth=owner)
+        wait(lambda: session(owner, again["id"])["status"] == "stopped", "stopped")
+
         print("\n=== offset resume and gap ===")
         status, rec = launch(owner, host_id, provider="fake")
         sid2 = rec["id"]
