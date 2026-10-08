@@ -45,6 +45,12 @@
 //! - [`mcp`]: the per-provider config writers, session handles and the
 //!   daemon socket's line format. The host forwards; it never authorizes.
 //! - [`bridge`]: `storm-runtime mcp-bridge`, the agent's stdio MCP server.
+//!
+//! ## macOS (D14, decision 83)
+//!
+//! - [`platform`]: everything that differs between Linux and macOS — paths,
+//!   the service account and service manager, the default `PATH`, and a PTY
+//!   write's wait for room. Nothing else matches on `target_os`.
 
 pub mod bridge;
 pub mod cli;
@@ -54,6 +60,7 @@ pub mod fake;
 pub mod host;
 pub mod identity;
 pub mod mcp;
+pub mod platform;
 pub mod provider;
 mod pty;
 pub mod scrollback;
