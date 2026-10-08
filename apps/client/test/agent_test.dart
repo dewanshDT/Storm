@@ -539,13 +539,103 @@ void main() {
       expect(
         find.descendant(
           of: find.byType(AlertDialog),
-          matching: find.textContaining('storm-runtime enroll'),
+          matching: find.text('sudo -u storm-runtime storm-runtime enroll'),
         ),
         findsOneWidget,
       );
       await tester.tap(find.text('Done'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('enrollment-string')), findsNothing);
+    });
+
+    // AM40: the machine being enrolled need not be this client, so the sheet
+    // offers both platforms, and each shows only its own commands.
+    Finder inDialog(Finder f) =>
+        find.descendant(of: find.byType(AlertDialog), matching: f);
+
+    void expectOnly(HostPlatform shown) {
+      for (final platform in HostPlatform.values) {
+        for (final step in enrollSteps(platform)) {
+          expect(
+            inDialog(find.text(step.command)),
+            platform == shown ? findsOneWidget : findsNothing,
+            reason: '${step.command} on $shown',
+          );
+        }
+      }
+      expect(
+        find.text(enrollFootnote(shown)),
+        findsOneWidget,
+        reason: 'the footnote for $shown',
+      );
+    }
+
+    testWidgets('the enroll sheet shows one platform at a time and switches', (
+      tester,
+    ) async {
+      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('enroll-host')));
+      await tester.pumpAndSettle();
+      // Not a Mac (the test platform is Android): Linux first.
+      expectOnly(HostPlatform.linux);
+      expect(inDialog(find.textContaining('brew')), findsNothing);
+      expect(inDialog(find.textContaining('_stormruntime')), findsNothing);
+
+      await tester.tap(inDialog(find.text('macOS')));
+      await tester.pumpAndSettle();
+      expectOnly(HostPlatform.macos);
+      expect(inDialog(find.textContaining('systemctl')), findsNothing);
+      expect(inDialog(find.textContaining('apt install')), findsNothing);
+      expect(
+        inDialog(find.textContaining('sudo -u storm-runtime')),
+        findsNothing,
+      );
+      // The string is the same whichever platform is shown.
+      expect(find.byKey(const Key('enrollment-string')), findsOneWidget);
+
+      await tester.tap(inDialog(find.text('Linux')));
+      await tester.pumpAndSettle();
+      expectOnly(HostPlatform.linux);
+    });
+
+    testWidgets('on a Mac the enroll sheet opens on macOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        await tester.pumpWidget(app(const HostsScreen(), server()));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('enroll-host')));
+        await tester.pumpAndSettle();
+        expectOnly(HostPlatform.macos);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    test('each platform\'s steps are its own, with one enroll step', () {
+      final linux = enrollSteps(HostPlatform.linux);
+      final mac = enrollSteps(HostPlatform.macos);
+      for (final step in linux) {
+        expect(step.command, isNot(contains('brew')));
+        expect(step.command, isNot(contains('_stormruntime')));
+      }
+      for (final step in mac) {
+        expect(step.command, isNot(contains('systemctl')));
+        expect(step.command, isNot(contains('apt ')));
+        expect(step.command, isNot(contains('-u storm-runtime')));
+      }
+      for (final steps in [linux, mac]) {
+        final enroll = steps.where((s) => s.pastesString).toList();
+        expect(enroll, hasLength(1));
+        expect(enroll.single.command, endsWith('storm-runtime enroll'));
+        // The enrollment string is a secret: never an argument (freeze §5.3).
+        expect(enroll.single.command, isNot(contains('storm-enroll:')));
+      }
+      expect(
+        mac.last.command,
+        'sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
+      );
+      expect(enrollFootnote(HostPlatform.macos), contains('dev.storm.runtime'));
     });
 
     // The sessions list at both widths is in agents_navigation_test.dart,
