@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../agent/agent_state.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../tokens.dart';
@@ -28,9 +27,6 @@ class SpaceSwitch extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!(ref.watch(agentAccessProvider).value ?? false)) {
-      return const SizedBox.shrink();
-    }
     final t = context.tokens;
 
     Widget segment(StormSpace space, String label) {

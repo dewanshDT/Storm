@@ -1,22 +1,12 @@
-/// Sign in on a device that is already paired.
-///
-/// The gap `PairingScreen` deliberately left: that screen is first-run only, so
-/// a device holding device credentials but no session had nowhere to enter a
-/// password. Without this, `logout()` had no caller, because signing out would
-/// have stranded you at a screen asking for a pairing QR you no longer need.
-///
-/// The account list comes from `GET /v1/users` on the **device** credential
-/// (A7/A8) — a paired device may see who exists so it can offer a picker; a
-/// stranger on the LAN may not.
+/// Sign in on a device that is already paired — or, on a fresh Storm reached
+/// by web bootstrap, set up the account. One account, password only
+/// (decision 82).
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../api/auth_api.dart';
-import '../api/auth_models.dart';
-import '../router.dart';
 import '../state/app_state.dart';
 import '../state/web_bootstrap.dart';
 import 'tokens.dart';
@@ -31,122 +21,62 @@ class LoginScreen extends ConsumerStatefulWidget {
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _passwordController = TextEditingController();
-  final _usernameController = TextEditingController();
 
-  List<AuthUser>? _users;
-  String? _selected;
-  bool _loadingUsers = true;
-  bool _signingIn = false;
+  bool _loading = true;
+  bool _needsSetup = false;
+  bool _busy = false;
   String? _error;
-
-  /// Set when the account list could not be fetched. The password form still
-  /// works — you type the username instead — because a picker that failed to
-  /// load must not be the thing standing between someone and their notes.
-  bool _pickerUnavailable = false;
-
-  /// Whether this server takes new accounts (A13).
-  ///
-  /// Starts false and is only ever raised by an answer from the server, so a
-  /// screen that could not ask offers nothing. **A link to a door that is not
-  /// there is worse than no link** — it turns a closed server into what looks
-  /// like a broken one.
-  bool _registrationOpen = false;
-
-  /// The server has zero users — show the first-user creation form instead of
-  /// the login form. This happens on a fresh server reached over web bootstrap:
-  /// the device is paired but nobody has an account yet.
-  bool _noUsers = false;
-  bool _creatingAccount = false;
 
   @override
   void initState() {
     super.initState();
-    _loadUsers();
-    _loadRegistrationState();
-  }
-
-  Future<void> _loadRegistrationState() async {
-    final settings = ref.read(settingsProvider).value;
-    if (settings == null || !settings.isPaired) return;
-    final api = AuthApi(baseUrl: settings.baseUrl);
-    try {
-      final open = await api.registrationOpen(
-        deviceId: settings.deviceId,
-        deviceSecret: settings.deviceSecret,
-      );
-      if (mounted) setState(() => _registrationOpen = open);
-    } finally {
-      api.dispose();
-    }
+    _loadAccountState();
   }
 
   @override
   void dispose() {
     _passwordController.dispose();
-    _usernameController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadUsers() async {
+  Future<void> _loadAccountState() async {
     final settings = ref.read(settingsProvider).value;
     if (settings == null || !settings.isPaired) {
-      setState(() {
-        _loadingUsers = false;
-        _pickerUnavailable = true;
-      });
+      setState(() => _loading = false);
       return;
     }
     final api = AuthApi(baseUrl: settings.baseUrl);
     try {
-      final users = await api.listUsers(
+      final exists = await api.accountExists(
         deviceId: settings.deviceId,
         deviceSecret: settings.deviceSecret,
       );
       if (!mounted) return;
       setState(() {
-        _users = users;
-        // Preselect when there is exactly one account, which is the homelab
-        // case — the picker is then a label, not a decision.
-        final usable = users.where((u) => !u.isDisabled).toList();
-        _selected = usable.length == 1 ? usable.first.username : null;
-        _loadingUsers = false;
-        // A fresh server with zero users: show the first-user creation form
-        // instead of the login form. This is the web bootstrap's gap — the
-        // device is paired but nobody has an account yet.
-        _noUsers = users.isEmpty;
+        _needsSetup = !exists;
+        _loading = false;
       });
     } on AuthApiException catch (e) {
       if (!mounted) return;
       setState(() {
-        _loadingUsers = false;
-        _pickerUnavailable = true;
-        // A revoked device is the one failure worth surfacing here: no password
-        // will fix it, and the remedy is to pair again.
+        _loading = false;
         if (e.message == 'device_revoked' || e.message == 'not_paired') {
           _error = authFailureMessage(e);
         }
       });
     } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        _loadingUsers = false;
-        _pickerUnavailable = true;
-      });
+      if (mounted) setState(() => _loading = false);
     } finally {
       api.dispose();
     }
   }
 
-  String get _username => _selected ?? _usernameController.text.trim();
-
   Future<void> _signIn() async {
     final settings = ref.read(settingsProvider).value;
-    if (settings == null) return;
-    final username = _username;
-    if (username.isEmpty || _passwordController.text.isEmpty) return;
+    if (settings == null || _passwordController.text.isEmpty) return;
 
     setState(() {
-      _signingIn = true;
+      _busy = true;
       _error = null;
     });
 
@@ -155,118 +85,85 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final tokens = await api.login(
         deviceId: settings.deviceId,
         deviceSecret: settings.deviceSecret,
-        username: username,
         password: _passwordController.text,
       );
-      // The server sends the absolute instant; there is nothing to compute.
-      final expiresAt = tokens.expires;
       await ref
           .read(settingsProvider.notifier)
           .save(
             settings.copyWith(
               accessToken: tokens.accessToken,
               refreshToken: tokens.refreshToken,
-              accessTokenExpiresAt: expiresAt,
+              accessTokenExpiresAt: tokens.expires,
               userId: tokens.userId,
             ),
           );
-      // The router's redirect takes it from here: `hasSession` is now true, so
-      // /login sends us to the dashboard.
     } on AuthApiException catch (e) {
       if (!mounted) return;
-
-      // **The device credential is the problem, not the password.** The server
-      // does not know this device — its `auth.db` was wiped or restored, or
-      // the device was revoked. No amount of retyping fixes that, and until
-      // this branch existed the client could not recover at all: it held a
-      // credential every device-tier call refused, and `bootstrapWebDevice`
-      // short-circuits on `isPaired`, so a browser never minted another.
-      //
-      // Recovering here rather than on screen load is deliberate. This path
-      // runs because a person pressed Sign in, so it cannot become a loop.
+      // The server no longer knows this device, so no password will help:
+      // forget it and pair again (on the web, from a fresh document).
       if (isDeviceRejected(e)) {
         await ref.read(settingsProvider.notifier).forgetDevice();
         if (!mounted) return;
-        // The web client needs a *new document* to be issued a new nonce: the
-        // one it was served is single-use and already spent. Off the web this
-        // is a no-op and the router sends us to pairing instead.
         reloadForFreshBootstrap();
         setState(() {
           _error =
               'This device is no longer registered with the server. '
               'Setting it up again — sign in once more when it reloads.';
-          _signingIn = false;
+          _busy = false;
         });
         return;
       }
-
       setState(() {
         _error = authFailureMessage(e);
-        _signingIn = false;
+        _busy = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        // Not an auth refusal — this is the genuinely-unreachable case, and it
-        // is the only one allowed to say so.
         _error = "Couldn't reach the server.\n\n$e";
-        _signingIn = false;
+        _busy = false;
       });
+    } finally {
+      api.dispose();
     }
   }
 
-  /// Creates the first user on a fresh server, then logs in.
-  ///
-  /// The web bootstrap pairs the device but cannot create an account — that
-  /// requires a password the user must choose. This mirrors the zero-user
-  /// branch in `PairingScreen._createAccount()`, using the device credential
-  /// already stored in Settings rather than one from `_pairResult`.
-  Future<void> _createFirstUser() async {
+  Future<void> _setUp() async {
     final settings = ref.read(settingsProvider).value;
     if (settings == null) return;
-    final username = _usernameController.text.trim();
-    final password = _passwordController.text;
-    if (username.isEmpty || password.isEmpty) {
-      setState(() => _error = 'Username and password are required.');
-      return;
-    }
-    if (username.length < 3) {
-      setState(() => _error = 'Username must be at least 3 characters.');
-      return;
-    }
-    if (password.length < 12) {
+    if (_passwordController.text.length < 12) {
       setState(() => _error = 'Password must be at least 12 characters.');
       return;
     }
 
     setState(() {
-      _creatingAccount = true;
+      _busy = true;
       _error = null;
     });
 
     final api = AuthApi(baseUrl: settings.baseUrl);
     try {
-      await api.createFirstUser(
-        username: username,
-        password: password,
+      await api.setUpAccount(
+        password: _passwordController.text,
         deviceId: settings.deviceId,
         deviceSecret: settings.deviceSecret,
       );
       if (!mounted) return;
-      // Account created — now log in. The router's redirect takes it from
-      // here: `hasSession` becomes true and /login sends us to the dashboard.
       await _signIn();
     } on AuthApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.isConflict
-            ? 'That username is already taken.'
+            ? 'This Storm is already set up. Sign in instead.'
             : 'Server error: ${e.message}';
-        _creatingAccount = false;
+        _needsSetup = !e.isConflict;
+        _busy = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = "Couldn't reach the server.\n\n$e";
-        _creatingAccount = false;
+        _busy = false;
       });
     } finally {
       api.dispose();
@@ -277,18 +174,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final settings = ref.watch(settingsProvider).value;
+    final password = _passwordController.text;
     final canSubmit =
-        !_signingIn &&
-        !_creatingAccount &&
-        _username.isNotEmpty &&
-        _passwordController.text.isNotEmpty;
-
-    // First-user creation on a fresh server (web bootstrap gap).
-    final canCreate =
-        !_creatingAccount &&
-        !_signingIn &&
-        _usernameController.text.trim().length >= 3 &&
-        _passwordController.text.length >= 12;
+        !_busy && (_needsSetup ? password.length >= 12 : password.isNotEmpty);
+    final submit = _needsSetup ? _setUp : _signIn;
 
     return Scaffold(
       body: Center(
@@ -303,7 +192,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 const Center(child: BrandMark(size: 44, withWordmark: true)),
                 SizedBox(height: t.sp * 2),
                 Text(
-                  _noUsers ? 'Create your account' : 'Sign in',
+                  _needsSetup ? 'Set up your Storm' : 'Sign in',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
@@ -311,10 +200,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     color: t.text3,
                   ),
                 ),
-                SizedBox(height: t.sp * 1),
+                SizedBox(height: t.sp),
                 Text(
-                  // The address, because a paired device may be one of several
-                  // and "sign in" alone does not say to what.
                   settings?.baseUrl ?? '',
                   textAlign: TextAlign.center,
                   style: TextStyle(
@@ -324,60 +211,23 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                 ),
                 SizedBox(height: t.sp * 3.5),
-
-                if (_loadingUsers)
+                if (_loading)
                   const Center(child: CircularProgressIndicator())
-                else if (_noUsers) ...[
-                  // First-user creation: username + password, matching
-                  // PairingScreen._buildAccountForm.
+                else
                   StormInput(
-                    key: const Key('first-user-username'),
-                    controller: _usernameController,
-                    autofocus: true,
-                    labelText: 'Username',
-                    autocorrect: false,
-                    textInputAction: TextInputAction.next,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                  SizedBox(height: t.sp * 1.75),
-                  StormInput(
-                    key: const Key('first-user-password'),
-                    controller: _passwordController,
-                    labelText: 'Password (12+ characters)',
-                    obscureText: true,
-                    autocorrect: false,
-                    onChanged: (_) => setState(() {}),
-                    onSubmitted: canCreate ? (_) => _createFirstUser() : null,
-                  ),
-                ] else ...[
-                  if (_users != null && _users!.isNotEmpty)
-                    _AccountPicker(
-                      users: _users!,
-                      selected: _selected,
-                      onChanged: _signingIn
-                          ? null
-                          : (u) => setState(() => _selected = u),
-                    )
-                  else if (_pickerUnavailable)
-                    StormInput(
-                      key: const Key('login-username'),
-                      controller: _usernameController,
-                      labelText: 'Username',
-                      autocorrect: false,
-                      onChanged: (_) => setState(() {}),
+                    key: Key(
+                      _needsSetup ? 'first-user-password' : 'login-password',
                     ),
-                  SizedBox(height: t.sp * 2),
-                  StormInput(
-                    key: const Key('login-password'),
                     controller: _passwordController,
-                    labelText: 'Password',
+                    labelText: _needsSetup
+                        ? 'Choose a password (12+ characters)'
+                        : 'Password',
                     obscureText: true,
-                    autofocus: _selected != null,
+                    autocorrect: false,
+                    autofocus: true,
                     onChanged: (_) => setState(() {}),
-                    onSubmitted: canSubmit ? (_) => _signIn() : null,
+                    onSubmitted: canSubmit ? (_) => submit() : null,
                   ),
-                ],
-
                 if (_error != null) ...[
                   SizedBox(height: t.sp * 2),
                   Container(
@@ -397,50 +247,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ),
                   ),
                 ],
-
                 SizedBox(height: t.sp * 2.5),
-                if (_noUsers)
-                  FilledButton(
-                    key: const Key('first-user-submit'),
-                    onPressed: canCreate ? _createFirstUser : null,
-                    child: _creatingAccount
-                        ? const SizedBox(
-                            height: 18,
-                            width: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Create Account & Sign In'),
-                  )
-                else ...[
-                  FilledButton(
-                    key: const Key('login-submit'),
-                    onPressed: canSubmit ? _signIn : null,
-                    child: _signingIn
-                        ? const SizedBox(
-                            height: 18,
-                            width: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Sign in'),
-                  ),
-                  // Only when the server said yes. The switch is enforced
-                  // server-side; this is the half that keeps someone from
-                  // walking into a `403`.
-                  if (_registrationOpen) ...[
-                    SizedBox(height: t.sp * 1.5),
-                    TextButton(
-                      key: const Key('login-create-account'),
-                      onPressed: _signingIn
-                          ? null
-                          : () => context.push(Routes.signup),
-                      child: const Text('Create an account'),
-                    ),
-                  ],
-                ],
+                FilledButton(
+                  key: Key(_needsSetup ? 'first-user-submit' : 'login-submit'),
+                  onPressed: canSubmit ? submit : null,
+                  child: _busy
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(_needsSetup ? 'Set up & sign in' : 'Sign in'),
+                ),
                 SizedBox(height: t.sp * 1.5),
                 TextButton(
                   key: const Key('login-unpair'),
-                  onPressed: (_signingIn || _creatingAccount)
+                  onPressed: _busy
                       ? null
                       : () => ref.read(settingsProvider.notifier).unpair(),
                   child: const Text('Use a different server'),
@@ -449,69 +271,6 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// The account list, as a picker rather than a username field.
-class _AccountPicker extends StatelessWidget {
-  const _AccountPicker({
-    required this.users,
-    required this.selected,
-    required this.onChanged,
-  });
-
-  final List<AuthUser> users;
-  final String? selected;
-  final ValueChanged<String?>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    // `RadioGroup` rather than per-tile `groupValue`/`onChanged`, which this
-    // Flutter deprecates.
-    return RadioGroup<String>(
-      groupValue: selected,
-      // `RadioGroup` wants a non-null callback, so "disabled" is expressed on
-      // the tiles instead — a null `onChanged` here is the sign-in being in
-      // flight, and every tile goes inert with it.
-      onChanged: onChanged ?? (_) {},
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final user in users)
-            Padding(
-              padding: EdgeInsets.only(bottom: t.sp * 0.5),
-              child: RadioListTile<String>(
-                key: Key('login-account-${user.username}'),
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                value: user.username,
-                // A disabled account cannot log in, so offering it would only
-                // produce a refusal after the password was typed.
-                enabled: !user.isDisabled && onChanged != null,
-                title: Text(
-                  user.label,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
-                    color: user.isDisabled ? t.text3 : null,
-                  ),
-                ),
-                subtitle: user.isDisabled
-                    ? Text(
-                        'Disabled',
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: t.codeSize * 0.9,
-                          color: t.text3,
-                        ),
-                      )
-                    : null,
-              ),
-            ),
-        ],
       ),
     );
   }

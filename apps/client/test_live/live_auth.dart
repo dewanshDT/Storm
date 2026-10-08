@@ -41,7 +41,6 @@ const _password = 'correct horse battery staple';
 Future<LiveSession> signIn({
   required String baseUrl,
   required String logPath,
-  String username = 'live',
 }) async {
   final log = await File(logPath).readAsString();
   final uri = RegExp(r'storm://pair\?\S+').firstMatch(log)?.group(0);
@@ -62,11 +61,8 @@ Future<LiveSession> signIn({
       platform: 'test',
     );
 
-    // The first account, if this server has none. A 409 means someone got
-    // there first, which is fine — the login below is what matters.
     try {
-      await auth.createFirstUser(
-        username: username,
+      await auth.setUpAccount(
         password: _password,
         deviceId: paired.deviceId,
         deviceSecret: paired.deviceSecret,
@@ -78,7 +74,6 @@ Future<LiveSession> signIn({
     final session = await auth.login(
       deviceId: paired.deviceId,
       deviceSecret: paired.deviceSecret,
-      username: username,
       password: _password,
     );
     return LiveSession(

@@ -44,24 +44,6 @@ final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
 /// An [AgentApi] for the signed-in session, or null without one.
 AgentApi? agentApi(WidgetRef ref) => ref.read(agentApiFactoryProvider)?.call();
 
-/// Whether to show agents at all. **The server's owner check is the
-/// answer**: a 403 hides every entry point, so "hidden for non-owners"
-/// (AC-S1) cannot drift from what the server enforces (decision 77d).
-///
-/// Every agent entry point reads this — the dashboard band, the sidebar's
-/// space switch, Server settings, and the router's guard (decision 78).
-final agentAccessProvider = FutureProvider<bool>((ref) async {
-  final api = ref.watch(agentApiFactoryProvider)?.call();
-  if (api == null) return false;
-  try {
-    return await api.canUseAgents();
-  } catch (_) {
-    return false;
-  } finally {
-    api.dispose();
-  }
-});
-
 /// Sessions and hosts, as the band, the sidebar and the Agents screen show
 /// them (decision 78).
 class AgentOverview {

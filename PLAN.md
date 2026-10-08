@@ -58,7 +58,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
-| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **in progress** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · **slice 0 done 2026-10-08** (#95) · **slice 1a built** (single-user server, `auth.db` v6) · next: slice 1b, single-user client |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **in progress** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · **slice 0 done 2026-10-08** (#95) · **slice 1a** (#96, single-user server, `auth.db` v6) · **slice 1b** (single-user client) · next: slice 2, design-system additions |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -3984,6 +3984,12 @@ three ways; `cli_account.rs` replaces `cli_users.rs`; `make test-migration`
 builds the pre-v6 binary to make a real v5 database. In the live suites,
 member checks became access-key checks, and `auth_e2e`'s throttle flood now
 runs before setup (no account, so a 429 can only be the limiter).
+
+**Slice 1b (single user, client; `feat/single-user-client`):** the sign-in
+and pairing screens take only a password and choose between setup and sign-in
+from `GET /v1/account`; signup, the account picker, the registration switch,
+`AuthUser`, `agentAccessProvider` and every owner gate are gone. 767 client
+tests pass; the Dart live auth test runs password-only against the new server.
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.

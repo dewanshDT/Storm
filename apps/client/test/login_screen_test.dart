@@ -91,7 +91,6 @@ void main() {
         'session_revoked',
         'device_revoked',
         'not_paired',
-        'user_disabled',
         'forbidden',
         'already_initialized',
         'pairing_consumed',

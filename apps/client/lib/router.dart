@@ -11,13 +11,11 @@ import 'ui/client_settings_screen.dart';
 import 'ui/gallery_screen.dart';
 import 'ui/add_device_screen.dart';
 import 'ui/login_screen.dart';
-import 'agent/agent_state.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
 import 'agent/hosts_screen.dart';
 import 'agent/integrations_screen.dart';
 import 'ui/mcp_keys_screen.dart';
-import 'ui/signup_screen.dart';
 import 'ui/starting_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
@@ -44,10 +42,6 @@ abstract final class Routes {
   /// Sign in on a device that is already paired. Distinct from [pairing],
   /// which is first-run only and asks for a QR nobody needs twice.
   static const login = '/login';
-
-  /// Create an account, on a server whose owner has opened registration (A13).
-  /// Reachable from [login] only when the server says so.
-  static const signup = '/signup';
 
   /// Reachable without a vault, from the phone's dashboard — which is the
   /// screen you are on when there is no vault yet.
@@ -129,9 +123,6 @@ final routerProvider = Provider<GoRouter>((ref) {
   // router instead, which is the only thing settings actually affect here.
   final refresh = _RouterRefresh();
   ref.listen(settingsProvider, (_, _) => refresh.notify());
-  // The guard below reads the owner check, which arrives after the first
-  // frame; re-run the redirect when it does.
-  ref.listen(agentAccessProvider, (_, _) => refresh.notify());
   ref.onDispose(refresh.dispose);
 
   final router = GoRouter(
@@ -143,8 +134,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       final paired = settings.value?.isPaired ?? false;
       final atPairing = state.matchedLocation == Routes.pairing;
       final atLogin = state.matchedLocation == Routes.login;
-      final atSignup = state.matchedLocation == Routes.signup;
-      final atAuthScreen = atPairing || atLogin || atSignup;
+      final atAuthScreen = atPairing || atLogin;
 
       // **Hold on a neutral screen rather than guessing.** `null` means "stay
       // where you are", which on a cold start is the dashboard — so returning
@@ -199,16 +189,6 @@ final routerProvider = Provider<GoRouter>((ref) {
             : Routes.starting;
       }
 
-      // **The Agents space is the owner's** (decision 78). The server's 403
-      // was always the boundary; this is so an account that is not an owner,
-      // arriving by URL, lands somewhere useful instead of on an empty frame.
-      // Only once the check has *answered* no — while it is still asking,
-      // holding is right, and the listener above re-runs this when it lands.
-      if (state.matchedLocation.startsWith(Routes.agents) &&
-          ref.read(agentAccessProvider).value == false) {
-        return Routes.dashboard;
-      }
-
       // The gallery needs no server, and bouncing it to Connect would make it
       // unreachable on exactly the install where the theme is being judged.
       if (state.matchedLocation == Routes.gallery) return null;
@@ -229,10 +209,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       // is /login's whole reason to exist: the device already has credentials,
       // so asking for a pairing QR again would be asking for something the
       // user does not have and does not need.
-      // /signup is the same situation as /login — paired, no session — so it
-      // has to be reachable from here, or the link on the login screen would
-      // bounce straight back to the screen it was offered on.
-      if (paired) return (atLogin || atSignup) ? null : Routes.login;
+      if (paired) return atLogin ? null : Routes.login;
       if (atStarting) return Routes.pairing;
 
       // Nothing at all. Pairing is the only first-run flow now — /connect
@@ -245,7 +222,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.starting, builder: (_, _) => const StartingScreen()),
       GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
-      GoRoute(path: Routes.signup, builder: (_, _) => const SignupScreen()),
       GoRoute(
         path: Routes.addDevice,
         builder: (_, _) => const AddDeviceScreen(),

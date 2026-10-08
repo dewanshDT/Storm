@@ -56,6 +56,7 @@ the state recipe in `harness/shots.py`.
 | Implementation | Reference | Slice | Status |
 |---|---|---|---|
 | `baseline/*` (10 shots) | — (pre-v2 record) | 0 | captured 2026-10-08 on `staging` `c9131b4` |
+| `auth/phone-setup.png`, `auth/phone-signin.png` | — (not redesigned; existing style) | 1b | password only, captured 2026-10-08 |
 | `desktop-01-notes-provenance.png` | same name | 4 + 8 | — |
 | `desktop-02-note-start-session.png` | same name | 4 | — |
 | `desktop-03-vault-switcher.png` | same name | 4 | — |
