@@ -4024,8 +4024,9 @@ cross-vault recents (they lived on the dashboard).
 
 **Slice 5 (server agent capabilities; `feat/v2-agent-capabilities`):**
 `agent.db` gains `session_launch` (name, context note ids and title snapshot,
-write vault) and `session_writes` (one row per note a session wrote: `created`
-stays `created`, version and time follow its latest write), both additive and
+write vault) and `session_writes` (one row per note or kit script a session
+wrote: `created` stays `created`, version and time follow its latest write),
+both additive and
 kept when a session is dismissed, so provenance still names it. `POST
 /v1/agent/sessions` takes `context {vault_id, note_id}` (read through the vault
 seam, 404 if gone) and `write_vault_id` (must exist); `allow_vault_writes`
@@ -4043,16 +4044,24 @@ mcp_writable`, what agents needed before, and `mcp_writable` no longer touches
 agents. `StormPolicy` replaces `AllowAuthenticated`: an `Actor::Agent` writes
 only to its `write_vault`, refused at `vault_of` and answered as the JSON-RPC
 code `vault_write_not_allowed`; kit scripts follow the same rule. The write
-hook is in `ops::create_note`/`update_note`; script writes and `move_note`
-(REST only, never an agent's) are not recorded. Context delivery: the built-in
+hook is in `ops::create_note`/`update_note`/`create_script`/`update_script`:
+**Wrote is every successful write a session performs** (operator, 2026-10-08),
+so a kit script is a row too — `kind: script_created|script_edited`, `note_id`
+and `version` null, `path` its vault-relative path, `title` its script name. It
+counts in `wrote_count`; it is not in a note's provenance or the vault's
+`agent-writes` map, which are keyed by note id and a script has none. A
+refused write records nothing; `move_note` is REST only, never an agent's.
+**The launch context is history** (operator, 2026-10-08): its ids, title and
+the session's name are fixed at launch and a later rename or move changes none
+of them, while `session_context` resolves the note by id. Context delivery: the built-in
 connection offers agents `session_context` and names it in its instructions;
 `start` carries `context: true`, and the runtime adds `mcp::OPENING_PROMPT`
 (`claude <prompt>`, `opencode --prompt <prompt>`, nothing for `shell`/`fake`).
 `gateway_e2e.py` scans every process's argv and environment for the note's
 title, body and ids with a positive control. Mutation-checked: the policy
 allowing every agent write, and note data sent in `start` / the prompt growing
-an argument. Rust 561 + 54 tests; live 81 (`e2e.py` unmodified) · mcp 86 ·
-agent 76 · gateway 79 · auth 72 · client 20.
+an argument, and a script write left unrecorded. Rust 562 + 54 tests; live 81
+(`e2e.py` unmodified) · mcp 86 · agent 78 · gateway 84 · auth 72 · client 20.
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.

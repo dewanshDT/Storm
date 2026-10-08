@@ -1296,9 +1296,19 @@ mod tests {
         let w = |session: &str, note: &str, kind: &str, version: i64, at: &str| WriteRecord {
             session_id: session.into(),
             vault_id: "vlt_W".into(),
-            note_id: note.into(),
+            note_id: Some(note.into()),
+            path: None,
             kind: kind.into(),
-            version,
+            version: Some(version),
+            at: at.into(),
+        };
+        let script = |session: &str, path: &str, kind: &str, at: &str| WriteRecord {
+            session_id: session.into(),
+            vault_id: "vlt_W".into(),
+            note_id: None,
+            path: Some(path.into()),
+            kind: kind.into(),
+            version: None,
             at: at.into(),
         };
         m.record_write(&w(&a.id, "n1", "created", 1, "2026-10-08T10:00:00.000Z"))
@@ -1310,12 +1320,55 @@ mod tests {
         let mine = m.writes_of(&a.id).unwrap();
         assert_eq!(
             mine.iter()
-                .map(|w| (w.note_id.as_str(), w.kind.as_str(), w.version))
+                .map(|w| (w.note_id.as_deref(), w.kind.as_str(), w.version))
                 .collect::<Vec<_>>(),
-            [("n2", "edited", 7), ("n1", "created", 2)],
+            [
+                (Some("n2"), "edited", Some(7)),
+                (Some("n1"), "created", Some(2))
+            ],
             "newest first, one row per note, created stays created"
         );
         assert_eq!(m.write_count(&a.id).unwrap(), 2);
+
+        // A kit script is one row per path, beside the notes.
+        m.record_write(&script(
+            &a.id,
+            "scripts/x.sh",
+            "script_created",
+            "2026-10-08T10:02:10.000Z",
+        ))
+        .unwrap();
+        m.record_write(&script(
+            &a.id,
+            "scripts/x.sh",
+            "script_edited",
+            "2026-10-08T10:02:20.000Z",
+        ))
+        .unwrap();
+        m.record_write(&script(
+            &a.id,
+            "scripts/y.sh",
+            "script_edited",
+            "2026-10-08T10:02:30.000Z",
+        ))
+        .unwrap();
+        let mine = m.writes_of(&a.id).unwrap();
+        assert_eq!(
+            mine.iter()
+                .take(2)
+                .map(|w| (
+                    w.path.as_deref(),
+                    w.kind.as_str(),
+                    w.note_id.as_deref(),
+                    w.version
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (Some("scripts/y.sh"), "script_edited", None, None),
+                (Some("scripts/x.sh"), "script_created", None, None)
+            ]
+        );
+        assert_eq!(m.write_count(&a.id).unwrap(), 4);
 
         // Session b edits n1 later: it is the latest writer; a still lists it.
         m.record_write(&w(&b.id, "n1", "edited", 3, "2026-10-08T10:03:00.000Z"))
@@ -1333,12 +1386,16 @@ mod tests {
         assert_eq!(
             latest
                 .iter()
-                .map(|w| (w.note_id.as_str(), w.session_id.as_str(), w.version))
+                .map(|w| (w.note_id.as_deref(), w.session_id.as_str(), w.version))
                 .collect::<Vec<_>>(),
-            [("n1", b.id.as_str(), 3), ("n2", a.id.as_str(), 7)]
+            [
+                (Some("n1"), b.id.as_str(), Some(3)),
+                (Some("n2"), a.id.as_str(), Some(7))
+            ],
+            "scripts are not notes, so not provenance"
         );
         assert!(m.latest_writes("vlt_OTHER").unwrap().is_empty());
-        assert_eq!(m.write_count(&a.id).unwrap(), 2);
+        assert_eq!(m.write_count(&a.id).unwrap(), 4);
 
         end(&m, &b.id);
         m.dismiss(&b.id).unwrap();

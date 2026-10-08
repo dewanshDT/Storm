@@ -184,7 +184,7 @@ pub async fn get_note_with_provenance(
 ) -> ApiResult<NoteWithProvenance> {
     let detail = get_note(state, actor, vault, id).await?;
     let agent_write = match state.agent.latest_write(vault, id).map_err(internal)? {
-        Some(w) => {
+        Some(w) if w.version.is_some() => {
             let launch = state.agent.launch_of(&w.session_id).map_err(internal)?;
             let session = state.agent.get(&w.session_id).ok();
             Some(AgentWrite {
@@ -195,11 +195,11 @@ pub async fn get_note_with_provenance(
                 session_dismissed: session.is_none(),
                 session_id: w.session_id,
                 kind: w.kind,
-                version: w.version,
+                version: w.version.unwrap_or_default(),
                 at: w.at,
             })
         }
-        None => None,
+        _ => None,
     };
     Ok(NoteWithProvenance {
         detail,
@@ -227,15 +227,15 @@ pub async fn vault_agent_writes(
         .latest_writes(vault)
         .map_err(internal)?
         .into_iter()
-        .map(|w| {
-            (
-                w.note_id,
+        .filter_map(|w| {
+            Some((
+                w.note_id?,
                 LatestAgentWrite {
-                    version: w.version,
+                    version: w.version?,
                     at: w.at,
                     session_id: w.session_id,
                 },
-            )
+            ))
         })
         .collect())
 }
@@ -477,9 +477,28 @@ fn record_agent_write(
     let write = crate::agent::store::WriteRecord {
         session_id: session_id.clone(),
         vault_id: vault.to_string(),
-        note_id: note.id.clone(),
+        note_id: Some(note.id.clone()),
+        path: None,
         kind: kind.to_string(),
-        version: note.version,
+        version: Some(note.version),
+        at: write_stamp(),
+    };
+    if let Err(e) = state.agent.record_write(&write) {
+        tracing::warn!(error = %e, session = %session_id, "could not record an agent's write");
+    }
+}
+
+fn record_agent_script_write(state: &Shared, actor: &Actor, vault: &str, path: &str, kind: &str) {
+    let Actor::Agent { session_id, .. } = actor else {
+        return;
+    };
+    let write = crate::agent::store::WriteRecord {
+        session_id: session_id.clone(),
+        vault_id: vault.to_string(),
+        note_id: None,
+        path: Some(path.to_string()),
+        kind: kind.to_string(),
+        version: None,
         at: write_stamp(),
     };
     if let Err(e) = state.agent.record_write(&write) {
@@ -803,13 +822,15 @@ pub async fn create_script(
     content: &str,
 ) -> ApiResult<ScriptStored> {
     let rel = script_path(name)?;
-    let handle = kit_handle(state, actor, Access::Write).await?;
+    let kit = kit_vault_id(state).await?;
+    let handle = vault_of(state, actor, Access::Write, &kit).await?;
     let mut ix = handle.indexer.lock().await;
     if ix.vault.exists(&rel) {
         return Err(conflict(format!("script “{name}” already exists")));
     }
     ix.put_attachment(&rel, content.as_bytes())
         .map_err(|e| bad_request(e.to_string()))?;
+    record_agent_script_write(state, actor, &kit, &rel, "script_created");
     Ok(ScriptStored {
         name: name.to_string(),
         path: rel,
@@ -826,13 +847,15 @@ pub async fn update_script(
     content: &str,
 ) -> ApiResult<ScriptStored> {
     let rel = script_path(name)?;
-    let handle = kit_handle(state, actor, Access::Write).await?;
+    let kit = kit_vault_id(state).await?;
+    let handle = vault_of(state, actor, Access::Write, &kit).await?;
     let mut ix = handle.indexer.lock().await;
     if !ix.vault.exists(&rel) {
         return Err(not_found("no such script"));
     }
     ix.put_attachment(&rel, content.as_bytes())
         .map_err(|e| bad_request(e.to_string()))?;
+    record_agent_script_write(state, actor, &kit, &rel, "script_edited");
     Ok(ScriptStored {
         name: name.to_string(),
         path: rel,
@@ -1501,15 +1524,17 @@ pub async fn get_session(state: &Shared, id: &str) -> ApiResult<SessionView> {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionWrite {
     pub vault_id: String,
-    pub note_id: String,
+    /// `None` for a kit script, which is a file, not a note.
+    pub note_id: Option<String>,
     pub title: Option<String>,
     pub path: Option<String>,
     pub kind: String,
-    pub version: i64,
+    /// `None` for a kit script: scripts are not versioned.
+    pub version: Option<i64>,
     pub at: String,
 }
 
-/// The notes a session created or edited, newest write first.
+/// The notes and kit scripts a session created or edited, newest write first.
 pub async fn session_writes(
     state: &Shared,
     actor: &Actor,
@@ -1522,13 +1547,24 @@ pub async fn session_writes(
         if !crate::api::may_see_vault(state, actor, &w.vault_id) {
             continue;
         }
-        let row = match state.vaults.read().await.get(&w.vault_id) {
-            Some(handle) => handle.indexer.lock().await.db.get_note(&w.note_id)?,
-            None => None,
+        let (title, path) = match (&w.note_id, &w.path) {
+            (Some(note_id), _) => {
+                let row = match state.vaults.read().await.get(&w.vault_id) {
+                    Some(handle) => handle.indexer.lock().await.db.get_note(note_id)?,
+                    None => None,
+                };
+                (row.as_ref().map(|r| r.title.clone()), row.map(|r| r.path))
+            }
+            (None, path) => (
+                path.as_deref()
+                    .and_then(|p| p.strip_prefix(&format!("{SCRIPTS_ROOT}/")))
+                    .map(str::to_string),
+                path.clone(),
+            ),
         };
         out.push(SessionWrite {
-            title: row.as_ref().map(|r| r.title.clone()),
-            path: row.map(|r| r.path),
+            title,
+            path,
             vault_id: w.vault_id,
             note_id: w.note_id,
             kind: w.kind,

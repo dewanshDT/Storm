@@ -298,7 +298,7 @@ args = ["-i"]
         check("the server reports its version", isinstance(cfg.get("version"), str) and cfg["version"], cfg)
         check("agents are read only on a fresh install", cfg.get("agent_writes") is False, cfg)
         _, vaults = call("GET", "/v1/vaults", auth=owner)
-        vault = vaults["vaults"][0]["id"]
+        vault = next(v["id"] for v in vaults["vaults"] if v["dir"] == "primary")
         _, made = call("POST", f"/v1/vaults/{vault}/notes",
                        {"path": "Specs/Gateway spec.md", "content": "# Gateway spec\n"}, auth=owner)
         note = made["note"]
@@ -346,6 +346,13 @@ args = ["-i"]
             call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
         wait(lambda: all(session(owner, r["id"])["status"] == "stopped" for r in (first, second, plain, old)),
              "the launch-record sessions to stop")
+        status, moved = call("POST", f"/v1/vaults/{vault}/notes/{note['id']}/move",
+                             {"new_path": "Archive/Renamed.md"}, auth=owner)
+        check("the context note is moved after the launch", status == 200, moved)
+        view = session(owner, first["id"])
+        check("the session's launch context is unchanged by the move",
+              view["context"] == {"vault_id": vault, "note_id": note["id"], "title": "Gateway spec"}
+              and view["name"] == "gateway-spec", view)
         status, again = launch_with(ctx)
         check("an ended session frees its name", again.get("name") == "gateway-spec", again)
         running(owner, again["id"])

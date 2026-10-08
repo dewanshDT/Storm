@@ -213,7 +213,7 @@ def main():
     os.makedirs(os.path.join(WORK, "vaults", "primary"))
     with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
         f.write("# Seed\n")
-    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2"):
+    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw"):
         os.makedirs(os.path.join(WORKSPACES, ws))
     os.makedirs(UP_STATE)
     with open(CANARY_FILE, "w") as f:
@@ -467,7 +467,7 @@ args = ["-i"]
         check("OpenCode's session calls through its bridge", text_of(oc.answer(slug, 2)) == "echo: oc")
 
         _, vaults = call("GET", "/v1/vaults", auth=owner)
-        vault = vaults["vaults"][0]["id"]
+        vault = next(v["id"] for v in vaults["vaults"] if v["dir"] == "primary")
 
         print("\n=== a session started from a note (§5.3 C; the argv rule) ===")
         prompt = "Read your context note with the storm session_context tool, then wait for my instructions."
@@ -577,6 +577,29 @@ args = ["-i"]
               final)
         _, unseen = call("GET", f"/v1/vaults/{vault}/agent-writes", auth=owner)
         check("the vault's agent-writes map has it", unseen.get(note_id, {}).get("session_id") == wid, unseen)
+
+        print("\n=== kit scripts: written only with kit as the write vault, and in Wrote ===")
+        kit = next(v for v in call("GET", "/v1/vaults", auth=owner)[1]["vaults"] if v["dir"] == "kit")
+        before = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)[1]
+        w.tool("storm", 20, "create_script", {"name": "e2e/tool.sh", "content": "echo hi\n"})
+        refused = w.answer("storm", 20)
+        check("a script write with another write vault is refused",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "vault_write_not_allowed", refused)
+        after = call("GET", f"/v1/agent/sessions/{wid}/writes", auth=owner)[1]
+        check("and is not recorded", after == before, after)
+        krec = launch("claude-code", "kw", {"write_vault_id": kit["id"]})
+        k = Agent("kw")
+        k.initialize("storm", 1)
+        k.tool("storm", 2, "create_script", {"name": "e2e/tool.sh", "content": "echo hi\n"})
+        made = k.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        check("with kit as its write vault the agent writes a script", made.get("path") == "scripts/e2e/tool.sh", made)
+        k.tool("storm", 3, "update_script", {"name": "e2e/tool.sh", "content": "echo bye\n"})
+        k.answer("storm", 3)
+        _, kwrites = call("GET", f"/v1/agent/sessions/{krec['id']}/writes", auth=owner)
+        check("the script is in the session's Wrote list, once",
+              [(x["kind"], x["path"], x["title"], x["note_id"], x["version"]) for x in kwrites] ==
+              [("script_created", "scripts/e2e/tool.sh", "e2e/tool.sh", None, None)], kwrites)
+        check("and counts", call("GET", f"/v1/agent/sessions/{krec['id']}", auth=owner)[1]["wrote_count"] == 1)
 
         call("PUT", "/v1/config/mcp", {"agent_writes": False}, auth=owner)
         w.tool("storm", 7, "update_note", {"vault": vault, "note_id": note_id, "base_version": 1,

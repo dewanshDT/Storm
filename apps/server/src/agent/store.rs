@@ -75,16 +75,29 @@ pub struct Context {
     pub title: String,
 }
 
-/// One note an agent session created or edited.
+/// One note or kit script an agent session created or edited. A note has an
+/// id and a version; a script has neither, only its vault-relative path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRecord {
     pub session_id: String,
     pub vault_id: String,
-    pub note_id: String,
-    /// `created` or `edited`.
+    pub note_id: Option<String>,
+    pub path: Option<String>,
+    /// `created` or `edited` for a note, `script_created` or `script_edited`
+    /// for a script.
     pub kind: String,
-    pub version: i64,
+    pub version: Option<i64>,
     pub at: String,
+}
+
+impl WriteRecord {
+    fn target(&self) -> String {
+        match (&self.note_id, &self.path) {
+            (Some(id), _) => id.clone(),
+            (None, Some(path)) => format!("script:{path}"),
+            (None, None) => String::new(),
+        }
+    }
 }
 
 pub struct Store {
@@ -162,11 +175,15 @@ impl Store {
              CREATE TABLE IF NOT EXISTS session_writes (
                  session_id TEXT NOT NULL,
                  vault_id   TEXT NOT NULL,
-                 note_id    TEXT NOT NULL,
-                 kind       TEXT NOT NULL CHECK (kind IN ('created', 'edited')),
-                 version    INTEGER NOT NULL,
+                 -- The note id, or `script:<path>` for a kit script.
+                 target     TEXT NOT NULL,
+                 note_id    TEXT,
+                 path       TEXT,
+                 kind       TEXT NOT NULL CHECK (kind IN
+                     ('created', 'edited', 'script_created', 'script_edited')),
+                 version    INTEGER,
                  at         TEXT NOT NULL,
-                 PRIMARY KEY (session_id, vault_id, note_id)
+                 PRIMARY KEY (session_id, vault_id, target)
              );
              CREATE INDEX IF NOT EXISTS writes_by_note
                  ON session_writes(vault_id, note_id, at);",
@@ -395,15 +412,25 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// One row per note a session wrote. A note it created and then edited
-    /// stays `created`; the version and time follow the latest write.
+    /// One row per note or script a session wrote. One it created and then
+    /// edited stays created; the version and time follow the latest write.
     pub fn record_write(&self, w: &WriteRecord) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO session_writes (session_id, vault_id, note_id, kind, version, at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (session_id, vault_id, note_id)
+            "INSERT INTO session_writes (session_id, vault_id, target, note_id, path, kind,
+                 version, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (session_id, vault_id, target)
              DO UPDATE SET version = excluded.version, at = excluded.at",
-            params![w.session_id, w.vault_id, w.note_id, w.kind, w.version, w.at],
+            params![
+                w.session_id,
+                w.vault_id,
+                w.target(),
+                w.note_id,
+                w.path,
+                w.kind,
+                w.version,
+                w.at
+            ],
         )?;
         Ok(())
     }
@@ -428,7 +455,7 @@ impl Store {
     /// Versions only grow, so the highest version is the latest writer.
     pub fn latest_writes(&self, vault_id: &str) -> Result<Vec<WriteRecord>> {
         self.writes_where(
-            "vault_id = ?1 AND NOT EXISTS (
+            "vault_id = ?1 AND note_id IS NOT NULL AND NOT EXISTS (
                  SELECT 1 FROM session_writes newer
                  WHERE newer.vault_id = session_writes.vault_id
                    AND newer.note_id = session_writes.note_id
@@ -452,7 +479,7 @@ impl Store {
 
     fn writes_where(&self, clause: &str, args: impl rusqlite::Params) -> Result<Vec<WriteRecord>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT session_id, vault_id, note_id, kind, version, at FROM session_writes
+            "SELECT session_id, vault_id, note_id, path, kind, version, at FROM session_writes
              WHERE {clause}"
         ))?;
         let rows = stmt.query_map(args, |r| {
@@ -460,9 +487,10 @@ impl Store {
                 session_id: r.get(0)?,
                 vault_id: r.get(1)?,
                 note_id: r.get(2)?,
-                kind: r.get(3)?,
-                version: r.get(4)?,
-                at: r.get(5)?,
+                path: r.get(3)?,
+                kind: r.get(4)?,
+                version: r.get(5)?,
+                at: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

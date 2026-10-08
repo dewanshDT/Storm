@@ -7605,7 +7605,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_kit_script_is_written_only_by_a_session_whose_write_vault_is_kit() {
+    async fn a_kit_script_is_written_only_by_a_session_whose_write_vault_is_kit_and_is_in_its_wrote_list()
+     {
         let dir = tempdir::TempDir::new("storm-gateway-kit").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
         let work = f.vault("Work").await;
@@ -7621,6 +7622,14 @@ pub(crate) mod tests {
             let lines = f.tool(&session, "create_script", script.clone()).await;
             if expect_ok {
                 assert_eq!(structured(&lines)["path"], "scripts/tool.sh", "{lines:?}");
+                let lines = f
+                    .tool(
+                        &session,
+                        "update_script",
+                        serde_json::json!({"name": "tool.sh", "content": "echo bye\n"}),
+                    )
+                    .await;
+                assert_eq!(structured(&lines)["size"], 9, "{lines:?}");
             } else {
                 assert_eq!(
                     error_code(&lines).as_deref(),
@@ -7628,8 +7637,87 @@ pub(crate) mod tests {
                     "{lines:?}"
                 );
             }
+            let (_, writes) = f.get(&format!("/v1/agent/sessions/{session}/writes")).await;
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+            if expect_ok {
+                assert_eq!(
+                    writes,
+                    serde_json::json!([{
+                        "vault_id": kit, "note_id": null, "title": "tool.sh",
+                        "path": "scripts/tool.sh", "kind": "script_created", "version": null,
+                        "at": writes[0]["at"],
+                    }]),
+                    "one row per script; created stays created"
+                );
+                assert_eq!(view["wrote_count"], 1);
+                let (_, map) = f.get(&format!("/v1/vaults/{kit}/agent-writes")).await;
+                assert_eq!(map, serde_json::json!({}), "a script has no note id");
+            } else {
+                assert_eq!(
+                    writes,
+                    serde_json::json!([]),
+                    "a refused write is not recorded"
+                );
+                assert_eq!(view["wrote_count"], 0);
+            }
             f.report(&session, "completed").await;
         }
+    }
+
+    #[tokio::test]
+    async fn the_launch_context_is_a_snapshot_and_session_context_follows_the_note_by_id() {
+        let dir = tempdir::TempDir::new("storm-gateway-context-rename").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let personal = f.vault("Personal").await;
+        let note = f
+            .note(
+                &personal,
+                "specs/Gateway spec.md",
+                "# Gateway spec\n\nbody\n",
+            )
+            .await;
+        let note_id = note["id"].as_str().unwrap().to_string();
+        let (_, launched) = f
+            .launch_body(serde_json::json!({"context": {"vault_id": personal, "note_id": note_id}}))
+            .await;
+        let session = launched["id"].as_str().unwrap().to_string();
+        let launch_context = launched["context"].clone();
+        assert_eq!(launch_context["title"], "Gateway spec");
+
+        // Moved and retitled after the launch.
+        let (status, moved) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{note_id}/move"),
+                serde_json::json!({"new_path": "archive/Renamed plan.md"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        let (status, _) = send(
+            &f.app,
+            put_json_with_auth(
+                &format!("/v1/vaults/{personal}/notes/{note_id}"),
+                serde_json::json!({"base_version": moved["note"]["version"],
+                    "content": "# Renamed plan\n\nbody\n"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(
+            view["context"], launch_context,
+            "the launch's context is history"
+        );
+        assert_eq!(view["name"], "gateway-spec");
+        f.initialize(&session, "storm").await;
+        let got = structured(&f.call(&session, "storm", "session_context").await);
+        assert_eq!(got["note_id"], note_id.as_str());
+        assert_eq!(got["path"], "archive/Renamed plan.md");
+        assert_eq!(got["title"], "Renamed plan");
     }
 
     #[tokio::test]
