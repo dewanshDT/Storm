@@ -49,6 +49,14 @@ pub struct McpGrant {
     pub slug: String,
 }
 
+/// An integration a session was granted, as it was named at launch.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionIntegration {
+    pub id: String,
+    pub slug: String,
+    pub display_name: String,
+}
+
 /// A provider other than the one asked for, said out loud (freeze §6).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Fallback {
@@ -101,7 +109,7 @@ impl WriteRecord {
 }
 
 pub struct Store {
-    conn: Connection,
+    pub(super) conn: Connection,
 }
 
 const COLUMNS: &str = "id, owner_user_id, host_id, workspace, provider, provider_kind, \
@@ -186,7 +194,17 @@ impl Store {
                  PRIMARY KEY (session_id, vault_id, target)
              );
              CREATE INDEX IF NOT EXISTS writes_by_note
-                 ON session_writes(vault_id, note_id, at);",
+                 ON session_writes(vault_id, note_id, at);
+
+             -- The integrations a session was granted, named as they were at
+             -- launch: history, so a later rename or disconnect changes none.
+             CREATE TABLE IF NOT EXISTS session_integrations (
+                 session_id    TEXT NOT NULL,
+                 connection_id TEXT NOT NULL,
+                 slug          TEXT NOT NULL,
+                 display_name  TEXT NOT NULL,
+                 PRIMARY KEY (session_id, connection_id)
+             );",
         )?;
         Ok(Self { conn })
     }
@@ -348,6 +366,66 @@ impl Store {
              WHERE connection_id = ?1 AND revoked_at IS NULL",
             params![connection_id, now],
         )?)
+    }
+
+    pub fn insert_integrations(
+        &mut self,
+        session_id: &str,
+        integrations: &[SessionIntegration],
+    ) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for i in integrations {
+            tx.execute(
+                "INSERT OR REPLACE INTO session_integrations
+                     (session_id, connection_id, slug, display_name)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![session_id, i.id, i.slug, i.display_name],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The integrations a session was granted at launch, revoked ones
+    /// included. A session from before names were kept shows its grants'
+    /// slugs; `builtin` (Storm itself) is never one.
+    pub fn integrations_of(
+        &self,
+        session_id: &str,
+        builtin: &str,
+    ) -> Result<Vec<SessionIntegration>> {
+        let named = self.integrations_where(
+            "SELECT connection_id, slug, display_name FROM session_integrations
+             WHERE session_id = ?1 AND connection_id != ?2 ORDER BY display_name, slug",
+            session_id,
+            builtin,
+        )?;
+        if !named.is_empty() {
+            return Ok(named);
+        }
+        self.integrations_where(
+            "SELECT connection_id, slug, slug FROM session_mcp_grants
+             WHERE session_id = ?1 AND connection_id != ?2 ORDER BY slug",
+            session_id,
+            builtin,
+        )
+    }
+
+    fn integrations_where(
+        &self,
+        sql: &str,
+        session_id: &str,
+        builtin: &str,
+    ) -> Result<Vec<SessionIntegration>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![session_id, builtin], |r| {
+            Ok(SessionIntegration {
+                id: r.get(0)?,
+                slug: r.get(1)?,
+                display_name: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn insert_launch(&self, l: &LaunchRecord, now: &str) -> Result<()> {

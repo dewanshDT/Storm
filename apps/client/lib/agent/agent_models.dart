@@ -139,6 +139,7 @@ class AgentSession {
     this.context,
     this.writeVaultId,
     this.wroteCount = 0,
+    this.integrations,
     this.launchNotice,
   }) : name = name ?? workspace;
 
@@ -167,6 +168,10 @@ class AgentSession {
   /// The one vault it may write to; null is read only.
   final String? writeVaultId;
   final int wroteCount;
+
+  /// The integrations it was granted at launch, named as then; null from a
+  /// server that does not say.
+  final List<String>? integrations;
 
   /// Said at launch when the session got less than it asked for. Only on the
   /// launch answer.
@@ -224,6 +229,7 @@ class AgentSession {
           context: context,
           writeVaultId: writeVaultId,
           wroteCount: wroteCount,
+          integrations: integrations,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -251,6 +257,12 @@ class AgentSession {
         : null,
     writeVaultId: j['write_vault_id'] as String?,
     wroteCount: (j['wrote_count'] as num?)?.toInt() ?? 0,
+    integrations: j['integrations'] is List
+        ? [
+            for (final i in j['integrations'] as List)
+              if (i is Map) '${i['display_name'] ?? i['slug'] ?? ''}',
+          ]
+        : null,
     launchNotice: (j['mcp'] as Map?)?['notice'] as String?,
   );
 }

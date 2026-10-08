@@ -7344,6 +7344,23 @@ pub(crate) mod tests {
         let session = launched["id"].as_str().unwrap().to_string();
         let name = launched["name"].as_str().unwrap().to_string();
         assert_eq!(launched["wrote_count"], 0);
+        let granted = serde_json::json!([
+            {"id": f.connection, "slug": launched["mcp"]["connections"][1]["slug"], "display_name": "Mock"}
+        ]);
+        assert_eq!(launched["integrations"], granted, "{launched}");
+        // Launch history: a later rename of the connection changes nothing.
+        let (status, _) = send(
+            &f.app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{}", f.connection),
+                serde_json::json!({"display_name": "Renamed"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["integrations"], granted, "{view}");
         f.initialize(&session, "storm").await;
 
         // Each write op through the gateway is one row.

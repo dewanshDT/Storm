@@ -3,10 +3,13 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../agent/agent_state.dart' show agentOverviewProvider;
+import '../agent/agent_state.dart' show SessionTab, agentOverviewProvider;
 import '../agent/agents_screen.dart' show launchAgentSession;
+import '../api/models.dart' show AgentWrite;
 import '../router.dart';
+import '../state/agent_writes.dart' show noteProvenanceProvider;
 import '../state/app_state.dart' show activeVaultProvider, openNoteIdProvider;
+import '../state/health.dart' show relativeTime;
 import 'controls.dart';
 import 'tokens.dart';
 import 'widgets.dart' show SaveTone;
@@ -164,6 +167,76 @@ class VersionLine extends StatelessWidget {
           ),
       ],
     );
+  }
+}
+
+/// "Edited by session {name}, {age} ›" in accent on the version line,
+/// opening that session's Wrote (handoff §2.3). A dismissed session has no
+/// page to open, so its name is plain text.
+class ProvenanceLink extends StatelessWidget {
+  const ProvenanceLink({super.key, required this.write});
+
+  final AgentWrite write;
+
+  static String describe(AgentWrite w) =>
+      '${w.created ? 'Created' : 'Edited'} by session ${w.sessionName}, '
+      '${relativeTime(DateTime.tryParse(w.at)?.toLocal())}';
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final linked = !write.sessionDismissed;
+    final text = describe(write);
+    void open() => context.go(
+      Routes.agentSession(write.sessionId, tab: SessionTab.wrote.name),
+    );
+    final label = Text(
+      linked ? '$text ›' : text,
+      key: const Key('provenance'),
+      style: TextStyle(
+        fontFamily: StormTokens.monoFamily,
+        fontSize: t.codeSize,
+        color: linked ? t.accent : t.text3,
+      ),
+    );
+    if (!linked) return label;
+    return Semantics(
+      link: true,
+      label: text,
+      excludeSemantics: true,
+      onTap: open,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          key: const Key('provenance-link'),
+          behavior: HitTestBehavior.opaque,
+          onTap: open,
+          child: label,
+        ),
+      ),
+    );
+  }
+}
+
+/// The open note's provenance link, once the server has named a writer.
+class NoteProvenance extends ConsumerWidget {
+  const NoteProvenance({
+    super.key,
+    required this.vaultId,
+    required this.noteId,
+  });
+
+  final String vaultId;
+  final String noteId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final write = ref
+        .watch(noteProvenanceProvider((vaultId: vaultId, noteId: noteId)))
+        .value;
+    return write == null
+        ? const SizedBox.shrink()
+        : ProvenanceLink(write: write);
   }
 }
 

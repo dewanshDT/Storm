@@ -1361,6 +1361,8 @@ pub struct SessionView {
     pub context: Option<crate::agent::store::Context>,
     pub write_vault_id: Option<String>,
     pub wrote_count: i64,
+    /// What it was granted at launch, named as then; Storm itself is not one.
+    pub integrations: Vec<crate::agent::store::SessionIntegration>,
 }
 
 fn session_view(
@@ -1369,6 +1371,7 @@ fn session_view(
 ) -> ApiResult<SessionView> {
     let launch = state.agent.launch_of(&session.id).map_err(internal)?;
     let wrote_count = state.agent.write_count(&session.id).map_err(internal)?;
+    let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
     // A session launched before names existed is called by its workspace.
     let (name, context, write_vault_id) = match launch {
         Some(l) => (l.name, l.context, l.write_vault_id),
@@ -1380,6 +1383,7 @@ fn session_view(
         context,
         write_vault_id,
         wrote_count,
+        integrations,
     })
 }
 
@@ -1430,23 +1434,30 @@ pub async fn launch_session(
         vault_of(state, actor, Access::Write, v).await?;
     }
     let unhonoured_writes = req.allow_vault_writes && req.write_vault_id.is_none();
-    let meta = crate::agent::LaunchMeta {
-        context,
-        write_vault_id: req.write_vault_id.clone(),
-    };
     // Every non-disabled connection of the owner, plus `storm` (spec §6,
     // G-D9). Snapshotted here; the manager drops them for `shell` and for a
     // host that cannot bridge.
+    let connections = gateway_store(state)
+        .connections_of(actor.user_id())
+        .map_err(internal)?
+        .into_iter()
+        .filter(|c| c.status != status::DISABLED)
+        .collect::<Vec<_>>();
+    let meta = crate::agent::LaunchMeta {
+        context,
+        write_vault_id: req.write_vault_id.clone(),
+        integration_names: connections
+            .iter()
+            .map(|c| (c.id.clone(), c.display_name.clone()))
+            .collect(),
+    };
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
         slug: BUILTIN_SLUG.into(),
     }];
     offered.extend(
-        gateway_store(state)
-            .connections_of(actor.user_id())
-            .map_err(internal)?
+        connections
             .into_iter()
-            .filter(|c| c.status != status::DISABLED)
             .map(|c| crate::agent::store::McpGrant {
                 id: c.id,
                 slug: c.slug,
@@ -1489,6 +1500,7 @@ pub async fn launch_session(
             &detail.to_string(),
         );
     }
+    let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
     Ok(LaunchedSession {
         session: SessionView {
             session,
@@ -1496,6 +1508,7 @@ pub async fn launch_session(
             context: launch.context,
             write_vault_id: launch.write_vault_id.clone(),
             wrote_count: 0,
+            integrations,
         },
         mcp: LaunchMcp {
             connections,

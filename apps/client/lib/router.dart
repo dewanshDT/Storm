@@ -74,7 +74,12 @@ abstract final class Routes {
   static String browse(String vaultId) => '${vault(vaultId)}/browse';
   static String search(String vaultId) => '${vault(vaultId)}/search';
   static String tags(String vaultId) => '${vault(vaultId)}/tags';
-  static String note(String vaultId, String id) => '${vault(vaultId)}/note/$id';
+
+  /// [session] marks a note pushed from that agent session, which its back
+  /// link then names.
+  static String note(String vaultId, String id, {String? session}) =>
+      '${vault(vaultId)}/note/$id'
+      '${session == null ? '' : '?session=${Uri.encodeQueryComponent(session)}'}';
 
   /// `/v/<id>/browse/Daily/2026` — the folder path is the rest of the URL, so
   /// a breadcrumb is just the segments of the current location.
@@ -236,8 +241,10 @@ final routerProvider = Provider<GoRouter>((ref) {
               ),
               GoRoute(
                 path: '/v/:vault/note/:id',
-                builder: (_, state) =>
-                    NoteScreen(noteId: state.pathParameters['id']!),
+                builder: (_, state) => NoteScreen(
+                  noteId: state.pathParameters['id']!,
+                  fromSession: state.uri.queryParameters['session'],
+                ),
               ),
               GoRoute(
                 path: '/v/:vault/search',

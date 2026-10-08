@@ -133,7 +133,8 @@ class Harness:
         """Moves the server's agent state on (see agents.py)."""
         self.world = self.world or agents.AgentWorld(self)
         {"hosts": self.world.enroll_hosts,
-         "sessions": self.world.run_sessions}[name]()
+         "sessions": self.world.run_sessions,
+         "loop": self.world.run_loop}[name]()
         log(f"step {name} done")
 
     # ---- server -------------------------------------------------------

@@ -7,9 +7,12 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../agent/agent_state.dart' show agentOverviewProvider;
 import '../cache/cache_db.dart';
 import '../router.dart';
+import '../state/agent_writes.dart' show seenVersionsProvider;
 import '../state/app_state.dart';
+import '../state/note_session.dart' show NoteSession;
 import '../editor/frontmatter_edit.dart' as fme;
 import '../state/vault_config.dart';
 import '../state/wikilinks.dart';
@@ -34,9 +37,13 @@ import 'shell/vault_gate.dart';
 /// The route owns which note is open: navigating here loads it, so a deep
 /// link and a tap land in exactly the same state.
 class NoteScreen extends ConsumerStatefulWidget {
-  const NoteScreen({super.key, required this.noteId});
+  const NoteScreen({super.key, required this.noteId, this.fromSession});
 
   final String noteId;
+
+  /// The agent session this note was pushed from (phone), whose name the
+  /// back link carries.
+  final String? fromSession;
 
   @override
   ConsumerState<NoteScreen> createState() => _NoteScreenState();
@@ -47,6 +54,17 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  /// Whatever version of this note is on screen counts as seen here, which
+  /// is what clears its unseen dot.
+  void _markSeen(NoteSession s) {
+    if (s.noteId != widget.noteId || s.baseVersion <= 0) return;
+    final vaultId = ref.read(activeVaultProvider);
+    if (vaultId.isEmpty) return;
+    ref
+        .read(seenVersionsProvider.notifier)
+        .markSeen(vaultId, widget.noteId, s.baseVersion);
   }
 
   @override
@@ -244,6 +262,9 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     }
   }
 
+  String _sessionName(String id) =>
+      ref.watch(agentOverviewProvider).value?.byId(id)?.name ?? 'Session';
+
   /// Back to where the note was opened from, else its folder.
   void _leaveNote() {
     final folder = ref.read(noteSessionProvider).meta?.folder ?? '';
@@ -257,6 +278,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
   @override
   Widget build(BuildContext context) {
     ref.watch(syncListenerProvider);
+    ref.listen(noteSessionProvider, (_, s) => _markSeen(s));
     final session = ref.watch(noteSessionProvider);
     final pinned = ref.watch(pinnedNotesProvider).value ?? const <String>{};
     final isPinned = pinned.contains(widget.noteId);
@@ -299,13 +321,25 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
                     ? NoteCrumb(parts: [vaultName, ...folder.split('/')])
                     : Align(
                         alignment: Alignment.centerLeft,
-                        child: BackLink(
-                          label: folder.isEmpty
-                              ? vaultName
-                              : folder.split('/').last,
-                          onTap: _leaveNote,
-                        ),
+                        child: widget.fromSession != null
+                            ? BackLink(
+                                label: _sessionName(widget.fromSession!),
+                                onTap: () => leaveTo(
+                                  context,
+                                  Routes.agentSession(widget.fromSession!),
+                                ),
+                              )
+                            : BackLink(
+                                label: folder.isEmpty
+                                    ? vaultName
+                                    : folder.split('/').last,
+                                onTap: _leaveNote,
+                              ),
                       ),
+                provenance: NoteProvenance(
+                  vaultId: vaultId,
+                  noteId: widget.noteId,
+                ),
                 actions: [
                   StartSessionButton(compact: !wide),
                   if (wide)

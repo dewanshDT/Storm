@@ -301,6 +301,9 @@ args = ["-i"]
         sid = rec["id"]
         granted = sorted(g["slug"] for g in rec["mcp"]["connections"])
         check("the launch grants storm and the integration", granted == sorted(["storm", slug]), rec["mcp"])
+        launch_integrations = [{"id": cid, "slug": slug, "display_name": "Mock"}]
+        check("the session view names its integrations as launched, Storm not among them",
+              rec.get("integrations") == launch_integrations, rec)
         a = Agent("gw")
         env = wait(a.env, "the agent's record of its launch")
         argv = env["argv"]
@@ -618,6 +621,11 @@ args = ["-i"]
         answer = a.answer(slug, 60)
         check("the next call is refused", answer.get("error", {}).get("data", {}).get("storm_error") == "not_granted",
               answer)
+        _, view = call("GET", f"/v1/agent/sessions/{sid}", auth=owner)
+        check("and the session still shows it was granted at launch (history)",
+              view.get("integrations") == launch_integrations, view)
+        _, view = call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)
+        check("a shell session lists no integrations", view.get("integrations") == [], view)
 
         print("\n=== the credential boundary (C1, C2, C4, C5, C7) ===")
         spellings = [CANARY, f"Bearer {CANARY}"]
