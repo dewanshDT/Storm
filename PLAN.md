@@ -4482,6 +4482,73 @@ reported `not_installed`, and a CLI that did resolve would have run with a
 Removing either half fails its test. The real `/opt/homebrew/bin` case on a
 Mac is AC-M3.
 
+**83d. Slice 4: a host stops in order, an ending empties the whole
+session, and revocation is final.** *(2026-10-08; AM36, AM37)*
+
+**SIGTERM and SIGINT.** `serve` ends every session's process group: SIGHUP,
+then SIGKILL after the grace. It waits until each session is `ended`, bounded
+at 2×grace + 3 s (13 s, inside launchd's 20 s `ExitTimeOut`), and exits 0.
+- **Nothing is posted** from the first signal on: one flag, checked in
+  `post_for_response`.
+- **`sessions.json` keeps those sessions**, so the next `hello` reports them
+  `failed (host_restart)`. §13 is unchanged.
+
+**The kill reaches the session, not just the group.** A job-control shell
+(`zsh -l`, `bash -i`) puts `cmd &` in a process group of its own, which
+`kill(-pgid)` never reached.
+- **The gap.** A job that ignored SIGHUP survived End, on both platforms,
+  against §7.3. Found by the macOS acceptance harness's review (83g).
+- **The fix.** The SIGKILL step now also signals every process whose session
+  id is the agent's pid. `platform::session_members` lists them:
+  - **Linux:** `/proc/<pid>/stat` field 6, read after the last `)`;
+  - **macOS:** `proc_listallpids` + `getsid`.
+
+  Zombies are skipped.
+
+**`ended` means the session is empty.** Before the reader reports it,
+anything still in the session gets SIGHUP, then SIGKILL after the grace.
+Shutdown waits for `ended`, so it leaves nothing behind. Only a process that
+called `setsid` itself has left the session.
+
+**`--exclusive-account`** is passed by the systemd unit and the launchd plist.
+- **What it does:** `kill(-1)` SIGHUP, then SIGKILL after 0.5 s, at startup
+  and after a shutdown or revocation. That is the counterpart of systemd's
+  control-group kill. It also covers a host that was SIGKILLed or crashed,
+  which launchd's job-group kill does not reach.
+- **The guard:** it is refused as root and as any account but
+  `platform::SERVICE_ACCOUNT` (`getpwuid_r`), and the check runs before any
+  sweep can.
+- **Not tested:** no test runs the sweep, because a host's own agent session
+  may run the suite as the service account.
+
+**Enrollment announces first.** `host.json` is its last write: under launchd
+that file starts the host (AM35), and the host's sweep would end an `enroll`
+still running as the same account.
+
+**AM36.** A refused key renames `host.json` to `host.json.revoked` before
+exit 3, which is what stops launchd. After that, `serve` and `check` say the
+host was revoked, and `enroll` needs no `--force` and removes the marker.
+
+**Tests:**
+- **`tests/lifecycle.rs`** drives the real binary against a stand-in server
+  that proves its pinned key:
+  - SIGTERM and SIGINT exit 0;
+  - revocation exits 3 with the rename;
+  - enrollment announces before it writes.
+- **A host test** with a recording server: no ending is posted during
+  shutdown.
+- **`tests/cli.rs`:**
+  - a `set -m` job in its own group is gone after End;
+  - a detached job is gone before `ended`;
+  - `session_members` lists the leader and not the runtime.
+- **The plist** passes `--exclusive-account`.
+- **`agent_e2e.py`**, 85 checks, adds:
+  - **the SIGTERM case:** exit 0, a HUP-ignoring child gone, no ending
+    posted, `host_restart` after the restart;
+  - **the AM36 checks.**
+
+Every new test was mutation-checked (eight mutations, each caught).
+
 ---
 
 ## Data model

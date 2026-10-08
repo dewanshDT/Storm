@@ -113,6 +113,10 @@ pub fn plist(layout: &Layout, account: &str) -> String {
         path(&layout.state),
         string("--config"),
         path(&layout.config),
+        // The account runs nothing but this host: at start and after
+        // shutdown, every other process of it is ended (AM37). launchd kills
+        // only the job's own process group, and sessions have their own.
+        string("--exclusive-account"),
     ];
     let env = [
         ("HOME", layout.home.display().to_string()),
@@ -327,6 +331,19 @@ mod tests {
         assert!(p.contains(
             "<string>/Library/StormRuntime/bin/storm-runtime</string>\n    <string>serve</string>"
         ));
+    }
+
+    #[test]
+    fn the_daemon_sweeps_its_account_like_the_systemd_unit() {
+        // AM37: launchd kills only the job's process group, so the sweep is
+        // what leaves no survivor after a stop or a crash.
+        let p = plist(&Layout::standard(), "_stormruntime");
+        let args = &p[p.find("<key>ProgramArguments</key>").unwrap()..];
+        let args = &args[..args.find("</array>").unwrap()];
+        assert!(
+            args.contains("<string>--exclusive-account</string>"),
+            "{args}"
+        );
     }
 
     #[test]
