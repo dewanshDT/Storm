@@ -11,6 +11,7 @@ import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
 import '../ui/breakpoints.dart';
 import '../ui/markdown/storm_markdown_view.dart';
+import '../ui/note_header.dart' show DrawerToggle;
 import '../ui/panels.dart';
 import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
@@ -23,6 +24,7 @@ import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
+import 'session_inspector.dart';
 import 'terminal_surface.dart';
 
 /// One session at `/agents/s/:id` (handoff §3.6).
@@ -191,92 +193,97 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     String host,
   ) {
     final t = context.tokens;
+    final open =
+        ref.watch(sessionInspectorOpenProvider) ?? context.drawerOpensByDefault;
+    final terminal = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: c == null
+              ? const SizedBox.shrink()
+              : StormTerminalView(
+                  terminal: c.terminal,
+                  focusNode: _focus,
+                  autofocus: true,
+                  readOnly: s.ended,
+                  fontSize: t.codeSize,
+                  lineHeight: 1.7,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: t.sp * 1.25,
+                    vertical: t.sp * 1.5,
+                  ),
+                ),
+        ),
+        if (s.ended)
+          Container(
+            key: const Key('ended-footer'),
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 2.5,
+              vertical: t.sp * 1.25,
+            ),
+            decoration: BoxDecoration(
+              border: Border(
+                top: BorderSide(color: t.border, width: t.bw),
+              ),
+            ),
+            child: Text(
+              '${endedLine(s)} · scrollback kept until you dismiss it',
+              style: _mono(t, t.labelSize * 1.09),
+            ),
+          ),
+      ],
+    );
     return Scaffold(
       backgroundColor: t.bg,
       body: SafeArea(
         left: false,
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(
-              flex: 11,
-              child: DecoratedBox(
-                // Over the terminal, which paints its own background.
-                position: DecorationPosition.foreground,
-                decoration: BoxDecoration(
-                  border: Border(
-                    right: BorderSide(color: t.border, width: t.bw),
-                  ),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _header(context, s, host),
-                    if (_confirmEnd && !s.ended)
-                      Padding(
-                        padding: EdgeInsets.fromLTRB(
-                          t.sp * 2,
-                          t.sp * 1.5,
-                          t.sp * 2,
-                          0,
-                        ),
-                        child: InlineConfirm(
-                          key: const Key('end-confirm'),
-                          message:
-                              'End ${s.name}? The agent and everything it '
-                              'started are stopped on the host.',
-                          confirmLabel: 'End session',
-                          onConfirm: _ending ? null : () => _end(c),
-                          onCancel: () => setState(() => _confirmEnd = false),
-                        ),
-                      ),
-                    _Trouble(controller: c),
-                    Expanded(
-                      child: c == null
-                          ? const SizedBox.shrink()
-                          : StormTerminalView(
-                              terminal: c.terminal,
-                              focusNode: _focus,
-                              autofocus: true,
-                              readOnly: s.ended,
-                              fontSize: t.codeSize,
-                              lineHeight: 1.7,
-                              padding: EdgeInsets.symmetric(
-                                horizontal: t.sp * 2.5,
-                                vertical: t.sp * 2,
-                              ),
-                            ),
-                    ),
-                    if (s.ended)
-                      Container(
-                        key: const Key('ended-footer'),
-                        padding: EdgeInsets.symmetric(
-                          horizontal: t.sp * 2.5,
-                          vertical: t.sp * 1.25,
-                        ),
-                        decoration: BoxDecoration(
-                          border: Border(
-                            top: BorderSide(color: t.border, width: t.bw),
-                          ),
-                        ),
-                        child: Text(
-                          '${endedLine(s)} · scrollback kept until you '
-                          'dismiss it',
-                          style: _mono(t, t.labelSize * 1.09),
-                        ),
-                      ),
-                  ],
+            _header(context, s, host, inspectorOpen: open),
+            if (_confirmEnd && !s.ended)
+              Padding(
+                padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
+                child: InlineConfirm(
+                  key: const Key('end-confirm'),
+                  title: 'End ${s.name}',
+                  message:
+                      'The agent and everything it started are stopped on '
+                      'the host.',
+                  confirmLabel: 'End session',
+                  onConfirm: _ending ? null : () => _end(c),
+                  onCancel: () => setState(() => _confirmEnd = false),
                 ),
               ),
+            _Trouble(controller: c),
+            Expanded(
+              child: open
+                  ? LayoutBuilder(
+                      builder: (context, box) => Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(child: terminal),
+                          SessionInspector(
+                            available: box.maxWidth,
+                            child: _panel(context, s, host),
+                          ),
+                        ],
+                      ),
+                    )
+                  : terminal,
             ),
-            Expanded(flex: 10, child: _panel(context, s, host)),
           ],
         ),
       ),
     );
   }
 
-  Widget _header(BuildContext context, AgentSession s, String host) {
+  Widget _header(
+    BuildContext context,
+    AgentSession s,
+    String host, {
+    required bool inspectorOpen,
+  }) {
     final t = context.tokens;
     return Container(
       padding: EdgeInsets.symmetric(
@@ -293,23 +300,39 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         children: [
           Row(
             children: [
-              Flexible(
-                child: Text(
-                  s.name,
-                  key: const Key('session-name'),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.bodySize,
-                    fontWeight: FontWeight.w600,
-                    color: t.text,
-                  ),
+              // One flexible run, so the actions sit at the far edge rather
+              // than splitting the free space with the name.
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        s.name,
+                        key: const Key('session-name'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.bodySize,
+                          fontWeight: FontWeight.w600,
+                          color: t.text,
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: t.sp * 1.25),
+                    SessionStatusChip(status: s.status),
+                  ],
                 ),
               ),
-              SizedBox(width: t.sp * 1.25),
-              SessionStatusChip(status: s.status),
-              const Spacer(),
+              DrawerToggle(
+                key: const Key('inspector-toggle'),
+                tooltip: 'Details',
+                open: inspectorOpen,
+                onTap: () =>
+                    ref.read(sessionInspectorOpenProvider.notifier).state =
+                        !inspectorOpen,
+              ),
+              SizedBox(width: t.sp),
               if (!s.ended)
                 _HeaderButton(
                   key: const Key('end-session'),
@@ -358,7 +381,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ? _Quiet(
                 'Started without a note. Notes this session writes appear '
                 'under Wrote.',
-                padding: EdgeInsets.all(t.sp * 3.5),
+                padding: EdgeInsets.all(t.sp * 2),
               )
             : _NotePanel(
                 key: ValueKey('context-${s.context!.noteId}'),
@@ -380,7 +403,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               ),
       SessionTab.about => SingleChildScrollView(
         padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 3.5,
+          horizontal: t.sp * 2,
           vertical: t.sp * 2.75,
         ),
         child: _About(session: s, host: host),
@@ -401,20 +424,40 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 bottom: BorderSide(color: t.border, width: t.bw),
               ),
             ),
-            child: PanelTabs<SessionTab>(
-              tabs: [
-                (SessionTab.context, 'Context'),
-                (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
-                (SessionTab.about, 'About'),
+            child: Row(
+              children: [
+                Expanded(
+                  // Scrolls rather than overflowing at the inspector's
+                  // narrowest.
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: PanelTabs<SessionTab>(
+                      tabs: [
+                        (SessionTab.context, 'Context'),
+                        (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
+                        (SessionTab.about, 'About'),
+                      ],
+                      selected: tab,
+                      onSelected: (next) {
+                        if (next == tab) {
+                          setState(() => _wroteNote = null);
+                        } else {
+                          _pickTab(next);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                IconButton(
+                  key: const Key('inspector-close'),
+                  tooltip: 'Close details',
+                  icon: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () =>
+                      ref.read(sessionInspectorOpenProvider.notifier).state =
+                          false,
+                ),
               ],
-              selected: tab,
-              onSelected: (next) {
-                if (next == tab) {
-                  setState(() => _wroteNote = null);
-                } else {
-                  _pickTab(next);
-                }
-              },
             ),
           ),
           Expanded(child: body),
@@ -543,16 +586,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         fontSize: t.labelSize + 1,
                         lineHeight: 1.7,
                         padding: EdgeInsets.symmetric(
-                          horizontal: t.sp * 2,
-                          vertical: t.sp * 1.5,
+                          horizontal: t.sp * 1.25,
+                          vertical: t.sp,
                         ),
                       ),
               ),
             ),
+            // A keyboard accessory: there only while the software keyboard
+            // is, so a focused terminal with the keyboard down keeps the room.
             if (!s.ended && c != null)
-              _ExtraKeys(
-                terminal: c.terminal,
-                onDone: keyboard ? _focus.unfocus : null,
+              AnimatedSize(
+                duration: t.duration,
+                curve: Curves.easeOut,
+                alignment: Alignment.topCenter,
+                child: keyboard
+                    ? _ExtraKeys(terminal: c.terminal, onDone: _focus.unfocus)
+                    : const SafeArea(
+                        top: false,
+                        child: SizedBox(width: double.infinity),
+                      ),
               ),
             if (s.ended)
               Container(
@@ -914,12 +966,7 @@ class _NotePanel extends ConsumerWidget {
       color: t.accent,
     );
     return SingleChildScrollView(
-      padding: EdgeInsets.fromLTRB(
-        t.sp * 3.5,
-        t.sp * 2.75,
-        t.sp * 3.5,
-        t.sp * 5,
-      ),
+      padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 2.75, t.sp * 2, t.sp * 5),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -947,15 +994,22 @@ class _NotePanel extends ConsumerWidget {
                   style: _mono(t, t.labelSize * 1.09),
                 ),
               ),
-              Semantics(
-                link: true,
-                label: 'Open in Notes',
-                excludeSemantics: true,
-                onTap: open,
-                child: GestureDetector(
-                  key: const Key('open-in-notes'),
+              Flexible(
+                child: Semantics(
+                  link: true,
+                  label: 'Open in Notes',
+                  excludeSemantics: true,
                   onTap: open,
-                  child: Text('Open in Notes ›', style: accent),
+                  child: GestureDetector(
+                    key: const Key('open-in-notes'),
+                    onTap: open,
+                    child: Text(
+                      'Open in Notes ›',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: accent,
+                    ),
+                  ),
                 ),
               ),
             ],
@@ -1054,7 +1108,7 @@ class _WroteList extends ConsumerWidget {
       return _Quiet(
         _wroteEmpty(session),
         padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 3.5,
+          horizontal: t.sp * 2,
           vertical: t.sp * 3.5,
         ),
       );
@@ -1448,7 +1502,7 @@ class _ExtraKeys extends StatelessWidget {
   const _ExtraKeys({required this.terminal, required this.onDone});
 
   final StormTerminal terminal;
-  final VoidCallback? onDone;
+  final VoidCallback onDone;
 
   @override
   Widget build(BuildContext context) {
@@ -1463,7 +1517,6 @@ class _ExtraKeys extends StatelessWidget {
       ),
       child: SafeArea(
         top: false,
-        minimum: EdgeInsets.only(bottom: onDone == null ? t.sp * 2 : 0),
         child: SizedBox(
           height: t.sp * 6.5,
           // Armed modifiers light up, and go dark again when the next key
@@ -1521,22 +1574,19 @@ class _ExtraKeys extends StatelessWidget {
                     if (text != null && text.isNotEmpty) term.paste(text);
                   },
                 ),
-                if (onDone != null)
-                  TextButton(
-                    key: const Key('keys-done'),
-                    onPressed: onDone,
-                    child: Text(
-                      'Done',
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.codeSize,
-                        fontWeight: FontWeight.w600,
-                        color: t.accent,
-                      ),
+                TextButton(
+                  key: const Key('keys-done'),
+                  onPressed: onDone,
+                  child: Text(
+                    'Done',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      fontWeight: FontWeight.w600,
+                      color: t.accent,
                     ),
-                  )
-                else
-                  SizedBox(width: t.sp * 0.5),
+                  ),
+                ),
               ],
             ),
           ),
