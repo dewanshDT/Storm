@@ -347,96 +347,104 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
                 // centres anything — the prose sits 40px from the column's left
                 // edge. Centring reproduces that at 1200 and nowhere else: at
                 // 1700 it strands the text in the middle of an empty field.
-                child: Align(
-                  alignment: Alignment.topLeft,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: kEditorMeasure),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _headerRow(readModeEnabled: readModeEnabled),
-                        if (title != null)
-                          Padding(
-                            padding: EdgeInsets.only(top: t.sp * 2.75),
-                            child: Semantics(
-                              header: true,
-                              child: Text(
-                                title,
-                                key: const Key('note-title'),
-                                style: TextStyle(
-                                  fontFamily: settings.bodyFont.family,
-                                  fontSize: t.displaySize,
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.15,
-                                  color: t.text,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _headerRow(readModeEnabled: readModeEnabled),
+                    Align(
+                      alignment: Alignment.topLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          maxWidth: kEditorMeasure,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            if (title != null)
+                              Padding(
+                                padding: EdgeInsets.only(top: t.sp * 2.75),
+                                child: Semantics(
+                                  header: true,
+                                  child: Text(
+                                    title,
+                                    key: const Key('note-title'),
+                                    style: TextStyle(
+                                      fontFamily: settings.bodyFont.family,
+                                      fontSize: t.displaySize,
+                                      fontWeight: FontWeight.w600,
+                                      height: 1.15,
+                                      color: t.text,
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
-                        GestureDetector(
-                          key: const Key('note-actions'),
-                          onLongPress: widget.onActions,
-                          behavior: HitTestBehavior.opaque,
-                          child: Padding(
-                            padding: EdgeInsets.only(
-                              top: t.sp,
-                              bottom: t.sp * 2.25,
-                            ),
-                            child: _versionLine(session, settings),
-                          ),
-                        ),
-                        if (editing)
-                          StormEditorShortcuts(
-                            controller: _controller,
-                            child: TextField(
-                              // Named so tests can tell the prose apart from the
-                              // property inputs above it.
-                              key: const Key('note-body'),
-                              controller: _controller,
-                              focusNode: _focus,
-                              maxLines: null,
-                              cursorWidth: 2,
-                              keyboardType: TextInputType.multiline,
-                              textCapitalization: TextCapitalization.sentences,
-                              onTap: _onEditorTap,
-                              // Enter inside a list carries the list on.
-                              inputFormatters: const [
-                                ListContinuationFormatter(),
-                              ],
-                              contextMenuBuilder: _contextMenu,
-                              // Every border, not just `border`. The theme sets
-                              // enabledBorder and focusedBorder separately, and
-                              // clearing only `border` left a rounded outline drawn
-                              // around the whole note. `filled: false` for the same
-                              // reason: the theme fills every field with surface2,
-                              // which put the prose on a card of its own.
-                              decoration: const InputDecoration(
-                                border: InputBorder.none,
-                                enabledBorder: InputBorder.none,
-                                focusedBorder: InputBorder.none,
-                                disabledBorder: InputBorder.none,
-                                errorBorder: InputBorder.none,
-                                focusedErrorBorder: InputBorder.none,
-                                filled: false,
-                                contentPadding: EdgeInsets.zero,
-                                isDense: true,
+                            GestureDetector(
+                              key: const Key('note-actions'),
+                              onLongPress: widget.onActions,
+                              behavior: HitTestBehavior.opaque,
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  top: t.sp,
+                                  bottom: t.sp * 2.25,
+                                ),
+                                child: _versionLine(session, settings),
                               ),
                             ),
-                          )
-                        else
-                          StormMarkdownView(
-                            key: const Key('note-read'),
-                            markdown: session.body,
-                            onFollowLink: widget.onFollowLink,
-                            onOpenEdit: () => _setMode(NoteViewMode.edit),
-                          ),
-                        // Thumbnails only in Edit Mode: Read Mode renders images
-                        // inline, and a second strip under the document is noise.
-                        if (editing) AttachmentStrip(body: session.body),
-                        if (widget.footer != null) widget.footer!,
-                      ],
+                            if (editing)
+                              StormEditorShortcuts(
+                                controller: _controller,
+                                child: TextField(
+                                  // Named so tests can tell the prose apart from the
+                                  // property inputs above it.
+                                  key: const Key('note-body'),
+                                  controller: _controller,
+                                  focusNode: _focus,
+                                  maxLines: null,
+                                  cursorWidth: 2,
+                                  keyboardType: TextInputType.multiline,
+                                  textCapitalization:
+                                      TextCapitalization.sentences,
+                                  onTap: _onEditorTap,
+                                  // Enter inside a list carries the list on.
+                                  inputFormatters: const [
+                                    ListContinuationFormatter(),
+                                  ],
+                                  contextMenuBuilder: _contextMenu,
+                                  // Every border, not just `border`. The theme sets
+                                  // enabledBorder and focusedBorder separately, and
+                                  // clearing only `border` left a rounded outline drawn
+                                  // around the whole note. `filled: false` for the same
+                                  // reason: the theme fills every field with surface2,
+                                  // which put the prose on a card of its own.
+                                  decoration: const InputDecoration(
+                                    border: InputBorder.none,
+                                    enabledBorder: InputBorder.none,
+                                    focusedBorder: InputBorder.none,
+                                    disabledBorder: InputBorder.none,
+                                    errorBorder: InputBorder.none,
+                                    focusedErrorBorder: InputBorder.none,
+                                    filled: false,
+                                    contentPadding: EdgeInsets.zero,
+                                    isDense: true,
+                                  ),
+                                ),
+                              )
+                            else
+                              StormMarkdownView(
+                                key: const Key('note-read'),
+                                markdown: session.body,
+                                onFollowLink: widget.onFollowLink,
+                                onOpenEdit: () => _setMode(NoteViewMode.edit),
+                              ),
+                            // Thumbnails only in Edit Mode: Read Mode renders images
+                            // inline, and a second strip under the document is noise.
+                            if (editing) AttachmentStrip(body: session.body),
+                            if (widget.footer != null) widget.footer!,
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ),
