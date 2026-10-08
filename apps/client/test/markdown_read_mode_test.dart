@@ -146,7 +146,7 @@ void main() {
 
       expect(find.textContaining('Prose at the chosen size'), findsOneWidget);
       final selectable = tester
-          .widgetList<SelectableText>(find.byType(SelectableText))
+          .widgetList<Text>(find.byType(Text))
           .where(
             (s) =>
                 s.textSpan?.toPlainText().contains(
@@ -167,7 +167,7 @@ void main() {
     ) async {
       await pumpMarkdown(tester, '## Section\n\nProse.\n');
       TextStyle? styleOf(String text) => tester
-          .widgetList<SelectableText>(find.byType(SelectableText))
+          .widgetList<Text>(find.byType(Text))
           .firstWhere((s) => s.textSpan?.toPlainText() == text)
           .textSpan
           ?.style;
