@@ -15,7 +15,18 @@ compared one for one with the approved references in
 python3 docs/design/acceptance/storm-v2/harness/shoot.py --set current   # baseline/
 python3 docs/design/acceptance/storm-v2/harness/shoot.py --set v2        # the approved states
 python3 docs/design/acceptance/storm-v2/harness/shoot.py --set v2 --only desktop-08
+# slice 9: a preset, or other widths, into their own directory
+python3 docs/design/acceptance/storm-v2/harness/shoot.py --set v2 \
+    --only desktop-loop-0,desktop-01,phone-01 --preset storm-light --out …/presets/storm-light
+python3 docs/design/acceptance/storm-v2/harness/shoot.py --set v2 \
+    --only desktop-loop-0,desktop-01 --desktop-width 900 --phone-width 360 --out …/sweeps/d900-p360
 ```
+
+`--only` takes comma-separated name prefixes; `steps` always run, and the
+`loop` step needs `desktop-loop-0` (its session is launched in the UI), so
+keep that shot in any subset that reaches the loop shots. `--preset` writes
+the This device preset (`storm.theme`) into the page's storage and reloads,
+as a launch would read it.
 
 Needs `chromium` and Python 3 (standard library only). Ports: `HARNESS_PORT`
 (default 7481), `HARNESS_DEBUG_PORT` (9333). `--keep` keeps the temp state
@@ -74,6 +85,9 @@ the state recipe in `harness/shots.py`.
 | `phone-01-notes-vault-root.png`, `phone-03-note-start-session.png` | same names | 4 | captured 2026-10-08 |
 | `phone-10-settings-list.png`, `phone-11-settings-page-ai-access.png` | same names | 7 | captured 2026-10-08; deltas below |
 | `phone-04` … `phone-09` | same names | 6 | captured 2026-10-08; deltas below |
+| **every v2 shot above** | same names | 9 | **re-shot 2026-10-08 on `feat/v2-acceptance`** after the slice 9 polish (prose type, unseen baseline, phone-08's back link, Lucide pill, 20 phone inset, drawer default) |
+| `presets/storm-light/*`, `presets/slowflow-earth/*` | — (handoff §7.1 presets) | 9 | desktop-01, 04, 06, 08, 15, loop-0, loop-b; phone-01, 02, 10 in each light preset |
+| `sweeps/d900-p360/*`, `sweeps/d1100-p390/*`, `sweeps/d1600-p430/*` | — (resize sweep) | 9 | Notes (desktop-01), Agents (06), Settings (15), loop-0 at 900/1100/1600; phone-01, 05, 10 at 360/390/430 |
 
 Agent states are real server state, never client fixtures (`harness/agents.py`,
 slice 6). Shots in `shots.py` can carry a `step`, which moves the server on:
@@ -101,8 +115,14 @@ through the gateway. The loop shots are the result: unseen dots on BOARD
 and the new log note (the `log` folder opened by a tap), and BOARD's
 provenance link. The sessions step no longer launches `gateway-spec` itself.
 `--only desktop-loop` runs just the three, since steps always run. A tree
-row's accessible label is "Changed by an agent since you last opened it\n
-{name}" while it carries a dot, so the taps match `(^|\n)name$`.
+row's accessible label is "{name}\nChanged by an agent since you last opened
+it" while it carries a dot (slice 9: the name first), so the taps match
+`^name($|\n)`.
+
+**Unseen baseline (slice 9).** The harness device's first `agent-writes` load
+for `personal` happens at sign-in, before any agent wrote, so its baseline is
+empty and the loop's writes still dot BOARD and the log note. A device whose
+first look comes after the writes shows no dots for them, by design.
 
 ## Deliberate, documented deltas
 
@@ -122,10 +142,11 @@ prototype's illustrative coloured lines, §10 of the handoff).
   provenance link or unseen dots (slice 8); the search hint reads "Ctrl K"
   because headless Chromium reports Linux (⌘K on macOS); the drawer shows the
   existing `NoteProperties` rows (created/modified chips, the colour
-  swatches) rather than the prototype's simplified list; the note body keeps
-  the existing editor's size and the note's `color:` wash (Gateway spec is
-  sage); the tree sorts notes by name; the pill keeps the M14 solid glyphs;
-  phone insets stay at slice 3's 24 rather than 20.
+  swatches) rather than the prototype's simplified list; the note keeps its
+  `color:` wash (Gateway spec is sage); the tree sorts notes by name.
+  *Closed in slice 9:* the note body is now Newsreader ≈18 / 1.6 with a ≈22
+  H2, in `text` (§7.2, the prototype); the pill draws the prototype's Lucide
+  outlines; phone insets are 20.
 - **Settings (desktop-12…21, phone-10/11), slice 7.** Every value is the
   fixture server's real state, so the sample data differs: one signed-in
   web device (plus the harness's `e2e` device) instead of three; the key reads
@@ -139,7 +160,8 @@ prototype's illustrative coloured lines, §10 of the handoff).
   disabled with "Needs a newer server" until `GET /v1/config` returns
   `agent_writes`; Advanced › Versions shows the client only and About &
   health has no compatibility row until it returns `version`.
-- **Deliberate:** This device's Text size has − / + steppers and Note font
+- **Deliberate:** phone settings pages and the settings list now sit on the
+  shared 20 inset (slice 9), level with the bubbles. This device's Text size has − / + steppers and Note font
   opens a picker (the prototype's labels are static; the real controls stay);
   shortcuts read `Ctrl+` off macOS; a missing vault keeps **Remove**, the
   only way to clear one; Integrations keeps a ⋯ menu for Test, Replace token,
@@ -161,8 +183,11 @@ prototype's illustrative coloured lines, §10 of the handoff).
   overview's work cards are in newest-session order. The phone keeps the
   existing extra keys (⇧, ↑, ↓ besides the prototype's Esc Tab Ctrl ← →
   Paste). phone-08 is the note screen pushed over the session; its back link
-  now reads "‹ gateway-spec" (slice 8), cut to "‹ gatew…" because the phone
-  header also carries ⋯ and the properties button. The
+  reads "‹ gateway-spec" in full (slice 9): the phone header also carries ⋯
+  and the properties button, which the prototype does not draw, so when the
+  name and the controls do not fit on one line the controls move to a second
+  line rather than cutting the name. The corner bubbles stay (the prototype's
+  pushed note has none). The
   Context tab's body uses the note view's own size and colour.
 - **The loop (desktop-01, loop-a/b), slice 8.** Real state, so: BOARD is v2
   (desktop-01, edited by the `board` session) and v3 (loop-b, edited by
@@ -173,3 +198,36 @@ prototype's illustrative coloured lines, §10 of the handoff).
   matching the prototype and the references (the brief asked for RECENT too;
   the prototype wins). The drawer keeps the existing property rows, as in
   slice 4. The rail badge counts the harness's other live session too.
+- **Slice 9, accepted as they are (no change).** The folder tree orders
+  notes by name (the prototype hand-orders them); the launcher's Workspace
+  defaults to the runtime's first (by name); vaults are listed in the
+  server's order. Each is the real backend's order rather than sample data's.
+- **Slice 9, properties drawer default.** Rail 56 + sidebar 260 + drawer 280
+  leave the note pane `W − 596` between 900 and 1200 (sidebar and drawer are
+  at their floor there), so the prose column is `W − 676`: 224 at 900, 424 at
+  1100, 524 at 1200. Keeping it open only where the full 640 measure fits
+  would need 1316 px and would shut it in the 1280 reference shots, which draw
+  it open; so the drawer starts **open from the design frame (1200) up**,
+  where the prose is the prototype's own 524, and **shut below it**. The
+  toggle still opens it at any width and the choice sticks between notes.
+  `sweeps/d900-p360/desktop-01` and `sweeps/d1100-p390/desktop-01` show it
+  shut.
+- **Slice 9, preset pass.** Storm light and SlowFlow earth keep every
+  semantic: the provenance link and the unseen dot are `accent`, running dots
+  `accent`, failed `danger`, ended `text3`, and the rail's `danger` dot (the
+  offline `mac-mini` host). One finding, not changed: under SlowFlow earth the
+  accent is a low-chroma brown (oklch 0.40 0.06 55, the handoff's own value),
+  so a running dot and an ended (`text3`) dot are close
+  (`presets/slowflow-earth/desktop-06…`); the RUNNING / ENDED sections and the
+  status words carry the distinction.
+- **Slice 9, resize sweep.** No overflow at 900, 1100 or 1600, or at 360,
+  390 or 430: long names ellipsize (a work row's "gateway…" and a sidebar
+  meta's "complet…" at 900), the drawer starts shut below 1200, and at 1600
+  the side columns grow to their caps with the prose held at 640.
+- **Not run on this host:** Android back on a device or emulator (no Android
+  SDK, `adb` or emulator here; the back contract is widget-tested — see
+  `CHECKLIST.md`), and the plan's manual Claude Code / OpenCode start (the
+  CLIs are installed but would run on the operator's account; the scripted
+  agent exercises the same opening prompt and `session_context` path).
+
+The §11 checklist with evidence for every item is `CHECKLIST.md`.

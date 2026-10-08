@@ -221,7 +221,11 @@ From M9/M10 (`docs/storm-multi-vault.md`):
 - **Unseen is device-local and never stored on the server** (Storm v2,
   slice 8): the last version each device opened is in its prefs
   (`SeenVersions`), compared with the server's `agent-writes` map. A server
-  copy would clear a phone's dot because the laptop opened the note.
+  copy would clear a phone's dot because the laptop opened the note. A
+  device's first successful `agent-writes` load for a vault records a
+  `"<vault>/"` baseline marker and takes the versions it found as seen
+  (slice 9); markers are never evicted, or a long history would re-baseline
+  and hide real dots.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose
