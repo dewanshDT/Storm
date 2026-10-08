@@ -49,6 +49,23 @@ enum Command {
         /// The connection's slug.
         slug: String,
     },
+    /// Install this host as a system service, as root. macOS: creates the
+    /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
+    /// LaunchDaemon, which runs the host once it is enrolled. Re-run it to
+    /// upgrade. On Linux the package does this.
+    Install {
+        /// Who shares the workspace root with the host. Defaults to the user
+        /// who ran sudo.
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    /// Remove the system service `install` set up, as root. Workspaces are
+    /// always kept.
+    Uninstall {
+        /// Also remove the host's identity, state, logs, config and account.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
     Check {
@@ -94,6 +111,12 @@ async fn main() -> Result<()> {
                 std::process::exit(3);
             }
             Ok(())
+        }
+        Command::Install { operator } => {
+            storm_runtime::platform::install(&storm_runtime::platform::InstallOptions { operator })
+        }
+        Command::Uninstall { purge } => {
+            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions { purge })
         }
         Command::Check { state } => {
             let config = storm_runtime::identity::HostConfig::load(&state)?;

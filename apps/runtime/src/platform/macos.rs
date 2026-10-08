@@ -6,14 +6,16 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 pub const NAME: &str = "macos";
-pub const DEFAULT_STATE: &str = "/Library/StormRuntime/state";
-pub const DEFAULT_CONFIG: &str = "/Library/StormRuntime/runtime.toml";
+pub const DEFAULT_STATE: &str = super::launchd::STATE;
+pub const DEFAULT_CONFIG: &str = super::launchd::CONFIG;
 pub const SERVICE_ACCOUNT: &str = "_stormruntime";
 /// xnu's `ptcselect` reports a master writable while the slave's input
 /// queue is below `TTYHOG - 2`, which may be room for a single byte, and
 /// `ptcwrite` then sleeps until the whole write fits. One byte per wait
 /// never blocks.
 pub const PTY_WRITE_CHUNK: usize = 1;
+
+pub use super::macos_service::{install, uninstall};
 
 /// `select(2)`, not `poll(2)`: macOS's `poll` "does not support devices"
 /// (its man page, BUGS), and answers a PTY master with `POLLNVAL` at once. A

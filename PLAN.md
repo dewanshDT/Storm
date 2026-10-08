@@ -4395,6 +4395,59 @@ Then real-Mac acceptance, AC-M1–AC-M9.
 rather than `cfg`-selected modules); or `poll` is shown to support PTYs on
 every supported macOS (the split can go).
 
+**83b. Slice 2: `install` writes a LaunchDaemon that runs exactly while the
+host is enrolled.** *(2026-10-08)*
+
+**The layout and the plist are pure functions.** They live in
+`platform/launchd.rs`, compiled on every platform, so the Linux suite tests
+the plist too. A Python `plistlib` parse of the output gave exactly the
+intended dictionary. Executing them is `platform/macos_service.rs`. It is
+root only, idempotent, and calls every tool by absolute path, because it
+runs as root with the invoking user's `PATH`.
+
+**`sudo storm-runtime install [--operator <user>]`:**
+- **The account.** It creates, or brings back into shape, the hidden
+  `_stormruntime` user and group with `dscl`. The id is the first one free in
+  200–400, the shell `/usr/bin/false`, the password `*`, `IsHidden`, and the
+  home `state/home`. It refuses to continue if the account is in `admin` or
+  `wheel`.
+- **The directories.** Each is created with its mode and owner (AM33), and an
+  existing symlink is refused rather than followed.
+- **The workspace grants.** Two inheritable ACL entries go on the workspace
+  root, for the account and for the operator (`--operator`, else
+  `$SUDO_USER`). There is no `delete` on the root itself.
+- **The binary** is copied to `/Library/StormRuntime/bin`, `root:wheel
+  0755`, so only root can replace what launchd runs.
+- **The config** is written only when there is none.
+- **The plist** is written `root:wheel 0644`, then loaded with `bootout`
+  (if loaded) → `enable` → `bootstrap system`. Bootstrap is retried while a
+  bootout is still finishing.
+
+**The plist:**
+- `UserName` and `GroupName` are `_stormruntime`.
+- Explicit `HOME`, `PATH`, `SHELL=/bin/zsh` and `LANG`.
+- **`KeepAlive` is `PathState` on `state/host.json`, with no `RunAtLoad`.**
+  An unenrolled host never starts. Enrolling starts it, and a crash restarts
+  it. A revoked host, whose `host.json` AM36 renames, is not restarted.
+- `ProcessType Standard`, `Umask` 23 (= 0o027), `ExitTimeOut` 20, and logs to
+  `/Library/Logs/StormRuntime/storm-runtime.log`.
+
+**`uninstall [--purge]`** boots the job out and removes the plist and the
+binary. `--purge` also removes the state, logs, config and the account.
+Workspaces are never removed.
+
+**On Linux, both commands refuse** with a pointer to the package.
+
+**Verified here:**
+- plist tests: the account and environment, enrollment gating, never
+  `Background`, and well-formedness. They are mutation-checked: adding
+  `RunAtLoad` or `ProcessType Background` fails two tests.
+- the default config parses;
+- clippy `-D warnings` for `x86_64-linux` and for `aarch64-apple-darwin`.
+
+**Not verified here:** the `dscl`, `chmod +a` and `launchctl` calls
+themselves. They need a Mac, and they are AC-M1, AC-M2 and AC-M6.
+
 ---
 
 ## Data model
