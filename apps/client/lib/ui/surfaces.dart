@@ -98,17 +98,23 @@ Future<T?> showStormSheet<T>({
 
 /// The anchored menu the corner bubbles drop.
 class StormPopover extends StatelessWidget {
-  const StormPopover({super.key, required this.children, this.width});
+  const StormPopover({
+    super.key,
+    required this.children,
+    this.width,
+    this.padding,
+  });
 
   final List<Widget> children;
   final double? width;
+  final double? padding;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return Container(
       width: width,
-      padding: EdgeInsets.all(t.sp * 1.5),
+      padding: EdgeInsets.all(padding ?? t.sp * 1.5),
       decoration: BoxDecoration(
         color: t.surface2,
         borderRadius: BorderRadius.circular(t.rCard),

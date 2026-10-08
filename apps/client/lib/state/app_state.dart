@@ -963,6 +963,7 @@ final vaultFoldersProvider = Provider<List<String>>((ref) {
 final openNoteIdProvider = StateProvider<String?>((ref) => null);
 
 /// Whether the properties drawer is open beside the note, at desk width.
+/// Open by default, as the design draws it.
 ///
 /// A provider rather than the note screen's own state, which is where it
 /// started: opening a second note built a second `_NoteScreenState` and the
@@ -972,7 +973,7 @@ final openNoteIdProvider = StateProvider<String?>((ref) => null);
 /// Not read on a phone. There properties are a modal sheet, which has to be
 /// dismissed before anything else can be touched, so "is it open" is the
 /// navigator's question rather than ours.
-final propertiesOpenProvider = StateProvider<bool>((ref) => false);
+final propertiesOpenProvider = StateProvider<bool>((ref) => true);
 
 /// Whether the wide-layout sidebar is hidden (⌘\).
 ///

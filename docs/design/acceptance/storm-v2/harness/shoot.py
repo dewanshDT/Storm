@@ -284,7 +284,16 @@ class Harness:
     # ---- shots --------------------------------------------------------
 
     def shoot(self, shot):
+        switched = getattr(self, "current_viewport", None) != shot["viewport"]
         self.viewport(shot["viewport"])
+        if switched:
+            # A fresh load at the new size, as a device would be: flipping a
+            # live page between desktop and phone sometimes stalled Chromium.
+            self.page.call("Page.navigate", url=BASE + self.route(shot["route"]))
+            self.wait_app()
+            wait_for(lambda: self.location() not in ("/starting", "/login"), 30,
+                     "the app after reload")
+            self.settle(1.5)
         self.go(self.route(shot["route"]))
         for action in shot.get("actions", []):
             kind, arg = action
@@ -294,6 +303,9 @@ class Harness:
                 self.go(self.route(arg))
             elif kind == "wait":
                 time.sleep(arg)
+        if not any(kind == "tap" for kind, _ in shot.get("actions", [])):
+            # Park the pointer in a corner so no row is captured mid-hover.
+            self.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=1, y=1)
         self.settle(shot.get("settle", 1.5))
         png = self.page.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
         path = os.path.join(self.out, shot["name"] + ".png")
