@@ -67,10 +67,11 @@ the state recipe in `harness/shots.py`.
 | `desktop-06b-agents-first-session.png` | same name | 6 | — |
 | `desktop-06c-agents-no-host.png` | same name | 6 | — |
 | `desktop-07-session-running.png` … `desktop-11c-session-end-confirm.png` | same names | 6 | — |
-| `desktop-12-settings-this-device.png` … `desktop-21-settings-about-health.png` | same names | 7 | — |
+| `desktop-12-settings-this-device.png` … `desktop-21-settings-about-health.png` | same names | 7 | captured 2026-10-08 on `feat/v2-settings`; a key and a relay seeded through the API (`("api", …)` actions); deltas below |
 | `desktop-loop-a-unseen-dots.png`, `desktop-loop-b-edited-by-session.png` | same names | 8 | — |
 | `phone-02-place-picker.png` | same name | 3 (+4 for the root list, pill) | captured 2026-10-08; deltas below |
-| `phone-01`, `phone-03` … `phone-11` | same names | 4–8 | — |
+| `phone-10-settings-list.png`, `phone-11-settings-page-ai-access.png` | same names | 7 | captured 2026-10-08; deltas below |
+| `phone-01`, `phone-03` … `phone-09` | same names | 4–8 | — |
 
 Agent states need an enrolled host: from slice 5 the harness also starts
 `storm-runtime` with the `fake` provider (it exists for exactly this) and a
@@ -88,3 +89,23 @@ prototype's illustrative coloured lines, §10 of the handoff).
   "1 running" needs a live session, which the harness gains with slices 5/6.
 - **desktop-04:** the popover shows only the rows the fixture's real state
   produces — no hosts, no integrations, no version row until slice 5.
+- **Settings (desktop-12…21, phone-10/11), slice 7.** Every value is the
+  fixture server's real state, so the sample data differs: one signed-in
+  web device (plus the harness's `e2e` device) instead of three; the key reads
+  "never used" and has no `stk_••••3f9a` hint (`GET /v1/keys` carries no
+  prefix); the vaults are kit/personal/work under the temp root, with no
+  missing `archive` row (the missing-row drawing is covered by widget tests);
+  no integrations beyond Storm vaults, so no Integrations nav dot; no hosts
+  ("No hosts enrolled yet." / About & health "No hosts enrolled · Enroll");
+  address `127.0.0.1:7483`; Versions `1.0.0+1` (the local pubspec stamp).
+- **Awaiting slice 5:** "Allow writes when chosen at launch" is drawn off and
+  disabled with "Needs a newer server" until `GET /v1/config` returns
+  `agent_writes`; Advanced › Versions shows the client only and About &
+  health has no compatibility row until it returns `version`.
+- **Deliberate:** This device's Text size has − / + steppers and Note font
+  opens a picker (the prototype's labels are static; the real controls stay);
+  shortcuts read `Ctrl+` off macOS; a missing vault keeps **Remove**, the
+  only way to clear one; Integrations keeps a ⋯ menu for Test, Replace token,
+  Disable and Disconnect beside the row action; phone pages start below the
+  corner bubbles at slice 3's inset, so "‹ Settings" sits ~14px lower.
+

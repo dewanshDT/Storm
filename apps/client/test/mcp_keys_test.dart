@@ -11,7 +11,7 @@ import 'package:http/testing.dart';
 
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_api.dart';
-import 'package:storm/ui/mcp_keys_screen.dart';
+import 'package:storm/ui/settings/access_page.dart';
 
 /// A14, client side.
 ///

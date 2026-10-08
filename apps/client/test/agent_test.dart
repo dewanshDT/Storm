@@ -444,7 +444,16 @@ void main() {
           () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
         ),
       ],
-      child: MaterialApp(theme: StormTheme.light(), home: child),
+      // Desk width: Settings pages need no router there.
+      child: MaterialApp(
+        theme: StormTheme.light(),
+        home: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(size: const Size(1280, 800)),
+            child: Scaffold(body: child),
+          ),
+        ),
+      ),
     );
 
     setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -455,12 +464,14 @@ void main() {
       await tester.pumpWidget(app(const HostsScreen(), server()));
       await tester.pumpAndSettle();
       expect(find.text('build-vm'), findsOneWidget);
-      expect(find.text('Online'), findsOneWidget);
+      // Freeze §12.2: the row says the host's network policy applies.
       expect(
-        find.textContaining('Claude Code (not installed)'),
+        find.text(
+          'online now · Claude Code (not installed), Shell · '
+          'network: host policy',
+        ),
         findsOneWidget,
       );
-      expect(find.text("Network: inherits this host's policy"), findsOneWidget);
     });
 
     testWidgets('an enrollment string is shown once, with the command', (
@@ -471,7 +482,13 @@ void main() {
       await tester.tap(find.byKey(const Key('enroll-host')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('enrollment-string')), findsOneWidget);
-      expect(find.textContaining('storm-runtime enroll'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.textContaining('storm-runtime enroll'),
+        ),
+        findsOneWidget,
+      );
       await tester.tap(find.text('Done'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('enrollment-string')), findsNothing);

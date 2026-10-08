@@ -4022,6 +4022,31 @@ semantics container. 804 client tests; the back contract and health rows
 mutation-checked; desktop-04 and phone-02 captured. Gap until slice 4:
 cross-vault recents (they lived on the dashboard).
 
+**Slice 7 (Settings; `feat/v2-settings`):** the ten pages are built on real
+endpoints in `lib/ui/settings/` (`SettingsPage`: 680 column beside
+`SettingsNav` at ≥900, a pushed screen with "‹ Settings" and no AppBar
+below). This device keeps the real preset, text-size, note-font and Read-mode
+controls; Devices & access lists `GET /v1/auth/devices` (revoke =
+`DELETE /v1/auth/devices/{id}`, which also ends its sessions; this device
+signs out) and the access keys with the shown-once dialog; Vaults draws the
+tile, count and path, a missing vault greyed and still removable, and the
+tile opens `AccentPicker` (Q7, `setVaultAccent`); AI access puts the MCP
+switches and "Storm agents" on `/v1/config` + `/v1/config/mcp`, with
+"Allow writes when chosen at launch" wired **only when `GET /v1/config`
+returns `agent_writes`** (sent alone as `{agent_writes}`, slice 5's shape) and
+otherwise disabled, "Needs a newer server"; Integrations and Hosts are
+restyled with every flow unchanged (the FABs became buttons; Integrations
+keeps `/settings/integrations` and the orphan relay, and its nav item carries
+a danger dot from `integrationsAttentionProvider`); Storage, Connection
+(address, route, pinned-key fingerprint, relays on `PUT /v1/config/relays`,
+Disconnect with a confirm) and Advanced (MCP endpoint, versions, Re-pair →
+the pairing screen in a `rePair` mode that pops itself) are new; About &
+health is the shared health rows with actions plus a compatibility row
+(same major.minor) once the server reports `version`. Each page re-reads
+`/v1/config` when it opens. `server_settings_screen.dart`,
+`client_settings_screen.dart`, `mcp_keys_screen.dart`, `ClientSettingsBody`
+and `settingsLeading` are gone.
+
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
 

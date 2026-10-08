@@ -1,20 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../agent/hosts_screen.dart';
 import '../../agent/integrations_screen.dart';
 import '../../router.dart';
+import '../../state/app_state.dart' show serverConfigProvider;
+import '../../state/health.dart' show integrationsAttentionProvider;
 import '../breakpoints.dart';
-import '../client_settings_screen.dart';
 import '../controls.dart';
-import '../mcp_keys_screen.dart';
-import '../server_settings_screen.dart';
-import '../shell/activity_rail.dart' show HealthRows;
 import '../shell/sidebar_frame.dart';
 import '../shell/storm_scaffold.dart';
 import '../tokens.dart';
-import '../widgets.dart';
+import 'access_page.dart';
+import 'advanced_page.dart';
+import 'ai_page.dart';
+import 'connection_page.dart';
+import 'device_page.dart';
+import 'health_page.dart';
+import 'settings_widgets.dart';
+import 'storage_page.dart';
+import 'vaults_page.dart';
 
 /// One settings page (handoff §5.1). [storm] pages sit under the STORM label.
 class SettingsPageInfo {
@@ -40,27 +47,62 @@ const kSettingsPages = [
 
 bool isSettingsPage(String id) => kSettingsPages.any((p) => p.id == id);
 
-/// The page body for [id]. Until slice 7 rebuilds them, the Storm pages
-/// mount the existing screens.
-Widget settingsPageFor(String id) => switch (id) {
-  'device' => const ClientSettingsScreen(),
-  'access' => const McpKeysScreen(),
+Widget settingsPageFor(String id) =>
+    _FreshConfig(key: ValueKey(id), child: _pageFor(id));
+
+Widget _pageFor(String id) => switch (id) {
+  'access' => const AccessPage(),
+  'vaults' => const VaultsPage(),
+  'ai' => const AiPage(),
   'integrations' => const IntegrationsScreen(),
   'hosts' => const HostsScreen(),
-  'health' => const _HealthPage(),
-  _ => const ServerSettingsScreen(),
+  'storage' => const StoragePage(),
+  'connection' => const ConnectionPage(),
+  'advanced' => const AdvancedPage(),
+  'health' => const HealthPage(),
+  _ => const DevicePage(),
 };
 
-/// The back arrow a settings page shows: none at desk width, where the
-/// navigation is beside it; otherwise back to the list.
-Widget? settingsLeading(BuildContext context) => context.isExpanded
-    ? null
-    : IconButton(
-        icon: const Icon(LucideIcons.arrow_left),
-        tooltip: 'Settings',
-        onPressed: () =>
-            context.canPop() ? context.pop() : context.go(Routes.settings),
-      );
+/// Re-reads the server's settings each time a page opens: another device
+/// may have changed them since this one last asked.
+class _FreshConfig extends ConsumerStatefulWidget {
+  const _FreshConfig({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  ConsumerState<_FreshConfig> createState() => _FreshConfigState();
+}
+
+class _FreshConfigState extends ConsumerState<_FreshConfig> {
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(() {
+      if (mounted) ref.invalidate(serverConfigProvider);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// The danger dot beside Integrations while a connection needs attention.
+class _AttentionDot extends ConsumerWidget {
+  const _AttentionDot();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    if (!ref.watch(integrationsAttentionProvider)) return const SizedBox();
+    return Container(
+      key: const Key('integrations-attention'),
+      width: t.sp * 0.75,
+      height: t.sp * 0.75,
+      decoration: BoxDecoration(shape: BoxShape.circle, color: t.danger),
+    );
+  }
+}
 
 /// Settings navigation beside the page at desk width; on a phone the list
 /// and each page are separate screens.
@@ -116,13 +158,20 @@ class SettingsNav extends StatelessWidget {
               horizontal: t.sp * 1.25,
               vertical: t.sp * 0.875,
             ),
-            child: Text(
-              p.label,
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.codeSize,
-                color: on ? t.text : t.text2,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    p.label,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: on ? t.text : t.text2,
+                    ),
+                  ),
+                ),
+                if (p.id == 'integrations') const _AttentionDot(),
+              ],
             ),
           ),
         ),
@@ -150,7 +199,7 @@ class SettingsNav extends StatelessWidget {
           item(p),
         Padding(
           padding: EdgeInsets.fromLTRB(t.sp * 1.25, t.sp * 2, 0, t.sp * 0.75),
-          child: const SectionLabel('Storm'),
+          child: const GroupLabel('Storm', bottom: 0),
         ),
         for (final p in kSettingsPages.where((p) => p.storm)) item(p),
         SizedBox(height: t.sp * 2),
@@ -170,7 +219,15 @@ class SettingsListScreen extends StatelessWidget {
     Widget row(SettingsPageInfo p) => SettingsRow(
       key: Key('settings-row-${p.id}'),
       label: p.label,
-      trailing: Icon(LucideIcons.chevron_right, size: t.uiSize, color: t.text3),
+      large: true,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        spacing: t.sp,
+        children: [
+          if (p.id == 'integrations') const _AttentionDot(),
+          Icon(LucideIcons.chevron_right, size: t.uiSize, color: t.text3),
+        ],
+      ),
       onTap: () => context.push(Routes.settingsPage(p.id)),
     );
 
@@ -193,33 +250,10 @@ class SettingsListScreen extends StatelessWidget {
             (p) => !p.storm && p.id != 'health',
           ))
             row(p),
-          Padding(
-            padding: EdgeInsets.only(top: t.sp * 3, bottom: t.sp * 0.5),
-            child: const SectionLabel('Storm'),
-          ),
+          GroupLabel('Storm', top: t.sp * 3),
           for (final p in kSettingsPages.where((p) => p.storm)) row(p),
           row(kSettingsPages.last),
         ],
-      ),
-    );
-  }
-}
-
-class _HealthPage extends StatelessWidget {
-  const _HealthPage();
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Scaffold(
-      appBar: AppBar(
-        leading: settingsLeading(context),
-        automaticallyImplyLeading: false,
-        title: const Text('About & health'),
-      ),
-      body: ListView(
-        padding: EdgeInsets.all(t.cardPad),
-        children: const [HealthRows()],
       ),
     );
   }

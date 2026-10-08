@@ -171,6 +171,53 @@ class StormApi {
     );
   }
 
+  /// Sets whether agent sessions may write to their launch vault, leaving
+  /// both MCP switches as they are.
+  Future<void> setAgentWrites(bool on) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/mcp'),
+        headers: _headers,
+        body: jsonEncode({'agent_writes': on}),
+      ),
+    );
+  }
+
+  /// Replaces the configured relay list. The server refuses the whole list
+  /// on one bad URL.
+  Future<List<String>> setRelays(List<String> relays) async {
+    final json = _decode(
+      await _client.put(
+        _uri('/v1/config/relays'),
+        headers: _headers,
+        body: jsonEncode({'relays': relays}),
+      ),
+    );
+    return [for (final r in (json['relays'] as List? ?? const [])) r as String];
+  }
+
+  // ---- devices ----------------------------------------------------------
+
+  Future<List<PairedDevice>> devices() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/auth/devices'), headers: _headers),
+    );
+    return (json as List)
+        .map((e) => PairedDevice.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Revokes a device and every session it holds.
+  Future<void> revokeDevice(String id) async {
+    final r = await _client.delete(
+      _uri('/v1/auth/devices/${Uri.encodeComponent(id)}'),
+      headers: _headers,
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    }
+  }
+
   // ---- MCP keys (A14) ---------------------------------------------------
 
   /// Mints an MCP key. **The secret in the response is the only copy.**

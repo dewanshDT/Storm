@@ -33,6 +33,28 @@ V2 = [
          actions=[("tap", "^Status$")]),
     dict(name="phone-02-place-picker", viewport="phone", route=f"/v/{P}/browse",
          actions=[("tap", "^Places$")]),
+    # Slice 7: Settings. Seeded through the real API where a page needs state
+    # the fixture lacks (an access key, a relay).
+    dict(name="desktop-12-settings-this-device", viewport="desktop", route="/settings/device"),
+    dict(name="desktop-13-settings-devices-access", viewport="desktop", route="/settings/access",
+         actions=[("api", ("POST", "/v1/keys", {"name": "laptop-claude"})),
+                  ("go", "/settings/device"), ("go", "/settings/access")]),
+    dict(name="desktop-14-settings-vaults", viewport="desktop", route="/settings/vaults"),
+    dict(name="desktop-15-settings-ai-access", viewport="desktop", route="/settings/ai",
+         actions=[("api", ("PUT", "/v1/config/mcp", {"enabled": True, "writable": False})),
+                  ("go", "/settings/device"), ("go", "/settings/ai")]),
+    dict(name="desktop-16-settings-integrations", viewport="desktop",
+         route="/settings/integrations"),
+    dict(name="desktop-17-settings-hosts", viewport="desktop", route="/settings/hosts"),
+    dict(name="desktop-18-settings-storage", viewport="desktop", route="/settings/storage"),
+    dict(name="desktop-19-settings-connection", viewport="desktop", route="/settings/connection",
+         actions=[("api", ("PUT", "/v1/config/relays", {"relays": ["wss://relay.example.net"]})),
+                  ("go", "/settings/device"), ("go", "/settings/connection")]),
+    dict(name="desktop-20-settings-advanced", viewport="desktop", route="/settings/advanced"),
+    dict(name="desktop-21-settings-about-health", viewport="desktop", route="/settings/health"),
+    dict(name="phone-10-settings-list", viewport="phone", route="/settings"),
+    dict(name="phone-11-settings-page-ai-access", viewport="phone", route="/settings",
+         actions=[("tap", "^AI access$")]),
 ]
 
 DESIGN = [

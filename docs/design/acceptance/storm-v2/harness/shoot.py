@@ -294,6 +294,17 @@ class Harness:
                 self.go(self.route(arg))
             elif kind == "wait":
                 time.sleep(arg)
+            elif kind == "api":
+                # Seeds real server state (a key, a relay) through its API.
+                method, path, body = arg
+                status, _ = storm_auth._call(BASE, method, self.route(path), body=body,
+                                             auth=self.session)
+                if status >= 300:
+                    raise RuntimeError(f"seeding {method} {path} answered {status}")
+        # Park the pointer in a corner so no row is captured mid-hover.
+        vp = VIEWPORTS[shot["viewport"]]
+        self.page.call("Input.dispatchMouseEvent", type="mouseMoved",
+                       x=vp["width"] - 1, y=vp["height"] - 1)
         self.settle(shot.get("settle", 1.5))
         png = self.page.call("Page.captureScreenshot", format="png", captureBeyondViewport=False)
         path = os.path.join(self.out, shot["name"] + ".png")

@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
+import 'package:storm/ui/controls.dart';
 
 import 'shell_harness.dart';
 
-/// The MCP switch on the server settings screen.
+/// The MCP switches on Settings › AI access ("AI apps outside Storm").
 ///
 /// The thing worth testing here is not that a `Switch` renders. It is that the
 /// switch reflects and changes *the server's* state: MCP is a way into every
@@ -17,11 +18,9 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  final switchFinder = find.byType(SwitchListTile);
-  // The first switch is the endpoint, the second is write access.
-  Finder readSwitch() => switchFinder.at(0);
-  Finder writeSwitch() => switchFinder.at(1);
-  bool valueOf(WidgetTester t, Finder f) => t.widget<SwitchListTile>(f).value;
+  Finder readSwitch() => find.byKey(const Key('mcp-read'));
+  Finder writeSwitch() => find.byKey(const Key('mcp-write'));
+  bool valueOf(WidgetTester t, Finder f) => t.widget<StormToggle>(f).value;
 
   testWidgets('shows the server as off, and says what off means', (
     tester,
@@ -32,7 +31,10 @@ void main() {
 
     expect(serverOf(c).mcpEnabled, isFalse, reason: 'precondition');
     expect(valueOf(tester, readSwitch()), isFalse);
-    expect(find.textContaining('refuses every request'), findsOneWidget);
+    expect(
+      find.text('Serves your vaults to apps that hold an access key.'),
+      findsOneWidget,
+    );
     await disposeShell(tester, c);
   });
 
@@ -43,7 +45,6 @@ void main() {
     await openSettings(tester, c);
 
     expect(valueOf(tester, readSwitch()), isTrue);
-    expect(find.textContaining('Serving at /mcp'), findsOneWidget);
     await disposeShell(tester, c);
   });
 
@@ -126,7 +127,7 @@ void main() {
 
       expect(valueOf(tester, writeSwitch()), isFalse);
       expect(
-        tester.widget<SwitchListTile>(writeSwitch()).onChanged,
+        tester.widget<StormToggle>(writeSwitch()).onChanged,
         isNull,
         reason: 'write access without the endpoint means nothing',
       );
