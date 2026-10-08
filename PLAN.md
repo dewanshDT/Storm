@@ -4448,6 +4448,40 @@ Workspaces are never removed.
 **Not verified here:** the `dscl`, `chmod +a` and `launchctl` calls
 themselves. They need a Mac, and they are AC-M1, AC-M2 and AC-M6.
 
+**83c. Slice 3: one explicit `PATH` for finding an agent CLI and for
+running it (AM38).** *(2026-10-08)*
+
+**The problem.** Under launchd the host's `PATH` is bare
+(`/usr/bin:/bin:/usr/sbin:/sbin`). `claude` in `/opt/homebrew/bin` was
+reported `not_installed`, and a CLI that did resolve would have run with a
+`PATH` that could not find its own tools.
+
+**The fix:**
+- **`runtime.toml` gains an optional `path`** (a list of directories). Unset,
+  the platform decides:
+  - **macOS:** the host's own `PATH`, rooted at the account's `HOME`:
+    `$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
+    The plist sets the same string, from the same function.
+  - **Linux:** the unit's own `PATH`, unchanged (`platform::default_path()`
+    is `None`).
+- **Every `CliProvider` is built with that one `PATH`.** `available()`
+  resolves against it, and every session's environment carries it, set
+  after the provider's env file, so an env file cannot make "installed" and
+  "runs" disagree.
+- **`HOME` and `SHELL`** come from the service definition: on macOS the plist
+  sets `/Library/StormRuntime/state/home` and `/bin/zsh`. The shell provider
+  is still `$SHELL -l` (§9.2).
+
+**Tests**, both mutation-checked:
+- `agent_clis_are_found_on_the_configured_path_not_only_the_hosts`: a
+  `claude` and a custom CLI in a directory off the host's `PATH` are
+  available only through `path`.
+- `a_session_runs_with_the_path_its_cli_was_found_on`: the session sees the
+  configured `PATH` even when its env file says `/nowhere`.
+
+Removing either half fails its test. The real `/opt/homebrew/bin` case on a
+Mac is AC-M3.
+
 ---
 
 ## Data model

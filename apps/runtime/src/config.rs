@@ -33,6 +33,10 @@ pub struct RuntimeConfig {
     pub max_sessions: u32,
     #[serde(default = "default_scrollback")]
     pub scrollback_bytes: usize,
+    /// Where agent CLIs are looked for, and the `PATH` every session gets
+    /// (AM38). Omitted: the platform's default.
+    #[serde(default)]
+    pub path: Option<Vec<PathBuf>>,
     /// Storm data roots this host must never put a workspace in or around
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
@@ -58,6 +62,7 @@ impl Default for RuntimeConfig {
             providers: None,
             max_sessions: default_max_sessions(),
             scrollback_bytes: default_scrollback(),
+            path: None,
             forbidden_roots: default_forbidden(),
         }
     }
@@ -127,6 +132,18 @@ impl RuntimeConfig {
         Ok(())
     }
 
+    /// The one `PATH` availability resolves against and sessions run with
+    /// (AM38): `path` when set, else the platform's default. `None` keeps
+    /// the inherited one.
+    pub fn search_path(&self) -> Result<Option<OsString>> {
+        match &self.path {
+            Some(dirs) => Ok(Some(
+                std::env::join_paths(dirs).context("`path` in runtime.toml")?,
+            )),
+            None => Ok(crate::platform::default_path()),
+        }
+    }
+
     /// The `settings` of the `opencode` provider entry, as JSON.
     pub fn opencode_settings(&self) -> Option<serde_json::Value> {
         self.providers
@@ -140,11 +157,16 @@ impl RuntimeConfig {
 
     /// The providers this host offers, by id.
     pub fn providers(&self) -> Result<Vec<Arc<dyn Provider>>> {
+        let path = self.search_path()?;
+        let on_path = |p: CliProvider| match &path {
+            Some(path) => p.with_path(path.clone()),
+            None => p,
+        };
         let Some(entries) = &self.providers else {
             return Ok(vec![
-                Arc::new(CliProvider::claude_code()),
-                Arc::new(CliProvider::opencode()),
-                Arc::new(CliProvider::shell()),
+                Arc::new(on_path(CliProvider::claude_code())),
+                Arc::new(on_path(CliProvider::opencode())),
+                Arc::new(on_path(CliProvider::shell())),
             ]);
         };
         let mut out: Vec<Arc<dyn Provider>> = Vec::new();
@@ -161,6 +183,7 @@ impl RuntimeConfig {
                         (None, "shell") => CliProvider::shell(),
                         (None, other) => bail!("provider `{other}` needs a command"),
                     };
+                    let base = on_path(base);
                     Arc::new(match &entry.env_file {
                         Some(path) => base.with_env(read_env_file(path)?),
                         None => base,
@@ -302,6 +325,51 @@ mod tests {
             ..RuntimeConfig::default()
         };
         config.check_roots().unwrap();
+    }
+
+    /// An executable named `name` in `dir` that prints its PATH.
+    fn agent(dir: &Path, name: &str) {
+        let bin = dir.join(name);
+        std::fs::write(&bin, "#!/bin/sh\necho PATH=$PATH\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn agent_clis_are_found_on_the_configured_path_not_only_the_hosts() {
+        // AM38: under launchd the host's own PATH is bare, so `claude` in
+        // /opt/homebrew/bin was reported not installed. A configured `path`
+        // is where availability looks, for built-ins and custom providers.
+        let brew = tempfile::tempdir().unwrap();
+        agent(brew.path(), "claude");
+        agent(brew.path(), "storm-test-agent");
+        let text = format!(
+            "path = [{:?}, \"/usr/bin\", \"/bin\"]\n\
+             [[providers]]\nid = \"claude-code\"\n\
+             [[providers]]\nid = \"custom\"\ncommand = \"storm-test-agent\"\n",
+            brew.path()
+        );
+        let config: RuntimeConfig = toml::from_str(&text).unwrap();
+        let path = config.search_path().unwrap().unwrap();
+        assert_eq!(
+            path,
+            OsString::from(format!("{}:/usr/bin:/bin", brew.path().display()))
+        );
+        for p in config.providers().unwrap() {
+            assert_eq!(
+                p.available(),
+                crate::provider::Availability::Available,
+                "{} not found on {path:?}",
+                p.id().as_str()
+            );
+        }
+        // Without it, the same CLIs are not on the host's PATH.
+        let bare: RuntimeConfig =
+            toml::from_str("[[providers]]\nid = \"custom\"\ncommand = \"storm-test-agent\"\n")
+                .unwrap();
+        assert_eq!(
+            bare.providers().unwrap()[0].available(),
+            crate::provider::Availability::NotInstalled
+        );
     }
 
     #[test]

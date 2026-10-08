@@ -17,6 +17,21 @@ pub const PTY_WRITE_CHUNK: usize = 1;
 
 pub use super::macos_service::{install, uninstall};
 
+/// launchd's `PATH` is bare, so the host supplies AM38's, rooted at the
+/// account's `HOME` (which the plist sets).
+pub fn default_path() -> Option<std::ffi::OsString> {
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| {
+            super::launchd::Layout::standard()
+                .home
+                .display()
+                .to_string()
+        });
+    Some(super::launchd::path_for_home(&home).into())
+}
+
 /// `select(2)`, not `poll(2)`: macOS's `poll` "does not support devices"
 /// (its man page, BUGS), and answers a PTY master with `POLLNVAL` at once. A
 /// wait built on it never waits, and the write after it blocks for as long as

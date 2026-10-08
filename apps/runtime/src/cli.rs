@@ -53,6 +53,9 @@ pub struct CliProvider {
     command: OsString,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    /// The `PATH` it is looked for on and runs with (AM38). `None`: the
+    /// host's own.
+    path: Option<OsString>,
 }
 
 impl CliProvider {
@@ -66,7 +69,16 @@ impl CliProvider {
             command: command.into(),
             args: args.into_iter().map(Into::into).collect(),
             env: Vec::new(),
+            path: None,
         }
+    }
+
+    /// Looks the command up on `path`, and gives every session that `PATH`,
+    /// so "installed" and "runs" cannot disagree (AM38). It is set after a
+    /// provider env file, so an env file cannot make them disagree either.
+    pub fn with_path(mut self, path: impl Into<OsString>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 
     /// Variables added after the terminal's own, so a provider may override
@@ -127,7 +139,7 @@ impl Provider for CliProvider {
     }
 
     fn available(&self) -> Availability {
-        match pty::resolve(&self.command) {
+        match pty::resolve(&self.command, self.path.as_deref()) {
             Some(_) => Availability::Available,
             None => Availability::NotInstalled,
         }
@@ -138,7 +150,8 @@ impl Provider for CliProvider {
         spec: SessionSpec,
         events: Arc<dyn SessionEvents>,
     ) -> Result<Box<dyn ProviderSession>, StartError> {
-        let program = pty::resolve(&self.command).ok_or(StartError::NotAvailable)?;
+        let program =
+            pty::resolve(&self.command, self.path.as_deref()).ok_or(StartError::NotAvailable)?;
         let InteractionSpec::Terminal(size) = spec.interaction;
         let failed = |what: &str, e: io::Error| StartError::Failed(format!("{what}: {e}"));
 
@@ -151,6 +164,7 @@ impl Provider for CliProvider {
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
             .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .envs(self.path.iter().map(|p| ("PATH", p)))
             // The session's own values last (AM32): its MCP config must win
             // over anything a provider env file says.
             .envs(spec.launch.env.iter().map(|(k, v)| (k, v)));

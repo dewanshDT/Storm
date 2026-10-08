@@ -75,8 +75,9 @@ pub(crate) fn spawn(command: &mut Command, slave: &OwnedFd) -> io::Result<Child>
 }
 
 /// Resolves a command the way a shell would: as given when it contains a `/`,
-/// otherwise the first executable file of that name on `PATH`.
-pub(crate) fn resolve(command: &OsStr) -> Option<std::path::PathBuf> {
+/// otherwise the first executable file of that name on `path` (AM38), or on
+/// the host's own `PATH` when there is none.
+pub(crate) fn resolve(command: &OsStr, path: Option<&OsStr>) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let executable = |path: &std::path::Path| {
         std::fs::metadata(path)
@@ -87,7 +88,8 @@ pub(crate) fn resolve(command: &OsStr) -> Option<std::path::PathBuf> {
     if command.as_encoded_bytes().contains(&b'/') {
         return executable(as_path).then(|| as_path.to_path_buf());
     }
-    std::env::var_os("PATH")
+    path.map(OsStr::to_os_string)
+        .or_else(|| std::env::var_os("PATH"))
         .iter()
         .flat_map(std::env::split_paths)
         .map(|dir| dir.join(command))

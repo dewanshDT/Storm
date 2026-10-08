@@ -20,6 +20,11 @@ pub const CONFIG: &str = "/Library/StormRuntime/runtime.toml";
 /// system.
 pub const DEFAULT_PATH: &str = "$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// [`DEFAULT_PATH`] for an account whose home is `home`.
+pub fn path_for_home(home: &str) -> String {
+    DEFAULT_PATH.replace("$HOME", home)
+}
+
 /// The job's label, under the app's bundle-id prefix (`dev.storm`).
 pub const LABEL: &str = "dev.storm.runtime";
 
@@ -71,7 +76,7 @@ impl Layout {
     /// The `PATH` the daemon and its agents get when `runtime.toml` names
     /// none (AM38).
     pub fn default_path(&self) -> String {
-        DEFAULT_PATH.replace("$HOME", &self.home.display().to_string())
+        path_for_home(&self.home.display().to_string())
     }
 }
 
@@ -213,6 +218,13 @@ workspace_roots = ["{workspaces}"]
 max_sessions = 8
 scrollback_bytes = 4194304
 
+# Where agent CLIs are looked for, and the PATH every session gets (AM38).
+# Omit it for the default:
+#   {path}
+# A CLI must be executable by the host's account: a CLI inside a person's
+# home is out of its reach.
+# path = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+
 # Omit [[providers]] entirely to offer the three built-ins: claude-code (the
 # default), opencode and shell. Provider secrets go in an env file, mode 0600,
 # readable by the host's account, never here:
@@ -224,6 +236,7 @@ scrollback_bytes = 4194304
         config = layout.config.display(),
         workspaces = layout.workspaces.display(),
         state = layout.state.display(),
+        path = layout.default_path(),
     )
 }
 
@@ -336,6 +349,20 @@ mod tests {
     }
 
     #[test]
+    fn the_macos_default_path_starts_at_the_accounts_own_clis_then_homebrew() {
+        assert_eq!(
+            path_for_home("/h"),
+            "/h/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        // The plist's PATH and the host's default are the same string.
+        let l = Layout::standard();
+        assert_eq!(
+            l.default_path(),
+            path_for_home(&l.home.display().to_string())
+        );
+    }
+
+    #[test]
     fn the_daemon_is_never_throttled_as_background_work() {
         let p = plist(&Layout::standard(), "_stormruntime");
         assert_eq!(value_after(&p, "ProcessType"), "<string>Standard</string>");
@@ -362,5 +389,6 @@ mod tests {
         let text = default_config(&l);
         let config: crate::config::RuntimeConfig = toml::from_str(&text).expect("parses");
         assert_eq!(config.workspace_roots, vec![l.workspaces.clone()]);
+        assert!(config.path.is_none(), "the default PATH is the platform's");
     }
 }

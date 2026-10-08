@@ -40,6 +40,14 @@ pub const DEFAULT_CONFIG: &str = os::DEFAULT_CONFIG;
 /// The dedicated account the packaged service runs as (77e, AM34).
 pub const SERVICE_ACCOUNT: &str = os::SERVICE_ACCOUNT;
 
+/// The `PATH` agents get, and providers are looked for on, when
+/// `runtime.toml` names none (AM38). `None` keeps the inherited one: Linux,
+/// where systemd's is already fixed. macOS: launchd's is bare, so the host
+/// supplies its own, rooted at the account's `HOME`.
+pub fn default_path() -> Option<std::ffi::OsString> {
+    os::default_path()
+}
+
 /// `storm-runtime install` (AM35).
 #[derive(Debug, Default)]
 pub struct InstallOptions {
