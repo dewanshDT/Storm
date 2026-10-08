@@ -175,6 +175,11 @@ void main() {
       expect(body.fontFamily, StormTokens.serifFamily);
       expect(body.fontSize, closeTo(18, 0.2));
       expect(body.height, 1.6);
+      expect(
+        body.color,
+        StormTokens.from(StormPreset.stormDark).text,
+        reason: 'the v2 prototype draws prose in text',
+      );
       final h2 = styleOf('Section')!;
       expect(h2.fontSize, closeTo(22, 0.4));
       expect(h2.fontWeight, FontWeight.w600);

@@ -20,7 +20,7 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
     fontFamily: bodyFamily,
     fontSize: fontSize,
     height: StormTokens.proseLeading,
-    color: t.text2,
+    color: t.text,
   );
 
   TextStyle heading(double size, {FontWeight weight = FontWeight.w600}) =>
@@ -91,7 +91,7 @@ MarkdownStyleSheet stormMarkdownStyleSheet({
       border: Border.all(color: t.border, width: t.bw),
     ),
     listIndent: checkboxSide,
-    listBullet: body.copyWith(color: t.text2),
+    listBullet: body,
     listBulletPadding: const EdgeInsets.only(right: kStormMarkdownCheckboxGap),
     checkbox: body.copyWith(color: t.accent),
     // Inserted between *every* sibling, including list items. Prototype
