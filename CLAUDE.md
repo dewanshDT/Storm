@@ -226,6 +226,14 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   `"<vault>/"` baseline marker and takes the versions it found as seen
   (slice 9); markers are never evicted, or a long history would re-baseline
   and hide real dots.
+- **Prose is never `SelectableText` on the open note** (Storm v2). Flutter
+  web leaves a read-only text field's text out of the DOM, so the note body
+  vanished from screen readers; Read mode is plain text in a `SelectionArea`.
+  `test/semantics_test.dart` holds it, with the provenance link's own node.
+- **The terminal's theme is one instance per colour set** (Storm v2). xterm2
+  reports the colour scheme to the agent on every non-identical theme while
+  DEC 2031 is on; a report after the agent restored echo prints as
+  `^[[?997;1n` in the scrollback.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose

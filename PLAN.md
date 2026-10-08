@@ -58,7 +58,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · left: macOS acceptance, the journal grep on the real build, a release |
-| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **all slices built, awaiting merge** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · slices 0–3 (#95–#98 and the shell) · 4 Notes · 5 server agent capabilities · 6 Agents · 7 Settings · 8 the loop (#104) · **9 regression + acceptance** (`feat/v2-acceptance`): every suite green, handoff §11 43 of 44 ticked (`docs/design/acceptance/storm-v2/CHECKLIST.md`; Android back on a device not run) · stacked on `feat/v2-loop`, nothing merged to `staging` yet |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **all slices built, awaiting merge** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration design and acceptance harness in `docs/design/` · slices 0–3 (#95–#98 and the shell) · 4 Notes · 5 server agent capabilities · 6 Agents · 7 Settings · 8 the loop (#104) · **9 regression + acceptance** (`feat/v2-acceptance`): every suite green, handoff §11 43 of 44 ticked (`docs/design/acceptance/storm-v2/CHECKLIST.md`; Android back on a device not run) · real Claude Code run passed; its three findings fixed (`fix/v2-acceptance-findings`) · stacked on `feat/v2-loop`, nothing merged to `staging` yet |
 
 **Release state (2026-10-04).** **v0.3.1 is being cut** (decision 72's
 steps; this paragraph is the prep PR's): client-only fixes from the
@@ -4255,6 +4255,43 @@ running dot close to an ended one. `docs/storm-ui.md` rewritten for v2.
 on this host; the contract is widget-tested) and the plan's manual Claude
 Code / OpenCode start (installed, but it would run on the operator's
 account). `CHECKLIST.md` reproduces handoff §11 with evidence per item.
+
+**Real-run fixes (2026-10-08; `fix/v2-acceptance-findings`, stacked on
+slice 9):** the operator's real Claude Code run on `c63eacd` passed all eight
+checks and surfaced three implementation bugs, fixed before merge, with no
+design or contract change. **Compatibility:** release CI stamps the client and
+every crate from the tag, but a source build reported pubspec's `1.0.0`
+against the server crate's `0.1.0`, so every unreleased build read "may not be
+compatible". The pubspec placeholder is now `0.1.0+1`, the same major.minor as
+`apps/server/Cargo.toml`; `version_compat_test` fails if they drift, and the
+major.minor check itself is unchanged. **Accessibility (web):** Read mode drew
+every block as `SelectableText`, a read-only text field whose text Flutter web
+never writes into the DOM (`SemanticTextField` sets `aria-label` only), so the
+note body was absent from the accessibility tree. It is now plain text in a
+`SelectionArea`, pixel-identical in the acceptance set, with selection and
+links intact; links in prose became real links. The provenance link is its own
+semantics node (it had absorbed `v51 · Saved` into its label), the note title
+is a heading, and `SettingsRow` names a trailing `StormToggle` by the row's
+label with the sub-line as hint (AI access and This device). Verified in
+Chromium's own accessibility tree on the real build. **Terminal:** xterm2
+reports the colour scheme (`CSI ? 997 ; Ps n`) whenever `TerminalView` gets a
+theme that is not identical while the agent has DEC 2031 on, and
+`TerminalTheme` has no value equality, so every session-screen rebuild sent
+Claude Code a report. Claude Code restores echo about 0.25 s after `/exit` or
+End and exits about 0.5 s later; a report landing in that window is echoed by
+the PTY as `^[[?997;1n` (reproduced under a local PTY with 2.1.283). The theme
+is now one instance per colour set; a real theme change still reports. A
+theme switch in that half second can still echo once: that is the PTY's
+behaviour with any late input, left as is. **Kept as is:** About still lists
+a session's integrations as granted at launch after a disconnect (launch
+history; calls are refused `not_granted`). **Deployment:** a Runtime Host must
+run under its own OS account, never one that can reach the vaults
+(`deploy/README.md`); the real-run staging, one Unix user for everything,
+could edit vault files around Storm. Tests: client 926 (was 915); `make
+check`, `make test-live` and `make test-migration` unchanged otherwise; every
+fix mutation-checked; the v2 set re-shot from both builds, differing only in
+the compatibility row and health dot; the real Claude Code smoke re-run on
+`15bb470`, scrollback clean after End.
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
