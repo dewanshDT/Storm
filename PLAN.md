@@ -4817,6 +4817,14 @@ Fixed:
   `deploy/README.md`: the interactive login needs a login Keychain the
   hidden account does not have.
 
+**A review of the fixes** found that a start in flight across a reconnect
+was missing from `hello` (the server would mark it lost while it ran), and
+that concurrent starts could pass `max_sessions`. In-flight starts are now
+reported as `starting` and hold their slot; a duplicate Start is ignored. F1
+also ends a per-account daemon a session started on demand (tmux,
+ssh-agent) with that session: accepted, since nothing a session started
+outlives it.
+
 **Still open:** the Mac re-test of these fixes; an Intel Mac.
 
 ---
