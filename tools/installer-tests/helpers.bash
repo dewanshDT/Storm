@@ -128,8 +128,10 @@ install_fake() {
     macos-server)
       mkdir -p "$HOME/Library/Application Support/Storm/bin" "$HOME/Library/LaunchAgents" "$HOME/${2:-Storm}/state"
       cp "$FAKE_DIR/tools/storm-server" "$HOME/Library/Application Support/Storm/bin/storm-server"
-      printf '<dict>\n<key>STORM_STATE</key>\n<string>%s/state</string>\n</dict>\n' "$HOME/${2:-Storm}" \
-        >"$HOME/Library/LaunchAgents/dev.storm.server.plist"
+      printf '{\n  "data_root": "%s",\n  "state": "%s/state",\n  "host": "0.0.0.0",\n  "port": %s\n}\n' \
+        "$HOME/${2:-Storm}" "$HOME/${2:-Storm}" "${3:-8484}" \
+        >"$HOME/Library/Application Support/Storm/server.json"
+      : >"$HOME/Library/LaunchAgents/dev.storm.server.plist"
       ;;
     macos-runtime)
       mkdir -p "$STORM_TEST_SYSROOT/Library/StormRuntime/bin" "$STORM_TEST_SYSROOT/Library/StormRuntime/state"

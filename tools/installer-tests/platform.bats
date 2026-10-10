@@ -77,7 +77,7 @@ setup() {
   [ "$RT_STATE" = "$STORM_TEST_SYSROOT/Library/StormRuntime/state" ]
   [ "$RT_CONFIG" = "$STORM_TEST_SYSROOT/Library/StormRuntime/runtime.toml" ]
   [ "$SRV_INSTALLED_BIN" = "$HOME/Library/Application Support/Storm/bin/storm-server" ]
-  [ "$SRV_PLIST" = "$HOME/Library/LaunchAgents/dev.storm.server.plist" ]
+  [ "$SRV_RECORD" = "$HOME/Library/Application Support/Storm/server.json" ]
   [ "$DEFAULT_DATA" = "$HOME/Storm" ]
   [ "$LOG_FILE" = "$HOME/Library/Logs/Storm/install.log" ]
 }

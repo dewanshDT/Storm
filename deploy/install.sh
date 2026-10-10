@@ -343,7 +343,7 @@ set_paths() {
       RT_WORKSPACES="$RT_ROOT/workspaces"
       SRV_SUPPORT="$HOME/Library/Application Support/Storm"
       SRV_INSTALLED_BIN="$SRV_SUPPORT/bin/storm-server"
-      SRV_PLIST="$HOME/Library/LaunchAgents/dev.storm.server.plist"
+      SRV_RECORD="$SRV_SUPPORT/server.json"
       DEFAULT_DATA="$HOME/Storm"
       APP_DIR="$root/Applications"
       AGENT_BIN_DIRS="$root/opt/homebrew/bin $root/usr/local/bin"
@@ -1403,9 +1403,11 @@ linux_pkg_available() {
   return 0
 }
 
-macos_server_state_from_plist() {
-  [ -f "$SRV_PLIST" ] || return 1
-  awk '/<key>STORM_STATE<\/key>/ { getline; sub(/.*<string>/, ""); sub(/<\/string>.*/, ""); print; exit }' "$SRV_PLIST"
+# What `storm-server up` recorded on macOS (decision 84d): server.json beside
+# the installed binary, e.g. "data_root": "/Users/a/Storm", "port": 8484.
+macos_server_record() {
+  [ -f "$SRV_RECORD" ] || return 1
+  sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",]*\)\"\{0,1\}[[:space:]]*,\{0,1\}[[:space:]]*\$/\1/p" "$SRV_RECORD" | head -n 1
 }
 
 server_detect() {
@@ -1414,8 +1416,8 @@ server_detect() {
   case "$OS" in
     macos)
       [ -x "$SRV_INSTALLED_BIN" ] && SRV_INSTALLED=1
-      state=$(macos_server_state_from_plist 2>/dev/null) || state=""
-      [ -n "$state" ] && SRV_DATA=${state%/state}
+      SRV_DATA=$(macos_server_record data_root 2>/dev/null) || SRV_DATA=""
+      port=$(macos_server_record port 2>/dev/null) || port=""
       ;;
     linux)
       command -v storm-server >/dev/null 2>&1 && SRV_INSTALLED=1
