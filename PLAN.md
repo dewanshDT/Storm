@@ -5092,6 +5092,49 @@ A bare script must answer the terminal's device-attributes query, as the
 app's emulator does — without it Claude Code's parser swallowed the first
 arrow key.
 
+**86. System back on Android 16: every page claims it while it has
+somewhere to go.** *(2026-10-10, the operator's phone report)*
+
+**The report.** On the phone, back from a note left the app instead of
+going to its folder; back from a session left the app instead of going to
+the Agents list; and the places bubble's Agents opened the last session
+instead of the list.
+
+**The cause.** The app targets SDK 36 (Flutter 3.44's default), so Android
+16 runs **predictive back**: the platform asks the app *in advance* whether
+it handles back (`SystemNavigator.setFrameworkHandlesBack`), and closes the
+app when it says no. Flutter says yes only when a navigator can pop or its
+top route blocks the pop. Storm reaches most pages with `go`, so nothing can
+pop, and the Q2 logic in `AppShell`'s `BackButtonListener` — correct, and
+covered by `back_navigation_test` — was never asked. The tests drove
+`handlePopRoute` directly, which skips the platform's question. A second
+layer: when a `go` swaps one shell for another (Notes → a session), the
+outer navigator reports for its own top page *after* the leaf, so a leaf's
+claim alone loses.
+**The places bubble** went to the remembered Agents location, which after
+opening a session is that session — full screen on a phone.
+
+**The fix.**
+- `LogicalBack` (`app_shell.dart`): a `PopScope` that blocks the pop while
+  `logicalParent` has somewhere to go and the page was not pushed, and
+  goes there when the pop is attempted. Every signed-in leaf page and every
+  shell around them (`AppShell`, `VaultShell`, `AgentsShell`,
+  `SettingsShell`) is wrapped, so whichever navigator reports last says yes.
+  Pushed pages still pop; the vault root still says no, so back there
+  leaves the app as Q2 says.
+- The places bubble's Agents goes to `/agents`, the list where sessions are
+  and new ones start. The desk rail keeps the remembered location: its list
+  is always beside the session.
+- Test: `predictive_back_test.dart` records what the app tells the platform
+  (`setFrameworkHandlesBack`) under Android, then backs: a note opened with
+  `go` claims back and returns to its folder; a session claims back and
+  returns to the list, and the list to Notes; the bubble opens the list.
+  All three fail without the fix. Client 978.
+
+*Revisit if:* Flutter changes how predictive back is negotiated; Storm opts
+out of it with `enableOnBackInvokedCallback="false"` (which Android 16
+ignores at target 36 anyway).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
