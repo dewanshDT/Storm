@@ -165,6 +165,9 @@ impl Provider for CliProvider {
             .env("COLORTERM", "truecolor")
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .envs(self.path.iter().map(|p| ("PATH", p)))
+            // A login shell's profile may reorder PATH; this is what the
+            // managed `.zprofile` restores (F3).
+            .envs(self.path.iter().map(|p| (crate::platform::SESSION_PATH, p)))
             // The session's own values last (AM32): its MCP config must win
             // over anything a provider env file says.
             .envs(spec.launch.env.iter().map(|(k, v)| (k, v)));
