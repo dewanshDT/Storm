@@ -62,9 +62,13 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 
-**Release state (2026-10-10).** **v0.6.0 is being cut** (decision 72's
-steps; this paragraph is the prep PR's), at the operator's request after M24
-merged into `staging` (#120–#122, #128, #129). It carries **M24, the
+**Release state (2026-10-10).** **v0.6.1 is being cut** (decision 72's
+steps), at the operator's request after M24 merged into `staging` (#120–#122,
+#128, #129). **v0.6.0 was tagged (`2b0956c`, PR #133) but never published:**
+its new `server (macOS universal)` job ran `storm-server --version`, which the
+server's CLI did not accept, so `publish` and `apt` were skipped. v0.6.1 adds
+`--version` (which the installer's upgrade check also reads) and is otherwise
+v0.6.0. It carries **M24, the
 interactive installer** (decision 84): `curl -fsSL
 https://dewanshdt.github.io/Storm/install.sh | sh` installs any of the server,
 the Runtime Host, the app and phone pairing on Linux or macOS, sets up the
