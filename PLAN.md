@@ -60,31 +60,27 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
-| M24 | Interactive installer — one script for server, runtime, app and pairing | **in progress** | decision 84 · spec + plan in the vault (*Installer/*) · slices: server commands (#120), macOS server as a LaunchAgent (#121), release assets (#122), the script + its bats suite (#128), end-to-end CI and docs · left: merge, release, the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
+| M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 
-**Release state (2026-10-10).** **v0.5.0 is being cut** (decision 72's
-steps; this paragraph is the prep PR's), at the operator's request after the
-macOS Runtime Host stack (#110–#116) merged into `staging`. It carries **M23,
-macOS Runtime Hosts** (decisions 83–83i): `storm-runtime` as a launchd
-LaunchDaemon under the hidden `_stormruntime` account, the shared
-`/Library/StormRuntime/workspaces` root, the per-platform enroll sheet, the
-`storm-runtime-<v>-macos-universal.tar.gz` asset and the Homebrew formula —
-plus the fixes from the operator's manual Mac round (83i): a session's ending
-reaches what left it with `setsid` (F1, OpenCode's unauthenticated server), a
-hung start no longer blocks the host's link (B-0), hosts heartbeat and a
-silent one goes offline (B-1, needs this server), command and startup logging
-(B-2), the shell's `PATH` on macOS (F3), and client fixes (B-3/B-4/B-6/B-7,
-S1). **Upgrading prod:** `storm-server` 0.5.0 adds `/v1/runtime/heartbeat`
-and the silent-host reaper; 0.4.0 hosts never heartbeat and are never reaped,
-and 0.5.0 hosts ignore a 0.4.0 server's 404. No schema change. **v0.4.0** (PR
-#109, `018a063`, 2026-10-08) carried M21 (MCP Gateway) and M22 (Storm v2,
-`auth.db` v6) and **prod runs it** until the operator upgrades. **v0.3.1**
-(PR #75, `3829134`) carried client-only fixes for Agent Runtime V1;
-**v0.3.0** (PR #71, `df45838`) decisions 73–79 and the first `storm-runtime`
-`.deb`. v0.2.9 (PR #48, `f046eaf`) carried decisions 65–71; v0.2.8 (PR #37,
-2026-09-02) carried decisions 56–64. **Known issue (still open):** the web
-client can stay on the spinner after a correct password in Firefox-based
-browsers (vault: *Storm v2/Issue — Zen login hang*).
+**Release state (2026-10-10).** **v0.6.0 is being cut** (decision 72's
+steps; this paragraph is the prep PR's), at the operator's request after M24
+merged into `staging` (#120–#122, #128, #129). It carries **M24, the
+interactive installer** (decision 84): `curl -fsSL
+https://dewanshdt.github.io/Storm/install.sh | sh` installs any of the server,
+the Runtime Host, the app and phone pairing on Linux or macOS, sets up the
+account and enrolls the runtime (automatically beside its server, through
+`storm-server host-enrollment`); **the server on macOS** as a LaunchAgent
+running as the user with the notes in `~/Storm`
+(`storm-server-<v>-macos-universal.tar.gz`); `storm-server has-account`,
+`qr` and `uninstall`; `install.sh` attached to the release. **Upgrading
+prod:** nothing changes for a Linux server (no schema change); the old
+`curl … | sudo sh` still does the apt bootstrap. **v0.5.0** (PR #119,
+`39cf955`, 2026-10-10) carried M23, macOS Runtime Hosts; **v0.4.0** (PR #109,
+`018a063`) M21 + M22 (`auth.db` v6) and **prod runs it** until the operator
+upgrades. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8 (PR #37).
+**Known issue (still open):** the web client can stay on the spinner after a
+correct password in Firefox-based browsers (vault: *Storm v2/Issue — Zen
+login hang*).
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
