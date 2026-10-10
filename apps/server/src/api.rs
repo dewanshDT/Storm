@@ -340,6 +340,10 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(runtime_output),
         )
         .route("/v1/runtime/sessions/{id}/status", post(runtime_status))
+        .route(
+            "/v1/runtime/sessions/{id}/terminal/images/{image}",
+            get(runtime_image).post(runtime_image_staged),
+        )
         // The MCP Gateway (decision 81e): a session's bridge traffic, carried
         // by the host's existing token — no new credential (G-D3).
         .route(
@@ -440,6 +444,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(agent_terminal_stream),
         )
         .route("/v1/agent/sessions/{id}/terminal/input", post(agent_input))
+        .route(
+            "/v1/agent/sessions/{id}/terminal/images",
+            post(agent_image).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent::images::MAX_IMAGE_BYTES + 1,
+            )),
+        )
         .route(
             "/v1/agent/sessions/{id}/terminal/resize",
             post(agent_resize),
@@ -1708,6 +1718,58 @@ async fn agent_input(
     body: axum::body::Bytes,
 ) -> ApiResult<StatusCode> {
     crate::ops::session_input(&state, &id, &body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A pasted image: staged on the session's host, answered with its path
+/// (D15 AM46).
+async fn agent_image(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> ApiResult<Json<crate::agent::StagedImage>> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let staged = crate::ops::stage_image(&state, &id, content_type, body.to_vec()).await?;
+    Ok(Json(staged))
+}
+
+async fn runtime_image(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path((id, image)): Path<(String, String)>,
+) -> ApiResult<axum::response::Response> {
+    let bytes = crate::ops::runtime_image(&state, &auth.host.id, &id, &image)?;
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from(bytes.as_ref().clone()))
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct StagedReport {
+    #[serde(default)]
+    staged: Option<String>,
+    #[serde(default)]
+    failed: Option<String>,
+}
+
+async fn runtime_image_staged(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path((id, image)): Path<(String, String)>,
+    Json(report): Json<StagedReport>,
+) -> ApiResult<StatusCode> {
+    let outcome = match report {
+        StagedReport {
+            staged: Some(path), ..
+        } => Ok(path),
+        StagedReport { failed, .. } => Err(failed.unwrap_or_else(|| "no reason".into())),
+    };
+    crate::ops::runtime_image_staged(&state, &auth.host.id, &id, &image, outcome)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

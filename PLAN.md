@@ -4965,6 +4965,32 @@ with the agent's mark (AM44).** *(2026-10-10)*
   motion, faded ended tiles), model tests for `displayName` and the live
   merge; two list tests updated for the new sub-line. Client 965.
 
+**85e. Slice 5: an image is staged on the session's host (AM46).**
+*(2026-10-10)*
+- `POST /v1/agent/sessions/{id}/terminal/images`, raw bytes, up to 10 MiB
+  (the route's own body limit). The type is the bytes' (`agent/images.rs`
+  sniffs PNG, JPEG, GIF, WebP); a declared `image/*` type must agree, any
+  other declared type is ignored. 413 / 415 / 409 ended / 503 offline / 429
+  over 4 per session or 64 MiB in total / 504 after 30 s / 502 with the
+  host's reason.
+- The bytes stay in the manager's memory only while in flight. The host is
+  sent `terminal.image {session, image, size, blake3, ext}` — **BLAKE3, not
+  the spec's SHA-256**: both crates already depend on it — and pulls them
+  with `GET /v1/runtime/sessions/{id}/terminal/images/{image}`, which only
+  that session's host may read. It answers `POST` with `{"staged": path}` or
+  `{"failed": reason}`; the server accepts only an absolute, printable path.
+- The host runs it as its own task, like `refresh` (found by
+  `agent_e2e.py`: the generic path would have queued it), checks the id
+  (`img_` + alphanumerics, so nothing can leave the inbox), the size and the
+  hash, and writes `state/sessions/<ags>/inbox/<image>.<ext>` `0600` through
+  a temporary file and a rename, the directories `0700`. The inbox goes with
+  the session directory when the session ends.
+- Tests: `images.rs` (sniffing, limits), two manager tests (the round trip,
+  only the session's host can fetch, every refusal and the timeout), two
+  host tests (a private whole file; a damaged image reported, not staged; an
+  escaping id refused) and `agent_e2e.py`: a real stage with the file `0600`
+  in the inbox, 415, 413, and the inbox gone after the end (93 checks).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

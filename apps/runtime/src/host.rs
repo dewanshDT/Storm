@@ -53,6 +53,10 @@ use crate::terminal::{Title, TitleObserver};
 const SESSIONS_FILE: &str = "sessions.json";
 const BATCH: usize = 64 * 1024;
 const COALESCE: Duration = Duration::from_millis(20);
+/// Pasted images (D15 AM46): where they land, and the bounds on fetching one.
+const INBOX: &str = "inbox";
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(25);
 /// At most one title report per session per this long (D15 AM43).
 const TITLE_EVERY: Duration = Duration::from_secs(1);
 /// How long a provider may take to start a session. A start that has not
@@ -110,6 +114,15 @@ pub enum Command {
         connection: String,
         message: serde_json::Value,
     },
+    /// A pasted image to fetch and stage in the session's inbox (D15 AM46).
+    #[serde(rename = "terminal.image")]
+    TerminalImage {
+        session: String,
+        image: String,
+        size: u64,
+        blake3: String,
+        ext: String,
+    },
 }
 
 impl Command {
@@ -123,6 +136,7 @@ impl Command {
             Self::Replay { .. } => "terminal.replay",
             Self::Refresh => "refresh",
             Self::McpMessage { .. } => "mcp.message",
+            Self::TerminalImage { .. } => "terminal.image",
         }
     }
 
@@ -134,7 +148,8 @@ impl Command {
             | Self::Input { session, .. }
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
-            | Self::McpMessage { session, .. } => Some(session),
+            | Self::McpMessage { session, .. }
+            | Self::TerminalImage { session, .. } => Some(session),
             Self::Refresh => None,
         }
     }
@@ -631,7 +646,7 @@ impl Host {
                     host.starting.lock().unwrap().remove(&id);
                 });
             }
-            Command::Refresh => {
+            Command::Refresh | Command::TerminalImage { .. } => {
                 tokio::spawn(self.clone().handle(command));
             }
             command => {
@@ -675,6 +690,15 @@ impl Host {
                     .post("/v1/runtime/inventory", &self.capabilities())
                     .await;
             }
+            Command::TerminalImage {
+                session,
+                image,
+                size,
+                blake3,
+                ext,
+            } => {
+                tokio::spawn(self.stage_image(session, image, size, blake3, ext));
+            }
             command => self.handle_now(command),
         }
     }
@@ -684,7 +708,7 @@ impl Host {
     /// the session) runs on a blocking thread.
     fn handle_now(&self, command: Command) {
         match command {
-            Command::Start { .. } | Command::Refresh => {
+            Command::Start { .. } | Command::Refresh | Command::TerminalImage { .. } => {
                 debug_assert!(false, "{} handled inline", command.kind());
             }
             Command::McpMessage {
@@ -1063,6 +1087,83 @@ impl Host {
     }
 
     /// A session ended: its handle stops working and its directory goes.
+    /// Fetches a pasted image, checks it, and writes it into the session's
+    /// inbox; the server is told the path, or why not. Never retried.
+    async fn stage_image(
+        self: Arc<Self>,
+        session: String,
+        image: String,
+        size: u64,
+        hash: String,
+        ext: String,
+    ) {
+        let staged = self.fetch_image(&session, &image, size, &hash, &ext).await;
+        if let Err(e) = &staged {
+            tracing::warn!(%session, %image, error = %format!("{e:#}"), "image not staged");
+        }
+        let body = match staged {
+            Ok(path) => json!({ "staged": path }),
+            Err(e) => json!({ "failed": format!("{e:#}") }),
+        };
+        let _ = self
+            .post(
+                &format!("/v1/runtime/sessions/{session}/terminal/images/{image}"),
+                &body,
+            )
+            .await;
+    }
+
+    async fn fetch_image(
+        &self,
+        session: &str,
+        image: &str,
+        size: u64,
+        hash: &str,
+        ext: &str,
+    ) -> Result<String> {
+        let id_ok = image.strip_prefix("img_").is_some_and(|rest| {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+        });
+        if !id_ok || !matches!(ext, "png" | "jpg" | "gif" | "webp") {
+            bail!("not an image this host stages");
+        }
+        if self.session(session).is_none() {
+            bail!("no such session on this host");
+        }
+        if size > MAX_IMAGE_BYTES {
+            bail!("too large");
+        }
+        let token = self
+            .token
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("no token yet"))?;
+        let bytes = self
+            .client
+            .http()
+            .get(format!(
+                "{}/v1/runtime/sessions/{session}/terminal/images/{image}",
+                self.client.base()
+            ))
+            .bearer_auth(token)
+            .timeout(IMAGE_FETCH_TIMEOUT)
+            .send()
+            .await
+            .context("fetching the image")?
+            .error_for_status()
+            .context("the server refused the image")?
+            .bytes()
+            .await
+            .context("reading the image")?;
+        if bytes.len() as u64 != size || blake3::hash(&bytes).to_hex().as_str() != hash {
+            bail!("the image arrived damaged");
+        }
+        let inbox =
+            std::path::absolute(crate::mcp::session_dir(&self.state_dir, session).join(INBOX))?;
+        write_private(&inbox, &format!("{image}.{ext}"), &bytes)
+    }
+
     fn forget_mcp(&self, session: &str) {
         self.handles.forget_session(session);
         self.subscribers
@@ -1190,6 +1291,30 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
     }
 }
 
+/// Writes `name` into `dir` as `0600`, through a temporary file and a rename,
+/// with `dir` and its parent `0700`. Returns the file's path.
+fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    std::fs::create_dir_all(dir).context("creating the inbox")?;
+    for d in [dir.parent(), Some(dir)].into_iter().flatten() {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let tmp = dir.join(format!(".{name}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .context("creating the image file")?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    let path = dir.join(name);
+    std::fs::rename(&tmp, &path)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// A status body with the session's title and activity (D15 AM43). A null
 /// title changes nothing on the server; it keeps the last name it had.
 fn with_title(mut body: serde_json::Value, title: &Title) -> serde_json::Value {
@@ -1298,6 +1423,109 @@ mod tests {
 
     fn alive(pid: i32) -> bool {
         rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
+    }
+
+    #[test]
+    fn a_staged_image_is_private_and_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        let inbox = state.path().join("sessions/ags_X/inbox");
+        let path = write_private(&inbox, "img_A.png", b"\x89PNG").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(std::path::Path::new(&path)), 0o600);
+        assert_eq!(mode(&inbox), 0o700);
+        assert_eq!(mode(inbox.parent().unwrap()), 0o700);
+        let left: Vec<_> = std::fs::read_dir(&inbox).unwrap().collect();
+        assert_eq!(left.len(), 1, "no temporary file left");
+    }
+
+    /// D15 AM46: an image that does not match what the server announced is
+    /// not staged, and the server is told why.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_damaged_image_is_reported_not_staged() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\n[[providers]]\nid = \"shell\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"exec sleep 1000\"]\n",
+            roots.path().display().to_string(),
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        host.clone()
+            .handle(Command::Start {
+                session: "ags_IMG".into(),
+                workspace: "w".into(),
+                provider: "shell".into(),
+                interaction: Some("terminal".into()),
+                terminal: Size { cols: 80, rows: 24 },
+                mcp: Vec::new(),
+                context: false,
+            })
+            .await;
+        // The recording server answers every request with `{}`: two bytes
+        // that are not the image announced.
+        host.clone()
+            .handle(Command::TerminalImage {
+                session: "ags_IMG".into(),
+                image: "img_ABC".into(),
+                size: 4,
+                blake3: blake3::hash(b"\x89PNG").to_hex().to_string(),
+                ext: "png".into(),
+            })
+            .await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let report = loop {
+            let found = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(p, b)| {
+                    p.ends_with("/terminal/images/img_abc")
+                        && b.is_object()
+                        && !b.as_object().unwrap().is_empty()
+                })
+                .map(|(_, b)| b.clone());
+            if let Some(b) = found {
+                break b;
+            }
+            assert!(std::time::Instant::now() < deadline, "no report");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            report["failed"].as_str().unwrap().contains("damaged"),
+            "{report}"
+        );
+        assert!(
+            !crate::mcp::session_dir(state.path(), "ags_IMG")
+                .join(INBOX)
+                .join("img_ABC.png")
+                .exists()
+        );
+
+        // An id that could leave the inbox is refused before any fetch.
+        let err = host
+            .fetch_image("ags_IMG", "img_../../x", 4, "h", "png")
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not an image"), "{err}");
+        host.shutdown(Duration::from_millis(200)).await;
     }
 
     /// D15 AM43: the host reads the agent's title from its output and posts
