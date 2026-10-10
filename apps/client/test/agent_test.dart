@@ -120,8 +120,44 @@ void main() {
         session(status: 'failed', endReason: 'host_restart'),
       );
       expect(endedLine(failed), 'Failed · host restarted');
-      expect(sessionSub(failed), 'storm · Claude Code · failed');
+      expect(sessionSub(failed, 'build-vm'), 'build-vm · storm · failed');
     });
+
+    test(
+      'the agent\'s title names the session; the launch name is the fallback',
+      () {
+        final plain = AgentSession.fromJson({...session(), 'name': 'storm-1'});
+        expect(plain.displayName, 'storm-1');
+        final named = AgentSession.fromJson({
+          ...session(),
+          'name': 'storm-1',
+          'title': 'Fix the login',
+          'activity': 'working',
+        });
+        expect(named.displayName, 'Fix the login');
+        expect(named.working, isTrue);
+        expect(
+          sessionSpoken(named, 'build-vm'),
+          'Fix the login, Claude Code on build-vm, working',
+        );
+        // The stream's bare record brings the newest title and activity.
+        final live = AgentSession.fromJson({
+          ...session(),
+          'title': 'Fix the login redirect',
+          'activity': 'idle',
+        });
+        final merged = plain.withLive(live);
+        expect(merged.displayName, 'Fix the login redirect');
+        expect(merged.name, 'storm-1');
+        expect(merged.working, isFalse);
+        expect(
+          sessionSpoken(merged, 'build-vm'),
+          'Fix the login redirect, Claude Code on build-vm, running',
+        );
+        // A record without a title keeps the one already known.
+        expect(named.withLive(plain).displayName, 'Fix the login');
+      },
+    );
 
     test('a kit script in Wrote is a file under its path, not a note', () {
       final w = SessionWrite.fromJson({

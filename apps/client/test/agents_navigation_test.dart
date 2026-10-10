@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:storm/agent/agent_widgets.dart';
 import 'package:storm/router.dart';
 
 import 'agent_fakes.dart';
@@ -151,7 +152,8 @@ void main() {
         top(tester, find.text('RUNNING')),
         lessThan(top(tester, find.text('ENDED'))),
       );
-      expect(find.text('storm · Claude Code · completed'), findsOneWidget);
+      expect(find.textContaining(' · storm · completed'), findsOneWidget);
+      expect(find.byType(AgentMark), findsWidgets);
       expect(find.byKey(const Key('places-bubble')), findsOneWidget);
       expect(find.byKey(const Key('rail-agents')), findsNothing);
       expect(find.text('WORK'), findsNothing, reason: 'no grouping on a phone');

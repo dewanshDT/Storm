@@ -4982,6 +4982,29 @@ attachment; terminal values need to follow the person across devices.
   fake provider's echo reaches the stream as a status and outlives the end):
   88 checks.
 
+**85d. Slice 4: every surface names a session by its agent, and rows lead
+with the agent's mark (AM44).** *(2026-10-10)*
+- `AgentSession` gains `title`, `activity` and `displayName` (`title`, else
+  the launch name); the stream's bare record brings both, and a record
+  without a title keeps the one known. Sidebar, phone list, overview rows,
+  the session header, the end confirmation and a note's "from session" link
+  all use `displayName`. The launch `name` stays the handle.
+- `AgentMark` (`agent_widgets.dart`): the agent's real mark on a `surface2`
+  tile — Claude's starburst in `#D97757`, OpenCode's mark in `text` (its
+  brand black vanishes on dark), Lucide `square_terminal` for the shell,
+  `bot` otherwise — from Simple Icons 16.34.0 (CC0), drawn with
+  `flutter_svg`; source noted in `assets/agents/README.md`. The badge:
+  accent and pulsing while working (still under reduced motion), text3 while
+  starting, amber while unknown, danger when failed; an ended tile at 50%.
+- Rows read `host · workspace · age`; the overview's grouped rows, already
+  under "workspace on host", read just the age. Rows are announced as "Fix
+  the login, Claude Code on build-vm, working".
+- The harness's scripted agent takes `{"title": …}`, and its sessions now
+  name themselves as Claude Code does, so the shots show names and badges.
+- Tests: `agent_mark_test.dart` (marks, badge colours, pulse, reduced
+  motion, faded ended tiles), model tests for `displayName` and the live
+  merge; two list tests updated for the new sub-line. Client 965.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

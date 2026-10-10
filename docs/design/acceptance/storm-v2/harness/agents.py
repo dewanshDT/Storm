@@ -113,6 +113,10 @@ class Agent:
         self._drop({"say": text})
         time.sleep(0.2)
 
+    def title(self, text):
+        self._drop({"title": text})
+        time.sleep(0.2)
+
     def exit(self, code=0):
         self._drop({"exit": code})
 
@@ -216,6 +220,7 @@ class AgentWorld:
 
         # lint-fix: on mac-mini, which restarts under it and is then stopped.
         rec, a = self.launch(mac, "storm", "claude-code", "lint-fix")
+        a.title("◐ Fix the clippy warnings")
         a.say("› running clippy…")
         mac.stop(signal.SIGKILL)
         mac.start()
@@ -227,6 +232,7 @@ class AgentWorld:
         rec, a = self.launch(build, "storm", "claude-code", "test-sweep",
                              context=board, write_vault="personal")
         a.initialize()
+        a.title("◐ Sweep the flaky tests")
         a.tool("session_context")
         a.say("› read personal/projects/storm/BOARD")
         vault, n = self.note(board)
@@ -235,6 +241,7 @@ class AgentWorld:
                                    "- Relay settings screen",
                                    "- Relay settings screen\n- Flaky sync test")})
         a.say("› updated BOARD\n✓ done")
+        a.title("✳ Sweep the flaky tests")
         time.sleep(0.5)
         a.exit(0)
         wait(lambda: self.session(rec["id"])["status"] == "completed", 30, "test-sweep completed")
@@ -261,6 +268,7 @@ class AgentWorld:
         host = next(h for h in self.hosts.values() if h.id == rec["host_id"])
         a = Agent(host, rec["workspace"], rec["id"])
         a.initialize()
+        a.title("◐ Move gateway acceptance to Done")
         context = a.tool("session_context")
         if "Storm holds third-party MCP credentials" not in context.get("content", ""):
             raise RuntimeError(f"session_context: {context}")
@@ -273,4 +281,4 @@ class AgentWorld:
         made = a.tool("create_note", {"vault": vault, "path": "projects/storm/log/2026-10-08.md",
                                       "content": "# 2026-10-08\n\n- Moved gateway acceptance to Done.\n"})
         self.h.ids["note:personal/projects/storm/log/2026-10-08.md"] = made["note"]["id"]
-        a.say("› created personal/projects/storm/log/2026-10-08\n› waiting for input")
+        a.say("› created personal/projects/storm/log/2026-10-08\n› checking the release notes…")

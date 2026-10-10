@@ -10,6 +10,8 @@ into `inbox-<session>/` (`NNNNN.json`), in order:
 - `{"slug": …, "message": …}` — send an MCP message to that bridge; every
   line a bridge answers is appended to `transcript-<session>-<slug>.jsonl`;
 - `{"say": "…"}` — print a line to its terminal: what it just did;
+- `{"title": "…"}` — set its terminal title (OSC 0), as Claude Code names a
+  conversation and marks it working (`◐`) or idle (`✳`);
 - `{"exit": 0}` — leave, with that status.
 
 Its writes are real calls through the gateway, so Wrote rows, provenance
@@ -93,6 +95,10 @@ def main():
                 sys.stdout.write("\r\x1b[K")
                 sys.stdout.flush()
                 sys.exit(item["exit"])
+            if "title" in item:
+                sys.stdout.write(f"\x1b]0;{item['title']}\x07")
+                sys.stdout.flush()
+                continue
             if "say" in item:
                 sys.stdout.write("\r\x1b[K")
                 for line in item["say"].split("\n"):

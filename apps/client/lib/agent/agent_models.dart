@@ -141,6 +141,8 @@ class AgentSession {
     this.wroteCount = 0,
     this.integrations,
     this.launchNotice,
+    this.title,
+    this.activity,
   }) : name = name ?? workspace;
 
   final String id;
@@ -163,6 +165,18 @@ class AgentSession {
 
   /// Assigned by the server (Q12), so it is the same on every device.
   final String name;
+
+  /// The agent's own name for the session, from its terminal title (D15
+  /// AM42); kept after it ends.
+  final String? title;
+
+  /// `working` or `idle` while running, when the agent says.
+  final String? activity;
+
+  /// What every surface calls the session.
+  String get displayName => title ?? name;
+
+  bool get working => activity == 'working';
   final SessionContext? context;
 
   /// The one vault it may write to; null is read only.
@@ -230,6 +244,8 @@ class AgentSession {
           writeVaultId: writeVaultId,
           wroteCount: wroteCount,
           integrations: integrations,
+          title: live.title ?? title,
+          activity: live.activity,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -264,6 +280,8 @@ class AgentSession {
           ]
         : null,
     launchNotice: (j['mcp'] as Map?)?['notice'] as String?,
+    title: j['title'] as String?,
+    activity: j['activity'] as String?,
   );
 }
 

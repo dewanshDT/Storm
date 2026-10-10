@@ -65,6 +65,7 @@ dependencies:
   # Web-only, behind a conditional import, so native builds never see it.
   web: ^1.1.1
   xterm2: ^5.2.0
+  flutter_svg: ^2.3.0
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.
@@ -168,6 +169,7 @@ flutter:
   # enough for Image.asset to find it at runtime.
   assets:
     - assets/icon/storm_icon_full.png
+    - assets/agents/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
