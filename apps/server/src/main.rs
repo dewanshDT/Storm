@@ -33,6 +33,7 @@ mod frontmatter;
 mod gateway;
 mod index;
 mod install;
+mod install_macos;
 mod kit;
 mod mcp;
 mod merge;
@@ -67,12 +68,17 @@ struct Cli {
 enum Commands {
     /// Run the sync server (what systemd starts).
     Serve(ServeArgs),
-    /// Write config, enable the systemd unit, and start it.
+    /// Install and start the server as a service. Linux: write the env file
+    /// and enable the systemd unit (as root). macOS: install a LaunchAgent
+    /// that runs as you, with the notes in ~/Storm (decision 84d; not root).
     Up(UpArgs),
-    /// Stop and disable the systemd unit.
+    /// Stop the service (and keep it from starting again).
     Down,
-    /// Show unit state and a local health probe.
+    /// Show the service's state and a local health probe.
     Status,
+    /// macOS: stop the LaunchAgent and remove what `up` installed, keeping
+    /// the notes. Linux: the package owns the install (`apt remove`).
+    Uninstall,
     /// Report what an import would change, then exit without writing.
     DryRun(VaultArgs),
     /// Set the account's password — the recovery path when it is forgotten
@@ -133,12 +139,13 @@ enum Commands {
 
 #[derive(clap::Args, Debug)]
 struct UpArgs {
-    /// Directory for vaults/, state/, and backups/ (default /srv/storm).
+    /// Directory for vaults/, state/, and backups/ (default /srv/storm on
+    /// Linux, ~/Storm on macOS).
     ///
     /// Ignored for a path that `--vault-root` / `--state` override individually —
     /// needed when vaults and state already live in different places.
-    #[arg(long, default_value = "/srv/storm")]
-    data_root: PathBuf,
+    #[arg(long)]
+    data_root: Option<PathBuf>,
 
     /// Override the storage root (default: `<data-root>/vaults`).
     #[arg(long)]
@@ -154,9 +161,10 @@ struct UpArgs {
     #[arg(long, default_value_t = 8484)]
     port: u16,
 
-    /// Built Flutter web client directory (package default).
-    #[arg(long, default_value = "/usr/share/storm/web")]
-    web: PathBuf,
+    /// Built Flutter web client directory (Linux: the package's
+    /// /usr/share/storm/web; macOS: the `web/` beside this binary).
+    #[arg(long)]
+    web: Option<PathBuf>,
 }
 
 /// **There is deliberately no `--password` flag anywhere.** A password in an
@@ -1385,25 +1393,45 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Serve(args) => run_serve(args).await,
+        Commands::Up(args) if cfg!(target_os = "macos") => {
+            install_macos::up(install_macos::UpOptions {
+                data_root: args.data_root,
+                vault_root: args.vault_root,
+                state: args.state,
+                host: Some(args.host),
+                port: Some(args.port),
+                web: args.web,
+            })
+        }
+        Commands::Down if cfg!(target_os = "macos") => install_macos::down(),
+        Commands::Status if cfg!(target_os = "macos") => install_macos::status(),
+        Commands::Uninstall if cfg!(target_os = "macos") => install_macos::uninstall(),
+        Commands::Uninstall => bail!(
+            "on Linux the package owns the install: `sudo apt remove storm-server` \
+             (your vaults and state are kept)"
+        ),
         Commands::Up(args) => {
-            let vault_root = args
-                .vault_root
-                .unwrap_or_else(|| args.data_root.join("vaults"));
-            let state = args.state.unwrap_or_else(|| args.data_root.join("state"));
-            let backups = args.data_root.join("backups");
+            let data_root = args
+                .data_root
+                .unwrap_or_else(|| PathBuf::from("/srv/storm"));
+            let vault_root = args.vault_root.unwrap_or_else(|| data_root.join("vaults"));
+            let state = args.state.unwrap_or_else(|| data_root.join("state"));
+            let backups = data_root.join("backups");
             // ReadWritePaths must cover every path the service writes. When
             // vaults and state are split (NAS vaults + local state), widen to
             // both parents via the data-root drop-in's primary path plus an
             // extra line — `up` passes the data_root for the drop-in and the
             // concrete vault/state paths for the env file.
             install::up(install::UpOptions {
-                data_root: args.data_root,
+                data_root,
                 vault_root,
                 state,
                 backups,
                 host: args.host,
                 port: args.port,
-                web: args.web,
+                web: args
+                    .web
+                    .unwrap_or_else(|| PathBuf::from("/usr/share/storm/web")),
             })
         }
         Commands::Down => install::down(),
