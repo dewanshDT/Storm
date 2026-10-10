@@ -22,7 +22,9 @@ export const release = {
     return `${this.aptRoot}install.sh`;
   },
   get installCommand() {
-    return `curl -fsSL ${this.installScriptUrl} | sudo sh`;
+    // The interactive installer (decision 84) runs as the user and asks for
+    // sudo only for the steps that need it.
+    return `curl -fsSL ${this.installScriptUrl} | sh`;
   },
   /** Apt already registered — refresh binary + bundled web client. */
   get upgradeCommand() {
