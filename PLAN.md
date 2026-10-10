@@ -63,9 +63,13 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **in progress** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven slices 85a–85g |
 
-**Release state (2026-10-10).** **v0.6.0 is being cut** (decision 72's
-steps; this paragraph is the prep PR's), at the operator's request after M24
-merged into `staging` (#120–#122, #128, #129). It carries **M24, the
+**Release state (2026-10-10).** **v0.6.1 is being cut** (decision 72's
+steps), at the operator's request after M24 merged into `staging` (#120–#122,
+#128, #129). **v0.6.0 was tagged (`2b0956c`, PR #133) but never published:**
+its new `server (macOS universal)` job ran `storm-server --version`, which the
+server's CLI did not accept, so `publish` and `apt` were skipped. v0.6.1 adds
+`--version` (which the installer's upgrade check also reads) and is otherwise
+v0.6.0. It carries **M24, the
 interactive installer** (decision 84): `curl -fsSL
 https://dewanshdt.github.io/Storm/install.sh | sh` installs any of the server,
 the Runtime Host, the app and phone pairing on Linux or macOS, sets up the
