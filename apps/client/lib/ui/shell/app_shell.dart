@@ -49,6 +49,50 @@ String _folderOf(String notePath) {
   return cut < 0 ? '' : notePath.substring(0, cut);
 }
 
+String? _parentOf(WidgetRef ref, BuildContext context, String location) {
+  final tree = ref.read(treeProvider).value ?? const [];
+  return logicalParent(
+    location,
+    wide: context.isExpanded,
+    memory: ref.read(navMemoryProvider),
+    folderOfNote: (id) {
+      final meta = tree.where((n) => n.id == id).firstOrNull;
+      return meta == null ? null : _folderOf(meta.path);
+    },
+  );
+}
+
+/// Claims system back for a page that has a logical parent, so the platform
+/// asks the app instead of closing it. Android 16's predictive back (target
+/// SDK 36) only asks when a route can pop or blocks the pop; a page reached
+/// with `go` can do neither.
+class LogicalBack extends ConsumerWidget {
+  const LogicalBack({super.key, required this.child, this.shell = false});
+
+  final Widget child;
+
+  /// A shell's page is never pushed; the pages inside it may be.
+  final bool shell;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final pushed = !shell && !(ModalRoute.of(context)?.isFirst ?? true);
+    ref.watch(treeProvider);
+    final parent = _parentOf(
+      ref,
+      context,
+      GoRouterState.of(context).uri.toString(),
+    );
+    return PopScope(
+      canPop: pushed || parent == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && parent != null) context.go(parent);
+      },
+      child: child,
+    );
+  }
+}
+
 /// Every signed-in location: the rail beside it at desk width, the phone's
 /// corner bubbles (drawn by each screen's chrome) below it.
 class AppShell extends ConsumerStatefulWidget {
@@ -85,16 +129,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     final router = GoRouter.of(context);
     if (await router.routerDelegate.popRoute()) return true;
     if (!mounted) return true;
-    final tree = ref.read(treeProvider).value ?? const [];
-    final parent = logicalParent(
-      router.state.uri.toString(),
-      wide: context.isExpanded,
-      memory: ref.read(navMemoryProvider),
-      folderOfNote: (id) {
-        final meta = tree.where((n) => n.id == id).firstOrNull;
-        return meta == null ? null : _folderOf(meta.path);
-      },
-    );
+    final parent = _parentOf(ref, context, router.state.uri.toString());
     if (parent == null) return false;
     router.go(parent);
     return true;

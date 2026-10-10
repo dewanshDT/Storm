@@ -106,7 +106,9 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
         },
         onAgents: () {
           Navigator.pop(popContext);
-          context.go(ref.read(navMemoryProvider).entryOf(Activity.agents));
+          // The list, where every session is and a new one starts; not the
+          // last session, which a phone would then open full screen.
+          context.go(Routes.agents);
         },
       ),
     );
