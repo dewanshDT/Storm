@@ -1321,6 +1321,20 @@ fn agent_error(e: crate::agent::AgentError) -> ApiError {
             "the host has no supported provider installed".into(),
         ),
         E::NotYours => ApiError(S::FORBIDDEN, "not a session on this host".into()),
+        E::TooLarge => ApiError(S::PAYLOAD_TOO_LARGE, "an image is at most 10 MiB".into()),
+        E::Unsupported(m) => ApiError(S::UNSUPPORTED_MEDIA_TYPE, m),
+        E::Busy => ApiError(
+            S::TOO_MANY_REQUESTS,
+            "too many images are already on their way".into(),
+        ),
+        E::Timeout => ApiError(
+            S::GATEWAY_TIMEOUT,
+            "the host did not take the image in time".into(),
+        ),
+        E::HostFailed(m) => ApiError(
+            S::BAD_GATEWAY,
+            format!("the host could not take the image: {m}"),
+        ),
         E::Internal(e) => internal(e),
     }
 }
@@ -1601,6 +1615,44 @@ pub async fn dismiss_session(state: &Shared, id: &str) -> ApiResult<()> {
 
 pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
     state.agent.input(id, bytes).map_err(agent_error)
+}
+
+pub async fn stage_image(
+    state: &Shared,
+    id: &str,
+    content_type: Option<&str>,
+    bytes: Vec<u8>,
+) -> ApiResult<crate::agent::StagedImage> {
+    state
+        .agent
+        .stage_image(id, content_type, bytes)
+        .await
+        .map_err(agent_error)
+}
+
+pub fn runtime_image(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    image: &str,
+) -> ApiResult<std::sync::Arc<Vec<u8>>> {
+    state
+        .agent
+        .image_bytes(host_id, session, image)
+        .map_err(agent_error)
+}
+
+pub fn runtime_image_staged(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    image: &str,
+    outcome: crate::agent::images::Outcome,
+) -> ApiResult<()> {
+    state
+        .agent
+        .image_staged(host_id, session, image, outcome)
+        .map_err(agent_error)
 }
 
 pub async fn session_resize(

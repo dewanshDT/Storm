@@ -17,6 +17,7 @@
 //! `auth_db` guard once did.
 
 pub mod cache;
+pub mod images;
 pub mod store;
 
 use std::collections::HashMap;
@@ -82,6 +83,16 @@ pub enum Command {
         connection: String,
         message: serde_json::Value,
     },
+    /// An image to pull and stage for a paste (D15 AM46). The bytes are not
+    /// here: the host fetches them.
+    #[serde(rename = "terminal.image")]
+    TerminalImage {
+        session: String,
+        image: String,
+        size: u64,
+        blake3: String,
+        ext: String,
+    },
 }
 
 impl Command {
@@ -95,6 +106,7 @@ impl Command {
             Self::Replay { .. } => "terminal.replay",
             Self::Refresh => "refresh",
             Self::McpMessage { .. } => "mcp.message",
+            Self::TerminalImage { .. } => "terminal.image",
         }
     }
 
@@ -106,7 +118,8 @@ impl Command {
             | Self::Input { session, .. }
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
-            | Self::McpMessage { session, .. } => Some(session),
+            | Self::McpMessage { session, .. }
+            | Self::TerminalImage { session, .. } => Some(session),
             Self::Refresh => None,
         }
     }
@@ -260,6 +273,16 @@ pub enum AgentError {
     NoProvider,
     /// A host posting for a session that is not its own.
     NotYours,
+    /// A pasted image over [`images::MAX_IMAGE_BYTES`] (413).
+    TooLarge,
+    /// Not an image, or not the type it says it is (415).
+    Unsupported(String),
+    /// Too many images in flight (429).
+    Busy,
+    /// The host did not stage it in time (504).
+    Timeout,
+    /// The host could not stage it, and said why (502).
+    HostFailed(String),
     Internal(anyhow::Error),
 }
 
@@ -320,8 +343,23 @@ struct AgentConfig {
 pub struct AgentManager {
     store: Mutex<Store>,
     live: Mutex<Live>,
+    images: Mutex<images::Images>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
+}
+
+/// How long a paste waits for its host to stage the image.
+const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
+/// A staged image: the path the client pastes.
+#[derive(Debug, Clone, Serialize)]
+pub struct StagedImage {
+    pub image: String,
+    pub path: String,
 }
 
 /// A host's live state, for the host list.
@@ -357,6 +395,7 @@ impl AgentManager {
         Ok(Self {
             store: Mutex::new(store),
             live: Mutex::new(Live::default()),
+            images: Mutex::new(images::Images::default()),
             config_path,
             config: Mutex::new(config),
         })
@@ -1039,6 +1078,98 @@ impl AgentManager {
             return Err(AgentError::Conflict("the session has ended".into()));
         }
         Ok(r)
+    }
+
+    /// Stages a pasted image on the session's host and answers with the path
+    /// to paste (D15 AM46). At most once: a failure is never retried.
+    pub async fn stage_image(
+        &self,
+        id: &str,
+        content_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> AgentResult<StagedImage> {
+        if bytes.len() > images::MAX_IMAGE_BYTES {
+            return Err(AgentError::TooLarge);
+        }
+        let ext = images::sniff(&bytes)
+            .ok_or_else(|| AgentError::Unsupported("not a PNG, JPEG, GIF or WebP image".into()))?;
+        if let Some(ct) = content_type
+            && ct.trim_start().starts_with("image/")
+            && !images::declared_matches(ct, ext)
+        {
+            return Err(AgentError::Unsupported(format!(
+                "the bytes are {ext}, not {ct}"
+            )));
+        }
+        let r = self.live_record(id)?;
+        let image = crate::auth::identity::random_id("img_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let command = Command::TerminalImage {
+            session: r.id.clone(),
+            image: image.clone(),
+            size: bytes.len() as u64,
+            blake3: blake3::hash(&bytes).to_hex().to_string(),
+            ext: ext.into(),
+        };
+        let admitted = self.images.lock().unwrap().admit(
+            image.clone(),
+            images::Pending {
+                session: r.id.clone(),
+                host: r.host_id.clone(),
+                bytes: std::sync::Arc::new(bytes),
+                done: Some(tx),
+            },
+        );
+        if !admitted {
+            return Err(AgentError::Busy);
+        }
+        let outcome = match self.send(&r.host_id, command) {
+            Ok(()) => tokio::time::timeout(IMAGE_DEADLINE, rx).await,
+            Err(e) => {
+                self.images.lock().unwrap().remove(&image);
+                return Err(e);
+            }
+        };
+        self.images.lock().unwrap().remove(&image);
+        match outcome {
+            Ok(Ok(Ok(path))) => Ok(StagedImage { image, path }),
+            Ok(Ok(Err(reason))) => Err(AgentError::HostFailed(reason)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::Timeout),
+        }
+    }
+
+    /// The bytes of an image a host was told to fetch, for that host only.
+    pub fn image_bytes(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        image: &str,
+    ) -> AgentResult<std::sync::Arc<Vec<u8>>> {
+        self.owned_by(host_id, session_id)?;
+        let images = self.images.lock().unwrap();
+        match images.get(image) {
+            Some(p) if p.session == session_id && p.host == host_id => Ok(p.bytes.clone()),
+            _ => Err(AgentError::NotFound("no such image")),
+        }
+    }
+
+    /// A host's answer for an image: where it put it, or why it could not.
+    pub fn image_staged(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        image: &str,
+        outcome: images::Outcome,
+    ) -> AgentResult<()> {
+        self.image_bytes(host_id, session_id, image)?;
+        let outcome = outcome.and_then(|path| {
+            let printable = !path.chars().any(char::is_control);
+            (path.starts_with('/') && printable && path.len() <= 4096)
+                .then_some(path)
+                .ok_or_else(|| "the host answered an unusable path".to_string())
+        });
+        self.images.lock().unwrap().finish(image, outcome);
+        Ok(())
     }
 
     /// Raw input. At most once: refused while the host is offline, never
@@ -2164,6 +2295,100 @@ mod tests {
         assert_eq!((old.status.as_str(), old.title), ("completed", None));
         drop(m);
         AgentManager::open(d.path()).unwrap();
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-not-really-but-the-magic-is-right";
+
+    /// D15 AM46: an image goes to the session's host as a fetch-it command,
+    /// only that host can fetch it, and its answer completes the paste.
+    #[tokio::test]
+    async fn an_image_is_staged_through_the_sessions_host() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let _other = online(&m, "hst_B", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        while rx.try_recv().is_ok() {}
+        let m = std::sync::Arc::new(m);
+        let paste = tokio::spawn({
+            let (m, id) = (m.clone(), r.id.clone());
+            async move { m.stage_image(&id, Some("image/png"), PNG.to_vec()).await }
+        });
+        let cmd = loop {
+            if let Ok(e) = rx.try_recv() {
+                break e.command;
+            }
+            tokio::task::yield_now().await;
+        };
+        let Command::TerminalImage {
+            session,
+            image,
+            size,
+            blake3: hash,
+            ext,
+        } = cmd
+        else {
+            panic!("{cmd:?}")
+        };
+        assert_eq!(
+            (session.as_str(), size, ext.as_str()),
+            (r.id.as_str(), PNG.len() as u64, "png")
+        );
+        assert_eq!(hash, blake3::hash(PNG).to_hex().to_string());
+        assert!(matches!(
+            m.image_bytes("hst_B", &r.id, &image),
+            Err(AgentError::NotYours)
+        ));
+        assert_eq!(
+            m.image_bytes("hst_A", &r.id, &image).unwrap().as_slice(),
+            PNG
+        );
+        m.image_staged(
+            "hst_A",
+            &r.id,
+            &image,
+            Ok("/state/sessions/x/inbox/i.png".into()),
+        )
+        .unwrap();
+        let staged = paste.await.unwrap().unwrap();
+        assert_eq!(staged.path, "/state/sessions/x/inbox/i.png");
+        assert!(
+            matches!(
+                m.image_bytes("hst_A", &r.id, &image),
+                Err(AgentError::NotFound(_))
+            ),
+            "the bytes are gone once staged"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_image_is_refused_or_fails_honestly() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        let big = [PNG, &vec![0; images::MAX_IMAGE_BYTES]].concat();
+        assert!(matches!(
+            m.stage_image(&r.id, None, big).await,
+            Err(AgentError::TooLarge)
+        ));
+        assert!(matches!(
+            m.stage_image(&r.id, None, b"plain text".to_vec()).await,
+            Err(AgentError::Unsupported(_))
+        ));
+        assert!(matches!(
+            m.stage_image(&r.id, Some("image/jpeg"), PNG.to_vec()).await,
+            Err(AgentError::Unsupported(_))
+        ));
+        // Nobody answers: the paste times out and nothing stays behind.
+        assert!(matches!(
+            m.stage_image(&r.id, None, PNG.to_vec()).await,
+            Err(AgentError::Timeout)
+        ));
+        let (generation, _) = m.connect_host("hst_A");
+        m.disconnect_host("hst_A", generation);
+        assert!(matches!(
+            m.stage_image(&r.id, None, PNG.to_vec()).await,
+            Err(AgentError::HostOffline)
+        ));
     }
 
     #[test]
