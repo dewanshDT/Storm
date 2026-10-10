@@ -5041,6 +5041,17 @@ with the agent's mark (AM44).** *(2026-10-10)*
   stage now fails the paste instead of throwing. Client 975. The Kotlin is
   compiled by `acceptance.yml`.
 
+**85, the real run** *(2026-10-10, on a Runtime Host, the stack's head)*: a
+real `storm-server` and `storm-runtime`, a `claude-code` session (Claude
+Code 2.1.296), driven only through Storm's REST and SSE surface. A 32×32 red
+PNG posted to `…/terminal/images` was staged in the session's inbox; its
+path, bracket-pasted, became **`[Image #1]`** with the path not on screen;
+asked its colour, the model answered **"Red"**; the session record took
+Claude's own title, **"Single fill colour in image"**, activity `working`.
+A bare script must answer the terminal's device-attributes query, as the
+app's emulator does — without it Claude Code's parser swallowed the first
+arrow key.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
