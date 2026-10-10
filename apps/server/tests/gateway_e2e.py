@@ -105,6 +105,11 @@ def call(method, path, body=None, auth=None, timeout=15):
             return e.code, text
 
 
+# The host's reconnect backoff doubles from 1 s to a 60 s ceiling, and
+# restarts back to back leave it waiting near the top.
+RECONNECT = 90
+
+
 def wait(predicate, what, timeout=30):
     deadline = time.time() + timeout
     last = None
@@ -392,7 +397,7 @@ args = ["-i"]
         server.send_signal(signal.SIGTERM)
         server.wait(10)
         server = start_server()
-        wait(host_online, "the host to reconnect")
+        wait(host_online, "the host to reconnect", timeout=RECONNECT)
         wait(lambda: call("GET", f"/v1/agent/sessions/{sid}", auth=owner)[1]["status"] == "running",
              "the session to be running again")
         a.tool(slug, 20, "echo", {"text": "after-restart"})
@@ -412,7 +417,7 @@ args = ["-i"]
         # Straight back up: a bridge that retried "until the server is back"
         # (the gates' `retry` mutation) would now run the call a second time.
         server = start_server()
-        wait(host_online, "the host to reconnect")
+        wait(host_online, "the host to reconnect", timeout=RECONNECT)
         answer = a.answer(slug, 30, timeout=60)
         check("the in-flight call fails once", "error" in answer, answer)
         time.sleep(8)  # longer than the call; a retry would have run by now
@@ -434,7 +439,7 @@ args = ["-i"]
                      and m["params"]["requestId"] == ask["id"]]
         check("the open elicitation is cancelled toward the agent (R8)", len(cancelled) == 1, cancelled)
         server = start_server()
-        wait(host_online, "the host to reconnect")
+        wait(host_online, "the host to reconnect", timeout=RECONNECT)
         responses_before = len([e for e in upstream_log() if e["kind"] == "client_response"])
         a.send(slug, {"jsonrpc": "2.0", "id": ask["id"], "result": {"action": "accept", "content": {"answer": "late"}}})
         time.sleep(2)
