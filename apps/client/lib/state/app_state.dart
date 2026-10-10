@@ -19,6 +19,7 @@ import '../ui/theme.dart';
 import '../ui/tokens.dart';
 import '../sync/sync_engine.dart';
 import 'nav_memory.dart';
+import 'terminal_prefs.dart';
 import 'note_session.dart';
 import '../ui/accents.dart';
 import 'vault_config.dart';
@@ -53,10 +54,14 @@ class Settings {
     this.serverId = '',
     this.relays = const <RelayAdvert>[],
     this.nav = const NavMemory(),
+    this.terminal = const TerminalPrefs(),
   });
 
   /// Read at launch only; [navMemoryProvider] owns it afterwards.
   final NavMemory nav;
+
+  /// Read at launch only; [terminalPrefsProvider] owns it afterwards.
+  final TerminalPrefs terminal;
 
   final String baseUrl;
 
@@ -228,6 +233,7 @@ class Settings {
     String? serverId,
     List<RelayAdvert>? relays,
     NavMemory? nav,
+    TerminalPrefs? terminal,
   }) => Settings(
     baseUrl: baseUrl ?? this.baseUrl,
     theme: theme ?? this.theme,
@@ -247,6 +253,7 @@ class Settings {
     serverId: serverId ?? this.serverId,
     relays: relays ?? this.relays,
     nav: nav ?? this.nav,
+    terminal: terminal ?? this.terminal,
   );
 }
 
@@ -306,6 +313,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       serverId: prefs.getString(_kServerId) ?? '',
       relays: _decodeRelays(prefs.getString(_kRelays)),
       nav: NavMemory.read(prefs),
+      terminal: TerminalPrefs.read(prefs),
     );
   }
 

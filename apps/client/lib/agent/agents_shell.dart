@@ -73,6 +73,7 @@ class AgentsSidebar extends ConsumerWidget {
         for (final s in list)
           SessionRow(
             session: s,
+            host: o?.hostName(s.hostId) ?? 'host',
             selected: s.id == selected,
             onTap: () => openAgentSession(context, s.id),
           ),

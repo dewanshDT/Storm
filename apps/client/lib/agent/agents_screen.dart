@@ -11,7 +11,6 @@ import '../state/health.dart' show integrationsSummaryProvider;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/panels.dart';
-import '../ui/session_status.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
@@ -720,7 +719,7 @@ class _WorkCard extends StatelessWidget {
               ],
             ),
           ),
-          for (final s in sessions) _WorkRow(session: s),
+          for (final s in sessions) _WorkRow(session: s, host: host),
         ],
       ),
     );
@@ -728,9 +727,10 @@ class _WorkCard extends StatelessWidget {
 }
 
 class _WorkRow extends StatelessWidget {
-  const _WorkRow({required this.session});
+  const _WorkRow({required this.session, required this.host});
 
   final AgentSession session;
+  final String host;
 
   @override
   Widget build(BuildContext context) {
@@ -740,7 +740,7 @@ class _WorkRow extends StatelessWidget {
     void open() => openAgentSession(context, s.id);
     return Semantics(
       button: true,
-      label: '${s.name}, ${s.statusLabel}',
+      label: sessionSpoken(s, host),
       excludeSemantics: true,
       onTap: open,
       child: Material(
@@ -755,11 +755,11 @@ class _WorkRow extends StatelessWidget {
             padding: EdgeInsets.all(t.sp),
             child: Row(
               children: [
-                SessionStatusDot(status: s.status),
+                AgentMark(session: s, size: t.sp * 3.5),
                 SizedBox(width: t.sp * 1.25),
                 Flexible(
                   child: Text(
-                    s.name,
+                    s.displayName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -771,7 +771,7 @@ class _WorkRow extends StatelessWidget {
                 ),
                 SizedBox(width: t.sp * 1.25),
                 Text(
-                  '${providerLabel(s.provider)} · ${sessionWhen(s)}',
+                  sessionWhen(s),
                   style: TextStyle(
                     fontFamily: StormTokens.monoFamily,
                     fontSize: t.labelSize * 1.09,
@@ -908,6 +908,7 @@ class _PhoneList extends StatelessWidget {
         for (final s in list)
           SessionRow(
             session: s,
+            host: o.hostName(s.hostId),
             phone: true,
             onTap: () => openAgentSession(context, s.id),
           ),

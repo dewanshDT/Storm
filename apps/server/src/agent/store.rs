@@ -33,6 +33,11 @@ pub struct SessionRecord {
     pub egress: String,
     pub cols: u16,
     pub rows: u16,
+    /// The agent's own name for the session, from its terminal title (D15
+    /// AM42). Kept after the end.
+    pub title: Option<String>,
+    /// `working` or `idle` while running; never stored (AM42).
+    pub activity: Option<String>,
 }
 
 impl SessionRecord {
@@ -114,7 +119,7 @@ pub struct Store {
 
 const COLUMNS: &str = "id, owner_user_id, host_id, workspace, provider, provider_kind, \
     interaction, provider_fallback, status, end_reason, signal, exit_code, created_at, \
-    started_at, ended_at, last_activity, egress, cols, rows";
+    started_at, ended_at, last_activity, egress, cols, rows, title";
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -206,6 +211,13 @@ impl Store {
                  PRIMARY KEY (session_id, connection_id)
              );",
         )?;
+        // D15 AM42, additive: a database from before it gains the column.
+        let has_title = conn
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'title'")?
+            .exists([])?;
+        if !has_title {
+            conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", [])?;
+        }
         Ok(Self { conn })
     }
 
@@ -223,7 +235,7 @@ impl Store {
 
     pub fn insert(&self, r: &SessionRecord) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"),
+            &format!("INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"),
             params![
                 r.id,
                 r.owner_user_id,
@@ -246,6 +258,7 @@ impl Store {
                 r.egress,
                 r.cols,
                 r.rows,
+                r.title,
             ],
         )?;
         Ok(())
@@ -283,7 +296,8 @@ impl Store {
     pub fn update(&self, r: &SessionRecord) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET status = ?2, end_reason = ?3, signal = ?4, exit_code = ?5,
-                 started_at = ?6, ended_at = ?7, last_activity = ?8, cols = ?9, rows = ?10
+                 started_at = ?6, ended_at = ?7, last_activity = ?8, cols = ?9, rows = ?10,
+                 title = ?11
              WHERE id = ?1",
             params![
                 r.id,
@@ -295,7 +309,8 @@ impl Store {
                 r.ended_at,
                 r.last_activity,
                 r.cols,
-                r.rows
+                r.rows,
+                r.title
             ],
         )?;
         Ok(())
@@ -604,5 +619,7 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         egress: r.get(16)?,
         cols: r.get(17)?,
         rows: r.get(18)?,
+        title: r.get(19)?,
+        activity: None,
     })
 }

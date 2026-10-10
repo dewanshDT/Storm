@@ -207,6 +207,23 @@ class AgentApi {
     );
   }
 
+  /// Stages a pasted image on the session's host; the path to paste
+  /// (D15 AM46). Never retried.
+  Future<String> stageImage(String id, Uint8List bytes, String mime) async {
+    final body = _decode(
+      await _client.post(
+        _uri('${_s(id)}/terminal/images'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': mime},
+        body: bytes,
+      ),
+    );
+    final path = body is Map ? body['path'] : null;
+    if (path is! String) {
+      throw StormApiException(502, 'the server answered without a path');
+    }
+    return path;
+  }
+
   Future<void> resize(
     String id,
     int cols,

@@ -17,6 +17,7 @@
 //! `auth_db` guard once did.
 
 pub mod cache;
+pub mod images;
 pub mod store;
 
 use std::collections::HashMap;
@@ -82,6 +83,16 @@ pub enum Command {
         connection: String,
         message: serde_json::Value,
     },
+    /// An image to pull and stage for a paste (D15 AM46). The bytes are not
+    /// here: the host fetches them.
+    #[serde(rename = "terminal.image")]
+    TerminalImage {
+        session: String,
+        image: String,
+        size: u64,
+        blake3: String,
+        ext: String,
+    },
 }
 
 impl Command {
@@ -95,6 +106,7 @@ impl Command {
             Self::Replay { .. } => "terminal.replay",
             Self::Refresh => "refresh",
             Self::McpMessage { .. } => "mcp.message",
+            Self::TerminalImage { .. } => "terminal.image",
         }
     }
 
@@ -106,7 +118,8 @@ impl Command {
             | Self::Input { session, .. }
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
-            | Self::McpMessage { session, .. } => Some(session),
+            | Self::McpMessage { session, .. }
+            | Self::TerminalImage { session, .. } => Some(session),
             Self::Refresh => None,
         }
     }
@@ -176,6 +189,11 @@ pub struct StatusReport {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub end_reason: Option<String>,
+    /// The agent's name for the session (D15 AM43). Null changes nothing.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub activity: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
 }
@@ -255,6 +273,16 @@ pub enum AgentError {
     NoProvider,
     /// A host posting for a session that is not its own.
     NotYours,
+    /// A pasted image over [`images::MAX_IMAGE_BYTES`] (413).
+    TooLarge,
+    /// Not an image, or not the type it says it is (415).
+    Unsupported(String),
+    /// Too many images in flight (429).
+    Busy,
+    /// The host did not stage it in time (504).
+    Timeout,
+    /// The host could not stage it, and said why (502).
+    HostFailed(String),
     Internal(anyhow::Error),
 }
 
@@ -279,6 +307,8 @@ struct HostLink {
 
 struct SessionLive {
     cache: OutputCache,
+    /// `working` / `idle`, as the host last said (D15 AM42).
+    activity: Option<String>,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
 }
@@ -287,6 +317,7 @@ impl SessionLive {
     fn new() -> Self {
         Self {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
+            activity: None,
             version: watch::channel(0).0,
         }
     }
@@ -312,8 +343,23 @@ struct AgentConfig {
 pub struct AgentManager {
     store: Mutex<Store>,
     live: Mutex<Live>,
+    images: Mutex<images::Images>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
+}
+
+/// How long a paste waits for its host to stage the image.
+const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
+/// A staged image: the path the client pastes.
+#[derive(Debug, Clone, Serialize)]
+pub struct StagedImage {
+    pub image: String,
+    pub path: String,
 }
 
 /// A host's live state, for the host list.
@@ -349,6 +395,7 @@ impl AgentManager {
         Ok(Self {
             store: Mutex::new(store),
             live: Mutex::new(Live::default()),
+            images: Mutex::new(images::Images::default()),
             config_path,
             config: Mutex::new(config),
         })
@@ -585,6 +632,7 @@ impl AgentManager {
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
                         self.store.lock().unwrap().update(&r)?;
+                        self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
                     }
                     let empty = {
@@ -695,15 +743,19 @@ impl AgentManager {
             // An ending is final; a late duplicate changes nothing.
             return Ok(());
         }
+        let before = r.status.clone();
         apply_report(&mut r, report)?;
-        tracing::info!(
-            host = host_id,
-            session = session_id,
-            status = %r.status,
-            end_reason = r.end_reason.as_deref(),
-            "session status"
-        );
+        if r.status != before || r.is_ended() {
+            tracing::info!(
+                host = host_id,
+                session = session_id,
+                status = %r.status,
+                end_reason = r.end_reason.as_deref(),
+                "session status"
+            );
+        }
         self.store.lock().unwrap().update(&r)?;
+        self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
     }
@@ -803,6 +855,8 @@ impl AgentManager {
             egress: "host".into(),
             cols: req.terminal.cols,
             rows: req.terminal.rows,
+            title: None,
+            activity: None,
         };
         // The grants (spec §6): none for `shell` (G-D9), none for a host
         // that cannot bridge, and otherwise everything the caller offered.
@@ -963,15 +1017,48 @@ impl AgentManager {
     }
 
     pub fn get(&self, id: &str) -> AgentResult<SessionRecord> {
-        self.store
+        let r = self
+            .store
             .lock()
             .unwrap()
             .get(id)?
-            .ok_or(AgentError::NotFound("no such session"))
+            .ok_or(AgentError::NotFound("no such session"))?;
+        Ok(self.with_activity(r))
     }
 
     pub fn list(&self) -> AgentResult<Vec<SessionRecord>> {
-        Ok(self.store.lock().unwrap().list()?)
+        let records = self.store.lock().unwrap().list()?;
+        Ok(records.into_iter().map(|r| self.with_activity(r)).collect())
+    }
+
+    fn set_activity(&self, r: &SessionRecord, report: &StatusReport) {
+        let activity = report
+            .activity
+            .as_deref()
+            .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
+            .map(str::to_owned);
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .entry(r.id.clone())
+            .or_insert_with(SessionLive::new)
+            .activity = activity;
+    }
+
+    /// Activity is shown only while the session runs: an `unknown` session's
+    /// last word may be stale.
+    fn with_activity(&self, mut r: SessionRecord) -> SessionRecord {
+        if r.status == "running" {
+            r.activity = self
+                .live
+                .lock()
+                .unwrap()
+                .sessions
+                .get(&r.id)
+                .and_then(|s| s.activity.clone());
+        }
+        r
     }
 
     /// Live sessions per workspace on a host, for the shared-workspace warning.
@@ -991,6 +1078,98 @@ impl AgentManager {
             return Err(AgentError::Conflict("the session has ended".into()));
         }
         Ok(r)
+    }
+
+    /// Stages a pasted image on the session's host and answers with the path
+    /// to paste (D15 AM46). At most once: a failure is never retried.
+    pub async fn stage_image(
+        &self,
+        id: &str,
+        content_type: Option<&str>,
+        bytes: Vec<u8>,
+    ) -> AgentResult<StagedImage> {
+        if bytes.len() > images::MAX_IMAGE_BYTES {
+            return Err(AgentError::TooLarge);
+        }
+        let ext = images::sniff(&bytes)
+            .ok_or_else(|| AgentError::Unsupported("not a PNG, JPEG, GIF or WebP image".into()))?;
+        if let Some(ct) = content_type
+            && ct.trim_start().starts_with("image/")
+            && !images::declared_matches(ct, ext)
+        {
+            return Err(AgentError::Unsupported(format!(
+                "the bytes are {ext}, not {ct}"
+            )));
+        }
+        let r = self.live_record(id)?;
+        let image = crate::auth::identity::random_id("img_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let command = Command::TerminalImage {
+            session: r.id.clone(),
+            image: image.clone(),
+            size: bytes.len() as u64,
+            blake3: blake3::hash(&bytes).to_hex().to_string(),
+            ext: ext.into(),
+        };
+        let admitted = self.images.lock().unwrap().admit(
+            image.clone(),
+            images::Pending {
+                session: r.id.clone(),
+                host: r.host_id.clone(),
+                bytes: std::sync::Arc::new(bytes),
+                done: Some(tx),
+            },
+        );
+        if !admitted {
+            return Err(AgentError::Busy);
+        }
+        let outcome = match self.send(&r.host_id, command) {
+            Ok(()) => tokio::time::timeout(IMAGE_DEADLINE, rx).await,
+            Err(e) => {
+                self.images.lock().unwrap().remove(&image);
+                return Err(e);
+            }
+        };
+        self.images.lock().unwrap().remove(&image);
+        match outcome {
+            Ok(Ok(Ok(path))) => Ok(StagedImage { image, path }),
+            Ok(Ok(Err(reason))) => Err(AgentError::HostFailed(reason)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::Timeout),
+        }
+    }
+
+    /// The bytes of an image a host was told to fetch, for that host only.
+    pub fn image_bytes(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        image: &str,
+    ) -> AgentResult<std::sync::Arc<Vec<u8>>> {
+        self.owned_by(host_id, session_id)?;
+        let images = self.images.lock().unwrap();
+        match images.get(image) {
+            Some(p) if p.session == session_id && p.host == host_id => Ok(p.bytes.clone()),
+            _ => Err(AgentError::NotFound("no such image")),
+        }
+    }
+
+    /// A host's answer for an image: where it put it, or why it could not.
+    pub fn image_staged(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        image: &str,
+        outcome: images::Outcome,
+    ) -> AgentResult<()> {
+        self.image_bytes(host_id, session_id, image)?;
+        let outcome = outcome.and_then(|path| {
+            let printable = !path.chars().any(char::is_control);
+            (path.starts_with('/') && printable && path.len() <= 4096)
+                .then_some(path)
+                .ok_or_else(|| "the host answered an unusable path".to_string())
+        });
+        self.images.lock().unwrap().finish(image, outcome);
+        Ok(())
     }
 
     /// Raw input. At most once: refused while the host is offline, never
@@ -1162,6 +1341,9 @@ fn slug(text: &str) -> String {
 /// Applies a host's report to a record. Unknown statuses are refused rather
 /// than stored: the vocabulary is fixed (freeze §7.2).
 fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()> {
+    if let Some(title) = report.title.as_deref().and_then(clean_title) {
+        r.title = Some(title);
+    }
     match report.status.as_str() {
         "starting" | "running" => {
             if report.status == "running" {
@@ -1190,6 +1372,20 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
     }
     Ok(())
 }
+
+/// The host cleans titles (AM43); this only keeps a misbehaving host's text
+/// printable and bounded.
+fn clean_title(raw: &str) -> Option<String> {
+    let text: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(TITLE_MAX)
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+const TITLE_MAX: usize = 120;
 
 #[cfg(test)]
 mod tests {
@@ -1302,6 +1498,8 @@ mod tests {
                 exit_code: Some(0),
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1699,6 +1897,8 @@ mod tests {
                 exit_code: None,
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1711,6 +1911,8 @@ mod tests {
                 exit_code: Some(0),
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1728,6 +1930,8 @@ mod tests {
                 exit_code: None,
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1808,6 +2012,8 @@ mod tests {
                 exit_code: None,
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1925,6 +2131,8 @@ mod tests {
                         exit_code: None,
                         end_reason: None,
                         signal: None,
+                        title: None,
+                        activity: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -1946,6 +2154,241 @@ mod tests {
                 from: 0
             }
         );
+    }
+
+    fn report(status: &str, title: Option<&str>, activity: Option<&str>) -> StatusReport {
+        StatusReport {
+            status: status.into(),
+            exit_code: None,
+            end_reason: None,
+            title: title.map(str::to_owned),
+            activity: activity.map(str::to_owned),
+            signal: None,
+        }
+    }
+
+    /// D15 AM42: the title is stored and kept after the end, a null one
+    /// changes nothing, and activity shows only while running.
+    #[test]
+    fn the_agents_title_and_activity_follow_the_host() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        assert_eq!((r.title.as_deref(), r.activity.as_deref()), (None, None));
+
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("Fix the login"), Some("working")),
+        )
+        .unwrap();
+        let got = m.get(&r.id).unwrap();
+        assert_eq!(got.title.as_deref(), Some("Fix the login"));
+        assert_eq!(got.activity.as_deref(), Some("working"));
+        assert_eq!(m.list().unwrap()[0].activity.as_deref(), Some("working"));
+
+        m.host_status("hst_A", &r.id, &report("running", None, Some("idle")))
+            .unwrap();
+        let got = m.get(&r.id).unwrap();
+        assert_eq!(got.title.as_deref(), Some("Fix the login"), "null keeps it");
+        assert_eq!(got.activity.as_deref(), Some("idle"));
+
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("ok\u{7}\u{1b}"), Some("busy")),
+        )
+        .unwrap();
+        let got = m.get(&r.id).unwrap();
+        assert_eq!(
+            got.title.as_deref(),
+            Some("ok"),
+            "control characters dropped"
+        );
+        assert_eq!(got.activity, None, "an unknown activity is none");
+
+        let long = "x".repeat(400);
+        m.host_status("hst_A", &r.id, &report("running", Some(&long), None))
+            .unwrap();
+        assert_eq!(m.get(&r.id).unwrap().title.unwrap().chars().count(), 120);
+
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("Ship it"), Some("working")),
+        )
+        .unwrap();
+        m.host_status("hst_A", &r.id, &report("completed", None, None))
+            .unwrap();
+        let ended = m.get(&r.id).unwrap();
+        assert_eq!(
+            ended.title.as_deref(),
+            Some("Ship it"),
+            "kept after the end"
+        );
+        assert_eq!(ended.activity, None);
+    }
+
+    /// AM42: a restarted server learns the title from the database and the
+    /// activity from the host's `hello`.
+    #[test]
+    fn a_restart_keeps_the_title_and_hello_restores_activity() {
+        let (m, d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("Plan"), Some("working")),
+        )
+        .unwrap();
+        drop(m);
+
+        let m = AgentManager::open(d.path()).unwrap();
+        let back = m.get(&r.id).unwrap();
+        assert_eq!(
+            (back.status.as_str(), back.title.as_deref()),
+            ("unknown", Some("Plan"))
+        );
+        assert_eq!(back.activity, None, "unknown shows no activity");
+        let (_, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: caps(&[("shell", true)]),
+                sessions: vec![ReportedSession {
+                    id: r.id.clone(),
+                    status: report("running", Some("Plan"), Some("idle")),
+                    output_end_offset: 0,
+                }],
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        let back = m.get(&r.id).unwrap();
+        assert_eq!(back.activity.as_deref(), Some("idle"));
+    }
+
+    /// AM42 is additive: a database from before it gains the column, and its
+    /// sessions read back with no title.
+    #[test]
+    fn an_old_database_gains_the_title_column() {
+        let d = tempdir::TempDir::new("storm-agent").unwrap();
+        std::fs::create_dir_all(d.path().join("agent")).unwrap();
+        let conn = rusqlite::Connection::open(d.path().join("agent/agent.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, host_id TEXT NOT NULL,
+                 workspace TEXT NOT NULL, provider TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                 interaction TEXT NOT NULL, provider_fallback TEXT, status TEXT NOT NULL,
+                 end_reason TEXT, signal INTEGER, exit_code INTEGER, created_at TEXT NOT NULL,
+                 started_at TEXT, ended_at TEXT, last_activity TEXT,
+                 egress TEXT NOT NULL DEFAULT 'host', cols INTEGER NOT NULL, rows INTEGER NOT NULL);
+             INSERT INTO sessions VALUES ('ags_OLD', 'usr_A', 'hst_A', 'w', 'shell', 'cli',
+                 'terminal', NULL, 'completed', NULL, NULL, 0, '2026-10-01T00:00:00Z',
+                 NULL, NULL, NULL, 'host', 80, 24);",
+        )
+        .unwrap();
+        drop(conn);
+        let m = AgentManager::open(d.path()).unwrap();
+        let old = m.get("ags_OLD").unwrap();
+        assert_eq!((old.status.as_str(), old.title), ("completed", None));
+        drop(m);
+        AgentManager::open(d.path()).unwrap();
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-not-really-but-the-magic-is-right";
+
+    /// D15 AM46: an image goes to the session's host as a fetch-it command,
+    /// only that host can fetch it, and its answer completes the paste.
+    #[tokio::test]
+    async fn an_image_is_staged_through_the_sessions_host() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let _other = online(&m, "hst_B", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        while rx.try_recv().is_ok() {}
+        let m = std::sync::Arc::new(m);
+        let paste = tokio::spawn({
+            let (m, id) = (m.clone(), r.id.clone());
+            async move { m.stage_image(&id, Some("image/png"), PNG.to_vec()).await }
+        });
+        let cmd = loop {
+            if let Ok(e) = rx.try_recv() {
+                break e.command;
+            }
+            tokio::task::yield_now().await;
+        };
+        let Command::TerminalImage {
+            session,
+            image,
+            size,
+            blake3: hash,
+            ext,
+        } = cmd
+        else {
+            panic!("{cmd:?}")
+        };
+        assert_eq!(
+            (session.as_str(), size, ext.as_str()),
+            (r.id.as_str(), PNG.len() as u64, "png")
+        );
+        assert_eq!(hash, blake3::hash(PNG).to_hex().to_string());
+        assert!(matches!(
+            m.image_bytes("hst_B", &r.id, &image),
+            Err(AgentError::NotYours)
+        ));
+        assert_eq!(
+            m.image_bytes("hst_A", &r.id, &image).unwrap().as_slice(),
+            PNG
+        );
+        m.image_staged(
+            "hst_A",
+            &r.id,
+            &image,
+            Ok("/state/sessions/x/inbox/i.png".into()),
+        )
+        .unwrap();
+        let staged = paste.await.unwrap().unwrap();
+        assert_eq!(staged.path, "/state/sessions/x/inbox/i.png");
+        assert!(
+            matches!(
+                m.image_bytes("hst_A", &r.id, &image),
+                Err(AgentError::NotFound(_))
+            ),
+            "the bytes are gone once staged"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_image_is_refused_or_fails_honestly() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        let big = [PNG, &vec![0; images::MAX_IMAGE_BYTES]].concat();
+        assert!(matches!(
+            m.stage_image(&r.id, None, big).await,
+            Err(AgentError::TooLarge)
+        ));
+        assert!(matches!(
+            m.stage_image(&r.id, None, b"plain text".to_vec()).await,
+            Err(AgentError::Unsupported(_))
+        ));
+        assert!(matches!(
+            m.stage_image(&r.id, Some("image/jpeg"), PNG.to_vec()).await,
+            Err(AgentError::Unsupported(_))
+        ));
+        // Nobody answers: the paste times out and nothing stays behind.
+        assert!(matches!(
+            m.stage_image(&r.id, None, PNG.to_vec()).await,
+            Err(AgentError::Timeout)
+        ));
+        let (generation, _) = m.connect_host("hst_A");
+        m.disconnect_host("hst_A", generation);
+        assert!(matches!(
+            m.stage_image(&r.id, None, PNG.to_vec()).await,
+            Err(AgentError::HostOffline)
+        ));
     }
 
     #[test]
@@ -1982,6 +2425,8 @@ mod tests {
                     exit_code: None,
                     end_reason: None,
                     signal: None,
+                    title: None,
+                    activity: None,
                 },
             )
             .unwrap();

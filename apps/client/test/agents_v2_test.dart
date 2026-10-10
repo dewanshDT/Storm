@@ -640,7 +640,7 @@ void main() {
       expect(find.byKey(const Key('agent-card-claude-code')), findsOneWidget);
       expect(find.byKey(const Key('agent-card-shell')), findsOneWidget);
       expect(find.textContaining('1 of 2 hosts online'), findsOneWidget);
-      expect(find.text('storm · Claude Code · failed'), findsOneWidget);
+      expect(find.text('mac-mini · storm · failed'), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-ags_site')));
       await tester.pumpAndSettle();
       expect(where(c).path, '/agents/s/ags_site');

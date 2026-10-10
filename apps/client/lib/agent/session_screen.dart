@@ -9,6 +9,7 @@ import '../editor/frontmatter.dart' as fm;
 import '../router.dart';
 import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
+import '../state/terminal_prefs.dart';
 import '../ui/breakpoints.dart';
 import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
@@ -25,6 +26,7 @@ import 'agents_screen.dart' show launchAgentSession;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
 import 'session_inspector.dart';
+import 'image_target.dart';
 import 'terminal_surface.dart';
 
 /// One session at `/agents/s/:id` (handoff §3.6).
@@ -184,6 +186,29 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     );
   }
 
+  /// The terminal, taking pasted and dropped images while the session runs,
+  /// with the paste's chip over its bottom edge (D15 AM45).
+  Widget _withPaste(SessionController c, AgentSession s, Widget terminal) {
+    if (s.ended) return terminal;
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: ImagePasteTarget(
+            onImages: c.pasteImages,
+            focused: () => _focus.hasFocus,
+            child: terminal,
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: context.tokens.sp * 1.5,
+          child: Center(child: ImagePasteChip(controller: c)),
+        ),
+      ],
+    );
+  }
+
   // ---- desk ---------------------------------------------------------------
 
   Widget _desk(
@@ -201,16 +226,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         Expanded(
           child: c == null
               ? const SizedBox.shrink()
-              : StormTerminalView(
-                  terminal: c.terminal,
-                  focusNode: _focus,
-                  autofocus: true,
-                  readOnly: s.ended,
-                  fontSize: t.codeSize,
-                  lineHeight: 1.7,
-                  padding: EdgeInsets.symmetric(
-                    horizontal: t.sp * 1.25,
-                    vertical: t.sp * 1.5,
+              : _withPaste(
+                  c,
+                  s,
+                  StormTerminalView(
+                    terminal: c.terminal,
+                    focusNode: _focus,
+                    autofocus: true,
+                    readOnly: s.ended,
+                    prefs: ref.watch(terminalPrefsProvider),
                   ),
                 ),
         ),
@@ -246,7 +270,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
                 child: InlineConfirm(
                   key: const Key('end-confirm'),
-                  title: 'End ${s.name}',
+                  title: 'End ${s.displayName}',
                   message:
                       'The agent and everything it started are stopped on '
                       'the host.',
@@ -307,7 +331,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   children: [
                     Flexible(
                       child: Text(
-                        s.name,
+                        s.displayName,
                         key: const Key('session-name'),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -510,7 +534,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           ),
           SizedBox(height: t.sp),
           Text(
-            s.name,
+            s.displayName,
             key: const Key('session-name'),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -575,19 +599,18 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 ),
                 child: c == null
                     ? const SizedBox.shrink()
-                    : StormTerminalView(
-                        terminal: c.terminal,
-                        focusNode: _focus,
-                        // Focus opens the keyboard on a phone, which should
-                        // wait for a tap on the terminal.
-                        autofocus: false,
-                        readOnly: s.ended,
-                        surface: true,
-                        fontSize: t.labelSize + 1,
-                        lineHeight: 1.7,
-                        padding: EdgeInsets.symmetric(
-                          horizontal: t.sp * 1.25,
-                          vertical: t.sp,
+                    : _withPaste(
+                        c,
+                        s,
+                        StormTerminalView(
+                          terminal: c.terminal,
+                          focusNode: _focus,
+                          // Focus opens the keyboard on a phone, which should
+                          // wait for a tap on the terminal.
+                          autofocus: false,
+                          readOnly: s.ended,
+                          phone: true,
+                          prefs: ref.watch(terminalPrefsProvider),
                         ),
                       ),
               ),
@@ -1569,6 +1592,8 @@ class _ExtraKeys extends StatelessWidget {
                   label: 'Paste',
                   tooltip: 'Paste',
                   onTap: () async {
+                    // An image first (D15 AM45), as the desktop's paste does.
+                    if (await term.onImagePaste?.call() ?? false) return;
                     final data = await Clipboard.getData(Clipboard.kTextPlain);
                     final text = data?.text;
                     if (text != null && text.isNotEmpty) term.paste(text);
@@ -1642,6 +1667,83 @@ class _Key extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// "Pasting image…" with a cancel while a paste takes a moment, or why it
+/// failed; nothing at all otherwise (D15 AM45).
+class ImagePasteChip extends StatelessWidget {
+  const ImagePasteChip({super.key, required this.controller});
+
+  final SessionController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return ValueListenableBuilder<ImagePasteState?>(
+      valueListenable: controller.imagePaste,
+      builder: (context, state, _) {
+        if (state == null) return const SizedBox.shrink();
+        final error = state.error;
+        final label =
+            error ??
+            (state.count > 1
+                ? 'Pasting ${state.count} images…'
+                : 'Pasting image…');
+        return Container(
+          key: const Key('image-paste-chip'),
+          padding: EdgeInsets.fromLTRB(
+            t.sp * 1.5,
+            t.sp * 0.75,
+            t.sp * 0.75,
+            t.sp * 0.75,
+          ),
+          decoration: BoxDecoration(
+            color: t.surface2,
+            borderRadius: BorderRadius.circular(t.rControl),
+            border: Border.all(
+              color: error == null ? t.border : t.danger,
+              width: t.bw,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.labelSize + 1,
+                    color: error == null ? t.text2 : t.danger,
+                  ),
+                ),
+              ),
+              SizedBox(width: t.sp),
+              Semantics(
+                button: true,
+                label: error == null ? 'Cancel the paste' : 'Dismiss',
+                excludeSemantics: true,
+                onTap: controller.dismissPaste,
+                child: InkWell(
+                  key: const Key('image-paste-dismiss'),
+                  onTap: controller.dismissPaste,
+                  borderRadius: BorderRadius.circular(t.rControl * 0.6),
+                  child: Padding(
+                    padding: EdgeInsets.all(t.sp * 0.5),
+                    child: Icon(
+                      LucideIcons.x,
+                      size: t.labelSize + 2,
+                      color: t.text3,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

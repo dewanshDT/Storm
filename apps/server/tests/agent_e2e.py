@@ -277,6 +277,30 @@ args = ["-i"]
         check("input is accepted", write(owner, sid, "hello\r") == 204)
         text, _, _ = s.until(lambda e, i, d, t: "hello\r" in t)
         check("input comes back as output", "hello" in text, text)
+        write(owner, sid, "\x1b]0;\u25d0 Fix the login\x07")
+        seen = []
+        _, _, closed = s.until(lambda e, i, d, t: e == "status" and seen.append(json.loads(d))
+                               or (seen and seen[-1].get("title") == "Fix the login"))
+        check("the agent's title reaches the stream as a status (D15 AM42)",
+              not closed and seen[-1]["activity"] == "working", seen[-1:])
+        check("and the record carries it", session(owner, sid)["title"] == "Fix the login")
+        png = b"\x89PNG\r\n\x1a\n" + bytes(64)
+        status, staged = call("POST", f"/v1/agent/sessions/{sid}/terminal/images", auth=owner,
+                              raw=png, timeout=40)
+        staged_path = (staged or {}).get("path", "") if status == 200 else ""
+        check("a pasted image is staged on the host and its path answered (D15 AM46)",
+              status == 200 and staged_path.startswith(HOST_STATE), (status, staged))
+        if staged_path:
+            mode = os.stat(staged_path).st_mode & 0o777
+            check("it is the image, 0600, in the session's inbox",
+                  open(staged_path, "rb").read() == png and mode == 0o600
+                  and f"/sessions/{sid}/inbox/" in staged_path, oct(mode))
+        status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/images", auth=owner,
+                         raw=b"just some text")
+        check("text is not an image: 415", status == 415, status)
+        status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/images", auth=owner,
+                         raw=png + bytes(10 * 1024 * 1024))
+        check("over 10 MiB: 413", status == 413, status)
         status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/resize",
                          {"cols": 100, "rows": 40, "focus": True}, auth=owner)
         check("resize is accepted", status == 204, status)
@@ -290,6 +314,12 @@ args = ["-i"]
         check("the stream closes once the session has ended", s.next() is None)
         s.close()
         check("the record is stopped", session(owner, sid)["status"] == "stopped")
+        ended_rec = session(owner, sid)
+        if staged_path:
+            check("the inbox goes with the session",
+                  wait(lambda: not os.path.exists(staged_path), "the inbox removed", 10))
+        check("the title outlives the session, the activity does not",
+              ended_rec["title"] == "Fix the login" and ended_rec["activity"] is None, ended_rec)
         status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/input", auth=owner, raw=b"x")
         check("input to an ended session is refused", status == 409, status)
 
@@ -518,7 +548,10 @@ args = ["-i"]
         try:
             def both_online():
                 _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
-                return all(any(h["id"] == i and h["status"] == "online" for h in hosts) for i in (host_id, host2_id))
+                # A launch needs the capabilities `hello` brings, a moment
+                # after the host shows online.
+                return all(any(h["id"] == i and h["status"] == "online" and h.get("capabilities")
+                               for h in hosts) for i in (host_id, host2_id))
             wait(both_online, "both hosts online", timeout=60)
             a = launch(owner, host_id, workspace="storm", provider="fake")[1]["id"]
             b = launch(owner, host_id, workspace="storm", provider="fake")[1]["id"]

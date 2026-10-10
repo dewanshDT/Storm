@@ -61,30 +61,30 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
+| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) |
 
-**Release state (2026-10-10).** **v0.6.1 is being cut** (decision 72's
-steps), at the operator's request after M24 merged into `staging` (#120–#122,
-#128, #129). **v0.6.0 was tagged (`2b0956c`, PR #133) but never published:**
-its new `server (macOS universal)` job ran `storm-server --version`, which the
-server's CLI did not accept, so `publish` and `apt` were skipped. v0.6.1 adds
-`--version` (which the installer's upgrade check also reads) and is otherwise
-v0.6.0. It carries **M24, the
-interactive installer** (decision 84): `curl -fsSL
-https://dewanshdt.github.io/Storm/install.sh | sh` installs any of the server,
-the Runtime Host, the app and phone pairing on Linux or macOS, sets up the
-account and enrolls the runtime (automatically beside its server, through
-`storm-server host-enrollment`); **the server on macOS** as a LaunchAgent
-running as the user with the notes in `~/Storm`
-(`storm-server-<v>-macos-universal.tar.gz`); `storm-server has-account`,
-`qr` and `uninstall`; `install.sh` attached to the release. **Upgrading
-prod:** nothing changes for a Linux server (no schema change); the old
-`curl … | sudo sh` still does the apt bootstrap. **v0.5.0** (PR #119,
-`39cf955`, 2026-10-10) carried M23, macOS Runtime Hosts; **v0.4.0** (PR #109,
-`018a063`) M21 + M22 (`auth.db` v6) and **prod runs it** until the operator
-upgrades. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8 (PR #37).
-**Known issue (still open):** the web client can stay on the spinner after a
-correct password in Firefox-based browsers (vault: *Storm v2/Issue — Zen
-login hang*).
+**Release state (2026-10-11).** **v0.7.0 is being cut** (decision 72's
+steps; this paragraph is the prep PR's), at the operator's request after M25
+merged into `staging`. It carries **M25, the session experience** (decision
+85): sessions named by the agent's own terminal title, logo rows with a
+working / idle badge, **pasting and dropping images** into a session on
+desktop, web and Android (staged on the session's host, then bracket-pasted
+as a path), images inserted from Gboard (87, xterm2 vendored as
+`5.2.0+storm.1`), and **Settings › Terminal** (text size, line spacing,
+padding); Android 16's predictive back goes to the parent page (86); the
+flaky identity-leak test and two live-suite races are fixed (#117, 86a).
+**Upgrading prod:** titles, activity and image paste need both
+`storm-server` and `storm-runtime` 0.7.0 — `agent.db` gains
+`sessions.title` by `ALTER TABLE` on start (additive, no version bump);
+older hosts and servers keep working without those features. **v0.6.1**
+(PR #136, `14049f1`, 2026-10-10) carried M24, the interactive installer and
+the macOS server (v0.6.0, `2b0956c`, was tagged but never published);
+**v0.5.0** (PR #119, `39cf955`) M23, macOS Runtime Hosts; **v0.4.0** (PR
+#109, `018a063`) M21 + M22 (`auth.db` v6) and **prod runs it** until the
+operator upgrades. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8
+(PR #37). **Known issue (still open):** the web client can stay on the
+spinner after a correct password in Firefox-based browsers (vault: *Storm
+v2/Issue — Zen login hang*).
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
@@ -4873,6 +4873,305 @@ checked, paired or cleaned up.
   stdin only; uninstall never deletes vaults or workspaces; no telemetry.
 
 ---
+
+**85. The session experience: agent-named sessions, logo rows, native image
+paste, terminal metrics and settings.** *(2026-10-10, approved by the
+operator)*
+
+**The spec.** D15 in *Agent Runtime/Decisions*, full text in *Agent
+Runtime/Session Experience — D15* (vault), amends the freeze with AM42–AM47
+and adds AC-N1–N5, AC-I1–I5 and AC-T1–T3. 84 is the installer.
+
+**What a same-day spike on a Runtime Host settled** (Claude Code 2.1.296,
+OpenCode 1.18.31, a real PTY, no `DISPLAY`):
+- **A bracketed paste of an image's absolute path is each agent's own image
+  attach.** Claude Code shows `[Image #1]` with no path, and the model named
+  the test image's colour; OpenCode shows `[Image 1]`. No permission prompt,
+  although the file sat outside the workspace.
+- **Claude Code's Ctrl+V cannot be served on a headless host.** With shims
+  for `xclip`, `wl-paste` and `xsel` first on `PATH`, none was called, with or
+  without `DISPLAY`. Faking the host clipboard is dropped.
+- **Claude Code's title carries a name and an activity glyph**: `✳ <name>`
+  idle, `◐`/`◑ <name>` working. OpenCode's is always `OpenCode`.
+
+**The decisions.**
+- **AM42–AM43:** the host parses each session's output once, live, with
+  `vte`, for OSC 0/2 only, and reports a cleaned `title` and an `activity`
+  through the status POST and `hello`. The server stores `title` (kept after
+  the end); `activity` is not a status. **The client never parses titles.**
+- **AM44:** session rows lead with the agent's real logo, status as a badge
+  on it, and `host · workspace · age` underneath.
+- **AM45–AM46:** a pasted or dropped image is pulled by the host into
+  `sessions/<ags>/inbox/` and its path bracket-pasted. Never in a workspace;
+  the server holds the bytes in memory only until staged.
+- **AM47:** terminal line height 1.25 (was 1.7), even padding, the leftover
+  under the last row split above and below it; and **Settings › Terminal**,
+  client-only.
+
+**The slices**, each its own PR to `staging`: 85a terminal metrics and
+settings; 85b–85d the naming stack (host, server, client); 85e–85g the image
+stack (wire, desktop and web capture, Android capture).
+
+*Revisit if:* AM22 is approved (its screen model replaces AM43's observer;
+the wire is unchanged); an agent stops treating a pasted image path as an
+attachment; terminal values need to follow the person across devices.
+
+**85a. Slice 1: the terminal's metrics, and Settings › Terminal (AM47).**
+*(2026-10-10)*
+- **Why the bottom gap grew in v0.4.0.** xterm2 fits
+  `floor(height / cellHeight)` rows and leaves the remainder under the last
+  one. The v2 handoff's line height of 1.7 made a row about 22 px, so up to
+  21 px sat below the padding. `StormTerminalView` now measures a row exactly
+  as xterm2's painter does (`terminalCellHeight`) and splits the remainder
+  above and below (`evenTerminalPadding`), a hair under it so xterm2's own
+  `~/` still fits every row.
+- **Line height 1.25**, and the padding `sp × 1.25` on every side in both
+  layouts (10 px, the inset the v2 polish pass pinned on phone and desk; the
+  spec's tighter phone value was dropped for it).
+- **Settings › Terminal** (`lib/ui/settings/terminal_page.dart`), right after
+  This device: text size (10–20, "Default" keeps each layout's size), line
+  spacing Compact 1.15 / Default 1.25 / Relaxed 1.5, padding Tight / Default /
+  Roomy, a live preview through the real view, and Reset. `TerminalPrefs`
+  lives in prefs under `storm.terminal.*`, is read with Settings at launch so
+  a terminal opens at its final size, and is never sent to the server.
+- **The view owns the layout values.** Callers pass `phone` and the prefs;
+  the font size, padding and line height are decided in one place, so the
+  preview and every session agree.
+- Tests: `terminal_settings_test.dart` (row fit at every spacing, the
+  remainder split, prefs round trip and fallback, the page end to end);
+  `ui_polish_test.dart` reads the inset from the rendered `TerminalView`.
+
+**85b. Slice 2: the host reads the agent's title (AM43).** *(2026-10-10)*
+- `apps/runtime/src/terminal.rs`: a `vte` 0.15 parser fed from
+  `Events::output`, acting only on OSC 0/2 (BEL or ST, `;` inside a title
+  kept). It observes; the ring and the stream are untouched, and a replay
+  re-sends stored bytes without parsing them.
+- `clean()` takes one leading glyph (`✳` idle; `◐◑◒◓` and braille
+  working), drops control characters, collapses whitespace, caps at 120
+  characters, and gives no name for an empty title, a bare `Claude Code` /
+  `OpenCode`, or a shell's `user@host:path`. Pinned by
+  `docs/terminal-title-vectors.json`, captured from Claude Code 2.1.296 and
+  OpenCode 1.18.31. A name, once given, survives a later title without one.
+- **Reported only on a change** of `(title, activity)`, at most once a second
+  per session, in the uploader after the output it came with: the status
+  POST carries `{"status": "running", "title", "activity"}`, so a server
+  without 85c ignores the extra fields. The ending's POST and `hello`'s
+  live sessions carry them too, so a reconnect restores them.
+- Test: `the_agents_title_is_reported_once_per_change` runs a real shell that
+  sets four titles in one burst and a fifth later: two reports (the first
+  burst coalesced, no spinner frame), and `hello` carries the last.
+
+**85c. Slice 3: the server keeps the title and the activity (AM42).**
+*(2026-10-10)*
+- `agent.db` `sessions` gains `title TEXT`, added by `ALTER TABLE` when an
+  older database lacks it (no version bump; the store has always been
+  additive). The record carries `title` and `activity` in its JSON.
+- A report's non-empty `title` replaces the stored one; null keeps it, so a
+  name survives the session's end. The server also drops control characters
+  and caps it at 120 characters, so a misbehaving host's text stays printable.
+- `activity` lives in `SessionLive`, never on disk. Only `working` / `idle`
+  are accepted, and it is shown only while the record is `running` — an
+  `unknown` session's last word may be stale. `hello` restores it.
+- A report that only changes the title or activity is logged at no level
+  (the record still updates and the stream gets a `status` event); a status
+  change is logged as before.
+- Tests: three manager tests (title kept and never cleared, activity only
+  while running, a restart keeps the title and `hello` restores activity, an
+  old database gains the column) and `agent_e2e.py` (a title typed into the
+  fake provider's echo reaches the stream as a status and outlives the end):
+  88 checks.
+
+**85d. Slice 4: every surface names a session by its agent, and rows lead
+with the agent's mark (AM44).** *(2026-10-10)*
+- `AgentSession` gains `title`, `activity` and `displayName` (`title`, else
+  the launch name); the stream's bare record brings both, and a record
+  without a title keeps the one known. Sidebar, phone list, overview rows,
+  the session header, the end confirmation and a note's "from session" link
+  all use `displayName`. The launch `name` stays the handle.
+- `AgentMark` (`agent_widgets.dart`): the agent's real mark on a `surface2`
+  tile — Claude's starburst in `#D97757`, OpenCode's mark in `text` (its
+  brand black vanishes on dark), Lucide `square_terminal` for the shell,
+  `bot` otherwise — from Simple Icons 16.34.0 (CC0), drawn with
+  `flutter_svg`; source noted in `assets/agents/README.md`. The badge:
+  accent and pulsing while working (still under reduced motion), text3 while
+  starting, amber while unknown, danger when failed; an ended tile at 50%.
+- Rows read `host · workspace · age`; the overview's grouped rows, already
+  under "workspace on host", read just the age. Rows are announced as "Fix
+  the login, Claude Code on build-vm, working".
+- The harness's scripted agent takes `{"title": …}`, and its sessions now
+  name themselves as Claude Code does, so the shots show names and badges.
+- Tests: `agent_mark_test.dart` (marks, badge colours, pulse, reduced
+  motion, faded ended tiles), model tests for `displayName` and the live
+  merge; two list tests updated for the new sub-line. Client 965.
+
+**85e. Slice 5: an image is staged on the session's host (AM46).**
+*(2026-10-10)*
+- `POST /v1/agent/sessions/{id}/terminal/images`, raw bytes, up to 10 MiB
+  (the route's own body limit). The type is the bytes' (`agent/images.rs`
+  sniffs PNG, JPEG, GIF, WebP); a declared `image/*` type must agree, any
+  other declared type is ignored. 413 / 415 / 409 ended / 503 offline / 429
+  over 4 per session or 64 MiB in total / 504 after 30 s / 502 with the
+  host's reason.
+- The bytes stay in the manager's memory only while in flight. The host is
+  sent `terminal.image {session, image, size, blake3, ext}` — **BLAKE3, not
+  the spec's SHA-256**: both crates already depend on it — and pulls them
+  with `GET /v1/runtime/sessions/{id}/terminal/images/{image}`, which only
+  that session's host may read. It answers `POST` with `{"staged": path}` or
+  `{"failed": reason}`; the server accepts only an absolute, printable path.
+- The host runs it as its own task, like `refresh` (found by
+  `agent_e2e.py`: the generic path would have queued it), checks the id
+  (`img_` + alphanumerics, so nothing can leave the inbox), the size and the
+  hash, and writes `state/sessions/<ags>/inbox/<image>.<ext>` `0600` through
+  a temporary file and a rename, the directories `0700`. The inbox goes with
+  the session directory when the session ends.
+- Tests: `images.rs` (sniffing, limits), two manager tests (the round trip,
+  only the session's host can fetch, every refusal and the timeout), two
+  host tests (a private whole file; a damaged image reported, not staged; an
+  escaping id refused) and `agent_e2e.py`: a real stage with the file `0600`
+  in the inbox, 415, 413, and the inbox gone after the end (93 checks).
+
+**85f. Slice 6: pasting and dropping images on desktop and web (AM45).**
+*(2026-10-10)*
+- **Keys.** `StormTerminal` asks `onImagePaste` on the platform's paste
+  (Cmd+V on a Mac, Ctrl+Shift+V elsewhere) and on Ctrl+V (Claude Code's
+  image key). With an image on the clipboard it is staged and pasted;
+  without one the paste chord pastes text and Ctrl+V sends `^V`, as before.
+  Not on the web, where the browser owns the clipboard.
+- **The clipboard.** **Not `super_clipboard`, as the spec said:** it builds a
+  Rust library for every app. A `storm/clipboard` method channel instead, in
+  `AppDelegate.swift` beside `storm/links` (81l): a copied image file's own
+  bytes (PNG/JPEG/GIF/WebP kept, anything else AppKit reads → PNG), a PNG as
+  it is, a screenshot's TIFF → PNG, and nothing for a copied file that is not
+  an image (Finder puts its icon there too). Dart re-encodes anything else
+  it can decode (BMP) as PNG.
+- **The web** listens for `paste` events carrying image files while the
+  terminal has focus; text pastes pass untouched. **Drops** on every
+  platform come through `desktop_drop` 0.8.4; the terminal shows an accent
+  outline while something is held over it.
+- **The flow** (`SessionController.pasteImages`): each image staged in turn,
+  every path typed through `StormTerminal.paste` (so bracketed paste follows
+  the agent's mode) only once all arrived; a chip after 300 ms with a cancel
+  (a cancelled paste's path is never typed); a failure says why for 6 s and
+  types nothing.
+- **Verified on the real web build**: the harness's new `desktop-23` shot
+  dispatches a browser paste of a PNG into a running session on a real
+  server and Runtime Host; the host staged it in the session's inbox and its
+  path was typed. The Swift is compiled by `acceptance.yml`, not here.
+- Tests: `image_paste_test.dart` (sniffing, which keys are a paste, the
+  controller's stage-then-type, the 300 ms chip, failure, cancel, Ctrl+V with
+  and without an image). Client 973.
+
+**85g. Slice 7: an image from the Android clipboard (AM45).** *(2026-10-10)*
+- `storm/clipboard` in `MainActivity.kt` beside `storm/links`: the first
+  clip item whose content URI names an `image/*` type, read through the
+  content resolver, bounded at 12 MiB.
+- The extra-keys **Paste** asks for an image first, exactly as the desktop's
+  paste keys do; without one it pastes text as before. Drops on Android go
+  through `desktop_drop` (85f).
+- **Not built: Gboard's image insertion.** xterm2 5.2's own input
+  connection (`CustomTextEdit`) declares no `allowedMimeTypes` and has no
+  `insertContent`, so the keyboard never offers an image to the terminal.
+  It needs a fork of xterm2 (MIT, the freeze's sanctioned path, but a
+  decision: the freeze reserves the fork for its revisit triggers). Left for
+  the operator. Android's long-press paste is the Paste key here: the
+  terminal has no system text-selection menu.
+- Tests: `image_paste_phone_test.dart` (Paste with an image stages it and
+  types the path; without one nothing is staged). A malformed answer to the
+  stage now fails the paste instead of throwing. Client 975. The Kotlin is
+  compiled by `acceptance.yml`.
+
+**85, the real run** *(2026-10-10, on a Runtime Host, the stack's head)*: a
+real `storm-server` and `storm-runtime`, a `claude-code` session (Claude
+Code 2.1.296), driven only through Storm's REST and SSE surface. A 32×32 red
+PNG posted to `…/terminal/images` was staged in the session's inbox; its
+path, bracket-pasted, became **`[Image #1]`** with the path not on screen;
+asked its colour, the model answered **"Red"**; the session record took
+Claude's own title, **"Single fill colour in image"**, activity `working`.
+A bare script must answer the terminal's device-attributes query, as the
+app's emulator does — without it Claude Code's parser swallowed the first
+arrow key.
+
+**86. System back on Android 16: every page claims it while it has
+somewhere to go.** *(2026-10-10, the operator's phone report)*
+
+**The report.** On the phone, back from a note left the app instead of
+going to its folder; back from a session left the app instead of going to
+the Agents list; and the places bubble's Agents opened the last session
+instead of the list.
+
+**The cause.** The app targets SDK 36 (Flutter 3.44's default), so Android
+16 runs **predictive back**: the platform asks the app *in advance* whether
+it handles back (`SystemNavigator.setFrameworkHandlesBack`), and closes the
+app when it says no. Flutter says yes only when a navigator can pop or its
+top route blocks the pop. Storm reaches most pages with `go`, so nothing can
+pop, and the Q2 logic in `AppShell`'s `BackButtonListener` — correct, and
+covered by `back_navigation_test` — was never asked. The tests drove
+`handlePopRoute` directly, which skips the platform's question. A second
+layer: when a `go` swaps one shell for another (Notes → a session), the
+outer navigator reports for its own top page *after* the leaf, so a leaf's
+claim alone loses.
+**The places bubble** went to the remembered Agents location, which after
+opening a session is that session — full screen on a phone.
+
+**The fix.**
+- `LogicalBack` (`app_shell.dart`): a `PopScope` that blocks the pop while
+  `logicalParent` has somewhere to go and the page was not pushed, and
+  goes there when the pop is attempted. Every signed-in leaf page and every
+  shell around them (`AppShell`, `VaultShell`, `AgentsShell`,
+  `SettingsShell`) is wrapped, so whichever navigator reports last says yes.
+  Pushed pages still pop; the vault root still says no, so back there
+  leaves the app as Q2 says.
+- The places bubble's Agents goes to `/agents`, the list where sessions are
+  and new ones start. The desk rail keeps the remembered location: its list
+  is always beside the session.
+- Test: `predictive_back_test.dart` records what the app tells the platform
+  (`setFrameworkHandlesBack`) under Android, then backs: a note opened with
+  `go` claims back and returns to its folder; a session claims back and
+  returns to the list, and the list to Notes; the bubble opens the list.
+  All three fail without the fix. Client 978.
+
+*Revisit if:* Flutter changes how predictive back is negotiated; Storm opts
+out of it with `enableOnBackInvokedCallback="false"` (which Android 16
+ignores at target 36 anyway).
+
+**86a. Two live-test races, found verifying `staging` after the merge.**
+*(2026-10-11)* Each failed once in three full `make test-live` runs on
+`990a1b8` and passed 3/3 alone; both are in test code older than D15.
+- **`gateway_e2e.py` R7** waited 30 s for the host to reconnect. The host's
+  backoff doubles from 1 s to a 60 s ceiling, and R7 restarts the server
+  right after R5/R6 did, so the host can be waiting longer than that. All
+  three reconnect waits now allow `RECONNECT = 90` s, as AC-R1 in
+  `agent_e2e.py` already did.
+- **`agent_e2e.py` AC-F6** waited for the second host to be `online`, then
+  launched on it; a launch needs the capabilities its `hello` brings a moment
+  later, and answered 503 without an `id`. The wait now requires both.
+- Neither change can pass a real failure: one wait is longer, the other's
+  precondition stricter. Verified: agent 93 and gateway 87, three runs each.
+
+**87. xterm2 is forked for the keyboard's images.** *(2026-10-11, the
+operator's approval of 85g's open decision)*
+- **Why now.** The freeze kept the fork for AC-Q5's revisit triggers; the
+  operator chose it for Gboard's image insertion, which 5.2 cannot take: its
+  input connection declares no `allowedMimeTypes` and drops `insertContent`.
+- **The fork is vendored**, `apps/client/third_party/xterm2`, a path
+  dependency at `5.2.0+storm.1`: one commit of 5.2.0 as published, then the
+  patch on its own, so a rebase onto a later xterm2 is that one diff. No
+  second repository to keep. The analyzer skips it, as it skipped the
+  package in the pub cache.
+- **The patch** gives `TerminalView` Flutter's own
+  `contentInsertionConfiguration` and passes it to `CustomTextEdit`, which
+  declares its types on the connection, reopens the connection when they
+  change, and hands `insertContent` on. Nothing else in xterm2 changes.
+- **Storm's side** stays behind the terminal-surface boundary:
+  `StormTerminal.onKeyboardImage` (PNG, JPEG, GIF, WebP), set by
+  `SessionController` to the same stage-then-type flow as a paste (85f). A
+  read-only terminal offers no types. The keyboard's `content://` URI is
+  never typed.
+- Tests: `keyboard_image_test.dart` drives the engine's `commitContent`
+  message: the types reach `TextInput.setClient`, an image is staged and its
+  path typed, an empty or non-image insertion stages nothing. With the
+  forwarding removed, the staging test fails.
+- **Not verified on a device**: Gboard on Android is the operator's check.
 
 ## Data model
 

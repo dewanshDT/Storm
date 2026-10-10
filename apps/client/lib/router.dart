@@ -221,72 +221,82 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
       ShellRoute(
         builder: (_, state, child) =>
-            AppShell(location: state.uri.toString(), child: child),
+            _shell(AppShell(location: state.uri.toString(), child: child)),
         routes: [
-          GoRoute(path: Routes.notes, builder: (_, _) => const NotesHome()),
+          GoRoute(
+            path: Routes.notes,
+            builder: (_, _) => _leaf(const NotesHome()),
+          ),
           // The vault's screens share `VaultShell`, which carries `VaultGate`
           // (the route's vault is active before its children build) and, at
           // desk width, the folder tree.
           ShellRoute(
-            builder: (_, _, child) => VaultShell(child: child),
+            builder: (_, _, child) => _shell(VaultShell(child: child)),
             routes: [
               GoRoute(
                 path: '/v/:vault/browse/:path(.*)',
                 builder: (_, state) =>
-                    BrowseScreen(folder: Routes.folderOf(state.uri)),
+                    _leaf(BrowseScreen(folder: Routes.folderOf(state.uri))),
               ),
               GoRoute(
                 path: '/v/:vault/browse',
-                builder: (_, _) => const BrowseScreen(folder: ''),
+                builder: (_, _) => _leaf(const BrowseScreen(folder: '')),
               ),
               GoRoute(
                 path: '/v/:vault/note/:id',
-                builder: (_, state) => NoteScreen(
-                  noteId: state.pathParameters['id']!,
-                  fromSession: state.uri.queryParameters['session'],
+                builder: (_, state) => _leaf(
+                  NoteScreen(
+                    noteId: state.pathParameters['id']!,
+                    fromSession: state.uri.queryParameters['session'],
+                  ),
                 ),
               ),
               GoRoute(
                 path: '/v/:vault/search',
-                builder: (_, _) => const SearchScreen(),
+                builder: (_, _) => _leaf(const SearchScreen()),
               ),
               GoRoute(
                 path: '/v/:vault/tags',
-                builder: (_, _) => const TagsScreen(),
+                builder: (_, _) => _leaf(const TagsScreen()),
               ),
             ],
           ),
           ShellRoute(
             builder: (_, state, child) =>
-                AgentsShell(location: state.uri, child: child),
+                _shell(AgentsShell(location: state.uri, child: child)),
             routes: [
               GoRoute(
                 path: Routes.agents,
-                builder: (_, _) => const AgentsScreen(),
+                builder: (_, _) => _leaf(const AgentsScreen()),
               ),
               GoRoute(
                 path: '/agents/s/:id',
-                builder: (_, state) => SessionScreen(
-                  sessionId: state.pathParameters['id']!,
-                  tab: sessionTabOf(state.uri.queryParameters['tab']),
+                builder: (_, state) => _leaf(
+                  SessionScreen(
+                    sessionId: state.pathParameters['id']!,
+                    tab: sessionTabOf(state.uri.queryParameters['tab']),
+                  ),
                 ),
               ),
             ],
           ),
           ShellRoute(
-            builder: (_, state, child) =>
-                SettingsShell(page: state.pathParameters['page'], child: child),
+            builder: (_, state, child) => _shell(
+              SettingsShell(page: state.pathParameters['page'], child: child),
+            ),
             routes: [
               GoRoute(
                 path: Routes.settings,
-                builder: (context, _) => context.isExpanded
-                    ? settingsPageFor('device')
-                    : const SettingsListScreen(),
+                builder: (context, _) => _leaf(
+                  context.isExpanded
+                      ? settingsPageFor('device')
+                      : const SettingsListScreen(),
+                ),
               ),
               GoRoute(
                 path: '/settings/:page',
                 builder: (_, state) =>
-                    settingsPageFor(state.pathParameters['page']!),
+                    _leaf(settingsPageFor(state.pathParameters['page']!)),
               ),
             ],
           ),
@@ -333,3 +343,10 @@ String? _shellRedirect(GoRouterState state, Ref ref) {
 class _RouterRefresh extends ChangeNotifier {
   void notify() => notifyListeners();
 }
+
+/// Every signed-in page claims system back while it has somewhere to go.
+Widget _leaf(Widget page) => LogicalBack(child: page);
+
+/// And so does each shell around it: a navigator whose pages changed reports
+/// for its own top page, and that report can arrive after the page's.
+Widget _shell(Widget shell) => LogicalBack(shell: true, child: shell);

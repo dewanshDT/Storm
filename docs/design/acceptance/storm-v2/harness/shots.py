@@ -25,6 +25,15 @@ def opened(*notes):
     return [a for n in notes for a in (("go", f"/v/{vaults[n]}/note/{n}"), ("wait", 2.5))]
 
 
+PASTE_PNG = (
+    "(() => { const b = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
+    "FcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));"
+    " const dt = new DataTransfer(); dt.items.add(new File([b], 'shot.png', {type: 'image/png'}));"
+    " const e = new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true});"
+    " (document.activeElement || document.body).dispatchEvent(e); return e.defaultPrevented; })()"
+)
+
+
 CURRENT = [
     dict(name="baseline/desktop-note", viewport="desktop", route=f"/v/{P}/note/{GW}"),
     dict(name="baseline/desktop-browse", viewport="desktop", route=f"/v/{P}/browse"),
@@ -71,6 +80,8 @@ V2 = [
                   ("go", "/settings/device"), ("go", "/settings/connection")]),
     dict(name="desktop-20-settings-advanced", viewport="desktop", route="/settings/advanced"),
     dict(name="desktop-21-settings-about-health", viewport="desktop", route="/settings/health"),
+    dict(name="desktop-22-settings-terminal", viewport="desktop", route="/settings/terminal",
+         settle=1.5),
     dict(name="phone-10-settings-list", viewport="phone", route="/settings"),
     dict(name="phone-11-settings-page-ai-access", viewport="phone", route="/settings",
          actions=[("tap", "^AI access$")]),
@@ -116,6 +127,11 @@ V2 = [
     dict(name="desktop-11c-session-end-confirm", viewport="desktop",
          route="/agents/s/{session:gateway-spec}?tab=context",
          actions=[("tap", "^End$")]),
+    # D15 AM45: an image pasted into the running session (a browser paste
+    # event carrying a PNG file) is staged on the host and its path typed.
+    dict(name="desktop-23-image-pasted", viewport="desktop",
+         route="/agents/s/{session:gateway-spec}", settle=2.5,
+         actions=[("wait", 1.5), ("js", PASTE_PNG), ("wait", 3)]),
     dict(name="phone-05-agents-list", viewport="phone", route="/agents", fresh=True),
     dict(name="phone-06-session-running", viewport="phone",
          route="/agents/s/{session:gateway-spec}", settle=2.5),
