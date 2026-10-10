@@ -10,7 +10,7 @@
 class StormRuntime < Formula
   desc "Storm Runtime Host: runs agent sessions for a Storm Server"
   homepage "https://github.com/dewanshDT/Storm"
-  url "https://github.com/dewanshDT/Storm.git", tag: "v0.6.1"
+  url "https://github.com/dewanshDT/Storm.git", tag: "v0.7.0"
   license "MIT"
   head "https://github.com/dewanshDT/Storm.git", branch: "staging"
 

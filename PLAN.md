@@ -61,31 +61,30 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
-| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **in progress** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven slices 85a–85g · 87 (xterm2 fork, Gboard images) |
+| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) |
 
-**Release state (2026-10-10).** **v0.6.1 is being cut** (decision 72's
-steps), at the operator's request after M24 merged into `staging` (#120–#122,
-#128, #129). **v0.6.0 was tagged (`2b0956c`, PR #133) but never published:**
-its new `server (macOS universal)` job ran `storm-server --version`, which the
-server's CLI did not accept, so `publish` and `apt` were skipped. v0.6.1 adds
-`--version` (which the installer's upgrade check also reads) and is otherwise
-v0.6.0. It carries **M24, the
-interactive installer** (decision 84): `curl -fsSL
-https://dewanshdt.github.io/Storm/install.sh | sh` installs any of the server,
-the Runtime Host, the app and phone pairing on Linux or macOS, sets up the
-account and enrolls the runtime (automatically beside its server, through
-`storm-server host-enrollment`); **the server on macOS** as a LaunchAgent
-running as the user with the notes in `~/Storm`
-(`storm-server-<v>-macos-universal.tar.gz`); `storm-server has-account`,
-`qr` and `uninstall`; `install.sh` attached to the release. **Upgrading
-prod:** nothing changes for a Linux server (no schema change); the old
-`curl … | sudo sh` still does the apt bootstrap. **v0.5.0** (PR #119,
-`39cf955`, 2026-10-10) carried M23, macOS Runtime Hosts; **v0.4.0** (PR #109,
-`018a063`) M21 + M22 (`auth.db` v6) and **prod runs it** until the operator
-upgrades. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8 (PR #37).
-**Known issue (still open):** the web client can stay on the spinner after a
-correct password in Firefox-based browsers (vault: *Storm v2/Issue — Zen
-login hang*).
+**Release state (2026-10-11).** **v0.7.0 is being cut** (decision 72's
+steps; this paragraph is the prep PR's), at the operator's request after M25
+merged into `staging`. It carries **M25, the session experience** (decision
+85): sessions named by the agent's own terminal title, logo rows with a
+working / idle badge, **pasting and dropping images** into a session on
+desktop, web and Android (staged on the session's host, then bracket-pasted
+as a path), images inserted from Gboard (87, xterm2 vendored as
+`5.2.0+storm.1`), and **Settings › Terminal** (text size, line spacing,
+padding); Android 16's predictive back goes to the parent page (86); the
+flaky identity-leak test and two live-suite races are fixed (#117, 86a).
+**Upgrading prod:** titles, activity and image paste need both
+`storm-server` and `storm-runtime` 0.7.0 — `agent.db` gains
+`sessions.title` by `ALTER TABLE` on start (additive, no version bump);
+older hosts and servers keep working without those features. **v0.6.1**
+(PR #136, `14049f1`, 2026-10-10) carried M24, the interactive installer and
+the macOS server (v0.6.0, `2b0956c`, was tagged but never published);
+**v0.5.0** (PR #119, `39cf955`) M23, macOS Runtime Hosts; **v0.4.0** (PR
+#109, `018a063`) M21 + M22 (`auth.db` v6) and **prod runs it** until the
+operator upgrades. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8
+(PR #37). **Known issue (still open):** the web client can stay on the
+spinner after a correct password in Firefox-based browsers (vault: *Storm
+v2/Issue — Zen login hang*).
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
