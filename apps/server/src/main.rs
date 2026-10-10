@@ -1010,6 +1010,18 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // The Agent Manager (decision 77c). Opening it marks every session that
     // had not ended `unknown` until its host reports in.
     let agent = Arc::new(crate::agent::AgentManager::open(&state_dir)?);
+    // B-1: a host that heartbeats every 15 s and has been silent for 45 s is
+    // gone (asleep, unplugged), whatever its TCP connection says.
+    {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                agent.reap_silent(std::time::Duration::from_secs(45));
+            }
+        });
+    }
 
     // The MCP Gateway's store and data key (decision 81b). Opened at boot,
     // like `agent.db`, so the key file exists before the first backup runs.

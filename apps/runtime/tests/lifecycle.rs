@@ -233,7 +233,7 @@ fn a_revoked_host_exits_3_and_is_no_longer_enrolled() {
 /// account sweep would end an `enroll` running as that account before it had
 /// said anything. So `enroll` announces first, and `host.json` is its last
 /// write. Also AM36: after a revocation it enrolls again without `--force`,
-/// and the old `host.json.revoked` goes.
+/// and the old `host.json.revoked` moves under `revoked/` (B-5).
 #[tokio::test]
 async fn enrollment_is_announced_before_host_json_exists() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -263,5 +263,14 @@ async fn enrollment_is_announced_before_host_json_exists() {
     assert!(
         !state.path().join(REVOKED_FILE).exists(),
         "the revoked marker stayed"
+    );
+    // Unreadable, so filed by time rather than by host id.
+    let archived: Vec<_> = std::fs::read_dir(state.path().join("revoked"))
+        .unwrap()
+        .map(|e| e.unwrap().path().join(REVOKED_FILE))
+        .collect();
+    assert!(
+        archived.len() == 1 && archived[0].exists(),
+        "the revoked enrollment was not kept: {archived:?}"
     );
 }

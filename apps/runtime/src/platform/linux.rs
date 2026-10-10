@@ -87,6 +87,12 @@ pub fn account_processes(uid: u32) -> io::Result<Vec<i32>> {
     Ok(out)
 }
 
+/// The environment `pid` was started with, NUL-separated: readable for the
+/// processes of one's own account.
+pub fn environment(pid: i32) -> Option<Vec<u8>> {
+    std::fs::read(format!("/proc/{pid}/environ")).ok()
+}
+
 fn status_owned_by(status: &str, uid: u32) -> bool {
     let field = |name: &str| {
         status
