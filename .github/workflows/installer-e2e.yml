@@ -1,0 +1,179 @@
+name: Installer end to end
+
+# AC-I1 / AC-I2 / AC-I4 / AC-I5 (decision 84): the real deploy/install.sh,
+# run non-interactively on a clean runner, installing this commit's server and
+# runtime built here (`--from-dir`, never the public release), then checked
+# from the outside: the server healthy, the account made, the runtime
+# enrolled to it with no app and no visible secret, a re-run that changes
+# nothing, a dry run that changes nothing, and no secret in the log.
+# The runners are disposable, which is why this may install system services.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["acceptance/**"]
+  pull_request:
+    paths:
+      - deploy/install.sh
+      - tools/installer-tests/**
+      - apps/server/src/install*.rs
+      - .github/workflows/installer-e2e.yml
+
+permissions:
+  contents: read
+
+env:
+  CI_VERSION: 0.0.0
+  CI_PASSWORD: ci-installer-password-1
+
+jobs:
+  linux:
+    name: installer e2e (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Build the .debs
+        run: |
+          set -eux
+          mkdir -p dist apps/server/packaging/web
+          echo '<!doctype html><title>Storm</title>ci web' > apps/server/packaging/web/index.html
+          for app in server runtime; do
+            (cd apps/$app &&
+              sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml &&
+              cargo build --release &&
+              cargo deb --no-build &&
+              cp target/debian/*.deb ../../dist/)
+          done
+          (cd dist && sha256sum * > checksums.txt && cat checksums.txt)
+      - name: Install everything (non-interactive)
+        run: |
+          printf '%s\n' "$CI_PASSWORD" |
+            sh deploy/install.sh --yes --everything --version "v$CI_VERSION" \
+              --from-dir dist --password-stdin --port 8484
+      - name: Check — server, account, runtime enrolled
+        run: |
+          set -eux
+          systemctl is-active storm-server
+          curl -fsS http://127.0.0.1:8484/v1/health
+          state=$(sudo sed -n 's/^STORM_STATE=//p' /etc/storm/storm.env)
+          owner=$(stat -c %U "$state")
+          sudo -u "$owner" storm-server has-account --state "$state"
+          systemctl is-active storm-runtime
+          sudo test -f /var/lib/storm-runtime/host.json
+          sudo -u storm-runtime storm-runtime check | tee check.txt
+          grep -q '^OK:' check.txt
+      - name: Re-run changes nothing (AC-I4)
+        run: |
+          set -eux
+          pid=$(systemctl show -p MainPID --value storm-server)
+          rt=$(systemctl show -p MainPID --value storm-runtime)
+          sh deploy/install.sh --yes --everything --version "v$CI_VERSION" --from-dir dist
+          test "$pid" = "$(systemctl show -p MainPID --value storm-server)"
+          test "$rt" = "$(systemctl show -p MainPID --value storm-runtime)"
+      - name: Dry run changes nothing (AC-I5)
+        run: |
+          set -eux
+          before=$(sudo find /etc/storm /etc/storm-runtime /var/lib/storm-runtime -newer dist/checksums.txt 2>/dev/null | wc -l)
+          sh deploy/install.sh --dry-run --everything --version "v$CI_VERSION" --from-dir dist | tee plan.txt
+          grep -qi sudo plan.txt
+          test "$before" = "$(sudo find /etc/storm /etc/storm-runtime /var/lib/storm-runtime -newer dist/checksums.txt 2>/dev/null | wc -l)"
+      - name: No secret on record
+        run: |
+          set -eu
+          log="${XDG_STATE_HOME:-$HOME/.local/state}/storm/install.log"
+          test -s "$log"
+          ! grep -F "$CI_PASSWORD" "$log"
+          ! grep -E 'storm-enroll:v1:[^ ]*sen_' "$log"
+          ! sudo journalctl -u storm-runtime -u storm-server --no-pager | grep -E 'storm-enroll:v1:|sen_[A-Z0-9]{8}'
+      - name: Logs
+        if: always()
+        run: |
+          cat "${XDG_STATE_HOME:-$HOME/.local/state}/storm/install.log" || true
+          sudo journalctl -u storm-server -u storm-runtime --no-pager | tail -100 || true
+
+  macos:
+    name: installer e2e (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: Build the release-shaped assets
+        run: |
+          set -eux
+          for app in server runtime; do
+            (cd apps/$app &&
+              sed -i.bak "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml && rm Cargo.toml.bak &&
+              cargo build --release)
+          done
+          mkdir -p dist srv/web rt app/Storm.app/Contents
+          cp apps/server/target/release/storm-server deploy/storm-backup.sh LICENSE srv/
+          echo '<!doctype html><title>Storm</title>ci web' > srv/web/index.html
+          echo ci > srv/README-macos.txt
+          tar -C srv -czf "dist/storm-server-$CI_VERSION-macos-universal.tar.gz" .
+          cp apps/runtime/target/release/storm-runtime LICENSE rt/
+          echo ci > rt/README-macos.txt
+          tar -C rt -czf "dist/storm-runtime-$CI_VERSION-macos-universal.tar.gz" .
+          printf '<plist version="1.0"><dict/></plist>\n' > app/Storm.app/Contents/Info.plist
+          (cd app && ditto -c -k --keepParent Storm.app "../dist/Storm-$CI_VERSION-macos-arm64.zip")
+          (cd dist && shasum -a 256 * > checksums.txt && cat checksums.txt)
+      - name: Install everything but the agent CLIs (non-interactive)
+        run: |
+          printf '%s\n' "$CI_PASSWORD" |
+            sh deploy/install.sh --yes --server --runtime --app --mobile \
+              --version "v$CI_VERSION" --from-dir dist --password-stdin --port 8484
+      - name: Check — LaunchAgent server as the user, runtime enrolled, app
+        run: |
+          set -eux
+          curl -fsS http://127.0.0.1:8484/v1/health
+          bin="$HOME/Library/Application Support/Storm/bin/storm-server"
+          "$bin" status
+          "$bin" has-account --state "$HOME/Storm/state"
+          ps -axo user,command | grep "[s]torm-server serve" | grep "^$USER "
+          sudo launchctl print system/dev.storm.runtime | grep -E 'state = running'
+          sudo test -f /Library/StormRuntime/state/host.json
+          (cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check) | tee check.txt
+          grep -q '^OK:' check.txt
+          test -d /Applications/Storm.app || test -d "$HOME/Applications/Storm.app"
+      - name: Re-run changes nothing (AC-I4)
+        run: |
+          set -eux
+          pid=$(pgrep -f "storm-server serve")
+          sh deploy/install.sh --yes --server --runtime --app --mobile --version "v$CI_VERSION" --from-dir dist
+          test "$pid" = "$(pgrep -f "storm-server serve")"
+      - name: No secret on record
+        run: |
+          set -eu
+          log="$HOME/Library/Logs/Storm/install.log"
+          test -s "$log"
+          ! grep -F "$CI_PASSWORD" "$log"
+          ! grep -E 'storm-enroll:v1:[^ ]*sen_' "$log"
+      - name: Uninstall keeps the notes
+        run: |
+          set -eux
+          mkdir -p "$HOME/Storm/vaults/keep" && echo '# kept' > "$HOME/Storm/vaults/keep/n.md"
+          sh deploy/install.sh --yes uninstall --server --runtime
+          ! curl -fsS --max-time 2 http://127.0.0.1:8484/v1/health
+          test -f "$HOME/Storm/vaults/keep/n.md"
+          ! sudo launchctl print system/dev.storm.runtime
+      - name: Logs
+        if: always()
+        run: |
+          cat "$HOME/Library/Logs/Storm/install.log" || true
+          cat "$HOME/Library/Logs/Storm/storm-server.log" || true
+          sudo tail -n 80 /Library/Logs/StormRuntime/storm-runtime.log || true
