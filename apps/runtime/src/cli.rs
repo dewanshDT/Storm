@@ -29,7 +29,11 @@
 //!   ([`crate::platform::SESSION_TAG`]). A server an agent daemonized with
 //!   `setsid` (OpenCode's `serve --service`) has left the session and been
 //!   reparented, but still carries the tag, so it is a straggler like any
-//!   other: the session's ending ends it too.
+//!   other: the session's ending ends it too. So does any per-account
+//!   daemon a session happened to start on demand (a tmux server, an
+//!   ssh-agent, a build daemon): it is the session's, and goes with it, even
+//!   if a later session was using it. That is the design — nothing a session
+//!   started outlives it — and the price of finding what left the session.
 //! - `ended` is reported only after the output has drained, so nothing arrives
 //!   after it.
 
