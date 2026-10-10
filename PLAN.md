@@ -4962,6 +4962,26 @@ attachment; terminal values need to follow the person across devices.
   sets four titles in one burst and a fifth later: two reports (the first
   burst coalesced, no spinner frame), and `hello` carries the last.
 
+**85c. Slice 3: the server keeps the title and the activity (AM42).**
+*(2026-10-10)*
+- `agent.db` `sessions` gains `title TEXT`, added by `ALTER TABLE` when an
+  older database lacks it (no version bump; the store has always been
+  additive). The record carries `title` and `activity` in its JSON.
+- A report's non-empty `title` replaces the stored one; null keeps it, so a
+  name survives the session's end. The server also drops control characters
+  and caps it at 120 characters, so a misbehaving host's text stays printable.
+- `activity` lives in `SessionLive`, never on disk. Only `working` / `idle`
+  are accepted, and it is shown only while the record is `running` — an
+  `unknown` session's last word may be stale. `hello` restores it.
+- A report that only changes the title or activity is logged at no level
+  (the record still updates and the stream gets a `status` event); a status
+  change is logged as before.
+- Tests: three manager tests (title kept and never cleared, activity only
+  while running, a restart keeps the title and `hello` restores activity, an
+  old database gains the column) and `agent_e2e.py` (a title typed into the
+  fake provider's echo reaches the stream as a status and outlives the end):
+  88 checks.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

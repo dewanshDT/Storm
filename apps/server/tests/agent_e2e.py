@@ -277,6 +277,13 @@ args = ["-i"]
         check("input is accepted", write(owner, sid, "hello\r") == 204)
         text, _, _ = s.until(lambda e, i, d, t: "hello\r" in t)
         check("input comes back as output", "hello" in text, text)
+        write(owner, sid, "\x1b]0;\u25d0 Fix the login\x07")
+        seen = []
+        _, _, closed = s.until(lambda e, i, d, t: e == "status" and seen.append(json.loads(d))
+                               or (seen and seen[-1].get("title") == "Fix the login"))
+        check("the agent's title reaches the stream as a status (D15 AM42)",
+              not closed and seen[-1]["activity"] == "working", seen[-1:])
+        check("and the record carries it", session(owner, sid)["title"] == "Fix the login")
         status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/resize",
                          {"cols": 100, "rows": 40, "focus": True}, auth=owner)
         check("resize is accepted", status == 204, status)
@@ -290,6 +297,9 @@ args = ["-i"]
         check("the stream closes once the session has ended", s.next() is None)
         s.close()
         check("the record is stopped", session(owner, sid)["status"] == "stopped")
+        ended_rec = session(owner, sid)
+        check("the title outlives the session, the activity does not",
+              ended_rec["title"] == "Fix the login" and ended_rec["activity"] is None, ended_rec)
         status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/input", auth=owner, raw=b"x")
         check("input to an ended session is refused", status == 409, status)
 

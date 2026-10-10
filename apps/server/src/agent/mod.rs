@@ -176,6 +176,11 @@ pub struct StatusReport {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub end_reason: Option<String>,
+    /// The agent's name for the session (D15 AM43). Null changes nothing.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub activity: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
 }
@@ -279,6 +284,8 @@ struct HostLink {
 
 struct SessionLive {
     cache: OutputCache,
+    /// `working` / `idle`, as the host last said (D15 AM42).
+    activity: Option<String>,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
 }
@@ -287,6 +294,7 @@ impl SessionLive {
     fn new() -> Self {
         Self {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
+            activity: None,
             version: watch::channel(0).0,
         }
     }
@@ -585,6 +593,7 @@ impl AgentManager {
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
                         self.store.lock().unwrap().update(&r)?;
+                        self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
                     }
                     let empty = {
@@ -695,15 +704,19 @@ impl AgentManager {
             // An ending is final; a late duplicate changes nothing.
             return Ok(());
         }
+        let before = r.status.clone();
         apply_report(&mut r, report)?;
-        tracing::info!(
-            host = host_id,
-            session = session_id,
-            status = %r.status,
-            end_reason = r.end_reason.as_deref(),
-            "session status"
-        );
+        if r.status != before || r.is_ended() {
+            tracing::info!(
+                host = host_id,
+                session = session_id,
+                status = %r.status,
+                end_reason = r.end_reason.as_deref(),
+                "session status"
+            );
+        }
         self.store.lock().unwrap().update(&r)?;
+        self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
     }
@@ -803,6 +816,8 @@ impl AgentManager {
             egress: "host".into(),
             cols: req.terminal.cols,
             rows: req.terminal.rows,
+            title: None,
+            activity: None,
         };
         // The grants (spec §6): none for `shell` (G-D9), none for a host
         // that cannot bridge, and otherwise everything the caller offered.
@@ -963,15 +978,48 @@ impl AgentManager {
     }
 
     pub fn get(&self, id: &str) -> AgentResult<SessionRecord> {
-        self.store
+        let r = self
+            .store
             .lock()
             .unwrap()
             .get(id)?
-            .ok_or(AgentError::NotFound("no such session"))
+            .ok_or(AgentError::NotFound("no such session"))?;
+        Ok(self.with_activity(r))
     }
 
     pub fn list(&self) -> AgentResult<Vec<SessionRecord>> {
-        Ok(self.store.lock().unwrap().list()?)
+        let records = self.store.lock().unwrap().list()?;
+        Ok(records.into_iter().map(|r| self.with_activity(r)).collect())
+    }
+
+    fn set_activity(&self, r: &SessionRecord, report: &StatusReport) {
+        let activity = report
+            .activity
+            .as_deref()
+            .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
+            .map(str::to_owned);
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .entry(r.id.clone())
+            .or_insert_with(SessionLive::new)
+            .activity = activity;
+    }
+
+    /// Activity is shown only while the session runs: an `unknown` session's
+    /// last word may be stale.
+    fn with_activity(&self, mut r: SessionRecord) -> SessionRecord {
+        if r.status == "running" {
+            r.activity = self
+                .live
+                .lock()
+                .unwrap()
+                .sessions
+                .get(&r.id)
+                .and_then(|s| s.activity.clone());
+        }
+        r
     }
 
     /// Live sessions per workspace on a host, for the shared-workspace warning.
@@ -1162,6 +1210,9 @@ fn slug(text: &str) -> String {
 /// Applies a host's report to a record. Unknown statuses are refused rather
 /// than stored: the vocabulary is fixed (freeze §7.2).
 fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()> {
+    if let Some(title) = report.title.as_deref().and_then(clean_title) {
+        r.title = Some(title);
+    }
     match report.status.as_str() {
         "starting" | "running" => {
             if report.status == "running" {
@@ -1190,6 +1241,20 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
     }
     Ok(())
 }
+
+/// The host cleans titles (AM43); this only keeps a misbehaving host's text
+/// printable and bounded.
+fn clean_title(raw: &str) -> Option<String> {
+    let text: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(TITLE_MAX)
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+const TITLE_MAX: usize = 120;
 
 #[cfg(test)]
 mod tests {
@@ -1302,6 +1367,8 @@ mod tests {
                 exit_code: Some(0),
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1699,6 +1766,8 @@ mod tests {
                 exit_code: None,
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1711,6 +1780,8 @@ mod tests {
                 exit_code: Some(0),
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1728,6 +1799,8 @@ mod tests {
                 exit_code: None,
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1808,6 +1881,8 @@ mod tests {
                 exit_code: None,
                 end_reason: None,
                 signal: None,
+                title: None,
+                activity: None,
             },
         )
         .unwrap();
@@ -1925,6 +2000,8 @@ mod tests {
                         exit_code: None,
                         end_reason: None,
                         signal: None,
+                        title: None,
+                        activity: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -1946,6 +2023,147 @@ mod tests {
                 from: 0
             }
         );
+    }
+
+    fn report(status: &str, title: Option<&str>, activity: Option<&str>) -> StatusReport {
+        StatusReport {
+            status: status.into(),
+            exit_code: None,
+            end_reason: None,
+            title: title.map(str::to_owned),
+            activity: activity.map(str::to_owned),
+            signal: None,
+        }
+    }
+
+    /// D15 AM42: the title is stored and kept after the end, a null one
+    /// changes nothing, and activity shows only while running.
+    #[test]
+    fn the_agents_title_and_activity_follow_the_host() {
+        let (m, _d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        assert_eq!((r.title.as_deref(), r.activity.as_deref()), (None, None));
+
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("Fix the login"), Some("working")),
+        )
+        .unwrap();
+        let got = m.get(&r.id).unwrap();
+        assert_eq!(got.title.as_deref(), Some("Fix the login"));
+        assert_eq!(got.activity.as_deref(), Some("working"));
+        assert_eq!(m.list().unwrap()[0].activity.as_deref(), Some("working"));
+
+        m.host_status("hst_A", &r.id, &report("running", None, Some("idle")))
+            .unwrap();
+        let got = m.get(&r.id).unwrap();
+        assert_eq!(got.title.as_deref(), Some("Fix the login"), "null keeps it");
+        assert_eq!(got.activity.as_deref(), Some("idle"));
+
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("ok\u{7}\u{1b}"), Some("busy")),
+        )
+        .unwrap();
+        let got = m.get(&r.id).unwrap();
+        assert_eq!(
+            got.title.as_deref(),
+            Some("ok"),
+            "control characters dropped"
+        );
+        assert_eq!(got.activity, None, "an unknown activity is none");
+
+        let long = "x".repeat(400);
+        m.host_status("hst_A", &r.id, &report("running", Some(&long), None))
+            .unwrap();
+        assert_eq!(m.get(&r.id).unwrap().title.unwrap().chars().count(), 120);
+
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("Ship it"), Some("working")),
+        )
+        .unwrap();
+        m.host_status("hst_A", &r.id, &report("completed", None, None))
+            .unwrap();
+        let ended = m.get(&r.id).unwrap();
+        assert_eq!(
+            ended.title.as_deref(),
+            Some("Ship it"),
+            "kept after the end"
+        );
+        assert_eq!(ended.activity, None);
+    }
+
+    /// AM42: a restarted server learns the title from the database and the
+    /// activity from the host's `hello`.
+    #[test]
+    fn a_restart_keeps_the_title_and_hello_restores_activity() {
+        let (m, d) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let r = launch(&m, Some("shell")).unwrap();
+        m.host_status(
+            "hst_A",
+            &r.id,
+            &report("running", Some("Plan"), Some("working")),
+        )
+        .unwrap();
+        drop(m);
+
+        let m = AgentManager::open(d.path()).unwrap();
+        let back = m.get(&r.id).unwrap();
+        assert_eq!(
+            (back.status.as_str(), back.title.as_deref()),
+            ("unknown", Some("Plan"))
+        );
+        assert_eq!(back.activity, None, "unknown shows no activity");
+        let (_, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: caps(&[("shell", true)]),
+                sessions: vec![ReportedSession {
+                    id: r.id.clone(),
+                    status: report("running", Some("Plan"), Some("idle")),
+                    output_end_offset: 0,
+                }],
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        let back = m.get(&r.id).unwrap();
+        assert_eq!(back.activity.as_deref(), Some("idle"));
+    }
+
+    /// AM42 is additive: a database from before it gains the column, and its
+    /// sessions read back with no title.
+    #[test]
+    fn an_old_database_gains_the_title_column() {
+        let d = tempdir::TempDir::new("storm-agent").unwrap();
+        std::fs::create_dir_all(d.path().join("agent")).unwrap();
+        let conn = rusqlite::Connection::open(d.path().join("agent/agent.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, host_id TEXT NOT NULL,
+                 workspace TEXT NOT NULL, provider TEXT NOT NULL, provider_kind TEXT NOT NULL,
+                 interaction TEXT NOT NULL, provider_fallback TEXT, status TEXT NOT NULL,
+                 end_reason TEXT, signal INTEGER, exit_code INTEGER, created_at TEXT NOT NULL,
+                 started_at TEXT, ended_at TEXT, last_activity TEXT,
+                 egress TEXT NOT NULL DEFAULT 'host', cols INTEGER NOT NULL, rows INTEGER NOT NULL);
+             INSERT INTO sessions VALUES ('ags_OLD', 'usr_A', 'hst_A', 'w', 'shell', 'cli',
+                 'terminal', NULL, 'completed', NULL, NULL, 0, '2026-10-01T00:00:00Z',
+                 NULL, NULL, NULL, 'host', 80, 24);",
+        )
+        .unwrap();
+        drop(conn);
+        let m = AgentManager::open(d.path()).unwrap();
+        let old = m.get("ags_OLD").unwrap();
+        assert_eq!((old.status.as_str(), old.title), ("completed", None));
+        drop(m);
+        AgentManager::open(d.path()).unwrap();
     }
 
     #[test]
@@ -1982,6 +2200,8 @@ mod tests {
                     exit_code: None,
                     end_reason: None,
                     signal: None,
+                    title: None,
+                    activity: None,
                 },
             )
             .unwrap();
