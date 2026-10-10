@@ -131,6 +131,7 @@ async fn main() -> Result<()> {
                 exclusive_account,
                 "starting"
             );
+            storm_runtime::platform::prepare_home();
             let config = storm_runtime::config::RuntimeConfig::load(&config)?;
             let host = storm_runtime::host::Host::new(&state, config)?;
             host.log_inventory();
