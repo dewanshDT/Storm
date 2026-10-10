@@ -86,24 +86,26 @@ pub fn account_processes(uid: u32) -> io::Result<Vec<i32>> {
 /// buffer is `argc`, the executable path, padding NULs, `argc` arguments, then
 /// the environment, which ends at the first empty string.
 pub fn environment(pid: i32) -> Option<Vec<u8>> {
-    let mut argmax: libc::c_int = 0;
-    let mut size = std::mem::size_of::<libc::c_int>();
-    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
-    // SAFETY: `argmax` is a live c_int and `size` is its size.
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            2,
-            (&mut argmax as *mut libc::c_int).cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || argmax <= 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; argmax as usize];
+    // Asked once: an ending scans every process of the account every 50 ms.
+    static ARGMAX: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let argmax = (*ARGMAX.get_or_init(|| {
+        let mut argmax: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        // SAFETY: `argmax` is a live c_int and `size` is its size.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                (&mut argmax as *mut libc::c_int).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0 && argmax > 0).then_some(argmax as usize)
+    }))?;
+    let mut buf = vec![0u8; argmax];
     let mut size = buf.len();
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     // SAFETY: `buf` is a live buffer of `size` bytes.
