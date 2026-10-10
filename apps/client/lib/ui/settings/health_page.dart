@@ -23,9 +23,10 @@ class HealthPage extends ConsumerWidget {
     final rows = ref.watch(healthRowsProvider);
     final overview = ref.watch(agentOverviewProvider).value;
     final settings = ref.watch(settingsProvider).value ?? const Settings();
-    final version =
-        ref.watch(serverConfigProvider).value?.version ??
-        ref.watch(clientVersionProvider).value;
+    // Both, labelled: a test build reports its own version, which need not
+    // be the server's (B-7).
+    final serverVersion = ref.watch(serverConfigProvider).value?.version;
+    final appVersion = ref.watch(clientVersionProvider).value;
 
     Future<void> syncNow() async {
       await ref.read(syncEngineProvider).sync();
@@ -66,7 +67,8 @@ class HealthPage extends ConsumerWidget {
           padding: EdgeInsets.only(top: t.sp * 2),
           child: Text(
             [
-              'Storm${version == null ? '' : ' $version'}',
+              'App ${appVersion ?? '?'}',
+              if (serverVersion != null) 'Server $serverVersion',
               serverAddress(settings.baseUrl),
             ].join(' · '),
             key: const Key('about-footer'),

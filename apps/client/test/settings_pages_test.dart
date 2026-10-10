@@ -677,7 +677,9 @@ void main() {
         find.text('This client and the server are compatible'),
         findsOneWidget,
       );
-      expect(find.text('Storm 0.0.9 · test'), findsOneWidget);
+      final footer = tester.widget<Text>(find.byKey(const Key('about-footer')));
+      expect(footer.data, startsWith('App '));
+      expect(footer.data, endsWith(' · Server 0.0.9 · test'));
       await disposeShell(tester, c);
     });
 
@@ -688,10 +690,9 @@ void main() {
       serverOf(c).version = '0.4.0';
       await pumpShell(tester, c, size: phone);
       await open(tester, c, 'health');
-      expect(
-        find.text('This client and the server may not be compatible'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('may not be compatible'), findsOneWidget);
+      // B-7: it says which versions it compared.
+      expect(find.textContaining('the server (0.4.0)'), findsOneWidget);
       await disposeShell(tester, c);
     });
 

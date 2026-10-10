@@ -97,9 +97,9 @@ final compatibilityRowProvider = Provider.autoDispose<HealthRow?>((ref) {
           HealthTone.muted,
           'This client and the server are compatible',
         )
-      : const HealthRow(
+      : HealthRow(
           HealthTone.danger,
-          'This client and the server may not be compatible',
+          'This client ($client) and the server ($server) may not be compatible',
         );
 });
 

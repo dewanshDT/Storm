@@ -273,6 +273,8 @@ struct HostLink {
     capabilities: Option<Capabilities>,
     /// The last request the host made, of any kind.
     last_seen: std::time::Instant,
+    /// Bumped on every inventory the host reports.
+    inventory: watch::Sender<u64>,
 }
 
 struct SessionLive {
@@ -390,6 +392,7 @@ impl AgentManager {
                 next_seq: 1,
                 capabilities,
                 last_seen: std::time::Instant::now(),
+                inventory: watch::channel(0).0,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -610,17 +613,32 @@ impl AgentManager {
         Ok(())
     }
 
-    /// Asks a host to re-report its inventory. Sent when a client asks for a
-    /// host's workspaces, so a directory created since the last report shows
-    /// up on the next look. Best-effort: an offline host is simply skipped.
-    pub fn refresh(&self, host_id: &str) {
-        let _ = self.send(host_id, Command::Refresh);
+    /// Asks a host to re-report its inventory, then waits up to `wait` for its
+    /// answer. Sent when a client asks for a host's workspaces, so a directory
+    /// created since the last report is in this look, not the next one (S1:
+    /// a workspace cloned after the host linked showed up only on a second
+    /// look). Best-effort: an offline host returns at once.
+    pub async fn refresh_and_wait(&self, host_id: &str, wait: std::time::Duration) {
+        let rx = self
+            .live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .map(|link| link.inventory.subscribe());
+        let Some(mut rx) = rx else { return };
+        rx.borrow_and_update();
+        if self.send(host_id, Command::Refresh).is_err() {
+            return;
+        }
+        let _ = tokio::time::timeout(wait, rx.changed()).await;
     }
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
         let mut live = self.live.lock().unwrap();
         let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
         link.capabilities = Some(capabilities);
+        link.inventory.send_modify(|v| *v += 1);
         Ok(())
     }
 
@@ -1844,6 +1862,45 @@ mod tests {
         assert!(!m.touch("hst_A"));
         assert_eq!(m.get(&r.id).unwrap().status, "unknown");
         assert!(matches!(m.input(&r.id, b"x"), Err(AgentError::HostOffline)));
+    }
+
+    /// S1: a look at a host's workspaces waits for the inventory the look
+    /// asked for, so a directory created since the last report is in it.
+    #[tokio::test]
+    async fn a_refresh_waits_for_the_hosts_fresh_inventory() {
+        let (m, _d) = manager();
+        let m = std::sync::Arc::new(m);
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let looking = {
+            let m = m.clone();
+            tokio::spawn(async move {
+                m.refresh_and_wait("hst_A", std::time::Duration::from_secs(10))
+                    .await;
+                m.host_live("hst_A").capabilities.unwrap().workspaces
+            })
+        };
+        let cmd = loop {
+            if let Ok(cmd) = rx.try_recv() {
+                break cmd;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        assert_eq!(cmd.command, Command::Refresh);
+        let mut fresh = caps(&[("shell", true)]);
+        fresh.workspaces.push("cloned-just-now".into());
+        m.inventory("hst_A", fresh).unwrap();
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(5), looking)
+            .await
+            .expect("the look waited past the answer")
+            .unwrap();
+        assert!(seen.contains(&"cloned-just-now".to_string()), "{seen:?}");
+        // Offline: no wait at all.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            m.refresh_and_wait("hst_GONE", std::time::Duration::from_secs(10)),
+        )
+        .await
+        .expect("an offline host was waited for");
     }
 
     #[test]
