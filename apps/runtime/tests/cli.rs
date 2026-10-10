@@ -287,3 +287,34 @@ fn the_default_host_name_is_the_node_name_without_local() {
         assert!(node.starts_with(&name), "{name:?} is not from {node:?}");
     }
 }
+
+#[test]
+fn a_session_runs_with_the_path_its_cli_was_found_on() {
+    // AM38: "installed" and "runs" use one PATH. A CLI found on the
+    // configured path, outside the host's own, starts and sees that PATH —
+    // even when a provider env file says otherwise.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("storm-test-agent");
+    std::fs::write(&bin, "#!/bin/sh\necho \"path=$PATH\"\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", dir.path().display());
+
+    let provider = CliProvider::new(
+        ProviderId::new("custom").unwrap(),
+        "storm-test-agent",
+        Vec::<String>::new(),
+    );
+    assert_eq!(provider.available(), Availability::NotInstalled);
+    let provider = provider
+        .with_env([("PATH", "/nowhere")])
+        .with_path(path.clone());
+    assert_eq!(provider.available(), Availability::Available);
+    let (_session, rec) = start(&provider);
+    rec.wait_end();
+    assert!(
+        rec.output().contains(&format!("path={path}")),
+        "{}",
+        rec.output()
+    );
+}

@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
+            storm_runtime::platform::prepare_home();
             let config = storm_runtime::config::RuntimeConfig::load(&config)?;
             let host = storm_runtime::host::Host::new(&state, config)?;
             if let Err(e) = host.run().await {

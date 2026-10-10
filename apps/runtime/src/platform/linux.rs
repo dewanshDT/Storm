@@ -11,6 +11,11 @@ pub const SERVICE_ACCOUNT: &str = "storm-runtime";
 /// `poll` reports a master writable with room to spare; 77c's chunk.
 pub const PTY_WRITE_CHUNK: usize = 256;
 
+/// systemd gives the unit a fixed `PATH`; the host keeps it (77a).
+pub fn default_path() -> Option<std::ffi::OsString> {
+    None
+}
+
 const USE_THE_PACKAGE: &str = "on Linux the storm-runtime package installs and removes the \
 service: `sudo apt install storm-runtime` / `sudo apt remove storm-runtime` \
 (deploy/README.md, Runtime Hosts)";
@@ -32,6 +37,11 @@ pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_keeps_the_units_path() {
+        assert_eq!(super::default_path(), None);
+    }
+
     #[test]
     fn install_and_uninstall_point_at_the_package() {
         let e = super::install(&Default::default()).unwrap_err().to_string();
