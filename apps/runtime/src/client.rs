@@ -259,8 +259,9 @@ pub async fn enroll(
         host_id,
         key_id: key.key_id.clone(),
     };
-    // A revoked enrollment it replaces (AM36) is history now.
-    let _ = std::fs::remove_file(state_dir.join(crate::identity::REVOKED_FILE));
+    // A revoked enrollment it replaces (AM36) is kept as a record, with its
+    // key, out of the way of the live identity (B-5).
+    HostConfig::archive_revoked(state_dir)?;
     announce(&config);
     config.save(state_dir)?;
     Ok(config)
