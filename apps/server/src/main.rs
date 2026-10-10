@@ -33,6 +33,7 @@ mod frontmatter;
 mod gateway;
 mod index;
 mod install;
+mod install_macos;
 mod kit;
 mod mcp;
 mod merge;
@@ -67,12 +68,17 @@ struct Cli {
 enum Commands {
     /// Run the sync server (what systemd starts).
     Serve(ServeArgs),
-    /// Write config, enable the systemd unit, and start it.
+    /// Install and start the server as a service. Linux: write the env file
+    /// and enable the systemd unit (as root). macOS: install a LaunchAgent
+    /// that runs as you, with the notes in ~/Storm (decision 84d; not root).
     Up(UpArgs),
-    /// Stop and disable the systemd unit.
+    /// Stop the service (and keep it from starting again).
     Down,
-    /// Show unit state and a local health probe.
+    /// Show the service's state and a local health probe.
     Status,
+    /// macOS: stop the LaunchAgent and remove what `up` installed, keeping
+    /// the notes. Linux: the package owns the install (`apt remove`).
+    Uninstall,
     /// Report what an import would change, then exit without writing.
     DryRun(VaultArgs),
     /// Set the account's password — the recovery path when it is forgotten
@@ -83,6 +89,32 @@ enum Commands {
     SingleUser(SingleUserArgs),
     /// Print a bootstrap pairing QR code for a fresh server (no account yet).
     Pair(PairArgs),
+    /// Exit 0 if this Storm has its account, 1 if not (decision 84). For the
+    /// installer, which waits on a first device's pairing.
+    HasAccount {
+        /// State directory holding auth.db.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
+    },
+    /// Mint a one-time Runtime Host enrollment string for a host on this
+    /// machine, and print it for `storm-runtime enroll` to read (decision
+    /// 84e). Run by whoever owns the state directory, like `passwd`. It is a
+    /// secret, so it is printed only into a pipe, never to a terminal.
+    HostEnrollment {
+        /// State directory holding auth.db and the server identity.
+        #[arg(long, default_value = "./state")]
+        state: PathBuf,
+        /// The address the host will reach this server at. Defaults to the
+        /// loopback address on `STORM_PORT` (8484).
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Draw TEXT as a scannable QR block, for the installer's download and
+    /// web links.
+    Qr {
+        #[arg(value_name = "TEXT")]
+        text: String,
+    },
     /// Snapshot every vault index into DIR, then exit.
     BackupDb {
         /// State directory holding the registry and indexes.
@@ -107,12 +139,13 @@ enum Commands {
 
 #[derive(clap::Args, Debug)]
 struct UpArgs {
-    /// Directory for vaults/, state/, and backups/ (default /srv/storm).
+    /// Directory for vaults/, state/, and backups/ (default /srv/storm on
+    /// Linux, ~/Storm on macOS).
     ///
     /// Ignored for a path that `--vault-root` / `--state` override individually —
     /// needed when vaults and state already live in different places.
-    #[arg(long, default_value = "/srv/storm")]
-    data_root: PathBuf,
+    #[arg(long)]
+    data_root: Option<PathBuf>,
 
     /// Override the storage root (default: `<data-root>/vaults`).
     #[arg(long)]
@@ -128,9 +161,10 @@ struct UpArgs {
     #[arg(long, default_value_t = 8484)]
     port: u16,
 
-    /// Built Flutter web client directory (package default).
-    #[arg(long, default_value = "/usr/share/storm/web")]
-    web: PathBuf,
+    /// Built Flutter web client directory (Linux: the package's
+    /// /usr/share/storm/web; macOS: the `web/` beside this binary).
+    #[arg(long)]
+    web: Option<PathBuf>,
 }
 
 /// **There is deliberately no `--password` flag anywhere.** A password in an
@@ -839,6 +873,34 @@ fn run_pair(args: PairArgs) -> Result<()> {
     Ok(())
 }
 
+/// A Runtime Host enrollment string issued on this machine, as the account
+/// (decision 84e): the same issuance as the app's Enroll a host, without the
+/// app, for a host the installer sets up beside this server.
+fn local_host_enrollment(state: &Path, url: &str) -> Result<String> {
+    auth::hosts::validate_server_url(url).map_err(|e| anyhow::anyhow!("--url {url}: {e}"))?;
+    if !auth::AuthDb::path_in(state).exists() {
+        bail!(
+            "no Storm in {}: start the server once, then set up the account",
+            state.display()
+        );
+    }
+    let mut db = auth::AuthDb::open(state)
+        .with_context(|| format!("opening the auth database in {}", state.display()))?;
+    let Some(account) = db.account()? else {
+        bail!("this Storm has no account yet: pair a device or run `storm-server passwd` first");
+    };
+    let now = index::now_rfc3339();
+    let identity = auth::identity::load_or_create(&mut db, state, &now)
+        .context("loading server identity — has the server booted at least once?")?;
+    let (_, token) = auth::hosts::issue_enrollment(&mut db, &account.id, &now)?;
+    Ok(auth::hosts::enrollment_string(
+        url.trim_end_matches('/'),
+        &identity.server_id,
+        &identity.public_key_b64(),
+        &token,
+    ))
+}
+
 /// What `pair` prints once the session exists.
 ///
 /// Split out of [`run_pair`] so it can be tested: the default run draws no QR
@@ -1331,25 +1393,45 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Serve(args) => run_serve(args).await,
+        Commands::Up(args) if cfg!(target_os = "macos") => {
+            install_macos::up(install_macos::UpOptions {
+                data_root: args.data_root,
+                vault_root: args.vault_root,
+                state: args.state,
+                host: Some(args.host),
+                port: Some(args.port),
+                web: args.web,
+            })
+        }
+        Commands::Down if cfg!(target_os = "macos") => install_macos::down(),
+        Commands::Status if cfg!(target_os = "macos") => install_macos::status(),
+        Commands::Uninstall if cfg!(target_os = "macos") => install_macos::uninstall(),
+        Commands::Uninstall => bail!(
+            "on Linux the package owns the install: `sudo apt remove storm-server` \
+             (your vaults and state are kept)"
+        ),
         Commands::Up(args) => {
-            let vault_root = args
-                .vault_root
-                .unwrap_or_else(|| args.data_root.join("vaults"));
-            let state = args.state.unwrap_or_else(|| args.data_root.join("state"));
-            let backups = args.data_root.join("backups");
+            let data_root = args
+                .data_root
+                .unwrap_or_else(|| PathBuf::from("/srv/storm"));
+            let vault_root = args.vault_root.unwrap_or_else(|| data_root.join("vaults"));
+            let state = args.state.unwrap_or_else(|| data_root.join("state"));
+            let backups = data_root.join("backups");
             // ReadWritePaths must cover every path the service writes. When
             // vaults and state are split (NAS vaults + local state), widen to
             // both parents via the data-root drop-in's primary path plus an
             // extra line — `up` passes the data_root for the drop-in and the
             // concrete vault/state paths for the env file.
             install::up(install::UpOptions {
-                data_root: args.data_root,
+                data_root,
                 vault_root,
                 state,
                 backups,
                 host: args.host,
                 port: args.port,
-                web: args.web,
+                web: args
+                    .web
+                    .unwrap_or_else(|| PathBuf::from("/usr/share/storm/web")),
             })
         }
         Commands::Down => install::down(),
@@ -1358,6 +1440,34 @@ async fn main() -> Result<()> {
         Commands::Passwd(args) => run_passwd(args).await,
         Commands::SingleUser(args) => run_single_user(args),
         Commands::Pair(args) => run_pair(args),
+        Commands::HasAccount { state } => {
+            // Never create the database just to answer "no".
+            let has = auth::AuthDb::path_in(&state).exists()
+                && auth::AuthDb::open(&state)
+                    .with_context(|| format!("opening the auth database in {}", state.display()))?
+                    .has_account()?;
+            std::process::exit(if has { 0 } else { 1 });
+        }
+        Commands::HostEnrollment { state, url } => {
+            use std::io::IsTerminal;
+            if std::io::stdout().is_terminal() {
+                bail!(
+                    "the enrollment string is a secret and is never printed to a terminal: \
+                     pipe it into the host, e.g. `storm-server host-enrollment … | \
+                     sudo -u storm-runtime storm-runtime enroll`"
+                );
+            }
+            let url = url.unwrap_or_else(|| {
+                let port = std::env::var("STORM_PORT").unwrap_or_else(|_| "8484".into());
+                format!("http://127.0.0.1:{port}")
+            });
+            println!("{}", local_host_enrollment(&state, &url)?);
+            Ok(())
+        }
+        Commands::Qr { text } => {
+            println!("{}", render_qr(&text)?);
+            Ok(())
+        }
         Commands::BackupDb { state, dest } => {
             backup_all(&state, &dest)?;
             println!("index snapshots written to {}", dest.display());
@@ -1383,6 +1493,47 @@ mod tests {
     use super::*;
 
     const URI: &str = "storm://pair?v=1&sid=srv_x&pk=k&n=n&exp=e&addr=host:8484";
+
+    /// 84e: a string issued on the server's own machine is the app's string:
+    /// it names the URL given, carries this server's id and key, and its
+    /// token is one `enroll` redeems.
+    #[test]
+    fn a_local_host_enrollment_is_a_real_one() {
+        let dir = tempdir::TempDir::new("storm-hostenroll").unwrap();
+        let state = dir.path();
+        let now = index::now_rfc3339();
+        {
+            let mut db = auth::AuthDb::open(state).unwrap();
+            assert!(
+                local_host_enrollment(state, "http://127.0.0.1:8484")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no account"),
+            );
+            auth::account::create_account(&mut db, "x", &now).unwrap();
+        }
+        let s = local_host_enrollment(state, "http://127.0.0.1:9000/").unwrap();
+        let mut db = auth::AuthDb::open(state).unwrap();
+        let id = auth::identity::load_or_create(&mut db, state, &now).unwrap();
+        let prefix = format!(
+            "storm-enroll:v1:http://127.0.0.1:9000:{}:{}:",
+            id.server_id,
+            id.public_key_b64()
+        );
+        assert!(s.starts_with(&prefix), "{s}");
+        let token = &s[prefix.len()..];
+        assert!(auth::hosts::enrollment_token_id(token).is_some(), "{token}");
+        assert!(local_host_enrollment(state, "ftp://x").is_err());
+    }
+
+    #[test]
+    fn a_host_enrollment_needs_a_storm() {
+        let dir = tempdir::TempDir::new("storm-hostenroll-none").unwrap();
+        let err = local_host_enrollment(&dir.path().join("nope"), "http://127.0.0.1:8484")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no Storm"), "{err}");
+    }
 
     #[test]
     fn the_default_run_does_not_tell_you_to_scan_a_code_it_did_not_draw() {

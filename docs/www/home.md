@@ -38,7 +38,7 @@ clients and first-class access for AI agents through MCP.
 **Install command (real)**
 
 ```sh
-curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
 ```
 
 **Metadata row:** Rust server · Flutter client · Markdown · MCP · Self-hosted

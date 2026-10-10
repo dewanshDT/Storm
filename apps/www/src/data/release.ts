@@ -5,7 +5,7 @@
  * Apt install lives on GitHub Pages (decision 49) — not on the marketing host.
  */
 export const release = {
-  tag: "v0.5.0",
+  tag: "v0.6.0",
   get version() {
     return this.tag.replace(/^v/, "");
   },
@@ -22,7 +22,9 @@ export const release = {
     return `${this.aptRoot}install.sh`;
   },
   get installCommand() {
-    return `curl -fsSL ${this.installScriptUrl} | sudo sh`;
+    // The interactive installer (decision 84) runs as the user and asks for
+    // sudo only for the steps that need it.
+    return `curl -fsSL ${this.installScriptUrl} | sh`;
   },
   /** Apt already registered — refresh binary + bundled web client. */
   get upgradeCommand() {
