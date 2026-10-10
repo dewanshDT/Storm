@@ -5022,6 +5022,25 @@ with the agent's mark (AM44).** *(2026-10-10)*
   controller's stage-then-type, the 300 ms chip, failure, cancel, Ctrl+V with
   and without an image). Client 973.
 
+**85g. Slice 7: an image from the Android clipboard (AM45).** *(2026-10-10)*
+- `storm/clipboard` in `MainActivity.kt` beside `storm/links`: the first
+  clip item whose content URI names an `image/*` type, read through the
+  content resolver, bounded at 12 MiB.
+- The extra-keys **Paste** asks for an image first, exactly as the desktop's
+  paste keys do; without one it pastes text as before. Drops on Android go
+  through `desktop_drop` (85f).
+- **Not built: Gboard's image insertion.** xterm2 5.2's own input
+  connection (`CustomTextEdit`) declares no `allowedMimeTypes` and has no
+  `insertContent`, so the keyboard never offers an image to the terminal.
+  It needs a fork of xterm2 (MIT, the freeze's sanctioned path, but a
+  decision: the freeze reserves the fork for its revisit triggers). Left for
+  the operator. Android's long-press paste is the Paste key here: the
+  terminal has no system text-selection menu.
+- Tests: `image_paste_phone_test.dart` (Paste with an image stages it and
+  types the path; without one nothing is staged). A malformed answer to the
+  stage now fails the paste instead of throwing. Client 975. The Kotlin is
+  compiled by `acceptance.yml`.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
