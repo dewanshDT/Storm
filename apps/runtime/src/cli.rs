@@ -20,6 +20,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -311,18 +312,11 @@ impl TerminalChannel for CliTerminal {
     /// get in. Input is at-most-once (freeze §11.3): a write that cannot land
     /// in time fails with `TimedOut` rather than waiting.
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
         self.ensure_running()?;
         let deadline = std::time::Instant::now() + INPUT_DEADLINE;
-        for chunk in bytes.chunks(256) {
+        for chunk in bytes.chunks(crate::platform::PTY_WRITE_CHUNK) {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            let timeout = Timespec {
-                tv_sec: left.as_secs() as _,
-                tv_nsec: left.subsec_nanos() as _,
-            };
-            let mut fds = [PollFd::new(&self.writer, PollFlags::OUT)];
-            let ready = poll(&mut fds, Some(&timeout))?;
-            if ready == 0 {
+            if !crate::platform::wait_writable(self.writer.as_fd(), left)? {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "the agent is not reading its input",

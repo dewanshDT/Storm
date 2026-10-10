@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-/// The host's state: its key, `host.json` and later its session table. The
-/// systemd unit's `StateDirectory` (freeze §5.8).
-const DEFAULT_STATE: &str = "/var/lib/storm-runtime";
+/// The host's state: its key, `host.json` and its session table. Linux: the
+/// systemd unit's `StateDirectory` (freeze §5.8). macOS: AM33.
+const DEFAULT_STATE: &str = storm_runtime::platform::DEFAULT_STATE;
 
 #[derive(Parser)]
 #[command(name = "storm-runtime", version, about = "Storm Runtime Host")]
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         Command::McpBridge { slug } => storm_runtime::bridge::run(slug).await,
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
-            let name = name.unwrap_or_else(default_name);
+            let name = name.unwrap_or_else(storm_runtime::platform::host_name);
             let config = storm_runtime::client::enroll(&state, &enrollment, &name, force).await?;
             println!("Enrolled as {} ({}).", name, config.host_id);
             println!("  server : {} ({})", config.server_url, config.server_id);
@@ -135,13 +135,4 @@ fn read_enrollment() -> Result<String> {
         line
     };
     Ok(line.trim().to_string())
-}
-
-fn default_name() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .map(|s| s.trim().chars().take(64).collect::<String>())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "runtime-host".into())
 }

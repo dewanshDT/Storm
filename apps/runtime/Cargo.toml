@@ -50,7 +50,7 @@ rpassword = "7.5.4"
 # The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
 # the child's pre_exec stays async-signal-safe and the musl build needs no libc
 # shims.
-rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event"] }
+rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
@@ -60,5 +60,5 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
-rustix = { version = "1.1.5", features = ["process"] }
+rustix = { version = "1.1.5", features = ["process", "system"] }
 tempfile = "3.27.0"

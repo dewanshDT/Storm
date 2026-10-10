@@ -18,7 +18,7 @@ use crate::cli::CliProvider;
 use crate::fake::FakeProvider;
 use crate::provider::{Provider, ProviderId};
 
-pub const DEFAULT_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
+pub const DEFAULT_CONFIG: &str = crate::platform::DEFAULT_CONFIG;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

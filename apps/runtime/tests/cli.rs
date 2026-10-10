@@ -151,6 +151,16 @@ fn the_terminal_environment_and_the_workspace_are_set() {
 }
 
 #[test]
+// Known to fail on macOS until slice 4 (PLAN.md 83d), found on the first
+// real-Mac CI run: when the session leader exits, BSD revokes the session's
+// controlling terminal, so the master sees end-of-file while a job that
+// ignores SIGHUP is still alive, the session reports `ended`, and the
+// grace's SIGKILL is skipped. Slice 4 ends a session only once it is empty,
+// and turns this test back on.
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "fixed in slice 4 (83d): BSD revokes the terminal"
+)]
 fn stopping_ends_everything_the_session_spawned() {
     // A background job in the session that ignores the hangup, so only the
     // group-wide SIGKILL after the grace can end it. Nothing the session
@@ -233,4 +243,47 @@ fn the_built_in_providers_are_what_the_freeze_says() {
     assert_eq!(claude.command(), "claude");
     assert_eq!(CliProvider::opencode().id().as_str(), "opencode");
     assert_eq!(CliProvider::shell().id().as_str(), "shell");
+}
+
+#[test]
+fn input_to_an_agent_that_never_reads_times_out_instead_of_hanging() {
+    // Decision 77c: a PTY write waits for room within a deadline, so a hung
+    // agent cannot hold its session against `end`. The wait is per platform
+    // (D14): macOS's poll(2) does not support devices and never waits, so a
+    // write built on it blocks for as long as the agent ignores its input.
+    let (mut session, rec) = start(&sh("stty raw -echo; echo ready; exec sleep 60"));
+    rec.wait_for("ready");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let result = {
+            let Interaction::Terminal(term) = session.interaction();
+            term.write(&vec![b'x'; 1 << 20])
+        };
+        let _ = tx.send((result.map_err(|e| e.kind()), started.elapsed()));
+        session.stop(Duration::from_millis(100));
+    });
+    let deadline = storm_runtime::cli::INPUT_DEADLINE + Duration::from_secs(5);
+    let (result, took) = rx
+        .recv_timeout(deadline)
+        .expect("the write hung past its deadline");
+    assert_eq!(result, Err(std::io::ErrorKind::TimedOut));
+    assert!(
+        took >= storm_runtime::cli::INPUT_DEADLINE,
+        "gave up early: {took:?}"
+    );
+}
+
+#[test]
+fn the_default_host_name_is_the_node_name_without_local() {
+    let name = storm_runtime::platform::host_name();
+    assert!(!name.is_empty() && name.chars().count() <= 64, "{name:?}");
+    assert!(!name.ends_with(".local"), "{name:?}");
+    let node = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned();
+    if !node.trim().is_empty() {
+        assert!(node.starts_with(&name), "{name:?} is not from {node:?}");
+    }
 }

@@ -59,6 +59,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
+| M23 | macOS Runtime Hosts — the same host, on launchd | **in progress** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · built in seven slices on `feat/runtime-macos-*` · real-Mac acceptance (AC-M1–M9) not yet run |
 
 **Release state (2026-10-08).** **v0.4.0 is being cut** (decision 72's
 steps; this paragraph is the prep PR's), at the operator's request after the
@@ -4325,6 +4326,74 @@ does not reproduce; logged in the vault (*Storm v2/Issue — Zen login hang*).
 
 **Revisit if** a second human user becomes a real requirement (Teams, A9):
 that is a new authorization design, not a restoration of the removed one.
+
+**83. macOS Runtime Hosts: the same host, a LaunchDaemon, a dedicated
+account.** *(2026-10-08, the operator's brief)*
+
+**The spec.** D14 in *Agent Runtime/Decisions*, full text in *Agent
+Runtime/macOS Runtime Host* (vault), amends the freeze with AM33–AM41 and adds
+AC-M1–AC-M9. The operator's brief fixed the architecture: macOS is a second
+platform of the **same** Runtime Host. It runs as a launchd LaunchDaemon under
+a dedicated `_stormruntime` account, and never as the logged-in human for
+convenience. The amendment is the smallest set of decisions that make that
+true. Two of them change Linux behaviour too:
+- **AM36:** a revoked host renames `host.json` to `host.json.revoked`.
+- **AM37:** SIGTERM and SIGINT end every session's process group, and
+  `--exclusive-account` sweeps the service account.
+
+**Why not Docker or a LaunchAgent.**
+- **Docker** on a Mac is a Linux VM. File access across the boundary is
+  slow, memory is capped, and agents would lose the Mac's own toolchains.
+- **A LaunchAgent** running as the human would hand every agent the human's
+  whole home. The brief rules it out. The account is the boundary, as on
+  Linux.
+
+**The slices**, each its own PR to `staging`, stacked:
+1. **The platform module and macOS CI.** `apps/runtime/src/platform/` holds
+   paths, the service account, the host name and the PTY write's wait. A
+   `runtime-macos` CI job runs clippy and tests on `macos-latest`.
+2. **launchd and the install lifecycle.** `install` / `uninstall`, the
+   `_stormruntime` account, the layout and the plist, gated on enrollment
+   (AM33–AM35), plus AM36's final revocation.
+3. **The provider environment** (AM38).
+4. **Process lifecycle on shutdown** (AM37), on both platforms.
+5. **Workspaces and the TCC boundary** (AM39).
+6. **Per-platform enrollment instructions in the client** (AM40).
+7. **Release and distribution** (AM41).
+
+Then real-Mac acceptance, AC-M1–AC-M9.
+
+**Slice 1's findings.**
+- **macOS's `poll(2)` does not support devices** (its man page, BUGS). On a
+  PTY master it answers `POLLNVAL` at once. 77c's bounded input write was
+  built on `poll`, so on macOS it would never wait, and the write after it
+  would block for as long as an agent ignores its input. The session's lock
+  would be held, so not even `end` could get in.
+  - **Fix:** the wait is per platform. Linux keeps `poll`, which 77c
+    verified. macOS uses `select(2)` through `rustix`, which lifts
+    `FD_SETSIZE` on Apple.
+  - **Guard:** `input_to_an_agent_that_never_reads_times_out_instead_of_hanging`.
+    It is mutation-checked: a wait that always says "writable" makes it fail.
+  - **The first run on a real Mac (CI, `macos-latest`) still hung.** xnu's
+    `ptcselect` calls a master writable while the slave's queue is below
+    `TTYHOG - 2`, which may be room for one byte. `ptcwrite` then sleeps
+    until a whole 256-byte chunk fits. So "writable" bounds only the first
+    byte. **Fix:** `platform::PTY_WRITE_CHUNK` is 1 on macOS (256 on Linux,
+    as verified), so no write after a wait can block. The same test is the
+    guard.
+- **The default host name** read `/proc/sys/kernel/hostname` and
+  `/etc/hostname`, neither of which exists on macOS. Every Mac would have
+  enrolled as `runtime-host`. It now comes from `uname`'s node name, with
+  `.local` dropped (AM40).
+- **The crate cross-checks for `aarch64-apple-darwin`** (`cargo clippy
+  --all-targets -D warnings`, with zig as the C compiler for `ring`). That
+  check is how the `select` code was first compiled. A Linux box cannot link
+  a macOS binary without Apple's SDK, so the CI job on `macos-latest` is
+  what builds, links and runs the tests.
+
+*Revisit if:* a third platform arrives (the platform module becomes a trait
+rather than `cfg`-selected modules); or `poll` is shown to support PTYs on
+every supported macOS (the split can go).
 
 ---
 
