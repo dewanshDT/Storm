@@ -217,7 +217,11 @@ class AgentApi {
         body: bytes,
       ),
     );
-    return (body as Map)['path'] as String;
+    final path = body is Map ? body['path'] : null;
+    if (path is! String) {
+      throw StormApiException(502, 'the server answered without a path');
+    }
+    return path;
   }
 
   Future<void> resize(

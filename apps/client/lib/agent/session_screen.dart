@@ -1592,6 +1592,8 @@ class _ExtraKeys extends StatelessWidget {
                   label: 'Paste',
                   tooltip: 'Paste',
                   onTap: () async {
+                    // An image first (D15 AM45), as the desktop's paste does.
+                    if (await term.onImagePaste?.call() ?? false) return;
                     final data = await Clipboard.getData(Clipboard.kTextPlain);
                     final text = data?.text;
                     if (text != null && text.isNotEmpty) term.paste(text);

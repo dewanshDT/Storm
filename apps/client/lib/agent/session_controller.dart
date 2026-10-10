@@ -210,7 +210,7 @@ class SessionController extends ChangeNotifier {
         terminal.paste(path);
       }
       imagePaste.value = null;
-    } on Exception catch (e) {
+    } catch (e) {
       if (seq != _pasteSeq || _disposed) return;
       final why = e is StormApiException
           ? e.message

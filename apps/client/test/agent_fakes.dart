@@ -159,6 +159,12 @@ class FakeAgentServer {
       final s = session(id);
       if (s == null) return _json({'error': 'no such session'}, 404);
       if (seg.length == 5 && seg[4] == 'writes') return _json(writes[id] ?? []);
+      if (seg.length == 6 && seg[5] == 'images' && req.method == 'POST') {
+        return _json({
+          'image': 'img_1',
+          'path': '/h/sessions/$id/inbox/img_1.png',
+        });
+      }
       if (seg.length == 5 && seg[4] == 'end' && req.method == 'POST') {
         s['status'] = 'stopped';
         return http.Response('', 204);
