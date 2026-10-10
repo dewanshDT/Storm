@@ -64,7 +64,8 @@ dependencies:
   # Reading the bootstrap nonce out of the document Storm served (slice 15).
   # Web-only, behind a conditional import, so native builds never see it.
   web: ^1.1.1
-  xterm2: ^5.2.0
+  xterm2:
+    path: third_party/xterm2
   flutter_svg: ^2.3.0
   desktop_drop: ^0.8.4
 dev_dependencies:

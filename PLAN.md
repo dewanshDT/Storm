@@ -61,7 +61,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
-| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **in progress** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven slices 85a–85g |
+| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **in progress** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven slices 85a–85g · 87 (xterm2 fork, Gboard images) |
 
 **Release state (2026-10-10).** **v0.6.1 is being cut** (decision 72's
 steps), at the operator's request after M24 merged into `staging` (#120–#122,
@@ -5148,6 +5148,31 @@ ignores at target 36 anyway).
   later, and answered 503 without an `id`. The wait now requires both.
 - Neither change can pass a real failure: one wait is longer, the other's
   precondition stricter. Verified: agent 93 and gateway 87, three runs each.
+
+**87. xterm2 is forked for the keyboard's images.** *(2026-10-11, the
+operator's approval of 85g's open decision)*
+- **Why now.** The freeze kept the fork for AC-Q5's revisit triggers; the
+  operator chose it for Gboard's image insertion, which 5.2 cannot take: its
+  input connection declares no `allowedMimeTypes` and drops `insertContent`.
+- **The fork is vendored**, `apps/client/third_party/xterm2`, a path
+  dependency at `5.2.0+storm.1`: one commit of 5.2.0 as published, then the
+  patch on its own, so a rebase onto a later xterm2 is that one diff. No
+  second repository to keep. The analyzer skips it, as it skipped the
+  package in the pub cache.
+- **The patch** gives `TerminalView` Flutter's own
+  `contentInsertionConfiguration` and passes it to `CustomTextEdit`, which
+  declares its types on the connection, reopens the connection when they
+  change, and hands `insertContent` on. Nothing else in xterm2 changes.
+- **Storm's side** stays behind the terminal-surface boundary:
+  `StormTerminal.onKeyboardImage` (PNG, JPEG, GIF, WebP), set by
+  `SessionController` to the same stage-then-type flow as a paste (85f). A
+  read-only terminal offers no types. The keyboard's `content://` URI is
+  never typed.
+- Tests: `keyboard_image_test.dart` drives the engine's `commitContent`
+  message: the types reach `TextInput.setClient`, an image is staged and its
+  path typed, an empty or non-image insertion stages nothing. With the
+  forwarding removed, the staging test fails.
+- **Not verified on a device**: Gboard on Android is the operator's check.
 
 ## Data model
 
