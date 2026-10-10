@@ -548,7 +548,10 @@ args = ["-i"]
         try:
             def both_online():
                 _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
-                return all(any(h["id"] == i and h["status"] == "online" for h in hosts) for i in (host_id, host2_id))
+                # A launch needs the capabilities `hello` brings, a moment
+                # after the host shows online.
+                return all(any(h["id"] == i and h["status"] == "online" and h.get("capabilities")
+                               for h in hosts) for i in (host_id, host2_id))
             wait(both_online, "both hosts online", timeout=60)
             a = launch(owner, host_id, workspace="storm", provider="fake")[1]["id"]
             b = launch(owner, host_id, workspace="storm", provider="fake")[1]["id"]

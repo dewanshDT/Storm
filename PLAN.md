@@ -5135,6 +5135,20 @@ opening a session is that session — full screen on a phone.
 out of it with `enableOnBackInvokedCallback="false"` (which Android 16
 ignores at target 36 anyway).
 
+**86a. Two live-test races, found verifying `staging` after the merge.**
+*(2026-10-11)* Each failed once in three full `make test-live` runs on
+`990a1b8` and passed 3/3 alone; both are in test code older than D15.
+- **`gateway_e2e.py` R7** waited 30 s for the host to reconnect. The host's
+  backoff doubles from 1 s to a 60 s ceiling, and R7 restarts the server
+  right after R5/R6 did, so the host can be waiting longer than that. All
+  three reconnect waits now allow `RECONNECT = 90` s, as AC-R1 in
+  `agent_e2e.py` already did.
+- **`agent_e2e.py` AC-F6** waited for the second host to be `online`, then
+  launched on it; a launch needs the capabilities its `hello` brings a moment
+  later, and answered 503 without an `id`. The wait now requires both.
+- Neither change can pass a real failure: one wait is longer, the other's
+  precondition stricter. Verified: agent 93 and gateway 87, three runs each.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
