@@ -269,6 +269,32 @@ impl Host {
         }))
     }
 
+    /// What this host offers, once, at start: the line to read first when a
+    /// provider shows as missing in the app.
+    pub fn log_inventory(&self) {
+        tracing::info!(
+            host = %self.identity.host_id,
+            server = %self.identity.server_url,
+            max_sessions = self.config.max_sessions,
+            "identity"
+        );
+        for p in &self.providers {
+            tracing::info!(
+                provider = p.id().as_str(),
+                kind = p.kind().as_str(),
+                available = p.available() == Availability::Available,
+                "provider"
+            );
+        }
+        for root in &self.config.workspace_roots {
+            tracing::info!(root = %root.display(), "workspace root");
+        }
+        tracing::info!(
+            workspaces = list_workspaces(&self.config.workspace_roots).len(),
+            "workspaces"
+        );
+    }
+
     fn capabilities(&self) -> serde_json::Value {
         let providers: Vec<_> = self
             .providers

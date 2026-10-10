@@ -124,12 +124,20 @@ async fn main() -> Result<()> {
             // default action and leave sessions behind (AM37).
             let mut terminate = signal(SignalKind::terminate())?;
             let mut interrupt = signal(SignalKind::interrupt())?;
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                state = %state.display(),
+                config = %config.display(),
+                exclusive_account,
+                "starting"
+            );
             let config = storm_runtime::config::RuntimeConfig::load(&config)?;
             let host = storm_runtime::host::Host::new(&state, config)?;
+            host.log_inventory();
             if exclusive_account {
                 // Whatever a previous host left behind — after a SIGKILL or a
                 // crash nothing ended its sessions (AM37).
-                sweep().await;
+                sweep("start").await;
             }
             let outcome = tokio::select! {
                 ended = host.clone().run() => ended,
@@ -142,14 +150,14 @@ async fn main() -> Result<()> {
                 // not to restart on, rather than looping against a server that
                 // has revoked this host (freeze §5.6, AM36).
                 if exclusive_account {
-                    sweep().await;
+                    sweep("revoked").await;
                 }
                 std::process::exit(3);
             }
             tracing::info!("stopping");
             host.shutdown(storm_runtime::cli::DEFAULT_GRACE).await;
             if exclusive_account {
-                sweep().await;
+                sweep("stop").await;
             }
             Ok(())
         }
@@ -187,11 +195,21 @@ async fn main() -> Result<()> {
 }
 
 /// AM37's sweep, off the async threads: it sleeps through its grace.
-async fn sweep() {
-    let _ = tokio::task::spawn_blocking(|| {
+async fn sweep(when: &str) {
+    let swept = tokio::task::spawn_blocking(|| {
         storm_runtime::platform::sweep_account(std::time::Duration::from_millis(500))
     })
     .await;
+    match swept {
+        Ok((0, _)) => tracing::info!(when, "account sweep: nothing left over"),
+        Ok((hung_up, killed)) => tracing::info!(
+            when,
+            hung_up,
+            killed,
+            "account sweep: ended this account's other processes"
+        ),
+        Err(e) => tracing::warn!(when, error = %e, "account sweep did not finish"),
+    }
 }
 
 fn read_enrollment() -> Result<String> {

@@ -84,6 +84,34 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// The wire name, for the log.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Start { .. } => "start",
+            Self::End { .. } => "end",
+            Self::Input { .. } => "terminal.input",
+            Self::Resize { .. } => "terminal.resize",
+            Self::Replay { .. } => "terminal.replay",
+            Self::Refresh => "refresh",
+            Self::McpMessage { .. } => "mcp.message",
+        }
+    }
+
+    /// The session a command is for, if it is for one.
+    fn session(&self) -> Option<&str> {
+        match self {
+            Self::Start { session, .. }
+            | Self::End { session }
+            | Self::Input { session, .. }
+            | Self::Resize { session, .. }
+            | Self::Replay { session, .. }
+            | Self::McpMessage { session, .. } => Some(session),
+            Self::Refresh => None,
+        }
+    }
+}
+
 /// A command with its sequence number, as it goes on the wire.
 #[derive(Debug, Clone, Serialize)]
 pub struct Envelope {
@@ -399,7 +427,34 @@ impl AgentManager {
 
     fn send(&self, host_id: &str, command: Command) -> AgentResult<()> {
         let mut live = self.live.lock().unwrap();
-        let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
+        let Some(link) = live.hosts.get_mut(host_id) else {
+            tracing::info!(
+                host = host_id,
+                kind = command.kind(),
+                session = command.session(),
+                "command not sent: host offline"
+            );
+            return Err(AgentError::HostOffline);
+        };
+        // Input, resize and MCP messages are per keystroke or chatty: debug.
+        match &command {
+            Command::Input { .. } | Command::Resize { .. } | Command::McpMessage { .. } => {
+                tracing::debug!(
+                    host = host_id,
+                    seq = link.next_seq,
+                    kind = command.kind(),
+                    session = command.session(),
+                    "command sent"
+                )
+            }
+            _ => tracing::info!(
+                host = host_id,
+                seq = link.next_seq,
+                kind = command.kind(),
+                session = command.session(),
+                "command sent"
+            ),
+        }
         let envelope = Envelope {
             cmd_seq: link.next_seq,
             command,
@@ -567,6 +622,13 @@ impl AgentManager {
             return Ok(());
         }
         apply_report(&mut r, report)?;
+        tracing::info!(
+            host = host_id,
+            session = session_id,
+            status = %r.status,
+            end_reason = r.end_reason.as_deref(),
+            "session status"
+        );
         self.store.lock().unwrap().update(&r)?;
         self.bump(session_id);
         Ok(())
@@ -944,7 +1006,8 @@ impl AgentManager {
     /// A revoked host: its link is closed and its sessions are failed
     /// (freeze §5.6). The host ends them itself when next refused.
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
-        self.live.lock().unwrap().hosts.remove(host_id);
+        let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
+        tracing::info!(host = host_id, was_online, "runtime host revoked");
         self.transition_host_sessions(host_id, |r| {
             (!r.is_ended()).then(|| {
                 (

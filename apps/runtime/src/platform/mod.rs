@@ -196,19 +196,25 @@ pub fn sweep_targets() -> io::Result<Vec<i32>> {
 /// `grace` to whatever is left. The counterpart of systemd's control-group
 /// kill, and the only one launchd has (AM37). **Call it only after
 /// [`check_exclusive_account`] passed** — `serve` does, and nothing else
-/// calls this.
-pub fn sweep_account(grace: Duration) {
+/// calls this. Returns how many processes got the SIGHUP, and how many of
+/// those were still there for the SIGKILL.
+pub fn sweep_account(grace: Duration) -> (usize, usize) {
     let signal_all = |signal| {
-        for pid in sweep_targets().unwrap_or_default() {
+        let targets = sweep_targets().unwrap_or_default();
+        for &pid in &targets {
             if let Some(pid) = rustix::process::Pid::from_raw(pid) {
                 // ESRCH: it is already gone.
                 let _ = rustix::process::kill_process(pid, signal);
             }
         }
+        targets.len()
     };
-    signal_all(rustix::process::Signal::HUP);
+    let hung_up = signal_all(rustix::process::Signal::HUP);
+    if hung_up == 0 {
+        return (0, 0);
+    }
     std::thread::sleep(grace);
-    signal_all(rustix::process::Signal::KILL);
+    (hung_up, signal_all(rustix::process::Signal::KILL))
 }
 
 #[cfg(test)]
