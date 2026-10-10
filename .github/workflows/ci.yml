@@ -74,6 +74,26 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The same Runtime Host on a real Mac (decision 83). The PTY and the
+  # syscalls under it differ there (macOS's poll(2) does not support devices),
+  # so the suite runs on macOS rather than only cross-compiling for it.
+  runtime-macos:
+    name: runtime (rust, macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   client:
     name: client (flutter)
     runs-on: ubuntu-latest
@@ -136,3 +156,6 @@ jobs:
       - run: npm run build
       # A green build says the site compiles, not that it is true.
       - run: ./scripts/check-claims.sh
+      # The Homebrew formula (the repo is the tap) names the same release as
+      # the site, or every Mac installs the previous one (decision 83).
+      - run: ../../tools/formula-check.sh

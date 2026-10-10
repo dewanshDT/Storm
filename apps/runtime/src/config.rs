@@ -18,7 +18,7 @@ use crate::cli::CliProvider;
 use crate::fake::FakeProvider;
 use crate::provider::{Provider, ProviderId};
 
-pub const DEFAULT_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
+pub const DEFAULT_CONFIG: &str = crate::platform::DEFAULT_CONFIG;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +33,10 @@ pub struct RuntimeConfig {
     pub max_sessions: u32,
     #[serde(default = "default_scrollback")]
     pub scrollback_bytes: usize,
+    /// Where agent CLIs are looked for, and the `PATH` every session gets
+    /// (AM38). Omitted: the platform's default.
+    #[serde(default)]
+    pub path: Option<Vec<PathBuf>>,
     /// Storm data roots this host must never put a workspace in or around
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
@@ -58,6 +62,7 @@ impl Default for RuntimeConfig {
             providers: None,
             max_sessions: default_max_sessions(),
             scrollback_bytes: default_scrollback(),
+            path: None,
             forbidden_roots: default_forbidden(),
         }
     }
@@ -108,8 +113,15 @@ impl RuntimeConfig {
     /// A workspace root may not be inside, or contain, a Storm data root this
     /// host can see (D3, freeze §8). The permissions of P3 keep
     /// `storm-runtime` out of one anyway; this keeps an operator from pointing
-    /// agents at the vault by mistake.
+    /// agents at the vault by mistake. Nor may it be in, or contain, one of
+    /// the platform's protected locations (AM39): on macOS, people's homes
+    /// and mounted volumes, which a LaunchDaemon cannot be granted without
+    /// Full Disk Access.
     pub fn check_roots(&self) -> Result<()> {
+        self.check_roots_against(crate::platform::PROTECTED_ROOTS)
+    }
+
+    fn check_roots_against(&self, protected: &[&str]) -> Result<()> {
         for root in &self.workspace_roots {
             let root = canonical(root);
             for forbidden in &self.forbidden_roots {
@@ -123,8 +135,32 @@ impl RuntimeConfig {
                     );
                 }
             }
+            for protected in protected.iter().map(Path::new) {
+                if root.starts_with(protected) || protected.starts_with(&root) {
+                    bail!(
+                        "workspace root {} overlaps {} — a Runtime Host never works in \
+                         people's homes or on mounted volumes, and needs no Full Disk \
+                         Access (AM39). Put workspaces in the host's own root, and clone \
+                         or move a checkout there",
+                        root.display(),
+                        protected.display()
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// The one `PATH` availability resolves against and sessions run with
+    /// (AM38): `path` when set, else the platform's default. `None` keeps
+    /// the inherited one.
+    pub fn search_path(&self) -> Result<Option<OsString>> {
+        match &self.path {
+            Some(dirs) => Ok(Some(
+                std::env::join_paths(dirs).context("`path` in runtime.toml")?,
+            )),
+            None => Ok(crate::platform::default_path()),
+        }
     }
 
     /// The `settings` of the `opencode` provider entry, as JSON.
@@ -140,11 +176,16 @@ impl RuntimeConfig {
 
     /// The providers this host offers, by id.
     pub fn providers(&self) -> Result<Vec<Arc<dyn Provider>>> {
+        let path = self.search_path()?;
+        let on_path = |p: CliProvider| match &path {
+            Some(path) => p.with_path(path.clone()),
+            None => p,
+        };
         let Some(entries) = &self.providers else {
             return Ok(vec![
-                Arc::new(CliProvider::claude_code()),
-                Arc::new(CliProvider::opencode()),
-                Arc::new(CliProvider::shell()),
+                Arc::new(on_path(CliProvider::claude_code())),
+                Arc::new(on_path(CliProvider::opencode())),
+                Arc::new(on_path(CliProvider::shell())),
             ]);
         };
         let mut out: Vec<Arc<dyn Provider>> = Vec::new();
@@ -161,6 +202,7 @@ impl RuntimeConfig {
                         (None, "shell") => CliProvider::shell(),
                         (None, other) => bail!("provider `{other}` needs a command"),
                     };
+                    let base = on_path(base);
                     Arc::new(match &entry.env_file {
                         Some(path) => base.with_env(read_env_file(path)?),
                         None => base,
@@ -302,6 +344,103 @@ mod tests {
             ..RuntimeConfig::default()
         };
         config.check_roots().unwrap();
+    }
+
+    /// An executable named `name` in `dir` that prints its PATH.
+    fn agent(dir: &Path, name: &str) {
+        let bin = dir.join(name);
+        std::fs::write(&bin, "#!/bin/sh\necho PATH=$PATH\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn agent_clis_are_found_on_the_configured_path_not_only_the_hosts() {
+        // AM38: under launchd the host's own PATH is bare, so `claude` in
+        // /opt/homebrew/bin was reported not installed. A configured `path`
+        // is where availability looks, for built-ins and custom providers.
+        let brew = tempfile::tempdir().unwrap();
+        agent(brew.path(), "claude");
+        agent(brew.path(), "storm-test-agent");
+        let text = format!(
+            "path = [{:?}, \"/usr/bin\", \"/bin\"]\n\
+             [[providers]]\nid = \"claude-code\"\n\
+             [[providers]]\nid = \"custom\"\ncommand = \"storm-test-agent\"\n",
+            brew.path()
+        );
+        let config: RuntimeConfig = toml::from_str(&text).unwrap();
+        let path = config.search_path().unwrap().unwrap();
+        assert_eq!(
+            path,
+            OsString::from(format!("{}:/usr/bin:/bin", brew.path().display()))
+        );
+        for p in config.providers().unwrap() {
+            assert_eq!(
+                p.available(),
+                crate::provider::Availability::Available,
+                "{} not found on {path:?}",
+                p.id().as_str()
+            );
+        }
+        // Without it, the same CLIs are not on the host's PATH.
+        let bare: RuntimeConfig =
+            toml::from_str("[[providers]]\nid = \"custom\"\ncommand = \"storm-test-agent\"\n")
+                .unwrap();
+        assert_eq!(
+            bare.providers().unwrap()[0].available(),
+            crate::provider::Availability::NotInstalled
+        );
+    }
+
+    #[test]
+    fn a_root_in_or_around_a_protected_location_is_refused() {
+        // AM39, with macOS's list: a home, a volume, the data volume's
+        // spelling of a home, and any root that contains them.
+        let protected = crate::platform::launchd::PROTECTED_ROOTS;
+        for root in [
+            "/Users/alice/Developer",
+            "/Users",
+            "/Volumes/NAS/storm",
+            "/Network/Servers/x",
+            "/System/Volumes/Data/Users/alice/Developer",
+            "/",
+            "/System",
+        ] {
+            let config = RuntimeConfig {
+                workspace_roots: vec![PathBuf::from(root)],
+                forbidden_roots: vec![],
+                ..RuntimeConfig::default()
+            };
+            let err = config
+                .check_roots_against(protected)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("AM39"), "{root}: {err}");
+        }
+        for root in [
+            "/Library/StormRuntime/workspaces",
+            "/opt/work",
+            "/Users-shared",
+        ] {
+            let config = RuntimeConfig {
+                workspace_roots: vec![PathBuf::from(root)],
+                forbidden_roots: vec![],
+                ..RuntimeConfig::default()
+            };
+            config
+                .check_roots_against(protected)
+                .unwrap_or_else(|e| panic!("{root}: {e}"));
+        }
+    }
+
+    #[test]
+    fn the_platforms_own_list_is_what_check_roots_enforces() {
+        if let Some(first) = crate::platform::PROTECTED_ROOTS.first() {
+            let config = RuntimeConfig {
+                workspace_roots: vec![Path::new(first).join("x")],
+                ..RuntimeConfig::default()
+            };
+            assert!(config.check_roots().is_err());
+        }
     }
 
     #[test]

@@ -14,6 +14,11 @@ name: Acceptance builds
 # (decision 81m: as of 2026-10-08 they do not). Its build number is the
 # latest release's, so with the same key it installs as an update over that
 # release, and the next release still updates over it.
+#
+# Both apps also carry the latest release's version name (B-3 of the macOS
+# manual round): pubspec says 0.1.0, which a release overrides from its tag,
+# and an acceptance build that kept it showed "may not be compatible" against
+# a 0.4 server.
 
 on:
   push:
@@ -60,11 +65,19 @@ jobs:
           n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?status=success&per_page=1" \
                 --jq '.workflow_runs[0].run_number')
           echo "RELEASE_BUILD_NUMBER=${n:-1}" >> "$GITHUB_ENV"
+      - name: The latest release's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          echo "RELEASE_VERSION=${v#v}" >> "$GITHUB_ENV"
       - name: Build APK
         working-directory: apps/client
         run: |
           flutter pub get
-          flutter build apk --release --build-number="${RELEASE_BUILD_NUMBER}"
+          flutter build apk --release \
+            --build-name="${RELEASE_VERSION}" \
+            --build-number="${RELEASE_BUILD_NUMBER}"
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
             "dist/storm-acceptance-${GITHUB_SHA::7}.apk"
@@ -87,11 +100,24 @@ jobs:
           channel: stable
           flutter-version: 3.44.8
           cache: true
+      - name: The latest release's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          echo "RELEASE_VERSION=${v#v}" >> "$GITHUB_ENV"
       - name: Build macOS app
         working-directory: apps/client
         run: |
           flutter pub get
-          flutter build macos --release --build-number="${GITHUB_RUN_NUMBER}"
+          flutter build macos --release \
+            --build-name="${RELEASE_VERSION}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          # The version the app will report (B-3).
+          shown=$(plutil -extract CFBundleShortVersionString raw \
+            build/macos/Build/Products/Release/Storm.app/Contents/Info.plist)
+          echo "CFBundleShortVersionString: $shown"
+          test "$shown" = "${RELEASE_VERSION}"
           mkdir -p dist
           APP="build/macos/Build/Products/Release/Storm.app"
           test -d "$APP"

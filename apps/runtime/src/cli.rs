@@ -14,12 +14,33 @@
 //! - Either way, once the agent is gone its process group gets SIGHUP and then
 //!   SIGKILL, so nothing the session spawned outlives it, and a background job
 //!   holding the terminal cannot keep the session open forever.
+//! - **The SIGKILL reaches the whole session, not only the group.** A
+//!   job-control shell (`zsh -l`, `bash -i`) puts each `cmd &` in a process
+//!   group of its own, which `kill(-pgid)` never reaches. Every process whose
+//!   session id is the agent's pid is found by `platform::session_members`.
+//! - **`ended` means the session is empty.** Before reporting it, whatever is
+//!   still in the session (a job that ignored SIGHUP and let go of the
+//!   terminal) gets SIGHUP, then SIGKILL after the grace. A host that waits
+//!   for `ended` (its shutdown, AM37) therefore leaves nothing behind. Only a
+//!   process that called `setsid` itself has left the session; the
+//!   exclusive-account sweep ends those when the host stops.
+//! - **What left the session is found by its tag** (F1). Every process a
+//!   session starts inherits `STORM_RUNTIME_SESSION=<id>`
+//!   ([`crate::platform::SESSION_TAG`]). A server an agent daemonized with
+//!   `setsid` (OpenCode's `serve --service`) has left the session and been
+//!   reparented, but still carries the tag, so it is a straggler like any
+//!   other: the session's ending ends it too. So does any per-account
+//!   daemon a session happened to start on demand (a tmux server, an
+//!   ssh-agent, a build daemon): it is the session's, and goes with it, even
+//!   if a later session was using it. That is the design — nothing a session
+//!   started outlives it — and the price of finding what left the session.
 //! - `ended` is reported only after the output has drained, so nothing arrives
 //!   after it.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +73,9 @@ pub struct CliProvider {
     command: OsString,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    /// The `PATH` it is looked for on and runs with (AM38). `None`: the
+    /// host's own.
+    path: Option<OsString>,
 }
 
 impl CliProvider {
@@ -65,7 +89,16 @@ impl CliProvider {
             command: command.into(),
             args: args.into_iter().map(Into::into).collect(),
             env: Vec::new(),
+            path: None,
         }
+    }
+
+    /// Looks the command up on `path`, and gives every session that `PATH`,
+    /// so "installed" and "runs" cannot disagree (AM38). It is set after a
+    /// provider env file, so an env file cannot make them disagree either.
+    pub fn with_path(mut self, path: impl Into<OsString>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 
     /// Variables added after the terminal's own, so a provider may override
@@ -126,7 +159,7 @@ impl Provider for CliProvider {
     }
 
     fn available(&self) -> Availability {
-        match pty::resolve(&self.command) {
+        match pty::resolve(&self.command, self.path.as_deref()) {
             Some(_) => Availability::Available,
             None => Availability::NotInstalled,
         }
@@ -137,7 +170,8 @@ impl Provider for CliProvider {
         spec: SessionSpec,
         events: Arc<dyn SessionEvents>,
     ) -> Result<Box<dyn ProviderSession>, StartError> {
-        let program = pty::resolve(&self.command).ok_or(StartError::NotAvailable)?;
+        let program =
+            pty::resolve(&self.command, self.path.as_deref()).ok_or(StartError::NotAvailable)?;
         let InteractionSpec::Terminal(size) = spec.interaction;
         let failed = |what: &str, e: io::Error| StartError::Failed(format!("{what}: {e}"));
 
@@ -149,7 +183,12 @@ impl Provider for CliProvider {
             .current_dir(&spec.workspace)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
+            .env(crate::platform::SESSION_TAG, &spec.session_id)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .envs(self.path.iter().map(|p| ("PATH", p)))
+            // A login shell's profile may reorder PATH; this is what the
+            // managed `.zprofile` restores (F3).
+            .envs(self.path.iter().map(|p| (crate::platform::SESSION_PATH, p)))
             // The session's own values last (AM32): its MCP config must win
             // over anything a provider env file says.
             .envs(spec.launch.env.iter().map(|(k, v)| (k, v)));
@@ -165,9 +204,12 @@ impl Provider for CliProvider {
                 .map_err(|e| failed("cloning the pty", e))?,
         );
         let shared = Arc::new(Shared {
+            tag: spec.session_id.clone(),
             status: Mutex::new(SessionStatus::Running),
             stop_requested: AtomicBool::new(false),
             exit: (Mutex::new(None), Condvar::new()),
+            leader: group,
+            grace: Mutex::new(DEFAULT_GRACE),
         });
 
         let waiter = shared.clone();
@@ -180,7 +222,7 @@ impl Provider for CliProvider {
                 hang_up(group);
                 waiter.set_exit(status);
                 if !waiter.sleep_until_ended(DEFAULT_GRACE) {
-                    kill(group);
+                    kill(group, &waiter.tag);
                 }
             })
             .map_err(|e| failed("starting the wait thread", e))?;
@@ -203,10 +245,18 @@ impl Provider for CliProvider {
 
 /// State the session, its reader and its waiter share.
 struct Shared {
+    /// The session id, which every process it started carries in
+    /// [`crate::platform::SESSION_TAG`].
+    tag: String,
     status: Mutex<SessionStatus>,
     stop_requested: AtomicBool,
     /// The agent's exit, once it has one, and a wake-up for whoever waits.
     exit: (Mutex<Option<io::Result<ExitStatus>>>, Condvar),
+    /// The agent's pid: its process group's id and its session's.
+    leader: Pid,
+    /// How long stragglers get between SIGHUP and SIGKILL: the stop's grace
+    /// when the owner asked, [`DEFAULT_GRACE`] otherwise.
+    grace: Mutex<Duration>,
 }
 
 impl Shared {
@@ -233,6 +283,34 @@ impl Shared {
             waited += step;
         }
         self.status().is_ended()
+    }
+
+    /// Ends whatever is still in the session once the terminal has closed:
+    /// SIGHUP, then SIGKILL to what remains after the grace. Returns once the
+    /// session is empty, or a second after the SIGKILL.
+    fn end_stragglers(&self) {
+        let members = || stragglers(self.leader, &self.tag);
+        if members().is_empty() {
+            return;
+        }
+        signal_each(&members(), Signal::HUP);
+        let grace = *self.grace.lock().unwrap();
+        let step = Duration::from_millis(50);
+        let mut waited = Duration::ZERO;
+        while waited < grace {
+            if members().is_empty() {
+                return;
+            }
+            thread::sleep(step);
+            waited += step;
+        }
+        signal_each(&members(), Signal::KILL);
+        for _ in 0..20 {
+            if members().is_empty() {
+                return;
+            }
+            thread::sleep(step);
+        }
     }
 
     /// Forwards output until the terminal closes, then reports the ending —
@@ -264,6 +342,7 @@ impl Shared {
             (false, _) => SessionEnd::Completed { exit_code: None },
         };
         drop(exit);
+        self.end_stragglers();
         *self.status.lock().unwrap() = end.status();
         events.ended(end);
     }
@@ -274,8 +353,45 @@ fn hang_up(group: Pid) {
     let _ = rustix::process::kill_process_group(group, Signal::HUP);
 }
 
-fn kill(group: Pid) {
+/// SIGKILL to the group and to every other member of the session the agent
+/// leads (its pid is both ids): a job-control shell's jobs have groups of
+/// their own.
+fn kill(group: Pid, tag: &str) {
     let _ = rustix::process::kill_process_group(group, Signal::KILL);
+    signal_each(&stragglers(group, tag), Signal::KILL);
+}
+
+/// Everything the session started that is still alive: the members of the
+/// session `leader` leads, and whatever left it but carries the session's tag.
+fn stragglers(leader: Pid, tag: &str) -> Vec<Pid> {
+    let mut all = session_members(leader);
+    for pid in crate::platform::tagged_processes(tag)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(Pid::from_raw)
+    {
+        if !all.contains(&pid) {
+            all.push(pid);
+        }
+    }
+    all
+}
+
+/// The live members of the session `leader` leads. If they cannot be listed,
+/// none: the group signals still went out.
+fn session_members(leader: Pid) -> Vec<Pid> {
+    crate::platform::session_members(leader.as_raw_nonzero().get())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(Pid::from_raw)
+        .collect()
+}
+
+fn signal_each(pids: &[Pid], signal: Signal) {
+    for &pid in pids {
+        // ESRCH just means it is already gone.
+        let _ = rustix::process::kill_process(pid, signal);
+    }
 }
 
 struct CliSession {
@@ -311,18 +427,11 @@ impl TerminalChannel for CliTerminal {
     /// get in. Input is at-most-once (freeze §11.3): a write that cannot land
     /// in time fails with `TimedOut` rather than waiting.
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        use rustix::event::{PollFd, PollFlags, Timespec, poll};
         self.ensure_running()?;
         let deadline = std::time::Instant::now() + INPUT_DEADLINE;
-        for chunk in bytes.chunks(256) {
+        for chunk in bytes.chunks(crate::platform::PTY_WRITE_CHUNK) {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            let timeout = Timespec {
-                tv_sec: left.as_secs() as _,
-                tv_nsec: left.subsec_nanos() as _,
-            };
-            let mut fds = [PollFd::new(&self.writer, PollFlags::OUT)];
-            let ready = poll(&mut fds, Some(&timeout))?;
-            if ready == 0 {
+            if !crate::platform::wait_writable(self.writer.as_fd(), left)? {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "the agent is not reading its input",
@@ -357,6 +466,7 @@ impl ProviderSession for CliSession {
         if shared.status().is_ended() || shared.stop_requested.swap(true, Ordering::SeqCst) {
             return;
         }
+        *shared.grace.lock().unwrap() = grace;
         hang_up(self.group);
         let (shared, group) = (shared.clone(), self.group);
         // Non-blocking: the caller is the host link, which must not stall for
@@ -365,7 +475,7 @@ impl ProviderSession for CliSession {
             .name("stop-grace".into())
             .spawn(move || {
                 if !shared.sleep_until_ended(grace) {
-                    kill(group);
+                    kill(group, &shared.tag);
                 }
             });
     }

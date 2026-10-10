@@ -215,11 +215,19 @@ impl std::error::Error for Refused {}
 /// 4. Write `host.json`.
 ///
 /// `host.json` existing therefore implies a key on disk that the server knows.
+///
+/// `announce` runs after the server accepted the enrollment and **before**
+/// `host.json` is written, which is the last write. Under launchd that file
+/// starts the host (AM35's `PathState`), and a host started with
+/// `--exclusive-account` ends every other process of its account (AM37) —
+/// this one included, when enrollment runs as that account. Whatever the
+/// operator must read is therefore said before the file exists.
 pub async fn enroll(
     state_dir: &Path,
     enrollment: &str,
     name: &str,
     force: bool,
+    announce: impl FnOnce(&HostConfig),
 ) -> Result<HostConfig> {
     let enrollment = Enrollment::parse(enrollment).map_err(|e| anyhow!("{e}"))?;
     if HostConfig::path(state_dir).exists() && !force {
@@ -251,6 +259,14 @@ pub async fn enroll(
         host_id,
         key_id: key.key_id.clone(),
     };
+    // A revoked enrollment it replaces (AM36) is kept as a record, with its
+    // key, out of the way of the live identity (B-5).
+    // The server has accepted this enrollment: a failure here must not
+    // abort it, or the one-time string is spent and host.json never written.
+    if let Err(e) = HostConfig::archive_revoked(state_dir) {
+        eprintln!("warning: could not keep the revoked enrollment: {e:#}");
+    }
+    announce(&config);
     config.save(state_dir)?;
     Ok(config)
 }

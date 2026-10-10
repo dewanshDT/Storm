@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -323,6 +324,64 @@ class StatusChip extends StatelessWidget {
   }
 }
 
+/// The machine being enrolled. It is not necessarily the one this client
+/// runs on, so the enroll sheet offers both (AM40).
+enum HostPlatform { linux, macos }
+
+/// The platform the enroll sheet opens on: macOS on a Mac (native or web),
+/// Linux everywhere else.
+HostPlatform defaultHostPlatform() =>
+    defaultTargetPlatform == TargetPlatform.macOS
+    ? HostPlatform.macos
+    : HostPlatform.linux;
+
+/// One command the operator runs on the host, in order.
+class EnrollStep {
+  const EnrollStep(this.command, {this.pastesString = false});
+
+  final String command;
+
+  /// The step that asks for the enrollment string.
+  final bool pastesString;
+}
+
+/// What to run on a host of [platform], and nothing of the other's: Linux is
+/// the `.deb` and systemd (decision 77e), macOS is Homebrew and a launchd
+/// LaunchDaemon (D14, AM35).
+List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
+  HostPlatform.linux => const [
+    EnrollStep('sudo apt install storm-runtime'),
+    EnrollStep(
+      'sudo -u storm-runtime storm-runtime enroll',
+      pastesString: true,
+    ),
+    EnrollStep('sudo systemctl enable --now storm-runtime'),
+  ],
+  HostPlatform.macos => const [
+    EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
+    EnrollStep('brew install storm-runtime'),
+    // The full path: `sudo` need not search Homebrew's prefix.
+    EnrollStep('sudo "\$(brew --prefix)/bin/storm-runtime" install'),
+    // `cd /` first: the hidden account cannot read the operator's current
+    // directory, and the command fails before asking for the string (B-4).
+    EnrollStep(
+      'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
+      pastesString: true,
+    ),
+  ],
+};
+
+/// Where the host runs and keeps its workspaces, in a line.
+String enrollFootnote(HostPlatform platform) => switch (platform) {
+  HostPlatform.linux =>
+    'It runs under systemd as the storm-runtime account. Workspaces are the '
+        'folders in /var/lib/storm-runtime/workspaces.',
+  HostPlatform.macos =>
+    'launchd starts it by itself once it is enrolled (the LaunchDaemon '
+        'dev.storm.runtime), as the dedicated _stormruntime account. '
+        'Workspaces are the folders in /Library/StormRuntime/workspaces.',
+};
+
 /// The enrollment string, shown once: it carries a single-use secret that
 /// nothing stores.
 class _EnrollDialog extends StatefulWidget {
@@ -335,8 +394,23 @@ class _EnrollDialog extends StatefulWidget {
   State<_EnrollDialog> createState() => _EnrollDialogState();
 }
 
+/// The enrollment string with its secret hidden: the scheme, then the last
+/// four characters, enough to tell two strings apart (B-6). The sheet ends up
+/// in screenshots; the string works once, but there is no need to show it.
+String maskEnrollment(String s) {
+  const shown = 'storm-enroll:v1:';
+  if (s.length <= shown.length + 4) return '•' * s.length;
+  final head = s.startsWith(shown) ? shown : '';
+  return '$head${'•' * 12}${s.substring(s.length - 4)}';
+}
+
 class _EnrollDialogState extends State<_EnrollDialog> {
   bool _copied = false;
+  bool _revealed = false;
+  HostPlatform _platform = defaultHostPlatform();
+
+  /// The command whose copy button last succeeded, by index.
+  int? _copiedCommand;
 
   @override
   Widget build(BuildContext context) {
@@ -346,55 +420,114 @@ class _EnrollDialogState extends State<_EnrollDialog> {
         ? 'soon'
         : '${until.hour.toString().padLeft(2, '0')}:'
               '${until.minute.toString().padLeft(2, '0')}';
+    final steps = enrollSteps(_platform);
+    final mono = TextStyle(
+      fontFamily: StormTokens.monoFamily,
+      fontSize: t.labelSize,
+    );
+    final box = BoxDecoration(
+      color: t.surface2,
+      borderRadius: BorderRadius.circular(t.rControl),
+    );
     return AlertDialog(
       title: const Text('Enroll a host'),
       content: SizedBox(
         width: 520,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'On the host, run the command below and paste this string when '
-              'it asks. It works once, until $when.',
-            ),
-            SizedBox(height: t.sp * 1.5),
-            Container(
-              padding: EdgeInsets.all(t.sp),
-              decoration: BoxDecoration(
-                color: t.surface2,
-                borderRadius: BorderRadius.circular(t.rControl),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ChoiceChips<HostPlatform>(
+                key: const Key('enroll-platform'),
+                options: const [
+                  ChoiceOption(HostPlatform.linux, 'Linux'),
+                  ChoiceOption(HostPlatform.macos, 'macOS'),
+                ],
+                selected: _platform,
+                onSelected: (p) => setState(() {
+                  _platform = p;
+                  _copiedCommand = null;
+                }),
               ),
-              child: SelectableText(
-                'sudo -u storm-runtime storm-runtime enroll',
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
+              SizedBox(height: t.sp * 1.5),
+              Text(
+                'On the host, run these in order, and paste this string when '
+                'enroll asks for it. It works once, until $when.',
+              ),
+              SizedBox(height: t.sp),
+              for (final (i, step) in steps.indexed) ...[
+                Container(
+                  key: Key('enroll-command-$i'),
+                  padding: EdgeInsets.only(left: t.sp),
+                  decoration: box,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: SelectableText(step.command, style: mono),
+                      ),
+                      IconButton(
+                        key: Key('copy-command-$i'),
+                        tooltip: 'Copy',
+                        iconSize: 16,
+                        icon: Icon(
+                          _copiedCommand == i
+                              ? LucideIcons.check
+                              : LucideIcons.copy,
+                        ),
+                        onPressed: () async {
+                          final ok = await copyToClipboard(step.command);
+                          if (mounted) {
+                            setState(() => _copiedCommand = ok ? i : null);
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(height: t.sp * 0.5),
+              ],
+              SizedBox(height: t.sp * 0.5),
+              Container(
+                padding: EdgeInsets.only(left: t.sp),
+                decoration: box,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: SelectableText(
+                        _revealed
+                            ? widget.enrollment
+                            : maskEnrollment(widget.enrollment),
+                        key: const Key('enrollment-string'),
+                        style: mono,
+                      ),
+                    ),
+                    IconButton(
+                      key: const Key('reveal-enrollment'),
+                      tooltip: _revealed ? 'Hide' : 'Show',
+                      iconSize: 16,
+                      icon: Icon(
+                        _revealed ? LucideIcons.eye_off : LucideIcons.eye,
+                      ),
+                      onPressed: () => setState(() => _revealed = !_revealed),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            SizedBox(height: t.sp),
-            Container(
-              padding: EdgeInsets.all(t.sp),
-              decoration: BoxDecoration(
-                color: t.surface2,
-                borderRadius: BorderRadius.circular(t.rControl),
+              SizedBox(height: t.sp),
+              Text(
+                enrollFootnote(_platform),
+                key: const Key('enroll-footnote'),
+                style: TextStyle(fontSize: t.labelSize, color: t.text3),
               ),
-              child: SelectableText(
-                widget.enrollment,
-                key: const Key('enrollment-string'),
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                ),
+              SizedBox(height: t.sp * 0.5),
+              Text(
+                'Close this and the string is gone. Issue a new one if you need '
+                'it.',
+                style: TextStyle(fontSize: t.labelSize, color: t.text3),
               ),
-            ),
-            SizedBox(height: t.sp),
-            Text(
-              'Close this and the string is gone. Issue a new one if you need it.',
-              style: TextStyle(fontSize: t.labelSize, color: t.text3),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
       actions: [
@@ -404,7 +537,7 @@ class _EnrollDialogState extends State<_EnrollDialog> {
             if (mounted) setState(() => _copied = ok);
           },
           icon: Icon(_copied ? LucideIcons.check : LucideIcons.copy, size: 16),
-          label: Text(_copied ? 'Copied' : 'Copy'),
+          label: Text(_copied ? 'Copied' : 'Copy string'),
         ),
         FilledButton(
           onPressed: () => Navigator.of(context).pop(),

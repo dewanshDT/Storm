@@ -29,6 +29,15 @@ pub const ENROLL_PREFIX: &str = "storm-enroll:v1:";
 
 pub const IDENTITY_DIR: &str = "identity";
 pub const HOST_FILE: &str = "host.json";
+/// Where `host.json` goes when the server refuses the key (AM36): a revoked
+/// identity is dead, and its absence is what stops launchd restarting the
+/// host (AM35's `PathState`) and lets `enroll` run again without `--force`.
+pub const REVOKED_FILE: &str = "host.json.revoked";
+
+/// Where re-enrolling puts a revoked enrollment and its key (B-5):
+/// `revoked/<old host id>/`, so the old identity is kept as a record and
+/// `identity/` holds only the live key.
+pub const REVOKED_DIR: &str = "revoked";
 
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -242,6 +251,13 @@ impl HostConfig {
 
     pub fn load(state_dir: &Path) -> Result<Self> {
         let path = Self::path(state_dir);
+        if !path.exists() && state_dir.join(REVOKED_FILE).exists() {
+            anyhow::bail!(
+                "this host is not enrolled: the server revoked it ({} holds the old \
+                 enrollment). Enroll it again with `storm-runtime enroll`.",
+                state_dir.join(REVOKED_FILE).display()
+            );
+        }
         let text = fs::read_to_string(&path).with_context(|| {
             format!(
                 "reading {} — has this host been enrolled? (storm-runtime enroll)",
@@ -266,6 +282,54 @@ impl HostConfig {
         file.sync_all()?;
         fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
+    }
+
+    /// The server refused this host's key (AM36): `host.json` becomes
+    /// `host.json.revoked`, atomically, replacing any older one. Afterwards the
+    /// host is visibly unenrolled, on every platform.
+    pub fn mark_revoked(state_dir: &Path) -> Result<()> {
+        let from = Self::path(state_dir);
+        let to = state_dir.join(REVOKED_FILE);
+        fs::rename(&from, &to)
+            .with_context(|| format!("renaming {} to {}", from.display(), to.display()))
+    }
+
+    /// Before a new enrollment: moves `host.json.revoked` and the key it names
+    /// into `revoked/<host id>/` (`0700`). Returns where they went, or `None`
+    /// when there was no revoked enrollment.
+    pub fn archive_revoked(state_dir: &Path) -> Result<Option<PathBuf>> {
+        let revoked = state_dir.join(REVOKED_FILE);
+        if !revoked.exists() {
+            return Ok(None);
+        }
+        let old: Option<Self> = fs::read(&revoked)
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok());
+        let name = match &old {
+            Some(old) => old.host_id.clone(),
+            None => format!(
+                "unreadable-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+            ),
+        };
+        let dest = state_dir.join(REVOKED_DIR).join(name);
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dest)
+            .with_context(|| format!("creating {}", dest.display()))?;
+        fs::rename(&revoked, dest.join(REVOKED_FILE))
+            .with_context(|| format!("moving {} to {}", revoked.display(), dest.display()))?;
+        if let Some(old) = old {
+            let key = HostKey::path(state_dir, &old.key_id);
+            if key.exists() {
+                fs::rename(&key, dest.join(format!("{}.key", old.key_id)))
+                    .with_context(|| format!("moving {} to {}", key.display(), dest.display()))?;
+            }
+        }
+        Ok(Some(dest))
     }
 }
 
@@ -369,6 +433,59 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn a_revoked_host_is_unenrolled_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = HostConfig {
+            server_url: "http://127.0.0.1:1".into(),
+            server_id: "srv_X".into(),
+            server_pubkey: "k".into(),
+            host_id: "hst_X".into(),
+            key_id: "key_X".into(),
+        };
+        config.save(dir.path()).unwrap();
+        HostConfig::mark_revoked(dir.path()).unwrap();
+        assert!(
+            !HostConfig::path(dir.path()).exists(),
+            "host.json must be gone"
+        );
+        let kept: HostConfig =
+            serde_json::from_slice(&std::fs::read(dir.path().join(REVOKED_FILE)).unwrap()).unwrap();
+        assert_eq!(kept, config, "the old enrollment is kept beside it");
+        let err = format!("{:#}", HostConfig::load(dir.path()).unwrap_err());
+        assert!(err.contains("revoked"), "{err}");
+    }
+
+    /// B-5: re-enrolling keeps the revoked enrollment and its key, under
+    /// `revoked/<host id>/`, and leaves only the live key in `identity/`.
+    #[test]
+    fn re_enrolling_archives_the_revoked_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(HostConfig::archive_revoked(dir.path()).unwrap(), None);
+        let key = HostKey::generate();
+        key.save(dir.path()).unwrap();
+        let old = HostConfig {
+            server_url: "http://127.0.0.1:1".into(),
+            server_id: "srv_X".into(),
+            server_pubkey: "k".into(),
+            host_id: "hst_OLD".into(),
+            key_id: key.key_id.clone(),
+        };
+        old.save(dir.path()).unwrap();
+        HostConfig::mark_revoked(dir.path()).unwrap();
+
+        let dest = HostConfig::archive_revoked(dir.path()).unwrap().unwrap();
+        assert_eq!(dest, dir.path().join(REVOKED_DIR).join("hst_OLD"));
+        assert!(!dir.path().join(REVOKED_FILE).exists());
+        let kept: HostConfig =
+            serde_json::from_slice(&std::fs::read(dest.join(REVOKED_FILE)).unwrap()).unwrap();
+        assert_eq!(kept, old);
+        assert!(dest.join(format!("{}.key", key.key_id)).exists());
+        assert!(!HostKey::path(dir.path(), &key.key_id).exists());
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

@@ -70,6 +70,10 @@ fn a_revoked_host_is_not_restarted() {
         main.contains("std::process::exit(3)"),
         "main must exit 3 on refusal"
     );
+    // AM36: and the refused identity is moved aside, which is what stops
+    // launchd, which has no RestartPreventExitStatus.
+    let host = repo_file("apps/runtime/src/host.rs");
+    assert!(host.contains("HostConfig::mark_revoked(&self.state_dir)"));
 }
 
 #[test]
@@ -81,6 +85,8 @@ fn the_unit_runs_what_the_package_installs_where_it_installs_it() {
     assert!(cargo.contains(r#"["target/release/storm-runtime", "usr/bin/", "755"]"#));
     assert!(cargo.contains(r#""../../deploy/storm-runtime.service", "lib/systemd/system/""#));
     assert!(exec.contains("--config /etc/storm-runtime/runtime.toml"));
+    // AM37: the account is the host's alone, so the host sweeps it.
+    assert!(exec.contains("--exclusive-account"), "{exec}");
     assert!(cargo.contains(r#""etc/storm-runtime/runtime.toml""#));
     // HOME is the account's home, where an agent CLI was logged in.
     assert_eq!(

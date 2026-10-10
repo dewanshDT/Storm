@@ -28,7 +28,11 @@ Group=storm-runtime
 # Where `sudo -u storm-runtime -H claude` logs an agent CLI in, so the agent
 # finds the same credentials when the runtime starts it.
 Environment=HOME=/var/lib/storm-runtime/home
-ExecStart=/usr/bin/storm-runtime serve --state /var/lib/storm-runtime --config /etc/storm-runtime/runtime.toml
+# --exclusive-account: this account runs nothing but this host, so at startup
+# and after shutdown the host ends every other process of it (AM37). systemd's
+# control-group kill covers a stop already; the sweep also covers what a
+# crashed host left behind, and is the same on launchd.
+ExecStart=/usr/bin/storm-runtime serve --state /var/lib/storm-runtime --config /etc/storm-runtime/runtime.toml --exclusive-account
 StateDirectory=storm-runtime
 StateDirectoryMode=0700
 Restart=on-failure

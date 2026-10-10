@@ -60,12 +60,20 @@ impl Recorder {
 
     /// Waits for the one ending, and checks there is only one.
     fn wait_end(&self) -> SessionEnd {
-        let deadline = Instant::now() + WAIT;
+        self.wait_end_within(WAIT)
+    }
+
+    /// [`Self::wait_end`] with a budget of its own.
+    fn wait_end_within(&self, budget: Duration) -> SessionEnd {
+        let started = Instant::now();
+        let deadline = started + budget;
         let mut state = self.state.lock().unwrap();
         while state.1.is_empty() {
             let left = deadline
                 .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("the session never ended"));
+                .unwrap_or_else(|| {
+                    panic!("the session did not end within {:?}", started.elapsed())
+                });
             state = self.changed.wait_timeout(state, left).unwrap().0;
         }
         drop(state);
@@ -86,9 +94,13 @@ fn workspace() -> PathBuf {
 }
 
 fn start(provider: &CliProvider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
+    // Unique per test: a session's ending ends every process carrying its
+    // id, and the tests run side by side.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let rec = Arc::new(Recorder::default());
     let spec = SessionSpec {
-        session_id: "ags_CLI".into(),
+        session_id: format!("ags_CLI{n}_{}", std::process::id()),
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
@@ -233,4 +245,190 @@ fn the_built_in_providers_are_what_the_freeze_says() {
     assert_eq!(claude.command(), "claude");
     assert_eq!(CliProvider::opencode().id().as_str(), "opencode");
     assert_eq!(CliProvider::shell().id().as_str(), "shell");
+}
+
+#[test]
+fn input_to_an_agent_that_never_reads_times_out_instead_of_hanging() {
+    // Decision 77c: a PTY write waits for room within a deadline, so a hung
+    // agent cannot hold its session against `end`. The wait is per platform
+    // (D14): macOS's poll(2) does not support devices and never waits, so a
+    // write built on it blocks for as long as the agent ignores its input.
+    let (mut session, rec) = start(&sh("stty raw -echo; echo ready; exec sleep 60"));
+    rec.wait_for("ready");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let result = {
+            let Interaction::Terminal(term) = session.interaction();
+            term.write(&vec![b'x'; 1 << 20])
+        };
+        let _ = tx.send((result.map_err(|e| e.kind()), started.elapsed()));
+        session.stop(Duration::from_millis(100));
+    });
+    let deadline = storm_runtime::cli::INPUT_DEADLINE + Duration::from_secs(5);
+    let (result, took) = rx
+        .recv_timeout(deadline)
+        .expect("the write hung past its deadline");
+    assert_eq!(result, Err(std::io::ErrorKind::TimedOut));
+    assert!(
+        took >= storm_runtime::cli::INPUT_DEADLINE,
+        "gave up early: {took:?}"
+    );
+}
+
+#[test]
+fn the_default_host_name_is_the_node_name_without_local() {
+    let name = storm_runtime::platform::host_name();
+    assert!(!name.is_empty() && name.chars().count() <= 64, "{name:?}");
+    assert!(!name.ends_with(".local"), "{name:?}");
+    let node = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned();
+    if !node.trim().is_empty() {
+        assert!(node.starts_with(&name), "{name:?} is not from {node:?}");
+    }
+}
+
+#[test]
+fn a_session_runs_with_the_path_its_cli_was_found_on() {
+    // AM38: "installed" and "runs" use one PATH. A CLI found on the
+    // configured path, outside the host's own, starts and sees that PATH —
+    // even when a provider env file says otherwise.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("storm-test-agent");
+    std::fs::write(&bin, "#!/bin/sh\necho \"path=$PATH\"\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", dir.path().display());
+
+    let provider = CliProvider::new(
+        ProviderId::new("custom").unwrap(),
+        "storm-test-agent",
+        Vec::<String>::new(),
+    );
+    assert_eq!(provider.available(), Availability::NotInstalled);
+    let provider = provider
+        .with_env([("PATH", "/nowhere")])
+        .with_path(path.clone());
+    assert_eq!(provider.available(), Availability::Available);
+    let (_session, rec) = start(&provider);
+    rec.wait_end();
+    assert!(
+        rec.output().contains(&format!("path={path}")),
+        "{}",
+        rec.output()
+    );
+}
+
+fn pid_after(out: &str, tag: &str) -> i32 {
+    out.split(tag)
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no {tag} in {out:?}"))
+}
+
+fn pgid(pid: i32) -> i32 {
+    rustix::process::getpgid(rustix::process::Pid::from_raw(pid))
+        .unwrap()
+        .as_raw_nonzero()
+        .get()
+}
+
+fn wait_gone(pid: i32, what: &str) {
+    let deadline = Instant::now() + WAIT;
+    while alive(pid) {
+        assert!(Instant::now() < deadline, "{what} survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn stopping_reaches_jobs_a_job_control_shell_put_in_groups_of_their_own() {
+    // `set -m` is what an interactive `zsh -l` or `bash -i` does: `cmd &`
+    // gets a process group of its own, which kill(-pgid) never reaches. This
+    // job ignores SIGHUP and holds the terminal, so unless the SIGKILL reaches
+    // the whole session the session never even ends (freeze §7.3).
+    let (mut session, rec) = start(&sh(
+        "set -m; (trap '' HUP; exec sleep 1000) & echo leader:$$ bg:$! :ready; wait",
+    ));
+    let out = rec.wait_for(":ready");
+    let (leader, job) = (pid_after(&out, "leader:"), pid_after(&out, "bg:"));
+    assert!(alive(job));
+    assert_ne!(pgid(job), leader, "the job must have a group of its own");
+
+    session.stop(Duration::from_millis(300));
+    assert_eq!(rec.wait_end(), SessionEnd::Stopped);
+    wait_gone(job, "the job in its own process group");
+}
+
+#[test]
+fn ended_means_the_session_is_empty() {
+    // A job in a group of its own that ignores SIGHUP and has let go of the
+    // terminal: the terminal closes when the agent exits, so nothing waits on
+    // it. It is still in the session, and is ended before `ended` is reported
+    // — which is what a host's shutdown waits for (AM37).
+    let (_session, rec) = start(&sh(
+        "set -m; (trap '' HUP; exec sleep 1000 </dev/null >/dev/null 2>&1) & echo bg:$! :ready; exit 0",
+    ));
+    let out = rec.wait_for(":ready");
+    let job = pid_after(&out, "bg:");
+    // The ending may legitimately take two graces: the agent's exit gives
+    // its group one before the SIGKILL, and the stragglers' pass may give
+    // the job another before reporting (the bound 83d documents). WAIT
+    // alone was less than that, and a slow macOS runner ran past it.
+    let budget = storm_runtime::cli::DEFAULT_GRACE * 2 + Duration::from_secs(5);
+    assert_eq!(
+        rec.wait_end_within(budget),
+        SessionEnd::Completed { exit_code: Some(0) }
+    );
+    assert!(!alive(job), "the detached job outlived its session's end");
+}
+
+/// F1: what an agent daemonized — `setsid`, stdio closed, reparented, as
+/// OpenCode does with `serve --service` — has left the session, so neither
+/// the group nor the session signals reach it. It still carries the
+/// session's tag, so the ending ends it too.
+#[test]
+fn ending_reaches_what_left_the_session_with_setsid() {
+    let daemon = "perl -MPOSIX -e 'setsid() or die; open STDIN, q(</dev/null); \
+                  open STDOUT, q(>/dev/null); open STDERR, q(>/dev/null); \
+                  exec q(sleep), 1000'";
+    let (mut session, rec) = start(&sh(&format!(
+        "{daemon} & echo daemon:$! :ready; exec sleep 1000"
+    )));
+    let out = rec.wait_for(":ready");
+    let daemon = pid_after(&out, "daemon:");
+    let deadline = Instant::now() + WAIT;
+    // perl calls setsid only once it runs.
+    while rustix::process::getsid(rustix::process::Pid::from_raw(daemon))
+        .map(|s| s.as_raw_nonzero().get())
+        != Ok(daemon)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never left the session"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    session.stop(Duration::from_millis(300));
+    assert_eq!(rec.wait_end(), SessionEnd::Stopped);
+    wait_gone(daemon, "the setsid daemon");
+}
+
+#[test]
+fn a_session_lists_its_members() {
+    let (mut session, rec) = start(&sh("echo leader:$$ :ready; exec sleep 1000"));
+    let leader = pid_after(&rec.wait_for(":ready"), "leader:");
+    let members = storm_runtime::platform::session_members(leader).unwrap();
+    assert!(members.contains(&leader), "{members:?}");
+    let ours = rustix::process::getpid().as_raw_nonzero().get();
+    assert!(
+        !members.contains(&ours),
+        "the runtime is not in the agent's session"
+    );
+    session.stop(Duration::from_millis(100));
+    rec.wait_end();
 }

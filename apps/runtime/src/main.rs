@@ -5,10 +5,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tokio::signal::unix::{SignalKind, signal};
 
-/// The host's state: its key, `host.json` and later its session table. The
-/// systemd unit's `StateDirectory` (freeze §5.8).
-const DEFAULT_STATE: &str = "/var/lib/storm-runtime";
+/// The host's state: its key, `host.json` and its session table. Linux: the
+/// systemd unit's `StateDirectory` (freeze §5.8). macOS: AM33.
+const DEFAULT_STATE: &str = storm_runtime::platform::DEFAULT_STATE;
 
 #[derive(Parser)]
 #[command(name = "storm-runtime", version, about = "Storm Runtime Host")]
@@ -40,6 +41,12 @@ enum Command {
         state: PathBuf,
         #[arg(long, env = "STORM_RUNTIME_CONFIG", default_value = storm_runtime::config::DEFAULT_CONFIG)]
         config: PathBuf,
+        /// Declare that this account runs nothing but this host (AM37): at
+        /// startup and after shutdown, end every other process of it. Passed
+        /// by the packaged service definitions; refused unless running as the
+        /// service account, and never as root.
+        #[arg(long)]
+        exclusive_account: bool,
     },
     /// The agent's stdio MCP server for one gateway connection. Started by
     /// the agent CLI from the session's MCP config, never by hand: it reads
@@ -48,6 +55,23 @@ enum Command {
     McpBridge {
         /// The connection's slug.
         slug: String,
+    },
+    /// Install this host as a system service, as root. macOS: creates the
+    /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
+    /// LaunchDaemon, which runs the host once it is enrolled. Re-run it to
+    /// upgrade. On Linux the package does this.
+    Install {
+        /// Who shares the workspace root with the host. Defaults to the user
+        /// who ran sudo.
+        #[arg(long)]
+        operator: Option<String>,
+    },
+    /// Remove the system service `install` set up, as root. Workspaces are
+    /// always kept.
+    Uninstall {
+        /// Also remove the host's identity, state, logs, config and account.
+        #[arg(long)]
+        purge: bool,
     },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
@@ -70,30 +94,79 @@ async fn main() -> Result<()> {
         Command::McpBridge { slug } => storm_runtime::bridge::run(slug).await,
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
-            let name = name.unwrap_or_else(default_name);
-            let config = storm_runtime::client::enroll(&state, &enrollment, &name, force).await?;
-            println!("Enrolled as {} ({}).", name, config.host_id);
-            println!("  server : {} ({})", config.server_url, config.server_id);
-            println!("  state  : {}", state.display());
+            let name = name.unwrap_or_else(storm_runtime::platform::host_name);
+            // Said before host.json exists: writing it may start the host,
+            // whose account sweep would end this process (AM35, AM37).
+            storm_runtime::client::enroll(&state, &enrollment, &name, force, |config| {
+                println!("Enrolled as {} ({}).", name, config.host_id);
+                println!("  server : {} ({})", config.server_url, config.server_id);
+                println!("  state  : {}", state.display());
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            })
+            .await?;
             Ok(())
         }
-        Command::Serve { state, config } => {
+        Command::Serve {
+            state,
+            config,
+            exclusive_account,
+        } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
+            if exclusive_account {
+                storm_runtime::platform::check_exclusive_account().map_err(anyhow::Error::msg)?;
+            }
+            // Before anything else can fail: SIGTERM must never take the
+            // default action and leave sessions behind (AM37).
+            let mut terminate = signal(SignalKind::terminate())?;
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                state = %state.display(),
+                config = %config.display(),
+                exclusive_account,
+                "starting"
+            );
+            storm_runtime::platform::prepare_home();
             let config = storm_runtime::config::RuntimeConfig::load(&config)?;
             let host = storm_runtime::host::Host::new(&state, config)?;
-            if let Err(e) = host.run().await {
+            host.log_inventory();
+            if exclusive_account {
+                // Whatever a previous host left behind — after a SIGKILL or a
+                // crash nothing ended its sessions (AM37).
+                sweep("start").await;
+            }
+            let outcome = tokio::select! {
+                ended = host.clone().run() => ended,
+                _ = terminate.recv() => Ok(()),
+                _ = interrupt.recv() => Ok(()),
+            };
+            if let Err(e) = outcome {
                 eprintln!("storm-runtime: {e:#}");
                 // A refused key is final: exit with a status the unit is told
                 // not to restart on, rather than looping against a server that
-                // has revoked this host (freeze §5.6).
+                // has revoked this host (freeze §5.6, AM36).
+                if exclusive_account {
+                    sweep("revoked").await;
+                }
                 std::process::exit(3);
             }
+            tracing::info!("stopping");
+            host.shutdown(storm_runtime::cli::DEFAULT_GRACE).await;
+            if exclusive_account {
+                sweep("stop").await;
+            }
             Ok(())
+        }
+        Command::Install { operator } => {
+            storm_runtime::platform::install(&storm_runtime::platform::InstallOptions { operator })
+        }
+        Command::Uninstall { purge } => {
+            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions { purge })
         }
         Command::Check { state } => {
             let config = storm_runtime::identity::HostConfig::load(&state)?;
@@ -122,6 +195,24 @@ async fn main() -> Result<()> {
     }
 }
 
+/// AM37's sweep, off the async threads: it sleeps through its grace.
+async fn sweep(when: &str) {
+    let swept = tokio::task::spawn_blocking(|| {
+        storm_runtime::platform::sweep_account(std::time::Duration::from_millis(500))
+    })
+    .await;
+    match swept {
+        Ok((0, _)) => tracing::info!(when, "account sweep: nothing left over"),
+        Ok((hung_up, killed)) => tracing::info!(
+            when,
+            hung_up,
+            killed,
+            "account sweep: ended this account's other processes"
+        ),
+        Err(e) => tracing::warn!(when, error = %e, "account sweep did not finish"),
+    }
+}
+
 fn read_enrollment() -> Result<String> {
     let line = if std::io::stdin().is_terminal() {
         rpassword::prompt_password("Paste the enrollment string from the Storm app: ")
@@ -135,13 +226,4 @@ fn read_enrollment() -> Result<String> {
         line
     };
     Ok(line.trim().to_string())
-}
-
-fn default_name() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .map(|s| s.trim().chars().take(64).collect::<String>())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "runtime-host".into())
 }
