@@ -362,8 +362,10 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
     EnrollStep('brew install storm-runtime'),
     // The full path: `sudo` need not search Homebrew's prefix.
     EnrollStep('sudo "\$(brew --prefix)/bin/storm-runtime" install'),
+    // `cd /` first: the hidden account cannot read the operator's current
+    // directory, and the command fails before asking for the string (B-4).
     EnrollStep(
-      'sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
+      'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       pastesString: true,
     ),
   ],
@@ -392,8 +394,19 @@ class _EnrollDialog extends StatefulWidget {
   State<_EnrollDialog> createState() => _EnrollDialogState();
 }
 
+/// The enrollment string with its secret hidden: the scheme, then the last
+/// four characters, enough to tell two strings apart (B-6). The sheet ends up
+/// in screenshots; the string works once, but there is no need to show it.
+String maskEnrollment(String s) {
+  const shown = 'storm-enroll:v1:';
+  if (s.length <= shown.length + 4) return '•' * s.length;
+  final head = s.startsWith(shown) ? shown : '';
+  return '$head${'•' * 12}${s.substring(s.length - 4)}';
+}
+
 class _EnrollDialogState extends State<_EnrollDialog> {
   bool _copied = false;
+  bool _revealed = false;
   HostPlatform _platform = defaultHostPlatform();
 
   /// The command whose copy button last succeeded, by index.
@@ -476,12 +489,29 @@ class _EnrollDialogState extends State<_EnrollDialog> {
               ],
               SizedBox(height: t.sp * 0.5),
               Container(
-                padding: EdgeInsets.all(t.sp),
+                padding: EdgeInsets.only(left: t.sp),
                 decoration: box,
-                child: SelectableText(
-                  widget.enrollment,
-                  key: const Key('enrollment-string'),
-                  style: mono,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: SelectableText(
+                        _revealed
+                            ? widget.enrollment
+                            : maskEnrollment(widget.enrollment),
+                        key: const Key('enrollment-string'),
+                        style: mono,
+                      ),
+                    ),
+                    IconButton(
+                      key: const Key('reveal-enrollment'),
+                      tooltip: _revealed ? 'Hide' : 'Show',
+                      iconSize: 16,
+                      icon: Icon(
+                        _revealed ? LucideIcons.eye_off : LucideIcons.eye,
+                      ),
+                      onPressed: () => setState(() => _revealed = !_revealed),
+                    ),
+                  ],
                 ),
               ),
               SizedBox(height: t.sp),

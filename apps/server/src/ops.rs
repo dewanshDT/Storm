@@ -1333,7 +1333,10 @@ pub struct WorkspaceView {
 }
 
 pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<WorkspaceView>> {
-    state.agent.refresh(host_id);
+    state
+        .agent
+        .refresh_and_wait(host_id, std::time::Duration::from_secs(2))
+        .await;
     let caps = state.agent.host_live(host_id).capabilities.ok_or_else(|| {
         ApiError(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
