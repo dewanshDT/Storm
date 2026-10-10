@@ -56,6 +56,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Decision 84d: storm-server as a LaunchAgent, as the runner's user, with the
+  # data in ~/Storm — up, health, the account and enrollment commands the
+  # installer drives, the nightly backup, down, and an uninstall that keeps
+  # the notes. tools/macos-server-acceptance.py.
+  server:
+    name: macOS server (LaunchAgent)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - name: Build storm-server
+        run: (cd apps/server && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}/apps/server/target/debug/storm-server
+          BACKUP_SCRIPT: ${{ github.workspace }}/deploy/storm-backup.sh
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}/macos-server-acceptance
+        run: python3 tools/macos-server-acceptance.py
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-server-acceptance-logs
+          path: ${{ runner.temp }}/macos-server-acceptance
+          if-no-files-found: ignore
+          retention-days: 14
+
   # The binary an operator installs for the manual rows (a real CLI login, the
   # Mac → phone handoff, a reboot): built exactly as release.yml's
   # runtime-macos job builds it, from this commit, stamped with it.
