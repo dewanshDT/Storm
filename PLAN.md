@@ -59,26 +59,31 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
-| M23 | macOS Runtime Hosts — the same host, on launchd | **in progress** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83h), CI green on all seven · **real-Mac acceptance on `macos-latest`: 97 passed, 0 failed, 5 manual** (83h) · left: the manual rows on the operator's Mac (real Claude Code / OpenCode prompt, Mac → phone, reboot, Full Disk Access inspection) |
+| M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 
-**Release state (2026-10-08).** **v0.4.0 is being cut** (decision 72's
+**Release state (2026-10-10).** **v0.5.0 is being cut** (decision 72's
 steps; this paragraph is the prep PR's), at the operator's request after the
-Storm v2 stack merged into `staging`. It carries **M21, the MCP Gateway**
-(decisions 81, 81a–81n: integrations through Storm, encrypted upstream
-credentials, the runtime bridge, OAuth, `storm://oauth` on Android and macOS)
-and **M22, Storm v2** (decision 82: the activity rail, single user, the
-knowledge ↔ agent loop, #95–#107). **Upgrading runs `auth.db` v6** — the
-single-user migration keeps the oldest active owner and deletes every other
-account after writing `auth.db.pre-v6`; run `storm-server single-user --keep
-<name>` first to choose who survives (prod and the codebox dev server both
-have more than one owner). **Known issue:** the web client can stay on the
-spinner after a correct password in Firefox-based browsers (Zen) — the server
-signs in; Chrome works (vault: *Storm v2/Issue — Zen login hang*). **v0.3.1**
-(PR #75, `3829134`) carried client-only fixes for Agent Runtime V1 (#72,
-#73); **v0.3.0** (PR #71, `df45838`) carried decisions 73–79 and the first
-`storm-runtime` `.deb`; **prod runs v0.3.0** until the operator upgrades.
-v0.2.9 (PR #48, `f046eaf`) carried decisions 65–71; v0.2.8 (PR #37,
-2026-09-02) carried decisions 56–64.
+macOS Runtime Host stack (#110–#116) merged into `staging`. It carries **M23,
+macOS Runtime Hosts** (decisions 83–83i): `storm-runtime` as a launchd
+LaunchDaemon under the hidden `_stormruntime` account, the shared
+`/Library/StormRuntime/workspaces` root, the per-platform enroll sheet, the
+`storm-runtime-<v>-macos-universal.tar.gz` asset and the Homebrew formula —
+plus the fixes from the operator's manual Mac round (83i): a session's ending
+reaches what left it with `setsid` (F1, OpenCode's unauthenticated server), a
+hung start no longer blocks the host's link (B-0), hosts heartbeat and a
+silent one goes offline (B-1, needs this server), command and startup logging
+(B-2), the shell's `PATH` on macOS (F3), and client fixes (B-3/B-4/B-6/B-7,
+S1). **Upgrading prod:** `storm-server` 0.5.0 adds `/v1/runtime/heartbeat`
+and the silent-host reaper; 0.4.0 hosts never heartbeat and are never reaped,
+and 0.5.0 hosts ignore a 0.4.0 server's 404. No schema change. **v0.4.0** (PR
+#109, `018a063`, 2026-10-08) carried M21 (MCP Gateway) and M22 (Storm v2,
+`auth.db` v6) and **prod runs it** until the operator upgrades. **v0.3.1**
+(PR #75, `3829134`) carried client-only fixes for Agent Runtime V1;
+**v0.3.0** (PR #71, `df45838`) decisions 73–79 and the first `storm-runtime`
+`.deb`. v0.2.9 (PR #48, `f046eaf`) carried decisions 65–71; v0.2.8 (PR #37,
+2026-09-02) carried decisions 56–64. **Known issue (still open):** the web
+client can stay on the spinner after a correct password in Firefox-based
+browsers (vault: *Storm v2/Issue — Zen login hang*).
 
 Last updated: 2026-08-19. M0–M15 deployed. VM runs `storm-server` **0.2.2-1**
 from apt (state `/srv/storm/state`, vaults on NAS `/mnt/media/Docs/storm`, web
