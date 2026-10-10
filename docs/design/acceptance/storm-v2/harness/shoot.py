@@ -330,6 +330,8 @@ class Harness:
                 self.go(self.route(arg))
             elif kind == "wait":
                 time.sleep(arg)
+            elif kind == "js":
+                self.page.eval(arg)
             elif kind == "api":
                 # Seeds real server state (a key, a relay) through its API.
                 method, path, body = arg
