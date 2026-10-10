@@ -39,6 +39,7 @@ Every capability belongs to exactly one scope:
 |---|---|---|
 | **Storm workspace** | Notes (vaults, folders, notes), Agents (work, sessions) | Primary navigation: rail / place picker |
 | **This device** | Theme, text size, note font, read mode, show note id, keyboard | Settings › This device |
+| **Terminal** (this client) | Terminal text size, line spacing, padding | Settings › Terminal |
 | **You (access)** | Signed-in devices, add a device, access keys, sign out | Settings › Devices & access |
 | **Storm configuration** | Vaults, AI access, Integrations, Hosts & default agent, Storage, Connection, Advanced | Settings › Storm group |
 | **Health** | Sync, hosts, integrations, compatibility | Rail status dot → popover; Settings › About & health |
@@ -419,7 +420,7 @@ Entry points: Start session on a note; ＋ New session (sidebar or pill); the ag
     - Text: "End {name}? The agent and everything it started are stopped on the host."
     - Buttons: Cancel, then **End session** (`danger` fill, `onAccent` text).
     - Confirming sets the status to stopped.
-  - **Terminal.** The real terminal surface (xterm), mono 13, line-height 1.7, on `bg`, padding 16 / 20. The prototype's coloured lines are illustrative (§10).
+  - **Terminal.** The real terminal surface (xterm), mono 13, line-height 1.25, on `bg`, padding 10 on every side, with the height left under the last whole row split above and below it. Settings › Terminal can change all three (D15 AM47; was line-height 1.7, padding 16 / 20). The prototype's coloured lines are illustrative (§10).
   - **Ended footer** (mono 12 `text3`, top border): "{ended line} · scrollback kept until you dismiss it", for example "Completed 14:02 · ran 38 min".
 - **Right column: the panel** (`bg`).
   - **Tabs** (padding 10 / 14, bottom border): **Context | Wrote {n} | About**. Each tab: padding 6 / 12, radius `rControl`, 13px. Active: `accent` 600 on `accentSoft`. Inactive: `text3` 500.
@@ -453,7 +454,7 @@ Entry points: Start session on a note; ＋ New session (sidebar or pill); the ag
     - context chip "▤ {note}": pushes the note full-screen, with "‹ {session}" as its back link;
     - "Wrote {n}": opens the details sheet;
     - "Details": opens the details sheet.
-- Terminal: fills the screen, mono 12, on `surface`, with a top border.
+- Terminal: fills the screen, mono 12, line-height 1.25, padding 10, on `surface`, with a top border.
 - **Extra-keys row** while the session is live: Esc, Tab, Ctrl, ←, →, a spacer, Paste. Keys are on `surface`, inside a `surface2` bar. Keep the existing row from `agents_screen.dart`.
 - For an ended session: a bottom bar with **Run again** (primary) and **Dismiss** (outline), both 50% width.
 - **Details bottom sheet**: a 36 × 4 grabber, max-height 75%, scrolls.
@@ -496,6 +497,7 @@ Entry points: Start session on a note; ＋ New session (sidebar or pill); the ag
 
 ```
 This device            ← device-level (this client only)
+Terminal               ← this client's terminals (D15 AM47)
 Devices & access       ← you: devices and keys (server-stored, per account)
 STORM                  ← Storm / server-level configuration
   Vaults
@@ -538,6 +540,13 @@ The Accounts section is **removed**, including the registration toggle (single u
   - "Open notes in Read mode" / "Switch to Edit with ⌘E." (toggle);
   - "Show note id" / "Shown on the version line." (toggle).
 - KEYBOARD: ⌘K Search · ⌘N New note · ⌘\ Sidebar · ⌘E Read / Edit.
+
+**Terminal** · *Every agent session in this app. Kept on this device.* (D15 AM47)
+- "Text size" … a stepper showing "Default" (each layout's own size) or "14 px", 10–20.
+- LINE SPACING: chips Compact (1.15) · Default (1.25) · Relaxed (1.5).
+- PADDING: chips Tight (×0.5) · Default · Roomy (×1.5).
+- PREVIEW: a read-only terminal at the chosen values, on the terminal's own colours.
+- "Reset to defaults", only once something differs.
 
 **Devices & access** · *Where you’re signed in, and keys for AI apps outside Storm.*
 - SIGNED-IN DEVICES: rows of name and meta (mono 11), for example "MacBook (this device)" / "active now" with **Sign out**, and other devices with **Revoke**. Then "＋ Add a device" (outline; shows the existing QR).

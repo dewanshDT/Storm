@@ -60,6 +60,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
+| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **in progress** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven slices 85a–85g · M24 is held by the installer draft (decision 84, vault) |
 
 **Release state (2026-10-10).** **v0.5.0 is being cut** (decision 72's
 steps; this paragraph is the prep PR's), at the operator's request after the
@@ -4833,6 +4834,73 @@ outlives it.
 **Still open:** the Mac re-test of these fixes; an Intel Mac.
 
 ---
+
+**85. The session experience: agent-named sessions, logo rows, native image
+paste, terminal metrics and settings.** *(2026-10-10, approved by the
+operator)*
+
+**The spec.** D15 in *Agent Runtime/Decisions*, full text in *Agent
+Runtime/Session Experience — D15* (vault), amends the freeze with AM42–AM47
+and adds AC-N1–N5, AC-I1–I5 and AC-T1–T3. 84 is held by the installer draft.
+
+**What a same-day spike on a Runtime Host settled** (Claude Code 2.1.296,
+OpenCode 1.18.31, a real PTY, no `DISPLAY`):
+- **A bracketed paste of an image's absolute path is each agent's own image
+  attach.** Claude Code shows `[Image #1]` with no path, and the model named
+  the test image's colour; OpenCode shows `[Image 1]`. No permission prompt,
+  although the file sat outside the workspace.
+- **Claude Code's Ctrl+V cannot be served on a headless host.** With shims
+  for `xclip`, `wl-paste` and `xsel` first on `PATH`, none was called, with or
+  without `DISPLAY`. Faking the host clipboard is dropped.
+- **Claude Code's title carries a name and an activity glyph**: `✳ <name>`
+  idle, `◐`/`◑ <name>` working. OpenCode's is always `OpenCode`.
+
+**The decisions.**
+- **AM42–AM43:** the host parses each session's output once, live, with
+  `vte`, for OSC 0/2 only, and reports a cleaned `title` and an `activity`
+  through the status POST and `hello`. The server stores `title` (kept after
+  the end); `activity` is not a status. **The client never parses titles.**
+- **AM44:** session rows lead with the agent's real logo, status as a badge
+  on it, and `host · workspace · age` underneath.
+- **AM45–AM46:** a pasted or dropped image is pulled by the host into
+  `sessions/<ags>/inbox/` and its path bracket-pasted. Never in a workspace;
+  the server holds the bytes in memory only until staged.
+- **AM47:** terminal line height 1.25 (was 1.7), even padding, the leftover
+  under the last row split above and below it; and **Settings › Terminal**,
+  client-only.
+
+**The slices**, each its own PR to `staging`: 85a terminal metrics and
+settings; 85b–85d the naming stack (host, server, client); 85e–85g the image
+stack (wire, desktop and web capture, Android capture).
+
+*Revisit if:* AM22 is approved (its screen model replaces AM43's observer;
+the wire is unchanged); an agent stops treating a pasted image path as an
+attachment; terminal values need to follow the person across devices.
+
+**85a. Slice 1: the terminal's metrics, and Settings › Terminal (AM47).**
+*(2026-10-10)*
+- **Why the bottom gap grew in v0.4.0.** xterm2 fits
+  `floor(height / cellHeight)` rows and leaves the remainder under the last
+  one. The v2 handoff's line height of 1.7 made a row about 22 px, so up to
+  21 px sat below the padding. `StormTerminalView` now measures a row exactly
+  as xterm2's painter does (`terminalCellHeight`) and splits the remainder
+  above and below (`evenTerminalPadding`), a hair under it so xterm2's own
+  `~/` still fits every row.
+- **Line height 1.25**, and the padding `sp × 1.25` on every side in both
+  layouts (10 px, the inset the v2 polish pass pinned on phone and desk; the
+  spec's tighter phone value was dropped for it).
+- **Settings › Terminal** (`lib/ui/settings/terminal_page.dart`), right after
+  This device: text size (10–20, "Default" keeps each layout's size), line
+  spacing Compact 1.15 / Default 1.25 / Relaxed 1.5, padding Tight / Default /
+  Roomy, a live preview through the real view, and Reset. `TerminalPrefs`
+  lives in prefs under `storm.terminal.*`, is read with Settings at launch so
+  a terminal opens at its final size, and is never sent to the server.
+- **The view owns the layout values.** Callers pass `phone` and the prefs;
+  the font size, padding and line height are decided in one place, so the
+  preview and every session agree.
+- Tests: `terminal_settings_test.dart` (row fit at every spacing, the
+  remainder split, prefs round trip and fallback, the page end to end);
+  `ui_polish_test.dart` reads the inset from the rendered `TerminalView`.
 
 ## Data model
 
