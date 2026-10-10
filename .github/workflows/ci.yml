@@ -94,6 +94,25 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The server on a Mac (decision 84d): the same suite, on FSEvents instead of
+  # inotify, plus the LaunchAgent code compiled for real.
+  server-macos:
+    name: server (rust, macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   client:
     name: client (flutter)
     runs-on: ubuntu-latest
