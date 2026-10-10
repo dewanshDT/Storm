@@ -66,7 +66,7 @@ jobs:
           systemctl is-active storm-server
           curl -fsS http://127.0.0.1:8484/v1/health
           state=$(sudo sed -n 's/^STORM_STATE=//p' /etc/storm/storm.env)
-          owner=$(stat -c %U "$state")
+          owner=$(sudo stat -c %U "$state")
           sudo -u "$owner" storm-server has-account --state "$state"
           systemctl is-active storm-runtime
           sudo test -f /var/lib/storm-runtime/host.json

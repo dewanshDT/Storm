@@ -31,7 +31,7 @@ setup() {
   ! grep -q SECRET "$LOG_FILE"
   grep -q 'storm-enroll:v1:\[redacted\]' "$LOG_FILE"
   # Only its owner can read it.
-  [ "$(stat -c %a "$LOG_FILE")" = 600 ]
+  [ "$(file_mode "$LOG_FILE")" = 600 ]
 }
 
 @test "write_claude_env: the token reaches the file through stdin only" {
@@ -39,7 +39,7 @@ setup() {
   mkdir -p "$RT_STATE"
   printf '%s\n' "sk-ant-oat01-TOKENSECRET" | write_claude_env
   [ "$(cat "$RT_STATE/claude.env")" = "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-TOKENSECRET" ]
-  [ "$(stat -c %a "$RT_STATE/claude.env")" = 600 ]
+  [ "$(file_mode "$RT_STATE/claude.env")" = 600 ]
   grep -q "sudo -u storm-runtime sh -c" "$FAKE_LOG"
   ! grep -q TOKENSECRET "$FAKE_LOG"
 }
