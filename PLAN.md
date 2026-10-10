@@ -4942,6 +4942,26 @@ attachment; terminal values need to follow the person across devices.
   remainder split, prefs round trip and fallback, the page end to end);
   `ui_polish_test.dart` reads the inset from the rendered `TerminalView`.
 
+**85b. Slice 2: the host reads the agent's title (AM43).** *(2026-10-10)*
+- `apps/runtime/src/terminal.rs`: a `vte` 0.15 parser fed from
+  `Events::output`, acting only on OSC 0/2 (BEL or ST, `;` inside a title
+  kept). It observes; the ring and the stream are untouched, and a replay
+  re-sends stored bytes without parsing them.
+- `clean()` takes one leading glyph (`✳` idle; `◐◑◒◓` and braille
+  working), drops control characters, collapses whitespace, caps at 120
+  characters, and gives no name for an empty title, a bare `Claude Code` /
+  `OpenCode`, or a shell's `user@host:path`. Pinned by
+  `docs/terminal-title-vectors.json`, captured from Claude Code 2.1.296 and
+  OpenCode 1.18.31. A name, once given, survives a later title without one.
+- **Reported only on a change** of `(title, activity)`, at most once a second
+  per session, in the uploader after the output it came with: the status
+  POST carries `{"status": "running", "title", "activity"}`, so a server
+  without 85c ignores the extra fields. The ending's POST and `hello`'s
+  live sessions carry them too, so a reconnect restores them.
+- Test: `the_agents_title_is_reported_once_per_change` runs a real shell that
+  sets four titles in one burst and a fifth later: two reports (the first
+  burst coalesced, no spinner frame), and `hello` carries the last.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

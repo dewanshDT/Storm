@@ -65,3 +65,4 @@ pub mod provider;
 mod pty;
 pub mod scrollback;
 pub mod status;
+pub mod terminal;

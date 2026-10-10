@@ -48,10 +48,13 @@ use crate::provider::{
 };
 use crate::scrollback::{Read, Scrollback};
 use crate::status::{EndReason, SessionEnd};
+use crate::terminal::{Title, TitleObserver};
 
 const SESSIONS_FILE: &str = "sessions.json";
 const BATCH: usize = 64 * 1024;
 const COALESCE: Duration = Duration::from_millis(20);
+/// At most one title report per session per this long (D15 AM43).
+const TITLE_EVERY: Duration = Duration::from_secs(1);
 /// How long a provider may take to start a session. A start that has not
 /// returned by then is reported `failed (start_failure)`, and whatever it
 /// later returns is stopped: a start that hangs costs its own session, never
@@ -156,10 +159,12 @@ struct Events {
     ring: Mutex<Scrollback>,
     ended: Mutex<Option<SessionEnd>>,
     wake: Notify,
+    title: Mutex<TitleObserver>,
 }
 
 impl SessionEvents for Events {
     fn output(&self, bytes: &[u8]) {
+        self.title.lock().unwrap().feed(bytes);
         self.ring.lock().unwrap().append(bytes);
         self.wake.notify_one();
     }
@@ -178,6 +183,8 @@ struct HostSession {
     sent: Mutex<u64>,
     /// `running`, posted once.
     running_sent: AtomicBool,
+    /// The title last acknowledged by the server, and when it was posted.
+    title_sent: Mutex<(Title, Option<std::time::Instant>)>,
     /// Input, in order, for this session's writer task. A queue so the link
     /// never waits on a PTY, and one writer so keystrokes never reorder.
     input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -537,7 +544,7 @@ impl Host {
         let mut sessions = Vec::new();
         for s in self.sessions.lock().unwrap().values() {
             let end = *s.events.ended.lock().unwrap();
-            let mut entry = status_json(end);
+            let mut entry = with_title(status_json(end), s.events.title.lock().unwrap().current());
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -792,6 +799,7 @@ impl Host {
             ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
             ended: Mutex::new(None),
             wake: Notify::new(),
+            title: Mutex::new(TitleObserver::default()),
         });
         let spec = SessionSpec {
             session_id: id.clone(),
@@ -840,6 +848,7 @@ impl Host {
             events,
             sent: Mutex::new(0),
             running_sent: AtomicBool::new(false),
+            title_sent: Mutex::new((Title::default(), None)),
             input,
         });
         // The writer: one per session, in order. Each write is bounded by the
@@ -960,9 +969,37 @@ impl Host {
                 Read::UpToDate | Read::Beyond { .. } => {}
             }
 
+            let title = s.events.title.lock().unwrap().current().clone();
             let end = *s.events.ended.lock().unwrap();
+            let (sent, posted_at) = s.title_sent.lock().unwrap().clone();
+            if end.is_none() && title != sent {
+                let wait =
+                    posted_at.map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()));
+                if !wait.is_zero() {
+                    tokio::select! {
+                        _ = s.events.wake.notified() => {}
+                        _ = tokio::time::sleep(wait) => {}
+                    }
+                    continue;
+                }
+                let body = with_title(status_json(None), &title);
+                match self
+                    .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
+                    .await
+                {
+                    Ok(st) if st.is_success() => {
+                        *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
+                        retry = Duration::from_millis(250);
+                    }
+                    _ => {
+                        tokio::time::sleep(retry).await;
+                        retry = (retry * 2).min(Duration::from_secs(5));
+                    }
+                }
+                continue;
+            }
             if let Some(end) = end {
-                let body = status_json(Some(end));
+                let body = with_title(status_json(Some(end)), &title);
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
@@ -1153,6 +1190,14 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
     }
 }
 
+/// A status body with the session's title and activity (D15 AM43). A null
+/// title changes nothing on the server; it keeps the last name it had.
+fn with_title(mut body: serde_json::Value, title: &Title) -> serde_json::Value {
+    body["title"] = json!(title.name);
+    body["activity"] = json!(title.activity);
+    body
+}
+
 /// Aborts a task when the scope that owns it ends.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -1253,6 +1298,90 @@ mod tests {
 
     fn alive(pid: i32) -> bool {
         rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
+    }
+
+    /// D15 AM43: the host reads the agent's title from its output and posts
+    /// the name and activity, once per change, and `hello` carries them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_agents_title_is_reported_once_per_change() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let script = r#"t() { printf '\033]0;%s\007' "$1"; }
+            t '✳ Claude Code'; t '◐ Fix the login'; t '◑ Fix the login'
+            t '◐ Fix the login'; sleep 1.5; t '✳ Claude Code'; exec sleep 1000"#;
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\n[[providers]]\nid = \"shell\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", {:?}]\n",
+            roots.path().display().to_string(),
+            script,
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        host.clone()
+            .handle(Command::Start {
+                session: "ags_TITLE".into(),
+                workspace: "w".into(),
+                provider: "shell".into(),
+                interaction: Some("terminal".into()),
+                terminal: Size { cols: 80, rows: 24 },
+                mcp: Vec::new(),
+                context: false,
+            })
+            .await;
+
+        let titled = || -> Vec<serde_json::Value> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, b)| p.ends_with("/ags_title/status") && b.get("title").is_some())
+                .map(|(_, b)| json!({"title": b["title"], "activity": b["activity"]}))
+                .collect()
+        };
+        let want = [
+            json!({"title": null, "activity": "idle"}),
+            json!({"title": "Fix the login", "activity": "working"}),
+            json!({"title": "Fix the login", "activity": "idle"}),
+        ];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while titled().last() != want.last() {
+            assert!(std::time::Instant::now() < deadline, "got {:?}", titled());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let got = titled();
+        assert!(
+            got.len() <= want.len(),
+            "a spinner frame was reported: {got:?}"
+        );
+        assert!(got.contains(&want[1]), "{got:?}");
+
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        let entry = &hello["sessions"][0];
+        assert_eq!(entry["title"], "Fix the login");
+        assert_eq!(entry["activity"], "idle");
+        host.shutdown(Duration::from_millis(200)).await;
     }
 
     /// AM37: a shutdown ends a session and everything it spawned — here a
