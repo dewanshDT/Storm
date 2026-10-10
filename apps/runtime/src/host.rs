@@ -542,6 +542,17 @@ impl Host {
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
         }
+        // A start still in flight is alive: without it here the server would
+        // take it for lost, and the agent would run on with no session.
+        for id in self.starting.lock().unwrap().keys() {
+            if !sessions.iter().any(|s| s["id"] == json!(id)) {
+                sessions.push(json!({
+                    "id": id,
+                    "status": "starting",
+                    "output_end_offset": 0,
+                }));
+            }
+        }
         let died: Vec<String> = self.died.lock().unwrap().clone();
         for id in &died {
             sessions.push(json!({
@@ -588,7 +599,24 @@ impl Host {
         match command {
             Command::Start { ref session, .. } => {
                 let id = session.clone();
-                self.starting.lock().unwrap().insert(id.clone(), Vec::new());
+                {
+                    let mut starting = self.starting.lock().unwrap();
+                    let sessions = self.sessions.lock().unwrap();
+                    if starting.contains_key(&id) || sessions.contains_key(&id) {
+                        tracing::warn!(session = %id, "start for a session that exists; ignored");
+                        return;
+                    }
+                    // In-flight starts hold their slot, or N concurrent
+                    // starts would all pass the check in `start`.
+                    if sessions.len() + starting.len() >= self.config.max_sessions as usize {
+                        drop((starting, sessions));
+                        tracing::warn!(session = %id, reason = "max_sessions reached", "start refused");
+                        let host = self.clone();
+                        tokio::spawn(async move { host.post_start_failure(&id).await });
+                        return;
+                    }
+                    starting.insert(id.clone(), Vec::new());
+                }
                 let host = self.clone();
                 tokio::spawn(async move {
                     host.clone().handle(command).await;
@@ -1364,7 +1392,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .save(state.path())
         .unwrap();
         let config: RuntimeConfig = toml::from_str(&format!(
-            "workspace_roots = [\"{}\"]",
+            "workspace_roots = [\"{}\"]\nmax_sessions = 2",
             roots.path().display()
         ))
         .unwrap();
@@ -1532,6 +1560,60 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             host.session("ags_HUNG").is_none(),
             "a late start was adopted"
         );
+    }
+
+    /// A start in flight across a reconnect is reported in `hello`, so the
+    /// server does not take it for lost; and in-flight starts hold their
+    /// `max_sessions` slot, so concurrent starts cannot exceed it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn starts_in_flight_are_reported_and_hold_their_slot() {
+        let slow = Gated::new("slow", Duration::from_secs(60));
+        let (host, seen, _state, _roots) = test_host(vec![slow.clone()]).await;
+
+        host.dispatch(1, start("ags_ONE", "slow"));
+        host.dispatch(2, start("ags_TWO", "slow"));
+        // A duplicate is ignored, not started twice.
+        host.dispatch(3, start("ags_ONE", "slow"));
+        // max_sessions = 2: a third is refused at once, not at the deadline.
+        host.dispatch(4, start("ags_THREE", "slow"));
+        eventually("the third start was refused", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_three") && b["end_reason"] == "start_failure")
+        })
+        .await;
+
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(path, _)| path.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .expect("a hello");
+        let mut reported: Vec<_> = hello["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| (s["id"].as_str().unwrap().to_string(), s["status"].clone()))
+            .collect();
+        reported.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            reported,
+            vec![
+                ("ags_ONE".to_string(), json!("starting")),
+                ("ags_TWO".to_string(), json!("starting")),
+            ]
+        );
+
+        slow.open();
+        eventually("both started", || {
+            host.session("ags_ONE").is_some() && host.session("ags_TWO").is_some()
+        })
+        .await;
+        assert!(host.session("ags_THREE").is_none());
     }
 
     /// B-0: commands for a session that is still starting wait for it, and
