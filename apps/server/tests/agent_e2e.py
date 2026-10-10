@@ -454,6 +454,41 @@ args = ["-i"]
               rec["end_reason"] == "host_restart", rec)
         wait(host_online, "the host back online", timeout=60)
 
+        print("\n=== AM37: SIGTERM ends the host's sessions and everything they spawned ===")
+        status, rec = launch(owner, host_id, provider="shell")
+        stopped_by_term = rec["id"]
+        running(owner, stopped_by_term)
+        s = Stream(f"/v1/agent/sessions/{stopped_by_term}/terminal/stream?offset=0", owner)
+        # `set +m` keeps the job in the session's process group (an
+        # interactive sh would give it its own); it ignores SIGHUP, so only the
+        # group SIGKILL after the grace ends it.
+        write(owner, stopped_by_term, "set +m; (trap '' HUP; exec sleep 1000) & echo bg:$!\r")
+        text, _, _ = s.until(lambda e, i, d, t: re.search(r"bg:(\d+)", t))
+        s.close()
+        child = int(re.search(r"bg:(\d+)", text).group(1))
+        os.kill(child, 0)  # alive
+        runtime.send_signal(signal.SIGTERM)
+        try:
+            code = runtime.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            code = None
+        check("SIGTERM stops the host cleanly (exit 0)", code == 0, code)
+        try:
+            os.kill(child, 0)
+            gone = False
+        except ProcessLookupError:
+            gone = True
+        check("the session's child that ignored SIGHUP is gone", gone, child)
+        check("the host stayed enrolled", os.path.exists(os.path.join(HOST_STATE, "host.json")))
+        rec = session(owner, stopped_by_term)
+        check("the shutdown posted no ending", rec["status"] in ("running", "unknown"), rec)
+        runtime = start_runtime()
+        wait(lambda: session(owner, stopped_by_term)["status"] == "failed", "host_restart after SIGTERM", timeout=60)
+        rec = session(owner, stopped_by_term)
+        check("after the restart it is failed (host_restart), as after a crash",
+              rec["end_reason"] == "host_restart", rec)
+        wait(host_online, "the host back online", timeout=60)
+
         print("\n=== AC-S4: a mismatched pinned key ===")
         bogus = os.path.join(WORK, "bogus")
         os.makedirs(bogus)
@@ -521,8 +556,20 @@ args = ["-i"]
         except subprocess.TimeoutExpired:
             code = None
         check("the revoked host ends its sessions and exits 3", code == 3, code)
+        check("its host.json became host.json.revoked (AM36)",
+              not os.path.exists(os.path.join(HOST_STATE, "host.json"))
+              and os.path.exists(os.path.join(HOST_STATE, "host.json.revoked")))
         checked = subprocess.run([RUNTIME_BIN, "check", "--state", HOST_STATE], capture_output=True)
-        check("and cannot authenticate again", checked.returncode != 0, checked.stderr)
+        check("check says the host was revoked", checked.returncode != 0 and b"revoked" in checked.stderr, checked.stderr)
+        # The identity itself is refused, not merely missing: put it back in a
+        # copy and present it.
+        replay = os.path.join(WORK, "replay")
+        os.makedirs(os.path.join(replay, "identity"))
+        open(os.path.join(replay, "host.json"), "wb").write(open(os.path.join(HOST_STATE, "host.json.revoked"), "rb").read())
+        for f in os.listdir(os.path.join(HOST_STATE, "identity")):
+            open(os.path.join(replay, "identity", f), "wb").write(open(os.path.join(HOST_STATE, "identity", f), "rb").read())
+        checked = subprocess.run([RUNTIME_BIN, "check", "--state", replay], capture_output=True)
+        check("and its key cannot authenticate again", checked.returncode != 0 and b"refused" in checked.stderr, checked.stderr)
 
         print("\n=== AC-S5: no secret in any log ===")
         logs = open(SERVER_LOG).read() + open(RUNTIME_LOG).read()

@@ -60,12 +60,20 @@ impl Recorder {
 
     /// Waits for the one ending, and checks there is only one.
     fn wait_end(&self) -> SessionEnd {
-        let deadline = Instant::now() + WAIT;
+        self.wait_end_within(WAIT)
+    }
+
+    /// [`Self::wait_end`] with a budget of its own.
+    fn wait_end_within(&self, budget: Duration) -> SessionEnd {
+        let started = Instant::now();
+        let deadline = started + budget;
         let mut state = self.state.lock().unwrap();
         while state.1.is_empty() {
             let left = deadline
                 .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| panic!("the session never ended"));
+                .unwrap_or_else(|| {
+                    panic!("the session did not end within {:?}", started.elapsed())
+                });
             state = self.changed.wait_timeout(state, left).unwrap().0;
         }
         drop(state);
@@ -86,9 +94,13 @@ fn workspace() -> PathBuf {
 }
 
 fn start(provider: &CliProvider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
+    // Unique per test: a session's ending ends every process carrying its
+    // id, and the tests run side by side.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let rec = Arc::new(Recorder::default());
     let spec = SessionSpec {
-        session_id: "ags_CLI".into(),
+        session_id: format!("ags_CLI{n}_{}", std::process::id()),
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
@@ -151,16 +163,6 @@ fn the_terminal_environment_and_the_workspace_are_set() {
 }
 
 #[test]
-// Known to fail on macOS until slice 4 (PLAN.md 83d), found on the first
-// real-Mac CI run: when the session leader exits, BSD revokes the session's
-// controlling terminal, so the master sees end-of-file while a job that
-// ignores SIGHUP is still alive, the session reports `ended`, and the
-// grace's SIGKILL is skipped. Slice 4 ends a session only once it is empty,
-// and turns this test back on.
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "fixed in slice 4 (83d): BSD revokes the terminal"
-)]
 fn stopping_ends_everything_the_session_spawned() {
     // A background job in the session that ignores the hangup, so only the
     // group-wide SIGKILL after the grace can end it. Nothing the session
@@ -317,4 +319,116 @@ fn a_session_runs_with_the_path_its_cli_was_found_on() {
         "{}",
         rec.output()
     );
+}
+
+fn pid_after(out: &str, tag: &str) -> i32 {
+    out.split(tag)
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no {tag} in {out:?}"))
+}
+
+fn pgid(pid: i32) -> i32 {
+    rustix::process::getpgid(rustix::process::Pid::from_raw(pid))
+        .unwrap()
+        .as_raw_nonzero()
+        .get()
+}
+
+fn wait_gone(pid: i32, what: &str) {
+    let deadline = Instant::now() + WAIT;
+    while alive(pid) {
+        assert!(Instant::now() < deadline, "{what} survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn stopping_reaches_jobs_a_job_control_shell_put_in_groups_of_their_own() {
+    // `set -m` is what an interactive `zsh -l` or `bash -i` does: `cmd &`
+    // gets a process group of its own, which kill(-pgid) never reaches. This
+    // job ignores SIGHUP and holds the terminal, so unless the SIGKILL reaches
+    // the whole session the session never even ends (freeze §7.3).
+    let (mut session, rec) = start(&sh(
+        "set -m; (trap '' HUP; exec sleep 1000) & echo leader:$$ bg:$! :ready; wait",
+    ));
+    let out = rec.wait_for(":ready");
+    let (leader, job) = (pid_after(&out, "leader:"), pid_after(&out, "bg:"));
+    assert!(alive(job));
+    assert_ne!(pgid(job), leader, "the job must have a group of its own");
+
+    session.stop(Duration::from_millis(300));
+    assert_eq!(rec.wait_end(), SessionEnd::Stopped);
+    wait_gone(job, "the job in its own process group");
+}
+
+#[test]
+fn ended_means_the_session_is_empty() {
+    // A job in a group of its own that ignores SIGHUP and has let go of the
+    // terminal: the terminal closes when the agent exits, so nothing waits on
+    // it. It is still in the session, and is ended before `ended` is reported
+    // — which is what a host's shutdown waits for (AM37).
+    let (_session, rec) = start(&sh(
+        "set -m; (trap '' HUP; exec sleep 1000 </dev/null >/dev/null 2>&1) & echo bg:$! :ready; exit 0",
+    ));
+    let out = rec.wait_for(":ready");
+    let job = pid_after(&out, "bg:");
+    // The ending may legitimately take two graces: the agent's exit gives
+    // its group one before the SIGKILL, and the stragglers' pass may give
+    // the job another before reporting (the bound 83d documents). WAIT
+    // alone was less than that, and a slow macOS runner ran past it.
+    let budget = storm_runtime::cli::DEFAULT_GRACE * 2 + Duration::from_secs(5);
+    assert_eq!(
+        rec.wait_end_within(budget),
+        SessionEnd::Completed { exit_code: Some(0) }
+    );
+    assert!(!alive(job), "the detached job outlived its session's end");
+}
+
+/// F1: what an agent daemonized — `setsid`, stdio closed, reparented, as
+/// OpenCode does with `serve --service` — has left the session, so neither
+/// the group nor the session signals reach it. It still carries the
+/// session's tag, so the ending ends it too.
+#[test]
+fn ending_reaches_what_left_the_session_with_setsid() {
+    let daemon = "perl -MPOSIX -e 'setsid() or die; open STDIN, q(</dev/null); \
+                  open STDOUT, q(>/dev/null); open STDERR, q(>/dev/null); \
+                  exec q(sleep), 1000'";
+    let (mut session, rec) = start(&sh(&format!(
+        "{daemon} & echo daemon:$! :ready; exec sleep 1000"
+    )));
+    let out = rec.wait_for(":ready");
+    let daemon = pid_after(&out, "daemon:");
+    let deadline = Instant::now() + WAIT;
+    // perl calls setsid only once it runs.
+    while rustix::process::getsid(rustix::process::Pid::from_raw(daemon))
+        .map(|s| s.as_raw_nonzero().get())
+        != Ok(daemon)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never left the session"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    session.stop(Duration::from_millis(300));
+    assert_eq!(rec.wait_end(), SessionEnd::Stopped);
+    wait_gone(daemon, "the setsid daemon");
+}
+
+#[test]
+fn a_session_lists_its_members() {
+    let (mut session, rec) = start(&sh("echo leader:$$ :ready; exec sleep 1000"));
+    let leader = pid_after(&rec.wait_for(":ready"), "leader:");
+    let members = storm_runtime::platform::session_members(leader).unwrap();
+    assert!(members.contains(&leader), "{members:?}");
+    let ours = rustix::process::getpid().as_raw_nonzero().get();
+    assert!(
+        !members.contains(&ours),
+        "the runtime is not in the agent's session"
+    );
+    session.stop(Duration::from_millis(100));
+    rec.wait_end();
 }

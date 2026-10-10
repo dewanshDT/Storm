@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tokio::signal::unix::{SignalKind, signal};
 
 /// The host's state: its key, `host.json` and its session table. Linux: the
 /// systemd unit's `StateDirectory` (freeze §5.8). macOS: AM33.
@@ -40,6 +41,12 @@ enum Command {
         state: PathBuf,
         #[arg(long, env = "STORM_RUNTIME_CONFIG", default_value = storm_runtime::config::DEFAULT_CONFIG)]
         config: PathBuf,
+        /// Declare that this account runs nothing but this host (AM37): at
+        /// startup and after shutdown, end every other process of it. Passed
+        /// by the packaged service definitions; refused unless running as the
+        /// service account, and never as root.
+        #[arg(long)]
+        exclusive_account: bool,
     },
     /// The agent's stdio MCP server for one gateway connection. Started by
     /// the agent CLI from the session's MCP config, never by hand: it reads
@@ -88,28 +95,70 @@ async fn main() -> Result<()> {
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
             let name = name.unwrap_or_else(storm_runtime::platform::host_name);
-            let config = storm_runtime::client::enroll(&state, &enrollment, &name, force).await?;
-            println!("Enrolled as {} ({}).", name, config.host_id);
-            println!("  server : {} ({})", config.server_url, config.server_id);
-            println!("  state  : {}", state.display());
+            // Said before host.json exists: writing it may start the host,
+            // whose account sweep would end this process (AM35, AM37).
+            storm_runtime::client::enroll(&state, &enrollment, &name, force, |config| {
+                println!("Enrolled as {} ({}).", name, config.host_id);
+                println!("  server : {} ({})", config.server_url, config.server_id);
+                println!("  state  : {}", state.display());
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            })
+            .await?;
             Ok(())
         }
-        Command::Serve { state, config } => {
+        Command::Serve {
+            state,
+            config,
+            exclusive_account,
+        } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
+            if exclusive_account {
+                storm_runtime::platform::check_exclusive_account().map_err(anyhow::Error::msg)?;
+            }
+            // Before anything else can fail: SIGTERM must never take the
+            // default action and leave sessions behind (AM37).
+            let mut terminate = signal(SignalKind::terminate())?;
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                state = %state.display(),
+                config = %config.display(),
+                exclusive_account,
+                "starting"
+            );
             storm_runtime::platform::prepare_home();
             let config = storm_runtime::config::RuntimeConfig::load(&config)?;
             let host = storm_runtime::host::Host::new(&state, config)?;
-            if let Err(e) = host.run().await {
+            host.log_inventory();
+            if exclusive_account {
+                // Whatever a previous host left behind — after a SIGKILL or a
+                // crash nothing ended its sessions (AM37).
+                sweep("start").await;
+            }
+            let outcome = tokio::select! {
+                ended = host.clone().run() => ended,
+                _ = terminate.recv() => Ok(()),
+                _ = interrupt.recv() => Ok(()),
+            };
+            if let Err(e) = outcome {
                 eprintln!("storm-runtime: {e:#}");
                 // A refused key is final: exit with a status the unit is told
                 // not to restart on, rather than looping against a server that
-                // has revoked this host (freeze §5.6).
+                // has revoked this host (freeze §5.6, AM36).
+                if exclusive_account {
+                    sweep("revoked").await;
+                }
                 std::process::exit(3);
+            }
+            tracing::info!("stopping");
+            host.shutdown(storm_runtime::cli::DEFAULT_GRACE).await;
+            if exclusive_account {
+                sweep("stop").await;
             }
             Ok(())
         }
@@ -143,6 +192,24 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+    }
+}
+
+/// AM37's sweep, off the async threads: it sleeps through its grace.
+async fn sweep(when: &str) {
+    let swept = tokio::task::spawn_blocking(|| {
+        storm_runtime::platform::sweep_account(std::time::Duration::from_millis(500))
+    })
+    .await;
+    match swept {
+        Ok((0, _)) => tracing::info!(when, "account sweep: nothing left over"),
+        Ok((hung_up, killed)) => tracing::info!(
+            when,
+            hung_up,
+            killed,
+            "account sweep: ended this account's other processes"
+        ),
+        Err(e) => tracing::warn!(when, error = %e, "account sweep did not finish"),
     }
 }
 
