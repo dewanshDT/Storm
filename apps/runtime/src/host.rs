@@ -56,6 +56,11 @@ const COALESCE: Duration = Duration::from_millis(20);
 /// returned by then is reported `failed (start_failure)`, and whatever it
 /// later returns is stopped: a start that hangs costs its own session, never
 /// the link (B-0).
+/// How often the host tells the server it is alive (B-1), and how long the
+/// link may carry nothing — the server's keepalives come every 15 s — before
+/// the host takes it for dead and reconnects.
+const HEARTBEAT: Duration = Duration::from_secs(15);
+const LINK_IDLE: Duration = Duration::from_secs(45);
 const START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
@@ -316,6 +321,9 @@ impl Host {
             // This host runs `storm-runtime mcp-bridge` (spec §6). A host
             // that does not say so gets no grants.
             "mcp_bridge": true,
+            // It posts `/v1/runtime/heartbeat` while linked (B-1), so the
+            // server may drop a link it has gone silent on.
+            "heartbeat": true,
         })
     }
 
@@ -469,10 +477,35 @@ impl Host {
             session.events.wake.notify_one();
         }
 
+        // The heartbeat: a `409` means the server has dropped this link.
+        let relink = Arc::new(Notify::new());
+        let _heartbeat = {
+            let (host, relink) = (self.clone(), relink.clone());
+            AbortOnDrop(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(HEARTBEAT);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let sent = host
+                        .post_for_response("/v1/runtime/heartbeat", &json!({}), Some(HEARTBEAT))
+                        .await;
+                    if let Ok(r) = sent
+                        && r.status() == reqwest::StatusCode::CONFLICT
+                    {
+                        relink.notify_one();
+                        return;
+                    }
+                }
+            }))
+        };
+
         let mut buf: Vec<u8> = Vec::new();
         loop {
             tokio::select! {
-                chunk = stream.next() => {
+                chunk = tokio::time::timeout(LINK_IDLE, stream.next()) => {
+                    let Ok(chunk) = chunk else {
+                        bail!("the link carried nothing for {} s", LINK_IDLE.as_secs());
+                    };
                     let Some(chunk) = chunk else { return Ok(()) };
                     buf.extend_from_slice(&chunk.context("reading the link")?);
                     while let Some((event, rest)) = split_event(&buf) {
@@ -490,6 +523,10 @@ impl Host {
                 }
                 _ = self.reauth.notified() => {
                     tracing::info!("token refused; re-authenticating");
+                    return Ok(());
+                }
+                _ = relink.notified() => {
+                    tracing::warn!("the server has no link for this host; reconnecting");
                     return Ok(());
                 }
             }
@@ -1085,6 +1122,15 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
             };
             json!({ "status": "failed", "end_reason": reason.as_str(), "signal": signal })
         }
+    }
+}
+
+/// Aborts a task when the scope that owns it ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

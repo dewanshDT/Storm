@@ -333,6 +333,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/runtime/whoami", get(runtime_whoami))
         .route("/v1/runtime/link", get(runtime_link))
         .route("/v1/runtime/hello", post(runtime_hello))
+        .route("/v1/runtime/heartbeat", post(runtime_heartbeat))
         .route("/v1/runtime/inventory", post(runtime_inventory))
         .route(
             "/v1/runtime/sessions/{id}/terminal/output",
@@ -1557,6 +1558,20 @@ async fn runtime_link(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
 }
 
+/// POST /v1/runtime/heartbeat — the host is alive (B-1). Every host request
+/// counts as one (the auth layer records it); this is the one a quiet host
+/// sends. `409` says the server has no link for it: reconnect.
+async fn runtime_heartbeat(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+) -> StatusCode {
+    if state.agent.host_live(&auth.host.id).online {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
+}
+
 async fn runtime_hello(
     State(state): State<Shared>,
     Extension(auth): Extension<HostAuth>,
@@ -2101,6 +2116,7 @@ async fn require_auth(
                     }
                 }
             };
+            state.agent.touch(&host.id);
             request.extensions_mut().insert(HostAuth { host });
             return next.run(request).await;
         }
