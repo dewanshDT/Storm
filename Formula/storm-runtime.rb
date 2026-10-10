@@ -32,7 +32,7 @@ class StormRuntime < Formula
 
       Then, in the Storm app: Settings > Agents > Hosts > Enroll a host, and
       paste the string at this prompt (never as an argument):
-        sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
+        cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
 
       launchd starts the host by itself once it is enrolled. Workspaces are the
       directories under /Library/StormRuntime/workspaces.

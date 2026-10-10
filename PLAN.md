@@ -4749,6 +4749,76 @@ every checkout the operator made.
   `claude setup-token` into a `0600` `env_file`.
 - **An Intel Mac:** the universal binary includes x86_64, untested.
 
+**83i. The operator's manual Mac round, and the fixes folded into the
+stack.** *(2026-10-10)*
+
+The operator ran the MANUAL rows on their Mac (macOS 27.0, arm64, FileVault
+on), with a follow-up round for reboot, sleep/wake, revoke + re-enroll and the
+AM40 sheet: **28 PASS · 11 HUMAN · 5 FAIL · 1 SKIPPED**. The record, with
+evidence and code pointers, is the vault note *Agent Runtime/macOS Manual
+Test Report 2026-10-09*.
+- **Passed:** a token-authenticated Claude Code and OpenCode, each taking a
+  prompt as `_stormruntime`; Mac → phone handoff; restart; reboot (boot →
+  `link up` 45 s, login → `link up` 6 s); sleep/wake (reconnect in 5 s); no
+  Full Disk Access and no privacy prompt; revoke and re-enroll; no secret in
+  the log or in any argv.
+- **The operator chose to fold the fixes into the stack** rather than open
+  new PRs. Each fix is a commit on the slice it belongs to, merged up to
+  #116.
+
+Fixed:
+- **F1 (security), slice 4.** OpenCode's TUI daemonizes `opencode serve
+  --service` with `setsid`. It left the agent's process session, survived
+  End, and served its unauthenticated HTTP API on 127.0.0.1 as the host's
+  account until the host restarted. **Every process a CLI session starts now
+  carries `STORM_RUNTIME_SESSION=<id>`**, and the ending ends the session's
+  members plus every process of the account carrying the tag (read from
+  `/proc/<pid>/environ`, or `KERN_PROCARGS2` on macOS). The exclusive-account
+  sweep stays the backstop for a process that replaced its environment.
+- **B-0, slice 4.** After a reboot two sessions sat at Starting for 17
+  minutes and End did nothing. The link handled each command inline, so the
+  first start, which never returned, held every later command. **A start
+  now runs as its own task, with a 30 s deadline** (`start_failure` past it;
+  whatever it returns later is stopped). Commands for a starting session
+  queue behind it and apply in order. The hang's own cause is not known: the
+  new logs will say whether the command never arrived or the provider
+  blocked.
+- **B-2 / F4, slice 4.** Neither side logged a command. The host now logs a
+  start banner (version, paths, providers and their availability, roots, the
+  sweep's counts), each command received and each start's duration; the
+  server logs each command sent, each status report and each revocation.
+  Kinds and ids only, never payloads.
+- **B-1, slice 4.** With the Mac asleep the host looked online and input
+  typed from the phone was lost: the keepalives kept landing in a dead
+  connection's send buffer. **Hosts now heartbeat** (`POST
+  /v1/runtime/heartbeat` every 15 s; `heartbeat: true` in `hello`), and the
+  server drops the link of a heartbeating host silent for 45 s, which marks
+  it offline and its sessions `unknown` and refuses input with 503 (which
+  the client already words as "The host is offline"). Older hosts are never
+  dropped for silence. The host also treats 45 s without link bytes as a
+  dead link.
+- **F3, slice 3.** The Shell provider's `zsh -l` ran `/etc/zprofile`'s
+  `path_helper`, which put the system directories first. Sessions now carry
+  `STORM_RUNTIME_PATH`, and `serve` writes a managed `~/.zprofile` in the
+  service account's home that restores it. A `.zprofile` without the managed
+  first line is the operator's and is never replaced.
+- **B-5, slice 4.** Re-enrolling deleted `host.json.revoked` and left the
+  revoked key in `identity/`. Both now move to `revoked/<old host id>/`.
+- **S1, slice 6.** A workspace cloned after the host linked appeared only on
+  a second look. The workspace listing now waits up to 2 s for the inventory
+  its refresh asked for.
+- **B-4, B-6, B-7, slice 6.** The macOS enroll command starts with
+  `cd / &&`; the enrollment string is masked until Show; About & health says
+  "App x · Server y" and the compatibility warning names both versions.
+- **B-3, F5, slice 7.** Acceptance builds carry the latest release's version
+  name, so a test app no longer reads as incompatible with the server. The
+  token route (`claude setup-token` into a `0600` `env_file`) is the
+  documented Claude Code login on macOS, in `install`'s output and
+  `deploy/README.md`: the interactive login needs a login Keychain the
+  hidden account does not have.
+
+**Still open:** the Mac re-test of these fixes; an Intel Mac.
+
 ---
 
 ## Data model

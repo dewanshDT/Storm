@@ -549,8 +549,8 @@ sudo ./storm-runtime install
 the string at this prompt:
 
 ```sh
-sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
-sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check   # proves the whole path
+cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
+cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check   # proves the whole path
 ```
 
 launchd starts the host by itself as soon as enrollment writes `host.json`,
@@ -606,28 +606,41 @@ $HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/b
   A CLI inside your own home (`~/.local/bin`, `~/.nvm`) is out of the
   account's reach, by design, and the host reports it as not installed.
 
-**Log the agent CLIs in as `_stormruntime`, once.** The `cd /` matters: the
+**Log the agent CLIs in for `_stormruntime`, once.** The `cd /` matters: the
 account cannot read your current directory.
 
-```sh
-cd / && sudo -u _stormruntime -H claude                # then /login
-cd / && sudo -u _stormruntime -H opencode auth login
-```
+**Claude Code: use a long-lived token.** Its interactive login keeps the
+credentials in the login Keychain, which a hidden daemon account does not
+have, and it fails there (found on a real Mac, F5). The token route works:
+1. Run `claude setup-token` as yourself, and copy the token.
+2. Store it where only the host's account can read it, without it ever
+   appearing in a command line:
 
-Claude Code on macOS may keep its credentials in the login Keychain, which a
-daemon account without a login session may not have. If a session asks you
-to log in again, use a long-lived token instead:
-1. Run `claude setup-token` as yourself.
-2. Put `CLAUDE_CODE_OAUTH_TOKEN=<token>` in an env file, owned by
-   `_stormruntime` with mode `0600`, for example
-   `/Library/StormRuntime/state/claude.env`.
-3. Name that file in `runtime.toml`:
+   ```sh
+   sudo -u _stormruntime sh -c 'umask 077; cat > /Library/StormRuntime/state/claude.env'
+   ```
+
+   Type `CLAUDE_CODE_OAUTH_TOKEN=<the token>`, then Enter, then Ctrl-D.
+3. Name that file in `runtime.toml`. Listing providers replaces the
+   defaults, so list all three:
 
    ```toml
    [[providers]]
    id = "claude-code"
    env_file = "/Library/StormRuntime/state/claude.env"
+
+   [[providers]]
+   id = "opencode"
+
+   [[providers]]
+   id = "shell"
    ```
+
+**OpenCode** logs in interactively:
+
+```sh
+cd / && sudo -u _stormruntime -H opencode auth login
+```
 
 Storm never stores or transmits what is in it. Also, a login running as
 `_stormruntime` is ended if the host restarts during it (the
