@@ -4559,6 +4559,40 @@ host was revoked, and `enroll` needs no `--force` and removes the marker.
   - **the AM36 checks.**
 
 Every new test was mutation-checked (eight mutations, each caught).
+**83e. Slice 5: a macOS host works only in Storm's own root, never in a
+person's home or on a mounted volume (AM39).** *(2026-10-08)*
+
+**The boundary is three things together:**
+- **The account.** `_stormruntime` is not in `admin` or `staff`. A person's
+  home is `0750` (owner and `staff`), so the account cannot enter it.
+- **The default root, `/Library/StormRuntime/workspaces`,** sits outside every
+  TCC-protected location. The host neither needs nor asks for Full Disk
+  Access, and a LaunchDaemon could never answer TCC's prompts anyway.
+- **Configuration.**
+  - **`platform::PROTECTED_ROOTS`** is `/Users`, `/Volumes`, `/Network` and
+    `/System/Volumes/Data` on macOS. The last is the data volume's own
+    spelling of the first two, behind their firmlinks. On Linux the list is
+    empty, because the unit's `ProtectHome` already hides homes.
+  - **`check_roots()` refuses a root that is inside, or contains, any of
+    them**, as it refuses one that overlaps a Storm data root (D3). A root of
+    `/` is therefore refused. The list is not configurable in V1.
+
+**Sharing a workspace with the operator** is slice 2's two inheritable ACL
+entries: everything either account creates under the root stays readable and
+writable by both. An existing checkout is cloned or moved into the root.
+
+**Tests:**
+- Homes, volumes, autofs and the data-volume spelling are refused, and so
+  are `/` and `/System` because they contain them.
+- `/Library/StormRuntime/workspaces`, `/opt/work` and `/Users-shared` are
+  accepted, since components are compared, not strings.
+- `check_roots()` uses the platform's own list.
+- The "contains" half is mutation-checked.
+
+**What needs a Mac:** that the account really is refused a home,
+`~/Documents`, a `/Volumes` mount and a server's state tree, and that the
+operator really can write what the agent wrote. That is AC-M7, in the
+acceptance harness (83g).
 
 ---
 

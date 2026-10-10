@@ -10,6 +10,9 @@ pub const DEFAULT_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
 pub const SERVICE_ACCOUNT: &str = "storm-runtime";
 /// `poll` reports a master writable with room to spare; 77c's chunk.
 pub const PTY_WRITE_CHUNK: usize = 256;
+/// The unit's `ProtectHome` already hides `/home`, `/root` and
+/// `/run/user` (77e).
+pub const PROTECTED_ROOTS: &[&str] = &[];
 
 /// systemd gives the unit a fixed `PATH`; the host keeps it (77a).
 pub fn default_path() -> Option<std::ffi::OsString> {

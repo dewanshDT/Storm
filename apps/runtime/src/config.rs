@@ -113,8 +113,15 @@ impl RuntimeConfig {
     /// A workspace root may not be inside, or contain, a Storm data root this
     /// host can see (D3, freeze §8). The permissions of P3 keep
     /// `storm-runtime` out of one anyway; this keeps an operator from pointing
-    /// agents at the vault by mistake.
+    /// agents at the vault by mistake. Nor may it be in, or contain, one of
+    /// the platform's protected locations (AM39): on macOS, people's homes
+    /// and mounted volumes, which a LaunchDaemon cannot be granted without
+    /// Full Disk Access.
     pub fn check_roots(&self) -> Result<()> {
+        self.check_roots_against(crate::platform::PROTECTED_ROOTS)
+    }
+
+    fn check_roots_against(&self, protected: &[&str]) -> Result<()> {
         for root in &self.workspace_roots {
             let root = canonical(root);
             for forbidden in &self.forbidden_roots {
@@ -125,6 +132,18 @@ impl RuntimeConfig {
                          never work inside the vault store (D3)",
                         root.display(),
                         forbidden.display()
+                    );
+                }
+            }
+            for protected in protected.iter().map(Path::new) {
+                if root.starts_with(protected) || protected.starts_with(&root) {
+                    bail!(
+                        "workspace root {} overlaps {} — a Runtime Host never works in \
+                         people's homes or on mounted volumes, and needs no Full Disk \
+                         Access (AM39). Put workspaces in the host's own root, and clone \
+                         or move a checkout there",
+                        root.display(),
+                        protected.display()
                     );
                 }
             }
@@ -370,6 +389,58 @@ mod tests {
             bare.providers().unwrap()[0].available(),
             crate::provider::Availability::NotInstalled
         );
+    }
+
+    #[test]
+    fn a_root_in_or_around_a_protected_location_is_refused() {
+        // AM39, with macOS's list: a home, a volume, the data volume's
+        // spelling of a home, and any root that contains them.
+        let protected = crate::platform::launchd::PROTECTED_ROOTS;
+        for root in [
+            "/Users/alice/Developer",
+            "/Users",
+            "/Volumes/NAS/storm",
+            "/Network/Servers/x",
+            "/System/Volumes/Data/Users/alice/Developer",
+            "/",
+            "/System",
+        ] {
+            let config = RuntimeConfig {
+                workspace_roots: vec![PathBuf::from(root)],
+                forbidden_roots: vec![],
+                ..RuntimeConfig::default()
+            };
+            let err = config
+                .check_roots_against(protected)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("AM39"), "{root}: {err}");
+        }
+        for root in [
+            "/Library/StormRuntime/workspaces",
+            "/opt/work",
+            "/Users-shared",
+        ] {
+            let config = RuntimeConfig {
+                workspace_roots: vec![PathBuf::from(root)],
+                forbidden_roots: vec![],
+                ..RuntimeConfig::default()
+            };
+            config
+                .check_roots_against(protected)
+                .unwrap_or_else(|e| panic!("{root}: {e}"));
+        }
+    }
+
+    #[test]
+    fn the_platforms_own_list_is_what_check_roots_enforces() {
+        if let Some(first) = crate::platform::PROTECTED_ROOTS.first() {
+            let config = RuntimeConfig {
+                workspace_roots: vec![Path::new(first).join("x")],
+                ..RuntimeConfig::default()
+            };
+            assert!(config.check_roots().is_err());
+        }
     }
 
     #[test]
