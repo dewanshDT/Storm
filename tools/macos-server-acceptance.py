@@ -99,7 +99,7 @@ def main():
         check("S1g", "the data root is ~/Storm",
               all((DATA / d).is_dir() for d in ("vaults", "state", "backups")))
         mode = (DATA / "state").stat().st_mode & 0o777
-        check("S1h", "state is private", mode & 0o077 == 0, oct(mode))
+        check("S1h", "the data root and state are owner-only (staff is every user)", mode & 0o077 == 0 and ((DATA.stat().st_mode & 0o077) == 0), oct(mode))
         ps = run("ps", "-axo", "user,command").stdout
         line = next((l for l in ps.splitlines() if str(installed) in l and " serve " in l), "")
         check("S1i", "the server runs as the user, from the installed copy",

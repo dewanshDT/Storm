@@ -271,6 +271,16 @@ fn load(domain: &str, label: &str, plist: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Clears every group and other bit, keeping the owner's.
+pub fn owner_only(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(dir)?.permissions().mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode & 0o7700))?;
+    }
+    Ok(())
+}
+
 fn copy_file(from: &Path, to: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let tmp = to.with_extension("tmp");
@@ -344,8 +354,13 @@ pub fn up(opts: UpOptions) -> Result<()> {
     for dir in [&r.data_root, &r.vaults, &r.state, &r.backups] {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    // Owner-only. On a Mac every local account shares the `staff` group, so
+    // the Linux rule (no bits for others) would still let any other user of
+    // this Mac read the notes and auth.db.
     for dir in [&r.data_root, &r.state, &r.backups] {
-        let _ = crate::install::tighten_private_dir(dir);
+        if let Err(e) = owner_only(dir) {
+            eprintln!("warning: could not restrict {}: {e}", dir.display());
+        }
     }
     fs::create_dir_all(layout.bin.parent().unwrap())?;
     fs::create_dir_all(&layout.logs)?;
@@ -602,6 +617,18 @@ mod tests {
         assert!(p.contains("<key>STORM_STATE</key>\n    <string>/Users/ada/Storm/state</string>"));
         assert!(p.contains("<key>STORM_SERVER_BIN</key>"));
         assert!(p.contains("<key>Hour</key>\n    <integer>3</integer>"));
+    }
+
+    #[test]
+    fn the_data_dirs_become_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempdir::TempDir::new("storm-owner-only").unwrap();
+        fs::set_permissions(t.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        owner_only(t.path()).unwrap();
+        assert_eq!(
+            fs::metadata(t.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[test]
