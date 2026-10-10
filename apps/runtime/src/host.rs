@@ -1516,7 +1516,12 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         })
         .await;
         assert!(host.session("ags_HUNG").is_none());
-        assert!(host.starting.lock().unwrap().is_empty());
+        // The server hears of the failure before the start's task has
+        // dropped its queue.
+        eventually("the hung start's queue was dropped", || {
+            host.starting.lock().unwrap().is_empty()
+        })
+        .await;
 
         hung.open();
         eventually("the late session was stopped", || {
