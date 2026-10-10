@@ -5031,6 +5031,37 @@ with the agent's mark (AM44).** *(2026-10-10)*
   escaping id refused) and `agent_e2e.py`: a real stage with the file `0600`
   in the inbox, 415, 413, and the inbox gone after the end (93 checks).
 
+**85f. Slice 6: pasting and dropping images on desktop and web (AM45).**
+*(2026-10-10)*
+- **Keys.** `StormTerminal` asks `onImagePaste` on the platform's paste
+  (Cmd+V on a Mac, Ctrl+Shift+V elsewhere) and on Ctrl+V (Claude Code's
+  image key). With an image on the clipboard it is staged and pasted;
+  without one the paste chord pastes text and Ctrl+V sends `^V`, as before.
+  Not on the web, where the browser owns the clipboard.
+- **The clipboard.** **Not `super_clipboard`, as the spec said:** it builds a
+  Rust library for every app. A `storm/clipboard` method channel instead, in
+  `AppDelegate.swift` beside `storm/links` (81l): a copied image file's own
+  bytes (PNG/JPEG/GIF/WebP kept, anything else AppKit reads → PNG), a PNG as
+  it is, a screenshot's TIFF → PNG, and nothing for a copied file that is not
+  an image (Finder puts its icon there too). Dart re-encodes anything else
+  it can decode (BMP) as PNG.
+- **The web** listens for `paste` events carrying image files while the
+  terminal has focus; text pastes pass untouched. **Drops** on every
+  platform come through `desktop_drop` 0.8.4; the terminal shows an accent
+  outline while something is held over it.
+- **The flow** (`SessionController.pasteImages`): each image staged in turn,
+  every path typed through `StormTerminal.paste` (so bracketed paste follows
+  the agent's mode) only once all arrived; a chip after 300 ms with a cancel
+  (a cancelled paste's path is never typed); a failure says why for 6 s and
+  types nothing.
+- **Verified on the real web build**: the harness's new `desktop-23` shot
+  dispatches a browser paste of a PNG into a running session on a real
+  server and Runtime Host; the host staged it in the session's inbox and its
+  path was typed. The Swift is compiled by `acceptance.yml`, not here.
+- Tests: `image_paste_test.dart` (sniffing, which keys are a paste, the
+  controller's stage-then-type, the 300 ms chip, failure, cancel, Ctrl+V with
+  and without an image). Client 973.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

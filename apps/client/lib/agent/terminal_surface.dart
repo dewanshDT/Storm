@@ -44,6 +44,11 @@ class StormTerminal {
   /// The view's size changed.
   void Function(int cols, int rows)? onResize;
 
+  /// Asked on a paste chord or Ctrl+V: pastes the clipboard's image and says
+  /// whether there was one (D15 AM45). Without an image the keys do what
+  /// they always did.
+  Future<bool> Function()? onImagePaste;
+
   /// The phone keys row's sticky modifiers. Each applies to the next key,
   /// typed or tapped on the row, and is then released, as on a phone's own
   /// shift. Listenable, because typing consumes one without the row knowing.
@@ -149,6 +154,27 @@ class StormTerminal {
   KeyEventResult _onKeyEvent(FocusNode _, KeyEvent event) {
     if (event is KeyUpEvent) return KeyEventResult.ignored;
     final keys = HardwareKeyboard.instance;
+    final chord = pasteChord(
+      event.logicalKey,
+      shift: keys.isShiftPressed,
+      control: keys.isControlPressed,
+      alt: keys.isAltPressed,
+      meta: keys.isMetaPressed,
+      platform: defaultTargetPlatform,
+    );
+    final ask = onImagePaste;
+    if (chord != null && ask != null && !kIsWeb && event is KeyDownEvent) {
+      () async {
+        if (await ask()) return;
+        if (chord == PasteChord.paste) {
+          final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+          if (text != null && text.isNotEmpty) paste(text);
+        } else {
+          _emit('\x16');
+        }
+      }();
+      return KeyEventResult.handled;
+    }
     final bytes = _legacyFallback(
       event.logicalKey,
       shift: keys.isShiftPressed,
@@ -190,6 +216,25 @@ class StormTerminal {
     onInput?.call(Uint8List.fromList(utf8.encode(data)));
   }
 
+  /// Which paste a key is, if any: the platform's own paste (Cmd+V on a Mac,
+  /// Ctrl+Shift+V elsewhere), or Ctrl+V, which Claude Code uses for images.
+  @visibleForTesting
+  static PasteChord? pasteChord(
+    LogicalKeyboardKey key, {
+    required bool shift,
+    required bool control,
+    required bool alt,
+    required bool meta,
+    required TargetPlatform platform,
+  }) {
+    if (key != LogicalKeyboardKey.keyV || alt) return null;
+    final mac = platform == TargetPlatform.macOS;
+    if (mac && meta && !control && !shift) return PasteChord.paste;
+    if (!mac && control && shift && !meta) return PasteChord.paste;
+    if (control && !shift && !meta) return PasteChord.controlV;
+    return null;
+  }
+
   void dispose() {
     _bytes.close();
     ctrlArmed.dispose();
@@ -229,6 +274,8 @@ class _TerminalWriter implements StringSink {
   @override
   void writeln([Object? object = '']) => _terminal.write('$object\n');
 }
+
+enum PasteChord { paste, controlV }
 
 /// The terminal widget, themed from the tokens and sized by [prefs].
 class StormTerminalView extends StatelessWidget {

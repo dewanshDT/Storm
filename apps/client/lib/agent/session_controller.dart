@@ -7,6 +7,7 @@ import '../api/models.dart';
 import '../ui/states.dart';
 import 'agent_api.dart';
 import 'agent_models.dart';
+import 'image_paste.dart';
 import 'terminal_events.dart';
 import 'terminal_stream.dart';
 import 'terminal_surface.dart';
@@ -51,8 +52,23 @@ class SessionController extends ChangeNotifier {
   /// How long keystrokes gather before they are sent as one POST.
   static const coalesce = Duration(milliseconds: 15);
 
+  /// An image paste in flight, or why the last one failed (D15 AM45).
+  final imagePaste = ValueNotifier<ImagePasteState?>(null);
+  int _pasteSeq = 0;
+  Timer? _pasteShow;
+  Timer? _pasteClear;
+
+  /// Pasting takes this long before the chip says so.
+  static const pasteQuiet = Duration(milliseconds: 300);
+
   void start() {
     terminal.onInput = _queueInput;
+    terminal.onImagePaste = () async {
+      final image = await readClipboardImage();
+      if (image == null) return false;
+      unawaited(pasteImages([image]));
+      return true;
+    };
     terminal.onResize = (_, _) => _queueResize();
     _connect();
   }
@@ -171,9 +187,55 @@ class SessionController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// Stages each image on the host, then pastes its path into the terminal,
+  /// as a local terminal does for a dropped file: the agent attaches it.
+  /// Nothing is typed unless every image arrived.
+  Future<void> pasteImages(List<PastedImage> images) async {
+    if (images.isEmpty) return;
+    final seq = ++_pasteSeq;
+    _pasteClear?.cancel();
+    _pasteShow?.cancel();
+    _pasteShow = Timer(pasteQuiet, () {
+      if (seq == _pasteSeq && !_disposed) {
+        imagePaste.value = ImagePasteState.pasting(images.length);
+      }
+    });
+    try {
+      final paths = <String>[];
+      for (final image in images) {
+        paths.add(await api.stageImage(sessionId, image.bytes, image.mime));
+      }
+      if (seq != _pasteSeq || _disposed) return;
+      for (final path in paths) {
+        terminal.paste(path);
+      }
+      imagePaste.value = null;
+    } on Exception catch (e) {
+      if (seq != _pasteSeq || _disposed) return;
+      final why = e is StormApiException
+          ? e.message
+          : 'the image did not arrive';
+      imagePaste.value = ImagePasteState.failed('Image not pasted: $why');
+      _pasteClear = Timer(const Duration(seconds: 6), dismissPaste);
+    } finally {
+      _pasteShow?.cancel();
+    }
+  }
+
+  /// Cancels a paste in flight (its path is never typed), or clears a
+  /// failure.
+  void dismissPaste() {
+    _pasteSeq++;
+    _pasteClear?.cancel();
+    if (!_disposed) imagePaste.value = null;
+  }
+
   @override
   void dispose() {
     _disposed = true;
+    _pasteShow?.cancel();
+    _pasteClear?.cancel();
+    imagePaste.dispose();
     _sub?.cancel();
     _retry?.cancel();
     _flush?.cancel();
@@ -181,4 +243,13 @@ class SessionController extends ChangeNotifier {
     terminal.dispose();
     super.dispose();
   }
+}
+
+@immutable
+class ImagePasteState {
+  const ImagePasteState.pasting(this.count) : error = null;
+  const ImagePasteState.failed(String this.error) : count = 0;
+
+  final int count;
+  final String? error;
 }
