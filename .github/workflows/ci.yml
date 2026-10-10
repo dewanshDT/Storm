@@ -94,6 +94,56 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The server on a Mac (decision 84d): the same suite, on FSEvents instead of
+  # inotify, plus the LaunchAgent code compiled for real.
+  server-macos:
+    name: server (rust, macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # The interactive installer (decision 84): shellcheck, then the bats suite
+  # (arguments, detection, plans, secrets on stdin only, the TUI on a pty).
+  installer:
+    name: installer (shell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bats-core
+        run: git clone --depth 1 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats"
+      - run: make installer-check
+        env:
+          SHELLCHECK: shellcheck
+          BATS: ${{ runner.temp }}/bats/bin/bats
+
+  # The same suite under macOS's own bash 3.2 and BSD tools.
+  installer-macos:
+    name: installer (shell, macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bats-core and shellcheck
+        run: |
+          git clone --depth 1 https://github.com/bats-core/bats-core.git "$RUNNER_TEMP/bats"
+          brew install shellcheck
+      - name: make installer-check (bash 3.2)
+        run: |
+          /bin/bash --version | head -1
+          PATH="/bin:$PATH" make installer-check
+        env:
+          SHELLCHECK: shellcheck
+          BATS: ${{ runner.temp }}/bats/bin/bats
   client:
     name: client (flutter)
     runs-on: ubuntu-latest

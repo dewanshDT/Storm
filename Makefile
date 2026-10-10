@@ -379,6 +379,14 @@ www-check:
 formula-check:
 	tools/formula-check.sh
 
+## installer-check: shellcheck + bats for the interactive installer (deploy/install.sh)
+#
+# Needs shellcheck and bats-core (SHELLCHECK= / BATS= to point at them). No
+# root, no network: the tests run the installer against fake binaries in a
+# scratch sysroot.
+installer-check:
+	tools/installer-tests/run.sh
+
 ## clean: remove build output and local dev data
 clean:
 	cd $(SERVER) && cargo clean
@@ -388,5 +396,5 @@ clean:
 
 .PHONY: help check lint test test-server test-client test-live test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
-        deploy-web deploy-web-check \
+        deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

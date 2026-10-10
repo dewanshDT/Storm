@@ -13,6 +13,17 @@ After apt works, install under `/srv/storm` and remove the hand-rolled tree /
 
 ## First-time setup (packaged)
 
+**The interactive installer** does all of this — server, Runtime Host, app,
+pairing, enrollment — on Linux or macOS (decision 84):
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
+```
+
+The manual steps below stay for operators who want them. Run as root with no
+terminal and no arguments (`curl … | sudo sh`), the same script still does
+the old apt bootstrap, so existing automation keeps working.
+
 ```sh
 # Bootstrap apt (key + source + install) — same idea as Tailscale:
 curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
