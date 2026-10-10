@@ -242,7 +242,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
                 child: InlineConfirm(
                   key: const Key('end-confirm'),
-                  title: 'End ${s.name}',
+                  title: 'End ${s.displayName}',
                   message:
                       'The agent and everything it started are stopped on '
                       'the host.',
@@ -303,7 +303,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   children: [
                     Flexible(
                       child: Text(
-                        s.name,
+                        s.displayName,
                         key: const Key('session-name'),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -506,7 +506,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           ),
           SizedBox(height: t.sp),
           Text(
-            s.name,
+            s.displayName,
             key: const Key('session-name'),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

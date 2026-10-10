@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
-import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
@@ -60,9 +60,16 @@ String _clock(DateTime t) {
 String sessionWhen(AgentSession s) =>
     s.ended ? s.statusLabel.toLowerCase() : shortAge(s.createdAt);
 
-/// "storm · Claude Code · 40m": the sidebar and phone rows' sub-line.
-String sessionSub(AgentSession s) =>
-    '${s.workspace} · ${providerLabel(s.provider)} · ${sessionWhen(s)}';
+/// "build-vm · storm · 40m": the rows' sub-line; the mark says the agent.
+String sessionSub(AgentSession s, String host) =>
+    '$host · ${s.workspace} · ${sessionWhen(s)}';
+
+/// "Fix the login, Claude Code on build-vm, working": a row read aloud.
+String sessionSpoken(AgentSession s, String host) => [
+  s.displayName,
+  '${providerLabel(s.provider)} on $host',
+  s.status == 'running' && s.working ? 'working' : s.statusLabel.toLowerCase(),
+].join(', ');
 
 /// "Completed 14:02 · ran 38 min", "Failed · host restarted".
 String endedLine(AgentSession s) {
@@ -89,19 +96,21 @@ String sessionMeta(AgentSession s, String hostName) {
   return '${providerLabel(s.provider)} · ${s.workspace} on $hostName · $when';
 }
 
-/// One session in a list: its dot, its name, and a mono line under it. The
-/// sidebar's rows are tighter and fill when selected; the phone's are
-/// separated by hairlines (handoff §2.6, §2.8).
+/// One session in a list: its agent's mark, its name, and a mono line under
+/// it. The sidebar's rows are tighter and fill when selected; the phone's
+/// are separated by hairlines (handoff §2.6, §2.8; D15 AM44).
 class SessionRow extends StatelessWidget {
   const SessionRow({
     super.key,
     required this.session,
+    required this.host,
     required this.onTap,
     this.selected = false,
     this.phone = false,
   });
 
   final AgentSession session;
+  final String host;
   final VoidCallback onTap;
   final bool selected;
   final bool phone;
@@ -113,7 +122,11 @@ class SessionRow extends StatelessWidget {
     final radius = BorderRadius.circular(phone ? 0 : t.rControl);
     final content = Row(
       children: [
-        SessionStatusDot(status: s.status),
+        AgentMark(
+          session: s,
+          size: t.sp * (phone ? 4.5 : 4),
+          background: selected ? t.surface2 : (phone ? t.bg : t.surface),
+        ),
         SizedBox(width: t.sp * (phone ? 1.5 : 1.25)),
         Expanded(
           child: Column(
@@ -121,7 +134,7 @@ class SessionRow extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                s.name,
+                s.displayName,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -132,7 +145,7 @@ class SessionRow extends StatelessWidget {
               ),
               SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
               Text(
-                sessionSub(s),
+                sessionSub(s, host),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -149,7 +162,7 @@ class SessionRow extends StatelessWidget {
     return Semantics(
       button: true,
       selected: selected,
-      label: '${s.name}, ${s.statusLabel}',
+      label: sessionSpoken(s, host),
       excludeSemantics: true,
       onTap: onTap,
       child: Material(
@@ -295,6 +308,164 @@ class AgentsLabel extends StatelessWidget {
         fontSize: t.labelSize,
         letterSpacing: t.labelSize * 0.08,
         color: t.text3,
+      ),
+    );
+  }
+}
+
+/// The agent's mark on a rounded tile, the session's status a badge on its
+/// corner (D15 AM44): pulsing while the agent works, amber while unknown,
+/// danger once failed; an ended session's tile is faded.
+class AgentMark extends StatelessWidget {
+  const AgentMark({
+    super.key,
+    required this.session,
+    this.size,
+    this.background,
+  });
+
+  final AgentSession session;
+  final double? size;
+
+  /// What the badge's ring cuts out of: the row behind the tile.
+  final Color? background;
+
+  static const claudeOrange = Color(0xFFD97757);
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final s = session;
+    final side = size ?? t.sp * 4;
+    final glyph = side * 0.6;
+    final mark = switch (s.provider) {
+      'claude-code' => SvgPicture.asset(
+        'assets/agents/claude-code.svg',
+        width: glyph,
+        height: glyph,
+        colorFilter: const ColorFilter.mode(claudeOrange, BlendMode.srcIn),
+      ),
+      'opencode' => SvgPicture.asset(
+        'assets/agents/opencode.svg',
+        width: glyph * 0.8,
+        height: glyph * 0.8,
+        colorFilter: ColorFilter.mode(t.text, BlendMode.srcIn),
+      ),
+      'shell' => Icon(LucideIcons.square_terminal, size: glyph, color: t.text2),
+      _ => Icon(LucideIcons.bot, size: glyph, color: t.text2),
+    };
+    final badge = switch (s.status) {
+      'running' when s.working => t.accent,
+      'creating' || 'starting' => t.text3,
+      'unknown' => t.amber,
+      'failed' => t.danger,
+      _ => null,
+    };
+    final dot = side * 0.34;
+    return SizedBox(
+      key: Key('mark-${s.id}'),
+      width: side,
+      height: side,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Opacity(
+            opacity: s.ended ? 0.5 : 1,
+            child: Container(
+              width: side,
+              height: side,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: t.surface2,
+                borderRadius: BorderRadius.circular(t.rControl),
+              ),
+              child: mark,
+            ),
+          ),
+          if (badge != null)
+            Positioned(
+              right: -dot * 0.25,
+              bottom: -dot * 0.25,
+              child: _Badge(
+                key: Key('badge-${s.id}'),
+                color: badge,
+                ring: background ?? t.bg,
+                size: dot,
+                pulse: s.status == 'running' && s.working,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Badge extends StatefulWidget {
+  const _Badge({
+    super.key,
+    required this.color,
+    required this.ring,
+    required this.size,
+    required this.pulse,
+  });
+
+  final Color color;
+  final Color ring;
+  final double size;
+  final bool pulse;
+
+  @override
+  State<_Badge> createState() => _BadgeState();
+}
+
+class _BadgeState extends State<_Badge> with SingleTickerProviderStateMixin {
+  late final _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(_Badge old) {
+    super.didUpdateWidget(old);
+    _sync();
+  }
+
+  void _sync() {
+    final animate = widget.pulse && !MediaQuery.disableAnimationsOf(context);
+    if (animate && !_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    } else if (!animate && _pulse.isAnimating) {
+      _pulse
+        ..stop()
+        ..value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return AnimatedBuilder(
+      animation: _pulse,
+      builder: (context, _) => Container(
+        width: widget.size,
+        height: widget.size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color.lerp(widget.color, widget.ring, _pulse.value * 0.55),
+          border: Border.all(color: widget.ring, width: t.bw * 2),
+        ),
       ),
     );
   }

@@ -263,7 +263,8 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
   }
 
   String _sessionName(String id) =>
-      ref.watch(agentOverviewProvider).value?.byId(id)?.name ?? 'Session';
+      ref.watch(agentOverviewProvider).value?.byId(id)?.displayName ??
+      'Session';
 
   /// Back to where the note was opened from, else its folder.
   void _leaveNote() {
