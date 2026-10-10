@@ -167,3 +167,8 @@ assert_sudo_marks_consistent() {
 sudo_steps_used() {
   awk '$2=="sudo" && $0 !~ / sudo (-n )?-v$/ { sub(/^step=/,"",$1); if ($1 != "") print $1 }' "$FAKE_LOG" | sort -un
 }
+
+# A file's permission bits, on GNU or BSD stat.
+file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
