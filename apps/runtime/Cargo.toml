@@ -61,6 +61,8 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "
 toml = "1.1.6"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+# The agent's terminal title, parsed once on the host (D15 AM43).
+vte = "0.15"
 
 [dev-dependencies]
 rustix = { version = "1.1.5", features = ["process", "system"] }

@@ -1,0 +1,27 @@
+{
+  "comment": "D15 AM43: a terminal title (OSC 0/2) as an agent sets it, and the name and activity the Runtime Host reports for it. Captured from Claude Code 2.1.296 and OpenCode 1.18.31 on 2026-10-10.",
+  "titles": [
+    { "raw": "✳ Claude Code", "name": null, "activity": "idle" },
+    { "raw": "◐ Claude Code", "name": null, "activity": "working" },
+    { "raw": "◑ Ok", "name": "Ok", "activity": "working" },
+    { "raw": "✳ Ok", "name": "Ok", "activity": "idle" },
+    { "raw": "✳ Single colour image question", "name": "Single colour image question", "activity": "idle" },
+    { "raw": "◒ Fix the login redirect", "name": "Fix the login redirect", "activity": "working" },
+    { "raw": "◓ Fix the login redirect", "name": "Fix the login redirect", "activity": "working" },
+    { "raw": "⠂ Refactor auth", "name": "Refactor auth", "activity": "working" },
+    { "raw": "⣿ Refactor auth", "name": "Refactor auth", "activity": "working" },
+    { "raw": "OpenCode", "name": null, "activity": null },
+    { "raw": "opencode", "name": null, "activity": null },
+    { "raw": "", "name": null, "activity": null },
+    { "raw": "   ", "name": null, "activity": null },
+    { "raw": "✳ ", "name": null, "activity": "idle" },
+    { "raw": "dew@omarchy:~/storm", "name": null, "activity": null },
+    { "raw": "storm-runtime@codebox: /var/lib/storm-runtime/workspaces/scratch", "name": null, "activity": null },
+    { "raw": "vim notes.md", "name": "vim notes.md", "activity": null },
+    { "raw": "  Plan   the\tmigration  ", "name": "Plan the migration", "activity": null },
+    { "raw": "✳  Two  spaces", "name": "Two spaces", "activity": "idle" },
+    { "raw": "Ship it ✳", "name": "Ship it ✳", "activity": null },
+    { "raw": "a\u0007b\u001bc", "name": "abc", "activity": null }
+  ],
+  "long": { "raw_length": 300, "name_length": 120 }
+}
