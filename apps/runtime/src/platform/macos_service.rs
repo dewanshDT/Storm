@@ -330,14 +330,38 @@ pub fn install(options: &InstallOptions) -> Result<()> {
         println!("\nThis host is enrolled; launchd restarted it with this binary.");
     } else {
         println!("\nNext, enroll it. In the Storm app: Agents > Hosts > Enroll a host, then run:");
+        // `cd /`: the hidden account cannot read the operator's directory.
         println!(
-            "  sudo -u {SERVICE_ACCOUNT} {} enroll",
+            "  cd / && sudo -u {SERVICE_ACCOUNT} {} enroll",
             layout.bin.display()
         );
         println!("launchd starts the host as soon as it is enrolled.");
     }
-    println!("\nLog the agent CLIs in as the host's account, once:");
-    println!("  cd / && sudo -u {SERVICE_ACCOUNT} -H claude");
+    // F5: the interactive Claude Code login needs a login Keychain, which the
+    // hidden account has none of; a long-lived token in an env file works.
+    let env_file = layout.state.join("claude.env");
+    println!("\nLog the agent CLIs in for the host's account, once.");
+    println!("Claude Code: make a long-lived token as yourself, then store it for the host");
+    println!("(its interactive login needs a Keychain the hidden account does not have):");
+    println!("  claude setup-token");
+    println!(
+        "  sudo -u {SERVICE_ACCOUNT} sh -c 'umask 077; cat > {}'",
+        env_file.display()
+    );
+    println!("  (type CLAUDE_CODE_OAUTH_TOKEN=<the token>, Enter, then Ctrl-D)");
+    println!(
+        "and name it in {} (listing providers replaces the defaults):",
+        layout.config.display()
+    );
+    println!("  [[providers]]");
+    println!("  id = \"claude-code\"");
+    println!("  env_file = \"{}\"", env_file.display());
+    println!("  [[providers]]");
+    println!("  id = \"opencode\"");
+    println!("  [[providers]]");
+    println!("  id = \"shell\"");
+    println!("OpenCode:");
+    println!("  cd / && sudo -u {SERVICE_ACCOUNT} -H opencode auth login");
     println!("\nGit refuses a checkout another account owns. To use the host's checkouts");
     println!("with your own git (the host's account already trusts yours):");
     println!(

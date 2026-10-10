@@ -1,0 +1,100 @@
+name: macOS Runtime Host acceptance
+
+# AC-M1–AC-M9 (decision 83) on a real Mac: the runner. It installs the
+# branch's storm-runtime as a LaunchDaemon under the _stormruntime account,
+# enrolls it with a throwaway storm-server built from the same commit, and
+# drives install, enrollment, providers, sessions, process lifecycle,
+# filesystem boundaries, secrets, revocation and uninstall through
+# apps/runtime/tests/macos_acceptance.py. The runner is disposable, which is
+# why the harness may create a system account and a system service here.
+#
+# What a runner cannot do — a logged-in Claude Code or OpenCode taking a
+# prompt, the Mac → phone handoff, a reboot — the harness reports MANUAL,
+# never PASS. Nothing here publishes anything (decision 45).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["acceptance/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-host:
+    name: macOS Runtime Host (AC-M1–M9)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: Build storm-server and storm-runtime
+        run: |
+          (cd apps/server && cargo build)
+          (cd apps/runtime && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}/apps/server/target/debug/storm-server
+          RUNTIME_BIN: ${{ github.workspace }}/apps/runtime/target/debug/storm-runtime
+          # The runner has neither CLI: stubs in the Homebrew prefix prove
+          # discovery outside /usr/bin and the session environment (AC-M3).
+          STORM_ACCEPT_STUBS: "1"
+          STORM_ACCEPT_CLEANUP: "1"
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}/macos-acceptance
+        run: python3 apps/runtime/tests/macos_acceptance.py
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-acceptance-logs
+          path: ${{ runner.temp }}/macos-acceptance
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The binary an operator installs for the manual rows (a real CLI login, the
+  # Mac → phone handoff, a reboot): built exactly as release.yml's
+  # runtime-macos job builds it, from this commit, stamped with it.
+  test-build:
+    name: macOS test build (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - name: Stamp a pre-release version from the commit
+        working-directory: apps/runtime
+        run: |
+          VERSION="0.4.0-macos.$(git rev-parse --short=7 HEAD)"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          rm Cargo.toml.bak
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Build, join and sign
+        working-directory: apps/runtime
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/storm-runtime \
+            target/x86_64-apple-darwin/release/storm-runtime \
+            -output dist/storm-runtime
+          codesign --force --sign - dist/storm-runtime
+          codesign --verify --verbose dist/storm-runtime
+          lipo -info dist/storm-runtime
+          dist/storm-runtime --version
+          cp ../../LICENSE dist/
+          shasum -a 256 dist/storm-runtime | tee dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: storm-runtime-macos-test
+          path: apps/runtime/dist/*
+          retention-days: 30
