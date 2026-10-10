@@ -4832,6 +4832,45 @@ outlives it.
 
 **Still open:** the Mac re-test of these fixes; an Intel Mac.
 
+
+**84. An interactive installer: one script, any part of Storm, on a Linux or
+macOS laptop (M24).** *(2026-10-10)*
+
+Spec and plan: the vault notes *Installer/Interactive Installer* and
+*Installer/Interactive Installer — Plan*. `deploy/install.sh` becomes one
+dependency-free script with its own TUI, still served from
+`https://dewanshdt.github.io/Storm/install.sh`. On one machine it installs any
+of the server, the Runtime Host, the desktop app and phone pairing; sets up the
+account; and enrolls the runtime. Re-running it is how a machine is upgraded,
+checked, paired or cleaned up.
+- **84a.** One script, bash ≥ 3.2, no `dialog`/`gum`. Keys come from
+  `/dev/tty`, so `curl | sh` stays interactive; flags (`--yes`, `--dry-run`,
+  `--server --runtime --app --mobile --agents --everything`) script it.
+- **84b.** Components are a registry (detect, plan, install, configure,
+  verify, uninstall); presets are Everything / Server and app / Runtime only.
+  The relay is registered and disabled until Remote Connectivity ships.
+- **84c.** Linux takes the apt repo; macOS takes release assets, each checked
+  against `checksums.txt`. Homebrew is offered for the agent CLIs only.
+- **84d.** **A macOS server**: a universal `storm-server`, and `up` on macOS
+  installs a LaunchAgent that runs as the user, with data in `~/Storm`.
+  Notes are the person's own files; on a laptop the server need only run
+  while they are logged in; `~/Storm` is outside every TCC-protected folder.
+  *Revisit if* a Mac must serve while logged out (a LaunchDaemon with its own
+  account, like the runtime's).
+- **84e.** `storm-server host-enrollment` mints an enrollment string on the
+  server's own machine, as the account, and prints it only into a pipe.
+  The installer pipes it straight into `storm-runtime enroll`, so a runtime
+  beside its server enrolls with no app and no visible secret.
+  `storm-server has-account` (exit 0/1) lets the installer wait for a first
+  device's pairing; `storm-server qr TEXT` draws its links.
+- **84f.** A runtime for a server elsewhere enrolls by pasting the app's
+  string at a hidden prompt; it never reaches argv, the screen or the log.
+- **84g.** A fresh server's account comes from pairing (the first device to
+  scan creates it) or `passwd`, offered in that order.
+- **84h.** Safety: everything inside `main`; a plan screen lists every step and
+  every `sudo` before anything changes; re-runs are idempotent; secrets go on
+  stdin only; uninstall never deletes vaults or workspaces; no telemetry.
+
 ---
 
 ## Data model
