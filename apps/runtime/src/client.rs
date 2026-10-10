@@ -261,7 +261,11 @@ pub async fn enroll(
     };
     // A revoked enrollment it replaces (AM36) is kept as a record, with its
     // key, out of the way of the live identity (B-5).
-    HostConfig::archive_revoked(state_dir)?;
+    // The server has accepted this enrollment: a failure here must not
+    // abort it, or the one-time string is spent and host.json never written.
+    if let Err(e) = HostConfig::archive_revoked(state_dir) {
+        eprintln!("warning: could not keep the revoked enrollment: {e:#}");
+    }
     announce(&config);
     config.save(state_dir)?;
     Ok(config)
