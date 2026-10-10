@@ -94,9 +94,13 @@ fn workspace() -> PathBuf {
 }
 
 fn start(provider: &CliProvider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
+    // Unique per test: a session's ending ends every process carrying its
+    // id, and the tests run side by side.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let rec = Arc::new(Recorder::default());
     let spec = SessionSpec {
-        session_id: "ags_CLI".into(),
+        session_id: format!("ags_CLI{n}_{}", std::process::id()),
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
@@ -380,6 +384,38 @@ fn ended_means_the_session_is_empty() {
         SessionEnd::Completed { exit_code: Some(0) }
     );
     assert!(!alive(job), "the detached job outlived its session's end");
+}
+
+/// F1: what an agent daemonized — `setsid`, stdio closed, reparented, as
+/// OpenCode does with `serve --service` — has left the session, so neither
+/// the group nor the session signals reach it. It still carries the
+/// session's tag, so the ending ends it too.
+#[test]
+fn ending_reaches_what_left_the_session_with_setsid() {
+    let daemon = "perl -MPOSIX -e 'setsid() or die; open STDIN, q(</dev/null); \
+                  open STDOUT, q(>/dev/null); open STDERR, q(>/dev/null); \
+                  exec q(sleep), 1000'";
+    let (mut session, rec) = start(&sh(&format!(
+        "{daemon} & echo daemon:$! :ready; exec sleep 1000"
+    )));
+    let out = rec.wait_for(":ready");
+    let daemon = pid_after(&out, "daemon:");
+    let deadline = Instant::now() + WAIT;
+    // perl calls setsid only once it runs.
+    while rustix::process::getsid(rustix::process::Pid::from_raw(daemon))
+        .map(|s| s.as_raw_nonzero().get())
+        != Ok(daemon)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never left the session"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    session.stop(Duration::from_millis(300));
+    assert_eq!(rec.wait_end(), SessionEnd::Stopped);
+    wait_gone(daemon, "the setsid daemon");
 }
 
 #[test]

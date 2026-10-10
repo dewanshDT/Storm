@@ -24,6 +24,12 @@
 //!   for `ended` (its shutdown, AM37) therefore leaves nothing behind. Only a
 //!   process that called `setsid` itself has left the session; the
 //!   exclusive-account sweep ends those when the host stops.
+//! - **What left the session is found by its tag** (F1). Every process a
+//!   session starts inherits `STORM_RUNTIME_SESSION=<id>`
+//!   ([`crate::platform::SESSION_TAG`]). A server an agent daemonized with
+//!   `setsid` (OpenCode's `serve --service`) has left the session and been
+//!   reparented, but still carries the tag, so it is a straggler like any
+//!   other: the session's ending ends it too.
 //! - `ended` is reported only after the output has drained, so nothing arrives
 //!   after it.
 
@@ -173,8 +179,12 @@ impl Provider for CliProvider {
             .current_dir(&spec.workspace)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
+            .env(crate::platform::SESSION_TAG, &spec.session_id)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .envs(self.path.iter().map(|p| ("PATH", p)))
+            // A login shell's profile may reorder PATH; this is what the
+            // managed `.zprofile` restores (F3).
+            .envs(self.path.iter().map(|p| (crate::platform::SESSION_PATH, p)))
             // The session's own values last (AM32): its MCP config must win
             // over anything a provider env file says.
             .envs(spec.launch.env.iter().map(|(k, v)| (k, v)));
@@ -190,6 +200,7 @@ impl Provider for CliProvider {
                 .map_err(|e| failed("cloning the pty", e))?,
         );
         let shared = Arc::new(Shared {
+            tag: spec.session_id.clone(),
             status: Mutex::new(SessionStatus::Running),
             stop_requested: AtomicBool::new(false),
             exit: (Mutex::new(None), Condvar::new()),
@@ -207,7 +218,7 @@ impl Provider for CliProvider {
                 hang_up(group);
                 waiter.set_exit(status);
                 if !waiter.sleep_until_ended(DEFAULT_GRACE) {
-                    kill(group);
+                    kill(group, &waiter.tag);
                 }
             })
             .map_err(|e| failed("starting the wait thread", e))?;
@@ -230,6 +241,9 @@ impl Provider for CliProvider {
 
 /// State the session, its reader and its waiter share.
 struct Shared {
+    /// The session id, which every process it started carries in
+    /// [`crate::platform::SESSION_TAG`].
+    tag: String,
     status: Mutex<SessionStatus>,
     stop_requested: AtomicBool,
     /// The agent's exit, once it has one, and a wake-up for whoever waits.
@@ -271,7 +285,7 @@ impl Shared {
     /// SIGHUP, then SIGKILL to what remains after the grace. Returns once the
     /// session is empty, or a second after the SIGKILL.
     fn end_stragglers(&self) {
-        let members = || session_members(self.leader);
+        let members = || stragglers(self.leader, &self.tag);
         if members().is_empty() {
             return;
         }
@@ -338,9 +352,25 @@ fn hang_up(group: Pid) {
 /// SIGKILL to the group and to every other member of the session the agent
 /// leads (its pid is both ids): a job-control shell's jobs have groups of
 /// their own.
-fn kill(group: Pid) {
+fn kill(group: Pid, tag: &str) {
     let _ = rustix::process::kill_process_group(group, Signal::KILL);
-    signal_each(&session_members(group), Signal::KILL);
+    signal_each(&stragglers(group, tag), Signal::KILL);
+}
+
+/// Everything the session started that is still alive: the members of the
+/// session `leader` leads, and whatever left it but carries the session's tag.
+fn stragglers(leader: Pid, tag: &str) -> Vec<Pid> {
+    let mut all = session_members(leader);
+    for pid in crate::platform::tagged_processes(tag)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(Pid::from_raw)
+    {
+        if !all.contains(&pid) {
+            all.push(pid);
+        }
+    }
+    all
 }
 
 /// The live members of the session `leader` leads. If they cannot be listed,
@@ -441,7 +471,7 @@ impl ProviderSession for CliSession {
             .name("stop-grace".into())
             .spawn(move || {
                 if !shared.sleep_until_ended(grace) {
-                    kill(group);
+                    kill(group, &shared.tag);
                 }
             });
     }

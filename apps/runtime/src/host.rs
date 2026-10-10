@@ -52,6 +52,20 @@ use crate::status::{EndReason, SessionEnd};
 const SESSIONS_FILE: &str = "sessions.json";
 const BATCH: usize = 64 * 1024;
 const COALESCE: Duration = Duration::from_millis(20);
+/// How long a provider may take to start a session. A start that has not
+/// returned by then is reported `failed (start_failure)`, and whatever it
+/// later returns is stopped: a start that hangs costs its own session, never
+/// the link (B-0).
+/// How often the host tells the server it is alive (B-1), and how long the
+/// link may carry nothing — the server's keepalives come every 15 s — before
+/// the host takes it for dead and reconnects.
+const HEARTBEAT: Duration = Duration::from_secs(15);
+const LINK_IDLE: Duration = Duration::from_secs(45);
+const START_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(30)
+};
 
 /// A command from the server (freeze §11.5).
 #[derive(Debug, Deserialize)]
@@ -93,6 +107,34 @@ pub enum Command {
         connection: String,
         message: serde_json::Value,
     },
+}
+
+impl Command {
+    /// The wire name, for the log.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Start { .. } => "start",
+            Self::End { .. } => "end",
+            Self::Input { .. } => "terminal.input",
+            Self::Resize { .. } => "terminal.resize",
+            Self::Replay { .. } => "terminal.replay",
+            Self::Refresh => "refresh",
+            Self::McpMessage { .. } => "mcp.message",
+        }
+    }
+
+    /// The session a command is for, if it is for one.
+    fn session(&self) -> Option<&str> {
+        match self {
+            Self::Start { session, .. }
+            | Self::End { session }
+            | Self::Input { session, .. }
+            | Self::Resize { session, .. }
+            | Self::Replay { session, .. }
+            | Self::McpMessage { session, .. } => Some(session),
+            Self::Refresh => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -174,6 +216,9 @@ pub struct Host {
     /// Set once by [`Host::shutdown`]: from then on nothing is posted, so an
     /// ending the shutdown caused never reaches the server as `stopped`.
     shutting_down: AtomicBool,
+    /// Sessions whose start is in flight, with the commands that arrived for
+    /// them meanwhile, in order. They are applied once the session exists.
+    starting: Mutex<HashMap<String, Vec<Command>>>,
 }
 
 /// How long a shutdown waits for its sessions beyond their two graces (the
@@ -184,10 +229,18 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
+        let providers = config.providers()?;
+        Self::with_providers(state_dir, config, providers)
+    }
+
+    fn with_providers(
+        state_dir: &Path,
+        config: RuntimeConfig,
+        providers: Vec<Arc<dyn Provider>>,
+    ) -> Result<Arc<Self>> {
         let identity = HostConfig::load(state_dir)?;
         let key = HostKey::load(state_dir, &identity.key_id)?;
         let client = ServerClient::for_host(&identity)?;
-        let providers = config.providers()?;
         let opencode_settings = config.opencode_settings();
         // Every session directory belongs to a session that died with the
         // previous process: its handle is gone, so its bridge config is too.
@@ -217,7 +270,34 @@ impl Host {
             subscribers: Mutex::new(HashMap::new()),
             opencode_settings,
             shutting_down: AtomicBool::new(false),
+            starting: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// What this host offers, once, at start: the line to read first when a
+    /// provider shows as missing in the app.
+    pub fn log_inventory(&self) {
+        tracing::info!(
+            host = %self.identity.host_id,
+            server = %self.identity.server_url,
+            max_sessions = self.config.max_sessions,
+            "identity"
+        );
+        for p in &self.providers {
+            tracing::info!(
+                provider = p.id().as_str(),
+                kind = p.kind().as_str(),
+                available = p.available() == Availability::Available,
+                "provider"
+            );
+        }
+        for root in &self.config.workspace_roots {
+            tracing::info!(root = %root.display(), "workspace root");
+        }
+        tracing::info!(
+            workspaces = list_workspaces(&self.config.workspace_roots).len(),
+            "workspaces"
+        );
     }
 
     fn capabilities(&self) -> serde_json::Value {
@@ -241,6 +321,9 @@ impl Host {
             // This host runs `storm-runtime mcp-bridge` (spec §6). A host
             // that does not say so gets no grants.
             "mcp_bridge": true,
+            // It posts `/v1/runtime/heartbeat` while linked (B-1), so the
+            // server may drop a link it has gone silent on.
+            "heartbeat": true,
         })
     }
 
@@ -394,10 +477,35 @@ impl Host {
             session.events.wake.notify_one();
         }
 
+        // The heartbeat: a `409` means the server has dropped this link.
+        let relink = Arc::new(Notify::new());
+        let _heartbeat = {
+            let (host, relink) = (self.clone(), relink.clone());
+            AbortOnDrop(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(HEARTBEAT);
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let sent = host
+                        .post_for_response("/v1/runtime/heartbeat", &json!({}), Some(HEARTBEAT))
+                        .await;
+                    if let Ok(r) = sent
+                        && r.status() == reqwest::StatusCode::CONFLICT
+                    {
+                        relink.notify_one();
+                        return;
+                    }
+                }
+            }))
+        };
+
         let mut buf: Vec<u8> = Vec::new();
         loop {
             tokio::select! {
-                chunk = stream.next() => {
+                chunk = tokio::time::timeout(LINK_IDLE, stream.next()) => {
+                    let Ok(chunk) = chunk else {
+                        bail!("the link carried nothing for {} s", LINK_IDLE.as_secs());
+                    };
                     let Some(chunk) = chunk else { return Ok(()) };
                     buf.extend_from_slice(&chunk.context("reading the link")?);
                     while let Some((event, rest)) = split_event(&buf) {
@@ -405,7 +513,7 @@ impl Host {
                             match serde_json::from_str::<Envelope>(&data) {
                                 Ok(env) => {
                                     *self.last_cmd_seq.lock().unwrap() = env.cmd_seq;
-                                    self.clone().handle(env.command).await;
+                                    self.dispatch(env.cmd_seq, env.command);
                                 }
                                 Err(e) => tracing::warn!(error = %e, "unreadable command"),
                             }
@@ -415,6 +523,10 @@ impl Host {
                 }
                 _ = self.reauth.notified() => {
                     tracing::info!("token refused; re-authenticating");
+                    return Ok(());
+                }
+                _ = relink.notified() => {
+                    tracing::warn!("the server has no link for this host; reconnecting");
                     return Ok(());
                 }
             }
@@ -452,6 +564,55 @@ impl Host {
         Ok(())
     }
 
+    /// Takes one command off the link without ever waiting on a session
+    /// (B-0). A start runs as its own task; until it returns, the commands
+    /// for its session queue behind it, so they still apply in order. Every
+    /// other command returns at once.
+    fn dispatch(self: &Arc<Self>, cmd_seq: u64, command: Command) {
+        match &command {
+            Command::Input { .. } | Command::Resize { .. } | Command::McpMessage { .. } => {
+                tracing::debug!(
+                    seq = cmd_seq,
+                    kind = command.kind(),
+                    session = command.session(),
+                    "command"
+                )
+            }
+            _ => tracing::info!(
+                seq = cmd_seq,
+                kind = command.kind(),
+                session = command.session(),
+                "command"
+            ),
+        }
+        match command {
+            Command::Start { ref session, .. } => {
+                let id = session.clone();
+                self.starting.lock().unwrap().insert(id.clone(), Vec::new());
+                let host = self.clone();
+                tokio::spawn(async move {
+                    host.clone().handle(command).await;
+                    // A start that failed leaves its queue here: drop it.
+                    host.starting.lock().unwrap().remove(&id);
+                });
+            }
+            Command::Refresh => {
+                tokio::spawn(self.clone().handle(command));
+            }
+            command => {
+                if let Some(id) = command.session() {
+                    let mut starting = self.starting.lock().unwrap();
+                    if let Some(queue) = starting.get_mut(id) {
+                        queue.push(command);
+                        return;
+                    }
+                }
+                self.handle_now(command);
+            }
+        }
+    }
+
+    /// Applies one command, a start to the end of its start.
     async fn handle(self: Arc<Self>, command: Command) {
         match command {
             Command::Start {
@@ -474,6 +635,23 @@ impl Host {
                 )
                 .await
             }
+            Command::Refresh => {
+                let _ = self
+                    .post("/v1/runtime/inventory", &self.capabilities())
+                    .await;
+            }
+            command => self.handle_now(command),
+        }
+    }
+
+    /// Applies a command that is neither a start nor a refresh. It never
+    /// waits: what can block (a stop, a resize, behind a PTY write that holds
+    /// the session) runs on a blocking thread.
+    fn handle_now(&self, command: Command) {
+        match command {
+            Command::Start { .. } | Command::Refresh => {
+                debug_assert!(false, "{} handled inline", command.kind());
+            }
             Command::McpMessage {
                 session,
                 connection,
@@ -492,7 +670,9 @@ impl Host {
             }
             Command::End { session } => {
                 if let Some(s) = self.session(&session) {
-                    s.session.lock().unwrap().stop(DEFAULT_GRACE);
+                    tokio::task::spawn_blocking(move || {
+                        s.session.lock().unwrap().stop(DEFAULT_GRACE)
+                    });
                 }
             }
             Command::Input { session, data } => {
@@ -510,9 +690,11 @@ impl Host {
                 if let (Some(s), Some(size)) =
                     (self.session(&session), TerminalSize::new(cols, rows))
                 {
-                    let mut guard = s.session.lock().unwrap();
-                    let Interaction::Terminal(term) = guard.interaction();
-                    let _ = term.resize(size);
+                    tokio::task::spawn_blocking(move || {
+                        let mut guard = s.session.lock().unwrap();
+                        let Interaction::Terminal(term) = guard.interaction();
+                        let _ = term.resize(size);
+                    });
                 }
             }
             Command::Replay { session, from } => {
@@ -520,11 +702,6 @@ impl Host {
                     *s.sent.lock().unwrap() = from;
                     s.events.wake.notify_one();
                 }
-            }
-            Command::Refresh => {
-                let _ = self
-                    .post("/v1/runtime/inventory", &self.capabilities())
-                    .await;
             }
         }
     }
@@ -594,9 +771,28 @@ impl Host {
             interaction: InteractionSpec::Terminal(size),
             launch,
         };
-        let started = {
+        tracing::info!(session = %id, provider = %provider_id, %workspace, "starting");
+        let begun = std::time::Instant::now();
+        let mut provider_start = {
             let events: Arc<dyn SessionEvents> = events.clone();
-            tokio::task::spawn_blocking(move || provider.start(spec, events)).await
+            tokio::task::spawn_blocking(move || provider.start(spec, events))
+        };
+        let started = match tokio::time::timeout(START_DEADLINE, &mut provider_start).await {
+            Ok(started) => started,
+            Err(_) => {
+                tracing::warn!(
+                    session = %id,
+                    deadline_s = START_DEADLINE.as_secs(),
+                    "start did not return in time; reporting it failed"
+                );
+                // Whatever it returns now has no session to belong to.
+                tokio::spawn(async move {
+                    if let Ok(Ok(mut late)) = provider_start.await {
+                        tokio::task::spawn_blocking(move || late.stop(Duration::ZERO));
+                    }
+                });
+                return self.post_start_failure(&id).await;
+            }
         };
         let session = match started {
             Ok(Ok(session)) => session,
@@ -644,8 +840,21 @@ impl Host {
             .unwrap()
             .insert(id.clone(), host_session.clone());
         self.write_table();
-        tracing::info!(session = %id, provider = %provider_id, %workspace, "session started");
+        tracing::info!(
+            session = %id,
+            provider = %provider_id,
+            %workspace,
+            took_ms = begun.elapsed().as_millis() as u64,
+            "session started"
+        );
         tokio::spawn(self.clone().upload(host_session));
+        // What arrived while it started, in order. The lock is held
+        // throughout, so a newer command waits for these rather than
+        // overtaking them.
+        let mut starting = self.starting.lock().unwrap();
+        for command in starting.remove(&id).unwrap_or_default() {
+            self.handle_now(command);
+        }
     }
 
     async fn post_start_failure(&self, id: &str) {
@@ -916,6 +1125,15 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
     }
 }
 
+/// Aborts a task when the scope that owns it ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn read_table(state_dir: &Path) -> SessionTable {
     std::fs::read(state_dir.join(SESSIONS_FILE))
         .ok()
@@ -1118,6 +1336,237 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             vec!["ags_SHUTDOWN".to_string()],
             "sessions.json must keep it for the next hello"
         );
+    }
+
+    /// A host on the recording server with `providers`, its link up.
+    async fn test_host(
+        providers: Vec<Arc<dyn Provider>>,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [\"{}\"]",
+            roots.path().display()
+        ))
+        .unwrap();
+        let host = Host::with_providers(state.path(), config, providers).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, state, roots)
+    }
+
+    fn start(session: &str, provider: &str) -> Command {
+        Command::Start {
+            session: session.into(),
+            workspace: "w".into(),
+            provider: provider.into(),
+            interaction: Some("terminal".into()),
+            terminal: Size { cols: 80, rows: 24 },
+            mcp: Vec::new(),
+            context: false,
+        }
+    }
+
+    /// The fake provider under another id, whose `start` first waits for
+    /// `gate` (or for `hold`, if the gate never opens).
+    struct Gated {
+        id: crate::provider::ProviderId,
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        hold: Duration,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl Gated {
+        fn new(id: &str, hold: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                id: crate::provider::ProviderId::new(id).unwrap(),
+                gate: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                hold,
+                stopped: Arc::new(AtomicBool::new(false)),
+            })
+        }
+
+        fn open(&self) {
+            *self.gate.0.lock().unwrap() = true;
+            self.gate.1.notify_all();
+        }
+    }
+
+    struct Watched(Box<dyn ProviderSession>, Arc<AtomicBool>);
+
+    impl ProviderSession for Watched {
+        fn interaction(&mut self) -> Interaction<'_> {
+            self.0.interaction()
+        }
+        fn stop(&mut self, grace: Duration) {
+            self.1.store(true, Ordering::SeqCst);
+            self.0.stop(grace)
+        }
+        fn status(&self) -> crate::status::SessionStatus {
+            self.0.status()
+        }
+    }
+
+    impl Provider for Gated {
+        fn id(&self) -> &crate::provider::ProviderId {
+            &self.id
+        }
+        fn kind(&self) -> crate::provider::ProviderKind {
+            crate::provider::ProviderKind::Fake
+        }
+        fn interactions(&self) -> &[crate::provider::InteractionKind] {
+            &[crate::provider::InteractionKind::Terminal]
+        }
+        fn available(&self) -> Availability {
+            Availability::Available
+        }
+        fn start(
+            &self,
+            spec: SessionSpec,
+            events: Arc<dyn SessionEvents>,
+        ) -> Result<Box<dyn ProviderSession>, crate::provider::StartError> {
+            let (open, cvar) = &*self.gate;
+            let _ = cvar
+                .wait_timeout_while(open.lock().unwrap(), self.hold, |open| !*open)
+                .unwrap();
+            let inner = crate::fake::FakeProvider::new().start(spec, events)?;
+            Ok(Box::new(Watched(inner, self.stopped.clone())))
+        }
+    }
+
+    fn output(host: &Host, id: &str) -> String {
+        host.session(id)
+            .map(|s| match s.events.ring.lock().unwrap().read(0, BATCH) {
+                Read::Data { bytes, .. } => String::from_utf8_lossy(&bytes).into_owned(),
+                _ => String::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// B-0: a start that never returns costs its own session, not the link.
+    /// Another session starts and takes input meanwhile; the hung one is
+    /// reported `start_failure` at the deadline; and what its start returns
+    /// afterwards is stopped, not adopted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hung_start_blocks_neither_the_link_nor_other_sessions() {
+        let hung = Gated::new("hung", Duration::from_secs(60));
+        let (host, seen, _state, _roots) = test_host(vec![
+            hung.clone(),
+            Arc::new(crate::fake::FakeProvider::new()),
+        ])
+        .await;
+
+        host.dispatch(1, start("ags_HUNG", "hung"));
+        host.dispatch(2, start("ags_OK", "fake"));
+        eventually("the second session started", || {
+            host.session("ags_OK").is_some()
+        })
+        .await;
+        host.dispatch(
+            3,
+            Command::Input {
+                session: "ags_OK".into(),
+                data: BASE64.encode(b"hi"),
+            },
+        );
+        eventually("the second session echoed its input", || {
+            output(&host, "ags_OK").contains("hi")
+        })
+        .await;
+        // An End for the hung session neither blocks nor is lost.
+        host.dispatch(
+            4,
+            Command::End {
+                session: "ags_HUNG".into(),
+            },
+        );
+
+        eventually("the hung start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_hung") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_HUNG").is_none());
+        assert!(host.starting.lock().unwrap().is_empty());
+
+        hung.open();
+        eventually("the late session was stopped", || {
+            hung.stopped.load(Ordering::SeqCst)
+        })
+        .await;
+        assert!(
+            host.session("ags_HUNG").is_none(),
+            "a late start was adopted"
+        );
+    }
+
+    /// B-0: commands for a session that is still starting wait for it, and
+    /// then apply in the order they arrived.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commands_for_a_starting_session_apply_once_it_starts() {
+        let slow = Gated::new("slow", Duration::from_secs(60));
+        let ending = Gated::new("ending", Duration::from_secs(60));
+        let (host, _seen, _state, _roots) = test_host(vec![slow.clone(), ending.clone()]).await;
+
+        host.dispatch(1, start("ags_SLOW", "slow"));
+        for (seq, chunk) in [(2, "a"), (3, "b"), (4, "c")] {
+            host.dispatch(
+                seq,
+                Command::Input {
+                    session: "ags_SLOW".into(),
+                    data: BASE64.encode(chunk.as_bytes()),
+                },
+            );
+        }
+        host.dispatch(5, start("ags_ENDING", "ending"));
+        host.dispatch(
+            6,
+            Command::End {
+                session: "ags_ENDING".into(),
+            },
+        );
+        assert!(host.session("ags_SLOW").is_none());
+
+        slow.open();
+        ending.open();
+        eventually("the queued input arrived in order", || {
+            output(&host, "ags_SLOW").contains("abc")
+        })
+        .await;
+        eventually("the queued End stopped its session", || {
+            ending.stopped.load(Ordering::SeqCst)
+        })
+        .await;
+        assert!(!slow.stopped.load(Ordering::SeqCst));
     }
 
     #[test]

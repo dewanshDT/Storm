@@ -84,6 +84,34 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// The wire name, for the log.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Start { .. } => "start",
+            Self::End { .. } => "end",
+            Self::Input { .. } => "terminal.input",
+            Self::Resize { .. } => "terminal.resize",
+            Self::Replay { .. } => "terminal.replay",
+            Self::Refresh => "refresh",
+            Self::McpMessage { .. } => "mcp.message",
+        }
+    }
+
+    /// The session a command is for, if it is for one.
+    fn session(&self) -> Option<&str> {
+        match self {
+            Self::Start { session, .. }
+            | Self::End { session }
+            | Self::Input { session, .. }
+            | Self::Resize { session, .. }
+            | Self::Replay { session, .. }
+            | Self::McpMessage { session, .. } => Some(session),
+            Self::Refresh => None,
+        }
+    }
+}
+
 /// A command with its sequence number, as it goes on the wire.
 #[derive(Debug, Clone, Serialize)]
 pub struct Envelope {
@@ -114,6 +142,11 @@ pub struct Capabilities {
     /// says why.
     #[serde(default)]
     pub mcp_bridge: bool,
+    /// The host posts `/v1/runtime/heartbeat` while its link is up (B-1), so
+    /// a link it has gone silent on can be dropped. An old host does not, and
+    /// its link is never dropped for silence.
+    #[serde(default)]
+    pub heartbeat: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +271,8 @@ struct HostLink {
     tx: mpsc::UnboundedSender<Envelope>,
     next_seq: u64,
     capabilities: Option<Capabilities>,
+    /// The last request the host made, of any kind.
+    last_seen: std::time::Instant,
 }
 
 struct SessionLive {
@@ -354,6 +389,7 @@ impl AgentManager {
                 tx,
                 next_seq: 1,
                 capabilities,
+                last_seen: std::time::Instant::now(),
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -378,6 +414,54 @@ impl AgentManager {
         });
     }
 
+    /// The host made a request. Returns whether it has a link.
+    pub fn touch(&self, host_id: &str) -> bool {
+        match self.live.lock().unwrap().hosts.get_mut(host_id) {
+            Some(link) => {
+                link.last_seen = std::time::Instant::now();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drops the link of every heartbeating host that has made no request for
+    /// `silence` (B-1). A sleeping Mac's link looks healthy from here: TCP
+    /// keeps accepting the keepalives into its send buffer for many minutes.
+    /// Dropping it marks the host offline and its sessions `unknown`, so input
+    /// is refused instead of queued onto a dead stream. Returns the hosts
+    /// dropped.
+    pub fn reap_silent(&self, silence: std::time::Duration) -> Vec<String> {
+        let silent: Vec<(String, u64, u64)> = self
+            .live
+            .lock()
+            .unwrap()
+            .hosts
+            .iter()
+            .filter(|(_, link)| {
+                link.capabilities.as_ref().is_some_and(|c| c.heartbeat)
+                    && link.last_seen.elapsed() > silence
+            })
+            .map(|(id, link)| {
+                (
+                    id.clone(),
+                    link.generation,
+                    link.last_seen.elapsed().as_secs(),
+                )
+            })
+            .collect();
+        for (host, generation, silent_s) in &silent {
+            tracing::warn!(
+                host,
+                generation,
+                silent_s,
+                "runtime host silent: dropping its link"
+            );
+            self.disconnect_host(host, *generation);
+        }
+        silent.into_iter().map(|(host, ..)| host).collect()
+    }
+
     #[cfg(test)]
     pub fn is_online(&self, host_id: &str) -> bool {
         self.live.lock().unwrap().hosts.contains_key(host_id)
@@ -399,7 +483,34 @@ impl AgentManager {
 
     fn send(&self, host_id: &str, command: Command) -> AgentResult<()> {
         let mut live = self.live.lock().unwrap();
-        let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
+        let Some(link) = live.hosts.get_mut(host_id) else {
+            tracing::info!(
+                host = host_id,
+                kind = command.kind(),
+                session = command.session(),
+                "command not sent: host offline"
+            );
+            return Err(AgentError::HostOffline);
+        };
+        // Input, resize and MCP messages are per keystroke or chatty: debug.
+        match &command {
+            Command::Input { .. } | Command::Resize { .. } | Command::McpMessage { .. } => {
+                tracing::debug!(
+                    host = host_id,
+                    seq = link.next_seq,
+                    kind = command.kind(),
+                    session = command.session(),
+                    "command sent"
+                )
+            }
+            _ => tracing::info!(
+                host = host_id,
+                seq = link.next_seq,
+                kind = command.kind(),
+                session = command.session(),
+                "command sent"
+            ),
+        }
         let envelope = Envelope {
             cmd_seq: link.next_seq,
             command,
@@ -567,6 +678,13 @@ impl AgentManager {
             return Ok(());
         }
         apply_report(&mut r, report)?;
+        tracing::info!(
+            host = host_id,
+            session = session_id,
+            status = %r.status,
+            end_reason = r.end_reason.as_deref(),
+            "session status"
+        );
         self.store.lock().unwrap().update(&r)?;
         self.bump(session_id);
         Ok(())
@@ -944,7 +1062,8 @@ impl AgentManager {
     /// A revoked host: its link is closed and its sessions are failed
     /// (freeze §5.6). The host ends them itself when next refused.
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
-        self.live.lock().unwrap().hosts.remove(host_id);
+        let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
+        tracing::info!(host = host_id, was_online, "runtime host revoked");
         self.transition_host_sessions(host_id, |r| {
             (!r.is_ended()).then(|| {
                 (
@@ -1078,6 +1197,7 @@ mod tests {
             workspaces: vec!["storm".into(), "site".into()],
             max_sessions: 2,
             mcp_bridge: true,
+            heartbeat: false,
         }
     }
 
@@ -1690,6 +1810,40 @@ mod tests {
         let (_new, _rx2) = m.connect_host("hst_A");
         m.disconnect_host("hst_A", old);
         assert!(m.is_online("hst_A"));
+    }
+
+    /// B-1: a heartbeating host that goes silent is dropped, its sessions
+    /// become `unknown` and input is refused; a host that never said it
+    /// heartbeats is left alone however quiet it is.
+    #[test]
+    fn a_silent_heartbeating_host_is_dropped_and_input_refused() {
+        let (m, _d) = manager();
+        let _rx = online(
+            &m,
+            "hst_A",
+            Capabilities {
+                heartbeat: true,
+                ..caps(&[("shell", true)])
+            },
+        );
+        let r = launch(&m, Some("shell")).unwrap();
+        let _old = online(&m, "hst_OLD", caps(&[("shell", true)]));
+
+        assert!(m.reap_silent(std::time::Duration::from_secs(60)).is_empty());
+        assert!(m.touch("hst_A"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            m.reap_silent(std::time::Duration::from_millis(10)),
+            vec!["hst_A".to_string()]
+        );
+        assert!(!m.is_online("hst_A"));
+        assert!(
+            m.is_online("hst_OLD"),
+            "an old host was dropped for silence"
+        );
+        assert!(!m.touch("hst_A"));
+        assert_eq!(m.get(&r.id).unwrap().status, "unknown");
+        assert!(matches!(m.input(&r.id, b"x"), Err(AgentError::HostOffline)));
     }
 
     #[test]

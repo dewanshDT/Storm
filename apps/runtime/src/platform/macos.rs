@@ -81,6 +81,65 @@ pub fn account_processes(uid: u32) -> io::Result<Vec<i32>> {
         .collect())
 }
 
+/// The environment `pid` was started with, NUL-separated, from
+/// `KERN_PROCARGS2`: readable for the processes of one's own account. The
+/// buffer is `argc`, the executable path, padding NULs, `argc` arguments, then
+/// the environment, which ends at the first empty string.
+pub fn environment(pid: i32) -> Option<Vec<u8>> {
+    let mut argmax: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: `argmax` is a live c_int and `size` is its size.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&mut argmax as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || argmax <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; argmax as usize];
+    let mut size = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    // SAFETY: `buf` is a live buffer of `size` bytes.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < std::mem::size_of::<libc::c_int>() {
+        return None;
+    }
+    buf.truncate(size);
+    let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?);
+    let mut rest = &buf[4..];
+    // The executable path, then the NULs that pad it.
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    rest = &rest[path_end..];
+    let first = rest.iter().position(|&b| b != 0)?;
+    rest = &rest[first..];
+    for _ in 0..argc {
+        let end = rest.iter().position(|&b| b == 0)?;
+        rest = &rest[end + 1..];
+    }
+    // The environment ends at the first empty string.
+    let end = rest
+        .windows(2)
+        .position(|w| w == [0, 0])
+        .map_or(rest.len(), |at| at + 1);
+    Some(rest[..end].to_vec())
+}
+
 fn all_pids() -> io::Result<Vec<i32>> {
     // SAFETY: a null buffer asks for the count only.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
