@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:xterm2/xterm.dart' show TerminalView;
 
 import 'package:storm/agent/session_inspector.dart';
 import 'package:storm/agent/terminal_surface.dart';
@@ -123,9 +124,7 @@ void main() {
 
     testWidgets('the terminal sits 10 px in', (tester) async {
       final c = await session(tester);
-      final view = tester.widget<StormTerminalView>(
-        find.byType(StormTerminalView),
-      );
+      final view = tester.widget<TerminalView>(find.byType(TerminalView));
       expect(view.padding!.left, 10);
       expect(view.padding!.right, 10);
       await disposeShell(tester, c);
@@ -145,9 +144,7 @@ void main() {
     testWidgets('no third column; a 10 px terminal inset', (tester) async {
       final c = await session(tester, size: phone);
       expect(find.byKey(const Key('session-inspector')), findsNothing);
-      final view = tester.widget<StormTerminalView>(
-        find.byType(StormTerminalView),
-      );
+      final view = tester.widget<TerminalView>(find.byType(TerminalView));
       expect(view.padding!.left, 10);
       await disposeShell(tester, c);
     });

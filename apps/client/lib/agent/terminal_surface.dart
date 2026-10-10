@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -6,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:xterm2/xterm.dart';
 
 import '../keyboard/storm_shortcut_maps.dart';
+import '../state/terminal_prefs.dart';
 import '../ui/tokens.dart';
 
 /// **The terminal-surface boundary** (freeze §10, gate Q5; decision 77d).
@@ -227,7 +230,7 @@ class _TerminalWriter implements StringSink {
   void writeln([Object? object = '']) => _terminal.write('$object\n');
 }
 
-/// The terminal widget, themed from the tokens.
+/// The terminal widget, themed from the tokens and sized by [prefs].
 class StormTerminalView extends StatelessWidget {
   const StormTerminalView({
     super.key,
@@ -235,28 +238,19 @@ class StormTerminalView extends StatelessWidget {
     this.focusNode,
     this.autofocus = false,
     this.readOnly = false,
-    this.padding,
-    this.fontSize,
-    this.lineHeight = 1.2,
-    this.surface = false,
+    this.phone = false,
+    this.prefs = const TerminalPrefs(),
   });
-
-  /// The handoff's terminal sets 1.7 (§3.6); xterm2's own default is 1.2.
-  final double lineHeight;
 
   final StormTerminal terminal;
   final FocusNode? focusNode;
   final bool autofocus;
   final bool readOnly;
 
-  /// Around the character grid; `sp` on every side when null. The padding is
-  /// drawn in the view's colour, not the agent's, so a full-screen agent that
-  /// paints its own background (OpenCode) shows it as a frame.
-  final EdgeInsets? padding;
-  final double? fontSize;
-
-  /// On `surface` rather than `bg` (the phone's session, handoff §3.6).
-  final bool surface;
+  /// The phone's session: on `surface` rather than `bg`, with smaller text
+  /// (handoff §3.6).
+  final bool phone;
+  final TerminalPrefs prefs;
 
   @override
   Widget build(BuildContext context) {
@@ -266,13 +260,20 @@ class StormTerminalView extends StatelessWidget {
     // would vanish. Both colours still come from the tokens: the light theme's
     // off-black text and off-white page, swapped.
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final background = dark ? (surface ? t.surface : t.bg) : t.text;
+    final background = dark ? (phone ? t.surface : t.bg) : t.text;
     final foreground = dark ? t.text : t.bg;
     final theme = _themes.putIfAbsent((
       foreground,
       background,
       t.accent,
     ), () => _theme(foreground, background, t.accent));
+    final style = TerminalStyle(
+      fontFamily: StormTokens.monoFamily,
+      fontSize: prefs.fontSize ?? (phone ? t.labelSize + 1 : t.codeSize),
+      height: prefs.spacing.lineHeight,
+    );
+    final base = EdgeInsets.all(t.sp * 1.25 * prefs.padding.scale);
+    final cell = terminalCellHeight(style, MediaQuery.textScalerOf(context));
     // **The app's chords stop here while the terminal has focus** (freeze
     // §10). The terminal handles the keys it understands before they bubble;
     // this catches the ones it leaves, so Ctrl+K reaches the agent's world or
@@ -282,27 +283,60 @@ class StormTerminalView extends StatelessWidget {
         for (final activator in stormGlobalShortcuts().keys)
           activator: const DoNothingAndStopPropagationIntent(),
       },
-      child: TerminalView(
-        terminal._terminal,
-        focusNode: focusNode,
-        autofocus: autofocus,
-        readOnly: readOnly,
-        // Asked first; whatever it leaves goes to xterm2's own encoding.
-        onKeyEvent: readOnly ? null : terminal._onKeyEvent,
-        theme: theme,
-        padding: padding ?? EdgeInsets.all(t.sp),
-        textStyle: TerminalStyle(
-          fontFamily: StormTokens.monoFamily,
-          fontSize: fontSize ?? t.labelSize + 1,
-          height: lineHeight,
+      child: LayoutBuilder(
+        builder: (context, box) => TerminalView(
+          terminal._terminal,
+          focusNode: focusNode,
+          autofocus: autofocus,
+          readOnly: readOnly,
+          // Asked first; whatever it leaves goes to xterm2's own encoding.
+          onKeyEvent: readOnly ? null : terminal._onKeyEvent,
+          theme: theme,
+          padding: evenTerminalPadding(base, box.maxHeight, cell),
+          textStyle: style,
+          keyboardAppearance: Brightness.dark,
+          // Agents redraw on resize; the terminal follows its box.
+          autoResize: true,
         ),
-        keyboardAppearance: Brightness.dark,
-        // Agents redraw on resize; the terminal follows its box.
-        autoResize: true,
       ),
     );
   }
 }
+
+/// [base] with the height left under the last whole row split above and
+/// below it, so the grid sits centred instead of leaving a gap at the bottom.
+@visibleForTesting
+EdgeInsets evenTerminalPadding(EdgeInsets base, double height, double cell) {
+  final inner = height - base.vertical;
+  if (!inner.isFinite || cell <= 0 || inner < cell) return base;
+  // A hair under the remainder, so xterm2's own `~/` still fits every row.
+  final spare = math.max(0.0, inner - (inner / cell).floor() * cell - 0.01);
+  return base.copyWith(
+    top: base.top + spare / 2,
+    bottom: base.bottom + spare / 2,
+  );
+}
+
+final _cellHeights = <(TerminalStyle, TextScaler), double>{};
+
+/// A row's height, measured as xterm2's painter measures it.
+@visibleForTesting
+double terminalCellHeight(TerminalStyle style, TextScaler scaler) =>
+    _cellHeights.putIfAbsent((style, scaler), () {
+      final text = style.toTextStyle();
+      final run = text.getTextStyle(textScaler: scaler);
+      var height = 0.0;
+      for (var c = 0x21; c <= 0x7e; c++) {
+        final builder = ui.ParagraphBuilder(text.getParagraphStyle())
+          ..pushStyle(run)
+          ..addText(String.fromCharCode(c));
+        final paragraph = builder.build()
+          ..layout(const ui.ParagraphConstraints(width: double.infinity));
+        height = math.max(height, paragraph.height);
+        paragraph.dispose();
+      }
+      return height;
+    });
 
 // xterm2 reports a colour-scheme change to the agent whenever the view gets a
 // theme that is not identical, and TerminalTheme has no value equality.

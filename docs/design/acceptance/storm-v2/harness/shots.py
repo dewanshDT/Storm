@@ -71,6 +71,8 @@ V2 = [
                   ("go", "/settings/device"), ("go", "/settings/connection")]),
     dict(name="desktop-20-settings-advanced", viewport="desktop", route="/settings/advanced"),
     dict(name="desktop-21-settings-about-health", viewport="desktop", route="/settings/health"),
+    dict(name="desktop-22-settings-terminal", viewport="desktop", route="/settings/terminal",
+         settle=1.5),
     dict(name="phone-10-settings-list", viewport="phone", route="/settings"),
     dict(name="phone-11-settings-page-ai-access", viewport="phone", route="/settings",
          actions=[("tap", "^AI access$")]),

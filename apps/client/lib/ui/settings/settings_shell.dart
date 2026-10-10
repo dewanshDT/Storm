@@ -21,6 +21,7 @@ import 'device_page.dart';
 import 'health_page.dart';
 import 'settings_widgets.dart';
 import 'storage_page.dart';
+import 'terminal_page.dart';
 import 'vaults_page.dart';
 
 /// One settings page (handoff §5.1). [storm] pages sit under the STORM label.
@@ -34,6 +35,7 @@ class SettingsPageInfo {
 
 const kSettingsPages = [
   SettingsPageInfo('device', 'This device'),
+  SettingsPageInfo('terminal', 'Terminal'),
   SettingsPageInfo('access', 'Devices & access'),
   SettingsPageInfo('vaults', 'Vaults', storm: true),
   SettingsPageInfo('ai', 'AI access', storm: true),
@@ -51,6 +53,7 @@ Widget settingsPageFor(String id) =>
     _FreshConfig(key: ValueKey(id), child: _pageFor(id));
 
 Widget _pageFor(String id) => switch (id) {
+  'terminal' => const TerminalPage(),
   'access' => const AccessPage(),
   'vaults' => const VaultsPage(),
   'ai' => const AiPage(),

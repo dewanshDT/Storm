@@ -9,6 +9,7 @@ import '../editor/frontmatter.dart' as fm;
 import '../router.dart';
 import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
+import '../state/terminal_prefs.dart';
 import '../ui/breakpoints.dart';
 import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
@@ -206,12 +207,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   focusNode: _focus,
                   autofocus: true,
                   readOnly: s.ended,
-                  fontSize: t.codeSize,
-                  lineHeight: 1.7,
-                  padding: EdgeInsets.symmetric(
-                    horizontal: t.sp * 1.25,
-                    vertical: t.sp * 1.5,
-                  ),
+                  prefs: ref.watch(terminalPrefsProvider),
                 ),
         ),
         if (s.ended)
@@ -582,13 +578,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         // wait for a tap on the terminal.
                         autofocus: false,
                         readOnly: s.ended,
-                        surface: true,
-                        fontSize: t.labelSize + 1,
-                        lineHeight: 1.7,
-                        padding: EdgeInsets.symmetric(
-                          horizontal: t.sp * 1.25,
-                          vertical: t.sp,
-                        ),
+                        phone: true,
+                        prefs: ref.watch(terminalPrefsProvider),
                       ),
               ),
             ),
