@@ -548,6 +548,24 @@ void main() {
       expect(find.byKey(const Key('enrollment-string')), findsNothing);
     });
 
+    // B-6: the sheet ends up in screenshots, so the string is masked until
+    // asked for; Copy still copies the whole string.
+    testWidgets('the enrollment string is masked until revealed', (
+      tester,
+    ) async {
+      const full = 'storm-enroll:v1:http://s:srv_X:pk:sen_TOKEN.secret';
+      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('enroll-host')));
+      await tester.pumpAndSettle();
+      expect(find.text(full), findsNothing);
+      expect(find.text(maskEnrollment(full)), findsOneWidget);
+      expect(maskEnrollment(full), isNot(contains('TOKEN')));
+      await tester.tap(find.byKey(const Key('reveal-enrollment')));
+      await tester.pumpAndSettle();
+      expect(find.text(full), findsOneWidget);
+    });
+
     // AM40: the machine being enrolled need not be this client, so the sheet
     // offers both platforms, and each shows only its own commands.
     Finder inDialog(Finder f) =>
@@ -633,7 +651,7 @@ void main() {
       }
       expect(
         mac.last.command,
-        'sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
+        'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       );
       expect(enrollFootnote(HostPlatform.macos), contains('dev.storm.runtime'));
     });
