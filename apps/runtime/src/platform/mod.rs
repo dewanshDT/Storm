@@ -117,6 +117,30 @@ pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
     os::session_members(sid)
 }
 
+/// The environment variable that marks every process a session started:
+/// `STORM_RUNTIME_SESSION=<session id>`. Children inherit it, so it follows
+/// what left the session with `setsid` and was reparented — a daemonized
+/// agent server (F1) — where the session id no longer reaches.
+pub const SESSION_TAG: &str = "STORM_RUNTIME_SESSION";
+
+/// Every live process of this account, other than this one, that was started
+/// with `STORM_RUNTIME_SESSION=<session>` in its environment. A process
+/// carries the environment it was started with, inherited from its parent
+/// unless that parent replaced it.
+pub fn tagged_processes(session: &str) -> io::Result<Vec<i32>> {
+    let uid = rustix::process::geteuid().as_raw();
+    let me = rustix::process::getpid().as_raw_nonzero().get();
+    let entry = format!("{SESSION_TAG}={session}");
+    Ok(os::account_processes(uid)?
+        .into_iter()
+        .filter(|&pid| pid != me)
+        .filter(|&pid| {
+            os::environment(pid)
+                .is_some_and(|env| env.split(|&b| b == 0).any(|e| e == entry.as_bytes()))
+        })
+        .collect())
+}
+
 fn timespec(timeout: Duration) -> rustix::event::Timespec {
     rustix::event::Timespec {
         tv_sec: timeout.as_secs() as _,
