@@ -58,7 +58,7 @@ use crate::index::Indexer;
 use crate::registry::Registry;
 
 #[derive(Parser, Debug)]
-#[command(name = "storm-server", about = "Storm sync server")]
+#[command(name = "storm-server", about = "Storm sync server", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1524,6 +1524,15 @@ mod tests {
         let token = &s[prefix.len()..];
         assert!(auth::hosts::enrollment_token_id(token).is_some(), "{token}");
         assert!(local_host_enrollment(state, "ftp://x").is_err());
+    }
+
+    /// The release's macOS job and the installer's upgrade check both run
+    /// `storm-server --version`; v0.6.0's build failed for want of it.
+    #[test]
+    fn the_cli_answers_version() {
+        use clap::CommandFactory;
+        let v = Cli::command().render_version();
+        assert!(v.starts_with("storm-server "), "{v}");
     }
 
     #[test]
