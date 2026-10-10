@@ -575,6 +575,14 @@ ui_fail() {
   log "fail: $*"
 }
 
+# ui_pad TEXT WIDTH: TEXT padded to WIDTH characters (printf pads bytes,
+# which misaligns "…" and friends).
+ui_pad() {
+  local n=$(($2 - ${#1}))
+  [ "$n" -gt 0 ] || n=0
+  printf '%s%*s' "$1" "$n" ''
+}
+
 ui_cursor() {
   [ "$RAW_KEYS" = 1 ] || return 0
   if [ "$1" = hide ]; then printf '\033[?25l' >&"$UI_FD"; else printf '\033[?25h' >&"$UI_FD"; fi
@@ -679,9 +687,9 @@ ui_menu_draw() {
     hint=""
     case "$item" in *"|"*) hint=${item#*|} ;; esac
     if [ "$i" = "$sel" ]; then
-      printf '\r\033[2K  %s%s %-22s%s %s%s%s\n' "$C_CYAN$C_BOLD" "$G_PTR" "$label" "$C_RESET" "$C_DIM" "$hint" "$C_RESET" >&"$UI_FD"
+      printf '\r\033[2K  %s%s %s%s %s%s%s\n' "$C_CYAN$C_BOLD" "$G_PTR" "$(ui_pad "$label" 22)" "$C_RESET" "$C_DIM" "$hint" "$C_RESET" >&"$UI_FD"
     else
-      printf '\r\033[2K    %-22s %s%s%s\n' "$label" "$C_DIM" "$hint" "$C_RESET" >&"$UI_FD"
+      printf '\r\033[2K    %s %s%s%s\n' "$(ui_pad "$label" 22)" "$C_DIM" "$hint" "$C_RESET" >&"$UI_FD"
     fi
   done
   printf '\r\033[2K  %s%s%s\n' "$C_DIM" "up/down move ${G_DOT} enter select ${G_DOT} q quit" "$C_RESET" >&"$UI_FD"
@@ -820,14 +828,14 @@ ui_checklist_draw() {
   local i=0 box
   while [ "$i" -lt "$n" ]; do
     if [ "${states[$i]}" = disabled ]; then
-      printf '\r\033[2K    %s%s %-16s %s%s\n' "$C_DIM" "$G_OFF" "${labels[$i]}" "${notes[$i]}" "$C_RESET" >&"$UI_FD"
+      printf '\r\033[2K    %s%s %s %s%s\n' "$C_DIM" "$G_OFF" "$(ui_pad "${labels[$i]}" 16)" "${notes[$i]}" "$C_RESET" >&"$UI_FD"
     else
       box=$G_OFF
       [ "${states[$i]}" = on ] && box=$G_ON
       if [ "$i" = "$sel" ]; then
-        printf '\r\033[2K  %s%s %s %-16s%s %s%s%s\n' "$C_CYAN$C_BOLD" "$G_PTR" "$box" "${labels[$i]}" "$C_RESET" "$C_DIM" "${notes[$i]}" "$C_RESET" >&"$UI_FD"
+        printf '\r\033[2K  %s%s %s %s%s %s%s%s\n' "$C_CYAN$C_BOLD" "$G_PTR" "$box" "$(ui_pad "${labels[$i]}" 16)" "$C_RESET" "$C_DIM" "${notes[$i]}" "$C_RESET" >&"$UI_FD"
       else
-        printf '\r\033[2K    %s %-16s %s%s%s\n' "$box" "${labels[$i]}" "$C_DIM" "${notes[$i]}" "$C_RESET" >&"$UI_FD"
+        printf '\r\033[2K    %s %s %s%s%s\n' "$box" "$(ui_pad "${labels[$i]}" 16)" "$C_DIM" "${notes[$i]}" "$C_RESET" >&"$UI_FD"
       fi
     fi
     i=$((i + 1))
@@ -916,12 +924,15 @@ ui_spinner() {
   SPIN_PID=$!
   if [ "$RAW_KEYS" = 1 ]; then
     ui_cursor hide
+    # Keys typed meanwhile (a paste meant for the next prompt) stay unseen.
+    stty -echo <&"$UI_IN" 2>/dev/null || :
     while kill -0 "$SPIN_PID" 2>/dev/null; do
       printf '\r\033[2K  %s%s%s %s' "$C_CYAN" "${SPIN_FRAMES[$((i % ${#SPIN_FRAMES[@]}))]}" "$C_RESET" "$desc" >&"$UI_FD"
       i=$((i + 1))
       sleep 0.1 2>/dev/null || sleep 1
     done
     printf '\r\033[2K' >&"$UI_FD"
+    stty echo <&"$UI_IN" 2>/dev/null || :
     ui_cursor show
   else
     ui_line "  ... $desc"
@@ -1431,7 +1442,7 @@ server_detect() {
     return 0
   fi
   rc=0
-  probe srv_as_owner "$state" "$(srv_bin)" has-account --state "$state" >/dev/null || rc=$?
+  probe run_as -n "$(srv_owner "$state")" "$(srv_bin)" has-account --state "$state" >/dev/null || rc=$?
   case "$rc" in
     0) SRV_ACCOUNT=yes ;;
     1) SRV_ACCOUNT=no ;;
@@ -1782,7 +1793,7 @@ runtime_configure() {
 }
 
 runtime_enroll_local() {
-  local state="$DATA_ROOT/state" st
+  local state="$DATA_ROOT/state"
   if [ "$RT_ENROLL_ACTION" = enroll ] && rt_enrolled_now; then
     echo "already enrolled; kept"
     return 0
@@ -1791,12 +1802,9 @@ runtime_enroll_local() {
     echo "the server has no account yet: set one up (pair or password), then re-run the installer and choose Enroll this runtime"
     return 1
   fi
-  {
-    srv_as_owner "$state" "$(srv_bin)" host-enrollment --state "$state" --url "http://127.0.0.1:$PORT" | rt_enroll_stdin
-    st="${PIPESTATUS[*]}"
-  } || :
-  if [ "$st" != "0 0" ]; then
-    echo "enrollment failed (host-enrollment, enroll exited: $st)"
+  # If host-enrollment fails it prints nothing, and enroll fails on that.
+  if ! srv_as_owner "$state" "$(srv_bin)" host-enrollment --state "$state" --url "http://127.0.0.1:$PORT" | rt_enroll_stdin; then
+    echo "enrollment failed"
     return 1
   fi
 }
@@ -2273,23 +2281,20 @@ apt_source_line() {
 apt_plan_repo() {
   plan_once apt-repo || return 0
   plan_add spin 1 "Add Storm's apt repository (signing key and source) and refresh apt" \
-    "curl -fsSL $KEYRING_URL | sudo tee $KEYRING_PATH >/dev/null\nprintf '$(apt_source_line)\\\\n' | sudo tee $LIST_PATH >/dev/null\nsudo apt-get update" \
+    "curl -fsSL -o storm-archive-keyring.gpg $KEYRING_URL\nsudo tee $KEYRING_PATH < storm-archive-keyring.gpg >/dev/null\nprintf '$(apt_source_line)\\\\n' | sudo tee $LIST_PATH >/dev/null\nsudo apt-get update" \
     apt_setup
 }
 
 # The same key and source the apt bootstrap always wrote.
 apt_setup() {
-  local st
-  as_root mkdir -p "$KEYRING_DIR" || return 1
+  local key="$WORK_DIR/storm-archive-keyring.gpg"
   # A binary OpenPGP keyring (not ASCII armor): apt's signed-by expects that.
-  {
-    fetch_url "$KEYRING_URL" | as_root tee "$KEYRING_PATH" >/dev/null
-    st="${PIPESTATUS[*]}"
-  } || :
-  if [ "$st" != "0 0" ]; then
+  if ! fetch_url "$KEYRING_URL" >"$key" || [ ! -s "$key" ]; then
     echo "couldn't download $KEYRING_URL"
     return 1
   fi
+  as_root mkdir -p "$KEYRING_DIR" "$(dirname "$LIST_PATH")" || return 1
+  as_root tee "$KEYRING_PATH" <"$key" >/dev/null || return 1
   as_root chmod 0644 "$KEYRING_PATH" || return 1
   printf '%s\n' "$(apt_source_line)" | as_root tee "$LIST_PATH" >/dev/null || return 1
   as_root chmod 0644 "$LIST_PATH" || return 1
@@ -2604,7 +2609,11 @@ choose_enroll_action() {
   if [ "$LOCAL_SERVER" = 1 ] || [ "$INTERACTIVE" = 1 ] || [ "$OPT_ENROLL_STDIN" = 1 ]; then
     RT_ENROLL_ACTION=enroll
   else
-    plan_note_pending "Runtime: not enrolled. Pass --enroll-from-stdin with its enrollment string on stdin, or re-run interactively."
+    if [ "$RT_ENROLLED" = unknown ]; then
+      plan_note_pending "Runtime: if it isn't enrolled yet, pass --enroll-from-stdin with its enrollment string on stdin, or re-run interactively."
+    else
+      plan_note_pending "Runtime: not enrolled. Pass --enroll-from-stdin with its enrollment string on stdin, or re-run interactively."
+    fi
   fi
   return 0
 }
@@ -2844,6 +2853,31 @@ flow_install() {
   return "$rc"
 }
 
+# What `curl … | sudo sh` always did: the apt repo and the storm-server
+# package, nothing else (no `up`: that needs choices).
+flow_legacy_bootstrap() {
+  local rc
+  ui_info "No terminal and no options: doing what the apt bootstrap always did, the apt"
+  ui_info "repository and the storm-server package. For the rest, run it in a terminal"
+  ui_info "or see --help."
+  if ! comp_available server; then
+    ui_fail "$(comp_reason server)"
+    return 1
+  fi
+  plan_reset
+  apt_plan_repo
+  plan_add spin 1 "Install the storm-server package" "sudo apt-get install -y storm-server" apt_install_pkg storm-server install
+  plan_confirm_run
+  rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  ui_line ""
+  ui_info "Installed. Configure and start with:"
+  ui_info "  sudo storm-server up"
+  ui_info "  sudo storm-server status"
+  ui_info "Or run the installer in a terminal: curl -fsSL $STORM_INSTALL_URL | sh"
+  return 0
+}
+
 flow_upgrade() {
   local c rc
   SEL=""
@@ -3044,6 +3078,12 @@ storm_main() {
     ui_info "and the installer asks for sudo only for the steps that need it."
     return 2
   fi
+  # `curl … | sudo sh` with no terminal and no options is how the old apt
+  # bootstrap was run, by people and by scripts: keep doing exactly that.
+  LEGACY_BOOTSTRAP=0
+  if [ "$OS" = linux ] && [ "$MY_UID" = 0 ] && [ "$INTERACTIVE" != 1 ] && [ $# -eq 0 ]; then
+    LEGACY_BOOTSTRAP=1 OPT_YES=1
+  fi
   if [ "$INTERACTIVE" != 1 ] && [ "$OPT_YES" != 1 ] && [ "$OPT_DRY_RUN" != 1 ] && [ "$SUBCOMMAND" != status ]; then
     refuse_no_tty
     return 2
@@ -3056,6 +3096,10 @@ storm_main() {
   release_init
   detect_all
   availability_all
+  if [ "$LEGACY_BOOTSTRAP" = 1 ]; then
+    flow_legacy_bootstrap || rc=$?
+    return "$rc"
+  fi
   case "$SUBCOMMAND" in
     status)
       settle_config

@@ -52,6 +52,16 @@ sudo_marked_steps() {
   [ "$marked" = "$used" ]
 }
 
+@test "linux from the apt repo: the same key and source the bootstrap wrote" {
+  run storm_main --yes --server --version v0.6.0 --addr 10.0.0.5 --password-stdin <<<"pw"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STORM_TEST_SYSROOT/usr/share/keyrings/storm.gpg")" = KEYRING ]
+  [ "$(cat "$STORM_TEST_SYSROOT/etc/apt/sources.list.d/storm.list")" = \
+    "deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main" ]
+  grep -q 'apt-get update -y' "$FAKE_LOG"
+  grep -q 'apt-get install -y storm-server$' "$FAKE_LOG"
+}
+
 @test "macos everything --yes: user-level server, sudo runtime, app installed" {
   use_macos
   run storm_main --yes --everything --from-dir "$ASSETS" --addr 10.0.0.5 --password-stdin <<<"pw-mac"
@@ -180,6 +190,24 @@ sudo_marked_steps() {
   run storm_main --yes uninstall
   [ "$status" -eq 2 ]
   [[ "$output" == *"say which installed components to remove"* ]]
+}
+
+@test "curl | sudo sh with no terminal and no options: the old apt bootstrap" {
+  export FAKE_UID=0 FAKE_USER=root
+  run storm_main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"doing what the apt bootstrap always did"* ]]
+  [ "$(cat "$STORM_TEST_SYSROOT/etc/apt/sources.list.d/storm.list")" = \
+    "deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main" ]
+  grep -q 'apt-get install -y storm-server$' "$FAKE_LOG"
+  ! grep -q 'storm-server up\|sudo' "$FAKE_LOG"
+  [[ "$output" == *"sudo storm-server up"* ]]
+}
+
+@test "without root, no terminal and no options still refuses" {
+  run storm_main
+  [ "$status" -eq 2 ]
+  [ ! -s "$FAKE_LOG" ]
 }
 
 @test "status works without a terminal and changes nothing" {

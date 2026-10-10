@@ -100,6 +100,24 @@ typed() {
   ! grep -q 'apt-get' "$FAKE_LOG"
 }
 
+@test "raw keys on a real terminal: arrows, checklist, questions, install" {
+  [ -n "$REAL_PYTHON" ] || skip "no python3 for the pty driver"
+  make_assets 0.6.0
+  unset STORM_TTY NO_COLOR
+  # Custom… (three downs), tick server and runtime, keep the three defaults,
+  # Install, then "Set a password here" for the account.
+  run env TERM=xterm-256color "$REAL_PYTHON" "$BATS_TEST_DIRNAME/pty_drive.py" \
+    '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' '\r' '\r' '\r' '\r' 'j' '\r' -- \
+    bash -c 'source "$1"; POLL_SLEEP=0; HEALTH_TRIES=2; storm_main --from-dir "$2"' _ "$INSTALLER" "$ASSETS"
+  [[ "$output" == *"EXIT=0"* ]]
+  [[ "$output" == *"› Custom…"* ]]
+  [[ "$output" == *"› [x] Storm server"* ]]
+  [[ "$output" == *"› Set a password here"* ]]
+  [[ "$output" == *"Summary"* ]]
+  [ -f "$STORM_TEST_SYSROOT/var/lib/storm-runtime/host.json" ]
+  grep -q 'storm-runtime enroll: storm-enroll:v1:LOCALSECRET' "$FAKE_STDIN"
+}
+
 @test "NO_COLOR and TERM=dumb: no escape codes" {
   NO_COLOR=1 ui_style
   [ -z "$C_BOLD$C_RED$C_RESET" ]

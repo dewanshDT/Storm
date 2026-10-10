@@ -44,7 +44,8 @@ dry() {
   [ "$(printf '%s\n' "$output" | grep -c "Add Storm's apt repository")" -eq 1 ]
   [[ "$output" == *"sudo apt-get install -y storm-server"* ]]
   [[ "$output" == *"sudo apt-get install -y storm-runtime"* ]]
-  [[ "$output" == *"/storm-archive-keyring.gpg | sudo tee $STORM_TEST_SYSROOT/usr/share/keyrings/storm.gpg"* ]]
+  [[ "$output" == *"curl -fsSL -o storm-archive-keyring.gpg https://dewanshdt.github.io/Storm/storm-archive-keyring.gpg"* ]]
+  [[ "$output" == *"sudo tee $STORM_TEST_SYSROOT/usr/share/keyrings/storm.gpg < storm-archive-keyring.gpg"* ]]
   [[ "$output" == *"deb [signed-by=/usr/share/keyrings/storm.gpg] https://dewanshdt.github.io/Storm stable main"* ]]
   run assert_sudo_marks_consistent "$output"
   [ "$status" -eq 0 ]

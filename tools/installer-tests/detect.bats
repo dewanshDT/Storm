@@ -31,7 +31,7 @@ setup() {
   [ "$SRV_DATA" = /mnt/notes ]
   [ "$SRV_RUNNING" = yes ]
   [ "$SRV_ACCOUNT" = yes ]
-  grep -q 'sudo -u storm storm-server has-account --state /mnt/notes/state' "$FAKE_LOG"
+  grep -q 'sudo -n -u storm storm-server has-account --state /mnt/notes/state' "$FAKE_LOG"
 }
 
 @test "linux: no account, server down" {

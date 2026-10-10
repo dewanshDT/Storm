@@ -13,7 +13,7 @@ FAKE_SRC="$BATS_TEST_DIRNAME/fake/fake.sh"
 # Real tools the installer and the fakes may use.
 REAL_TOOLS="bash sh cat sed awk grep head tail tr cut date dirname basename mkdir rm cp mv ln
 chmod mktemp tar gzip sha256sum sleep kill env tee touch ls sort wc find printf
-test true false readlink"
+test true false readlink stty tput"
 
 # The fakes on PATH (id and stat only rename the user running the tests). storm-server and storm-runtime are not: like the real
 # ones, they appear when a fake apt-get or a fake `up`/`install` puts them there.
@@ -26,6 +26,8 @@ setup_world() {
   FAKE_REAL_USER=$(id -un)
   FAKE_REAL_ID=$(type -P id)
   FAKE_REAL_STAT=$(type -P stat)
+  export REAL_PYTHON
+  REAL_PYTHON=$(type -P python3 || :)
   export FAKE_DIR="$t/fake"
   export FAKE_LOG="$FAKE_DIR/argv.log"
   export FAKE_STDIN="$FAKE_DIR/stdin.log"

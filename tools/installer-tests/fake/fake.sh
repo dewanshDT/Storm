@@ -56,6 +56,7 @@ case "$name" in
   id)
     case "$*" in
       -un | "-u -n" | "-nu") echo "$FAKE_USER" ;;
+      -u) echo "${FAKE_UID:-$("$FAKE_REAL_ID" -u)}" ;;
       *) exec "$FAKE_REAL_ID" "$@" ;;
     esac
     ;;
