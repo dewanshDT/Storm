@@ -125,6 +125,7 @@ class TerminalView extends StatefulWidget {
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
+    this.contentInsertionConfiguration,
   });
 
   /// The underlying terminal that this widget renders.
@@ -226,6 +227,10 @@ class TerminalView extends StatefulWidget {
   /// keys to the application. This is standard behavior for most terminal
   /// emulators. True by default.
   final bool simulateScroll;
+
+  /// What the on-screen keyboard may insert besides text, such as images
+  /// from Gboard, and where they go.
+  final ContentInsertionConfiguration? contentInsertionConfiguration;
 
   @override
   State<TerminalView> createState() => TerminalViewState();
@@ -476,6 +481,7 @@ class TerminalViewState extends State<TerminalView> {
         inputType: widget.keyboardType,
         keyboardAppearance: widget.keyboardAppearance,
         deleteDetection: widget.deleteDetection,
+        contentInsertionConfiguration: widget.contentInsertionConfiguration,
         onInsert: _onInsert,
         onDelete: () {
           _scrollToBottom();

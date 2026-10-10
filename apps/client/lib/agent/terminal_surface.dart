@@ -49,6 +49,29 @@ class StormTerminal {
   /// they always did.
   Future<bool> Function()? onImagePaste;
 
+  /// An image the on-screen keyboard inserted, such as a GIF or sticker from
+  /// Gboard (decision 87). Unset, the keyboard offers no images.
+  void Function(Uint8List bytes)? onKeyboardImage;
+
+  static const keyboardImageTypes = [
+    'image/png',
+    'image/jpeg',
+    'image/gif',
+    'image/webp',
+  ];
+
+  ContentInsertionConfiguration? get _insertion {
+    final take = onKeyboardImage;
+    if (take == null) return null;
+    return ContentInsertionConfiguration(
+      allowedMimeTypes: keyboardImageTypes,
+      onContentInserted: (content) {
+        final data = content.data;
+        if (data != null && data.isNotEmpty) take(data);
+      },
+    );
+  }
+
   /// The phone keys row's sticky modifiers. Each applies to the next key,
   /// typed or tapped on the row, and is then released, as on a phone's own
   /// shift. Listenable, because typing consumes one without the row knowing.
@@ -336,6 +359,7 @@ class StormTerminalView extends StatelessWidget {
           focusNode: focusNode,
           autofocus: autofocus,
           readOnly: readOnly,
+          contentInsertionConfiguration: readOnly ? null : terminal._insertion,
           // Asked first; whatever it leaves goes to xterm2's own encoding.
           onKeyEvent: readOnly ? null : terminal._onKeyEvent,
           theme: theme,

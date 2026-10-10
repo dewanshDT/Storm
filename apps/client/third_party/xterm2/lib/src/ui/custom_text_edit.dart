@@ -20,6 +20,7 @@ class CustomTextEdit extends StatefulWidget {
     this.inputAction = TextInputAction.newline,
     this.keyboardAppearance = Brightness.light,
     this.deleteDetection = false,
+    this.contentInsertionConfiguration,
   }) : viewId = viewId ?? PlatformDispatcher.instance.implicitView?.viewId {
     if (this.viewId == null) {
       throw Exception('Cannot open input connection without a valid viewId.');
@@ -52,6 +53,8 @@ class CustomTextEdit extends StatefulWidget {
 
   final bool deleteDetection;
 
+  final ContentInsertionConfiguration? contentInsertionConfiguration;
+
   final int? viewId;
 
   @override
@@ -78,6 +81,9 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
     if (!_shouldCreateInputConnection) {
       _closeInputConnectionIfNeeded();
+    } else if (_contentTypesChanged(oldWidget) && hasInputConnection) {
+      _closeInputConnectionIfNeeded();
+      _openInputConnection();
     } else {
       if (oldWidget.readOnly && widget.focusNode.hasFocus) {
         _openInputConnection();
@@ -156,6 +162,11 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
     }
   }
 
+  bool _contentTypesChanged(CustomTextEdit oldWidget) => !listEquals(
+        oldWidget.contentInsertionConfiguration?.allowedMimeTypes,
+        widget.contentInsertionConfiguration?.allowedMimeTypes,
+      );
+
   bool get _shouldCreateInputConnection => kIsWeb || !widget.readOnly;
 
   void _openInputConnection() {
@@ -174,6 +185,9 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         autocorrect: false,
         enableSuggestions: false,
         enableIMEPersonalizedLearning: false,
+        allowedMimeTypes:
+            widget.contentInsertionConfiguration?.allowedMimeTypes ??
+                const <String>[],
       );
 
       _connection = TextInput.attach(this, config);
@@ -244,6 +258,11 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
         _currentEditingState.text != _initEditingState.text) {
       _connection!.setEditingState(_initEditingState);
     }
+  }
+
+  @override
+  void insertContent(KeyboardInsertedContent content) {
+    widget.contentInsertionConfiguration?.onContentInserted(content);
   }
 
   @override

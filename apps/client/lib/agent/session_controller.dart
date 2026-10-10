@@ -69,6 +69,10 @@ class SessionController extends ChangeNotifier {
       unawaited(pasteImages([image]));
       return true;
     };
+    terminal.onKeyboardImage = (bytes) async {
+      final image = await normalizeImage(bytes);
+      if (image != null) unawaited(pasteImages([image]));
+    };
     terminal.onResize = (_, _) => _queueResize();
     _connect();
   }

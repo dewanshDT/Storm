@@ -1,3 +1,8 @@
+## 5.2.0+storm.1
+
+- `TerminalView.contentInsertionConfiguration`: the keyboard may insert
+  images (Storm decision 87).
+
 ## [5.2.0] - 2026-07-25
 
 * Harden resize behavior for synchronized output, tab stops, and size reports.
