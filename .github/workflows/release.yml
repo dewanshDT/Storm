@@ -271,7 +271,7 @@ jobs:
 
           In the Storm app: Settings > Agents > Hosts > Enroll a host, then paste
           the string here (it is read from the prompt, never an argument):
-            sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
+            cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll
 
           launchd starts the host by itself once it is enrolled. Workspaces are the
           directories under /Library/StormRuntime/workspaces.
@@ -289,6 +289,84 @@ jobs:
         with:
           name: runtime-macos
           path: apps/runtime/dist/*
+
+  # Decision 84d: the server for a Mac — a universal binary with the web
+  # client and the backup script, which `storm-server up` installs as a
+  # LaunchAgent running as the user.
+  server-macos:
+    name: server (macOS universal)
+    needs: [check, web]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: web-zip
+      - name: Stamp Cargo version from tag
+        working-directory: apps/server
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          rm Cargo.toml.bak
+          grep '^version' Cargo.toml
+      - name: Build universal binary
+        working-directory: apps/server
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist/pkg
+          lipo -create \
+            target/aarch64-apple-darwin/release/storm-server \
+            target/x86_64-apple-darwin/release/storm-server \
+            -output dist/pkg/storm-server
+          lipo -info dist/pkg/storm-server
+          codesign --force --sign - dist/pkg/storm-server
+          codesign --verify --verbose dist/pkg/storm-server
+          dist/pkg/storm-server --version
+      - name: Package tarball
+        working-directory: apps/server
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/pkg/web
+          unzip -q "../../web-zip/storm-web-${VERSION}.zip" -d dist/pkg/web
+          test -f dist/pkg/web/index.html
+          cp ../../deploy/storm-backup.sh dist/pkg/
+          chmod 0755 dist/pkg/storm-backup.sh
+          cp ../../LICENSE dist/pkg/
+          cat > dist/pkg/README-macos.txt <<EOF
+          Storm server ${GITHUB_REF_NAME} for macOS (universal: arm64 + x86_64)
+
+          The easy way is the installer:
+            curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
+
+          By hand: run it as yourself (not sudo). It installs itself as a
+          LaunchAgent that runs while you are logged in, keeps your notes in
+          ~/Storm, and serves the web client on port 8484:
+            ./storm-server up
+
+          Then pair your first device (scan the code with the Storm app):
+            "\$HOME/Library/Application Support/Storm/bin/storm-server" pair --state ~/Storm/state --qr
+
+          Status, stop, remove (your notes in ~/Storm are always kept):
+            storm-server status | down | uninstall
+          Ad-hoc signed and not notarized. Full guide: deploy/README.md.
+          EOF
+          tar -C dist/pkg -czf "dist/storm-server-${VERSION}-macos-universal.tar.gz" \
+            storm-server storm-backup.sh web LICENSE README-macos.txt
+          rm -rf dist/pkg
+          ls -la dist/
+      - name: Upload macOS server artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-macos
+          path: apps/server/dist/*
 
   android:
     name: android (apk)
@@ -390,7 +468,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, relay, runtime, runtime-macos, android, macos, web]
+    needs: [server, server-macos, relay, runtime, runtime-macos, android, macos, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -402,6 +480,8 @@ jobs:
           mkdir -p release
           # Artifacts land as artifacts/<name>/<file> — flatten.
           find artifacts -type f -exec cp {} release/ \;
+          # The installer, pinned to this release and checksummed with it (84).
+          cp deploy/install.sh release/install.sh
           cd release
           sha256sum * > checksums.txt
           ls -la
@@ -413,7 +493,17 @@ jobs:
           NOTES=$(cat <<EOF
           Storm ${GITHUB_REF_NAME}
 
-          Install the server on Debian/Ubuntu:
+          **Install anything — server, Runtime Host, app, phone pairing — on Linux
+          or macOS with the interactive installer:**
+          \`\`\`
+          curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
+          \`\`\`
+
+          **Server for macOS:** \`storm-server-${VERSION}-macos-universal.tar.gz\`
+          runs as you, as a LaunchAgent, with your notes in \`~/Storm\`:
+          \`./storm-server up\`.
+
+          Install the server on Debian/Ubuntu by hand:
           \`\`\`
           sudo apt install ./storm-server_${VERSION}_amd64.deb
           sudo storm-server up

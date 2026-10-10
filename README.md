@@ -61,15 +61,34 @@ The Android client, in the SlowFlow earth and Storm dark themes.
   </tr>
 </table>
 
-## Install (server)
+## Install
 
-Debian / Ubuntu — apt bootstrap, then start:
+One command, on Linux (Debian/Ubuntu) or macOS — an interactive installer
+that sets up any part of Storm on this machine: the server and app, a Runtime
+Host for agents, or everything, with your phone paired over the local network
+and the runtime enrolled for you:
 
 ```sh
-curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
+```
+
+It shows its plan (every `sudo` step included) before changing anything, and
+re-running it is how you upgrade, check status, pair a device, enroll a
+runtime or uninstall (your notes are always kept). Scripted:
+`sh install.sh --yes --server --app`, `--runtime`, `--everything`,
+`--dry-run`; `sh install.sh --help` lists the rest.
+
+### By hand (server on Debian / Ubuntu)
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sudo sh   # apt repo + storm-server only
 sudo storm-server up
 sudo storm-server status
 ```
+
+On macOS by hand: download `storm-server-<v>-macos-universal.tar.gz` from the
+release and run `./storm-server up` as yourself — a LaunchAgent with your
+notes in `~/Storm`.
 
 That URL is the **apt repository** root (not the marketing site). `up` creates
 the `storm` user and data root (`/srv/storm`), writes `/etc/storm/storm.env`

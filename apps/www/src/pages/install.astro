@@ -30,19 +30,23 @@ sudo -u storm storm-server passwd <name> --state /srv/storm/state`;
     <p class="eyebrow">07 · Installation</p>
     <h1>Install Storm</h1>
     <p class="lede">
-      Preferred path: one bootstrap on Debian or Ubuntu, then
-      <code>storm-server up</code>. The package ships the binary, systemd unit,
-      and web client. Then
+      One command on Linux (Debian/Ubuntu) or macOS opens an interactive
+      installer: the server and app, a Runtime Host for agents, or everything,
+      with your phone paired and the runtime enrolled for you. It shows its
+      plan before changing anything; run it again to upgrade, pair a device or
+      uninstall. Then
       <a href="/clients">get a client</a>
-      for your device.
+      for your other devices.
     </p>
   </header>
 
   <section class="section wrap-narrow" id="linux">
-    <h2>Linux · apt</h2>
+    <h2>Linux and macOS</h2>
     <p class="support">
-      The script adds Storm’s apt key and source, then runs
-      <code>apt install storm-server</code>. Served from the apt repo root at
+      On Linux the installer uses Storm’s signed apt repository; on macOS it
+      downloads the release, checks every file against its checksums, and runs
+      the server as you with your notes in <code>~/Storm</code>. Served from
+      the apt repo root at
       <a href={release.aptRoot} target="_blank" rel="noopener noreferrer"
         >dewanshdt.github.io/Storm</a
       >
