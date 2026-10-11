@@ -5731,6 +5731,28 @@ operator: agent pages give too much of the screen to the top bar)*
   - The back bubble in a session, and the place picker elsewhere.
 - The acceptance shots `phone-06` to `phone-09` are retaken.
 
+**91. `TCP_NODELAY` on every relay socket (P1).** *(2026-10-12, relay TODO
+§12.)* A relayed exchange is several small writes each way — the head, body
+chunks, a `CLOSE` — and nothing turned Nagle off, so each write after the
+first waited out the peer's delayed ACK. Measured 2026-10-03 against a real
+relay on localhost: **~42 ms p50 per request**, against 0.4 ms direct.
+- **The relay** sets it on every accepted socket: the plain listener is
+  wrapped (`PlainListener`; axum's `tap_io` cannot carry `PeerAddr`'s
+  `Connected` impl without overlapping axum's own), and the TLS accept loop
+  sets it before the handshake task, never inside `Listener::accept`.
+- **storm-server's tunnel** dials with `connect_async_with_config(.., true)`,
+  under the same connect deadline.
+- **The Dart client needs nothing**: `WebSocketChannel.connect` goes through
+  dart:io's `HttpClient`, which sets `tcpNoDelay` on every TCP socket it
+  opens (`_http/http_impl.dart`, Dart 3.12.2). Browsers do the same.
+- Tests: relay `a_relayed_exchange_does_not_wait_on_delayed_acks` (82 ms
+  median without the fix, under 1 ms with it) and server
+  `a_tunnelled_request_does_not_wait_on_delayed_acks` (42 ms without, under
+  1 ms with). Both assert a median under 15 ms over 21 exchanges, with Nagle
+  off on the test's own end so only the code under test can add the delay.
+*Revisit if:* a relayed exchange is ever batched into one write, which would
+make Nagle irrelevant — not a reason to turn it back on.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

@@ -159,8 +159,29 @@ async fn connect_upgrade(
 #[derive(Debug, Clone, Copy)]
 pub struct PeerAddr(pub SocketAddr);
 
-impl Connected<IncomingStream<'_, tokio::net::TcpListener>> for PeerAddr {
-    fn connect_info(stream: IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+/// A plain `TcpListener` that sets `TCP_NODELAY` on each accepted socket.
+///
+/// Its own type rather than axum's `tap_io`, because `PeerAddr` cannot be made
+/// `Connected` for a `TapIo` without overlapping axum's own impl.
+pub struct PlainListener(tokio::net::TcpListener);
+
+impl axum::serve::Listener for PlainListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (mut socket, peer) = axum::serve::Listener::accept(&mut self.0).await;
+        no_delay(&mut socket);
+        (socket, peer)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
+impl Connected<IncomingStream<'_, PlainListener>> for PeerAddr {
+    fn connect_info(stream: IncomingStream<'_, PlainListener>) -> Self {
         Self(*stream.remote_addr())
     }
 }
@@ -175,6 +196,7 @@ impl Connected<IncomingStream<'_, tls::TlsListener>> for PeerAddr {
 
 /// Serves until the listener errors or the process is asked to stop.
 pub async fn serve(listener: tokio::net::TcpListener, relay: Arc<Relay>) -> anyhow::Result<()> {
+    let listener = PlainListener(listener);
     // `into_make_service_with_connect_info` is what makes the peer address
     // reachable from a handler at all. Without it `relay_peer_ip` would have no
     // source but a header, and the field would be `X-Forwarded-For` renamed.
@@ -184,6 +206,14 @@ pub async fn serve(listener: tokio::net::TcpListener, relay: Arc<Relay>) -> anyh
     )
     .await?;
     Ok(())
+}
+
+/// Every relayed exchange is several small frames in a row, and with Nagle on
+/// each waits out the peer's delayed ACK: about 40 ms a request (decision 91).
+pub(crate) fn no_delay(socket: &mut tokio::net::TcpStream) {
+    if let Err(e) = socket.set_nodelay(true) {
+        tracing::debug!(error = %e, "setting TCP_NODELAY");
+    }
 }
 
 /// [`serve`], with TLS terminated here rather than by a proxy in front

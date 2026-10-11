@@ -153,7 +153,7 @@ async fn accept_loop(
 ) {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
     loop {
-        let (socket, peer) = match tcp.accept().await {
+        let (mut socket, peer) = match tcp.accept().await {
             Ok(accepted) => accepted,
             Err(e) => {
                 // Usually EMFILE. Spinning on it would starve everything else,
@@ -163,6 +163,7 @@ async fn accept_loop(
                 continue;
             }
         };
+        crate::no_delay(&mut socket);
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             tracing::debug!(%peer, "too many handshakes in progress; dropping");
             continue;
