@@ -320,6 +320,98 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    Map<String, dynamic> withConversation({String provider = 'claude-code'}) =>
+        agentSession(
+          'ags_done',
+          status: 'stopped',
+          name: 'design',
+          provider: provider,
+          harnessSession: provider == 'shell'
+              ? null
+              : '80d0cf8c-8176-43b4-8206-7908d74d1387',
+        );
+
+    testWidgets('Resume reopens the conversation without the launcher', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [withConversation()],
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_done'));
+      expect(find.byKey(const Key('resume-blocker')), findsNothing);
+      expect(find.byKey(const Key('run-again')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resume-session')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('launch')), findsNothing);
+      final body = agents.launches.single;
+      expect(body['resume_of'], 'ags_done');
+      expect(body['host_id'], 'hst_1');
+      expect(body['provider'], 'claude-code');
+      expect(where(c).path, '/agents/s/ags_new1');
+      // The conversation is listed once, under its latest session.
+      expect(find.byKey(const Key('session-ags_done')), findsNothing);
+      expect(find.byKey(const Key('session-ags_new1')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('phone: Resume leads the ended bar', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [withConversation(provider: 'opencode')],
+      );
+      final c = await open(
+        tester,
+        agents,
+        size: phone,
+        at: Routes.agentSession('ags_done'),
+      );
+      await tester.tap(find.byKey(const Key('resume-session')));
+      await tester.pumpAndSettle();
+      expect(agents.launches.single['resume_of'], 'ags_done');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Resume says why it is not offered', (tester) async {
+      for (final (host, why) in [
+        (
+          agentHost(resumes: null),
+          'Update storm-runtime on build-vm to resume',
+        ),
+        (
+          agentHost(status: 'offline'),
+          'Can\'t resume while build-vm is offline',
+        ),
+      ]) {
+        final agents = FakeAgentServer(
+          hosts: [host],
+          sessions: [withConversation()],
+        );
+        final c = await open(
+          tester,
+          agents,
+          at: Routes.agentSession('ags_done'),
+        );
+        expect(find.byKey(const Key('resume-session')), findsNothing);
+        expect(find.text(why), findsOneWidget);
+        expect(find.byKey(const Key('run-again')), findsOneWidget);
+        await disposeShell(tester, c);
+      }
+    });
+
+    testWidgets('a shell session has nothing to resume, and says nothing', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [withConversation(provider: 'shell')],
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_done'));
+      expect(find.byKey(const Key('resume-session')), findsNothing);
+      expect(find.byKey(const Key('resume-blocker')), findsNothing);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('Dismiss removes it and returns to the list', (tester) async {
       final agents = FakeAgentServer(hosts: [agentHost()], sessions: [ended()]);
       final c = await open(

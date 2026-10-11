@@ -6851,6 +6851,71 @@ pub(crate) mod tests {
             .to_string()
     }
 
+    /// Decision 89 over REST: the host reports the conversation, and a
+    /// resume runs where the old session ran, whatever the request says.
+    #[tokio::test]
+    async fn a_resume_reopens_the_conversation_where_it_ran() {
+        let dir = tempdir::TempDir::new("storm-resume-route").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let mut caps = host_caps(true);
+        caps["resume"] = serde_json::json!(["claude-code"]);
+        f.state
+            .agent
+            .hello(&f.host_id, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        let old = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _start = f.link.try_recv().unwrap();
+        let uuid = "80d0cf8c-8176-43b4-8206-7908d74d1387";
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{old}/status"),
+                serde_json::json!({"status": "completed", "exit_code": 0, "harness_session": uuid}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+
+        let (status, body) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "resume_of": old, "host_id": "hst_ELSEWHERE", "workspace": "other",
+                    "provider": "shell", "terminal": {"cols": 80, "rows": 24},
+                }),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["host_id"], f.host_id);
+        assert_eq!(body["workspace"], "storm");
+        assert_eq!(body["provider"], "claude-code");
+        assert_eq!(body["resumed_from"], old);
+        assert_eq!(body["harness_session"], uuid);
+        let start = serde_json::to_value(f.link.try_recv().unwrap()).unwrap();
+        assert_eq!(start["resume"], uuid);
+
+        let (status, body) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "resume_of": old, "host_id": f.host_id, "workspace": "storm",
+                    "terminal": {"cols": 80, "rows": 24},
+                }),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
     #[tokio::test]
     async fn an_agent_reaches_an_integration_through_the_host_link_and_only_its_allowlist() {
         let dir = tempdir::TempDir::new("storm-gateway-route").unwrap();

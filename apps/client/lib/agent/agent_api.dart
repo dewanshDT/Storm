@@ -145,6 +145,7 @@ class AgentApi {
     required int rows,
     ({String vaultId, String noteId})? context,
     String? writeVaultId,
+    String? resumeOf,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -164,6 +165,8 @@ class AgentApi {
               // Absent is read only (decision 82); `allow_vault_writes` is
               // the pre-v2 field and is never sent.
               'write_vault_id': ?writeVaultId,
+              // The server takes the rest from that session (decision 89).
+              'resume_of': ?resumeOf,
             }),
           ),
         )

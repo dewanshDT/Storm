@@ -56,6 +56,10 @@ enum Command {
         /// The connection's slug.
         slug: String,
     },
+    /// Tells the host which conversation the agent is on, so Storm can
+    /// resume it. Run by the agent's own hook or plugin, never by hand; reads
+    /// the id from stdin (a Claude Code hook's input) when none is given.
+    HarnessSession { id: Option<String> },
     /// Install this host as a system service, as root. macOS: creates the
     /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
     /// LaunchDaemon, which runs the host once it is enrolled. Re-run it to
@@ -92,6 +96,10 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         // Logs nothing: stdout is the MCP stream, and stderr is the agent's.
         Command::McpBridge { slug } => storm_runtime::bridge::run(slug).await,
+        Command::HarnessSession { id } => {
+            storm_runtime::harness::report(id);
+            Ok(())
+        }
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
             let name = name.unwrap_or_else(storm_runtime::platform::host_name);
