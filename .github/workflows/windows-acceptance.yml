@@ -83,3 +83,59 @@ jobs:
           path: ${{ runner.temp }}\windows-server-acceptance
           if-no-files-found: ignore
           retention-days: 14
+
+  # deploy/install.ps1 end to end, from zips built here: the server for this
+  # user, the Runtime Host as a service, enrolled through the pipe from the
+  # server beside it (no visible secret), and a first workspace.
+  installer:
+    name: Windows installer (install.ps1)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: The script parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/deploy/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors; exit 1 }
+      - name: Build and package as a release does
+        shell: pwsh
+        run: |
+          cargo build --manifest-path apps/server/Cargo.toml
+          cargo build --manifest-path apps/runtime/Cargo.toml
+          New-Item -ItemType Directory dist, pkg/server/web, pkg/runtime | Out-Null
+          Copy-Item apps/server/target/debug/storm-server.exe, apps/server/target/debug/storm-serverw.exe pkg/server/
+          Set-Content pkg/server/web/index.html '<!doctype html><title>Storm</title>'
+          Copy-Item apps/runtime/target/debug/storm-runtime.exe pkg/runtime/
+          Compress-Archive pkg/server/* dist/storm-server-windows-x86_64.zip
+          Compress-Archive pkg/runtime/* dist/storm-runtime-windows-x86_64.zip
+          Get-ChildItem dist/*.zip | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist/checksums.txt
+      - name: Install everything
+        shell: pwsh
+        run: ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes -Workspace scratch
+      - name: Check it
+        shell: pwsh
+        run: |
+          $ok = $true
+          function Check($what, $cond) { if ($cond) { "PASS  $what" } else { "FAIL  $what"; $script:ok = $false } }
+          Check 'the server answers' ((Invoke-WebRequest http://127.0.0.1:8484/v1/health -UseBasicParsing).StatusCode -eq 200)
+          Check 'the service runs' ((Get-Service StormRuntime).Status -eq 'Running')
+          & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" check
+          Check 'the host is enrolled with the server beside it' ($LASTEXITCODE -eq 0)
+          Check 'the first workspace exists' (Test-Path "$env:ProgramData\StormRuntime\workspaces\scratch")
+          Check 'the firewall rule is private-only' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
+          ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes
+          Check 're-running upgrades in place' ($? -and (Get-Service StormRuntime).Status -eq 'Running')
+          & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall --purge
+          & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" uninstall
+          if (-not $ok) { exit 1 }
