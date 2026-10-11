@@ -38,6 +38,11 @@ pub struct SessionRecord {
     pub title: Option<String>,
     /// `working` or `idle` while running; never stored (AM42).
     pub activity: Option<String>,
+    /// The agent's own id for the conversation, as its host last reported
+    /// it: what a resume reopens (decision 89).
+    pub harness_session: Option<String>,
+    /// The session this one resumed.
+    pub resumed_from: Option<String>,
 }
 
 impl SessionRecord {
@@ -119,7 +124,7 @@ pub struct Store {
 
 const COLUMNS: &str = "id, owner_user_id, host_id, workspace, provider, provider_kind, \
     interaction, provider_fallback, status, end_reason, signal, exit_code, created_at, \
-    started_at, ended_at, last_activity, egress, cols, rows, title";
+    started_at, ended_at, last_activity, egress, cols, rows, title, harness_session, resumed_from";
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -218,6 +223,18 @@ impl Store {
         if !has_title {
             conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", [])?;
         }
+        // Decision 89, additive the same way.
+        for column in ["harness_session", "resumed_from"] {
+            let has = conn
+                .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")?
+                .exists([column])?;
+            if !has {
+                conn.execute(
+                    &format!("ALTER TABLE sessions ADD COLUMN {column} TEXT"),
+                    [],
+                )?;
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -235,7 +252,7 @@ impl Store {
 
     pub fn insert(&self, r: &SessionRecord) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"),
+            &format!("INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
             params![
                 r.id,
                 r.owner_user_id,
@@ -259,6 +276,8 @@ impl Store {
                 r.cols,
                 r.rows,
                 r.title,
+                r.harness_session,
+                r.resumed_from,
             ],
         )?;
         Ok(())
@@ -297,7 +316,7 @@ impl Store {
         self.conn.execute(
             "UPDATE sessions SET status = ?2, end_reason = ?3, signal = ?4, exit_code = ?5,
                  started_at = ?6, ended_at = ?7, last_activity = ?8, cols = ?9, rows = ?10,
-                 title = ?11
+                 title = ?11, harness_session = ?12
              WHERE id = ?1",
             params![
                 r.id,
@@ -310,7 +329,8 @@ impl Store {
                 r.last_activity,
                 r.cols,
                 r.rows,
-                r.title
+                r.title,
+                r.harness_session
             ],
         )?;
         Ok(())
@@ -621,5 +641,7 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         rows: r.get(18)?,
         title: r.get(19)?,
         activity: None,
+        harness_session: r.get(20)?,
+        resumed_from: r.get(21)?,
     })
 }

@@ -58,6 +58,10 @@ pub enum Command {
         /// opening prompt. A flag, never text, so no note data reaches argv.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         context: bool,
+        /// The agent's own session to reopen (decision 89). Omitted on a
+        /// fresh launch, so its bytes are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -167,6 +171,11 @@ pub struct Capabilities {
     /// does not: a paste to it is refused at once instead of timing out.
     #[serde(default)]
     pub images: bool,
+    /// The providers whose conversations the host can resume (decision 89).
+    /// An old host says nothing and is never sent a resume: it would start a
+    /// new conversation under the old one's name.
+    #[serde(default)]
+    pub resume: Vec<String>,
 }
 
 impl Capabilities {
@@ -222,6 +231,10 @@ pub struct StatusReport {
     pub activity: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
+    /// The agent's own id for the conversation (decision 89). Null changes
+    /// nothing.
+    #[serde(default)]
+    pub harness_session: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -254,6 +267,11 @@ pub struct Launch {
     /// writes: without a vault it launches read only, and the launch says so.
     #[serde(default)]
     pub allow_vault_writes: bool,
+    /// An ended session whose conversation this one reopens (decision 89).
+    /// Its host, workspace, provider, note and write vault are the old
+    /// session's, whatever else the request says.
+    #[serde(default)]
+    pub resume_of: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -836,6 +854,10 @@ impl AgentManager {
             return Err(AgentError::TooManySessions);
         }
 
+        let resume = match &req.resume_of {
+            Some(old) => Some(self.resumable(owner, old, &req, &caps)?),
+            None => None,
+        };
         let requested = req
             .provider
             .clone()
@@ -850,6 +872,12 @@ impl AgentManager {
         };
         let (provider, fallback) = match offered(&requested) {
             Some(p) => (p, None),
+            // A conversation reopens in its own agent or not at all.
+            None if resume.is_some() => {
+                return Err(AgentError::Conflict(format!(
+                    "{requested} is no longer available on the host"
+                )));
+            }
             None => {
                 let p = FALLBACK_ORDER
                     .iter()
@@ -886,6 +914,10 @@ impl AgentManager {
             rows: req.terminal.rows,
             title: None,
             activity: None,
+            // Known at once, so a second resume of it is refused before the
+            // host has reported anything.
+            harness_session: resume.as_ref().map(|(_, id)| id.clone()),
+            resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
         };
         // The grants (spec §6): none for `shell` (G-D9), none for a host
         // that cannot bridge, and otherwise everything the caller offered.
@@ -957,6 +989,7 @@ impl AgentManager {
                 terminal: req.terminal,
                 mcp: grants,
                 context: reads_storm && launch.context.is_some(),
+                resume: resume.map(|(_, id)| id),
             },
         );
         let mut record = record;
@@ -971,6 +1004,54 @@ impl AgentManager {
         self.store.lock().unwrap().update(&record)?;
         self.bump(&record.id);
         Ok((record, launch, outcome))
+    }
+
+    /// Checks that `old` can be reopened by this launch, and returns it with
+    /// the agent's id for its conversation.
+    fn resumable(
+        &self,
+        owner: &str,
+        old: &str,
+        req: &Launch,
+        caps: &Capabilities,
+    ) -> AgentResult<(String, String)> {
+        let store = self.store.lock().unwrap();
+        let r = store
+            .get(old)?
+            .filter(|r| r.owner_user_id == owner)
+            .ok_or(AgentError::NotFound("no such session"))?;
+        if !r.is_ended() {
+            return Err(AgentError::Conflict("the session is still running".into()));
+        }
+        let Some(id) = r.harness_session.clone() else {
+            return Err(AgentError::Conflict(
+                "this session has no conversation to resume".into(),
+            ));
+        };
+        if req.host_id != r.host_id
+            || req.workspace != r.workspace
+            || req.provider.as_deref() != Some(r.provider.as_str())
+        {
+            return Err(AgentError::BadRequest(
+                "a resume runs on its session's host, workspace and agent".into(),
+            ));
+        }
+        if !caps.resume.contains(&r.provider) {
+            return Err(AgentError::Conflict(
+                "the host can't resume sessions — update storm-runtime".into(),
+            ));
+        }
+        // Two terminals on one conversation would interleave its history.
+        let open = store
+            .for_host(&r.host_id)?
+            .into_iter()
+            .any(|s| !s.is_ended() && s.harness_session.as_deref() == Some(id.as_str()));
+        if open {
+            return Err(AgentError::Conflict(
+                "this conversation is already open in another session".into(),
+            ));
+        }
+        Ok((r.id, id))
     }
 
     pub fn launch_of(&self, session_id: &str) -> Result<Option<LaunchRecord>> {
@@ -1380,6 +1461,11 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
     if let Some(title) = report.title.as_deref().and_then(clean_title) {
         r.title = Some(title);
     }
+    if let Some(id) = report.harness_session.as_deref()
+        && valid_harness_session(&r.provider, id)
+    {
+        r.harness_session = Some(id.to_string());
+    }
     match report.status.as_str() {
         "starting" | "running" => {
             if report.status == "running" {
@@ -1407,6 +1493,25 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
         }
     }
     Ok(())
+}
+
+/// Whether `id` is a conversation id `provider` could have made. The host
+/// checks the same before it ever puts one on a command line
+/// (`docs/harness-session-vectors.json` keeps the two in agreement).
+pub fn valid_harness_session(provider: &str, id: &str) -> bool {
+    match provider {
+        "claude-code" => {
+            id.len() == 36
+                && id.bytes().enumerate().all(|(i, c)| match i {
+                    8 | 13 | 18 | 23 => c == b'-',
+                    _ => c.is_ascii_digit() || (b'a'..=b'f').contains(&c),
+                })
+        }
+        "opencode" => id.strip_prefix("ses_").is_some_and(|rest| {
+            (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+        }),
+        _ => false,
+    }
 }
 
 /// The host cleans titles (AM43); this only keeps a misbehaving host's text
@@ -1450,6 +1555,7 @@ mod tests {
             mcp_bridge: true,
             heartbeat: false,
             images: true,
+            resume: vec!["claude-code".into(), "opencode".into()],
         }
     }
 
@@ -1509,10 +1615,146 @@ mod tests {
                 context: None,
                 write_vault_id: None,
                 allow_vault_writes: false,
+                resume_of: None,
             },
             meta,
             grants,
         )
+    }
+
+    fn resume(m: &AgentManager, old: &SessionRecord) -> AgentResult<SessionRecord> {
+        m.launch(
+            "usr_OWNER",
+            Launch {
+                host_id: old.host_id.clone(),
+                workspace: old.workspace.clone(),
+                provider: Some(old.provider.clone()),
+                interaction: "terminal".into(),
+                terminal: TerminalSize { cols: 80, rows: 24 },
+                context: None,
+                write_vault_id: None,
+                allow_vault_writes: false,
+                resume_of: Some(old.id.clone()),
+            },
+            LaunchMeta::default(),
+            offered(),
+        )
+        .map(|(r, _, _)| r)
+    }
+
+    fn report_harness(m: &AgentManager, id: &str, harness: &str) {
+        m.host_status(
+            "hst_A",
+            id,
+            &StatusReport {
+                status: "running".into(),
+                exit_code: None,
+                end_reason: None,
+                signal: None,
+                title: None,
+                activity: None,
+                harness_session: Some(harness.into()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn conversation_ids_agree_with_the_vectors() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/harness-session-vectors.json"
+        ))
+        .unwrap();
+        for (set, want) in [("valid", true), ("invalid", false)] {
+            for case in v[set].as_array().unwrap() {
+                let (provider, id) = (
+                    case["provider"].as_str().unwrap(),
+                    case["id"].as_str().unwrap(),
+                );
+                assert_eq!(
+                    valid_harness_session(provider, id),
+                    want,
+                    "{provider} {id:?}"
+                );
+            }
+        }
+    }
+
+    /// Decision 89: the host's id for the conversation is kept, and a resume
+    /// reopens it on the same host, workspace and agent, once at a time.
+    #[test]
+    fn a_resume_reopens_the_reported_conversation() {
+        let (m, _dir) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("claude-code", true), ("shell", true)]));
+        let first = launch(&m, Some("claude-code")).unwrap();
+        let _start = rx.try_recv().unwrap();
+        let uuid = "80d0cf8c-8176-43b4-8206-7908d74d1387";
+        report_harness(&m, &first.id, "ses_notclaude");
+        assert_eq!(m.get(&first.id).unwrap().harness_session, None);
+        report_harness(&m, &first.id, uuid);
+        assert_eq!(
+            m.get(&first.id).unwrap().harness_session.as_deref(),
+            Some(uuid)
+        );
+        assert!(matches!(resume(&m, &first), Err(AgentError::Conflict(_))));
+
+        end(&m, &first.id);
+        let mut moved = m.get(&first.id).unwrap();
+        moved.workspace = "site".into();
+        assert!(matches!(resume(&m, &moved), Err(AgentError::BadRequest(_))));
+
+        let second = resume(&m, &m.get(&first.id).unwrap()).unwrap();
+        assert_eq!(second.harness_session.as_deref(), Some(uuid));
+        assert_eq!(second.resumed_from.as_deref(), Some(first.id.as_str()));
+        assert_eq!(second.provider, "claude-code");
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert_eq!(wire["type"], "start");
+        assert_eq!(wire["resume"], uuid);
+        assert_eq!(
+            m.get(&second.id).unwrap().resumed_from.as_deref(),
+            Some(first.id.as_str())
+        );
+
+        // One terminal per conversation.
+        assert!(matches!(
+            resume(&m, &m.get(&first.id).unwrap()),
+            Err(AgentError::Conflict(_))
+        ));
+        end(&m, &second.id);
+        assert!(resume(&m, &m.get(&first.id).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_resume_is_refused_without_a_conversation_or_a_host_that_can() {
+        let (m, _dir) = manager();
+        let _rx = online(&m, "hst_A", caps(&[("claude-code", true), ("shell", true)]));
+        let shell = launch(&m, Some("shell")).unwrap();
+        end(&m, &shell.id);
+        assert!(matches!(
+            resume(&m, &m.get(&shell.id).unwrap()),
+            Err(AgentError::Conflict(_))
+        ));
+
+        let claude = launch(&m, Some("claude-code")).unwrap();
+        report_harness(&m, &claude.id, "80d0cf8c-8176-43b4-8206-7908d74d1387");
+        end(&m, &claude.id);
+        let mut old = caps(&[("claude-code", true)]);
+        old.resume.clear();
+        let _rx = online(&m, "hst_A", old);
+        assert!(matches!(
+            resume(&m, &m.get(&claude.id).unwrap()),
+            Err(AgentError::Conflict(_))
+        ));
+        // Never a fallback to another agent.
+        let _rx = online(
+            &m,
+            "hst_A",
+            caps(&[("claude-code", false), ("shell", true)]),
+        );
+        assert!(matches!(
+            resume(&m, &m.get(&claude.id).unwrap()),
+            Err(AgentError::Conflict(_))
+        ));
     }
 
     fn with_context(title: &str, write_vault: Option<&str>) -> LaunchMeta {
@@ -1538,6 +1780,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                harness_session: None,
             },
         )
         .unwrap();
@@ -1937,6 +2180,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                harness_session: None,
             },
         )
         .unwrap();
@@ -1951,6 +2195,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                harness_session: None,
             },
         )
         .unwrap();
@@ -1970,6 +2215,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                harness_session: None,
             },
         )
         .unwrap();
@@ -2021,6 +2267,7 @@ mod tests {
                 context: None,
                 write_vault_id: None,
                 allow_vault_writes: false,
+                resume_of: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -2052,6 +2299,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                harness_session: None,
             },
         )
         .unwrap();
@@ -2171,6 +2419,7 @@ mod tests {
                         signal: None,
                         title: None,
                         activity: None,
+                        harness_session: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -2201,6 +2450,7 @@ mod tests {
             end_reason: None,
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
+            harness_session: None,
             signal: None,
         }
     }
@@ -2500,6 +2750,7 @@ mod tests {
                     signal: None,
                     title: None,
                     activity: None,
+                    harness_session: None,
                 },
             )
             .unwrap();

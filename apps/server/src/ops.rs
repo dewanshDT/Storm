@@ -1434,8 +1434,24 @@ pub struct LaunchMcp {
 pub async fn launch_session(
     state: &Shared,
     actor: &Actor,
-    req: crate::agent::Launch,
+    mut req: crate::agent::Launch,
 ) -> ApiResult<LaunchedSession> {
+    // A resume is the old session's launch again (decision 89): its note as
+    // it was then, and its write vault, still checked below.
+    let resumed_context = match req.resume_of.clone() {
+        Some(old) => {
+            let r = state.agent.get(&old).map_err(agent_error)?;
+            let l = state.agent.launch_of(&old).map_err(internal)?;
+            req.host_id = r.host_id;
+            req.workspace = r.workspace;
+            req.provider = Some(r.provider);
+            req.context = None;
+            req.allow_vault_writes = false;
+            req.write_vault_id = l.as_ref().and_then(|l| l.write_vault_id.clone());
+            Some(l.and_then(|l| l.context))
+        }
+        None => None,
+    };
     // The host must exist and be live in auth.db, not merely connected.
     let host_name = {
         let auth_db = state.auth_db.lock().await;
@@ -1444,8 +1460,9 @@ pub async fn launch_session(
             _ => return Err(not_found("no such host")),
         }
     };
-    let context = match &req.context {
-        Some(c) => {
+    let context = match (resumed_context, &req.context) {
+        (Some(context), _) => context,
+        (None, Some(c)) => {
             let note = get_note(state, actor, &c.vault_id, &c.note_id).await?;
             Some(crate::agent::store::Context {
                 vault_id: c.vault_id.clone(),
@@ -1453,7 +1470,7 @@ pub async fn launch_session(
                 title: note.note.title,
             })
         }
-        None => None,
+        (None, None) => None,
     };
     if let Some(v) = &req.write_vault_id {
         vault_of(state, actor, Access::Write, v).await?;

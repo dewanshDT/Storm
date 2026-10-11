@@ -1,0 +1,23 @@
+{
+  "about": "Agent conversation ids a Runtime Host reports and resumes (PLAN.md decision 89). apps/runtime and apps/server both read this file: an id one accepts and the other refuses is a resume that silently never happens.",
+  "valid": [
+    { "provider": "claude-code", "id": "80d0cf8c-8176-43b4-8206-7908d74d1387" },
+    { "provider": "claude-code", "id": "0c2bf366-2db2-42da-9c3c-9498392b1f63" },
+    { "provider": "opencode", "id": "ses_ed5303b0dffeRnwXZdkDih2uxK" },
+    { "provider": "opencode", "id": "ses_a" }
+  ],
+  "invalid": [
+    { "provider": "claude-code", "id": "80D0CF8C-8176-43B4-8206-7908D74D1387", "why": "uppercase" },
+    { "provider": "claude-code", "id": "80d0cf8c-8176-43b4-8206-7908d74d138", "why": "short" },
+    { "provider": "claude-code", "id": "80d0cf8c8176-43b4-8206-7908d74d13870", "why": "dash misplaced" },
+    { "provider": "claude-code", "id": "--dangerously-skip-permissions", "why": "a flag" },
+    { "provider": "claude-code", "id": "ses_ed5303b0dffeRnwXZdkDih2uxK", "why": "another agent's" },
+    { "provider": "opencode", "id": "ses_", "why": "empty" },
+    { "provider": "opencode", "id": "ses_abc;rm -rf ~", "why": "shell" },
+    { "provider": "opencode", "id": "ses_abc-def", "why": "dash" },
+    { "provider": "opencode", "id": "-s", "why": "a flag" },
+    { "provider": "opencode", "id": "ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "why": "65 after the prefix" },
+    { "provider": "shell", "id": "ses_abc", "why": "shell has no conversations" },
+    { "provider": "claude-code", "id": "", "why": "empty" }
+  ]
+}

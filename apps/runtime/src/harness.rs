@@ -210,22 +210,17 @@ mod tests {
 
     #[test]
     fn only_ids_the_agent_could_have_made_are_valid() {
-        assert!(valid_id(
-            "claude-code",
-            "80d0cf8c-8176-43b4-8206-7908d74d1387"
-        ));
-        assert!(valid_id("opencode", "ses_ed5303b0dffeRnwXZdkDih2uxK"));
-        for (provider, bad) in [
-            ("claude-code", "80D0CF8C-8176-43B4-8206-7908D74D1387"),
-            ("claude-code", "80d0cf8c-8176-43b4-8206-7908d74d138"),
-            ("claude-code", "--dangerously-skip-permissions"),
-            ("opencode", "ses_"),
-            ("opencode", "ses_abc;rm"),
-            ("opencode", "-s"),
-            ("shell", "ses_abc"),
-            ("claude-code", "ses_abc"),
-        ] {
-            assert!(!valid_id(provider, bad), "{provider} {bad}");
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/harness-session-vectors.json"))
+                .unwrap();
+        for (set, want) in [("valid", true), ("invalid", false)] {
+            for case in v[set].as_array().unwrap() {
+                let (provider, id) = (
+                    case["provider"].as_str().unwrap(),
+                    case["id"].as_str().unwrap(),
+                );
+                assert_eq!(valid_id(provider, id), want, "{provider} {id:?}");
+            }
         }
     }
 
