@@ -57,6 +57,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod fake;
+pub mod harness;
 pub mod host;
 pub mod identity;
 pub mod mcp;
