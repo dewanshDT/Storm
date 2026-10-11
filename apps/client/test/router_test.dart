@@ -81,6 +81,33 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('a device secret that did not load is not an unpair', (
+      tester,
+    ) async {
+      // The macOS relaunch bug: `deviceId` comes from prefs, the secret from
+      // the keychain, and a keychain read that failed left one without the
+      // other. Login sent the half-credential, the server refused it, and the
+      // refusal forgot the device — deleting the secret that was fine all
+      // along. Now the screen says what happened and asks before re-pairing.
+      final c = shellContainer(
+        configured: false,
+        settings: const Settings(baseUrl: 'http://test', deviceId: 'dev_1'),
+      );
+      await pumpShell(tester, c);
+
+      expect(c.read(routerProvider).state.uri.path, Routes.login);
+      expect(find.byKey(const Key('login-secret-missing')), findsOneWidget);
+      expect(find.byKey(const Key('login-submit')), findsNothing);
+      expect(c.read(settingsProvider).value?.deviceId, 'dev_1');
+
+      // Re-pairing is there, and it is the user's choice.
+      await tester.tap(find.byKey(const Key('login-secret-repair')));
+      await tester.pumpAndSettle();
+      expect(c.read(settingsProvider).value?.isPaired, isFalse);
+      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('the router survives a settings change', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c);

@@ -142,6 +142,16 @@ class Settings {
   /// The device has completed pairing (has device credentials).
   bool get isPaired => deviceId.isNotEmpty;
 
+  /// Paired, but the device secret did not come back from the keychain.
+  ///
+  /// **This is a local read failure, not a server verdict.** `deviceId` lives
+  /// in prefs and the secret in the keychain, so they can come apart — a
+  /// keychain query that errors, a locked keychain, a denied access prompt.
+  /// Sending the half-credential anyway gets a 401, and treating that 401 as
+  /// "the server forgot this device" used to delete the real secret along with
+  /// it, turning a read that might work next launch into a forced re-pair.
+  bool get deviceSecretMissing => deviceId.isNotEmpty && deviceSecret.isEmpty;
+
   /// The device has session tokens. **Says nothing about whether they work.**
   ///
   /// Deliberately unchanged and deliberately narrow: half the app asks this to
