@@ -148,6 +148,9 @@ pub struct Capabilities {
     pub providers: Vec<ProviderCap>,
     #[serde(default)]
     pub workspaces: Vec<String>,
+    /// The folders the host finds workspaces in. An old host does not say.
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
     #[serde(default)]
     pub max_sessions: u32,
     /// The host runs `storm-runtime mcp-bridge` (spec §6). A host that does
@@ -160,6 +163,29 @@ pub struct Capabilities {
     /// its link is never dropped for silence.
     #[serde(default)]
     pub heartbeat: bool,
+    /// The host stages pasted images (`terminal.image`, 85e). An old host
+    /// does not: a paste to it is refused at once instead of timing out.
+    #[serde(default)]
+    pub images: bool,
+}
+
+impl Capabilities {
+    /// Whether the host stages pasted images. 0.7.0 did (85e) before it said
+    /// so; from 0.7.1 the host says `images`.
+    pub fn stages_images(&self) -> bool {
+        self.images || version_at_least(&self.version, (0, 7, 0))
+    }
+}
+
+/// `0.7.0`, `0.7.0-rc.1` or `0.7.0+build` against `(major, minor, patch)`;
+/// anything unreadable is older.
+fn version_at_least(version: &str, min: (u64, u64, u64)) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let mut parts = core.split('.').map(|p| p.parse::<u64>());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c) >= min,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +305,9 @@ pub enum AgentError {
     Unsupported(String),
     /// Too many images in flight (429).
     Busy,
+    /// The host's runtime is too old to stage images (409). Carries the
+    /// version it reported.
+    NoImages(String),
     /// The host did not stage it in time (504).
     Timeout,
     /// The host could not stage it, and said why (502).
@@ -1102,6 +1131,13 @@ impl AgentManager {
             )));
         }
         let r = self.live_record(id)?;
+        // An old host never answers `terminal.image`: say so now rather than
+        // after IMAGE_DEADLINE. An offline host falls through to `send`.
+        if let Some(caps) = self.host_live(&r.host_id).capabilities
+            && !caps.stages_images()
+        {
+            return Err(AgentError::NoImages(caps.version));
+        }
         let image = crate::auth::identity::random_id("img_");
         let (tx, rx) = tokio::sync::oneshot::channel();
         let command = Command::TerminalImage {
@@ -1409,9 +1445,11 @@ mod tests {
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
+            workspace_roots: vec!["/work".into()],
             max_sessions: 2,
             mcp_bridge: true,
             heartbeat: false,
+            images: true,
         }
     }
 
@@ -2389,6 +2427,41 @@ mod tests {
             m.stage_image(&r.id, None, PNG.to_vec()).await,
             Err(AgentError::HostOffline)
         ));
+    }
+
+    #[tokio::test]
+    async fn an_old_host_is_refused_an_image_at_once() {
+        let (m, _d) = manager();
+        let old = Capabilities {
+            version: "0.4.0".into(),
+            images: false,
+            ..caps(&[("shell", true)])
+        };
+        let _rx = online(&m, "hst_A", old);
+        let r = launch(&m, Some("shell")).unwrap();
+        let started = std::time::Instant::now();
+        match m.stage_image(&r.id, None, PNG.to_vec()).await {
+            Err(AgentError::NoImages(v)) => assert_eq!(v, "0.4.0"),
+            other => panic!("expected NoImages, got {other:?}"),
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_0_7_0_host_stages_images_without_saying_so() {
+        let with = |version: &str, images: bool| Capabilities {
+            version: version.into(),
+            images,
+            ..caps(&[])
+        };
+        assert!(with("0.7.0", false).stages_images());
+        assert!(with("0.10.2", false).stages_images());
+        assert!(with("1.0.0-rc.1", false).stages_images());
+        assert!(with("test", true).stages_images());
+        assert!(!with("0.4.0", false).stages_images());
+        assert!(!with("0.6.1+deb", false).stages_images());
+        assert!(!with("", false).stages_images());
+        assert!(!with("garbage", false).stages_images());
     }
 
     #[test]

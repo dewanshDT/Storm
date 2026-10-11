@@ -81,6 +81,33 @@ dry() {
   [[ "$output" == *"Pass --enroll-from-stdin"* ]]
 }
 
+@test "linux runtime with --workspace: made as the runtime's account, with sudo" {
+  dry --runtime --enroll-from-stdin --workspace scratch
+  [ "$status" -eq 0 ]
+  [[ "$(plan_descs "$output")" == *"Add the workspace scratch, unless the runtime has one"* ]]
+  [[ "$output" == *"sudo -u storm-runtime mkdir $STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch"* ]]
+  [[ "$output" != *"Pass --workspace"* ]]
+  run assert_sudo_marks_consistent "$output"
+  [ "$status" -eq 0 ]
+  [ ! -s "$FAKE_LOG" ]
+}
+
+@test "a fresh runtime without --workspace says how to add one" {
+  dry --runtime --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$(plan_descs "$output")" != *"workspace"* ]]
+  [[ "$output" == *"Pass --workspace NAME or a git URL, or make a folder in $STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces"* ]]
+}
+
+@test "macos runtime with a git --workspace: cloned as the user, no sudo" {
+  use_macos
+  dry --runtime --enroll-from-stdin --workspace https://github.com/me/app.git
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git clone https://github.com/me/app.git $STORM_TEST_SYSROOT/Library/StormRuntime/workspaces/app"* ]]
+  run assert_sudo_marks_consistent "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "macos everything: the server is never sudo; the runtime install is" {
   use_macos
   dry --everything

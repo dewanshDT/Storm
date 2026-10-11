@@ -39,6 +39,7 @@ class AgentHost {
     required this.workspaces,
     required this.maxSessions,
     required this.lastSeen,
+    this.workspaceRoots = const [],
   });
 
   final String id;
@@ -48,6 +49,9 @@ class AgentHost {
   final String status;
   final List<ProviderCap> providers;
   final List<String> workspaces;
+
+  /// The host's folders for workspaces, empty for an old host.
+  final List<String> workspaceRoots;
   final int maxSessions;
   final String? lastSeen;
 
@@ -68,6 +72,10 @@ class AgentHost {
       ],
       maxSessions: (caps?['max_sessions'] as num?)?.toInt() ?? 0,
       lastSeen: j['last_seen'] as String?,
+      workspaceRoots: [
+        for (final r in (caps?['workspace_roots'] as List? ?? const []))
+          r as String,
+      ],
     );
   }
 }

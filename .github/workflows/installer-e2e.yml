@@ -59,7 +59,7 @@ jobs:
         run: |
           printf '%s\n' "$CI_PASSWORD" |
             sh deploy/install.sh --yes --everything --version "v$CI_VERSION" \
-              --from-dir dist --password-stdin --port 8484
+              --from-dir dist --password-stdin --port 8484 --workspace scratch
       - name: Check — server, account, runtime enrolled
         run: |
           set -eux
@@ -72,6 +72,8 @@ jobs:
           sudo test -f /var/lib/storm-runtime/host.json
           sudo -u storm-runtime storm-runtime check | tee check.txt
           grep -q '^OK:' check.txt
+          # The first workspace, the runtime account's own.
+          test "$(sudo stat -c %U /var/lib/storm-runtime/workspaces/scratch)" = storm-runtime
       - name: Re-run changes nothing (AC-I4)
         run: |
           set -eux
@@ -136,7 +138,8 @@ jobs:
         run: |
           printf '%s\n' "$CI_PASSWORD" |
             sh deploy/install.sh --yes --server --runtime --app --mobile \
-              --version "v$CI_VERSION" --from-dir dist --password-stdin --port 8484
+              --version "v$CI_VERSION" --from-dir dist --password-stdin --port 8484 \
+              --workspace scratch
       - name: Check — LaunchAgent server as the user, runtime enrolled, app
         run: |
           set -eux
@@ -149,6 +152,9 @@ jobs:
           sudo test -f /Library/StormRuntime/state/host.json
           (cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check) | tee check.txt
           grep -q '^OK:' check.txt
+          # The first workspace: made by the user, writable by the runtime.
+          test -d /Library/StormRuntime/workspaces/scratch
+          (cd / && sudo -u _stormruntime touch /Library/StormRuntime/workspaces/scratch/.storm-ci)
           test -d /Applications/Storm.app || test -d "$HOME/Applications/Storm.app"
       - name: Re-run changes nothing (AC-I4)
         run: |

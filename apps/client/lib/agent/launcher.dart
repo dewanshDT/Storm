@@ -301,6 +301,8 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             onChanged: (w) => setState(() => _workspace = w),
           ),
         ),
+        if (host != null && _workspaces != null && _workspaces!.isEmpty)
+          _NoWorkspaces(host: host, onRetry: () => _pickHost(host)),
         _Field(
           label: 'Agent',
           child: _Select<String>(
@@ -556,6 +558,51 @@ class _ContextBox extends ConsumerWidget {
 }
 
 /// A 96px label column and the control beside it.
+/// A host with nothing to work in yet: where a workspace goes, and a way to
+/// look again once one is there.
+class _NoWorkspaces extends StatelessWidget {
+  const _NoWorkspaces({required this.host, required this.onRetry});
+
+  final AgentHost host;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final root = host.workspaceRoots.firstOrNull;
+    final style = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      color: t.text3,
+    );
+    return Column(
+      key: const Key('launcher-no-workspaces'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'A workspace is a folder in the host\'s workspaces folder. '
+          'Make one, or clone a repository there, on ${host.name}:',
+          style: style,
+        ),
+        SizedBox(height: t.sp * 0.75),
+        SelectableText(
+          root ?? 'the workspace_roots folder in its config.toml',
+          style: style.copyWith(
+            fontFamily: StormTokens.monoFamily,
+            color: t.text2,
+          ),
+        ),
+        SizedBox(height: t.sp * 0.75),
+        StormButton.text(
+          key: const Key('launcher-workspaces-retry'),
+          label: 'Check again',
+          onPressed: onRetry,
+        ),
+      ],
+    );
+  }
+}
+
 class _Field extends StatelessWidget {
   const _Field({required this.label, required this.child});
 

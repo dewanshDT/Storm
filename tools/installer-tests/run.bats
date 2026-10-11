@@ -114,6 +114,33 @@ sudo_marked_steps() {
   [[ "$output" != *"PASTEDSECRET"* ]]
 }
 
+@test "runtime only with --workspace: the folder is made, as the plan said" {
+  run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin --workspace scratch <<<"storm-enroll:v1:abc"
+  [ "$status" -eq 0 ]
+  [ -d "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch" ]
+  grep -q 'sudo -n -H -u storm-runtime env .* mkdir -- .*/workspaces/scratch$' "$FAKE_LOG"
+  marked=$(sudo_marked_steps "$output" | tr '\n' ' ')
+  used=$(sudo_steps_used | tr '\n' ' ')
+  [ "$marked" = "$used" ]
+}
+
+@test "--workspace leaves a runtime that has workspaces alone" {
+  mkdir -p "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/mine"
+  run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin --workspace scratch <<<"storm-enroll:v1:abc"
+  [ "$status" -eq 0 ]
+  [ ! -e "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch" ]
+  grep -q 'already has workspaces (mine)' "$HOME/.local/state/storm/install.log"
+}
+
+@test "macos --workspace with a git URL clones it as the user" {
+  use_macos
+  run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin --workspace https://github.com/me/app.git <<<"storm-enroll:v1:abc"
+  [ "$status" -eq 0 ]
+  [ -d "$STORM_TEST_SYSROOT/Library/StormRuntime/workspaces/app" ]
+  grep -q '^step=[0-9]* git clone -- https://github.com/me/app.git .*/Library/StormRuntime/workspaces/app$' "$FAKE_LOG"
+  ! grep -q 'sudo .*git clone' "$FAKE_LOG"
+}
+
 @test "runtime only: a malformed enrollment string is refused and not echoed" {
   run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin <<<"sk-ant-oops-wrong-thing"
   [ "$status" -eq 1 ]

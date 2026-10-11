@@ -84,6 +84,8 @@ Options:
   --port N             server port (default: $STORM_DEFAULT_PORT)
   --addr HOST:PORT     the address phones and other machines use to reach the server
   --enroll-from-stdin  read the runtime's enrollment string from stdin
+  --workspace NAME|URL the runtime's first workspace: a folder to make, or a
+                       git repository to clone (only if it has none)
   --password-stdin     set the new server account's password from stdin
   --from-dir DIR       take release files from DIR (with its checksums.txt)
                        instead of downloading them
@@ -97,6 +99,7 @@ Commands:
 Examples:
   sh install.sh --yes --server --app --data ~/Storm --port 8484
   sh install.sh --yes --runtime --enroll-from-stdin < enrollment.txt
+  sh install.sh --yes --runtime --workspace https://github.com/me/app.git
   sh install.sh --dry-run --everything
   sh install.sh status
 EOF
@@ -110,6 +113,7 @@ arg_error() {
 args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
+  OPT_WORKSPACE=""
   OPT_HELP=0 SUBCOMMAND=install
 }
 
@@ -187,6 +191,13 @@ set_opt() {
       fi
       OPT_FROM_DIR=$(cd "$2" && pwd)
       ;;
+    --workspace)
+      if ! ws_spec_ok "$2"; then
+        arg_error "--workspace wants a folder name (letters, digits, . _ -) or a git URL, not '$2'"
+        return 2
+      fi
+      OPT_WORKSPACE=$2
+      ;;
   esac
   return 0
 }
@@ -198,7 +209,7 @@ parse_args() {
     case "$1" in
       -y | --yes) OPT_YES=1 ;;
       --dry-run) OPT_DRY_RUN=1 ;;
-      --version | --data | --port | --addr | --from-dir)
+      --version | --data | --port | --addr | --from-dir | --workspace)
         if [ $# -lt 2 ]; then
           arg_error "$1 needs a value"
           return 2
@@ -206,7 +217,7 @@ parse_args() {
         set_opt "$1" "$2" || return 2
         shift
         ;;
-      --version=* | --data=* | --port=* | --addr=* | --from-dir=*)
+      --version=* | --data=* | --port=* | --addr=* | --from-dir=* | --workspace=*)
         set_opt "${1%%=*}" "${1#*=}" || return 2
         ;;
       --server | --runtime | --app | --mobile | --agents) add_component "${1#--}" ;;
@@ -341,6 +352,7 @@ set_paths() {
       RT_STATE="$RT_ROOT/state"
       RT_CONFIG="$RT_ROOT/runtime.toml"
       RT_WORKSPACES="$RT_ROOT/workspaces"
+      WS_SUDO=0
       SRV_SUPPORT="$HOME/Library/Application Support/Storm"
       SRV_INSTALLED_BIN="$SRV_SUPPORT/bin/storm-server"
       SRV_RECORD="$SRV_SUPPORT/server.json"
@@ -357,6 +369,7 @@ set_paths() {
       RT_STATE="$RT_ROOT"
       RT_CONFIG="$root/etc/storm-runtime/runtime.toml"
       RT_WORKSPACES="$RT_ROOT/workspaces"
+      WS_SUDO=1
       SRV_INSTALLED_BIN=storm-server
       SRV_DROPIN="$root/etc/systemd/system/storm-server.service.d/data-root.conf"
       DEFAULT_DATA="$root/srv/storm"
@@ -848,7 +861,11 @@ ui_input() {
   local ans=""
   UI_RESULT=$2
   [ "$INTERACTIVE" = 1 ] || return 0
-  printf '  %s%s%s [%s]: ' "$C_BOLD" "$1" "$C_RESET" "$2" >&"$UI_FD"
+  if [ -n "$2" ]; then
+    printf '  %s%s%s [%s]: ' "$C_BOLD" "$1" "$C_RESET" "$2" >&"$UI_FD"
+  else
+    printf '  %s%s%s: ' "$C_BOLD" "$1" "$C_RESET" >&"$UI_FD"
+  fi
   IFS= read -r ans <&"$UI_IN" || ans=""
   [ -n "$ans" ] && UI_RESULT=$ans
   return 0
@@ -1743,7 +1760,123 @@ runtime_plan() {
   if [ "$RT_ENROLL_ACTION" != skip ] || [ "$RT_ENROLLED" = yes ]; then
     plan_add spin 1 "Check the runtime reaches its server" "$(rt_as_display) check" runtime_verify
   fi
+  # Sessions run in a workspace; a fresh host has none.
+  if [ -n "$OPT_WORKSPACE" ]; then
+    plan_add spin "$WS_SUDO" "Add the workspace $(ws_name "$OPT_WORKSPACE"), unless the runtime has one" \
+      "$(ws_display "$OPT_WORKSPACE")" runtime_workspace "$OPT_WORKSPACE"
+  elif [ "$INTERACTIVE" = 1 ]; then
+    plan_add fg "$WS_SUDO" "Add a first workspace, if the runtime has none (a folder, or a git repository to clone)" \
+      "$(ws_display '<name or git URL>')" runtime_workspace
+  elif [ "$mode" = install ]; then
+    plan_note "Runtime: no workspace is made. Pass --workspace NAME or a git URL, or make a folder in $RT_WORKSPACES."
+  fi
   return 0
+}
+
+# ---- the first workspace
+#
+# A workspace is a folder in $RT_WORKSPACES. On macOS the operator has
+# inherited rights there (storm-runtime install --operator), so it is made as
+# them, with their git credentials; on Linux the folder is the runtime
+# account's (0750), so it is made as that account.
+
+ws_is_url() {
+  case "$1" in
+    *://* | git@*:*) return 0 ;;
+  esac
+  return 1
+}
+
+# ws_name SPEC: the folder SPEC becomes: a name as given, a git URL's last
+# path part without .git.
+ws_name() {
+  local n=${1%/}
+  n=${n%.git}
+  n=${n##*/}
+  n=${n##*:}
+  printf '%s' "$n"
+}
+
+ws_spec_ok() {
+  local n
+  if ! ws_is_url "$1"; then
+    case "$1" in */*) return 1 ;; esac
+  fi
+  n=$(ws_name "$1")
+  case "$n" in
+    '' | .* | *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+ws_display() {
+  local how="mkdir" dest
+  ws_is_url "$1" && how="git clone $1"
+  dest=$(shq "$RT_WORKSPACES/$(ws_name "$1")")
+  case "$OS" in
+    macos) printf '%s %s' "$how" "$dest" ;;
+    *) printf 'sudo -u %s %s %s' "$RT_ACCOUNT" "$how" "$dest" ;;
+  esac
+}
+
+# ws_as CMD...: as whoever makes workspaces here. Git never asks on the
+# terminal: a clone that needs a login fails and says so.
+ws_as() {
+  if [ "$OS" = macos ]; then
+    env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" "$@"
+  else
+    (cd / && run_as -H "$RT_ACCOUNT" env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -o BatchMode=yes" "$@")
+  fi
+}
+
+ws_existing() {
+  ws_as find "$RT_WORKSPACES" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null |
+    sed 's#.*/##' | sort | tr '\n' ' '
+}
+
+ws_make() {
+  local dest
+  dest="$RT_WORKSPACES/$(ws_name "$1")"
+  if ws_is_url "$1"; then
+    ws_as git clone -- "$1" "$dest"
+  else
+    ws_as mkdir -- "$dest"
+  fi
+}
+
+runtime_workspace() {
+  local spec=${1:-} have rc
+  have=$(ws_existing)
+  if [ -n "$have" ]; then
+    echo "the runtime already has workspaces (${have% }); none added"
+    [ -n "$spec" ] || ui_ok "The runtime already has workspaces: ${have% }"
+    return 0
+  fi
+  if [ -n "$spec" ]; then
+    ws_make "$spec"
+    return
+  fi
+  ui_info "Sessions run in a workspace: a folder in $RT_WORKSPACES. There's none yet."
+  ui_info "Name a folder to make, or give a git URL to clone into it."
+  while :; do
+    ui_input "Workspace (Enter alone skips)" ""
+    spec=$UI_RESULT
+    if [ -z "$spec" ]; then
+      ui_note "No workspace yet: make a folder in $RT_WORKSPACES before your first session."
+      return "$STEP_SKIPPED"
+    fi
+    ws_spec_ok "$spec" && break
+    ui_warn "That isn't a folder name (letters, digits, . _ -) or a git URL"
+  done
+  if ws_is_url "$spec"; then
+    ui_spinner "Clone $spec into $RT_WORKSPACES/$(ws_name "$spec")" ws_make "$spec"
+    rc=$?
+  else
+    logged ws_make "$spec"
+    rc=$?
+    [ "$rc" = 0 ] && ui_ok "Made $RT_WORKSPACES/$(ws_name "$spec")"
+  fi
+  return "$rc"
 }
 
 runtime_install() {

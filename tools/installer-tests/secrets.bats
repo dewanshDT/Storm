@@ -114,6 +114,31 @@ typed() {
   grep -q 'Agents › Hosts › Enroll a host' "$STORM_TTY_OUT"
 }
 
+@test "interactive first workspace: a bad name is re-asked, then made" {
+  platform
+  mkdir -p "$RT_WORKSPACES"
+  typed "a/b" "notes"
+  LOG_FILE="$BATS_TEST_TMPDIR/install.log"
+  runtime_workspace
+  [ -d "$RT_WORKSPACES/notes" ]
+  grep -q "That isn't a folder name" "$STORM_TTY_OUT"
+  grep -q "There's none yet" "$STORM_TTY_OUT"
+}
+
+@test "interactive first workspace: Enter alone skips; one already there is kept" {
+  platform
+  mkdir -p "$RT_WORKSPACES"
+  typed ""
+  run runtime_workspace
+  [ "$status" -eq "$STEP_SKIPPED" ]
+  [ -z "$(ls -A "$RT_WORKSPACES")" ]
+  mkdir "$RT_WORKSPACES/site"
+  typed "never-read"
+  runtime_workspace
+  grep -q "already has workspaces: site" "$STORM_TTY_OUT"
+  [ ! -e "$RT_WORKSPACES/never-read" ]
+}
+
 @test "pasted text is trimmed of bracketed-paste markers and spaces" {
   platform
   typed $'\033[200~  storm-enroll:v1:abc  \033[201~'
