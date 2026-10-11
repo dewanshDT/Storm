@@ -393,6 +393,15 @@ that closes instead of ending its body gets no response. A body with no end
 leaves the origin's handler waiting for input until a timeout, which is what
 made every relayed write hang before this rule was written down.
 
+**Body frame size.** A sender — client or origin, in either direction —
+**MUST** split a body into binary frames of at most **16 MiB** each, header
+included: the WebSocket libraries every implementation uses refuse a larger
+frame by closing the connection, and the connection is the whole trunk, not
+the one stream. A sender **SHOULD** split at **256 KiB** of payload, so that
+concurrent streams on one trunk interleave and no single frame delays a change
+feed behind a download. The relay forwards each frame as it arrives and never
+merges or splits them.
+
 **`relay_peer_ip`.** The relay attaches the client trunk's real source address
 as a sibling field on `HTTP_REQUEST_HEAD` when it re-emits the message
 server-ward. Two rules, **both required**, or this is `X-Forwarded-For` under a

@@ -1806,3 +1806,125 @@ async fn a_response_leaves_the_server_chunk_by_chunk() {
 
     tunnels.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Bodies larger than a WebSocket frame (decision 98)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_response_larger_than_a_websocket_frame_crosses_in_bounded_frames() {
+    // A 17 MiB attachment used to leave as one 0x02 frame. The relay refuses a
+    // frame over 16 MiB by closing the connection, and that connection is the
+    // server's trunk: every relayed client lost the server, not just this one.
+    let dir = tempdir::TempDir::new("storm-relay-big-response").unwrap();
+    let identity = test_identity(dir.path());
+    const SIZE: usize = 20 * 1024 * 1024;
+    let router = Router::new().route(
+        "/big",
+        axum::routing::get(|| async { axum::body::Bytes::from(vec![7u8; SIZE]) }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":9}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":9,"method":"GET","path":"/big","headers":{},
+    }));
+    assert_eq!(relay.next_control().await["type"], "HTTP_RESPONSE_HEAD");
+
+    let (mut received, mut largest) = (0usize, 0usize);
+    loop {
+        match relay.next_event().await {
+            Event::Binary(frame) => {
+                let (_, _, payload) = proto::decode_body_frame(&frame).unwrap();
+                received += payload.len();
+                largest = largest.max(payload.len());
+            }
+            Event::Text(value) if value["type"] == "PING" => continue,
+            Event::Text(value) if value["type"] == "CLOSE" => break,
+            other => panic!("the trunk must survive a large response: {other:?}"),
+        }
+    }
+    assert_eq!(received, SIZE);
+    assert!(
+        largest <= proto::MAX_BODY_FRAME_PAYLOAD,
+        "a frame carried {largest} bytes"
+    );
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_chunked_upload_sent_back_to_back_lands_whole() {
+    // Decision 95 closes a stream whose body outruns its handler by 32 chunks.
+    // A sender splitting at the recommended 256 KiB (§5.2) sends a 15 MiB
+    // attachment as 60 frames with nothing in between, so the real attachment
+    // route must keep up with that or the limit is a defect, not a guard.
+    let dir = tempdir::TempDir::new("storm-relay-chunked-upload").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+    let user = crate::api::tests::seed_owner(&state).await;
+    let bearer = format!(
+        "Bearer {}",
+        crate::api::tests::session_token(&state, &user).await
+    );
+    let vault = mcp_vault(&router, &bearer, "uploads").await;
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    let path = format!("/v1/vaults/{vault}/attachments/big.bin");
+
+    const SIZE: usize = 15 * 1024 * 1024;
+    let body: Vec<u8> = (0..SIZE).map(|i| (i * 31 + 7) as u8).collect();
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":2}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":2,"method":"PUT","path":path,
+        "headers":{"authorization":bearer},
+    }));
+    for piece in body.chunks(proto::MAX_BODY_FRAME_PAYLOAD) {
+        relay
+            .to_server
+            .send(Message::binary(proto::encode_body_frame(
+                proto::FRAME_REQUEST_BODY,
+                2,
+                piece,
+            )))
+            .unwrap();
+    }
+    relay
+        .to_server
+        .send(Message::binary(proto::encode_body_frame(
+            proto::FRAME_REQUEST_BODY,
+            2,
+            b"",
+        )))
+        .unwrap();
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["status"], 200, "{head}");
+    loop {
+        match relay.next_event().await {
+            Event::Text(value) if value["type"] == "CLOSE" => break,
+            Event::Text(value) if value["type"] == "PING" => continue,
+            Event::Binary(_) => continue,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    let fetched = relay
+        .request(
+            3,
+            TunnelRequest::get(&path).header("authorization", &bearer),
+        )
+        .await;
+    assert_eq!(fetched.status, 200);
+    assert!(
+        fetched.body == body,
+        "{} of {SIZE} bytes came back",
+        fetched.body.len()
+    );
+
+    tunnels.shutdown().await;
+}
