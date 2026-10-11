@@ -5548,6 +5548,34 @@ against a stub, backup pruning and copying, and the name rules.
 - **Docs.** `deploy/README.md` gains a Windows column and a Windows section;
   `README.md` the PowerShell one-liner; `CLAUDE.md` the invariants.
 
+**Real-Windows acceptance (`windows-latest`, Server 2022), three rounds.**
+- **Round 1: 32 passed, then stopped.** Install, enrollment and provider
+  discovery passed whole. The first Claude Code session never started:
+  **decision 89's `--settings` hook was inline JSON**, and npm installs
+  Claude Code on Windows as `claude.cmd`, whose arguments the batch guard
+  rightly refuses when they hold `"`. Every Claude Code session on such a
+  host would have failed. **Fix (99a):** the settings are a private file in
+  the session's directory (`gateway_e2e.py` reads it there; 95/95 on Linux).
+- **Round 2: 64 passed, 4 failed.** Two product defects:
+  - **A session's working directory was the canonical `\\?\C:\…`**, which
+    `cmd.exe` and many tools refuse. **Fix:** the carrier passes the plain
+    spelling (`winsvc::normalize`); `a_canonical_workspace_is_a_plain_working_directory`.
+  - **`Stop-Service` reported a failed stop:** the service stayed RUNNING
+    through its 13 s shutdown. **Fix:** STOP_PENDING with a 20 s hint the
+    moment Stop or PreShutdown arrives.
+  
+  The other two were the harness's (a batch file's arguments arrive quoted;
+  a refusal is read before the marker, not at the prompt).
+- **Round 3: AC-W1–W9 68 passed, 0 failed, 3 manual** (a logged-in CLI
+  taking a prompt, the phone handoff, a reboot). That includes End,
+  `Stop-Service` and `taskkill /f` each ending a detached child through the
+  job, recovery restarting the service, the pipe refusing even an
+  administrator, revocation's code 3 with no restart, and uninstall keeping
+  the workspaces.
+- **The server's per-user task** did not start the server on the runner
+  (`up` waited out its health check; the task stayed "Ready"). Being
+  diagnosed below.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
