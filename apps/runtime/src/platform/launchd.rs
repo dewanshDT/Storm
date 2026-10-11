@@ -255,7 +255,8 @@ scrollback_bytes = 4194304
     )
 }
 
-#[cfg(test)]
+// macOS paths, built with `Path::join`, so only where `/` is the separator.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

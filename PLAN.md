@@ -62,7 +62,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) · Resume reopens the agent's own conversation (89, on `staging`) |
-| M26 | Windows — the Runtime Host as a Windows Service, and the server per user | **in progress** | decision 91 · spec amendment D16 (AM48–AM57) in the vault, *Agent Runtime/Windows Runtime Host*, and *Installer/Windows Server* · stacked slices on `staging`: 91a carrier, platform and service (ConPTY, Job Objects, named pipe, Windows CI) · not yet run on Windows outside CI |
+| M26 | Windows — the Runtime Host as a Windows Service, and the server per user | **in progress** | decision 99 · spec amendment D16 (AM48–AM57) in the vault, *Agent Runtime/Windows Runtime Host*, and *Installer/Windows Server* · stacked slices on `staging`: 99a carrier, platform and service (ConPTY, Job Objects, named pipe, Windows CI) · not yet run on Windows outside CI |
 
 **Release state (2026-10-11).** **v0.7.1 is being cut** (decision 72's
 steps; this sentence is the prep PR's), at the operator's request after #141
@@ -5307,7 +5307,7 @@ it)*
 - **Also:** a 2px gap between Agents sidebar rows (#145), so a selected and
   a hovered row no longer merge into one fill.
 
-**91. Windows: the Runtime Host as a Windows Service, and the server per
+**99. Windows: the Runtime Host as a Windows Service, and the server per
 user (M26).** *(2026-10-12, the operator's choices)*
 
 **The spec.** D16 in *Agent Runtime/Decisions*, full text in *Agent
@@ -5329,7 +5329,7 @@ every one in the PTY, process groups, signals, uids and the Unix socket.
 
 **The slices**, stacked PRs to `staging`:
 1. **The carrier, the platform module and the service, with Windows CI**
-   (91a).
+   (99a).
 2. **The client's Windows enroll steps** (AM56).
 3. **The server on Windows** (W-S1–S4).
 4. **Release, `install.ps1`, docs, and the Windows acceptance harness**
@@ -5338,10 +5338,10 @@ every one in the PTY, process groups, signals, uids and the Unix socket.
 
 *Revisit if:* a host must confine agents more tightly than an account
 (AppContainer breaks the CLIs today); ConPTY's input stops draining into
-conhost's buffer (91a); Windows gains a polite signal for a process off the
+conhost's buffer (99a); Windows gains a polite signal for a process off the
 console (AM52's hang-up).
 
-**91a. Slice 1: ConPTY and a Job Object per session, one carrier interface,
+**99a. Slice 1: ConPTY and a Job Object per session, one carrier interface,
 a named pipe, and the service.** *(2026-10-12)*
 
 **The carrier is per platform; the policy is not.** `pty.rs` became
@@ -5441,6 +5441,15 @@ refuses).
 `x86_64-pc-windows-gnu` and `aarch64-apple-darwin` (zig as the C compiler);
 the Linux suite. **The new `runtime (rust, Windows)` job on `windows-latest`
 is the first run of any of it.**
+
+**The first Windows run** (MSVC, Server 2022): clippy `-D warnings` passed;
+the lib suite had 75 passed and 8 failed, none in the new carrier:
+- four `launchd` tests built macOS paths with `Path::join`, which writes `\`
+  on Windows: they are macOS layout tests, now `cfg(unix)`;
+- three host tests wrote a temp path into a TOML basic string, where
+  `C:\Users` is an invalid `\U` escape: now `{:?}`;
+- one config test used a temp dir under `C:\Users` as a workspace root,
+  which AM54 rightly refuses: Windows uses `%ProgramData%` there.
 
 ## Data model
 

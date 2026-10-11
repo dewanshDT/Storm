@@ -344,9 +344,18 @@ mod tests {
         assert!(!listed.contains(&".hidden".to_string()));
     }
 
+    /// A scratch directory a workspace root may be in: on Windows, the
+    /// runner's temp is under `C:\Users`, which AM54 refuses.
+    fn root_dir() -> tempfile::TempDir {
+        match std::env::var_os("ProgramData").filter(|_| cfg!(windows)) {
+            Some(dir) => tempfile::tempdir_in(dir).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        }
+    }
+
     #[test]
     fn a_root_overlapping_a_storm_data_root_is_refused() {
-        let data = tempfile::tempdir().unwrap();
+        let data = root_dir();
         let inside = data.path().join("vaults");
         std::fs::create_dir(&inside).unwrap();
         for root in [inside.clone(), data.path().to_path_buf()] {
@@ -357,7 +366,7 @@ mod tests {
             };
             assert!(config.check_roots().is_err());
         }
-        let elsewhere = tempfile::tempdir().unwrap();
+        let elsewhere = root_dir();
         let config = RuntimeConfig {
             workspace_roots: vec![elsewhere.path().to_path_buf()],
             forbidden_roots: vec![data.path().to_path_buf()],
@@ -542,7 +551,7 @@ mod tests {
         };
         let err = config.check_roots().unwrap_err().to_string();
         assert!(err.contains("AM54"), "{err}");
-        let own = tempfile::tempdir_in(std::env::var("ProgramData").unwrap()).unwrap();
+        let own = root_dir();
         let config = RuntimeConfig {
             workspace_roots: vec![own.path().to_path_buf()],
             forbidden_roots: vec![],

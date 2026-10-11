@@ -94,7 +94,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
-  # The same Runtime Host on Windows (D16, decision 91): ConPTY, Job Objects,
+  # The same Runtime Host on Windows (D16, decision 99): ConPTY, Job Objects,
   # the named pipe and DACLs exist only there, so the suite runs on Windows
   # rather than only cross-checking for it. `tests/windows.rs` is the carrier's
   # suite; the POSIX ones are compiled out.
