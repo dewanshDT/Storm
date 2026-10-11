@@ -139,8 +139,10 @@ def main():
               (user.lower() in principal.lower() or user_sid().lower() in principal.lower())
               and "<RunLevel>LeastPrivilege</RunLevel>" in principal, principal)
         direct = None
-        if not healthy() and not interactive_session():
+        if not wait(healthy, 30):
             diagnose()
+            print("--- the registered task, as exported\n" + xml, flush=True)
+        if not healthy() and not interactive_session():
             manual("WS1", "the logon task starts the server", "this runner has no interactive logon session")
             direct = start_as_the_task_would(xml)
         check("WS1", "it runs the windowless twin", "storm-serverw.exe" in xml, xml[:600])
