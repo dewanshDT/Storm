@@ -137,7 +137,8 @@ def main():
         principal = principal.group(1) if principal else ""
         check("WS1", "it runs as this user, not elevated",
               (user.lower() in principal.lower() or user_sid().lower() in principal.lower())
-              and "<RunLevel>LeastPrivilege</RunLevel>" in principal, principal)
+              # An export omits RunLevel when it is the default, LeastPrivilege.
+              and "HighestAvailable" not in principal, principal)
         direct = None
         if not wait(healthy, 30):
             diagnose()
