@@ -460,7 +460,8 @@ mod imp {
                 bail!("{name} is not beside this binary ({})", exe_dir.display());
             }
             if !same(&src, dest) {
-                std::fs::copy(&src, dest).with_context(|| format!("copying {name} to {dest}"))?;
+                copy_when_released(&src, Path::new(dest))
+                    .with_context(|| format!("copying {name} to {dest}"))?;
             }
         }
         let web_src = opts
@@ -574,8 +575,21 @@ mod imp {
     }
 
     /// `schtasks /end` returns before the server has exited, and Windows
-    /// cannot delete a running binary or an open log: retry for up to 15 s
+    /// cannot replace a running binary: an upgrade retries for up to 15 s
     /// (found on a real Windows run).
+    fn copy_when_released(src: &Path, dest: &Path) -> std::io::Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match std::fs::copy(src, dest) {
+                Ok(_) => return Ok(()),
+                Err(e) if std::time::Instant::now() >= deadline => return Err(e),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+            }
+        }
+    }
+
+    /// The same for `uninstall`: nor can it delete a running binary or an
+    /// open log.
     fn remove_when_released(dir: &Path) -> Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
