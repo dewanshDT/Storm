@@ -325,6 +325,24 @@ pub fn close_stream(stream_id: u32) -> String {
     control("CLOSE", StreamId { stream_id })
 }
 
+/// The response failed after its head: the body the client has is incomplete
+/// (§5.4). A `CLOSE` rather than an `ERROR`, because a relay that predates the
+/// rule drops the whole trunk on an origin-sent `ERROR`.
+pub fn abort_stream(stream_id: u32) -> String {
+    #[derive(Serialize)]
+    struct Aborted {
+        stream_id: u32,
+        aborted: bool,
+    }
+    control(
+        "CLOSE",
+        Aborted {
+            stream_id,
+            aborted: true,
+        },
+    )
+}
+
 pub fn close_trunk() -> String {
     control("CLOSE", serde_json::Map::new())
 }

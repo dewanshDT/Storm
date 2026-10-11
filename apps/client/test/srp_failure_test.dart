@@ -18,6 +18,10 @@ enum _Script {
 
   /// Head, one body chunk, then `ERROR{trunk_lost, stream_id}`.
   errorMidBody,
+
+  /// Head, one body chunk, then `ERROR{stream_aborted, stream_id}`: the
+  /// origin's body failed after its head (§5.4, decision 101).
+  abortedMidBody,
 }
 
 /// A relay that answers `HELLO` (or refuses it) and then follows a script.
@@ -85,6 +89,13 @@ class _ScriptedRelay {
                 'stream_id': 1,
               }),
             );
+          case _Script.abortedMidBody:
+            socket.add(
+              SrpControl.encode('ERROR', {
+                'code': 'stream_aborted',
+                'stream_id': 1,
+              }),
+            );
         }
     }
   }
@@ -144,6 +155,29 @@ void main() {
       await relay.close();
     }
   });
+
+  test(
+    'an aborted response is a body error, and only that stream ends',
+    () async {
+      final relay = _ScriptedRelay(script: _Script.abortedMidBody);
+      await relay.start();
+      final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+      final client = SrpHttpClient(trunk);
+      final unreachable = <String>[];
+      trunk.onServerUnreachable.listen(unreachable.add);
+      try {
+        final error = await _bodyError(client);
+        expect(error, isA<SrpTransportException>());
+        expect((error! as SrpTransportException).code, 'stream_aborted');
+        expect(relay.requestHeads, 1);
+        expect(trunk.isConnected, isTrue);
+        expect(unreachable, isEmpty, reason: 'the server answered');
+      } finally {
+        trunk.dispose();
+        await relay.close();
+      }
+    },
+  );
 
   test('a dead trunk is replaced by a fresh one, not reused', () async {
     final relay = _ScriptedRelay(script: _Script.dieMidBody);

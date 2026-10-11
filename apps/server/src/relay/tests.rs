@@ -2029,6 +2029,61 @@ async fn a_chunked_upload_sent_back_to_back_lands_whole() {
     tunnels.shutdown().await;
 }
 
+// A response that fails mid-body (decision 101)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_response_body_that_fails_midway_is_aborted_not_closed() {
+    let dir = tempdir::TempDir::new("storm-relay-abort").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let broken = Router::new().route(
+        "/broken",
+        axum::routing::get(|| async {
+            let body = futures_util::stream::iter([
+                Ok::<_, std::io::Error>(Bytes::from_static(b"first")),
+                Err(std::io::Error::other("disk went away")),
+            ]);
+            axum::body::Body::from_stream(body)
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router.merge(broken), identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":1}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":1,
+        "method":"GET","path":"/broken","headers":{}
+    }));
+    let head = relay.next_control().await;
+    assert_eq!(head["status"], 200, "{head}");
+
+    let mut body = Vec::new();
+    let end = loop {
+        match relay.next_event().await {
+            Event::Binary(frame) => {
+                let (_, id, payload) = proto::decode_body_frame(&frame).unwrap();
+                assert_eq!(id, 1);
+                body.extend_from_slice(payload);
+            }
+            Event::Text(value) if value["type"] == "PING" => continue,
+            Event::Text(value) => break value,
+            other => panic!("expected the body or its end, got {other:?}"),
+        }
+    };
+    assert_eq!(body, b"first");
+    assert_eq!(end["type"], "CLOSE", "{end}");
+    assert_eq!(end["stream_id"], 1, "{end}");
+    assert_eq!(
+        end["aborted"], true,
+        "a plain CLOSE tells the client a truncated body is complete: {end}"
+    );
+
+    tunnels.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // §9: failure handling (decision 94)
 // ---------------------------------------------------------------------------
