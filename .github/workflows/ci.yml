@@ -185,6 +185,32 @@ jobs:
         if: failure()
         run: cat .dev/live-server.log || true
 
+  browser:
+    name: browser (web sign-in in Firefox)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install websockets
+      # The runner image ships Firefox; the test drives it over WebDriver
+      # BiDi against a real server on a non-loopback (insecure) origin, the
+      # way a LAN Storm is reached (decision 90).
+      - run: firefox --version
+      - run: flutter pub get
+        working-directory: apps/client
+      - run: make test-browser
+
   www:
     name: www (astro)
     runs-on: ubuntu-latest
