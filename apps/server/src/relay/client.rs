@@ -509,12 +509,10 @@ fn close_stream(streams: &mut HashMap<u32, StreamEntry>, stream_id: u32) {
 
 /// Methods that never carry a request body.
 ///
-/// **This is what stops a tunnelled `GET` from hanging.** §5.2 defines body
-/// chunks but never says how a body *ends*, so there is no terminator this
-/// server can rely on a relay sending. Closing the body channel up front for
-/// the methods that cannot have one means the overwhelmingly common case is
-/// correct whatever the relay does; a bodied request still ends on the
-/// zero-length frame convention or on `CLOSE`. See the report's spec notes.
+/// SRP §5.2 lets an origin dispatch these at the head without waiting for the
+/// end-of-body frame, so a client from before that rule (which sent none)
+/// still gets its `GET`s answered. Every other method waits for the
+/// zero-length `0x01` frame.
 fn is_bodyless(method: &str) -> bool {
     matches!(
         method.to_ascii_uppercase().as_str(),
@@ -644,8 +642,7 @@ fn handle_body_frame(bytes: &[u8], streams: &mut HashMap<u32, StreamEntry>) {
         return;
     };
 
-    // A zero-length frame ends the body — the convention this implementation
-    // adopts because §5.2 defines no terminator. See `is_bodyless`.
+    // A zero-length frame ends the body (§5.2).
     if payload.is_empty() {
         entry.body = None;
         return;

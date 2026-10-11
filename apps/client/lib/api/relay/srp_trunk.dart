@@ -374,9 +374,17 @@ class SrpTrunk {
     );
   }
 
-  /// Sends one `0x01` request-body chunk for [stream].
+  /// Sends one `0x01` request-body chunk for [stream]. [bytes] must not be
+  /// empty: an empty chunk is the end of body (§5.2), sent by [endBody].
   void sendBody(SrpStream stream, List<int> bytes) {
+    assert(bytes.isNotEmpty, 'an empty 0x01 frame ends the body (§5.2)');
     _send(encodeBodyFrame(bodyRequest, stream.streamId, bytes));
+  }
+
+  /// Ends [stream]'s request body with a zero-length `0x01` frame (§5.2).
+  /// Every request sends it once, a body-less `GET` included.
+  void endBody(SrpStream stream) {
+    _send(encodeBodyFrame(bodyRequest, stream.streamId, const []));
   }
 
   /// Sends `CLOSE { stream_id }` and forgets the stream (§5.4).

@@ -360,6 +360,7 @@ slow server and an overloaded one should fail differently, not compound.
 Client → Relay → Server:
   HTTP_REQUEST_HEAD { stream_id, method, path, headers }
   [binary 0x01, stream_id] body chunk(s)
+  [binary 0x01, stream_id]                 // zero-length: end of body
 
 Server → Relay → Client:
   HTTP_RESPONSE_HEAD { stream_id, status, headers }
@@ -368,6 +369,29 @@ Server → Relay → Client:
 
 The body chunks are the proxied HTTP exchange verbatim. The relay MUST NOT
 rewrite them.
+
+**End of request body.** A `0x01` frame with an empty payload (the 5-byte
+header alone) ends the request body for its stream. The rules:
+
+1. A client **MUST** send exactly one end-of-body frame after the last
+   non-empty `0x01` chunk of **every** request — including a request with no
+   body, where it directly follows `HTTP_REQUEST_HEAD`. A `GET` sends it too, so
+   no party has to decide from the method whether a body is coming.
+2. A client **MUST NOT** send an empty `0x01` frame for any other purpose. An
+   empty chunk from the body source is skipped, not sent.
+3. A client **MUST NOT** send `0x01` frames for a stream after its end of body.
+   An origin ignores any that arrive.
+4. The relay forwards the end-of-body frame like any other `0x01` frame,
+   verbatim.
+5. An origin **MUST** treat the frame as end of input for the request it
+   dispatches. It **MAY** dispatch a `GET`, `HEAD`, `OPTIONS` or `TRACE` at
+   `HTTP_REQUEST_HEAD` without waiting for it, and treat any body frames for
+   those methods as absent.
+
+`CLOSE` is not an end of body. It abandons the stream (§5.4), so a client
+that closes instead of ending its body gets no response. A body with no end
+leaves the origin's handler waiting for input until a timeout, which is what
+made every relayed write hang before this rule was written down.
 
 **`relay_peer_ip`.** The relay attaches the client trunk's real source address
 as a sibling field on `HTTP_REQUEST_HEAD` when it re-emits the message
@@ -484,7 +508,7 @@ Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
 | `STREAM_ACK` | server→relay | `stream_id` — the trunk has accepted it (§5.1) |
 | `HTTP_REQUEST_HEAD` | client→relay→server | `stream_id`, `method`, `path`, `headers`; **relay sets `relay_peer_ip` on the server-ward hop** (§5.2) |
 | `HTTP_RESPONSE_HEAD` | server→relay→client | `stream_id`, `status`, `headers` |
-| *(binary `0x01` / `0x02`)* | either | `stream_id`, bytes |
+| *(binary `0x01` / `0x02`)* | either | `stream_id`, bytes; an empty `0x01` ends the request body (§5.2) |
 | `PING` / `PONG` | either | — |
 | `CLOSE` | either | `stream_id`? (absent = whole trunk) |
 | `ERROR` | relay→either | `code`, `message`, `stream_id`? |

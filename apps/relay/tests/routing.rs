@@ -300,6 +300,40 @@ async fn a_request_and_response_travel_client_relay_server_client_with_bodies() 
     }
 }
 
+/// The end-of-body frame (§5.2) is a `0x01` with an empty payload. It is the
+/// only thing that lets the origin answer a bodied request, so the relay must
+/// carry it like any other chunk rather than drop it as empty.
+#[tokio::test]
+async fn an_empty_request_body_frame_reaches_the_server_as_end_of_body() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let stream_id = client.open_stream("attempt-end").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+
+    client.send(request_head(stream_id, "/v1/notes")).await;
+    client.send_body(0x01, stream_id, b"{}").await;
+    client.send_body(0x01, stream_id, b"").await;
+
+    let head = server.recv().await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+    for expected in [&b"{}"[..], &b""[..]] {
+        match server.next_frame().await {
+            Frame::Body {
+                kind,
+                stream_id: id,
+                payload,
+            } => {
+                assert_eq!(kind, 0x01);
+                assert_eq!(id, stream_id);
+                assert_eq!(payload, expected);
+            }
+            Frame::Text(value) => panic!("expected a body frame, got {value}"),
+        }
+    }
+}
+
 // --------------------------------------------------- the cross-talk trap (§3)
 
 #[tokio::test]
