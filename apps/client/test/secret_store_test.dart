@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -138,6 +139,32 @@ void main() {
     });
   });
 
+  group('on the macOS file-based keychain', () {
+    test('loads credentials without readAll, which it refuses', () async {
+      // The bug: `readAll` asks for every item *with its data* in one query,
+      // which the file-based keychain answers with errSecParam (-50). Writes
+      // are per key and succeeded, so pairing worked and every relaunch came
+      // up with no device secret — then the login was rejected and unpaired
+      // the device. The mock keychain answers `readAll` happily, which is why
+      // nothing caught it; this fake answers it the way macOS does.
+      final prefs = await prefsWith({});
+      final keychain = _FileKeychain();
+      await SecretStore(secure: keychain).save(prefs, {
+        deviceSecret: 'dev-secret',
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+      });
+
+      final store = SecretStore(secure: keychain);
+      final loaded = await store.load(prefs);
+
+      expect(loaded[deviceSecret], 'dev-secret');
+      expect(loaded[accessToken], 'access-1');
+      expect(loaded[refreshToken], 'refresh-1');
+      expect(store.degraded, isFalse);
+    });
+  });
+
   group('when the keychain cannot be reached', () {
     test('reading falls back to prefs rather than losing access', () async {
       // A Linux box with no libsecret is the real case. Refusing to start
@@ -197,6 +224,17 @@ class _BrokenStorage extends FlutterSecureStorage {
   }) async => throw Exception('no secret service');
 
   @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => throw Exception('no secret service');
+
+  @override
   Future<void> write({
     required String key,
     required String? value,
@@ -218,4 +256,65 @@ class _BrokenStorage extends FlutterSecureStorage {
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
   }) async => throw Exception('no secret service');
+}
+
+/// The macOS file-based keychain as `usesDataProtectionKeychain: false` sees
+/// it: one item at a time works, and `readAll` — `kSecMatchLimitAll` with
+/// `kSecReturnData` — is refused with errSecParam.
+class _FileKeychain extends FlutterSecureStorage {
+  _FileKeychain();
+
+  final _items = <String, String>{};
+
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => throw PlatformException(code: '-50', message: 'errSecParam');
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => _items[key];
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (value == null) {
+      _items.remove(key);
+    } else {
+      _items[key] = value;
+    }
+  }
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    _items.remove(key);
+  }
 }
