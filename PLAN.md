@@ -5306,6 +5306,34 @@ it)*
 - **Also:** a 2px gap between Agents sidebar rows (#145), so a selected and
   a hovered row no longer merge into one fill.
 
+**91. The terminal follows the device being used: opening a session or typing
+in it re-claims a PTY sized elsewhere.** *(2026-10-12; the operator: "huge
+padding at the bottom" of a session on the phone)*
+- **What happened.** On the phone, Claude Code's status bar sat about four
+  rows above the bottom of the terminal, with blank rows under it. In a
+  correctly sized terminal, Claude Code puts its status bar on the last row
+  (checked in tmux at 66×50). So the host's PTY was shorter than the phone's
+  grid, and the agent drew for that height.
+- **Why.** The server applies whichever client sent the last resize. A
+  client sent one only when its own grid changed size, or when its terminal
+  took keyboard focus (freeze §11.4's "the PTY follows the client being
+  used"). A resize from another device (the session was also open on the Mac),
+  or one of the phone's own that was lost (the client never retries), stayed
+  in place until the phone's grid happened to change again. Reading a session
+  on the phone claimed nothing. The xterm2 emulator was ruled out: a fill,
+  shrink and grow keeps the content anchored to the bottom.
+- **The fix.** `SessionController` tracks the host's size: it is updated from
+  each status event, and from each resize it sends. It re-sends its own size
+  (with `focus`) when the two differ:
+  - **on opening a session**: the first status event;
+  - **on typing**: input is the signal that this device is the one in use.
+  
+  Another device's resize alone never triggers a claim, so two open devices
+  never fight over the PTY; the one being typed on wins.
+- Tests (`agent_test`): opening a session another device sized claims it;
+  typing claims it back, only typing does, and only once. Both fail on the
+  previous controller.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
