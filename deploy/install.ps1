@@ -33,6 +33,9 @@
   Take the zips and checksums.txt from this folder instead of downloading them.
 .PARAMETER Workspace
   A first workspace for the Runtime Host: a folder name, or a git URL to clone.
+.PARAMETER PasswordStdin
+  Set a new server's account password from stdin (one line), instead of pairing
+  a device first. Never an argument: arguments are visible to other users.
 .PARAMETER Yes
   Ask nothing: install what was chosen, and skip what needs an answer.
 .PARAMETER DryRun
@@ -45,6 +48,7 @@ param(
     [string]$Version,
     [string]$FromDir,
     [string]$Workspace,
+    [switch]$PasswordStdin,
     [switch]$Yes,
     [switch]$DryRun
 )
@@ -159,10 +163,24 @@ if ($Server) {
     } else {
         Say "So your phone can reach it, run once in PowerShell as administrator:`n  $rule"
     }
-    & $serverBin has-account --state $dataState
-    if ($LASTEXITCODE -ne 0) {
+    & $serverBin has-account --state $dataState *> $null
+    if ($LASTEXITCODE -ne 0 -and $PasswordStdin) {
+        $pw = [Console]::In.ReadLine()
+        if ([string]::IsNullOrEmpty($pw)) { Fail '-PasswordStdin: there was no password on stdin' }
+        $pw | & $serverBin passwd --state $dataState --password-stdin
+        $pw = $null
+        if ($LASTEXITCODE -ne 0) { Fail 'setting the account password failed' }
+    } elseif ($LASTEXITCODE -ne 0) {
         Say "`nPair your first device: in the Storm app, add a server and scan this code."
         & $serverBin pair --state $dataState --qr
+        if ($Runtime -and -not $Yes) {
+            # The Runtime Host enrolls with the account the first device creates.
+            Say 'Waiting for the first device to pair (Ctrl+C stops waiting)...'
+            do {
+                Start-Sleep -Seconds 3
+                & $serverBin has-account --state $dataState *> $null
+            } until ($LASTEXITCODE -eq 0)
+        }
     }
 }
 
@@ -176,11 +194,14 @@ if ($Runtime) {
 
     if (Test-Path (Join-Path $env:ProgramData 'StormRuntime\state\host.json')) {
         Say 'Already enrolled; the service was upgraded in place.'
-    } elseif ($Server) {
+    } elseif ($Server -and $(& $serverBin has-account --state $dataState *> $null; $LASTEXITCODE -eq 0)) {
         # The enrollment string goes from one process to the other through a
         # pipe, and never reaches a command line, the screen or a log (84e).
         & $serverBin host-enrollment --state $dataState | & $runtimeBin enroll
         if ($LASTEXITCODE -ne 0) { Fail 'enrollment failed' }
+    } elseif ($Server) {
+        Say "The server has no account yet. Once a device has paired, enroll, as administrator:"
+        Say "  & `"$serverBin`" host-enrollment --state `"$dataState`" | & `"$runtimeBin`" enroll"
     } elseif ($Yes) {
         Say "Enroll it later, in PowerShell as administrator:`n  & `"$runtimeBin`" enroll"
     } else {

@@ -122,7 +122,8 @@ jobs:
           } | Set-Content dist/checksums.txt
       - name: Install everything
         shell: pwsh
-        run: ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes -Workspace scratch
+        # The account from stdin, as install.sh's --password-stdin (84g).
+        run: "'ci-installer-password-1' | pwsh -NoProfile -File ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes -Workspace scratch -PasswordStdin"
       - name: Check it
         shell: pwsh
         run: |
