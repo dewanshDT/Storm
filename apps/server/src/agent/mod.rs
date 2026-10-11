@@ -169,6 +169,25 @@ pub struct Capabilities {
     pub images: bool,
 }
 
+impl Capabilities {
+    /// Whether the host stages pasted images. 0.7.0 did (85e) before it said
+    /// so; from 0.7.1 the host says `images`.
+    pub fn stages_images(&self) -> bool {
+        self.images || version_at_least(&self.version, (0, 7, 0))
+    }
+}
+
+/// `0.7.0`, `0.7.0-rc.1` or `0.7.0+build` against `(major, minor, patch)`;
+/// anything unreadable is older.
+fn version_at_least(version: &str, min: (u64, u64, u64)) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let mut parts = core.split('.').map(|p| p.parse::<u64>());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c) >= min,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderCap {
     pub id: String,
@@ -1115,7 +1134,7 @@ impl AgentManager {
         // An old host never answers `terminal.image`: say so now rather than
         // after IMAGE_DEADLINE. An offline host falls through to `send`.
         if let Some(caps) = self.host_live(&r.host_id).capabilities
-            && !caps.images
+            && !caps.stages_images()
         {
             return Err(AgentError::NoImages(caps.version));
         }
@@ -2426,6 +2445,23 @@ mod tests {
             other => panic!("expected NoImages, got {other:?}"),
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_0_7_0_host_stages_images_without_saying_so() {
+        let with = |version: &str, images: bool| Capabilities {
+            version: version.into(),
+            images,
+            ..caps(&[])
+        };
+        assert!(with("0.7.0", false).stages_images());
+        assert!(with("0.10.2", false).stages_images());
+        assert!(with("1.0.0-rc.1", false).stages_images());
+        assert!(with("test", true).stages_images());
+        assert!(!with("0.4.0", false).stages_images());
+        assert!(!with("0.6.1+deb", false).stages_images());
+        assert!(!with("", false).stages_images());
+        assert!(!with("garbage", false).stages_images());
     }
 
     #[test]

@@ -63,7 +63,17 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) |
 
-**Release state (2026-10-11).** **v0.7.0 is released** (PR #140, `6ed9de4`,
+**Release state (2026-10-11).** **v0.7.1 is being cut** (decision 72's
+steps; this sentence is the prep PR's), at the operator's request after #141
+merged into `staging`. It carries **decision 88**, the Mac first-run fixes: the
+installer offers a first workspace (and `--workspace NAME|URL`), the launcher
+shows an empty host's workspace folder with **Check again**, an image paste
+to a host without the new `images` capability fails at once (409) instead
+of after 30 s, and a held Ctrl+V no longer reaches the agent as `^V`. No
+migration. A 0.7.0 runtime does not report `images`, but stages images, so
+the server also takes a reported version of 0.7.0 or later as able (found in
+the prep, before the tag). The launcher shows an empty host's folder only
+once its runtime is 0.7.1. **v0.7.0** (PR #140, `6ed9de4`,
 release run 38094345519, apt `0.7.0-1`) and **prod runs it**: the operator
 upgraded the VM's `storm-server` the same day, with a state tarball taken
 first (vault: *Storm/Prod Upgrade — v0.7.0*). The codebox and omarchy Runtime
@@ -5190,7 +5200,9 @@ paste to an old host*)*
   and xterm2 sent the repeat as `^V`, which made Claude Code look in the
   host's own empty clipboard.
 - **An `images` capability.** The runtime says `"images": true` in
-  `hello`. For a host that does not, `stage_image` answers **409** at once
+  `hello`; a host reporting version 0.7.0 or later counts too, since 0.7.0
+  stages images without saying so (`Capabilities::stages_images`). For a host
+  that does neither, `stage_image` answers **409** at once
   ("this host's runtime (0.4.0) cannot take images: upgrade it to 0.7.0 or
   later"), and nothing is admitted. The client's paste chip already shows
   the server's message. An offline host still gets 503 from `send`.
