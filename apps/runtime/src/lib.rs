@@ -65,5 +65,6 @@ pub mod platform;
 pub mod provider;
 mod pty;
 pub mod scrollback;
+pub mod serve;
 pub mod status;
 pub mod terminal;

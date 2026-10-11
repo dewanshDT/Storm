@@ -94,6 +94,30 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The same Runtime Host on Windows (D16, decision 91): ConPTY, Job Objects,
+  # the named pipe and DACLs exist only there, so the suite runs on Windows
+  # rather than only cross-checking for it. `tests/windows.rs` is the carrier's
+  # suite; the POSIX ones are compiled out.
+  runtime-windows:
+    name: runtime (rust, Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/runtime
+    steps:
+      # The suites read files byte for byte; keep them as committed.
+      - run: git config --global core.autocrlf false
+        working-directory: .
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/runtime
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   # The server on a Mac (decision 84d): the same suite, on FSEvents instead of
   # inotify, plus the LaunchAgent code compiled for real.
   server-macos:

@@ -1142,7 +1142,7 @@ impl Host {
             &crate::mcp::session_dir(&self.state_dir, session),
             grants,
             &handle,
-            &crate::mcp::socket_path(&self.state_dir),
+            &self.socket_address(),
             &exe,
             self.opencode_settings.as_ref(),
         )?;
@@ -1170,7 +1170,7 @@ impl Host {
             provider,
             &crate::mcp::session_dir(&self.state_dir, session),
             &handle,
-            &crate::mcp::socket_path(&self.state_dir),
+            &self.socket_address(),
             &exe,
             resume,
         )?;
@@ -1273,23 +1273,24 @@ impl Host {
         let _ = std::fs::remove_dir_all(crate::mcp::session_dir(&self.state_dir, session));
     }
 
-    /// `run/mcp.sock`, in a `0700` directory: only this account's processes
-    /// (the bridges it launched) can connect.
-    fn bind_socket(&self) -> Result<tokio::net::UnixListener> {
+    /// `run/mcp.sock`, in a `0700` directory (a named pipe on Windows,
+    /// AM55): only this account's processes (the bridges it launched) can
+    /// connect.
+    fn bind_socket(&self) -> Result<crate::platform::ipc::Listener> {
         let path = crate::mcp::socket_path(&self.state_dir);
-        crate::mcp::private_dir(path.parent().expect("socket has a parent"))?;
-        let _ = std::fs::remove_file(&path);
-        let listener = tokio::net::UnixListener::bind(&path)
-            .with_context(|| format!("binding {}", path.display()))?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(listener)
+        crate::platform::ipc::Listener::bind(&path)
+            .with_context(|| format!("binding {}", path.display()))
     }
 
-    async fn serve_socket(self: Arc<Self>, listener: tokio::net::UnixListener) {
+    /// What a session's bridges and hooks are told to connect to.
+    fn socket_address(&self) -> PathBuf {
+        crate::platform::ipc::address(&crate::mcp::socket_path(&self.state_dir)).into()
+    }
+
+    async fn serve_socket(self: Arc<Self>, mut listener: crate::platform::ipc::Listener) {
         loop {
             match listener.accept().await {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     tokio::spawn(self.clone().bridge_connection(stream));
                 }
                 Err(e) => {
@@ -1321,9 +1322,9 @@ impl Host {
     }
 
     /// One bridge connection: a message to forward, or a subscription.
-    async fn bridge_connection(self: Arc<Self>, stream: tokio::net::UnixStream) {
+    async fn bridge_connection(self: Arc<Self>, stream: crate::platform::ipc::Stream) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-        let (read, mut write) = stream.into_split();
+        let (read, mut write) = tokio::io::split(stream);
         let mut line = String::new();
         let mut reader = tokio::io::BufReader::new(read.take(MCP_LINE_MAX));
         if reader.read_line(&mut line).await.is_err() {
@@ -1418,19 +1419,17 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
 /// with `dir` and its parent `0700`. Returns the file's path.
 fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     std::fs::create_dir_all(dir).context("creating the inbox")?;
     for d in [dir.parent(), Some(dir)].into_iter().flatten() {
-        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+        crate::platform::tighten_private_dir(d)?;
     }
     let tmp = dir.join(format!(".{name}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-        .context("creating the image file")?;
+    let mut f = crate::platform::open_private(
+        &tmp,
+        std::fs::OpenOptions::new().write(true).create_new(true),
+    )
+    .context("creating the image file")?;
     f.write_all(bytes)?;
     f.sync_all()?;
     let path = dir.join(name);
@@ -1552,21 +1551,20 @@ mod tests {
         (url, seen)
     }
 
+    #[cfg(unix)]
     fn alive(pid: i32) -> bool {
         rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
     }
 
     #[test]
     fn a_staged_image_is_private_and_whole() {
-        use std::os::unix::fs::PermissionsExt;
         let state = tempfile::tempdir().unwrap();
         let inbox = state.path().join("sessions/ags_X/inbox");
         let path = write_private(&inbox, "img_A.png", b"\x89PNG").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
-        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(std::path::Path::new(&path)), 0o600);
-        assert_eq!(mode(&inbox), 0o700);
-        assert_eq!(mode(inbox.parent().unwrap()), 0o700);
+        crate::platform::assert_private(std::path::Path::new(&path), 0o600);
+        crate::platform::assert_private(&inbox, 0o700);
+        crate::platform::assert_private(inbox.parent().unwrap(), 0o700);
         let left: Vec<_> = std::fs::read_dir(&inbox).unwrap().collect();
         assert_eq!(left.len(), 1, "no temporary file left");
     }
@@ -1574,6 +1572,7 @@ mod tests {
     /// D15 AM46: an image that does not match what the server announced is
     /// not staged, and the server is told why.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn a_damaged_image_is_reported_not_staged() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
@@ -1662,6 +1661,7 @@ mod tests {
 
     /// A host whose `claude-code` and `opencode` are `/bin/sh` running
     /// `script` (the launch's own arguments follow as `$0`, `$1`, …).
+    #[cfg(unix)]
     async fn harness_host(
         script: &str,
     ) -> (
@@ -1703,6 +1703,7 @@ mod tests {
         (host, seen, state, roots)
     }
 
+    #[cfg(unix)]
     fn harness_start(
         session: &str,
         provider: &str,
@@ -1724,6 +1725,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !ok() {
@@ -1732,6 +1734,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn harness_posts(seen: &Mutex<Vec<(String, serde_json::Value)>>, session: &str) -> Vec<String> {
         seen.lock()
             .unwrap()
@@ -1745,6 +1748,7 @@ mod tests {
     /// reported, then whatever its hook says, but only through its own
     /// handle and only as an id Claude Code could have made.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn the_agents_session_id_is_reported_as_it_changes() {
         let (host, seen, state, _roots) = harness_host("exec sleep 1000").await;
         host.clone()
@@ -1804,6 +1808,7 @@ mod tests {
     /// A resume names the conversation and skips the opening prompt; an id
     /// the provider could not have made never reaches a command line.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn a_resume_reopens_the_conversation_or_fails_to_start() {
         let (host, seen, _state, _roots) =
             harness_host(r#"echo "ARGS $0 $*"; exec sleep 1000"#).await;
@@ -1856,6 +1861,7 @@ mod tests {
     /// D15 AM43: the host reads the agent's title from its output and posts
     /// the name and activity, once per change, and `hello` carries them.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn the_agents_title_is_reported_once_per_change() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
@@ -1943,6 +1949,7 @@ mod tests {
     /// can end — posts no ending, and leaves `sessions.json` listing it, so
     /// the next `hello` reports `failed (host_restart)` (§13).
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn a_shutdown_ends_every_session_and_posts_no_ending() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;

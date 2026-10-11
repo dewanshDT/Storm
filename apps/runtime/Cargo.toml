@@ -44,16 +44,9 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 data-encoding = "2.11.1"
 ed25519-dalek = "3.0.0"
 futures-util = "0.3.34"
-# `getpwuid_r` and `kill(-1, …)` for the exclusive-account sweep (AM37):
-# rustix has neither the password database nor a pid of -1.
-libc = "0.2"
 rand = "0.10.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
 rpassword = "7.5.4"
-# The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
-# the child's pre_exec stays async-signal-safe and the musl build needs no libc
-# shims.
-rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
@@ -64,6 +57,38 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 # The agent's terminal title, parsed once on the host (D15 AM43).
 vte = "0.15"
 
+[target.'cfg(unix)'.dependencies]
+# `getpwuid_r` and `kill(-1, …)` for the exclusive-account sweep (AM37):
+# rustix has neither the password database nor a pid of -1.
+libc = "0.2"
+# The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
+# the child's pre_exec stays async-signal-safe and the musl build needs no libc
+# shims.
+rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system"] }
+
+# ConPTY, Job Objects, DACLs and the named pipe (D16, AM51–AM55), and the
+# Service Control Manager (AM50).
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8.1"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
-rustix = { version = "1.1.5", features = ["process", "system"] }
 tempfile = "3.27.0"
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1.1.5", features = ["process", "system"] }

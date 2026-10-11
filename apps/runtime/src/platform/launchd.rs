@@ -194,7 +194,12 @@ pub fn git_safe_directory(layout: &Layout) -> String {
 /// already there. Appended as its own `[safe]` section, so the rest of the
 /// file is left exactly as it was.
 pub fn with_git_safe_directory(gitconfig: &str, layout: &Layout) -> Option<String> {
-    let value = git_safe_directory(layout);
+    with_safe_directory(gitconfig, &git_safe_directory(layout))
+}
+
+/// `gitconfig` with `safe.directory = value` added, or `None` when it is
+/// already there. Windows' install uses it too (AM54).
+pub fn with_safe_directory(gitconfig: &str, value: &str) -> Option<String> {
     let present = gitconfig.lines().any(|l| {
         l.split_once('=')
             .is_some_and(|(k, v)| k.trim() == "directory" && v.trim() == value)

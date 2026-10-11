@@ -198,7 +198,7 @@ pub(crate) fn send(socket: impl AsRef<Path>, handle: String, id: String) -> Resu
         harness_session: id,
     })?;
     line.push(b'\n');
-    let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+    let mut stream = crate::platform::ipc::connect_blocking(socket.as_ref().as_os_str())?;
     stream.write_all(&line)?;
     Ok(())
 }
@@ -308,12 +308,7 @@ mod tests {
         )));
         let plugin = std::fs::read_to_string(config.join("plugin/storm.js")).unwrap();
         assert!(plugin.contains(r#"spawn("/usr/bin/storm-runtime", ["harness-session", id]"#));
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(config.join("plugin/storm.js"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        crate::platform::assert_private(&config.join("plugin/storm.js"), 0o600);
     }
 
     #[test]
