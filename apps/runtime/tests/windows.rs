@@ -339,3 +339,26 @@ fn the_default_host_name_is_the_computer_name() {
     let name = storm_runtime::platform::host_name();
     assert_eq!(name, std::env::var("COMPUTERNAME").unwrap().to_lowercase());
 }
+
+/// A workspace path is canonical (`\\?\C:\…`), but cmd.exe refuses a
+/// verbatim working directory: the agent gets the plain spelling.
+#[test]
+fn a_canonical_workspace_is_a_plain_working_directory() {
+    let canonical = std::env::temp_dir().canonicalize().unwrap();
+    assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+    let rec = Arc::new(Recorder::default());
+    let spec = SessionSpec {
+        session_id: "ags_WINCWD".into(),
+        workspace: canonical,
+        interaction: InteractionSpec::Terminal(TerminalSize::new(120, 24).unwrap()),
+        launch: Default::default(),
+    };
+    let _session = cmd("echo cwd=%CD%;")
+        .start(spec, rec.clone())
+        .expect("start");
+    rec.wait_for("cwd=");
+    assert_eq!(rec.wait_end(), SessionEnd::Completed { exit_code: Some(0) });
+    let text = rec.text();
+    assert!(!text.contains(r"cwd=\\?\"), "{text}");
+    assert!(!text.contains("UNC paths are not supported"), "{text}");
+}
