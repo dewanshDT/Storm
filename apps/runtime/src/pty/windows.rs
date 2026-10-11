@@ -266,7 +266,11 @@ fn create_process(launch: &Launch, hpc: HPCON, job: &OwnedHandle) -> io::Result<
     };
     let application = wide(&application);
     let mut line = wide(&line);
-    let cwd = wide(&launch.cwd);
+    // Never a `\\?\` path: a workspace is canonical, and cmd.exe and many
+    // tools refuse a verbatim working directory (found by AC-W7).
+    let cwd = wide(crate::platform::winsvc::normalize(
+        &launch.cwd.to_string_lossy(),
+    ));
     let mut env = environment_block(launch);
 
     let mut list_size = 0usize;
