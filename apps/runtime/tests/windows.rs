@@ -117,7 +117,7 @@ fn powershell(script: &str) -> CliProvider {
         [
             "-NoLogo",
             "-NoProfile",
-            "-NonInteractive",
+            // Not -NonInteractive: it turns Read-Host off.
             "-Command",
             script,
         ],
