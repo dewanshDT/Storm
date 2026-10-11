@@ -472,8 +472,9 @@ def main():
 
         sid = owner.launch(host_id, "claude-code")
         text = owner.output(sid, "ARGS=")
+        # cmd.exe hands a batch file each argument quoted (wincmd).
         check("W3", "a .cmd CLI runs through PATHEXT, with its arguments", "STUB=claude" in text
-              and "--permission-mode default" in text, text[-400:])
+              and '"--permission-mode" "default"' in text, text[-400:])
         check("W3", "its USERPROFILE is the account's home", f"HOME={HOME}".lower() in text.lower(), text[-400:])
         m = re.search(r"ENV_PATH=([^\s]+)", text)
         check("W3", "its PATH starts with the account's own bins",
@@ -514,12 +515,12 @@ def main():
         if OPERATOR_PROFILE:
             text = owner.run(sid, f"try {{ Get-ChildItem -Force '{OPERATOR_PROFILE}' -ErrorAction Stop | "
                                   f"Out-Null; 'READABLE' }} catch {{ 'DENIED' }}")
-            check("W7", "the account is refused the operator's profile", "DENIED" in text and "READABLE" not in
-                  text.split("DENIED")[-1], text[-300:])
+            check("W7", "the account is refused the operator's profile",
+                  re.search(r"DENIED\s*DONE\d+", text) is not None, text[-300:])
         text = owner.run(sid, f"try {{ Get-ChildItem '{SERVER_STATE}' -ErrorAction Stop | Out-Null; 'READABLE' }} "
                               f"catch {{ 'DENIED' }}")
-        check("W7", "and a Storm server's state in a profile", text.rstrip().endswith("DENIED") or
-              "DENIED" in text[-40:], text[-300:])
+        check("W7", "and a Storm server's state in a profile",
+              re.search(r"DENIED\s*DONE\d+", text) is not None, text[-300:])
         bad = os.path.join(WORK, "bad.toml")
         with open(bad, "w") as f:
             f.write(f"workspace_roots = [{json.dumps(os.path.join(OPERATOR_PROFILE or 'C:/Users/x', 'src'))}]\n")
