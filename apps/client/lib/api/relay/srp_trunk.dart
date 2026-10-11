@@ -156,6 +156,9 @@ class SrpTrunk {
   Timer? _heartbeatTimer;
   bool _closed = false;
 
+  /// The code of a trunk-scoped `ERROR` that ended the trunk, if one did.
+  String? _relayErrorCode;
+
   final Completer<void> _connected = Completer<void>();
 
   final _onTrunkLost = StreamController<String>.broadcast();
@@ -320,6 +323,7 @@ class SrpTrunk {
     final message = frame.body['message'] as String?;
     if (streamId is! int) {
       // A trunk-scoped error is fatal.
+      _relayErrorCode = code;
       _fail('relay_error');
       return;
     }
@@ -429,7 +433,9 @@ class SrpTrunk {
     for (final s in all) {
       s.finish();
     }
-    if (!_connected.isCompleted) _connected.completeError(SrpHandshakeFailed());
+    if (!_connected.isCompleted) {
+      _connected.completeError(SrpHandshakeFailed(_relayErrorCode));
+    }
     if (!_onTrunkLost.isClosed) _onTrunkLost.add(reason);
   }
 
@@ -459,7 +465,15 @@ class SrpTrunkClosed implements Exception {
 
 /// The `HELLO`/`READY` handshake never completed within [SrpTrunk.handshakeTimeout].
 class SrpHandshakeFailed implements Exception {
-  const SrpHandshakeFailed();
+  const SrpHandshakeFailed([this.code]);
+
+  /// The relay's `ERROR` code when it refused the `HELLO` — `server_unreachable`
+  /// means the relay is up and the server is not connected to it — or null when
+  /// the relay never answered.
+  final String? code;
+
+  @override
+  String toString() => 'SrpHandshakeFailed(${code ?? 'no answer'})';
 }
 
 /// The task that asked for a stream is gone before the open completed.
