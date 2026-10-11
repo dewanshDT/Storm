@@ -32,6 +32,20 @@ setup() {
   [ "$OPT_ADDR" = 10.1.2.3:9000 ]
 }
 
+@test "--workspace takes a folder name or a git URL, nothing else" {
+  parse_args --workspace scratch
+  [ "$OPT_WORKSPACE" = scratch ]
+  parse_args --workspace=https://github.com/me/app.git
+  [ "$OPT_WORKSPACE" = https://github.com/me/app.git ]
+  parse_args --workspace git@github.com:me/app.git
+  [ "$(ws_name "$OPT_WORKSPACE")" = app ]
+  for bad in ../up a/b .hidden "two words" ""; do
+    run parse_args --workspace "$bad"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--workspace wants a folder name"* ]]
+  done
+}
+
 @test "--everything expands and de-duplicates" {
   parse_args --server --everything --app
   [ "$OPT_COMPONENTS" = "server runtime agents app mobile" ]

@@ -13,6 +13,7 @@ Map<String, dynamic> agentHost({
   String status = 'online',
   List<String> providers = const ['claude-code', 'opencode', 'shell'],
   List<String> workspaces = const ['storm', 'site'],
+  List<String>? workspaceRoots,
 }) => {
   'id': id,
   'name': name,
@@ -23,6 +24,7 @@ Map<String, dynamic> agentHost({
       for (final p in providers) {'id': p, 'kind': 'cli', 'available': true},
     ],
     'workspaces': workspaces,
+    'workspace_roots': ?workspaceRoots,
     'max_sessions': 8,
   },
 };

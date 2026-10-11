@@ -186,6 +186,12 @@ class StormTerminal {
       platform: defaultTargetPlatform,
     );
     final ask = onImagePaste;
+    // A held paste chord repeats. The repeat must not reach the terminal as
+    // a bare ^V: the agent would look for an image in the host's own
+    // clipboard and say there is none, while this paste is still in flight.
+    if (chord != null && ask != null && !kIsWeb && event is KeyRepeatEvent) {
+      return KeyEventResult.handled;
+    }
     if (chord != null && ask != null && !kIsWeb && event is KeyDownEvent) {
       () async {
         if (await ask()) return;

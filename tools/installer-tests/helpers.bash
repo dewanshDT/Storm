@@ -17,7 +17,7 @@ test true false readlink stty tput"
 
 # The fakes on PATH (id and stat only rename the user running the tests). storm-server and storm-runtime are not: like the real
 # ones, they appear when a fake apt-get or a fake `up`/`install` puts them there.
-FAKE_TOOLS="sudo curl systemctl launchctl apt-get brew ditto defaults uname sw_vers ipconfig ip id stat"
+FAKE_TOOLS="sudo curl systemctl launchctl apt-get brew ditto defaults uname sw_vers ipconfig ip id stat git"
 
 setup_world() {
   local t n p
