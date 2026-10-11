@@ -148,6 +148,9 @@ pub struct Capabilities {
     pub providers: Vec<ProviderCap>,
     #[serde(default)]
     pub workspaces: Vec<String>,
+    /// The folders the host finds workspaces in. An old host does not say.
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
     #[serde(default)]
     pub max_sessions: u32,
     /// The host runs `storm-runtime mcp-bridge` (spec §6). A host that does
@@ -160,6 +163,10 @@ pub struct Capabilities {
     /// its link is never dropped for silence.
     #[serde(default)]
     pub heartbeat: bool,
+    /// The host stages pasted images (`terminal.image`, 85e). An old host
+    /// does not: a paste to it is refused at once instead of timing out.
+    #[serde(default)]
+    pub images: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +286,9 @@ pub enum AgentError {
     Unsupported(String),
     /// Too many images in flight (429).
     Busy,
+    /// The host's runtime is too old to stage images (409). Carries the
+    /// version it reported.
+    NoImages(String),
     /// The host did not stage it in time (504).
     Timeout,
     /// The host could not stage it, and said why (502).
@@ -1102,6 +1112,13 @@ impl AgentManager {
             )));
         }
         let r = self.live_record(id)?;
+        // An old host never answers `terminal.image`: say so now rather than
+        // after IMAGE_DEADLINE. An offline host falls through to `send`.
+        if let Some(caps) = self.host_live(&r.host_id).capabilities
+            && !caps.images
+        {
+            return Err(AgentError::NoImages(caps.version));
+        }
         let image = crate::auth::identity::random_id("img_");
         let (tx, rx) = tokio::sync::oneshot::channel();
         let command = Command::TerminalImage {
@@ -1409,9 +1426,11 @@ mod tests {
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
+            workspace_roots: vec!["/work".into()],
             max_sessions: 2,
             mcp_bridge: true,
             heartbeat: false,
+            images: true,
         }
     }
 
@@ -2389,6 +2408,24 @@ mod tests {
             m.stage_image(&r.id, None, PNG.to_vec()).await,
             Err(AgentError::HostOffline)
         ));
+    }
+
+    #[tokio::test]
+    async fn an_old_host_is_refused_an_image_at_once() {
+        let (m, _d) = manager();
+        let old = Capabilities {
+            version: "0.4.0".into(),
+            images: false,
+            ..caps(&[("shell", true)])
+        };
+        let _rx = online(&m, "hst_A", old);
+        let r = launch(&m, Some("shell")).unwrap();
+        let started = std::time::Instant::now();
+        match m.stage_image(&r.id, None, PNG.to_vec()).await {
+            Err(AgentError::NoImages(v)) => assert_eq!(v, "0.4.0"),
+            other => panic!("expected NoImages, got {other:?}"),
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]

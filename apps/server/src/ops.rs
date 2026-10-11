@@ -1327,6 +1327,14 @@ fn agent_error(e: crate::agent::AgentError) -> ApiError {
             S::TOO_MANY_REQUESTS,
             "too many images are already on their way".into(),
         ),
+        E::NoImages(v) => conflict(format!(
+            "this host's runtime ({}) cannot take images: upgrade it to 0.7.0 or later",
+            if v.is_empty() {
+                "an old version"
+            } else {
+                v.as_str()
+            }
+        )),
         E::Timeout => ApiError(
             S::GATEWAY_TIMEOUT,
             "the host did not take the image in time".into(),

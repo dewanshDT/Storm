@@ -142,7 +142,7 @@ case "$name" in
       --version) echo "storm-runtime ${FAKE_RUNTIME_VERSION:-0.6.0}" ;;
       install)
         place "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime"
-        mkdir -p "$(rt_state)"
+        mkdir -p "$(rt_state)" "$STORM_TEST_SYSROOT/Library/StormRuntime/workspaces"
         [ -f "$STORM_TEST_SYSROOT/Library/StormRuntime/runtime.toml" ] ||
           printf '# runtime.toml\n#[[providers]]\n' >"$STORM_TEST_SYSROOT/Library/StormRuntime/runtime.toml"
         echo "Installed the Storm Runtime Host."
@@ -172,7 +172,11 @@ case "$name" in
         for a in "$@"; do
           case "$a" in
             *storm-server*) place "$FAKE_DIR/installed/storm-server" ;;
-            *storm-runtime*) place "$FAKE_DIR/installed/storm-runtime" ;;
+            *storm-runtime*)
+              place "$FAKE_DIR/installed/storm-runtime"
+              # The package's postinst makes it.
+              mkdir -p "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces"
+              ;;
           esac
         done
         ;;
@@ -184,6 +188,18 @@ case "$name" in
         done
         ;;
     esac
+    exit 0
+    ;;
+
+  git)
+    # clone [--] URL DEST: the checkout is an empty folder.
+    if [ "${1:-}" = clone ]; then
+      [ "${FAKE_CLONE_FAILS:-}" = 1 ] && {
+        echo "fatal: could not read Username: terminal prompts disabled" >&2
+        exit 128
+      }
+      mkdir "${!#}" || exit 128
+    fi
     exit 0
     ;;
 

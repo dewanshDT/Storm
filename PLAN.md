@@ -61,11 +61,14 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
-| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) |
+| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) |
 
-**Release state (2026-10-11).** **v0.7.0 is being cut** (decision 72's
-steps; this paragraph is the prep PR's), at the operator's request after M25
-merged into `staging`. It carries **M25, the session experience** (decision
+**Release state (2026-10-11).** **v0.7.0 is released** (PR #140, `6ed9de4`,
+release run 38094345519, apt `0.7.0-1`) and **prod runs it**: the operator
+upgraded the VM's `storm-server` the same day, with a state tarball taken
+first (vault: *Storm/Prod Upgrade — v0.7.0*). The codebox and omarchy Runtime
+Hosts still run 0.4.0; a Mac host was enrolled on 0.7.0 with the installer,
+and its first run found decision 88's three gaps. It carries **M25, the session experience** (decision
 85): sessions named by the agent's own terminal title, logo rows with a
 working / idle badge, **pasting and dropping images** into a session on
 desktop, web and Android (staged on the session's host, then bracket-pasted
@@ -76,12 +79,12 @@ flaky identity-leak test and two live-suite races are fixed (#117, 86a).
 **Upgrading prod:** titles, activity and image paste need both
 `storm-server` and `storm-runtime` 0.7.0 — `agent.db` gains
 `sessions.title` by `ALTER TABLE` on start (additive, no version bump);
-older hosts and servers keep working without those features. **v0.6.1**
+older hosts and servers keep working without those features (an image paste
+to an older host fails; 88 makes that fail at once). **v0.6.1**
 (PR #136, `14049f1`, 2026-10-10) carried M24, the interactive installer and
 the macOS server (v0.6.0, `2b0956c`, was tagged but never published);
 **v0.5.0** (PR #119, `39cf955`) M23, macOS Runtime Hosts; **v0.4.0** (PR
-#109, `018a063`) M21 + M22 (`auth.db` v6) and **prod runs it** until the
-operator upgrades. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8
+#109, `018a063`) M21 + M22 (`auth.db` v6), on prod until 2026-10-11. v0.3.1 (PR #75), v0.3.0 (PR #71), v0.2.9 (PR #48), v0.2.8
 (PR #37). **Known issue (still open):** the web client can stay on the
 spinner after a correct password in Firefox-based browsers (vault: *Storm
 v2/Issue — Zen login hang*).
@@ -5172,6 +5175,49 @@ operator's approval of 85g's open decision)*
   path typed, an empty or non-image insertion stages nothing. With the
   forwarding removed, the staging test fails.
 - **Not verified on a device**: Gboard on Android is the operator's check.
+
+**88. A Mac host's first run: a first workspace, and image paste that fails
+fast.** *(2026-10-11, the operator's first run of a 0.7.0 Runtime Host on a
+Mac; vault: *Storm/Agent Runtime/Issue — Mac first run- no workspace, image
+paste to an old host*)*
+- **What happened.** The installer enrolled the Mac, but the launcher said
+  "No workspaces on this host": nothing made one, or said where one goes.
+  Pasting an image showed "pasting" for about 30 s and then failed. The
+  session was on codebox, which runs runtime 0.4.0 and never answers
+  `terminal.image`, so the server waited out `IMAGE_DEADLINE` (504).
+  Meanwhile Claude Code said "no image found": a held Ctrl+V repeats, a
+  `KeyRepeatEvent` skipped the image check (it only took `KeyDownEvent`),
+  and xterm2 sent the repeat as `^V`, which made Claude Code look in the
+  host's own empty clipboard.
+- **An `images` capability.** The runtime says `"images": true` in
+  `hello`. For a host that does not, `stage_image` answers **409** at once
+  ("this host's runtime (0.4.0) cannot take images: upgrade it to 0.7.0 or
+  later"), and nothing is admitted. The client's paste chip already shows
+  the server's message. An offline host still gets 503 from `send`.
+- **A held paste chord is swallowed.** A `KeyRepeatEvent` of a paste chord
+  (when the terminal pastes images) is handled and sends nothing. One press
+  still pastes once, and Ctrl+V with no image is still `^V`, as before:
+  vim's block select and a shell's quoted insert need it.
+- **The launcher says where a workspace goes.** The runtime also reports
+  `workspace_roots` (the server carries it in `Capabilities`). A host with
+  none shows its folder (`/Library/StormRuntime/workspaces` on a Mac) and
+  **Check again**, which re-reads the host's workspaces.
+- **The installer offers a first workspace.** After enrollment, an
+  interactive run asks for a folder name or a git URL to clone (Enter
+  skips), only when the runtime has none. `--workspace NAME|URL` does it
+  without asking; a fresh `--yes` install without it says how in the plan's
+  notes. On macOS it is made as the operator (the install's inherited ACL,
+  and their git credentials); on Linux as `storm-runtime` (the folder is
+  0750, that account's), so that step is `[sudo]`. Git never prompts: a
+  clone that needs a login fails and says so.
+- **Not in this change:** `curl … | sh` showing nothing on macOS (vault:
+  *Storm/Installer/Issue — macOS curl | sh shows nothing*) has no fix yet.
+- Tests: server `an_old_host_is_refused_an_image_at_once`; client a held
+  Ctrl+V pastes once and sends no `^V`, and the launcher's empty host and
+  Check again; installer bats for `--workspace` (args, plan on both OSes,
+  runs that make, clone and keep) and the interactive prompt (re-asked,
+  skipped, kept), and the pty run types a workspace. The installer e2e jobs
+  pass `--workspace scratch` and check the folder on Ubuntu and macOS.
 
 ## Data model
 

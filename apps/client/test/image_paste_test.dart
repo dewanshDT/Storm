@@ -228,5 +228,32 @@ void main() {
       ]);
       expect(sent, ['\x16']);
     });
+
+    testWidgets('a held Ctrl+V pastes once and sends no ^V', (tester) async {
+      final t = StormTerminal();
+      addTearDown(t.dispose);
+      final sent = <String>[];
+      var asked = 0;
+      t.onInput = (b) => sent.add(latin1.decode(b));
+      t.onImagePaste = () async {
+        asked++;
+        return true;
+      };
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: StormTerminalView(terminal: t, autofocus: true)),
+        ),
+      );
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(asked, 1);
+      expect(sent, isEmpty);
+    });
   });
 }

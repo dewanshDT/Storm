@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agents_screen.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/router.dart';
+import 'package:storm/ui/controls.dart';
 
 import 'agent_fakes.dart';
 import 'fake_server.dart';
@@ -467,6 +468,37 @@ void main() {
         await disposeShell(tester, c);
       },
     );
+
+    testWidgets('a host with no workspaces says where one goes', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [
+          agentHost(
+            name: 'macbook',
+            workspaces: [],
+            workspaceRoots: ['/Library/StormRuntime/workspaces'],
+          ),
+        ],
+      );
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+
+      expect(find.byKey(const Key('launcher-no-workspaces')), findsOneWidget);
+      expect(find.text('/Library/StormRuntime/workspaces'), findsOneWidget);
+      expect(
+        tester.widget<StormButton>(find.byKey(const Key('launch'))).onPressed,
+        isNull,
+      );
+
+      // One is made on the host; Check again finds it.
+      (agents.hosts.single['capabilities'] as Map)['workspaces'] = ['scratch'];
+      await tester.tap(find.byKey(const Key('launcher-workspaces-retry')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('launcher-no-workspaces')), findsNothing);
+      expect(inField('launcher-workspace', 'scratch'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
 
     testWidgets('without a note it writes to the first vault, or not at all', (
       tester,

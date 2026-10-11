@@ -107,7 +107,7 @@ typed() {
   # Custom… (three downs), tick server and runtime, keep the three defaults,
   # Install, then "Set a password here" for the account.
   run env TERM=xterm-256color "$REAL_PYTHON" "$BATS_TEST_DIRNAME/pty_drive.py" \
-    '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' '\r' '\r' '\r' '\r' 'j' '\r' -- \
+    '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' '\r' '\r' '\r' '\r' 'j' '\r' 'scratch\r' -- \
     bash -c 'source "$1"; POLL_SLEEP=0; HEALTH_TRIES=2; storm_main --from-dir "$2"' _ "$INSTALLER" "$ASSETS"
   [[ "$output" == *"EXIT=0"* ]]
   [[ "$output" == *"› Custom…"* ]]
@@ -116,6 +116,9 @@ typed() {
   [[ "$output" == *"Summary"* ]]
   [ -f "$STORM_TEST_SYSROOT/var/lib/storm-runtime/host.json" ]
   grep -q 'storm-runtime enroll: storm-enroll:v1:LOCALSECRET' "$FAKE_STDIN"
+  # Then the first workspace, typed at its prompt.
+  [[ "$output" == *"Workspace (Enter alone skips)"* ]]
+  [ -d "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch" ]
 }
 
 @test "NO_COLOR and TERM=dumb: no escape codes" {

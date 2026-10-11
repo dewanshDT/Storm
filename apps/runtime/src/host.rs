@@ -339,6 +339,14 @@ impl Host {
             "version": env!("CARGO_PKG_VERSION"),
             "providers": providers,
             "workspaces": list_workspaces(&self.config.workspace_roots),
+            // Where a workspace goes, so an empty host can say where to put
+            // one.
+            "workspace_roots": self
+                .config
+                .workspace_roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>(),
             "max_sessions": self.config.max_sessions,
             // This host runs `storm-runtime mcp-bridge` (spec §6). A host
             // that does not say so gets no grants.
@@ -346,6 +354,9 @@ impl Host {
             // It posts `/v1/runtime/heartbeat` while linked (B-1), so the
             // server may drop a link it has gone silent on.
             "heartbeat": true,
+            // It stages pasted images (`terminal.image`, 85e), so the server
+            // may send it one instead of refusing the paste.
+            "images": true,
         })
     }
 
