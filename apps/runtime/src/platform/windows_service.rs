@@ -453,8 +453,15 @@ fn run_service() -> Result<()> {
         .build()
         .context("starting the async runtime")?;
     let mut stop_rx = stop_rx;
-    let stop = async move {
+    let stop = async {
         let _ = stop_rx.wait_for(|stop| *stop).await;
+        // At once, with the shutdown's bound as the hint: a service still
+        // RUNNING after a Stop is one `Stop-Service` reports as failed.
+        report(
+            ServiceState::StopPending,
+            ServiceExitCode::Win32(0),
+            Duration::from_secs(20),
+        );
     };
     let config = PathBuf::from(&layout.config);
     let outcome = runtime.block_on(async {
