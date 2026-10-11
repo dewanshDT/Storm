@@ -73,8 +73,15 @@ enum ConnectionStatus {
   /// not [offline]: something is there, and that is the problem.
   unproven,
 
-  /// Nothing answered.
+  /// Nothing answered — not the server, and not any relay. From where the
+  /// device sits, the relays are unavailable too.
   offline,
+
+  /// A relay answered and said the server is not connected to it
+  /// (`server_unreachable`, `trunk_lost`, `server_timeout` — SRP §6). The
+  /// path is fine; the server is off, asleep, or lost its own connection.
+  /// Never [offline], which would send the user to check their network.
+  serverOffline,
 }
 
 /// Resolves candidates to one working, *proven* transport.
@@ -183,6 +190,33 @@ class StormConnection {
   ConnectionStatus _status = ConnectionStatus.idle;
   ConnectionStatus get status => _status;
 
+  final _statusChanges = StreamController<ConnectionStatus>.broadcast();
+
+  /// Every change of [status]. Most come from [connect], but a relay's
+  /// `server_unreachable` can arrive after the race has already given up —
+  /// the relay holds `HELLO` 5 s and the race does not wait that long.
+  Stream<ConnectionStatus> get statusChanges => _statusChanges.stream;
+
+  /// A relay said the server is not there since the last [reset].
+  bool _serverBehindRelay = false;
+
+  void _setStatus(ConnectionStatus value) {
+    if (_status == value) return;
+    _status = value;
+    if (!_statusChanges.isClosed) _statusChanges.add(value);
+  }
+
+  void _onServerUnreachable(String _) {
+    _serverBehindRelay = true;
+    if (_status == ConnectionStatus.offline) {
+      _setStatus(ConnectionStatus.serverOffline);
+    }
+  }
+
+  ConnectionStatus get _unreachable => _serverBehindRelay
+      ? ConnectionStatus.serverOffline
+      : ConnectionStatus.offline;
+
   /// The candidate currently in use. Above the seam nothing reads this except
   /// to *display* it — behaviour must never branch on it.
   ConnectionCandidate get active => _active;
@@ -275,10 +309,13 @@ class StormConnection {
   /// rest are released by [connect] once a winner is known.
   http.Client _relayClient(ConnectionCandidate c) {
     final url = c.relayUrl!;
-    final trunk = _trunks.putIfAbsent(
-      url,
-      () => SrpTrunk(url: Uri.parse(url), serverId: serverId),
-    );
+    var trunk = _trunks[url];
+    // A dead trunk is replaced, never reused: it refuses every request.
+    if (trunk == null || trunk.isClosed) {
+      trunk = SrpTrunk(url: Uri.parse(url), serverId: serverId);
+      trunk.onServerUnreachable.listen(_onServerUnreachable);
+      _trunks[url] = trunk;
+    }
     return SrpHttpClient(trunk);
   }
 
@@ -344,18 +381,18 @@ class StormConnection {
   /// Returns what the *identity* check concluded, because that is what the
   /// caller has to act on — reachability alone is not a connection.
   Future<ServerProof> connect() async {
-    _status = ConnectionStatus.connecting;
+    _setStatus(ConnectionStatus.connecting);
 
     // A pinned transport has nothing to race and nothing to refresh — probing
     // would put a request on the wire that the old code never sent, which is
     // the sort of change a refactor is not allowed to make.
     if (_pinnedApi != null) {
       final proof = await _verifierFor(authApi).check();
-      _status = switch (proof) {
+      _setStatus(switch (proof) {
         ServerProof.verified => ConnectionStatus.connected,
         ServerProof.impostor => ConnectionStatus.unproven,
-        ServerProof.unreachable => ConnectionStatus.offline,
-      };
+        ServerProof.unreachable => _unreachable,
+      });
       return proof;
     }
 
@@ -383,7 +420,7 @@ class StormConnection {
     }
 
     if (winner == null) {
-      _status = ConnectionStatus.offline;
+      _setStatus(_unreachable);
       return ServerProof.unreachable;
     }
 
@@ -404,11 +441,11 @@ class StormConnection {
     // **Reachability is not trust.** The race chose a transport; only the
     // challenge decides whether we are connected to the server.
     final proof = await _verifierFor(authApi).check();
-    _status = switch (proof) {
+    _setStatus(switch (proof) {
       ServerProof.verified => ConnectionStatus.connected,
       ServerProof.impostor => ConnectionStatus.unproven,
-      ServerProof.unreachable => ConnectionStatus.offline,
-    };
+      ServerProof.unreachable => _unreachable,
+    });
     return proof;
   }
 
@@ -418,7 +455,8 @@ class StormConnection {
   /// time — there is no mid-session transport migration, and reusing a stale
   /// winner is how you get one by accident.
   void reset() {
-    _status = ConnectionStatus.idle;
+    _setStatus(ConnectionStatus.idle);
+    _serverBehindRelay = false;
     _cachedApi = null;
     _cachedApiFor = null;
     for (final t in _trunks.values) {
