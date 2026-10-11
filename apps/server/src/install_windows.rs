@@ -217,10 +217,12 @@ pub fn task_xml(
 
 /// The server's task: `storm-serverw serve`, at logon, logging to a file.
 pub fn server_task(layout: &Layout, r: &Record, user: &str) -> String {
+    // The subcommand first: before it, a flag makes `normalize_argv`'s
+    // legacy shim insert a second `serve` (found on a real Windows run).
     let args: Vec<String> = [
+        "serve",
         "--log-file",
         &layout.log_file,
-        "serve",
         "--vault-root",
         &r.vaults,
         "--state",
@@ -248,9 +250,9 @@ pub fn server_task(layout: &Layout, r: &Record, user: &str) -> String {
 /// next chance after a missed one.
 pub fn backup_task(layout: &Layout, r: &Record, user: &str) -> String {
     let args: Vec<String> = [
+        "backup",
         "--log-file",
         &layout.backup_log,
-        "backup",
         "--vault-root",
         &r.vaults,
         "--state",
@@ -733,11 +735,38 @@ mod tests {
         assert!(x.contains(&format!("<Command>{}</Command>", l.binw)));
         // Paths with spaces are quoted, and XML-escaped inside the element.
         assert!(
-            x.contains(r"serve --vault-root &quot;C:\Users\Ada Lovelace\Storm\vaults&quot;"),
+            x.contains(r"--vault-root &quot;C:\Users\Ada Lovelace\Storm\vaults&quot;"),
             "{x}"
         );
+        assert!(x.contains("<Arguments>serve "), "{x}");
         assert!(x.contains("--log-file"));
         assert!(x.starts_with(r#"<?xml version="1.0" encoding="UTF-16"?>"#));
+    }
+
+    /// What each task's action would run, parsed by the real command line,
+    /// shim included. A task whose arguments do not parse exits 2 before it
+    /// can open its log, and nothing says why.
+    #[test]
+    fn every_task_runs_a_command_line_that_parses() {
+        use clap::Parser;
+        let l = layout();
+        let r = record_for(&l, &UpOptions::default());
+        for x in [
+            server_task(&l, &r, "PC\\Ada"),
+            backup_task(&l, &r, "PC\\Ada"),
+        ] {
+            let args = x
+                .split("<Arguments>")
+                .nth(1)
+                .and_then(|a| a.split("</Arguments>").next())
+                .unwrap()
+                .replace("&quot;", "\"");
+            let mut argv: Vec<std::ffi::OsString> = vec!["storm-serverw".into()];
+            argv.extend(split(&args).into_iter().map(Into::into));
+            let parsed = crate::Cli::try_parse_from(crate::normalize_argv(argv.clone()));
+            assert!(parsed.is_ok(), "{argv:?}: {}", parsed.unwrap_err());
+            assert!(parsed.unwrap().log_file.is_some());
+        }
     }
 
     #[test]
@@ -748,7 +777,7 @@ mod tests {
         assert!(x.contains("<StartBoundary>2026-01-01T03:30:00</StartBoundary>"));
         assert!(x.contains("<DaysInterval>1</DaysInterval>"));
         assert!(x.contains("<StartWhenAvailable>true</StartWhenAvailable>"));
-        assert!(x.contains(" backup --vault-root "), "{x}");
+        assert!(x.contains("<Arguments>backup "), "{x}");
         assert!(x.contains(&xml(&quote(&r.backups))), "{x}");
     }
 
