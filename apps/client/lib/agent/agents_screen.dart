@@ -151,6 +151,46 @@ Future<AgentSession?> launchAgentSession(
   return launched;
 }
 
+/// Reopens an ended session's conversation (decision 89). No launcher: a
+/// resume runs where the session ran, with what it had.
+Future<AgentSession?> resumeAgentSession(
+  BuildContext context,
+  WidgetRef ref,
+  AgentSession s,
+) async {
+  final api = agentApi(ref);
+  if (api == null) return null;
+  try {
+    final launched = await api.launch(
+      hostId: s.hostId,
+      workspace: s.workspace,
+      provider: s.provider,
+      cols: s.cols,
+      rows: s.rows,
+      resumeOf: s.id,
+    );
+    if (!context.mounted) return launched;
+    final notice = launched.launchNotice;
+    if (notice != null) {
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text(notice)));
+    }
+    ref.invalidate(agentOverviewProvider);
+    openAgentSession(context, launched.id);
+    return launched;
+  } catch (e) {
+    if (context.mounted) {
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text(describeFailure(e))));
+    }
+    return null;
+  } finally {
+    api.dispose();
+  }
+}
+
 class _PageTitle extends StatelessWidget {
   const _PageTitle(this.text);
 

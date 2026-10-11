@@ -494,7 +494,12 @@ args = ["-i"]
         c = Agent("ctx")
         argv = wait(c.env, "the agent's record of its launch")["argv"]
         check("Claude Code gets the fixed opening prompt, last",
-              argv[-1] == prompt and argv[-2] == "--strict-mcp-config", argv)
+              argv[-1] == prompt and prompt not in argv[:-1], argv)
+        # Decision 89: its conversation id and the hook that reports it, before
+        # the prompt and after the MCP config.
+        check("and its conversation id, with the hook that reports it",
+              argv.index("--strict-mcp-config") < argv.index("--session-id") < argv.index("--settings")
+              and "harness-session" in argv[argv.index("--settings") + 1], argv)
         rec2 = launch("opencode", "ctx2", {"context": {"vault_id": vault, "note_id": other["id"]}})
         c2 = Agent("ctx2")
         argv2 = wait(c2.env, "the second agent's record of its launch")["argv"]
@@ -530,8 +535,42 @@ args = ["-i"]
         got2 = c2.answer("storm", 2).get("result", {}).get("structuredContent", {})
         check("a second session reads its own note, never the first one's",
               f"{other_mark}-body" in got2.get("content", "") and mark not in json.dumps(got2), got2)
+        print("\n=== resuming a conversation (decision 89) ===")
+        check("the host says which agents it can resume",
+              sorted(host_online()["capabilities"].get("resume", [])) == ["claude-code", "opencode"],
+              host_online()["capabilities"])
+        first = argv[argv.index("--session-id") + 1]
+        hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63"
+        env = {**os.environ, **{k: v for k, v in c.env()["env"].items() if v}}
+        ran = subprocess.run(hook, shell=True, env=env, capture_output=True,
+                             input=json.dumps({"session_id": cleared, "source": "clear"}).encode())
+        check("the hook Claude Code runs is silent and succeeds", ran.returncode == 0 and ran.stdout == b"",
+              (ran.returncode, ran.stdout, ran.stderr))
+        wait(lambda: call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1].get("harness_session") == cleared,
+             "the hook's id on the record")
+        check("the first id was the launch's own", first != cleared and len(first) == 36, first)
         for sid_ in (rec["id"], rec2["id"]):
             call("POST", f"/v1/agent/sessions/{sid_}/end", auth=owner)
+        wait(lambda: call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1]["status"] == "stopped",
+             "the first session to stop")
+        os.remove(os.path.join(c.dir, "agent-env.json"))
+        status, resumed = call("POST", "/v1/agent/sessions", {
+            "resume_of": rec["id"], "host_id": host_id, "workspace": "gw", "provider": "shell",
+            "terminal": {"cols": 80, "rows": 24}}, auth=owner)
+        check("a resume launches", status == 200, resumed)
+        check("on the old session's workspace and agent, whatever was asked",
+              resumed.get("workspace") == "ctx" and resumed.get("provider") == "claude-code"
+              and resumed.get("resumed_from") == rec["id"], resumed)
+        rargv = wait(c.env, "the resumed agent's record of its launch")["argv"]
+        check("Claude Code is started with --resume and the conversation's id, and no opening prompt",
+              rargv[rargv.index("--resume") + 1] == cleared and "--session-id" not in rargv and prompt not in rargv,
+              rargv)
+        status, again = call("POST", "/v1/agent/sessions", {
+            "resume_of": rec["id"], "host_id": host_id, "workspace": "ctx",
+            "terminal": {"cols": 80, "rows": 24}}, auth=owner)
+        check("a second resume of an open conversation is refused", status == 409, (status, again))
+        call("POST", f"/v1/agent/sessions/{resumed['id']}/end", auth=owner)
 
         print("\n=== Phase 1's exit: an agent's write merges with a phone's (AM28), in its write vault ===")
         status, cfg = call("PUT", "/v1/config/mcp", {"agent_writes": True}, auth=owner)

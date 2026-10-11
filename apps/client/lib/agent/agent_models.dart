@@ -40,6 +40,7 @@ class AgentHost {
     required this.maxSessions,
     required this.lastSeen,
     this.workspaceRoots = const [],
+    this.resumes = const [],
   });
 
   final String id;
@@ -52,6 +53,10 @@ class AgentHost {
 
   /// The host's folders for workspaces, empty for an old host.
   final List<String> workspaceRoots;
+
+  /// The agents whose conversations it can reopen (decision 89); empty for
+  /// an old host.
+  final List<String> resumes;
   final int maxSessions;
   final String? lastSeen;
 
@@ -75,6 +80,9 @@ class AgentHost {
       workspaceRoots: [
         for (final r in (caps?['workspace_roots'] as List? ?? const []))
           r as String,
+      ],
+      resumes: [
+        for (final p in (caps?['resume'] as List? ?? const [])) p as String,
       ],
     );
   }
@@ -151,6 +159,8 @@ class AgentSession {
     this.launchNotice,
     this.title,
     this.activity,
+    this.harnessSession,
+    this.resumedFrom,
   }) : name = name ?? workspace;
 
   final String id;
@@ -185,6 +195,18 @@ class AgentSession {
   String get displayName => title ?? name;
 
   bool get working => activity == 'working';
+
+  /// The agent's own id for the conversation, once its host has said
+  /// (decision 89).
+  final String? harnessSession;
+
+  /// The session whose conversation this one reopened.
+  final String? resumedFrom;
+
+  /// There is a conversation to reopen.
+  bool get hasConversation =>
+      harnessSession != null &&
+      (provider == 'claude-code' || provider == 'opencode');
   final SessionContext? context;
 
   /// The one vault it may write to; null is read only.
@@ -254,6 +276,8 @@ class AgentSession {
           integrations: integrations,
           title: live.title ?? title,
           activity: live.activity,
+          harnessSession: live.harnessSession ?? harnessSession,
+          resumedFrom: resumedFrom,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -290,6 +314,8 @@ class AgentSession {
     launchNotice: (j['mcp'] as Map?)?['notice'] as String?,
     title: j['title'] as String?,
     activity: j['activity'] as String?,
+    harnessSession: j['harness_session'] as String?,
+    resumedFrom: j['resumed_from'] as String?,
   );
 }
 

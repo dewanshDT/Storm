@@ -22,7 +22,7 @@ import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
-import 'agents_screen.dart' show launchAgentSession;
+import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
 import 'session_inspector.dart';
@@ -119,6 +119,22 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   void _runAgain(AgentSession s) =>
       launchAgentSession(context, ref, runAgain: s);
+
+  bool _resuming = false;
+
+  Future<void> _resume(AgentSession s) async {
+    setState(() => _resuming = true);
+    await resumeAgentSession(context, ref, s);
+    if (mounted) setState(() => _resuming = false);
+  }
+
+  /// Resume, when the session's conversation can be reopened now.
+  bool _canResume(AgentSession s) =>
+      ref.read(agentOverviewProvider).value?.canResume(s) ?? false;
+
+  /// Why a conversation can't be reopened now, said under the header.
+  String? _resumeBlocker(AgentSession s) =>
+      ref.read(agentOverviewProvider).value?.resumeBlocker(s);
 
   void _say(String text) {
     if (!mounted) return;
@@ -366,10 +382,20 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   onTap: () => setState(() => _confirmEnd = true),
                 )
               else ...[
+                if (_canResume(s)) ...[
+                  _HeaderButton(
+                    key: const Key('resume-session'),
+                    label: 'Resume',
+                    color: t.accent,
+                    outlined: true,
+                    onTap: _resuming ? null : () => _resume(s),
+                  ),
+                  SizedBox(width: t.sp * 0.5),
+                ],
                 _HeaderButton(
                   key: const Key('run-again'),
                   label: 'Run again',
-                  color: t.accent,
+                  color: _canResume(s) ? t.text2 : t.accent,
                   outlined: true,
                   onTap: () => _runAgain(s),
                 ),
@@ -391,6 +417,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             overflow: TextOverflow.ellipsis,
             style: _mono(t, t.labelSize * 1.09),
           ),
+          if (_resumeBlocker(s) case final why?) ...[
+            SizedBox(height: t.sp * 0.25),
+            Text(
+              why,
+              key: const Key('resume-blocker'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: _mono(t, t.labelSize * 1.09),
+            ),
+          ],
         ],
       ),
     );
@@ -647,11 +683,22 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   minimum: EdgeInsets.only(bottom: t.sp * 2),
                   child: Row(
                     children: [
+                      if (_canResume(s)) ...[
+                        Expanded(
+                          child: _BarButton(
+                            key: const Key('resume-session'),
+                            label: 'Resume',
+                            primary: true,
+                            onTap: _resuming ? null : () => _resume(s),
+                          ),
+                        ),
+                        SizedBox(width: t.sp),
+                      ],
                       Expanded(
                         child: _BarButton(
                           key: const Key('run-again'),
                           label: 'Run again',
-                          primary: true,
+                          primary: !_canResume(s),
                           onTap: () => _runAgain(s),
                         ),
                       ),
@@ -787,7 +834,7 @@ class _HeaderButton extends StatelessWidget {
 
   final String label;
   final Color color;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final bool outlined;
 
   @override

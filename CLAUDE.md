@@ -525,6 +525,12 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   "ask"`; everything else gets nothing. A config that cannot be written fails
   the start rather than launching unconfined. It holds a handle and a socket
   path, never a credential.
+- **An agent's conversation id reaches argv only in its provider's shape**
+  (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
+  for `opencode`, checked by the host on every report and every `resume`,
+  and by the server before storing. `docs/harness-session-vectors.json`
+  keeps the two crates in agreement. The `SessionStart` hook prints nothing:
+  its stdout reaches the agent.
 - **OAuth discovery never reaches a private address** (81g, §10). rmcp's
   OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
   every URL and redirect hop resolved and refused unless all its addresses

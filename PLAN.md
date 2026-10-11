@@ -61,7 +61,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
-| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) |
+| M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) · Resume reopens the agent's own conversation (89, on `staging`) |
 
 **Release state (2026-10-11).** **v0.7.1 is being cut** (decision 72's
 steps; this sentence is the prep PR's), at the operator's request after #141
@@ -5230,6 +5230,81 @@ paste to an old host*)*
   runs that make, clone and keep) and the interactive prompt (re-asked,
   skipped, kept), and the pty run types a workspace. The installer e2e jobs
   pass `--workspace scratch` and check the folder on Ubuntu and macOS.
+
+**89. Resume reopens the agent's own conversation.** *(2026-10-11, the
+operator: an ended Claude Code or OpenCode session's Run again started a new
+conversation, though OpenCode itself printed `opencode -s ses_…` to continue
+it)*
+- **The host learns the id while the session runs, never from the
+  terminal.** The exit text is printed only on a clean exit, and a `/clear`
+  or `/new` changes the conversation mid-run. `apps/runtime/src/harness.rs`:
+  - **Claude Code**: a fresh session starts with `--session-id <uuid>`, so
+    the id is known before the agent runs. Every session also gets
+    `--settings` with a `SessionStart` hook that runs `storm-runtime
+    harness-session`; it fires on startup, resume, `/clear` and compaction
+    with the current `session_id`. The hook prints nothing (its output would
+    reach the agent) and always exits 0.
+  - **OpenCode** cannot be given an id. `OPENCODE_CONFIG_DIR` points at the
+    session's directory, which holds a plugin: on `message.updated` it runs
+    `storm-runtime harness-session <id>` for the session the message is in,
+    once per change, skipping subagent sessions (those with a `parentID`).
+    The variable adds to the operator's config rather than replacing it, and
+    it loads with AM32's `OPENCODE_DISABLE_PROJECT_CONFIG=1` and
+    `XDG_CONFIG_HOME` in place (checked on opencode 1.18.31).
+  - `harness-session` sends the id to the daemon socket with a per-session
+    handle (`STORM_HARNESS_HANDLE`), like `mcp-bridge`. The host takes it only
+    for a handle it issued and only as an id the provider could make: a
+    lowercase UUID, or `ses_` plus 1–64 alphanumerics.
+    `docs/harness-session-vectors.json` holds both crates to the same rule.
+- **Reported like the title.** `harness_session` rides the status posts as
+  it changes, the ending and `hello`, so a crash or host restart doesn't lose
+  it. The host says `"resume": ["claude-code", "opencode"]` in its
+  capabilities.
+- **A resume is its own launch.** `POST /v1/agent/sessions` with
+  `resume_of`: `ops::launch_session` takes the old session's host, workspace,
+  agent, note (as it was then) and write vault, whatever else the request
+  says. The write vault is still checked. The manager refuses (409) a
+  session that is running, has no conversation, sits on a host that doesn't
+  list its agent under `resume`, or whose agent is gone (never a fallback),
+  and a conversation a live session already holds. The new session records
+  `resumed_from` and starts with the id already stored, so a second resume
+  is refused before the host reports anything. `start` carries
+  `resume: <id>`. The runtime runs `claude --resume <id>` or
+  `opencode -s <id>`, and **not** the opening prompt.
+- **The client.** An ended session shows **Resume** (no launcher) before Run
+  again, which still starts fresh. When its host is offline, its runtime is
+  too old or the conversation is open elsewhere, Resume is hidden and a line
+  under the header says why. A resumed session leaves the Ended list; its
+  conversation is listed once, under its latest session.
+- **Rejected:** parsing the terminal for "Continue opencode -s" (clean exits
+  only, and wrong after `/new`); `opencode session list` after the end (a
+  guess when two sessions share a workspace); reopening the old record
+  instead of a new one (its run time, Wrote and ending are history).
+- **Known limits.** The id is per host and per workspace, so a resume runs
+  only there. Removing the agent's transcript on the host makes the CLI exit
+  at once, and the session fails like any other start. Switching OpenCode
+  to another session without sending a message is not reported. An agent
+  that runs `opencode` itself inherits the variable, and its messages would
+  report as the session's.
+- **Upgrading.** Both `storm-server` and `storm-runtime` must be this
+  version. `agent.db` gains `sessions.harness_session` and `resumed_from` by
+  `ALTER TABLE` on start (additive). With an older runtime, Resume is hidden
+  and says to update it.
+- Tests: runtime `harness` (ids against the vectors, launch arguments, the
+  plugin file, other providers untouched),
+  `the_agents_session_id_is_reported_as_it_changes`,
+  `a_resume_reopens_the_conversation_or_fails_to_start`; server
+  `a_resume_reopens_the_reported_conversation`,
+  `a_resume_is_refused_without_a_conversation_or_a_host_that_can`, the
+  vectors, and `a_resume_reopens_the_conversation_where_it_ran` over REST;
+  `gateway_e2e.py` runs the real hook against the real runtime and checks
+  the relaunched agent's argv (7 checks); client Resume, the phone bar, the
+  two reasons, and shell. **Against the real CLIs** (Claude Code, opencode
+  1.18.31), using the arguments `harness::launch` produces: the hook and the
+  plugin each reported the id once, and `--resume` / `-s` reopened the
+  conversation (each recalled the earlier message).
+- **Also:** a 2px gap between Agents sidebar rows (#145), so a selected and
+  a hovered row no longer merge into one fill.
 
 ## Data model
 
