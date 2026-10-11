@@ -325,15 +325,16 @@ class StatusChip extends StatelessWidget {
 }
 
 /// The machine being enrolled. It is not necessarily the one this client
-/// runs on, so the enroll sheet offers both (AM40).
-enum HostPlatform { linux, macos }
+/// runs on, so the enroll sheet offers every platform (AM40, AM56).
+enum HostPlatform { linux, macos, windows }
 
-/// The platform the enroll sheet opens on: macOS on a Mac (native or web),
-/// Linux everywhere else.
-HostPlatform defaultHostPlatform() =>
-    defaultTargetPlatform == TargetPlatform.macOS
-    ? HostPlatform.macos
-    : HostPlatform.linux;
+/// The platform the enroll sheet opens on: the client's own when it is a Mac
+/// or a Windows machine (native or web), Linux everywhere else.
+HostPlatform defaultHostPlatform() => switch (defaultTargetPlatform) {
+  TargetPlatform.macOS => HostPlatform.macos,
+  TargetPlatform.windows => HostPlatform.windows,
+  _ => HostPlatform.linux,
+};
 
 /// One command the operator runs on the host, in order.
 class EnrollStep {
@@ -345,9 +346,10 @@ class EnrollStep {
   final bool pastesString;
 }
 
-/// What to run on a host of [platform], and nothing of the other's: Linux is
+/// What to run on a host of [platform], and nothing of the others': Linux is
 /// the `.deb` and systemd (decision 77e), macOS is Homebrew and a launchd
-/// LaunchDaemon (D14, AM35).
+/// LaunchDaemon (D14, AM35), Windows is the release zip and a Windows Service
+/// (D16, AM50).
 List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
   HostPlatform.linux => const [
     EnrollStep('sudo apt install storm-runtime'),
@@ -369,6 +371,20 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
       pastesString: true,
     ),
   ],
+  // In an elevated PowerShell. `install` copies the binary into Program
+  // Files, so `enroll` runs from there; enrolling starts the service.
+  HostPlatform.windows => const [
+    EnrollStep(
+      'Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/'
+      'storm-runtime-windows-x86_64.zip -OutFile \$env:TEMP\\storm-runtime.zip; '
+      'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime',
+    ),
+    EnrollStep('& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install'),
+    EnrollStep(
+      '& "\$env:ProgramFiles\\StormRuntime\\storm-runtime.exe" enroll',
+      pastesString: true,
+    ),
+  ],
 };
 
 /// Where the host runs and keeps its workspaces, in a line.
@@ -380,6 +396,10 @@ String enrollFootnote(HostPlatform platform) => switch (platform) {
     'launchd starts it by itself once it is enrolled (the LaunchDaemon '
         'dev.storm.runtime), as the dedicated _stormruntime account. '
         'Workspaces are the folders in /Library/StormRuntime/workspaces.',
+  HostPlatform.windows =>
+    'Run them in PowerShell as administrator. Enrolling starts the '
+        'StormRuntime service, as the virtual account NT SERVICE\\StormRuntime. '
+        'Workspaces are the folders in C:\\ProgramData\\StormRuntime\\workspaces.',
 };
 
 /// The enrollment string, shown once: it carries a single-use secret that
@@ -443,6 +463,7 @@ class _EnrollDialogState extends State<_EnrollDialog> {
                 options: const [
                   ChoiceOption(HostPlatform.linux, 'Linux'),
                   ChoiceOption(HostPlatform.macos, 'macOS'),
+                  ChoiceOption(HostPlatform.windows, 'Windows'),
                 ],
                 selected: _platform,
                 onSelected: (p) => setState(() {

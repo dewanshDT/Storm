@@ -648,6 +648,12 @@ void main() {
       // The string is the same whichever platform is shown.
       expect(find.byKey(const Key('enrollment-string')), findsOneWidget);
 
+      await tester.tap(inDialog(find.text('Windows')));
+      await tester.pumpAndSettle();
+      expectOnly(HostPlatform.windows);
+      expect(inDialog(find.textContaining('sudo')), findsNothing);
+      expect(inDialog(find.textContaining('brew')), findsNothing);
+
       await tester.tap(inDialog(find.text('Linux')));
       await tester.pumpAndSettle();
       expectOnly(HostPlatform.linux);
@@ -666,9 +672,23 @@ void main() {
       }
     });
 
+    testWidgets('on Windows the enroll sheet opens on Windows', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await tester.pumpWidget(app(const HostsScreen(), server()));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('enroll-host')));
+        await tester.pumpAndSettle();
+        expectOnly(HostPlatform.windows);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
     test('each platform\'s steps are its own, with one enroll step', () {
       final linux = enrollSteps(HostPlatform.linux);
       final mac = enrollSteps(HostPlatform.macos);
+      final windows = enrollSteps(HostPlatform.windows);
       for (final step in linux) {
         expect(step.command, isNot(contains('brew')));
         expect(step.command, isNot(contains('_stormruntime')));
@@ -678,10 +698,18 @@ void main() {
         expect(step.command, isNot(contains('apt ')));
         expect(step.command, isNot(contains('-u storm-runtime')));
       }
-      for (final steps in [linux, mac]) {
+      // AM56: PowerShell, never a POSIX command.
+      for (final step in windows) {
+        expect(step.command, isNot(contains('sudo')));
+        expect(step.command, isNot(contains('brew')));
+        expect(step.command, isNot(contains('systemctl')));
+        expect(step.command, isNot(contains('/Library/')));
+      }
+      for (final steps in [linux, mac, windows]) {
         final enroll = steps.where((s) => s.pastesString).toList();
         expect(enroll, hasLength(1));
-        expect(enroll.single.command, endsWith('storm-runtime enroll'));
+        expect(enroll.single.command, contains('storm-runtime'));
+        expect(enroll.single.command, endsWith(' enroll'));
         // The enrollment string is a secret: never an argument (freeze §5.3).
         expect(enroll.single.command, isNot(contains('storm-enroll:')));
       }
@@ -690,6 +718,16 @@ void main() {
         'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       );
       expect(enrollFootnote(HostPlatform.macos), contains('dev.storm.runtime'));
+      // `install` puts the binary in Program Files; enroll runs from there.
+      expect(
+        windows.last.command,
+        r'& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll',
+      );
+      expect(windows[1].command, endsWith(' install'));
+      expect(
+        enrollFootnote(HostPlatform.windows),
+        contains(r'NT SERVICE\StormRuntime'),
+      );
     });
 
     // The sessions list at both widths is in agents_navigation_test.dart,
