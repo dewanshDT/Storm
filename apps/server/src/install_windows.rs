@@ -573,6 +573,23 @@ mod imp {
         Ok(())
     }
 
+    /// `schtasks /end` returns before the server has exited, and Windows
+    /// cannot delete a running binary or an open log: retry for up to 15 s
+    /// (found on a real Windows run).
+    fn remove_when_released(dir: &Path) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match std::fs::remove_dir_all(dir) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) if std::time::Instant::now() >= deadline => {
+                    return Err(e).with_context(|| format!("removing {}", dir.display()));
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+            }
+        }
+    }
+
     /// Stops the server and removes what `up` installed. The data root is
     /// never touched: it is the person's notes.
     pub fn uninstall() -> Result<()> {
@@ -598,8 +615,7 @@ mod imp {
             }
             println!("Remove {} once this command has finished.", layout.support);
         } else if Path::new(&layout.support).exists() {
-            std::fs::remove_dir_all(&layout.support)
-                .with_context(|| format!("removing {}", layout.support))?;
+            remove_when_released(Path::new(&layout.support))?;
         }
         println!("storm-server is uninstalled for this user.");
         match record {
