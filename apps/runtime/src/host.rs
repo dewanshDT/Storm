@@ -2083,8 +2083,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .save(state.path())
         .unwrap();
         let config: RuntimeConfig = toml::from_str(&format!(
-            "workspace_roots = [\"{}\"]\nmax_sessions = 2",
-            roots.path().display()
+            "workspace_roots = [{:?}]\nmax_sessions = 2",
+            roots.path().display().to_string()
         ))
         .unwrap();
         let host = Host::with_providers(state.path(), config, providers).unwrap();
