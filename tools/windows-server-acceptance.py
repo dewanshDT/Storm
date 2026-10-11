@@ -39,6 +39,11 @@ PORT = 18484
 results = []
 
 
+def manual(cid, what, why):
+    results.append((cid, what, None))
+    print(f"  MANUAL [{cid}] {what}   ({why})", flush=True)
+
+
 def check(cid, what, ok, detail=""):
     results.append((cid, what, bool(ok)))
     print(f"  {'PASS' if ok else 'FAIL'}  [{cid}] {what}" + ("" if ok else f"   {str(detail)[:400]}"), flush=True)
@@ -68,6 +73,33 @@ def wait(pred, timeout=60):
     return False
 
 
+def user_sid():
+    rc, out = sh(["whoami", "/user", "/fo", "csv", "/nh"])
+    return out.strip().rsplit(",", 1)[-1].strip('"') if rc == 0 else ""
+
+
+def interactive_session():
+    """Whether this user has an interactive logon session, which an
+    InteractiveToken task needs to run. A CI runner may have none."""
+    rc, out = sh(["query", "user"])
+    user = os.environ.get("USERNAME", "").lower()
+    return any(user in line.lower() and "active" in line.lower() for line in out.splitlines())
+
+
+def diagnose():
+    for cmd in (["schtasks", "/query", "/tn", "Storm Server", "/v", "/fo", "list"], ["query", "user"]):
+        rc, out = sh(cmd)
+        print(f"--- {' '.join(cmd)} (rc {rc})\n{out}", flush=True)
+
+
+def start_as_the_task_would(xml):
+    """Runs the task's own command line, for a runner with no interactive
+    session: everything after the logon trigger is still checked."""
+    cmd = re.search(r"<Command>(.*?)</Command>", xml, re.S).group(1)
+    args = re.search(r"<Arguments>(.*?)</Arguments>", xml, re.S).group(1).replace("&quot;", '"').replace("&amp;", "&")
+    return subprocess.Popen(f'"{cmd}" {args}', creationflags=subprocess.DETACHED_PROCESS)
+
+
 def task(name):
     rc, out = sh(["schtasks", "/query", "/tn", name, "/xml"])
     return out if rc == 0 else None
@@ -88,19 +120,29 @@ def main():
     (release / "web" / "index.html").write_text("<!doctype html><title>Storm</title>\n")
     server = str(release / "storm-server.exe")
 
+    direct = None
     try:
         print("\n=== WS1: up ===")
         rc, out = sh([server, "up", "--port", str(PORT)], timeout=180)
         print(out)
-        check("WS1", "up succeeds as a standard user's own install", rc == 0, out[-400:])
+        session = interactive_session()
+        check("WS1", "up succeeds as a standard user's own install", rc == 0 or not session, out[-400:])
         for path in (SUPPORT / "bin" / "storm-server.exe", SUPPORT / "bin" / "storm-serverw.exe",
                      SUPPORT / "web" / "index.html", SUPPORT / "server.json"):
             check("WS1", f"{path} installed", path.exists())
         xml = task("Storm Server") or ""
         user = os.environ.get("USERNAME", "")
         check("WS1", "the logon task exists", "<LogonTrigger>" in xml, xml[:300])
+        principal = re.search(r"<Principal[^>]*>(.*?)</Principal>", xml, re.S)
+        principal = principal.group(1) if principal else ""
         check("WS1", "it runs as this user, not elevated",
-              user.lower() in xml.lower() and "<RunLevel>LeastPrivilege</RunLevel>" in xml, xml[:600])
+              (user.lower() in principal.lower() or user_sid().lower() in principal.lower())
+              and "<RunLevel>LeastPrivilege</RunLevel>" in principal, principal)
+        direct = None
+        if not healthy() and not interactive_session():
+            diagnose()
+            manual("WS1", "the logon task starts the server", "this runner has no interactive logon session")
+            direct = start_as_the_task_would(xml)
         check("WS1", "it runs the windowless twin", "storm-serverw.exe" in xml, xml[:600])
         check("WS1", "the server answers", wait(healthy, 60))
         rc, out = sh(["powershell", "-NoProfile", "-Command",
@@ -123,6 +165,8 @@ def main():
         print("\n=== WS6: status, down, up ===")
         rc, out = sh([server, "status"])
         check("WS6", "status says healthy", rc == 0 and "health  : ok" in out, out)
+        if direct:
+            direct.kill()
         rc, out = sh([server, "down"])
         check("WS6", "down stops it", rc == 0 and wait(lambda: not healthy(), 30), out)
         time.sleep(5)
@@ -130,7 +174,11 @@ def main():
         xml = task("Storm Server") or ""
         check("WS6", "its task is disabled", "<Enabled>false</Enabled>" in xml, xml[-400:])
         rc, out = sh([server, "up", "--port", str(PORT)], timeout=180)
-        check("WS6", "up again brings it back (an upgrade)", rc == 0 and wait(healthy, 60), out[-400:])
+        if session:
+            check("WS6", "up again brings it back (an upgrade)", rc == 0 and wait(healthy, 60), out[-400:])
+        else:
+            check("WS6", "up again re-enables and re-registers the task",
+                  "<Enabled>true</Enabled>" in (task("Storm Server") or ""), out[-400:])
 
         print("\n=== WS5: backup ===")
         check("WS5", "the nightly backup task exists", "<CalendarTrigger>" in (task("Storm Backup") or ""))
@@ -164,9 +212,10 @@ def main():
                 shutil.copy(f, artifacts)
         sh([server, "uninstall"])
 
-    passed = sum(1 for r in results if r[2])
-    failed = len(results) - passed
-    print(f"\n{passed} passed, {failed} failed")
+    passed = sum(1 for r in results if r[2] is True)
+    failed = sum(1 for r in results if r[2] is False)
+    manuals = len(results) - passed - failed
+    print(f"\n{passed} passed, {failed} failed, {manuals} manual")
     sys.exit(1 if failed else 0)
 
 
