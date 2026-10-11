@@ -269,6 +269,12 @@ class Settings {
 
 class SettingsNotifier extends AsyncNotifier<Settings> {
   static const _kUrl = 'storm.baseUrl';
+
+  static String? _storedUrl(SharedPreferences prefs) {
+    final url = prefs.getString(_kUrl);
+    return url == null || url.trim().isEmpty ? null : url;
+  }
+
   static const _kDark = 'storm.darkMode';
   static const _kTheme = 'storm.theme';
   static const _kFont = 'storm.fontSize';
@@ -303,7 +309,12 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
       // from is asking it to tell us something it already knows, and getting
       // it wrong is the only way to fail. A stored value still wins, so a web
       // build pointed somewhere else by hand keeps working.
-      baseUrl: prefs.getString(_kUrl) ?? (kIsWeb ? Uri.base.origin : ''),
+      //
+      // **An empty stored value is no value** (decision 90). Builds before
+      // 2026-08-19 stored `''` here on the web, and a `??` keeps it forever:
+      // sign-in then succeeds against the page's own origin while
+      // `isConfigured` stays false, and /login spins with no way out.
+      baseUrl: _storedUrl(prefs) ?? (kIsWeb ? Uri.base.origin : ''),
       theme: _themeFrom(prefs),
       fontSize: prefs.getDouble(_kFont) ?? 16,
       activeVault: prefs.getString(_kVault) ?? '',

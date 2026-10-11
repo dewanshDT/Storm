@@ -190,6 +190,12 @@ SCENARIOS = {
     const f = e.key === 'Enter' && formOf(e);
     if (f) setTimeout(() => f.requestSubmit(), 50);
   }, true);""",
+    # What the operator's Zen profile held: builds before 2026-08-19 stored an
+    # empty server address on the web, and later builds kept it. Sign-in then
+    # succeeded on the server, relative to the page, while the app — with no
+    # address — never counted itself configured and stayed on /login.
+    "a browser that stored an empty server address (an older build's)": """
+  localStorage.setItem('flutter.storm.baseUrl', '""');""",
     "an inline autofill menu that keeps itself last in <body>": """
   let button = null, list = null;
   document.addEventListener('keydown', () => {

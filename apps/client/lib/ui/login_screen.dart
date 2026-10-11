@@ -103,6 +103,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               userId: tokens.userId,
             ),
           );
+      // Leaving /login is the router's job, off `isConfigured`. If the save
+      // left that false, the password was accepted and nothing will move on:
+      // say so rather than spin (decision 90).
+      if (!mounted) return;
+      if (!(ref.read(settingsProvider).value?.isConfigured ?? false)) {
+        setState(() {
+          _error =
+              "Signed in, but this browser couldn't finish setting up. "
+              'Reload the page and sign in again.';
+          _busy = false;
+        });
+      }
     } on AuthApiException catch (e) {
       if (!mounted) return;
       // The server no longer knows this device, so no password will help:
