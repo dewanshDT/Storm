@@ -270,6 +270,75 @@ void main() {
       expect(c.relays.map((r) => r.url), [selfHosted.url]);
     });
 
+    test(
+      'a device seeded from its pairing QR reaches the server through a relay '
+      'before any refresh',
+      () async {
+        // Paired on the LAN, then off it before the app ever raced: the QR's
+        // relays are all it has, and they must be enough.
+        final qr = PairingUri.parse(
+          'storm://pair?v=1&sid=$serverId&pk=$pubkey&n=NONCE'
+          '&exp=2026-08-18T20:00:00Z&addr=192.168.91.51:8585'
+          '&relay=${Uri.encodeQueryComponent(selfHosted.url)}',
+        )!;
+        final seeded = pairedRelays(
+          qr,
+          const ServerInfo(
+            serverId: serverId,
+            keyId: 'key_1',
+            algorithm: 'ed25519',
+            publicKey: '',
+          ),
+        );
+        expect(seeded.single.publicAddress, selfHosted.publicAddress);
+
+        final c = connectionWith(
+          byHost: {
+            'direct.test': serverAnswering(dead: true),
+            'mine.example': serverAnswering(),
+          },
+          relays: seeded,
+        );
+
+        expect(await c.connect(), ServerProof.verified);
+        expect(c.active.tier, CandidateTier.selfHosted);
+      },
+    );
+
+    test(
+      'a relay from a QR grants no trust: it still faces the challenge',
+      () async {
+        final qr = PairingUri.parse(
+          'storm://pair?v=1&sid=$serverId&pk=$pubkey&n=NONCE'
+          '&exp=2026-08-18T20:00:00Z&addr=192.168.91.51:8585'
+          '&relay=${Uri.encodeQueryComponent(selfHosted.url)}',
+        )!;
+        final c = connectionWith(
+          byHost: {
+            'direct.test': serverAnswering(dead: true),
+            'mine.example': serverAnswering(),
+          },
+          relays: qr.relayAdverts,
+          verifier: ServerVerifier(
+            authApi: AuthApi(
+              baseUrl: 'http://test',
+              client: MockClient(
+                (_) async => http.Response(
+                  jsonEncode({'signature': 'not-a-signature'}),
+                  200,
+                ),
+              ),
+            ),
+            serverId: serverId,
+            publicKeyB64: pubkey,
+          ),
+        );
+
+        expect(await c.connect(), ServerProof.impostor);
+        expect(c.status, ConnectionStatus.unproven);
+      },
+    );
+
     test('a server predating the field still connects', () async {
       // `relays` absent entirely, not `[]`. This endpoint is what a stranded
       // client reaches, so it must not be the thing that strands it.

@@ -22,6 +22,13 @@ class RelayAdvert {
     url: j['url'] as String,
     publicAddress: j['public_address'] as String,
   );
+
+  /// The advert for [url], deriving `public_address` exactly as the server's
+  /// `registry::public_address` does.
+  factory RelayAdvert.derive(String url, String serverId) {
+    final base = url.replaceFirst(RegExp(r'/+$'), '');
+    return RelayAdvert(url: base, publicAddress: '$base/connect/$serverId');
+  }
 }
 
 /// Server identity, from `GET /v1/server`.
@@ -107,6 +114,7 @@ class PairingInvite {
     required this.nonce,
     required this.expires,
     required this.address,
+    this.relays = const [],
   });
 
   final String serverId;
@@ -115,18 +123,23 @@ class PairingInvite {
   final String expires;
   final String address;
 
+  /// Relay URLs the server was registered with when it minted this invite.
+  final List<String> relays;
+
   factory PairingInvite.fromJson(Map<String, dynamic> j) => PairingInvite(
     serverId: j['sid'] as String,
     publicKey: j['pk'] as String,
     nonce: j['n'] as String,
     expires: j['exp'] as String,
     address: j['addr'] as String,
+    relays: [for (final r in (j['relays'] as List? ?? const [])) r as String],
   );
 
   /// The `storm://pair` URI a new device scans or pastes.
   String toUri() =>
       'storm://pair?v=1&sid=$serverId&pk=$publicKey&n=$nonce'
-      '&exp=$expires&addr=$address';
+      '&exp=$expires&addr=$address'
+      '${relays.map((r) => '&relay=${Uri.encodeQueryComponent(r)}').join()}';
 }
 
 /// A parsed `storm://pair` URI.
@@ -138,6 +151,7 @@ class PairingUri {
     required this.nonce,
     required this.expires,
     required this.address,
+    this.relays = const [],
   });
 
   final String version;
@@ -148,6 +162,18 @@ class PairingUri {
 
   /// The `addr` field exactly as the QR carries it: a bare `host:port`.
   final String address;
+
+  /// The `relay` keys: the relays the server was registered with when the QR
+  /// was issued. Optional — a QR from an older server, or one with no relays,
+  /// has none. A relay URL here grants no trust: whatever answers through it
+  /// still has to pass the challenge against [publicKey].
+  final List<String> relays;
+
+  /// [relays] as connection candidates, seeding `Settings.relays` until the
+  /// first `GET /v1/server` replaces them.
+  List<RelayAdvert> get relayAdverts => [
+    for (final r in relays) RelayAdvert.derive(r, serverId),
+  ];
 
   /// [address] as something an HTTP client can actually be given.
   ///
@@ -195,6 +221,12 @@ class PairingUri {
         nonce: q['n'] ?? '',
         expires: q['exp'] ?? '',
         address: q['addr'] ?? '',
+        // A malformed relay is dropped, not fatal: the LAN address is what
+        // pairing dials, and a relay is only ever an extra candidate.
+        relays: [
+          for (final r in url.queryParametersAll['relay'] ?? const <String>[])
+            if (_isRelayUrl(r)) r,
+        ],
       );
       if (parsed.version.isEmpty ||
           parsed.serverId.isEmpty ||
@@ -216,6 +248,18 @@ class PairingUri {
     }
   }
 
+  /// `ws://` or `wss://` and a host, nothing else — the server's
+  /// `normalize_relay_url` rule.
+  static bool _isRelayUrl(String r) {
+    final u = Uri.tryParse(r);
+    return u != null &&
+        (u.scheme == 'wss' || u.scheme == 'ws') &&
+        u.host.isNotEmpty &&
+        (u.path.isEmpty || u.path == '/') &&
+        !u.hasQuery &&
+        !u.hasFragment;
+  }
+
   bool get isExpired {
     try {
       final exp = DateTime.parse(expires).toUtc();
@@ -225,6 +269,13 @@ class PairingUri {
     }
   }
 }
+
+/// The relay set a newly paired device starts with (D3): what `GET /v1/server`
+/// reported during pairing — live, from the same server that then passed the
+/// challenge — or, when that names none, the QR's snapshot. Either way it is
+/// only a set of candidates for the connection race to try.
+List<RelayAdvert> pairedRelays(PairingUri uri, ServerInfo info) =>
+    info.relays.isNotEmpty ? info.relays : uri.relayAdverts;
 
 /// Session tokens, from `POST /v1/auth/login` or `POST /v1/auth/refresh`.
 class SessionTokens {

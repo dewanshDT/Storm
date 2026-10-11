@@ -5731,6 +5731,45 @@ operator: agent pages give too much of the screen to the top bar)*
   - The back bubble in a session, and the place picker elsewhere.
 - The acceptance shots `phone-06` to `phone-09` are retaken.
 
+**93. The pairing QR carries the registered relay set.** *(2026-10-12, relay
+TODO §2's last pairing box; SRP v1 §4.3 names two carriers and only
+`GET /v1/server` existed)*
+- **Wire.** `storm://pair?…&addr=…` gains one `relay=<url>` per relay,
+  percent-encoded (`url::form_urlencoded`), in the order `/v1/server` lists
+  them. **No relays, no key:** a server without relays issues the URI it always
+  did, and a client that predates the key ignores it. `POST /v1/pairings`
+  (`PairingQrPayload`) gains `relays: [url, …]` beside `addr`.
+- **Registered, never configured** — the same `registered_relays` snapshot
+  `server_info` reads, so the QR and `/v1/server` agree at the instant of
+  issue. `public_address` is not sent: the client derives it as
+  `registry::public_address` does (`RelayAdvert.derive`).
+- **Boot and `storm-server pair` QRs carry none.** The boot QR is minted
+  before any tunnel starts, and `pair` is a separate process that cannot know
+  what the running server registered with. Both devices learn the set from
+  `/v1/server` on their first connection.
+- **The client.** `PairingUri.relays` reads every `relay` key and drops one
+  that is not `ws(s)://host` (the server's `normalize_relay_url` rule) rather
+  than refusing the QR — pairing dials the LAN address; a relay is only an
+  extra candidate. At pairing, `Settings.relays` is seeded with
+  `pairedRelays`: the list `GET /v1/server` returned during pairing (live,
+  from the server that then passed the challenge), or the QR's when that is
+  empty (D3: a stale entry costs part of one race, none costs reachability).
+  Before this, pairing read `/v1/server` and **dropped its relays**, so a
+  device paired on the LAN knew no relay until its first connection race.
+- **No trust from a QR relay.** It is a race candidate like any other: the
+  privacy ordering is unchanged and whatever answers through it must pass
+  the challenge against the QR's public key.
+- **Not done here:** pairing *through* a relay. The pairing screen still
+  dials only `addr`, so a QR scanned off the LAN fails; the field now carries
+  what that flow would need.
+- Tests: server `qr_payload_encodes_as_storm_uri` (no relays → old URI),
+  `qr_payload_carries_one_encoded_relay_key_per_relay`,
+  `pairing_qr_carries_registered_relays_never_configured_ones`; client
+  `pairing_uri_test` (old URI, the server's exact bytes, malformed relays
+  dropped, live set wins), `pairing_invite_test` (JSON → URI → parse),
+  `storm_connection_test` (a QR-seeded device reaches the server through a
+  relay before any refresh; a QR relay still faces the challenge).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
