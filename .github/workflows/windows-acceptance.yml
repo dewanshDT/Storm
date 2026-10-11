@@ -1,0 +1,85 @@
+name: Windows acceptance
+
+# Decision 99 on a real Windows machine: the runner. The Runtime Host
+# (AC-W1–W9): the branch's storm-runtime installed as the StormRuntime service
+# under NT SERVICE\StormRuntime, enrolled with a throwaway storm-server built
+# from the same commit, and driven through install, enrollment, providers,
+# sessions, process lifecycle, filesystem, the pipe, secrets, revocation and
+# uninstall by apps/runtime/tests/windows_acceptance.py. The server (AC-WS1,
+# WS2, WS5, WS6): storm-server's per-user Scheduled Task, by
+# tools/windows-server-acceptance.py. The runner is disposable, which is why
+# the harnesses may install services and tasks here.
+#
+# What a runner cannot do — a logged-in Claude Code or OpenCode taking a
+# prompt, the handoff to a phone, a reboot — is reported MANUAL, never PASS.
+# Nothing here publishes anything (decision 45).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["acceptance/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-host:
+    name: Windows Runtime Host (AC-W1–W9)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: Build storm-server and storm-runtime
+        shell: bash
+        run: |
+          (cd apps/server && cargo build)
+          (cd apps/runtime && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}\apps\server\target\debug\storm-server.exe
+          RUNTIME_BIN: ${{ github.workspace }}\apps\runtime\target\debug\storm-runtime.exe
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}\windows-acceptance
+        run: python apps/runtime/tests/windows_acceptance.py
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance-logs
+          path: ${{ runner.temp }}\windows-acceptance
+          if-no-files-found: ignore
+          retention-days: 14
+
+  server:
+    name: Windows server (Scheduled Task)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - name: Build storm-server
+        shell: bash
+        run: (cd apps/server && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}\apps\server\target\debug\storm-server.exe
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}\windows-server-acceptance
+        run: python tools/windows-server-acceptance.py
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-server-acceptance-logs
+          path: ${{ runner.temp }}\windows-server-acceptance
+          if-no-files-found: ignore
+          retention-days: 14
