@@ -1230,3 +1230,579 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
 
     tunnels.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// MCP over the tunnel (relay TODO §5, decision 95)
+// ---------------------------------------------------------------------------
+
+impl<'a> TunnelRequest<'a> {
+    fn mcp(body: &'a [u8], auth: &str) -> Self {
+        Self {
+            method: "POST",
+            path: "/mcp",
+            body: Some(body),
+            ..Default::default()
+        }
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("authorization", auth)
+    }
+}
+
+fn rpc(method: &str, params: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        .to_string()
+        .into_bytes()
+}
+
+fn tool(name: &str, args: serde_json::Value) -> Vec<u8> {
+    rpc(
+        "tools/call",
+        serde_json::json!({"name": name, "arguments": args}),
+    )
+}
+
+async fn lan(router: &Router, body: &[u8], auth: &str, host: &str) -> (u16, serde_json::Value) {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("authorization", auth)
+                .header("host", host)
+                .body(axum::body::Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+async fn mcp_vault(router: &Router, bearer: &str, name: &str) -> String {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/vaults")
+                .header("content-type", "application/json")
+                .header("authorization", bearer)
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "name": name }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_string()
+}
+
+fn set_mcp(state: &crate::api::Shared, enabled: bool, writable: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    state.mcp_enabled.store(enabled, Relaxed);
+    state.mcp_writable.store(writable, Relaxed);
+}
+
+fn structured(response: &serde_json::Value) -> &serde_json::Value {
+    &response["result"]["structuredContent"]
+}
+
+struct McpTunnel {
+    relay: FakeRelay,
+    tunnels: super::Tunnels,
+    router: Router,
+    state: crate::api::Shared,
+    bearer: String,
+    next_stream: u32,
+    _dir: tempdir::TempDir,
+}
+
+impl McpTunnel {
+    async fn start(name: &str) -> Self {
+        let dir = tempdir::TempDir::new(name).unwrap();
+        let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+        Self::over(dir, router, identity, state).await
+    }
+
+    async fn over(
+        dir: tempdir::TempDir,
+        router: Router,
+        identity: Arc<ServerIdentity>,
+        state: crate::api::Shared,
+    ) -> Self {
+        let owner = crate::api::tests::seed_owner(&state).await;
+        let bearer = format!(
+            "Bearer {}",
+            crate::api::tests::session_token(&state, &owner).await
+        );
+        let mut relay = FakeRelay::start(Behaviour::Normal).await;
+        let (_registered, tunnels) = start_tunnel(&relay.url, router.clone(), identity);
+        let _ = relay.await_registration().await;
+        Self {
+            relay,
+            tunnels,
+            router,
+            state,
+            bearer,
+            next_stream: 1,
+            _dir: dir,
+        }
+    }
+
+    async fn relayed(&mut self, body: &[u8]) -> (u16, serde_json::Value) {
+        let bearer = self.bearer.clone();
+        self.relayed_as(body, &bearer).await
+    }
+
+    async fn relayed_as(&mut self, body: &[u8], auth: &str) -> (u16, serde_json::Value) {
+        let id = self.next_stream;
+        self.next_stream += 1;
+        let response = self.relay.request(id, TunnelRequest::mcp(body, auth)).await;
+        (response.status, response.json())
+    }
+
+    async fn lan(&self, body: &[u8]) -> (u16, serde_json::Value) {
+        lan(&self.router, body, &self.bearer, "localhost").await
+    }
+}
+
+#[tokio::test]
+async fn mcp_over_the_tunnel_answers_exactly_as_on_the_lan() {
+    let mut t = McpTunnel::start("storm-relay-mcp-parity").await;
+    set_mcp(&t.state, true, true);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+
+    let (status, made) = t
+        .relayed(&tool(
+            "create_note",
+            serde_json::json!({"vault": vault, "path": "Relayed.md", "content": "# Relayed\n\nbody\n"}),
+        ))
+        .await;
+    assert_eq!(status, 200, "{made}");
+    let note_id = structured(&made)["note"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{made}"))
+        .to_string();
+
+    let calls = [
+        rpc(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "relay-test", "version": "0"},
+            }),
+        ),
+        rpc("tools/list", serde_json::json!({})),
+        tool("get_vault", serde_json::json!({"vault": vault})),
+        tool(
+            "get_note",
+            serde_json::json!({"vault": vault, "note_id": note_id}),
+        ),
+    ];
+    for call in calls {
+        let relayed = t.relayed(&call).await;
+        let direct = t.lan(&call).await;
+        assert_eq!(relayed.0, 200, "{}", relayed.1);
+        assert_eq!(relayed, direct, "{}", String::from_utf8_lossy(&call));
+    }
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_mcp_write_merges_against_a_concurrent_lan_edit() {
+    let mut t = McpTunnel::start("storm-relay-mcp-merge").await;
+    set_mcp(&t.state, true, true);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+    let original = "# Shared\n\nfirst line\n\nmiddle\n\nlast line\n";
+
+    let (_, made) = t
+        .lan(&tool(
+            "create_note",
+            serde_json::json!({"vault": vault, "path": "Shared.md", "content": original}),
+        ))
+        .await;
+    let note = structured(&made)["note"].clone();
+    let (_, read) = t
+        .lan(&tool(
+            "get_note",
+            serde_json::json!({"vault": vault, "note_id": note["id"]}),
+        ))
+        .await;
+    let base = structured(&read)["version"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{read}"));
+    let original = structured(&read)["content"].as_str().unwrap().to_string();
+
+    // The phone's edit lands first, on the LAN…
+    let (_, phone) = t
+        .lan(&tool(
+            "update_note",
+            serde_json::json!({"vault": vault, "note_id": note["id"], "base_version": base,
+                "content": original.replace("first line", "first line, from the phone")}),
+        ))
+        .await;
+    assert_eq!(structured(&phone)["merged"], false, "{phone}");
+
+    // …and the agent's, written against the same base, arrives over the relay.
+    let (status, agent) = t
+        .relayed(&tool(
+            "update_note",
+            serde_json::json!({"vault": vault, "note_id": note["id"], "base_version": base,
+                "content": original.replace("last line", "last line, from the agent")}),
+        ))
+        .await;
+    assert_eq!(status, 200, "{agent}");
+    let result = structured(&agent);
+    assert_eq!(result["merged"], true, "{agent}");
+    assert_eq!(result["conflict"], false, "{agent}");
+    let content = result["content"].as_str().unwrap();
+    assert!(content.contains("from the phone"), "{content}");
+    assert!(content.contains("from the agent"), "{content}");
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_tool_error_over_the_tunnel_is_still_a_tool_error() {
+    let mut t = McpTunnel::start("storm-relay-mcp-tool-error").await;
+    set_mcp(&t.state, true, false);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+
+    let missing = tool(
+        "get_note",
+        serde_json::json!({"vault": vault, "note_id": "no-such-note"}),
+    );
+    let relayed = t.relayed(&missing).await;
+    assert_eq!(relayed.0, 200, "a 4xx inside a tool is not an HTTP failure");
+    assert_eq!(relayed.1["result"]["isError"], true, "{}", relayed.1);
+    assert_eq!(relayed, t.lan(&missing).await);
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_mcp_switches_gate_a_relayed_call_as_they_gate_a_lan_one() {
+    let mut t = McpTunnel::start("storm-relay-mcp-switches").await;
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+    let list = rpc("tools/list", serde_json::json!({}));
+    let write = tool(
+        "create_note",
+        serde_json::json!({"vault": vault, "path": "Nope.md", "content": "x"}),
+    );
+
+    set_mcp(&t.state, false, false);
+    let relayed = t.relayed(&list).await;
+    assert_eq!(relayed.0, 404, "{}", relayed.1);
+    assert_eq!(relayed, t.lan(&list).await);
+
+    set_mcp(&t.state, true, false);
+    let relayed = t.relayed(&list).await;
+    let names: Vec<&str> = relayed.1["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    for write_tool in crate::mcp::WRITE_TOOLS {
+        assert!(!names.contains(write_tool), "{write_tool} listed read-only");
+    }
+    assert_eq!(relayed, t.lan(&list).await);
+
+    let relayed = t.relayed(&write).await;
+    assert_eq!(relayed, t.lan(&write).await);
+    assert!(
+        relayed.1.get("error").is_some() || relayed.1["result"]["isError"] == true,
+        "a write must be refused while MCP is read-only: {}",
+        relayed.1
+    );
+    let (_, described) = t
+        .lan(&tool("get_vault", serde_json::json!({"vault": vault})))
+        .await;
+    assert_eq!(
+        structured(&described)["note_count"],
+        0,
+        "nothing was written: {described}"
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_mcp_key_works_over_the_tunnel_on_mcp_and_nowhere_else() {
+    let mut t = McpTunnel::start("storm-relay-mcp-key").await;
+    set_mcp(&t.state, true, false);
+
+    let key = {
+        use tower::ServiceExt;
+        let response = t
+            .router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/keys")
+                    .header("content-type", "application/json")
+                    .header("authorization", &t.bearer)
+                    .body(axum::body::Body::from(r#"{"name":"relayed agent"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        format!("Bearer {}", created["secret"].as_str().unwrap())
+    };
+    assert!(key.starts_with("Bearer stk_"), "{key}");
+
+    let (status, listed) = t
+        .relayed_as(&rpc("tools/list", serde_json::json!({})), &key)
+        .await;
+    assert_eq!(status, 200, "{listed}");
+    assert!(listed["result"]["tools"].as_array().is_some(), "{listed}");
+
+    let id = t.next_stream;
+    let rest = t
+        .relay
+        .request(
+            id,
+            TunnelRequest::get("/v1/vaults").header("authorization", &key),
+        )
+        .await;
+    assert_eq!(
+        rest.status, 401,
+        "an MCP key never reaches REST, relayed or not"
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_mcp_call_passes_rebinding_protection_on_a_concrete_bind() {
+    // The `Host` rewrite (dispatch.rs) end to end: with the server bound to a
+    // real address, the relay's hostname would be refused by rmcp.
+    let dir = tempdir::TempDir::new("storm-relay-mcp-host").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_mcp_hosts(
+        dir.path(),
+        crate::mcp::allowed_hosts("127.0.0.1", 8484),
+    );
+    let mut t = McpTunnel::over(dir, router, identity, state).await;
+    set_mcp(&t.state, true, false);
+    let list = rpc("tools/list", serde_json::json!({}));
+
+    let bearer = t.bearer.clone();
+    let (direct_status, _) = lan(&t.router, &list, &bearer, "relay.example.com").await;
+    assert_ne!(
+        direct_status, 200,
+        "the protection is live for a foreign Host"
+    );
+
+    let id = t.next_stream;
+    let relayed = t
+        .relay
+        .request(
+            id,
+            TunnelRequest::mcp(&list, &bearer).header("host", "relay.example.com"),
+        )
+        .await;
+    assert_eq!(
+        relayed.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&relayed.body)
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_write_whose_stream_closes_before_its_body_ends_writes_nothing() {
+    let mut t = McpTunnel::start("storm-relay-mcp-cut").await;
+    set_mcp(&t.state, true, true);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+    let call = tool(
+        "create_note",
+        serde_json::json!({"vault": vault, "path": "Half.md", "content": "never whole"}),
+    );
+
+    t.relay
+        .send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":7}));
+    assert_eq!(t.relay.next_control().await["type"], "STREAM_ACK");
+    t.relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":7,"method":"POST","path":"/mcp",
+        "headers": {"content-type":"application/json",
+            "accept":"application/json, text/event-stream","authorization": t.bearer},
+    }));
+    t.relay
+        .to_server
+        .send(Message::binary(proto::encode_body_frame(
+            proto::FRAME_REQUEST_BODY,
+            7,
+            &call[..call.len() / 2],
+        )))
+        .unwrap();
+    t.relay
+        .send(serde_json::json!({"v":1,"type":"CLOSE","stream_id":7}));
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, listed) = t
+        .lan(&tool(
+            "search",
+            serde_json::json!({"vault": vault, "query": "never whole"}),
+        ))
+        .await;
+    assert!(
+        !listed.to_string().contains("Half.md"),
+        "a request cut off mid-body must not run: {listed}"
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_body_that_outruns_its_handler_is_closed_not_truncated() {
+    // Before decision 95 a full body channel was dropped, which the handler
+    // read as end-of-body: it served the first 32 chunks as the whole request.
+    let dir = tempdir::TempDir::new("storm-relay-body-shed").unwrap();
+    let identity = test_identity(dir.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let served = Arc::new(std::sync::Mutex::new(None::<usize>));
+    let router = Router::new().route(
+        "/upload",
+        axum::routing::post({
+            let release = release.clone();
+            let served = served.clone();
+            move |body: axum::body::Body| async move {
+                release.notified().await;
+                if let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await {
+                    *served.lock().unwrap() = Some(bytes.len());
+                }
+                "stored"
+            }
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":3}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":3,"method":"POST","path":"/upload","headers":{},
+    }));
+    let chunk = vec![b'x'; 1024];
+    for _ in 0..64 {
+        relay
+            .to_server
+            .send(Message::binary(proto::encode_body_frame(
+                proto::FRAME_REQUEST_BODY,
+                3,
+                &chunk,
+            )))
+            .unwrap();
+    }
+    relay
+        .to_server
+        .send(Message::binary(proto::encode_body_frame(
+            proto::FRAME_REQUEST_BODY,
+            3,
+            b"",
+        )))
+        .unwrap();
+
+    let closed = relay.next_control().await;
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], 3);
+    release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        *served.lock().unwrap(),
+        None,
+        "the handler must never see a truncated body as a whole one"
+    );
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_response_leaves_the_server_chunk_by_chunk() {
+    // A long tool call or the change feed must reach the client as it is
+    // produced; the second chunk exists only after the first has arrived.
+    let dir = tempdir::TempDir::new("storm-relay-unbuffered").unwrap();
+    let identity = test_identity(dir.path());
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let router = Router::new().route(
+        "/slow",
+        axum::routing::get({
+            let gate = gate.clone();
+            move || async move {
+                let stream = futures_util::stream::unfold(0u8, move |step| {
+                    let gate = gate.clone();
+                    async move {
+                        match step {
+                            0 => Some((
+                                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first")),
+                                1,
+                            )),
+                            1 => {
+                                gate.notified().await;
+                                Some((Ok(axum::body::Bytes::from_static(b"second")), 2))
+                            }
+                            _ => None,
+                        }
+                    }
+                });
+                axum::body::Body::from_stream(stream)
+            }
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":5}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":5,"method":"GET","path":"/slow","headers":{},
+    }));
+    assert_eq!(relay.next_control().await["type"], "HTTP_RESPONSE_HEAD");
+    match relay.next_event().await {
+        Event::Binary(frame) => {
+            let (_, _, payload) = proto::decode_body_frame(&frame).unwrap();
+            assert_eq!(payload, b"first");
+        }
+        other => panic!("the first chunk must arrive before the second exists: {other:?}"),
+    }
+    gate.notify_one();
+    match relay.next_event().await {
+        Event::Binary(frame) => {
+            let (_, _, payload) = proto::decode_body_frame(&frame).unwrap();
+            assert_eq!(payload, b"second");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    tunnels.shutdown().await;
+}

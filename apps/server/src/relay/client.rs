@@ -398,7 +398,7 @@ async fn serve_trunk(
                     break;
                 }
             }
-            Message::Binary(bytes) => handle_body_frame(&bytes, &mut streams),
+            Message::Binary(bytes) => handle_body_frame(&bytes, &mut streams, &outbound),
             Message::Close(_) => break,
             // tungstenite answers protocol-level pings itself.
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
@@ -631,7 +631,11 @@ async fn serve_one(
         .await;
 }
 
-fn handle_body_frame(bytes: &[u8], streams: &mut HashMap<u32, StreamEntry>) {
+fn handle_body_frame(
+    bytes: &[u8],
+    streams: &mut HashMap<u32, StreamEntry>,
+    outbound: &mpsc::Sender<Message>,
+) {
     let Some((kind, stream_id, payload)) = proto::decode_body_frame(bytes) else {
         return;
     };
@@ -657,8 +661,22 @@ fn handle_body_frame(bytes: &[u8], streams: &mut HashMap<u32, StreamEntry>) {
     // backpressure in the direction that matters (responses); in this
     // direction a producer outrunning its own handler by 32 chunks is a
     // stream to end, not a reason to stall the socket.
-    if sender.try_send(Bytes::copy_from_slice(payload)).is_err() {
-        entry.body = None;
+    //
+    // **Shed means abort, never end the body.** Dropping the sender would read
+    // as end-of-body, and the handler would serve the prefix as the whole
+    // request: a truncated note or attachment saved as if complete (decision 95).
+    match sender.try_send(Bytes::copy_from_slice(payload)) {
+        Ok(()) => {}
+        // The handler answered without reading the rest; its response stands.
+        Err(mpsc::error::TrySendError::Closed(_)) => entry.body = None,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                stream_id,
+                "request body outran its handler; closing the stream"
+            );
+            close_stream(streams, stream_id);
+            let _ = outbound.try_send(Message::text(proto::close_stream(stream_id)));
+        }
     }
 }
 
