@@ -70,13 +70,15 @@ class AgentsSidebar extends ConsumerWidget {
           padding: EdgeInsets.fromLTRB(t.sp, top, t.sp, t.sp * 0.75),
           child: AgentsLabel(label),
         ),
-        for (final s in list)
+        for (final (i, s) in list.indexed) ...[
+          if (i > 0) SizedBox(height: t.sp * 0.25),
           SessionRow(
             session: s,
             host: o?.hostName(s.hostId) ?? 'host',
             selected: s.id == selected,
             onTap: () => openAgentSession(context, s.id),
           ),
+        ],
       ],
     );
 
