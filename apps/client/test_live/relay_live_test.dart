@@ -221,24 +221,16 @@ void main() {
     await nextApi.vaults().timeout(deadline);
   });
 
-  test(
-    'an upload larger than a WebSocket frame crosses the relay',
-    () async {
-      final (bigTrunk, bigApi) = freshRelayed();
-      addTearDown(bigTrunk.dispose);
-      await bigApi
-          .uploadAttachment(
-            vaultId,
-            scratch('20m-up'),
-            pattern(20 * 1024 * 1024),
-          )
-          .timeout(deadline);
-    },
-    skip:
-        'The Dart client sends a request body as one 0x01 frame, so over '
-        '16 MiB the relay closes its trunk. §5.2 now requires splitting '
-        '(decision 98); the client half is open.',
-  );
+  test('an upload larger than a WebSocket frame crosses the relay', () async {
+    // Sent as one 0x01 frame, a 20 MiB body made the relay close the
+    // client's trunk (decision 100).
+    final (bigTrunk, bigApi) = freshRelayed();
+    addTearDown(bigTrunk.dispose);
+    final path = scratch('20m-up');
+    final bytes = pattern(20 * 1024 * 1024);
+    await bigApi.uploadAttachment(vaultId, path, bytes).timeout(deadline);
+    expect(await direct.attachment(vaultId, path), bytes);
+  });
 
   test('MCP initializes and writes through the real relay', () async {
     final before = await direct.config();
