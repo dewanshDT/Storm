@@ -103,11 +103,14 @@ fn serve(state: &Path) -> (Child, mpsc::Receiver<String>) {
     let roots = state.join("roots");
     std::fs::create_dir_all(&roots).unwrap();
     let config = state.join("runtime.toml");
-    std::fs::write(
-        &config,
-        format!("workspace_roots = [\"{}\"]\n", roots.display()),
-    )
-    .unwrap();
+    // Windows refuses a root under C:\Users (AM54), where a runner's temp
+    // directory is; the host needs none to link or be revoked.
+    let roots = if cfg!(windows) {
+        String::new()
+    } else {
+        format!("{:?}", roots.display().to_string())
+    };
+    std::fs::write(&config, format!("workspace_roots = [{roots}]\n")).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_storm-runtime"))
         .args(["serve", "--state"])
         .arg(state)
@@ -135,6 +138,7 @@ fn serve(state: &Path) -> (Child, mpsc::Receiver<String>) {
     (child, rx)
 }
 
+#[cfg(unix)]
 fn wait_for_line(rx: &mpsc::Receiver<String>, needle: &str) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut seen = Vec::new();
@@ -170,6 +174,7 @@ fn wait_exit(child: &mut Child, within: Duration) -> ExitStatus {
 /// SIGTERM (launchd's and systemd's stop) and SIGINT (a terminal's Ctrl-C) are
 /// an orderly shutdown, exit 0 — never the default action, which would leave
 /// every session's process group running behind it (AM37).
+#[cfg(unix)]
 #[test]
 fn sigterm_and_sigint_stop_the_host_cleanly() {
     for signal in [rustix::process::Signal::TERM, rustix::process::Signal::INT] {

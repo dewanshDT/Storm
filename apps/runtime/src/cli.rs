@@ -36,26 +36,26 @@
 //!   started outlives it — and the price of finding what left the session.
 //! - `ended` is reported only after the output has drained, so nothing arrives
 //!   after it.
+//! - **On Windows** (AM51, AM52) the same policy runs on other means: the
+//!   hang-up is closing the pseudoconsole (`CTRL_CLOSE_EVENT` to its console
+//!   processes), the kill is terminating the session's Job Object, and
+//!   "anything left" is the job's process count. Every process the agent
+//!   starts is in the job and cannot leave it, so the tag is not searched.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
-use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, ExitStatus};
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
-
-use rustix::process::{Pid, Signal};
 
 use crate::provider::{
     Availability, Interaction, InteractionKind, InteractionSpec, Provider, ProviderId,
     ProviderKind, ProviderSession, SessionEvents, SessionSpec, StartError, TerminalChannel,
     TerminalSize,
 };
-use crate::pty;
+use crate::pty::{self, Exit, Group, Launch};
 use crate::status::{EndReason, SessionEnd, SessionStatus};
 
 /// How long a process group gets between SIGHUP and SIGKILL (freeze §7.3).
@@ -128,12 +128,11 @@ impl CliProvider {
     }
 
     /// A login shell in the workspace, as the runtime's own user. Not the
-    /// server shell, which stays Phase 4.
+    /// server shell, which stays Phase 4. PowerShell on Windows (AM53).
     pub fn shell() -> Self {
-        let shell = std::env::var_os("SHELL")
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".into());
-        Self::new(id("shell"), shell, ["-l"])
+        let (shell, args) =
+            crate::platform::session_shell(crate::platform::default_path().as_deref());
+        Self::new(id("shell"), shell, args)
     }
 
     pub fn command(&self) -> &OsStr {
@@ -175,59 +174,61 @@ impl Provider for CliProvider {
         let InteractionSpec::Terminal(size) = spec.interaction;
         let failed = |what: &str, e: io::Error| StartError::Failed(format!("{what}: {e}"));
 
-        let (master, slave) = pty::open(size).map_err(|e| failed("opening a pty", e))?;
-        let mut command = Command::new(&program);
-        command
-            .args(&self.args)
-            .args(&spec.launch.args)
-            .current_dir(&spec.workspace)
-            .env("TERM", "xterm-256color")
-            .env("COLORTERM", "truecolor")
-            .env(crate::platform::SESSION_TAG, &spec.session_id)
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .envs(self.path.iter().map(|p| ("PATH", p)))
-            // A login shell's profile may reorder PATH; this is what the
-            // managed `.zprofile` restores (F3).
-            .envs(self.path.iter().map(|p| (crate::platform::SESSION_PATH, p)))
-            // The session's own values last (AM32): its MCP config must win
-            // over anything a provider env file says.
-            .envs(spec.launch.env.iter().map(|(k, v)| (k, v)));
-        let child = pty::spawn(&mut command, &slave)
-            .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
-        // The parent's copy must go, or the master never sees end-of-file.
-        drop(slave);
-
-        let group = Pid::from_child(&child);
-        let reader = File::from(
-            master
-                .try_clone()
-                .map_err(|e| failed("cloning the pty", e))?,
+        let mut env: Vec<(OsString, OsString)> = vec![
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+            (
+                crate::platform::SESSION_TAG.into(),
+                spec.session_id.clone().into(),
+            ),
+        ];
+        env.extend(self.env.iter().cloned());
+        env.extend(self.path.iter().map(|p| ("PATH".into(), p.clone())));
+        // A login shell's profile may reorder PATH; this is what the
+        // managed `.zprofile` restores (F3).
+        env.extend(
+            self.path
+                .iter()
+                .map(|p| (crate::platform::SESSION_PATH.into(), p.clone())),
         );
-        let shared = Arc::new(Shared {
+        // The session's own values last (AM32): its MCP config must win
+        // over anything a provider env file says.
+        env.extend(spec.launch.env.iter().cloned());
+        let launch = Launch {
+            program: program.clone(),
+            args: self.args.iter().chain(&spec.launch.args).cloned().collect(),
+            cwd: spec.workspace.clone(),
+            env,
             tag: spec.session_id.clone(),
+        };
+        let spawned = pty::spawn(&launch, size)
+            .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
+
+        let shared = Arc::new(Shared {
             status: Mutex::new(SessionStatus::Running),
             stop_requested: AtomicBool::new(false),
             exit: (Mutex::new(None), Condvar::new()),
-            leader: group,
+            group: spawned.group,
             grace: Mutex::new(DEFAULT_GRACE),
         });
 
         let waiter = shared.clone();
+        let child = spawned.child;
         thread::Builder::new()
             .name(format!("{}-wait", spec.session_id))
             .spawn(move || {
-                let mut child = child;
                 let status = child.wait();
                 // Whatever the agent left behind in its group goes with it.
-                hang_up(group);
+                waiter.group.hang_up();
                 waiter.set_exit(status);
                 if !waiter.sleep_until_ended(DEFAULT_GRACE) {
-                    kill(group, &waiter.tag);
+                    waiter.group.kill();
                 }
             })
             .map_err(|e| failed("starting the wait thread", e))?;
 
         let drain = shared.clone();
+        let reader = spawned.output;
         thread::Builder::new()
             .name(format!("{}-read", spec.session_id))
             .spawn(move || drain.read_until_closed(reader, events))
@@ -235,25 +236,21 @@ impl Provider for CliProvider {
 
         Ok(Box::new(CliSession {
             terminal: CliTerminal {
-                writer: File::from(master),
+                input: spawned.input,
                 shared,
             },
-            group,
         }))
     }
 }
 
 /// State the session, its reader and its waiter share.
 struct Shared {
-    /// The session id, which every process it started carries in
-    /// [`crate::platform::SESSION_TAG`].
-    tag: String,
     status: Mutex<SessionStatus>,
     stop_requested: AtomicBool,
     /// The agent's exit, once it has one, and a wake-up for whoever waits.
-    exit: (Mutex<Option<io::Result<ExitStatus>>>, Condvar),
-    /// The agent's pid: its process group's id and its session's.
-    leader: Pid,
+    exit: (Mutex<Option<io::Result<Exit>>>, Condvar),
+    /// Everything the session started.
+    group: Group,
     /// How long stragglers get between SIGHUP and SIGKILL: the stop's grace
     /// when the owner asked, [`DEFAULT_GRACE`] otherwise.
     grace: Mutex<Duration>,
@@ -264,7 +261,7 @@ impl Shared {
         *self.status.lock().unwrap()
     }
 
-    fn set_exit(&self, status: io::Result<ExitStatus>) {
+    fn set_exit(&self, status: io::Result<Exit>) {
         let (lock, cvar) = &self.exit;
         *lock.lock().unwrap() = Some(status);
         cvar.notify_all();
@@ -289,24 +286,23 @@ impl Shared {
     /// SIGHUP, then SIGKILL to what remains after the grace. Returns once the
     /// session is empty, or a second after the SIGKILL.
     fn end_stragglers(&self) {
-        let members = || stragglers(self.leader, &self.tag);
-        if members().is_empty() {
+        if self.group.is_empty() {
             return;
         }
-        signal_each(&members(), Signal::HUP);
+        self.group.hang_up_rest();
         let grace = *self.grace.lock().unwrap();
         let step = Duration::from_millis(50);
         let mut waited = Duration::ZERO;
         while waited < grace {
-            if members().is_empty() {
+            if self.group.is_empty() {
                 return;
             }
             thread::sleep(step);
             waited += step;
         }
-        signal_each(&members(), Signal::KILL);
+        self.group.kill();
         for _ in 0..20 {
-            if members().is_empty() {
+            if self.group.is_empty() {
                 return;
             }
             thread::sleep(step);
@@ -333,10 +329,10 @@ impl Shared {
         }
         let end = match (self.stop_requested.load(Ordering::SeqCst), exit.as_ref()) {
             (true, _) => SessionEnd::Stopped,
-            (false, Some(Ok(status))) => match status.signal() {
+            (false, Some(Ok(exit))) => match exit.signal {
                 Some(signal) => SessionEnd::Failed(EndReason::Signal(signal)),
                 None => SessionEnd::Completed {
-                    exit_code: status.code(),
+                    exit_code: exit.code,
                 },
             },
             (false, _) => SessionEnd::Completed { exit_code: None },
@@ -348,59 +344,12 @@ impl Shared {
     }
 }
 
-fn hang_up(group: Pid) {
-    // ESRCH just means the group is already gone.
-    let _ = rustix::process::kill_process_group(group, Signal::HUP);
-}
-
-/// SIGKILL to the group and to every other member of the session the agent
-/// leads (its pid is both ids): a job-control shell's jobs have groups of
-/// their own.
-fn kill(group: Pid, tag: &str) {
-    let _ = rustix::process::kill_process_group(group, Signal::KILL);
-    signal_each(&stragglers(group, tag), Signal::KILL);
-}
-
-/// Everything the session started that is still alive: the members of the
-/// session `leader` leads, and whatever left it but carries the session's tag.
-fn stragglers(leader: Pid, tag: &str) -> Vec<Pid> {
-    let mut all = session_members(leader);
-    for pid in crate::platform::tagged_processes(tag)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(Pid::from_raw)
-    {
-        if !all.contains(&pid) {
-            all.push(pid);
-        }
-    }
-    all
-}
-
-/// The live members of the session `leader` leads. If they cannot be listed,
-/// none: the group signals still went out.
-fn session_members(leader: Pid) -> Vec<Pid> {
-    crate::platform::session_members(leader.as_raw_nonzero().get())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(Pid::from_raw)
-        .collect()
-}
-
-fn signal_each(pids: &[Pid], signal: Signal) {
-    for &pid in pids {
-        // ESRCH just means it is already gone.
-        let _ = rustix::process::kill_process(pid, signal);
-    }
-}
-
 struct CliSession {
     terminal: CliTerminal,
-    group: Pid,
 }
 
 struct CliTerminal {
-    writer: File,
+    input: pty::Input,
     shared: Arc<Shared>,
 }
 
@@ -428,31 +377,13 @@ impl TerminalChannel for CliTerminal {
     /// in time fails with `TimedOut` rather than waiting.
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.ensure_running()?;
-        let deadline = std::time::Instant::now() + INPUT_DEADLINE;
-        for chunk in bytes.chunks(crate::platform::PTY_WRITE_CHUNK) {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if !crate::platform::wait_writable(self.writer.as_fd(), left)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "the agent is not reading its input",
-                ));
-            }
-            self.writer.write_all(chunk).map_err(|e| {
-                // A write racing the agent's exit fails with EIO; to the caller
-                // it is the same thing as writing after the end.
-                if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "the session has ended")
-                } else {
-                    e
-                }
-            })?;
-        }
-        Ok(())
+        self.input
+            .write(bytes, std::time::Instant::now() + INPUT_DEADLINE)
     }
 
     fn resize(&mut self, size: TerminalSize) -> io::Result<()> {
         self.ensure_running()?;
-        pty::resize(&self.writer, size)
+        self.input.resize(size)
     }
 }
 
@@ -467,15 +398,15 @@ impl ProviderSession for CliSession {
             return;
         }
         *shared.grace.lock().unwrap() = grace;
-        hang_up(self.group);
-        let (shared, group) = (shared.clone(), self.group);
+        shared.group.hang_up();
+        let shared = shared.clone();
         // Non-blocking: the caller is the host link, which must not stall for
         // the grace period. The thread exits as soon as the session ends.
         let _ = thread::Builder::new()
             .name("stop-grace".into())
             .spawn(move || {
                 if !shared.sleep_until_ended(grace) {
-                    kill(group, &shared.tag);
+                    shared.group.kill();
                 }
             });
     }

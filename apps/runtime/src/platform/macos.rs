@@ -50,7 +50,7 @@ pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> 
             None,
             Some(&mut set),
             None,
-            Some(&super::timespec(timeout)),
+            Some(&super::posix::timespec(timeout)),
         )?
     };
     // The set holds one fd, so any readiness is its.
