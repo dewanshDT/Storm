@@ -108,6 +108,12 @@ test-migration:
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 		python3 "$$ROOT/$(SERVER)/tests/migration_e2e.py"
 
+## test-browser: the web sign-in in a real Firefox against a real server (needs: pip install websockets)
+test-browser:
+	@cd $(SERVER) && cargo build --quiet
+	@cd $(CLIENT) && flutter build web --release
+	python3 $(CLIENT)/test_browser/web_sign_in.py "$$PWD/$(SERVER)/target/debug/storm-server" "$$PWD/$(CLIENT)/build/web"
+
 ## test-live: integration suites against a real server, started and torn down
 test-live:
 	@cd $(SERVER) && cargo build --quiet
@@ -394,7 +400,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-client test-live test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-client test-live test-browser test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

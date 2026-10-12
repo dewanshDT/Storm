@@ -58,7 +58,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
 | M20 | Agent Runtime V1 — Runtime Hosts, sessions, terminal | **done** | decisions 77–78 released in **v0.3.0**, fixes in **v0.3.1** (#72, #73) · **accepted 2026-10-05 on the operator's daily use on Android, macOS and web** (AC items not logged one by one) · AM22 (host-owned terminal protocol) drafted, awaiting approval |
 | M21 | MCP Gateway V1 — integrations through Storm | **in progress** | decision 81 · spec approved (vault, rev 3) and **frozen 2026-10-08** (C3 passed) · M20 accepted 2026-10-05, so the build may start (G-D1) · **built** in eight slices (81a): the store (81b), connections (81c), the upstream client (81d), the gateway route (81e), the runtime bridge (81f), OAuth (81g), the client (81h), acceptance (81i), plus a simplify pass (81j); then, to the frozen spec, the new-tools notice (81k), `storm://oauth` (81l), AM-G11 (81m) and the Add-integration UI (81n); **merged into `staging` 2026-10-08 (#76–#93)** · **Android native-OAuth acceptance passed** (Notion, Linear) · released in **v0.4.0** · left: macOS acceptance and the journal grep on the real build |
-| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) |
+| M22 | Storm v2 — activity rail, single user, the knowledge ↔ agent loop | **done, released in v0.4.0** | decision 82 · design approved (`design_handoff_storm_v2/`) · plan, single-user migration and acceptance harness in `docs/design/` · slices 0–9 (#95–#105), the real-run fixes (#106) and the layout pass (#107) **merged into `staging` 2026-10-08** · real Claude Code run passed · handoff §11 43 of 44 (Android back on a device not run) · open: the login hang in Zen / Firefox (vault: *Storm v2/Issue — Zen login hang*) — cause found (an empty stored server address) and fixed, a real Firefox signs in on every PR (decision 90); confirmed in the operator's Zen 2026-10-12 |
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) · Resume reopens the agent's own conversation (89, on `staging`) |
@@ -5306,6 +5306,67 @@ it)*
   conversation (each recalled the earlier message).
 - **Also:** a 2px gap between Agents sidebar rows (#145), so a selected and
   a hovered row no longer merge into one fill.
+
+**90. The web client heals an empty stored server address, a sign-in can
+never spin forever, and a real Firefox signs in on every PR.** *(2026-10-11;
+vault: *Storm v2/Issue — Zen login hang*)*
+- **The issue.** In the operator's Zen (Firefox engine, macOS), a correct
+  password left the Sign in button spinning. The server logged every attempt
+  as `login_ok`. Chrome, and fresh Zen or Firefox profiles, signed in
+  normally.
+- **The cause, found with a traced build on the LAN staging server.**
+  `settings.save` ran with `configured=false` straight after a successful
+  login. `isConfigured` is `baseUrl.isNotEmpty && hasSession`, and the
+  profile's stored `storm.baseUrl` was `''`; the login screen's address line
+  was blank. Builds before 2026-08-19 (`b031b3b`) stored an empty address on
+  the web, and since then load used `prefs.getString(_kUrl) ?? origin`, which
+  keeps a stored `''` forever. With an empty address the login request is
+  relative to the page, so it succeeds; the router then never leaves `/login`,
+  and `_busy` is only ever cleared on failure. Every device in that profile
+  inherited it. A fresh profile, or another browser, never had it.
+- **The fix.**
+  - On load, an empty or blank stored address counts as none, so the web
+    falls back to the page's origin. Native clients still need one.
+  - The login screen stops spinning when a sign-in leaves the app
+    unconfigured, and says so (`router_test`: a sign-in that leaves the app
+    unconfigured says so, never spins). The test fails with the guard
+    disabled.
+- **Also fixed on the way: a native submit reloaded the app mid sign-in.**
+  Flutter keeps text fields in a hidden `<form method="post" action="#">` and
+  cancels its `submit` event. A native `form.submit()` fires no event, so the
+  browser POSTed the page; `storm-server` answers that with `index.html`, and
+  the sign-in in flight was cut off. That is **not** what the operator hit.
+  But a password manager or the browser can do it, and the browser test
+  proved it. `web/form_guard.js`, loaded before Flutter, routes such a submit
+  on a form inside `<flutter-view>` through `requestSubmit()`.
+  `test/web_form_guard_test.dart` keeps it wired.
+- **The test.** `apps/client/test_browser/web_sign_in.py` (`make
+  test-browser`, CI job `browser`). It runs a real `storm-server` on a
+  non-loopback, insecure origin as on a LAN, and drives headless Firefox over
+  WebDriver BiDi, a fresh profile per case. Each case must reach the app with
+  its token stored after a single page load:
+  - Enter alone
+  - a native `submit()` just after Enter
+  - a native `submit()` as the login request goes out
+  - `requestSubmit()`
+  - **a profile that stored an empty server address**
+  - an inline menu that keeps itself last in `<body>`
+  - a paired browser whose session is gone signing in again
+
+  The empty-address case failed exactly as the operator saw: on `/login`,
+  token stored, one page load. The native-submit cases failed too. After the
+  fixes all 8 pass, in Zen 1.22.1b locally and in the runner's Firefox 157.
+- **Ruled out on the way:** password managers (the operator tested Bitwarden
+  off), WebGL (hangs with `webgl.disabled`); and, in fresh profiles one
+  setting at a time, resist-fingerprinting, fingerprinting protection,
+  always-private browsing, first-party isolation, partitioned or blocked
+  cookies, IndexedDB, `localStorage` or service workers off, wasm off, and
+  site data left by the Oct 8 build.
+- **How it was found:** a throwaway build with a sign-in trace and a
+  once-a-second heartbeat (local branch `diag/firefox-login-trace`, never
+  merged). The heartbeat proved the page was alive, so the trace's
+  `configured=false` was the answer. Worth repeating for the next "it just
+  spins" report.
 
 **99. Windows: the Runtime Host as a Windows Service, and the server per
 user (M26).** *(2026-10-12, the operator's choices)*
