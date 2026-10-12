@@ -62,6 +62,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) · Resume reopens the agent's own conversation (89, on `staging`) |
+| M26 | Windows — the Runtime Host as a Windows Service, and the server per user | **in progress** | decision 99 · spec amendment D16 (AM48–AM57) in the vault, *Agent Runtime/Windows Runtime Host*, and *Installer/Windows Server* · stacked slices on `staging`: 99a carrier, platform and service (ConPTY, Job Objects, named pipe, Windows CI) · 99b the enroll sheet's Windows steps · 99c the server (Scheduled Task, `storm-serverw`, backup, filename rules) · 99d release zips, `install.ps1`, docs, Windows acceptance · **acceptance on `windows-latest` green** (AC-W1–W9 68/0/3, server 28/0, `install.ps1` end to end) · left: a real Windows 11 round, the operator's merge |
 
 **Release state (2026-10-11).** **v0.7.1 is being cut** (decision 72's
 steps; this sentence is the prep PR's), at the operator's request after #141
@@ -5306,7 +5307,298 @@ it)*
 - **Also:** a 2px gap between Agents sidebar rows (#145), so a selected and
   a hovered row no longer merge into one fill.
 
-**91. The terminal follows the device being used: opening a session or typing
+**99. Windows: the Runtime Host as a Windows Service, and the server per
+user (M26).** *(2026-10-12, the operator's choices)*
+
+**The spec.** D16 in *Agent Runtime/Decisions*, full text in *Agent
+Runtime/Windows Runtime Host* (AM48–AM57, AC-W1–W10), and *Installer/Windows
+Server* for the server (W-S1–S5, AC-WS1–WS6). The operator chose:
+- **the host runs as the virtual service account `NT SERVICE\StormRuntime`**:
+  no password to manage, never an administrator, its own SID, no access to
+  any person's profile. The counterpart of `_stormruntime` (D14).
+- **the server runs per user at logon** (a Scheduled Task, data in
+  `%USERPROFILE%\Storm`), as 84d's macOS server does.
+- **zip + `install.ps1`**; winget later.
+- **WSL2 was ruled out** for the reason Docker was on macOS (83): agents
+  lose the Windows toolchains, and files across the VM are slow.
+
+**What the type check found before any code** (`cargo check --target
+x86_64-pc-windows-gnu`, zig as the C compiler for `ring`): the server
+compiles for Windows except `install_macos.rs`; the runtime had 45 errors,
+every one in the PTY, process groups, signals, uids and the Unix socket.
+
+**The slices**, stacked PRs to `staging`:
+1. **The carrier, the platform module and the service, with Windows CI**
+   (99a).
+2. **The client's Windows enroll steps** (AM56).
+3. **The server on Windows** (W-S1–S4).
+4. **Release, `install.ps1`, docs, and the Windows acceptance harness**
+   that installs, enrolls, revokes and uninstalls the real service on
+   `windows-latest` (AM57, W-S5, AC-W1–W9).
+
+*Revisit if:* a host must confine agents more tightly than an account
+(AppContainer breaks the CLIs today); ConPTY's input stops draining into
+conhost's buffer (99a); Windows gains a polite signal for a process off the
+console (AM52's hang-up).
+
+**99a. Slice 1: ConPTY and a Job Object per session, one carrier interface,
+a named pipe, and the service.** *(2026-10-12)*
+
+**The carrier is per platform; the policy is not.** `pty.rs` became
+`pty/{mod,unix,windows}.rs` with one interface: `spawn`, a bounded
+`Input::write`, `resize`, `Child::wait`, and a `Group` that hangs up, kills
+and says whether anything is left. `cli.rs` keeps every rule of §7.3 and
+AM37 (the end order, the grace, "`ended` means the session is empty") and
+no longer names a signal or a pid. The Unix side is the old code moved
+whole: the 17 `tests/cli.rs` and every lib test pass unchanged.
+
+**Windows (AM51, AM52):**
+- **ConPTY** carries the terminal. The process is created with
+  `CreateProcessW` directly (the pseudoconsole is a `STARTUPINFOEX`
+  attribute std cannot pass), **suspended, put in its job, then resumed**.
+  The standard handles are explicitly invalid, so a host whose own are
+  redirected (CI, a log) does not hand them to the agent.
+- **A Job Object per session**, `KILL_ON_JOB_CLOSE`, no `BREAKAWAY_OK`.
+  Hang-up is closing the pseudoconsole (`CTRL_CLOSE_EVENT`), on its own
+  thread because closing can wait for the reader; kill is
+  `TerminateJobObject`; "anything left" is the job's active-process count.
+  The host dying, however, kills every job: stronger than the Unix sweep.
+- **The bounded write** is an overlapped write to a one-instance named pipe
+  (the pseudoconsole reads its other end), waited for with the deadline's
+  remainder and cancelled with `CancelIoEx` past it. **Expected on a real
+  machine:** conhost drains its input pipe into the console's input buffer
+  whether or not the agent reads, so the deadline should rarely fire.
+- **Exit status** is the exit code; there are no signals (a crash is its
+  `NTSTATUS`).
+- **Command lines** are built by `platform::wincmd`, pure and tested on
+  Linux against a reimplementation of the C runtime's parser. A `.cmd` /
+  `.bat` CLI (npm's shims) runs through `cmd.exe /d /e:ON /v:OFF /c`, and an
+  argument holding `" % ! ^ & | < >` or a line break is refused, never
+  escaped (the BatBadBut class). `PATHEXT` drives the lookup, dir by dir.
+
+**The platform module** gained `posix.rs` (what Linux and macOS share: the
+node name, the PTY wait, session members, the tagged-process scan, the
+sweep), `windows.rs`, and two pure modules compiled everywhere:
+- `winsvc.rs`: the layout under `C:\ProgramData\StormRuntime`, the
+  `icacls` plan (protected DACLs; only the workspace root names the
+  operator), the service's environment, the default `PATH`, and AM54's
+  root refusal (case-insensitive components, `\\?\` stripped);
+- `wincmd.rs`: command lines, the batch guard, the environment block,
+  `PATHEXT`.
+
+**Private files** go through `platform::{create_private_dir,
+tighten_private_dir, open_private, is_private}`: `0700`/`0600` created with
+the mode on Unix, exactly as before (A2); a protected DACL of SYSTEM,
+Administrators, this account and the service account on Windows (AM49). A
+provider env file is refused on Windows when `Everyone`, `Authenticated
+Users`, `Users`, `Guests` or `INTERACTIVE` may read it. Tests assert either
+through `platform::assert_private`.
+
+**The local channel** is `platform::ipc` (AM55): the same `run/mcp.sock` on
+Unix; on Windows a pipe named from a digest of that path, DACL of the
+account and SYSTEM, remote clients rejected, first instance only. `host`,
+`bridge` and `harness` no longer name a socket type.
+
+**The service (AM49, AM50)** is `platform::windows_service`, executing
+`winsvc`'s pure plan, elevated only and every tool by absolute path:
+- **`install`** creates the layout, copies the binary to `Program Files`,
+  writes the config once, creates or updates `StormRuntime` as `NT
+  SERVICE\StormRuntime` (manual start until enrolled; restart 10 s after a
+  crash, three times; a clean stop with a code is not a failure; a 20 s
+  pre-shutdown), sets its registry `Environment`, then the `icacls` plan
+  (after the service exists, so the account resolves) and `safe.directory`.
+  Re-running stops, replaces and restarts.
+- **`enroll`** with the default state, elevated, makes it automatic
+  (delayed) and (re)starts it.
+- **`storm-runtime service`** is the SCM's entry: a log file in `logs\`
+  (one `.old` past 10 MiB), the exclusive-account guard, then
+  `serve::run --exclusive-account` stopped by Stop or PreShutdown. Started
+  unenrolled it stops with code 2; revoked, with code 3, which recovery does
+  not restart (AM36).
+- **`uninstall [--purge]`** stops and deletes the service; workspaces are
+  never touched.
+
+None of it has run yet: slice 4's harness drives it on `windows-latest`.
+
+**`serve` is one routine** (`serve::run`) whose stop is a future: SIGTERM
+or SIGINT from `main` on Unix, the console events by hand on Windows, the
+SCM's Stop/PreShutdown. A revocation is now told apart from
+another run failure, but both still exit 3 on Unix, as before.
+
+**Tests.** `tests/windows.rs` (the carrier: output and exit code, input,
+resize, environment and workspace, Stop ending a detached child through
+the job, `ended` waiting for an emptied job, input after the end, a missing
+CLI, a `.cmd` CLI through `PATHEXT`, the batch guard, PowerShell as the
+shell, the host name); `platform::windows` (the sweep's guard and target
+list, the DACL helpers, AM54 on real paths, the default `PATH`);
+`platform::ipc` (a round trip on both platforms; on Windows, no second
+listener). `tests/cli.rs` and the POSIX-shell host tests are `cfg(unix)`;
+`lifecycle.rs`'s revocation and enrollment run on Windows too (its config
+names no root there: the runner's temp is under `C:\Users`, which AM54
+refuses).
+
+**Verified here:** clippy `-D warnings` for `x86_64-linux`,
+`x86_64-pc-windows-gnu` and `aarch64-apple-darwin` (zig as the C compiler);
+the Linux suite. **The new `runtime (rust, Windows)` job on `windows-latest`
+is the first run of any of it.**
+
+**The first Windows run** (MSVC, Server 2022): clippy `-D warnings` passed;
+the lib suite had 75 passed and 8 failed, none in the new carrier:
+- four `launchd` tests built macOS paths with `Path::join`, which writes `\`
+  on Windows: they are macOS layout tests, now `cfg(unix)`;
+- three host tests wrote a temp path into a TOML basic string, where
+  `C:\Users` is an invalid `\U` escape: now `{:?}`;
+- one config test used a temp dir under `C:\Users` as a workspace root,
+  which AM54 rightly refuses: Windows uses `%ProgramData%` there.
+
+**99b. Slice 2: the enroll sheet's Windows steps (AM56).** *(2026-10-12)*
+
+The sheet's `ChoiceChips` gain **Windows**, preselected when the client is
+on Windows (native or web); Linux stays the default elsewhere. Its three
+commands are for an **elevated PowerShell**:
+1. download `storm-runtime-windows-x86_64.zip` from the latest release
+   (`releases/latest/download/…`, so the asset name carries no version)
+   and expand it into `%TEMP%`;
+2. `& "$env:TEMP\storm-runtime\storm-runtime.exe" install`;
+3. `& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll` — the
+   installed copy, the one the service runs; enrolling starts it.
+
+The footnote names the service, its virtual account and
+`C:\ProgramData\StormRuntime\workspaces`. Tests: Windows never shows a
+POSIX command (`sudo`, `brew`, `systemctl`, `/Library/`), each platform has
+exactly one enroll step and never takes the string as an argument, a
+Windows client opens on Windows, and the switch reaches all three.
+`flutter test test/agent_test.dart` (36) and `flutter analyze` pass here.
+
+**99c. Slice 3: the server on Windows (W-S1–S4).** *(2026-10-12)*
+
+- **`storm-server` is a library with two binaries.** `main.rs` became
+  `lib.rs` (its `main` is now `pub`), and `main.rs` and
+  `bin/storm-serverw.rs` only call it. **`storm-serverw.exe`** is the same
+  program for the Windows GUI subsystem, like `pythonw`: a console program
+  started at logon by Task Scheduler opens a console window (a Windows
+  Terminal tab on 11), and no task setting hides it. A module `#[path]`-ing
+  `main.rs` into a second binary would have broken every `crate::` path.
+- **A global `--log-file`**, since `storm-serverw` has no terminal. Tracing
+  now starts after the command line is parsed.
+- **`install_windows`** (W-S1, W-S2): `up` copies both binaries and the web
+  client into `%LOCALAPPDATA%\Storm`, writes `server.json`, makes the data
+  root's DACL protected (the person's SID from `whoami /user`, SYSTEM,
+  Administrators), and registers two tasks with `schtasks /xml` (UTF-16):
+  **Storm Server** at this user's logon (`InteractiveToken`,
+  `LeastPrivilege`, no time limit, restart every minute) and **Storm
+  Backup** daily at 03:30 with `StartWhenAvailable`. Tasks sit in the root
+  folder: a standard user may not create a task folder. `down` ends and
+  disables both; `status` reads the task and `/health`; `uninstall` deletes
+  them and the support folder, never the data. Health is a raw HTTP/1.0
+  `GET` on a `TcpStream`, not curl. The firewall rule needs an
+  administrator, so `up` prints the one `New-NetFirewallRule` line (W-S5;
+  `install.ps1` will run it).
+- **`storm-server backup`** (W-S3): the bash script's steps in Rust — the
+  stored root (it wins over the flag), a fresh copy of the vaults (symlinks
+  skipped, not followed), `backup_all` into `index\`, a verify open, then
+  pruning of folders *named* as dates past `--keep-days`. Linux and macOS
+  keep the script.
+- **Windows filename rules** (W-S4): `vault::windows_name_problem` refuses
+  `< > : " | ? * \`, control characters, a trailing dot or space, and
+  `CON`/`PRN`/`AUX`/`NUL`/`COM1–9`/`LPT1–9` with any extension. `resolve`
+  applies it only on Windows; the function is tested everywhere.
+- **Dispatch:** Unix keeps its `cfg!` guards, so Linux still compiles and
+  tests `install_macos`; Windows gets `#[cfg(windows)]` arms.
+  `install_windows` is compiled everywhere for its tests, and `install.rs`'s
+  systemd commands are allowed to be unused on Windows.
+- **CI:** `server (rust, Windows)` on `windows-latest`.
+
+**Verified here:** clippy `-D warnings` on Linux and `x86_64-pc-windows-gnu`;
+the Linux suite (579 lib tests and every integration test). The new tests:
+the task XML (logon/daily, principal, quoting through a reimplemented C
+runtime parser, XML escaping), the record and layout, the health probe
+against a stub, backup pruning and copying, and the name rules.
+
+**99d. Slice 4: release, `install.ps1`, docs, and acceptance on
+`windows-latest` (AM57, W-S5, AC-W1–W9, AC-WS).** *(2026-10-12)*
+
+- **Release.** `runtime-windows` and `server-windows` build on
+  `windows-latest` and zip `storm-runtime-windows-x86_64.zip` and
+  `storm-server-windows-x86_64.zip` (both binaries and the web client), each
+  with a README. The names carry no version, so the enroll sheet's
+  `releases/latest/download/…` link always resolves; both are in
+  `checksums.txt`, and so is `install.ps1`, which Pages also serves beside
+  `install.sh`. Not code-signed (SmartScreen warns); x86_64 only (Windows on
+  Arm emulates it).
+- **`deploy/install.ps1`**, deliberately not a port of `install.sh`'s TUI:
+  `-Server`, `-Runtime`, `-Version`, `-FromDir`, `-Workspace`, `-Yes`,
+  `-DryRun`, or a three-way menu. It checks each zip against
+  `checksums.txt`, runs `storm-server up` as the person, adds the one
+  private-profile firewall rule when elevated (W-S5; otherwise prints it),
+  shows a pairing code while the server has no account, runs `storm-runtime
+  install`, and enrolls through a pipe from the server beside it or a
+  `-AsSecureString` prompt, never an argument (84e/84f). A first workspace is
+  a folder or a non-interactive `git clone`. It fails with `throw`, never
+  `exit`, since `irm | iex` would close the window.
+- **Acceptance.** `.github/workflows/windows-acceptance.yml` (on
+  `acceptance/**` and dispatch) runs three jobs:
+  `apps/runtime/tests/windows_acceptance.py` (AC-W1–W9 against the real
+  service: `sc.exe`, `icacls`, process command lines through CIM, Stop,
+  `taskkill /f` and recovery, the pipe refusing even an administrator,
+  revocation's code 3 and no restart, uninstall keeping workspaces),
+  `tools/windows-server-acceptance.py` (the logon task, a windowless
+  `storm-serverw`, the protected data root, `backup`, down/up/uninstall),
+  and `install.ps1` end to end from zips built in the job.
+- **Docs.** `deploy/README.md` gains a Windows column and a Windows section;
+  `README.md` the PowerShell one-liner; `CLAUDE.md` the invariants.
+
+**Real-Windows acceptance (`windows-latest`, Server 2022), three rounds.**
+- **Round 1: 32 passed, then stopped.** Install, enrollment and provider
+  discovery passed whole. The first Claude Code session never started:
+  **decision 89's `--settings` hook was inline JSON**, and npm installs
+  Claude Code on Windows as `claude.cmd`, whose arguments the batch guard
+  rightly refuses when they hold `"`. Every Claude Code session on such a
+  host would have failed. **Fix (99a):** the settings are a private file in
+  the session's directory (`gateway_e2e.py` reads it there; 95/95 on Linux).
+- **Round 2: 64 passed, 4 failed.** Two product defects:
+  - **A session's working directory was the canonical `\\?\C:\…`**, which
+    `cmd.exe` and many tools refuse. **Fix:** the carrier passes the plain
+    spelling (`winsvc::normalize`); `a_canonical_workspace_is_a_plain_working_directory`.
+  - **`Stop-Service` reported a failed stop:** the service stayed RUNNING
+    through its 13 s shutdown. **Fix:** STOP_PENDING with a 20 s hint the
+    moment Stop or PreShutdown arrives.
+  
+  The other two were the harness's (a batch file's arguments arrive quoted;
+  a refusal is read before the marker, not at the prompt).
+- **Round 3: AC-W1–W9 68 passed, 0 failed, 3 manual** (a logged-in CLI
+  taking a prompt, the phone handoff, a reboot). That includes End,
+  `Stop-Service` and `taskkill /f` each ending a detached child through the
+  job, recovery restarting the service, the pipe refusing even an
+  administrator, revocation's code 3 with no restart, and uninstall keeping
+  the workspaces.
+- **The server's per-user task** did not start the server: the runner has
+  an active console session, the task ran, and `storm-serverw` exited **2**
+  (clap's usage error) before it opened its log. The task's arguments began
+  with the global `--log-file`, and **`normalize_argv`'s legacy shim, seeing
+  a leading flag, inserted a second `serve`.** **Fix (99c):** each task names
+  its subcommand first, and `every_task_runs_a_command_line_that_parses`
+  runs both tasks' arguments through the real `Cli` and shim. Two more, the
+  same race: `schtasks /end` returns before the server exits, so `uninstall`
+  could not delete it and an upgrading `up` could not replace it; both now
+  retry for up to 15 s.
+- **`install.ps1`** enrolled through `host-enrollment` before the fresh
+  server had an account (84g), and piped the refusal into `enroll`. It now
+  takes **`-PasswordStdin`** (as `install.sh --password-stdin`), waits for
+  the first device to pair when interactive, and with `-Yes` alone says how
+  to enroll later.
+- **Final round: all three jobs green.** AC-W1–W9 **68 passed, 0 failed, 3
+  manual**; the server's Scheduled Task **28 passed, 0 failed** (a
+  windowless `storm-serverw` at logon, its log, the protected data root,
+  `backup`, down/up, uninstall keeping the notes); `install.ps1` end to end:
+  server up, service running, the host enrolled through the pipe from the
+  server beside it, the first workspace, the private-only firewall rule, and
+  a re-run upgrading in place.
+- **Still manual, for a real Windows 11 machine:** a logged-in Claude Code
+  and OpenCode taking a prompt, the phone handoff, a reboot, logging off and
+  on (AC-WS1), and Notepad edits reaching the watcher (AC-WS3).
+
+**103. The terminal follows the device being used: opening a session or typing
 in it re-claims a PTY sized elsewhere.** *(2026-10-12; the operator: "huge
 padding at the bottom" of a session on the phone)*
 - **What happened.** On the phone, Claude Code's status bar sat about four

@@ -499,7 +499,7 @@ args = ["-i"]
         # the prompt and after the MCP config.
         check("and its conversation id, with the hook that reports it",
               argv.index("--strict-mcp-config") < argv.index("--session-id") < argv.index("--settings")
-              and "harness-session" in argv[argv.index("--settings") + 1], argv)
+              and "harness-session" in open(argv[argv.index("--settings") + 1]).read(), argv)
         rec2 = launch("opencode", "ctx2", {"context": {"vault_id": vault, "note_id": other["id"]}})
         c2 = Agent("ctx2")
         argv2 = wait(c2.env, "the second agent's record of its launch")["argv"]
@@ -540,7 +540,8 @@ args = ["-i"]
               sorted(host_online()["capabilities"].get("resume", [])) == ["claude-code", "opencode"],
               host_online()["capabilities"])
         first = argv[argv.index("--session-id") + 1]
-        hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        # A file in the session's directory, never inline: claude.cmd on Windows (99).
+        hook = json.load(open(argv[argv.index("--settings") + 1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63"
         env = {**os.environ, **{k: v for k, v in c.env()["env"].items() if v}}
         ran = subprocess.run(hook, shell=True, env=env, capture_output=True,

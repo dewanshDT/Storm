@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -52,7 +51,12 @@ fn default_scrollback() -> usize {
 }
 
 fn default_forbidden() -> Vec<PathBuf> {
-    vec![PathBuf::from("/srv/storm")]
+    if cfg!(windows) {
+        // A Windows server's data lives in a profile, which AM54 refuses.
+        Vec::new()
+    } else {
+        vec![PathBuf::from("/srv/storm")]
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -147,6 +151,15 @@ impl RuntimeConfig {
                     );
                 }
             }
+            if let Some(place) = crate::platform::refused_root(&root) {
+                bail!(
+                    "workspace root {} is in or contains {place} — a Runtime Host never \
+                     works in people's profiles, on network shares or on removable \
+                     drives (AM54). Put workspaces in the host's own root, and clone or \
+                     move a checkout there",
+                    root.display()
+                );
+            }
         }
         Ok(())
     }
@@ -220,13 +233,16 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Reads a provider env file. **Refused unless it is `0600`-or-stricter**:
-/// it holds API keys, and a world-readable key file is the leak.
+/// Reads a provider env file. **Refused unless it is `0600`-or-stricter**
+/// (on Windows: unless no broad group may read it, AM49): it holds API
+/// keys, and a world-readable key file is the leak.
 pub fn read_env_file(path: &Path) -> Result<Vec<(OsString, OsString)>> {
-    let meta = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
-    if meta.permissions().mode() & 0o077 != 0 {
+    let private =
+        crate::platform::is_private(path).with_context(|| format!("reading {}", path.display()))?;
+    if !private {
         bail!(
-            "{} is readable beyond its owner; provider env files must be 0600",
+            "{} is readable beyond its owner; provider env files must be 0600 \
+             (on Windows: readable by no group such as Users or Everyone)",
             path.display()
         );
     }
@@ -281,7 +297,8 @@ pub fn list_workspaces(roots: &[PathBuf]) -> Vec<String> {
 pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
     if name.is_empty()
         || name.starts_with('.')
-        || name.contains('/')
+        || name.chars().any(std::path::is_separator)
+        || (cfg!(windows) && name.contains(':'))
         || name.contains('\0')
         || Path::new(name).is_absolute()
     {
@@ -305,7 +322,10 @@ pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     #[test]
     fn a_name_is_never_a_path_and_a_symlink_cannot_leave_the_root() {
         let root = tempfile::tempdir().unwrap();
@@ -324,9 +344,18 @@ mod tests {
         assert!(!listed.contains(&".hidden".to_string()));
     }
 
+    /// A scratch directory a workspace root may be in: on Windows, the
+    /// runner's temp is under `C:\Users`, which AM54 refuses.
+    fn root_dir() -> tempfile::TempDir {
+        match std::env::var_os("ProgramData").filter(|_| cfg!(windows)) {
+            Some(dir) => tempfile::tempdir_in(dir).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        }
+    }
+
     #[test]
     fn a_root_overlapping_a_storm_data_root_is_refused() {
-        let data = tempfile::tempdir().unwrap();
+        let data = root_dir();
         let inside = data.path().join("vaults");
         std::fs::create_dir(&inside).unwrap();
         for root in [inside.clone(), data.path().to_path_buf()] {
@@ -337,7 +366,7 @@ mod tests {
             };
             assert!(config.check_roots().is_err());
         }
-        let elsewhere = tempfile::tempdir().unwrap();
+        let elsewhere = root_dir();
         let config = RuntimeConfig {
             workspace_roots: vec![elsewhere.path().to_path_buf()],
             forbidden_roots: vec![data.path().to_path_buf()],
@@ -346,6 +375,7 @@ mod tests {
         config.check_roots().unwrap();
     }
 
+    #[cfg(unix)]
     /// An executable named `name` in `dir` that prints its PATH.
     fn agent(dir: &Path, name: &str) {
         let bin = dir.join(name);
@@ -353,6 +383,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_clis_are_found_on_the_configured_path_not_only_the_hosts() {
         // AM38: under launchd the host's own PATH is bare, so `claude` in
@@ -391,6 +422,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_root_in_or_around_a_protected_location_is_refused() {
         // AM39, with macOS's list: a home, a volume, the data volume's
@@ -443,6 +475,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_env_file_must_be_private() {
         let dir = tempfile::tempdir().unwrap();
@@ -484,5 +517,46 @@ mod tests {
             toml::from_str::<RuntimeConfig>("bogus = 1").is_err(),
             "unknown keys refused"
         );
+    }
+
+    /// AM54: a workspace name is never a path on Windows either, whichever
+    /// separator or drive spelling it tries.
+    #[test]
+    fn a_name_with_any_separator_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("storm")).unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        assert!(resolve_workspace(&roots, "storm").is_some());
+        for bad in ["storm/..", "../storm", "a/b"] {
+            assert!(resolve_workspace(&roots, bad).is_none(), "{bad:?}");
+        }
+        if cfg!(windows) {
+            for bad in [r"..\storm", r"storm\..", "C:storm", r"C:\Windows"] {
+                assert!(resolve_workspace(&roots, bad).is_none(), "{bad:?}");
+            }
+        }
+    }
+
+    /// AM54: on Windows the machine decides; a root under the profiles
+    /// directory is refused, Storm's own and a temp directory are not.
+    #[cfg(windows)]
+    #[test]
+    fn a_root_in_a_profile_is_refused_on_windows() {
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let profile = PathBuf::from(format!(r"{drive}\Users"));
+        let config = RuntimeConfig {
+            workspace_roots: vec![profile.join("someone").join("src")],
+            forbidden_roots: vec![],
+            ..RuntimeConfig::default()
+        };
+        let err = config.check_roots().unwrap_err().to_string();
+        assert!(err.contains("AM54"), "{err}");
+        let own = root_dir();
+        let config = RuntimeConfig {
+            workspace_roots: vec![own.path().to_path_buf()],
+            forbidden_roots: vec![],
+            ..RuntimeConfig::default()
+        };
+        config.check_roots().unwrap();
     }
 }
