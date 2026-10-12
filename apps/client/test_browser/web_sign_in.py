@@ -132,14 +132,23 @@ class Browser:
     async def open(self, url):
         await self.cmd("browsingContext.navigate", context=self.ctx, url=url, wait="complete")
 
+    async def key(self, value):
+        await self.cmd("input.performActions", context=self.ctx, actions=[
+            {"type": "key", "id": "kb", "actions": [
+                {"type": "keyDown", "value": value}, {"type": "keyUp", "value": value}]}])
+
     async def type_password(self):
-        """Flutter puts an <input type=password> in the DOM once the field has focus."""
-        for _ in range(150):
+        """Flutter puts an <input type=password> in the DOM once the field has
+        focus. Autofocus normally gives it that; a slow runner can miss it after
+        a reload, so Tab moves focus there, as a person would."""
+        for i in range(150):
             if await self.js("!!document.querySelector('input[type=password]')"):
                 break
+            if i and i % 15 == 0:
+                await self.key("\ue004")
             await asyncio.sleep(0.2)
         else:
-            raise RuntimeError("the login field never appeared")
+            raise RuntimeError(f"the login field never appeared at {await self.js('location.pathname')}")
         acts = []
         for ch in PASSWORD + "":
             acts += [{"type": "keyDown", "value": ch}, {"type": "keyUp", "value": ch}]
