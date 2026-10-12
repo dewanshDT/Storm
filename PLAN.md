@@ -62,7 +62,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M23 | macOS Runtime Hosts — the same host, on launchd | **done, released in v0.5.0** | decision 83 · spec amendment D14 (AM33–AM41) in the vault, *Agent Runtime/macOS Runtime Host* · seven stacked PRs #110–#116 (83–83i), **merged into `staging` 2026-10-10** · real-Mac acceptance on `macos-latest` 99 passed, 0 failed, 5 manual · the operator's manual Mac round 28 PASS / 11 HUMAN / 5 FAIL / 1 SKIPPED, its 12-item backlog fixed in the stack (83i) · left: the operator's re-test of those fixes (vault: *Agent Runtime/macOS Re-test Prompt (fix loop)*), an Intel Mac |
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) · Resume reopens the agent's own conversation (89, on `staging`) |
-| M26 | Windows — the Runtime Host as a Windows Service, and the server per user | **in progress** | decision 99 · spec amendment D16 (AM48–AM57) in the vault, *Agent Runtime/Windows Runtime Host*, and *Installer/Windows Server* · stacked slices on `staging`: 99a carrier, platform and service (ConPTY, Job Objects, named pipe, Windows CI) · 99b the enroll sheet's Windows steps · not yet run on Windows outside CI |
+| M26 | Windows — the Runtime Host as a Windows Service, and the server per user | **in progress** | decision 99 · spec amendment D16 (AM48–AM57) in the vault, *Agent Runtime/Windows Runtime Host*, and *Installer/Windows Server* · stacked slices on `staging`: 99a carrier, platform and service (ConPTY, Job Objects, named pipe, Windows CI) · 99b the enroll sheet's Windows steps · 99c the server (Scheduled Task, `storm-serverw`, backup, filename rules) · not yet run on Windows outside CI |
 
 **Release state (2026-10-11).** **v0.7.1 is being cut** (decision 72's
 steps; this sentence is the prep PR's), at the operator's request after #141
@@ -5469,6 +5469,51 @@ POSIX command (`sudo`, `brew`, `systemctl`, `/Library/`), each platform has
 exactly one enroll step and never takes the string as an argument, a
 Windows client opens on Windows, and the switch reaches all three.
 `flutter test test/agent_test.dart` (36) and `flutter analyze` pass here.
+
+**99c. Slice 3: the server on Windows (W-S1–S4).** *(2026-10-12)*
+
+- **`storm-server` is a library with two binaries.** `main.rs` became
+  `lib.rs` (its `main` is now `pub`), and `main.rs` and
+  `bin/storm-serverw.rs` only call it. **`storm-serverw.exe`** is the same
+  program for the Windows GUI subsystem, like `pythonw`: a console program
+  started at logon by Task Scheduler opens a console window (a Windows
+  Terminal tab on 11), and no task setting hides it. A module `#[path]`-ing
+  `main.rs` into a second binary would have broken every `crate::` path.
+- **A global `--log-file`**, since `storm-serverw` has no terminal. Tracing
+  now starts after the command line is parsed.
+- **`install_windows`** (W-S1, W-S2): `up` copies both binaries and the web
+  client into `%LOCALAPPDATA%\Storm`, writes `server.json`, makes the data
+  root's DACL protected (the person's SID from `whoami /user`, SYSTEM,
+  Administrators), and registers two tasks with `schtasks /xml` (UTF-16):
+  **Storm Server** at this user's logon (`InteractiveToken`,
+  `LeastPrivilege`, no time limit, restart every minute) and **Storm
+  Backup** daily at 03:30 with `StartWhenAvailable`. Tasks sit in the root
+  folder: a standard user may not create a task folder. `down` ends and
+  disables both; `status` reads the task and `/health`; `uninstall` deletes
+  them and the support folder, never the data. Health is a raw HTTP/1.0
+  `GET` on a `TcpStream`, not curl. The firewall rule needs an
+  administrator, so `up` prints the one `New-NetFirewallRule` line (W-S5;
+  `install.ps1` will run it).
+- **`storm-server backup`** (W-S3): the bash script's steps in Rust — the
+  stored root (it wins over the flag), a fresh copy of the vaults (symlinks
+  skipped, not followed), `backup_all` into `index\`, a verify open, then
+  pruning of folders *named* as dates past `--keep-days`. Linux and macOS
+  keep the script.
+- **Windows filename rules** (W-S4): `vault::windows_name_problem` refuses
+  `< > : " | ? * \`, control characters, a trailing dot or space, and
+  `CON`/`PRN`/`AUX`/`NUL`/`COM1–9`/`LPT1–9` with any extension. `resolve`
+  applies it only on Windows; the function is tested everywhere.
+- **Dispatch:** Unix keeps its `cfg!` guards, so Linux still compiles and
+  tests `install_macos`; Windows gets `#[cfg(windows)]` arms.
+  `install_windows` is compiled everywhere for its tests, and `install.rs`'s
+  systemd commands are allowed to be unused on Windows.
+- **CI:** `server (rust, Windows)` on `windows-latest`.
+
+**Verified here:** clippy `-D warnings` on Linux and `x86_64-pc-windows-gnu`;
+the Linux suite (579 lib tests and every integration test). The new tests:
+the task XML (logon/daily, principal, quoting through a reimplemented C
+runtime parser, XML escaping), the record and layout, the health probe
+against a stub, backup pruning and copying, and the name rules.
 
 ## Data model
 

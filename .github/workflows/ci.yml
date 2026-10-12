@@ -137,6 +137,28 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # The server on Windows (decision 99): the same suite, on
+  # ReadDirectoryChangesW and NTFS, plus the Scheduled Task code compiled for
+  # real and its Windows-only tests (filename rules, `up`'s pure parts).
+  server-windows:
+    name: server (rust, Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/server
+    steps:
+      - run: git config --global core.autocrlf false
+        working-directory: .
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
   # The interactive installer (decision 84): shellcheck, then the bats suite
   # (arguments, detection, plans, secrets on stdin only, the TUI on a pty).
   installer:
