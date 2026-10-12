@@ -455,6 +455,73 @@ void main() {
       c.dispose();
     });
 
+    group('the PTY follows the device in use (freeze §11.4)', () {
+      Map<String, dynamic> sized(int cols, int rows) => {
+        ...session(),
+        'cols': cols,
+        'rows': rows,
+      };
+
+      ({
+        SessionController c,
+        StreamController<TerminalEvent> stream,
+        List<Map<String, dynamic>> resizes,
+      })
+      open() {
+        final resizes = <Map<String, dynamic>>[];
+        final stream = StreamController<TerminalEvent>();
+        final c = SessionController(
+          api: api(
+            MockClient((req) async {
+              if (req.url.path.endsWith('/terminal/resize')) {
+                resizes.add(jsonDecode(req.body) as Map<String, dynamic>);
+              }
+              return http.Response('', 204);
+            }),
+          ),
+          sessionId: 'ags_1',
+          open: (_) => stream.stream,
+        )..start();
+        return (c: c, stream: stream, resizes: resizes);
+      }
+
+      test('opening a session another device sized claims it', () async {
+        final o = open();
+        final cols = o.c.terminal.cols, rows = o.c.terminal.rows;
+        o.stream.add(StatusEvent(AgentSession.fromJson(sized(cols, rows - 4))));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, [
+          {'cols': cols, 'rows': rows, 'focus': true},
+        ]);
+        o.c.dispose();
+      });
+
+      test('typing claims it back, and only typing', () async {
+        final o = open();
+        final cols = o.c.terminal.cols, rows = o.c.terminal.rows;
+        o.stream.add(StatusEvent(AgentSession.fromJson(sized(cols, rows))));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, isEmpty, reason: 'it already fits');
+
+        // Another device resizes the PTY: watching is not using.
+        o.stream.add(StatusEvent(AgentSession.fromJson(sized(120, rows - 4))));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, isEmpty, reason: 'no fight between open devices');
+
+        o.c.terminal.typeForTest('x');
+        o.c.terminal.typeForTest('y');
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, [
+          {'cols': cols, 'rows': rows, 'focus': true},
+        ]);
+
+        o.c.terminal.typeForTest('z');
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, hasLength(1), reason: 'claimed once, then it fits');
+        o.c.dispose();
+      });
+    });
+
     test(
       'input is coalesced, serial, never retried, and a 503 says why',
       () async {
