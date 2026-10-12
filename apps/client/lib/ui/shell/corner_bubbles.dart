@@ -243,6 +243,25 @@ class PlacePicker extends ConsumerWidget {
 String hostOf(String url) =>
     Uri.tryParse(url)?.host ?? url.replaceAll(RegExp(r'^https?://'), '');
 
+/// Top-left on a phone while a session is open: back to the Agents list, in
+/// the places bubble's spot.
+class BackBubble extends StatelessWidget {
+  const BackBubble({super.key, required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return StormBubble(
+      key: const Key('back-bubble'),
+      tooltip: 'Back',
+      onTap: onTap,
+      child: Icon(LucideIcons.chevron_left, size: t.sp * 2.5, color: t.text2),
+    );
+  }
+}
+
 /// Top-right on a phone: the way into Settings, lit while you are there.
 class SettingsBubble extends StatelessWidget {
   const SettingsBubble({super.key});

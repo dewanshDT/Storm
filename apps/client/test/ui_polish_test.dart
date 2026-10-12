@@ -170,6 +170,115 @@ void main() {
     });
   });
 
+  group('the compact phone session header', () {
+    const handset = Size(390, 844);
+    final long = 'x' * 60;
+
+    Future<ProviderContainer> phoneSession(
+      WidgetTester tester,
+      Map<String, dynamic> record,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()], sessions: [record]);
+      final c = shellContainer(agentClient: agents.client);
+      await pumpShell(tester, c, size: handset);
+      c.read(routerProvider).go(Routes.agentSession(record['id'] as String));
+      await tester.pumpAndSettle();
+      return c;
+    }
+
+    testWidgets('the terminal starts right under the bubble row', (
+      tester,
+    ) async {
+      final c = await phoneSession(tester, agentSession('ags_1'));
+      final view = tester.widget<TerminalView>(find.byType(TerminalView));
+      final top = tester.getRect(find.byType(StormTerminalView)).top;
+      expect(top, closeTo(84, 1));
+      expect(top + view.padding!.top, lessThanOrEqualTo(100));
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a long name ellipsizes between the bubbles, dot and caret '
+        'kept; the sheet shows it whole', (tester) async {
+      final c = await phoneSession(
+        tester,
+        agentSession(
+          'ags_1',
+          name: long,
+          context: {'vault_id': primary, 'note_id': 'n3', 'title': 'Design'},
+          wroteCount: 2,
+        ),
+      );
+      final header = rect(tester, 'session-header');
+      expect(
+        header.left,
+        greaterThanOrEqualTo(rect(tester, 'back-bubble').right),
+      );
+      expect(
+        header.right,
+        lessThanOrEqualTo(rect(tester, 'settings-bubble').left),
+      );
+      final name = tester.widget<Text>(find.byKey(const Key('session-name')));
+      expect(name.maxLines, 1);
+      expect(name.overflow, TextOverflow.ellipsis);
+      for (final part in [
+        rect(tester, 'session-dot'),
+        tester.getRect(find.text('▾')),
+        rect(tester, 'session-name'),
+      ]) {
+        expect(part.left, greaterThanOrEqualTo(header.left - 0.5));
+        expect(part.right, lessThanOrEqualTo(header.right + 0.5));
+      }
+      expect(
+        find.text('Running · Claude Code · Design · wrote 2'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('session-header')));
+      await tester.pumpAndSettle();
+      final full = tester.widget<Text>(find.byKey(const Key('details-name')));
+      expect(full.data, long);
+      expect(full.maxLines, isNull);
+      expect(find.byKey(const Key('details-context')), findsOneWidget);
+      expect(find.text('WROTE'), findsOneWidget);
+      expect(find.text('AGENT'), findsOneWidget);
+      expect(find.byKey(const Key('end-session')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an ended session keeps its bar and says so under the name', (
+      tester,
+    ) async {
+      final c = await phoneSession(
+        tester,
+        agentSession(
+          'ags_1',
+          status: 'completed',
+          context: {'vault_id': primary, 'note_id': 'n3', 'title': 'BOARD'},
+          wroteCount: 1,
+        ),
+      );
+      expect(
+        find.text('Completed · Claude Code · BOARD · wrote 1'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('run-again')), findsOneWidget);
+      expect(find.byKey(const Key('dismiss-session')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the left bubble is Back in a session, the place picker '
+        'elsewhere', (tester) async {
+      final c = await phoneSession(tester, agentSession('ags_1'));
+      expect(find.byKey(const Key('places-bubble')), findsNothing);
+      await tester.tap(find.byKey(const Key('back-bubble')));
+      await tester.pumpAndSettle();
+      expect(c.read(routerProvider).state.uri.path, Routes.agents);
+      expect(find.byKey(const Key('back-bubble')), findsNothing);
+      expect(find.byKey(const Key('places-bubble')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+  });
+
   group('the rail foot', () {
     testWidgets('status and Settings share one square on the rail axis', (
       tester,

@@ -136,10 +136,11 @@ V2 = [
     dict(name="phone-06-session-running", viewport="phone",
          route="/agents/s/{session:gateway-spec}", settle=2.5),
     dict(name="phone-07-session-details-sheet", viewport="phone",
-         route="/agents/s/{session:gateway-spec}", actions=[("tap", "^Details$")]),
+         route="/agents/s/{session:gateway-spec}", actions=[("tap", r", details$")]),
     dict(name="phone-08-session-context-note", viewport="phone",
          route="/agents/s/{session:gateway-spec}", fresh=True,
-         actions=[("tap", "^▤ Gateway spec$")], settle=2.5),
+         actions=[("tap", r", details$"), ("wait", 0.8),
+                  ("tap", "^Open Gateway spec$")], settle=2.5),
     dict(name="phone-09-session-ended", viewport="phone",
          route="/agents/s/{session:test-sweep}", fresh=True, settle=2.5),
     # The agent's two notes are unseen here: BOARD (edited since this device

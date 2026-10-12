@@ -63,12 +63,21 @@ class StormChrome extends StatelessWidget {
     super.key,
     required this.child,
     this.header,
+    this.bar,
+    this.onBack,
     this.showNav = true,
     this.showBubbles = true,
   });
 
   final Widget child;
   final Widget? header;
+
+  /// A header that sits in the bubble row, between the two bubbles, instead
+  /// of below them: the phone session's (handoff change: compact header).
+  final Widget? bar;
+
+  /// Turns the left bubble into Back for this screen.
+  final VoidCallback? onBack;
   final bool showNav;
   final bool showBubbles;
 
@@ -110,6 +119,14 @@ class StormChrome extends StatelessWidget {
   /// part of the same crowded band as the row above it.
   static double bubbleGap(BuildContext context) => context.tokens.sp * 3.5;
 
+  /// Where content starts under a [bar]: 20 + 44 + 20.
+  static double barContentTop(BuildContext context) =>
+      bubbleTopInset(context) + bubbleSide(context) + contentInset(context);
+
+  /// A [bar]'s inset from either edge: past the bubble and a 12 px gap.
+  static double barInset(BuildContext context) =>
+      contentInset(context) + bubbleSide(context) + context.tokens.sp * 1.5;
+
   /// What every scrolling child leaves at the bottom for the nav pill.
   static double navClearance(BuildContext context) => context.tokens.sp * 14;
 
@@ -119,6 +136,8 @@ class StormChrome extends StatelessWidget {
     // Wide screens carry the sidebar and its own switcher, so the corners are
     // free of both bubbles there.
     final bubbles = showBubbles && !context.isExpanded;
+    final inBar = bubbles && bar != null;
+    final top = inBar ? null : (header ?? bar);
 
     return SafeArea(
       bottom: false,
@@ -129,7 +148,11 @@ class StormChrome extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (bubbles)
-                  SizedBox(height: contentTop(context))
+                  SizedBox(
+                    height: inBar
+                        ? barContentTop(context)
+                        : contentTop(context),
+                  )
                 // Nothing at desk width. The columns beside the note carry the
                 // vertical rules that separate them, and a spacer here pushes
                 // the whole Row down — so those rules started eight pixels
@@ -142,10 +165,10 @@ class StormChrome extends StatelessWidget {
                 // No horizontal padding: a header made of icon buttons needs
                 // to hang past the inset so its glyphs land on it, and only
                 // the header knows what it is made of.
-                if (header != null)
+                if (top != null)
                   Padding(
                     padding: EdgeInsets.only(bottom: t.sp * 1.25),
-                    child: header!,
+                    child: top,
                   ),
                 Expanded(child: child),
               ],
@@ -155,8 +178,18 @@ class StormChrome extends StatelessWidget {
             Positioned(
               top: bubbleTopInset(context),
               left: contentInset(context),
-              child: const PlacesBubble(),
+              child: onBack == null
+                  ? const PlacesBubble()
+                  : BackBubble(onTap: onBack!),
             ),
+            if (inBar)
+              Positioned(
+                top: bubbleTopInset(context),
+                left: barInset(context),
+                right: barInset(context),
+                height: bubbleSide(context),
+                child: bar!,
+              ),
             Positioned(
               top: bubbleTopInset(context),
               right: contentInset(context),
