@@ -580,6 +580,33 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   older copy of the row cannot undo a review. Tool names are the upstream's:
   the client shows them through `displayToolName`.
 
+From M26 (Windows — the vault's *Agent Runtime/Windows Runtime Host*, D16,
+and *Installer/Windows Server*; `PLAN.md` decision 99):
+
+- **The carrier is per platform, the ending policy is not.** `pty/` holds
+  the PTY (Unix) and ConPTY (Windows) behind one interface; `cli.rs` decides
+  how a session ends and never names a signal or a pid. A `cfg(windows)` in
+  `cli.rs` is the regression.
+- **A Windows session's process is created suspended, put in its Job
+  Object, then resumed**, and the job is `KILL_ON_JOB_CLOSE` without
+  `BREAKAWAY_OK`. Resuming before the assignment lets the agent start a
+  child outside the job; nothing would then end it.
+- **A `.cmd`/`.bat` CLI's arguments are refused, never escaped**, when they
+  hold anything `cmd.exe` interprets (`platform::wincmd`). Escaping for a
+  batch file is the BatBadBut vulnerability class.
+- **Private files go through `platform::{create_private_dir,
+  open_private, is_private}`**: modes on Unix, created with them (A2);
+  protected DACLs on Windows. A raw `OpenOptionsExt::mode` outside
+  `platform/` does not compile on Windows, and a plain `create` there
+  inherits whatever its parent grants.
+- **The bridge socket is `platform::ipc`**: a Unix socket, or on Windows a
+  first-instance named pipe whose DACL is the host's account and SYSTEM.
+- **`install.ps1` fails with `throw`, never `exit`**: run through `irm |
+  iex`, `exit` closes the person's PowerShell window.
+- **`storm-server` is a library with two binaries.** `storm-serverw` is the
+  same program for the Windows GUI subsystem, which the logon task runs so no
+  console opens; it logs only through `--log-file`.
+
 ## Style
 
 Match the surrounding code. Comments explain *why*, especially where something

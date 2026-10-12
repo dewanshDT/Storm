@@ -98,6 +98,9 @@ jobs:
           # deploy/install.sh — republished with every apt Pages build.
           cp deploy/install.sh publish/install.sh
           chmod 0644 publish/install.sh
+          # Its Windows counterpart (decision 99), served beside it.
+          cp deploy/install.ps1 publish/install.ps1
+          chmod 0644 publish/install.ps1
           ls -laR publish
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
