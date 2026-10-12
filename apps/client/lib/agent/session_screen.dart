@@ -33,7 +33,8 @@ import 'terminal_surface.dart';
 ///
 /// At [kExpandedWidth] and wider: the terminal beside a panel of Context,
 /// Wrote and About. Below it — the default — a full-screen terminal under a
-/// chip row, the extra keys while it is live, and a details sheet. Both are
+/// compact header between the corner bubbles, the extra keys while it is
+/// live, and a details sheet the header opens. Both are
 /// the same route and share one stream (`sessionControllerProvider`), so a
 /// window crossing the breakpoint keeps its terminal.
 class SessionScreen extends ConsumerStatefulWidget {
@@ -536,91 +537,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   ) {
     final t = context.tokens;
     final keyboard = keyboardIsOpen(context);
-    final inset = StormChrome.contentInset(context);
     void details() => _showDetails(context, s, host, c);
-    final header = Padding(
-      padding: EdgeInsets.symmetric(horizontal: inset),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Semantics(
-                link: true,
-                label: 'Agents',
-                excludeSemantics: true,
-                onTap: () => context.go(Routes.agents),
-                child: GestureDetector(
-                  key: const Key('back-to-agents'),
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => context.go(Routes.agents),
-                  child: Text(
-                    '‹ Agents',
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.uiSize,
-                      color: t.accent,
-                    ),
-                  ),
-                ),
-              ),
-              const Spacer(),
-              SessionStatusChip(status: s.status),
-            ],
-          ),
-          SizedBox(height: t.sp),
-          Text(
-            s.displayName,
-            key: const Key('session-name'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: t.headingSize,
-              fontWeight: FontWeight.w600,
-              color: t.text,
-            ),
-          ),
-          SizedBox(height: t.sp),
-          Wrap(
-            spacing: t.sp,
-            runSpacing: t.sp,
-            children: [
-              if (s.context != null)
-                _Chip(
-                  key: const Key('chip-context'),
-                  label: '▤ ${s.context!.title}',
-                  color: t.text,
-                  onTap: () => context.push(
-                    Routes.note(
-                      s.context!.vaultId,
-                      s.context!.noteId,
-                      session: s.id,
-                    ),
-                  ),
-                ),
-              _Chip(
-                key: const Key('chip-wrote'),
-                label: 'Wrote ${s.wroteCount}',
-                color: t.accent,
-                onTap: details,
-              ),
-              _Chip(
-                key: const Key('chip-details'),
-                label: 'Details',
-                color: t.text2,
-                onTap: details,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
+    final header = _PhoneHeader(session: s, onTap: details);
 
     return Scaffold(
       body: StormChrome(
         showNav: false,
-        header: header,
+        bar: header,
+        onBack: () => context.go(Routes.agents),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -877,56 +801,78 @@ class _HeaderButton extends StatelessWidget {
   }
 }
 
-/// The phone's chip row: outlined, on `surface`.
-class _Chip extends StatelessWidget {
-  const _Chip({
-    super.key,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
+/// "Running · Claude Code · Gateway spec · wrote 2": the phone header's
+/// second line.
+String phoneHeaderMeta(AgentSession s) => [
+  s.statusLabel,
+  providerLabel(s.provider),
+  ?s.context?.title,
+  if (s.wroteCount > 0) 'wrote ${s.wroteCount}',
+].join(' · ');
 
-  final String label;
-  final Color color;
+/// The phone session's header, between the corner bubbles: status dot, name
+/// and caret over a mono line. A tap opens the details sheet, where the full
+/// name wraps.
+class _PhoneHeader extends StatelessWidget {
+  const _PhoneHeader({required this.session, required this.onTap});
+
+  final AgentSession session;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final radius = BorderRadius.circular(t.rControl);
+    final s = session;
+    final meta = phoneHeaderMeta(s);
     return Semantics(
       button: true,
-      label: label,
+      label: '${s.displayName}, $meta, details',
       excludeSemantics: true,
       onTap: onTap,
-      child: Material(
-        color: t.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: BorderSide(color: t.border, width: t.bw),
-        ),
-        child: InkWell(
-          borderRadius: radius,
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.25,
-              vertical: t.sp * 0.75,
-            ),
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: t.sp * 22),
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  color: color,
+      child: GestureDetector(
+        key: const Key('session-header'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SessionHeaderDot(session: s, size: t.sp * 0.875),
+                SizedBox(width: t.sp * 0.75),
+                Flexible(
+                  child: Text(
+                    s.displayName,
+                    key: const Key('session-name'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      height: 1.25,
+                      color: t.text,
+                    ),
+                  ),
                 ),
-              ),
+                SizedBox(width: t.sp * 0.75),
+                Text(
+                  '▾',
+                  style: TextStyle(fontSize: 11, height: 1, color: t.text3),
+                ),
+              ],
             ),
-          ),
+            SizedBox(height: t.sp * 0.25),
+            Text(
+              meta,
+              key: const Key('session-meta'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: _mono(t, 11).copyWith(height: 1.3),
+            ),
+          ],
         ),
       ),
     );
@@ -1388,6 +1334,24 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             borderRadius: BorderRadius.circular(999),
           ),
         ),
+      ),
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            s.displayName,
+            key: const Key('details-name'),
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
+              height: 1.3,
+              color: t.text,
+            ),
+          ),
+          SizedBox(height: t.sp),
+          SessionStatusChip(status: s.status),
+        ],
       ),
       if (s.context != null)
         Column(

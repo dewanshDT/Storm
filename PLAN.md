@@ -5687,6 +5687,37 @@ padding at the bottom" of a session on the phone)*
   typing claims it back, only typing does, and only once. Both fail on the
   previous controller.
 
+**104. The phone session's header sits between the corner bubbles; the
+details sheet takes everything the chip row held.** *(2026-10-12; the
+operator: agent pages give too much of the screen to the top bar)*
+- **What changed.** The terminal now starts at 84 px from the top instead of
+  about 200.
+  - The header sits in the bubble row, 76 px in from each edge. Line 1: status
+    dot, name and `▾`. Line 2, in mono: status · agent · context note ·
+    `wrote n`. Both lines end with an ellipsis, and the dot and caret never
+    shrink.
+  - A tap anywhere on the header opens the details sheet. The sheet now starts
+    with the full name, wrapped, and the status chip.
+  - While a session is open, the left bubble shows a back chevron that returns
+    to the Agents list. Everywhere else it is still the place picker, including
+    on a context note pushed over the session.
+  - Gone: `‹ Agents`, the 20 px title, the header's status chip, and the chip
+    row (context, Wrote n, Details).
+- **What did not change.** This is Claude Design's change to the handoff,
+  adjusted to the changes made since v2: Resume still comes first in the ended
+  bar (89); the extra keys are still a keyboard accessory; the desk header and
+  inspector are untouched; the dot uses `AgentMark`'s colours and pulse (85);
+  the other screens keep the 28 px bubble gap.
+- **How.** `StormChrome` gained `bar` (a header in the bubble row) and `onBack`
+  (the left bubble becomes `BackBubble`).
+- Tests (`ui_polish_test`, *the compact phone session header*):
+  - At 390 × 844, the terminal's top is 84 and its first line is within 100.
+  - A 60-character name ellipsizes between the bubbles, and the sheet shows it
+    whole.
+  - The meta line on an ended session, with its bar.
+  - The back bubble in a session, and the place picker elsewhere.
+- The acceptance shots `phone-06` to `phone-09` are retaken.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

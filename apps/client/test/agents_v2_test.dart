@@ -83,7 +83,7 @@ void main() {
         at: Routes.agentSession('ags_1'),
       );
       expect(find.text('gateway-spec'), findsOneWidget);
-      expect(find.byKey(const Key('back-to-agents')), findsOneWidget);
+      expect(find.byKey(const Key('back-bubble')), findsOneWidget);
       expect(await tester.binding.handlePopRoute(), isTrue);
       await tester.pumpAndSettle();
       expect(where(c).path, Routes.agents);
@@ -242,7 +242,7 @@ void main() {
         size: phone,
         at: Routes.agentSession('ags_1'),
       );
-      await tester.tap(find.byKey(const Key('chip-details')));
+      await tester.tap(find.byKey(const Key('session-header')));
       await tester.pumpAndSettle();
       expect(find.text('AGENT'), findsOneWidget);
       await tester.tap(find.byKey(const Key('end-session')));

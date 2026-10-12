@@ -375,7 +375,7 @@ void main() {
           agents: agents,
         );
         if (size == phone) {
-          await tester.tap(find.byKey(const Key('chip-details')));
+          await tester.tap(find.byKey(const Key('session-header')));
           await tester.pumpAndSettle();
         }
         expect(
@@ -399,7 +399,9 @@ void main() {
         size: phone,
         agents: agents,
       );
-      await tester.tap(find.byKey(const Key('chip-context')));
+      await tester.tap(find.byKey(const Key('session-header')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('details-context')));
       await tester.pumpAndSettle();
       expect(where(c).path, '/v/$primary/note/n3');
       expect(find.text('‹ gateway-spec'), findsOneWidget);
