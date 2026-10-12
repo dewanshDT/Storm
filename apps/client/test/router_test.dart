@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
@@ -77,6 +81,87 @@ void main() {
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
 
+      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets(
+      'a sign-in that leaves the app unconfigured says so, never spins',
+      (tester) async {
+        // Decision 90: a web profile that kept an empty server address signed
+        // in against the page's origin, `isConfigured` stayed false, and the
+        // button spun forever. Settings now heal that on the web; whatever
+        // else leaves a sign-in unconfigured must still not hang.
+        final server = MockClient((req) async {
+          if (req.url.path == '/v1/account') {
+            return http.Response(jsonEncode({'exists': true}), 200);
+          }
+          if (req.url.path == '/v1/auth/login') {
+            return http.Response(
+              jsonEncode({
+                'access_token': 'sat_1',
+                'refresh_token': 'srt_1',
+                'expires': '2099-01-01T00:00:00Z',
+                'refresh_expires': '2099-01-01T00:00:00Z',
+                'user_id': 'usr_1',
+                'device_id': 'dev_1',
+              }),
+              200,
+            );
+          }
+          return http.Response('', 404);
+        });
+        await http.runWithClient(() async {
+          final c = shellContainer(
+            configured: false,
+            settings: const Settings(deviceId: 'dev_1', deviceSecret: 'dvs_1'),
+          );
+          await pumpShell(tester, c);
+          expect(c.read(routerProvider).state.uri.path, Routes.login);
+
+          await tester.enterText(
+            find.byKey(const Key('login-password')),
+            'correct horse battery',
+          );
+          await tester.pump();
+          await tester.tap(find.byKey(const Key('login-submit')));
+          await tester.pumpAndSettle();
+
+          expect(c.read(settingsProvider).value?.accessToken, 'sat_1');
+          expect(c.read(routerProvider).state.uri.path, Routes.login);
+          expect(
+            find.textContaining("couldn't finish setting up"),
+            findsOneWidget,
+          );
+          expect(find.byType(CircularProgressIndicator), findsNothing);
+          await disposeShell(tester, c);
+        }, () => server);
+      },
+    );
+
+    testWidgets('a device secret that did not load is not an unpair', (
+      tester,
+    ) async {
+      // The macOS relaunch bug: `deviceId` comes from prefs, the secret from
+      // the keychain, and a keychain read that failed left one without the
+      // other. Login sent the half-credential, the server refused it, and the
+      // refusal forgot the device — deleting the secret that was fine all
+      // along. Now the screen says what happened and asks before re-pairing.
+      final c = shellContainer(
+        configured: false,
+        settings: const Settings(baseUrl: 'http://test', deviceId: 'dev_1'),
+      );
+      await pumpShell(tester, c);
+
+      expect(c.read(routerProvider).state.uri.path, Routes.login);
+      expect(find.byKey(const Key('login-secret-missing')), findsOneWidget);
+      expect(find.byKey(const Key('login-submit')), findsNothing);
+      expect(c.read(settingsProvider).value?.deviceId, 'dev_1');
+
+      // Re-pairing is there, and it is the user's choice.
+      await tester.tap(find.byKey(const Key('login-secret-repair')));
+      await tester.pumpAndSettle();
+      expect(c.read(settingsProvider).value?.isPaired, isFalse);
       expect(find.text('Pair with your Storm server'), findsOneWidget);
       await disposeShell(tester, c);
     });

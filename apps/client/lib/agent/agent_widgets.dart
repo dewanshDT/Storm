@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
@@ -400,17 +401,52 @@ class AgentMark extends StatelessWidget {
   }
 }
 
+/// The session's status as a bare dot, in the [AgentMark] badge's colours:
+/// pulsing while the agent works, amber while unknown, danger once failed;
+/// otherwise the status's own colour (the phone session header).
+class SessionHeaderDot extends StatelessWidget {
+  const SessionHeaderDot({super.key, required this.session, this.size});
+
+  final AgentSession session;
+  final double? size;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final s = session;
+    final color = switch (s.status) {
+      'creating' || 'starting' => t.text3,
+      'unknown' => t.amber,
+      'failed' => t.danger,
+      _ => sessionStatusLook(s.status, t).color,
+    };
+    return _Badge(
+      key: const Key('session-dot'),
+      color: color,
+      fade: t.bg,
+      size: size ?? t.sp * 0.875,
+      pulse: s.status == 'running' && s.working,
+    );
+  }
+}
+
 class _Badge extends StatefulWidget {
   const _Badge({
     super.key,
     required this.color,
-    required this.ring,
+    this.ring,
+    this.fade,
     required this.size,
     required this.pulse,
   });
 
   final Color color;
-  final Color ring;
+
+  /// Cut out of what is behind the badge; none for a bare dot.
+  final Color? ring;
+
+  /// What a pulse fades towards, when there is no [ring].
+  final Color? fade;
   final double size;
   final bool pulse;
 
@@ -463,8 +499,14 @@ class _BadgeState extends State<_Badge> with SingleTickerProviderStateMixin {
         height: widget.size,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: Color.lerp(widget.color, widget.ring, _pulse.value * 0.55),
-          border: Border.all(color: widget.ring, width: t.bw * 2),
+          color: Color.lerp(
+            widget.color,
+            widget.ring ?? widget.fade,
+            _pulse.value * 0.55,
+          ),
+          border: widget.ring == null
+              ? null
+              : Border.all(color: widget.ring!, width: t.bw * 2),
         ),
       ),
     );

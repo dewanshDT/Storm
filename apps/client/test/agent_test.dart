@@ -455,6 +455,73 @@ void main() {
       c.dispose();
     });
 
+    group('the PTY follows the device in use (freeze §11.4)', () {
+      Map<String, dynamic> sized(int cols, int rows) => {
+        ...session(),
+        'cols': cols,
+        'rows': rows,
+      };
+
+      ({
+        SessionController c,
+        StreamController<TerminalEvent> stream,
+        List<Map<String, dynamic>> resizes,
+      })
+      open() {
+        final resizes = <Map<String, dynamic>>[];
+        final stream = StreamController<TerminalEvent>();
+        final c = SessionController(
+          api: api(
+            MockClient((req) async {
+              if (req.url.path.endsWith('/terminal/resize')) {
+                resizes.add(jsonDecode(req.body) as Map<String, dynamic>);
+              }
+              return http.Response('', 204);
+            }),
+          ),
+          sessionId: 'ags_1',
+          open: (_) => stream.stream,
+        )..start();
+        return (c: c, stream: stream, resizes: resizes);
+      }
+
+      test('opening a session another device sized claims it', () async {
+        final o = open();
+        final cols = o.c.terminal.cols, rows = o.c.terminal.rows;
+        o.stream.add(StatusEvent(AgentSession.fromJson(sized(cols, rows - 4))));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, [
+          {'cols': cols, 'rows': rows, 'focus': true},
+        ]);
+        o.c.dispose();
+      });
+
+      test('typing claims it back, and only typing', () async {
+        final o = open();
+        final cols = o.c.terminal.cols, rows = o.c.terminal.rows;
+        o.stream.add(StatusEvent(AgentSession.fromJson(sized(cols, rows))));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, isEmpty, reason: 'it already fits');
+
+        // Another device resizes the PTY: watching is not using.
+        o.stream.add(StatusEvent(AgentSession.fromJson(sized(120, rows - 4))));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, isEmpty, reason: 'no fight between open devices');
+
+        o.c.terminal.typeForTest('x');
+        o.c.terminal.typeForTest('y');
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, [
+          {'cols': cols, 'rows': rows, 'focus': true},
+        ]);
+
+        o.c.terminal.typeForTest('z');
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        expect(o.resizes, hasLength(1), reason: 'claimed once, then it fits');
+        o.c.dispose();
+      });
+    });
+
     test(
       'input is coalesced, serial, never retried, and a 503 says why',
       () async {
@@ -648,6 +715,12 @@ void main() {
       // The string is the same whichever platform is shown.
       expect(find.byKey(const Key('enrollment-string')), findsOneWidget);
 
+      await tester.tap(inDialog(find.text('Windows')));
+      await tester.pumpAndSettle();
+      expectOnly(HostPlatform.windows);
+      expect(inDialog(find.textContaining('sudo')), findsNothing);
+      expect(inDialog(find.textContaining('brew')), findsNothing);
+
       await tester.tap(inDialog(find.text('Linux')));
       await tester.pumpAndSettle();
       expectOnly(HostPlatform.linux);
@@ -666,9 +739,23 @@ void main() {
       }
     });
 
+    testWidgets('on Windows the enroll sheet opens on Windows', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await tester.pumpWidget(app(const HostsScreen(), server()));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('enroll-host')));
+        await tester.pumpAndSettle();
+        expectOnly(HostPlatform.windows);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
     test('each platform\'s steps are its own, with one enroll step', () {
       final linux = enrollSteps(HostPlatform.linux);
       final mac = enrollSteps(HostPlatform.macos);
+      final windows = enrollSteps(HostPlatform.windows);
       for (final step in linux) {
         expect(step.command, isNot(contains('brew')));
         expect(step.command, isNot(contains('_stormruntime')));
@@ -678,10 +765,18 @@ void main() {
         expect(step.command, isNot(contains('apt ')));
         expect(step.command, isNot(contains('-u storm-runtime')));
       }
-      for (final steps in [linux, mac]) {
+      // AM56: PowerShell, never a POSIX command.
+      for (final step in windows) {
+        expect(step.command, isNot(contains('sudo')));
+        expect(step.command, isNot(contains('brew')));
+        expect(step.command, isNot(contains('systemctl')));
+        expect(step.command, isNot(contains('/Library/')));
+      }
+      for (final steps in [linux, mac, windows]) {
         final enroll = steps.where((s) => s.pastesString).toList();
         expect(enroll, hasLength(1));
-        expect(enroll.single.command, endsWith('storm-runtime enroll'));
+        expect(enroll.single.command, contains('storm-runtime'));
+        expect(enroll.single.command, endsWith(' enroll'));
         // The enrollment string is a secret: never an argument (freeze §5.3).
         expect(enroll.single.command, isNot(contains('storm-enroll:')));
       }
@@ -690,6 +785,16 @@ void main() {
         'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       );
       expect(enrollFootnote(HostPlatform.macos), contains('dev.storm.runtime'));
+      // `install` puts the binary in Program Files; enroll runs from there.
+      expect(
+        windows.last.command,
+        r'& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll',
+      );
+      expect(windows[1].command, endsWith(' install'));
+      expect(
+        enrollFootnote(HostPlatform.windows),
+        contains(r'NT SERVICE\StormRuntime'),
+      );
     });
 
     // The sessions list at both widths is in agents_navigation_test.dart,

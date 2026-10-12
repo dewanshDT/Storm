@@ -447,25 +447,25 @@ before any connection is attempted. Clients learn the relay from the server when
 ## Runtime Hosts (Agent Runtime)
 
 A Runtime Host is a machine that runs agents (Claude Code, OpenCode, a shell)
-for one Storm Server. It may be a separate VM, the server's own machine, or a
-Mac. It dials the server over the network, so the server needs no inbound
+for one Storm Server. It may be a separate VM, the server's own machine, a
+Mac, or a Windows PC. It dials the server over the network, so the server needs no inbound
 route to it. V1 runs on a direct network; the relay does not carry it yet
 (decision 77).
 
-It is the same `storm-runtime` on both platforms (decision 83). Each platform
+It is the same `storm-runtime` on every platform (decisions 83 and 99). Each platform
 runs it under the platform's own service manager, as a dedicated account that
 exists for nothing else:
 
-| | Linux | macOS |
-|---|---|---|
-| Install | `apt install storm-runtime` (`.deb`) | Homebrew or the release tarball, then `storm-runtime install` as root |
-| Service | systemd `storm-runtime.service` | launchd LaunchDaemon `dev.storm.runtime` |
-| Account | `storm-runtime` | `_stormruntime` (hidden, no login) |
-| Binary | `/usr/bin/storm-runtime` | `/Library/StormRuntime/bin/storm-runtime` |
-| Config | `/etc/storm-runtime/runtime.toml` | `/Library/StormRuntime/runtime.toml` |
-| State, key, `HOME` | `/var/lib/storm-runtime` (`home/` inside) | `/Library/StormRuntime/state` (`home/` inside) |
-| Workspaces | `/var/lib/storm-runtime/workspaces` | `/Library/StormRuntime/workspaces` |
-| Logs | `journalctl -u storm-runtime` | `/Library/Logs/StormRuntime/storm-runtime.log` |
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Install | `apt install storm-runtime` (`.deb`) | Homebrew or the release tarball, then `storm-runtime install` as root | `install.ps1`, or the release zip, then `storm-runtime install` as administrator |
+| Service | systemd `storm-runtime.service` | launchd LaunchDaemon `dev.storm.runtime` | Windows Service `StormRuntime` |
+| Account | `storm-runtime` | `_stormruntime` (hidden, no login) | `NT SERVICE\StormRuntime` (virtual, no password) |
+| Binary | `/usr/bin/storm-runtime` | `/Library/StormRuntime/bin/storm-runtime` | `C:\Program Files\StormRuntime\storm-runtime.exe` |
+| Config | `/etc/storm-runtime/runtime.toml` | `/Library/StormRuntime/runtime.toml` | `C:\ProgramData\StormRuntime\runtime.toml` |
+| State, key, `HOME` | `/var/lib/storm-runtime` (`home/` inside) | `/Library/StormRuntime/state` (`home/` inside) | `C:\ProgramData\StormRuntime\state` (`home\` inside) |
+| Workspaces | `/var/lib/storm-runtime/workspaces` | `/Library/StormRuntime/workspaces` | `C:\ProgramData\StormRuntime\workspaces` |
+| Logs | `journalctl -u storm-runtime` | `/Library/Logs/StormRuntime/storm-runtime.log` | `C:\ProgramData\StormRuntime\logs\storm-runtime.log` |
 
 What both guarantee (decisions 77e and 83):
 - **The account is its own.** It is never in the server's group, `admin` or
@@ -701,6 +701,84 @@ Storm never stores or transmits what is in it. Also, a login running as
 | The host exits at start with "refused" or "root" | A `workspace_roots` entry is under `/Users`, `/Volumes` or `/Network`, or overlaps a Storm data root. Move it to `/Library/StormRuntime/workspaces`. |
 | The host stays stopped and `host.json.revoked` exists | It was revoked. Enroll it again (the command above). |
 | An agent cannot read a file you put in a workspace | The file came from outside (moved, not copied, from a home folder), so it lacks the inherited ACL. `ls -le` shows it. Re-copy it, or `chmod -R +a "user:_stormruntime allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,list,search,add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" <dir>`. |
+
+### Windows
+
+The host runs as the **`StormRuntime` Windows Service under the virtual
+account `NT SERVICE\StormRuntime`**, never as you (D16). Windows creates
+that account with the service: it has no password, is never an
+administrator, and cannot open anyone's profile. Sessions run on ConPTY,
+each inside a Job Object, so ending a session, stopping the service, or the
+host dying in any way ends everything the session started. Windows 10 1809 /
+Server 2019 or later.
+
+**Install.** In PowerShell **as administrator**, either the installer:
+
+```powershell
+irm https://dewanshdt.github.io/Storm/install.ps1 | iex
+```
+
+or the release zip by hand (it is not code-signed, so SmartScreen may warn):
+
+```powershell
+Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/storm-runtime-windows-x86_64.zip -OutFile $env:TEMP\storm-runtime.zip
+Expand-Archive -Force $env:TEMP\storm-runtime.zip $env:TEMP\storm-runtime
+& "$env:TEMP\storm-runtime\storm-runtime.exe" install
+```
+
+`install` is idempotent; re-running a newer binary's `install` upgrades. It:
+- creates the layout in the table above, each directory with a **protected**
+  DACL (nothing inherited from `C:\ProgramData`, where every user may create
+  files): SYSTEM and Administrators, plus the account where it needs it;
+- shares the workspace root with you (`--operator` names someone else): you
+  and the account can both modify everything either creates there;
+- copies the binary into `Program Files` and writes `runtime.toml` if there
+  is none;
+- creates the service as **manual**, so an unenrolled host never runs, with
+  restart-on-crash and the account's profile variables in its environment;
+- adds `safe.directory` for the workspaces to the account's git config, and
+  prints the line for yours.
+
+**Enroll**, still as administrator (no one can run as a virtual account), and
+paste the string from Settings > Agents > Hosts > Enroll a host at the
+prompt. Enrolling starts the service and makes it start with Windows:
+
+```powershell
+& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll
+```
+
+**Operate:** `Get-Service StormRuntime`, `Restart-Service StormRuntime`,
+`Stop-Service StormRuntime`; `storm-runtime.exe check` (as administrator)
+proves the enrollment end to end; the log is in `C:\ProgramData\StormRuntime\logs`.
+**Remove:** `& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall`
+(`--purge` also removes the identity, state, logs and config). Workspaces are
+always kept.
+
+**Agent CLIs** must be reachable by the account. The host's `PATH` is the
+account's own `…\state\home\.local\bin` and `…\AppData\Roaming\npm`, then
+the machine `PATH` as the registry has it when the host starts (restart the
+service after installing a CLI machine-wide). `claude` finds `claude.exe` or
+`claude.cmd`. A CLI installed in your own profile is not reachable.
+- **Claude Code needs Git for Windows** (its Bash tool runs Git Bash):
+  install it machine-wide.
+- **Log a CLI in** from a Storm **shell** session on this host — it runs as
+  the account, in PowerShell — or put a token (`claude setup-token`) in an
+  `env_file` under `C:\ProgramData\StormRuntime` that `Users` cannot read.
+
+**Workspaces.** Roots under `C:\Users` (every profile and OneDrive), on a
+network share, or on a removable, network or optical drive are refused at
+startup; other fixed drives (`D:\src`) are fine. To work on an existing
+checkout, clone or move it into the workspace root.
+
+**Troubleshooting:**
+
+| Symptom | Check |
+|---|---|
+| The service stops at once with code 2 | It is not enrolled: run `enroll` as administrator. |
+| It stopped with code 3 and `host.json.revoked` exists | It was revoked. Enroll it again. |
+| `claude` or `opencode` shows as not installed | Install it machine-wide or as the account (from a Storm shell session), then `Restart-Service StormRuntime`. |
+| It exits at start naming AM54 | A `workspace_roots` entry is under `C:\Users`, a share, or a removable drive. |
+| git says "dubious ownership" in your own shell | Run the `safe.directory` line `install` printed, as yourself. |
 
 ### Never share an account with the vaults
 

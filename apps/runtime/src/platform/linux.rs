@@ -35,7 +35,7 @@ pub fn uninstall(_: &super::UninstallOptions) -> anyhow::Result<()> {
 pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
     use rustix::event::{PollFd, PollFlags, poll};
     let mut fds = [PollFd::new(&fd, PollFlags::OUT)];
-    Ok(poll(&mut fds, Some(&super::timespec(timeout)))? > 0)
+    Ok(poll(&mut fds, Some(&super::posix::timespec(timeout)))? > 0)
 }
 
 /// `/proc/<pid>/stat`: field 6 is the session. The command name (field 2)

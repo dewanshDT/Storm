@@ -1,15 +1,26 @@
-//! What differs between the platforms a Runtime Host runs on (D14, AM33).
+//! What differs between the platforms a Runtime Host runs on (D14, AM33;
+//! D16, AM48).
 //!
-//! macOS is a second platform of the **same** Runtime Host: one crate, one
-//! wire protocol, one session model. What genuinely differs lives here and
-//! nowhere else — default paths, the service account, and the few syscalls
-//! whose behaviour differs (a PTY write's wait for room). Business logic asks
-//! this module; it never matches on `target_os` itself.
+//! macOS and Windows are further platforms of the **same** Runtime Host: one
+//! crate, one wire protocol, one session model. What genuinely differs lives
+//! here and nowhere else — default paths, the service account, private
+//! files, the local socket, and the few syscalls whose behaviour differs.
+//! Business logic asks this module; it never matches on `target_os` itself.
+//! The terminal carrier is `crate::pty`, per platform the same way.
 
-use std::ffi::CStr;
 use std::io;
-use std::os::fd::BorrowedFd;
-use std::time::Duration;
+
+#[cfg(unix)]
+mod posix;
+#[cfg(unix)]
+use posix as shared;
+#[cfg(unix)]
+pub(crate) use posix::{PTY_WRITE_CHUNK, wait_writable};
+#[cfg(unix)]
+pub use posix::{
+    account_name, check_exclusive_account, exclusive_account_allowed, host_name, session_members,
+    sweep_account, sweep_targets, tagged_processes,
+};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -23,28 +34,58 @@ mod macos_service;
 #[cfg(target_os = "macos")]
 use macos as os;
 
-pub mod launchd;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+mod windows_service;
+#[cfg(windows)]
+use windows as os;
+#[cfg(windows)]
+use windows as shared;
+#[cfg(windows)]
+pub(crate) use windows::{OwnerOnly, wide};
+#[cfg(windows)]
+pub use windows::{
+    check_exclusive_account, current_account, exclusive_account_allowed, host_name, sweep_account,
+    sweep_targets,
+};
+#[cfg(windows)]
+pub use windows_service::{enable_and_start, service_main};
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("storm-runtime runs on Linux and macOS (D14)");
+pub mod ipc;
+pub mod launchd;
+pub mod wincmd;
+pub mod winsvc;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+compile_error!("storm-runtime runs on Linux, macOS and Windows (D14, D16)");
 
 /// The platform's name, as the host reports it and the docs use it.
 pub const NAME: &str = os::NAME;
 
 /// The host's state directory: its key, `host.json`, `sessions.json`, the
 /// MCP socket. Linux: the systemd unit's `StateDirectory`. macOS: AM33.
+/// Windows: AM48.
 pub const DEFAULT_STATE: &str = os::DEFAULT_STATE;
 
 /// The operator's `runtime.toml` (freeze §5.7).
 pub const DEFAULT_CONFIG: &str = os::DEFAULT_CONFIG;
 
-/// The dedicated account the packaged service runs as (77e, AM34).
+/// The dedicated account the packaged service runs as (77e, AM34, AM49).
 pub const SERVICE_ACCOUNT: &str = os::SERVICE_ACCOUNT;
+
+/// The environment variable that marks every process a session started:
+/// `STORM_RUNTIME_SESSION=<session id>`. Children inherit it, so it follows
+/// what left the session with `setsid` and was reparented — a daemonized
+/// agent server (F1) — where the session id no longer reaches. On Windows a
+/// Job Object holds the session instead (AM52); the tag is still set.
+pub const SESSION_TAG: &str = "STORM_RUNTIME_SESSION";
 
 /// The `PATH` agents get, and providers are looked for on, when
 /// `runtime.toml` names none (AM38). `None` keeps the inherited one: Linux,
 /// where systemd's is already fixed. macOS: launchd's is bare, so the host
-/// supplies its own, rooted at the account's `HOME`.
+/// supplies its own, rooted at the account's `HOME`. Windows: the account's
+/// own bins, then the machine `PATH` from the registry (AM53).
 pub fn default_path() -> Option<std::ffi::OsString> {
     os::default_path()
 }
@@ -55,8 +96,56 @@ pub fn default_path() -> Option<std::ffi::OsString> {
 /// network volumes, autofs mounts, and the data volume's own spelling of
 /// all of these. A LaunchDaemon cannot answer the privacy prompts guarding
 /// them, and the host never asks for Full Disk Access. Linux: none beyond
-/// the unit's `ProtectHome`.
+/// the unit's `ProtectHome`. Windows: none here; its locations depend on the
+/// machine, so [`refused_root`] decides.
 pub const PROTECTED_ROOTS: &[&str] = os::PROTECTED_ROOTS;
+
+/// Why `root` (canonical) may not be a workspace root on this machine, beyond
+/// [`PROTECTED_ROOTS`], or `None`. Windows: profiles, network shares and
+/// removable drives (AM54). Elsewhere: always `None`.
+pub fn refused_root(root: &std::path::Path) -> Option<String> {
+    shared::refused_root(root)
+}
+
+/// The `shell` provider's command and arguments (§9.2, AM53): `$SHELL -l` on
+/// Linux and macOS; PowerShell 7 if `path` has it, else Windows PowerShell,
+/// on Windows.
+pub fn session_shell(
+    path: Option<&std::ffi::OsStr>,
+) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
+    shared::session_shell(path)
+}
+
+/// Creates `dir` and any missing parents, private to this host's account:
+/// `0700`, created with that mode (A2) on Unix; a protected DACL of SYSTEM,
+/// Administrators and the account on Windows (AM49). An existing directory
+/// is left as it is.
+pub fn create_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    shared::create_private_dir(dir)
+}
+
+/// [`create_private_dir`], then makes `dir` private even if it already
+/// existed.
+pub fn tighten_private_dir(dir: &std::path::Path) -> io::Result<()> {
+    shared::tighten_private_dir(dir)
+}
+
+/// Opens `path` with `options`, private to this host's account: created
+/// `0600` on Unix; given AM49's protected DACL on Windows.
+pub fn open_private(
+    path: &std::path::Path,
+    options: &mut std::fs::OpenOptions,
+) -> io::Result<std::fs::File> {
+    shared::open_private(path, options)
+}
+
+/// Whether only this host's account (and, on Windows, SYSTEM and
+/// Administrators) can read `path`: the env-file rule. Unix: no group or
+/// other bit. Windows: no allow entry for `Everyone`, `Authenticated Users`
+/// or `Users` (AM49).
+pub fn is_private(path: &std::path::Path) -> io::Result<bool> {
+    shared::is_private(path)
+}
 
 /// The variable that carries a session's `PATH` past a login shell's
 /// profile (F3). `/etc/zprofile` on macOS runs `path_helper`, which moves
@@ -114,7 +203,8 @@ pub fn prepare_home() {
 /// `storm-runtime install` (AM35).
 #[derive(Debug, Default)]
 pub struct InstallOptions {
-    /// Who the workspace root is shared with. Defaults to `$SUDO_USER`.
+    /// Who the workspace root is shared with. Defaults to `$SUDO_USER`; on
+    /// Windows, the user who opened the elevated shell.
     pub operator: Option<String>,
 }
 
@@ -128,7 +218,8 @@ pub struct UninstallOptions {
 
 /// Installs this binary as the platform's system service. macOS: the
 /// `_stormruntime` account, `/Library/StormRuntime` and the LaunchDaemon.
-/// Linux: the `.deb` does this, so it refuses with a pointer to it.
+/// Windows: `C:\ProgramData\StormRuntime` and the `StormRuntime` service
+/// (AM50). Linux: the `.deb` does this, so it refuses with a pointer to it.
 pub fn install(options: &InstallOptions) -> anyhow::Result<()> {
     os::install(options)
 }
@@ -138,220 +229,31 @@ pub fn uninstall(options: &UninstallOptions) -> anyhow::Result<()> {
     os::uninstall(options)
 }
 
-/// How this host appears in the app when enrollment is given no `--name`:
-/// the kernel's node name, without macOS's `.local` suffix (AM40).
-pub fn host_name() -> String {
-    let uname = rustix::system::uname();
-    let node = uname.nodename().to_string_lossy();
-    let node = node.trim();
-    let node = node.strip_suffix(".local").unwrap_or(node);
-    let name: String = node.chars().take(64).collect();
-    if name.is_empty() {
-        "runtime-host".into()
-    } else {
-        name
+/// Asserts `path` is private: exactly `mode` on Unix (A2), AM49's DACL on
+/// Windows.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_private(path: &std::path::Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let actual = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(actual, mode, "{} is {actual:o}", path.display());
     }
-}
-
-/// The most a PTY write may carry after [`wait_writable`] said yes, so that
-/// the write itself never blocks. Linux: 256 bytes, what 77c verified. macOS:
-/// one byte, because its "writable" means room for at least one, and a
-/// blocking write of more sleeps until all of it fits — the hang the
-/// deadline exists to prevent (found on a real Mac, decision 83).
-pub(crate) const PTY_WRITE_CHUNK: usize = os::PTY_WRITE_CHUNK;
-
-/// Waits up to `timeout` for `fd` (a PTY master) to accept a write. Returns
-/// whether it can. The bounded input write of decision 77c rests on this:
-/// without it, an agent that stops reading holds its session forever.
-pub(crate) fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
-    os::wait_writable(fd, timeout)
-}
-
-/// Every live (non-zombie) process whose session id is `sid`.
-///
-/// A session's leader is `setsid`'s caller, so for an agent session `sid` is
-/// the agent's pid. Ending the session's process group is not enough: a
-/// job-control shell (`zsh -l`, `bash -i`) puts each `cmd &` in a process
-/// group of its own, inside the same session. Everything still in the session
-/// is found here; only a process that called `setsid` itself leaves it, and
-/// the exclusive-account sweep covers those when the host stops (AM37).
-pub fn session_members(sid: i32) -> io::Result<Vec<i32>> {
-    os::session_members(sid)
-}
-
-/// The environment variable that marks every process a session started:
-/// `STORM_RUNTIME_SESSION=<session id>`. Children inherit it, so it follows
-/// what left the session with `setsid` and was reparented — a daemonized
-/// agent server (F1) — where the session id no longer reaches.
-pub const SESSION_TAG: &str = "STORM_RUNTIME_SESSION";
-
-/// Every live process of this account, other than this one, that was started
-/// with `STORM_RUNTIME_SESSION=<session>` in its environment. A process
-/// carries the environment it was started with, inherited from its parent
-/// unless that parent replaced it.
-pub fn tagged_processes(session: &str) -> io::Result<Vec<i32>> {
-    let uid = rustix::process::geteuid().as_raw();
-    let me = rustix::process::getpid().as_raw_nonzero().get();
-    let entry = format!("{SESSION_TAG}={session}");
-    Ok(os::account_processes(uid)?
-        .into_iter()
-        .filter(|&pid| pid != me)
-        .filter(|&pid| {
-            os::environment(pid)
-                .is_some_and(|env| env.split(|&b| b == 0).any(|e| e == entry.as_bytes()))
-        })
-        .collect())
-}
-
-fn timespec(timeout: Duration) -> rustix::event::Timespec {
-    rustix::event::Timespec {
-        tv_sec: timeout.as_secs() as _,
-        tv_nsec: timeout.subsec_nanos() as _,
-    }
-}
-
-// ---- the exclusive account (AM37) ----------------------------------------
-
-/// Whether `serve --exclusive-account` may run as `uid`, named `name`.
-///
-/// The sweep signals every process the caller may signal. As root that is
-/// the whole machine; as a human it is their session. So it is allowed only
-/// as the platform's dedicated service account, which by construction runs
-/// nothing but this host and what this host started.
-pub fn exclusive_account_allowed(uid: u32, name: Option<&str>) -> Result<(), String> {
-    if uid == 0 {
-        return Err(
-            "--exclusive-account refuses to run as root: it would signal \
-                    every process on the machine"
-                .into(),
+    #[cfg(windows)]
+    {
+        let _ = mode;
+        assert!(
+            is_private(path).unwrap(),
+            "{} is readable by others",
+            path.display()
         );
     }
-    match name {
-        Some(name) if name == SERVICE_ACCOUNT => Ok(()),
-        Some(name) => Err(format!(
-            "--exclusive-account runs only as the service account {SERVICE_ACCOUNT}, \
-             not as {name}: it ends every other process of its account"
-        )),
-        None => Err(format!(
-            "--exclusive-account: uid {uid} has no account name; it runs only as \
-             {SERVICE_ACCOUNT}"
-        )),
-    }
-}
-
-/// [`exclusive_account_allowed`] for the running process.
-pub fn check_exclusive_account() -> Result<(), String> {
-    let uid = rustix::process::geteuid().as_raw();
-    exclusive_account_allowed(uid, account_name(uid).as_deref())
-}
-
-/// The login name of `uid`, from the password database (`getpwuid_r`).
-pub fn account_name(uid: u32) -> Option<String> {
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut out: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: every pointer is to a live local of the right type and size;
-    // `out` is either null or points at `pwd`, whose strings live in `buf`.
-    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut out) };
-    if rc != 0 || out.is_null() || pwd.pw_name.is_null() {
-        return None;
-    }
-    // SAFETY: getpwuid_r succeeded, so `pw_name` is a NUL-terminated string
-    // inside `buf`, which is still alive.
-    Some(
-        unsafe { CStr::from_ptr(pwd.pw_name) }
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-
-/// Every live process of this account except this one: what the sweep
-/// signals. Listed, not `kill(-1)`: on macOS a POSIX `kill(-1)` reaches the
-/// caller too, so the first real-Mac run of the sweep killed the host as it
-/// started (decision 83).
-pub fn sweep_targets() -> io::Result<Vec<i32>> {
-    let uid = rustix::process::geteuid().as_raw();
-    let me = rustix::process::getpid().as_raw_nonzero().get();
-    Ok(os::account_processes(uid)?
-        .into_iter()
-        .filter(|&pid| pid != me)
-        .collect())
-}
-
-/// Ends every other process of this account: SIGHUP, then SIGKILL after
-/// `grace` to whatever is left. The counterpart of systemd's control-group
-/// kill, and the only one launchd has (AM37). **Call it only after
-/// [`check_exclusive_account`] passed** — `serve` does, and nothing else
-/// calls this. Returns how many processes got the SIGHUP, and how many of
-/// those were still there for the SIGKILL.
-pub fn sweep_account(grace: Duration) -> (usize, usize) {
-    let signal_all = |signal| {
-        let targets = sweep_targets().unwrap_or_default();
-        for &pid in &targets {
-            if let Some(pid) = rustix::process::Pid::from_raw(pid) {
-                // ESRCH: it is already gone.
-                let _ = rustix::process::kill_process(pid, signal);
-            }
-        }
-        targets.len()
-    };
-    let hung_up = signal_all(rustix::process::Signal::HUP);
-    if hung_up == 0 {
-        return (0, 0);
-    }
-    std::thread::sleep(grace);
-    (hung_up, signal_all(rustix::process::Signal::KILL))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_sweep_targets_the_accounts_other_processes_never_itself() {
-        // Lists without signalling, so it is safe whoever runs the suite.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let targets = sweep_targets().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
-        let me = rustix::process::getpid().as_raw_nonzero().get();
-        assert!(
-            !targets.contains(&me),
-            "the sweep would kill the host itself"
-        );
-        assert!(
-            targets.contains(&(child.id() as i32)),
-            "a process of this account is missing: {targets:?}"
-        );
-    }
-
-    #[test]
-    fn the_sweep_runs_only_as_the_service_account() {
-        assert!(exclusive_account_allowed(0, Some("root")).is_err());
-        // Root is refused whatever it is called.
-        assert!(exclusive_account_allowed(0, Some(SERVICE_ACCOUNT)).is_err());
-        let human = exclusive_account_allowed(501, Some("alice")).unwrap_err();
-        assert!(human.contains(SERVICE_ACCOUNT), "{human}");
-        assert!(exclusive_account_allowed(501, None).is_err());
-        assert_eq!(
-            exclusive_account_allowed(250, Some(SERVICE_ACCOUNT)),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn the_running_account_is_found_by_uid() {
-        let uid = rustix::process::geteuid().as_raw();
-        // Whoever runs the tests is in the password database. (It may be the
-        // service account itself — a host's own agent session runs the suite
-        // — which is why no test ever calls `sweep_account`.)
-        let name = account_name(uid).expect("the test runner's account");
-        assert!(!name.is_empty());
-        assert_eq!(account_name(0).as_deref(), Some("root"));
-    }
 
     /// F3: the managed `.zprofile` is written, kept up to date, and never
     /// written over an operator's own.

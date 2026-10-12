@@ -5,10 +5,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tokio::signal::unix::{SignalKind, signal};
 
 /// The host's state: its key, `host.json` and its session table. Linux: the
-/// systemd unit's `StateDirectory` (freeze §5.8). macOS: AM33.
+/// systemd unit's `StateDirectory` (freeze §5.8). macOS: AM33. Windows: AM48.
 const DEFAULT_STATE: &str = storm_runtime::platform::DEFAULT_STATE;
 
 #[derive(Parser)]
@@ -56,18 +55,24 @@ enum Command {
         /// The connection's slug.
         slug: String,
     },
+    /// Tells the host which conversation the agent is on, so Storm can
+    /// resume it. Run by the agent's own hook or plugin, never by hand; reads
+    /// the id from stdin (a Claude Code hook's input) when none is given.
+    HarnessSession { id: Option<String> },
     /// Install this host as a system service, as root. macOS: creates the
     /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
-    /// LaunchDaemon, which runs the host once it is enrolled. Re-run it to
-    /// upgrade. On Linux the package does this.
+    /// LaunchDaemon, which runs the host once it is enrolled. Windows (in an
+    /// elevated shell): creates `C:\ProgramData\StormRuntime` and the
+    /// `StormRuntime` service, which enrolling starts. Re-run it to upgrade.
+    /// On Linux the package does this.
     Install {
         /// Who shares the workspace root with the host. Defaults to the user
         /// who ran sudo.
         #[arg(long)]
         operator: Option<String>,
     },
-    /// Remove the system service `install` set up, as root. Workspaces are
-    /// always kept.
+    /// Remove the system service `install` set up, as root (elevated on
+    /// Windows). Workspaces are always kept.
     Uninstall {
         /// Also remove the host's identity, state, logs, config and account.
         #[arg(long)]
@@ -79,6 +84,11 @@ enum Command {
         #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
         state: PathBuf,
     },
+    /// The Windows service's entry point (AM50). Run by the Service Control
+    /// Manager, never by hand.
+    #[cfg(windows)]
+    #[command(hide = true)]
+    Service,
 }
 
 #[tokio::main]
@@ -92,6 +102,10 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         // Logs nothing: stdout is the MCP stream, and stderr is the agent's.
         Command::McpBridge { slug } => storm_runtime::bridge::run(slug).await,
+        Command::HarnessSession { id } => {
+            storm_runtime::harness::report(id);
+            Ok(())
+        }
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
             let name = name.unwrap_or_else(storm_runtime::platform::host_name);
@@ -104,8 +118,13 @@ async fn main() -> Result<()> {
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             })
             .await?;
+            if cfg!(windows) && state == std::path::Path::new(DEFAULT_STATE) {
+                start_the_service();
+            }
             Ok(())
         }
+        #[cfg(windows)]
+        Command::Service => storm_runtime::platform::service_main(),
         Command::Serve {
             state,
             config,
@@ -122,45 +141,15 @@ async fn main() -> Result<()> {
             }
             // Before anything else can fail: SIGTERM must never take the
             // default action and leave sessions behind (AM37).
-            let mut terminate = signal(SignalKind::terminate())?;
-            let mut interrupt = signal(SignalKind::interrupt())?;
-            tracing::info!(
-                version = env!("CARGO_PKG_VERSION"),
-                state = %state.display(),
-                config = %config.display(),
-                exclusive_account,
-                "starting"
-            );
-            storm_runtime::platform::prepare_home();
-            let config = storm_runtime::config::RuntimeConfig::load(&config)?;
-            let host = storm_runtime::host::Host::new(&state, config)?;
-            host.log_inventory();
-            if exclusive_account {
-                // Whatever a previous host left behind — after a SIGKILL or a
-                // crash nothing ended its sessions (AM37).
-                sweep("start").await;
-            }
-            let outcome = tokio::select! {
-                ended = host.clone().run() => ended,
-                _ = terminate.recv() => Ok(()),
-                _ = interrupt.recv() => Ok(()),
-            };
-            if let Err(e) = outcome {
-                eprintln!("storm-runtime: {e:#}");
+            let stop = stop_signal()?;
+            match storm_runtime::serve::run(&state, &config, exclusive_account, stop).await? {
+                storm_runtime::serve::Outcome::Stopped => Ok(()),
                 // A refused key is final: exit with a status the unit is told
-                // not to restart on, rather than looping against a server that
-                // has revoked this host (freeze §5.6, AM36).
-                if exclusive_account {
-                    sweep("revoked").await;
-                }
-                std::process::exit(3);
+                // not to restart on, rather than looping against a server
+                // that has revoked this host (freeze §5.6, AM36).
+                storm_runtime::serve::Outcome::Revoked
+                | storm_runtime::serve::Outcome::Failed(_) => std::process::exit(3),
             }
-            tracing::info!("stopping");
-            host.shutdown(storm_runtime::cli::DEFAULT_GRACE).await;
-            if exclusive_account {
-                sweep("stop").await;
-            }
-            Ok(())
         }
         Command::Install { operator } => {
             storm_runtime::platform::install(&storm_runtime::platform::InstallOptions { operator })
@@ -195,21 +184,47 @@ async fn main() -> Result<()> {
     }
 }
 
-/// AM37's sweep, off the async threads: it sleeps through its grace.
-async fn sweep(when: &str) {
-    let swept = tokio::task::spawn_blocking(|| {
-        storm_runtime::platform::sweep_account(std::time::Duration::from_millis(500))
+/// What ends a host run by hand or by systemd and launchd: SIGTERM or
+/// SIGINT.
+#[cfg(unix)]
+fn stop_signal() -> Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
     })
-    .await;
-    match swept {
-        Ok((0, _)) => tracing::info!(when, "account sweep: nothing left over"),
-        Ok((hung_up, killed)) => tracing::info!(
-            when,
-            hung_up,
-            killed,
-            "account sweep: ended this account's other processes"
+}
+
+/// What ends a host run by hand in a console: Ctrl+C, Ctrl+Break, closing
+/// the window, or the machine shutting down. The service has its own.
+#[cfg(windows)]
+fn stop_signal() -> Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+    let (mut c, mut b, mut close, mut shutdown) =
+        (ctrl_c()?, ctrl_break()?, ctrl_close()?, ctrl_shutdown()?);
+    Ok(async move {
+        tokio::select! {
+            _ = c.recv() => {}
+            _ = b.recv() => {}
+            _ = close.recv() => {}
+            _ = shutdown.recv() => {}
+        }
+    })
+}
+
+/// After enrolling the installed host: the service runs from now on (AM50).
+fn start_the_service() {
+    #[cfg(windows)]
+    match storm_runtime::platform::enable_and_start() {
+        Ok(()) => println!("Started the StormRuntime service; it starts with Windows from now on."),
+        Err(e) => println!(
+            "Enrolled, but the service did not start: {e:#}\n\
+             Start it from an elevated shell: Start-Service StormRuntime"
         ),
-        Err(e) => tracing::warn!(when, error = %e, "account sweep did not finish"),
     }
 }
 

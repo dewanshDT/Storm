@@ -92,6 +92,9 @@ pub enum Command {
         /// Started from a note: the launch gains the fixed opening prompt.
         #[serde(default)]
         context: bool,
+        /// The agent's own session to resume (decision 89).
+        #[serde(default)]
+        resume: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -175,6 +178,8 @@ struct Events {
     ended: Mutex<Option<SessionEnd>>,
     wake: Notify,
     title: Mutex<TitleObserver>,
+    /// The agent's own session id, as last reported (decision 89).
+    harness: Mutex<Option<String>>,
 }
 
 impl SessionEvents for Events {
@@ -200,6 +205,8 @@ struct HostSession {
     running_sent: AtomicBool,
     /// The title last acknowledged by the server, and when it was posted.
     title_sent: Mutex<(Title, Option<std::time::Instant>)>,
+    /// The agent's session id last acknowledged by the server.
+    harness_sent: Mutex<Option<String>>,
     /// Input, in order, for this session's writer task. A queue so the link
     /// never waits on a PTY, and one writer so keystrokes never reorder.
     input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -207,6 +214,9 @@ struct HostSession {
 
 /// Bridges listening for unsolicited messages, by `(session, connection id)`.
 type Subscribers = HashMap<(String, String), Vec<tokio::sync::mpsc::Sender<serde_json::Value>>>;
+
+/// `harness-session` handles: handle → (session, provider, its events).
+type HarnessHandles = HashMap<String, (String, String, Arc<Events>)>;
 
 /// The table that survives a restart: which sessions this host was running.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -234,6 +244,7 @@ pub struct Host {
     /// Bridges listening for a session's unsolicited messages, by
     /// `(session, connection id)`.
     subscribers: Mutex<Subscribers>,
+    harness_handles: Mutex<HarnessHandles>,
     opencode_settings: Option<serde_json::Value>,
     /// Set once by [`Host::shutdown`]: from then on nothing is posted, so an
     /// ending the shutdown caused never reaches the server as `stopped`.
@@ -290,6 +301,7 @@ impl Host {
             reauth: Notify::new(),
             handles: crate::mcp::Handles::default(),
             subscribers: Mutex::new(HashMap::new()),
+            harness_handles: Mutex::new(HashMap::new()),
             opencode_settings,
             shutting_down: AtomicBool::new(false),
             starting: Mutex::new(HashMap::new()),
@@ -357,6 +369,14 @@ impl Host {
             // It stages pasted images (`terminal.image`, 85e), so the server
             // may send it one instead of refusing the paste.
             "images": true,
+            // The providers whose sessions it can resume (decision 89). A
+            // host without this would start a resume as a new conversation.
+            "resume": self
+                .providers
+                .iter()
+                .map(|p| p.id().as_str())
+                .filter(|id| crate::harness::PROVIDERS.contains(id))
+                .collect::<Vec<_>>(),
         })
     }
 
@@ -571,6 +591,7 @@ impl Host {
         for s in self.sessions.lock().unwrap().values() {
             let end = *s.events.ended.lock().unwrap();
             let mut entry = with_title(status_json(end), s.events.title.lock().unwrap().current());
+            entry = with_harness(entry, s.events.harness.lock().unwrap().as_deref());
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -684,6 +705,7 @@ impl Host {
                 terminal,
                 mcp,
                 context,
+                resume,
             } => {
                 self.start(
                     session,
@@ -693,6 +715,7 @@ impl Host {
                     terminal,
                     mcp,
                     context,
+                    resume,
                 )
                 .await
             }
@@ -790,6 +813,7 @@ impl Host {
         size: Size,
         mcp: Vec<crate::mcp::McpGrant>,
         context: bool,
+        resume: Option<String>,
     ) {
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
@@ -819,12 +843,18 @@ impl Host {
             refuse("bad size");
             return self.post_start_failure(&id).await;
         };
+        if let Some(r) = &resume
+            && !crate::harness::valid_id(&provider_id, r)
+        {
+            refuse("not a session this provider can resume");
+            return self.post_start_failure(&id).await;
+        }
         // The provider's MCP config (AM32). Written before the agent starts;
         // a session whose config cannot be written does not start, rather
         // than start without `--strict-mcp-config` and load the host's own
         // MCP servers (G-D12).
-        let launch = match self.mcp_launch(&id, &provider_id, &mcp) {
-            Ok(extras) => crate::mcp::with_opening_prompt(extras, &provider_id, context),
+        let mut launch = match self.mcp_launch(&id, &provider_id, &mcp) {
+            Ok(extras) => extras,
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
                 return self.post_start_failure(&id).await;
@@ -835,7 +865,25 @@ impl Host {
             ended: Mutex::new(None),
             wake: Notify::new(),
             title: Mutex::new(TitleObserver::default()),
+            harness: Mutex::new(None),
         });
+        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events) {
+            Ok(extras) => {
+                launch.args.extend(extras.args);
+                launch.env.extend(extras.env);
+            }
+            // A session that cannot report its id still runs; it only cannot
+            // be resumed. A resume still names its conversation.
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not set up resume");
+                if resume.is_some() {
+                    return self.post_start_failure(&id).await;
+                }
+            }
+        }
+        // A resumed conversation has read its note already.
+        let launch =
+            crate::mcp::with_opening_prompt(launch, &provider_id, context && resume.is_none());
         let spec = SessionSpec {
             session_id: id.clone(),
             workspace: dir,
@@ -884,6 +932,7 @@ impl Host {
             sent: Mutex::new(0),
             running_sent: AtomicBool::new(false),
             title_sent: Mutex::new((Title::default(), None)),
+            harness_sent: Mutex::new(None),
             input,
         });
         // The writer: one per session, in order. Each write is bounded by the
@@ -1005,9 +1054,11 @@ impl Host {
             }
 
             let title = s.events.title.lock().unwrap().current().clone();
+            let harness = s.events.harness.lock().unwrap().clone();
             let end = *s.events.ended.lock().unwrap();
             let (sent, posted_at) = s.title_sent.lock().unwrap().clone();
-            if end.is_none() && title != sent {
+            let harness_changed = harness != *s.harness_sent.lock().unwrap();
+            if end.is_none() && (title != sent || harness_changed) {
                 let wait =
                     posted_at.map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()));
                 if !wait.is_zero() {
@@ -1017,13 +1068,14 @@ impl Host {
                     }
                     continue;
                 }
-                let body = with_title(status_json(None), &title);
+                let body = with_harness(with_title(status_json(None), &title), harness.as_deref());
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
                 {
                     Ok(st) if st.is_success() => {
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
+                        *s.harness_sent.lock().unwrap() = harness;
                         retry = Duration::from_millis(250);
                     }
                     _ => {
@@ -1034,7 +1086,10 @@ impl Host {
                 continue;
             }
             if let Some(end) = end {
-                let body = with_title(status_json(Some(end)), &title);
+                let body = with_harness(
+                    with_title(status_json(Some(end)), &title),
+                    harness.as_deref(),
+                );
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
@@ -1087,13 +1142,43 @@ impl Host {
             &crate::mcp::session_dir(&self.state_dir, session),
             grants,
             &handle,
-            &crate::mcp::socket_path(&self.state_dir),
+            &self.socket_address(),
             &exe,
             self.opencode_settings.as_ref(),
         )?;
         if extras != crate::mcp::LaunchExtras::default() {
             self.handles.register(&handle, session, grants);
         }
+        Ok(extras)
+    }
+
+    /// What a session's launch gains so the agent's own session id reaches
+    /// this host, with its handle registered (decision 89).
+    fn harness_launch(
+        &self,
+        session: &str,
+        provider: &str,
+        resume: Option<&str>,
+        events: &Arc<Events>,
+    ) -> Result<crate::mcp::LaunchExtras> {
+        if !crate::harness::PROVIDERS.contains(&provider) {
+            return Ok(Default::default());
+        }
+        let handle = crate::mcp::new_handle();
+        let exe = std::env::current_exe().context("finding this binary for the hook")?;
+        let (extras, known) = crate::harness::launch(
+            provider,
+            &crate::mcp::session_dir(&self.state_dir, session),
+            &handle,
+            &self.socket_address(),
+            &exe,
+            resume,
+        )?;
+        *events.harness.lock().unwrap() = known;
+        self.harness_handles.lock().unwrap().insert(
+            handle,
+            (session.to_string(), provider.to_string(), events.clone()),
+        );
         Ok(extras)
     }
 
@@ -1177,6 +1262,10 @@ impl Host {
 
     fn forget_mcp(&self, session: &str) {
         self.handles.forget_session(session);
+        self.harness_handles
+            .lock()
+            .unwrap()
+            .retain(|_, (s, _, _)| s != session);
         self.subscribers
             .lock()
             .unwrap()
@@ -1184,23 +1273,24 @@ impl Host {
         let _ = std::fs::remove_dir_all(crate::mcp::session_dir(&self.state_dir, session));
     }
 
-    /// `run/mcp.sock`, in a `0700` directory: only this account's processes
-    /// (the bridges it launched) can connect.
-    fn bind_socket(&self) -> Result<tokio::net::UnixListener> {
+    /// `run/mcp.sock`, in a `0700` directory (a named pipe on Windows,
+    /// AM55): only this account's processes (the bridges it launched) can
+    /// connect.
+    fn bind_socket(&self) -> Result<crate::platform::ipc::Listener> {
         let path = crate::mcp::socket_path(&self.state_dir);
-        crate::mcp::private_dir(path.parent().expect("socket has a parent"))?;
-        let _ = std::fs::remove_file(&path);
-        let listener = tokio::net::UnixListener::bind(&path)
-            .with_context(|| format!("binding {}", path.display()))?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        Ok(listener)
+        crate::platform::ipc::Listener::bind(&path)
+            .with_context(|| format!("binding {}", path.display()))
     }
 
-    async fn serve_socket(self: Arc<Self>, listener: tokio::net::UnixListener) {
+    /// What a session's bridges and hooks are told to connect to.
+    fn socket_address(&self) -> PathBuf {
+        crate::platform::ipc::address(&crate::mcp::socket_path(&self.state_dir)).into()
+    }
+
+    async fn serve_socket(self: Arc<Self>, mut listener: crate::platform::ipc::Listener) {
         loop {
             match listener.accept().await {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     tokio::spawn(self.clone().bridge_connection(stream));
                 }
                 Err(e) => {
@@ -1211,14 +1301,37 @@ impl Host {
         }
     }
 
+    /// The agent's hook or plugin saying which conversation it is on. Only
+    /// a handle this host gave out, and only an id its provider could have
+    /// made, is taken.
+    fn harness_reported(&self, report: crate::harness::HarnessLine) {
+        let handles = self.harness_handles.lock().unwrap();
+        let Some((session, provider, events)) = handles.get(&report.handle) else {
+            return;
+        };
+        if !crate::harness::valid_id(provider, &report.harness_session) {
+            tracing::warn!(%session, "a harness session id that is not one; ignored");
+            return;
+        }
+        let mut current = events.harness.lock().unwrap();
+        if current.as_deref() != Some(&report.harness_session) {
+            tracing::info!(%session, harness = %report.harness_session, "harness session");
+            *current = Some(report.harness_session);
+            events.wake.notify_one();
+        }
+    }
+
     /// One bridge connection: a message to forward, or a subscription.
-    async fn bridge_connection(self: Arc<Self>, stream: tokio::net::UnixStream) {
+    async fn bridge_connection(self: Arc<Self>, stream: crate::platform::ipc::Stream) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-        let (read, mut write) = stream.into_split();
+        let (read, mut write) = tokio::io::split(stream);
         let mut line = String::new();
         let mut reader = tokio::io::BufReader::new(read.take(MCP_LINE_MAX));
         if reader.read_line(&mut line).await.is_err() {
             return;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::HarnessLine>(&line) {
+            return self.harness_reported(report);
         }
         let Ok(request) = serde_json::from_str::<crate::mcp::BridgeLine>(&line) else {
             return;
@@ -1306,24 +1419,30 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
 /// with `dir` and its parent `0700`. Returns the file's path.
 fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     std::fs::create_dir_all(dir).context("creating the inbox")?;
     for d in [dir.parent(), Some(dir)].into_iter().flatten() {
-        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+        crate::platform::tighten_private_dir(d)?;
     }
     let tmp = dir.join(format!(".{name}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-        .context("creating the image file")?;
+    let mut f = crate::platform::open_private(
+        &tmp,
+        std::fs::OpenOptions::new().write(true).create_new(true),
+    )
+    .context("creating the image file")?;
     f.write_all(bytes)?;
     f.sync_all()?;
     let path = dir.join(name);
     std::fs::rename(&tmp, &path)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// A status body with the agent's own session id, once there is one.
+fn with_harness(mut body: serde_json::Value, harness: Option<&str>) -> serde_json::Value {
+    if let Some(id) = harness {
+        body["harness_session"] = json!(id);
+    }
+    body
 }
 
 /// A status body with the session's title and activity (D15 AM43). A null
@@ -1432,21 +1551,20 @@ mod tests {
         (url, seen)
     }
 
+    #[cfg(unix)]
     fn alive(pid: i32) -> bool {
         rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
     }
 
     #[test]
     fn a_staged_image_is_private_and_whole() {
-        use std::os::unix::fs::PermissionsExt;
         let state = tempfile::tempdir().unwrap();
         let inbox = state.path().join("sessions/ags_X/inbox");
         let path = write_private(&inbox, "img_A.png", b"\x89PNG").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
-        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(std::path::Path::new(&path)), 0o600);
-        assert_eq!(mode(&inbox), 0o700);
-        assert_eq!(mode(inbox.parent().unwrap()), 0o700);
+        crate::platform::assert_private(std::path::Path::new(&path), 0o600);
+        crate::platform::assert_private(&inbox, 0o700);
+        crate::platform::assert_private(inbox.parent().unwrap(), 0o700);
         let left: Vec<_> = std::fs::read_dir(&inbox).unwrap().collect();
         assert_eq!(left.len(), 1, "no temporary file left");
     }
@@ -1454,6 +1572,7 @@ mod tests {
     /// D15 AM46: an image that does not match what the server announced is
     /// not staged, and the server is told why.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn a_damaged_image_is_reported_not_staged() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
@@ -1488,6 +1607,7 @@ mod tests {
                 terminal: Size { cols: 80, rows: 24 },
                 mcp: Vec::new(),
                 context: false,
+                resume: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -1539,9 +1659,209 @@ mod tests {
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    /// A host whose `claude-code` and `opencode` are `/bin/sh` running
+    /// `script` (the launch's own arguments follow as `$0`, `$1`, …).
+    #[cfg(unix)]
+    async fn harness_host(
+        script: &str,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let mut toml = format!(
+            "workspace_roots = [{:?}]\n",
+            roots.path().display().to_string()
+        );
+        for id in ["claude-code", "opencode"] {
+            toml.push_str(&format!(
+                "[[providers]]\nid = {id:?}\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\n"
+            ));
+        }
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        let listener = host.bind_socket().unwrap();
+        tokio::spawn(host.clone().serve_socket(listener));
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, state, roots)
+    }
+
+    #[cfg(unix)]
+    fn harness_start(
+        session: &str,
+        provider: &str,
+        resume: Option<&str>,
+        context: bool,
+    ) -> Command {
+        Command::Start {
+            session: session.into(),
+            workspace: "w".into(),
+            provider: provider.into(),
+            interaction: Some("terminal".into()),
+            terminal: Size {
+                cols: 200,
+                rows: 24,
+            },
+            mcp: Vec::new(),
+            context,
+            resume: resume.map(str::to_string),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !ok() {
+            assert!(std::time::Instant::now() < deadline, "never saw {what}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn harness_posts(seen: &Mutex<Vec<(String, serde_json::Value)>>, session: &str) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with(&format!("/{session}/status")))
+            .filter_map(|(_, b)| b["harness_session"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Decision 89: the id a fresh Claude Code session starts with is
+    /// reported, then whatever its hook says, but only through its own
+    /// handle and only as an id Claude Code could have made.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn the_agents_session_id_is_reported_as_it_changes() {
+        let (host, seen, state, _roots) = harness_host("exec sleep 1000").await;
+        host.clone()
+            .handle(harness_start("ags_HARN", "claude-code", None, false))
+            .await;
+        let first = host
+            .session("ags_HARN")
+            .unwrap()
+            .events
+            .harness
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        assert!(crate::harness::valid_id("claude-code", &first));
+        wait_for("the first id", || {
+            harness_posts(&seen, "ags_harn").contains(&first)
+        })
+        .await;
+
+        let handle = host
+            .harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == "ags_HARN")
+            .map(|(h, _)| h.clone())
+            .unwrap();
+        let socket = crate::mcp::socket_path(state.path());
+        let cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63";
+        crate::harness::send(&socket, "not-a-handle".into(), cleared.into()).unwrap();
+        crate::harness::send(&socket, handle.clone(), "ses_notclaude".into()).unwrap();
+        crate::harness::send(&socket, handle.clone(), cleared.into()).unwrap();
+        wait_for("the cleared id", || {
+            harness_posts(&seen, "ags_harn").last().map(String::as_str) == Some(cleared)
+        })
+        .await;
+        assert_eq!(
+            harness_posts(&seen, "ags_harn"),
+            [first, cleared.to_string()]
+        );
+
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert_eq!(hello["sessions"][0]["harness_session"], cleared);
+        assert_eq!(hello["resume"], json!(["claude-code", "opencode"]));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A resume names the conversation and skips the opening prompt; an id
+    /// the provider could not have made never reaches a command line.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_resume_reopens_the_conversation_or_fails_to_start() {
+        let (host, seen, _state, _roots) =
+            harness_host(r#"echo "ARGS $0 $*"; exec sleep 1000"#).await;
+        let ses = "ses_ed5303b0dffeRnwXZdkDih2uxK";
+        host.clone()
+            .handle(harness_start("ags_RES", "opencode", Some(ses), true))
+            .await;
+        wait_for("the resumed id", || {
+            harness_posts(&seen, "ags_res").contains(&ses.to_string())
+        })
+        .await;
+        let output = || -> String {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/ags_res/terminal/output"))
+                .map(|(_, b)| {
+                    String::from_utf8_lossy(
+                        &BASE64
+                            .decode(b["data"].as_str().unwrap().as_bytes())
+                            .unwrap(),
+                    )
+                    .into_owned()
+                })
+                .collect()
+        };
+        wait_for("the arguments", || output().contains("ARGS")).await;
+        let out = output();
+        assert!(out.contains(&format!("-s {ses}")), "{out}");
+        assert!(!out.contains("--prompt"), "{out}");
+
+        host.clone()
+            .handle(harness_start(
+                "ags_BAD",
+                "claude-code",
+                Some("--dangerously-skip-permissions"),
+                false,
+            ))
+            .await;
+        assert!(host.session("ags_BAD").is_none());
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_bad/status") && b["end_reason"] == "start_failure")
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
     /// D15 AM43: the host reads the agent's title from its output and posts
     /// the name and activity, once per change, and `hello` carries them.
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn the_agents_title_is_reported_once_per_change() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
@@ -1580,6 +1900,7 @@ mod tests {
                 terminal: Size { cols: 80, rows: 24 },
                 mcp: Vec::new(),
                 context: false,
+                resume: None,
             })
             .await;
 
@@ -1628,6 +1949,7 @@ mod tests {
     /// can end — posts no ending, and leaves `sessions.json` listing it, so
     /// the next `hello` reports `failed (host_restart)` (§13).
     #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
     async fn a_shutdown_ends_every_session_and_posts_no_ending() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
@@ -1669,6 +1991,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 terminal: Size { cols: 80, rows: 24 },
                 mcp: Vec::new(),
                 context: false,
+                resume: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -1760,8 +2083,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .save(state.path())
         .unwrap();
         let config: RuntimeConfig = toml::from_str(&format!(
-            "workspace_roots = [\"{}\"]\nmax_sessions = 2",
-            roots.path().display()
+            "workspace_roots = [{:?}]\nmax_sessions = 2",
+            roots.path().display().to_string()
         ))
         .unwrap();
         let host = Host::with_providers(state.path(), config, providers).unwrap();
@@ -1779,6 +2102,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             terminal: Size { cols: 80, rows: 24 },
             mcp: Vec::new(),
             context: false,
+            resume: None,
         }
     }
 

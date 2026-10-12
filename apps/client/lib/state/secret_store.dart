@@ -67,10 +67,21 @@ class SecretStore {
   /// only after the secure write has come back. The reverse order loses the
   /// credential outright if the write fails, which on this data means
   /// re-pairing a device to reach notes that were working a moment ago.
+  ///
+  /// **One `read` per key, never `readAll`.** `readAll` is a single
+  /// `SecItemCopyMatching` with `kSecMatchLimitAll` *and* `kSecReturnData`,
+  /// which the file-based keychain [_macOptions] selects refuses with
+  /// `errSecParam` (-50) — Apple documents that combination as unsupported for
+  /// password items. Writes are per key, so they succeeded; only the read
+  /// failed, and it failed on every launch: the Mac app came up with an empty
+  /// device secret, the login it was sent to was rejected, and the rejection
+  /// unpaired it. The keys are a fixed list, so there is nothing to enumerate.
   Future<Map<String, String>> load(SharedPreferences prefs) async {
-    Map<String, String> secure;
+    final secure = <String, String?>{};
     try {
-      secure = await _secure.readAll();
+      for (final key in secretKeys) {
+        secure[key] = await _secure.read(key: key);
+      }
     } catch (e) {
       _degraded = true;
       debugPrint('secure storage unreadable, falling back to prefs: $e');

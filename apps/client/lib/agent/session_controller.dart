@@ -49,6 +49,10 @@ class SessionController extends ChangeNotifier {
   Timer? _resizeTimer;
   bool _focusPending = false;
 
+  /// The size the host's PTY has, as last reported or last set from here.
+  (int, int)? _hostSize;
+  bool _claimedOnOpen = false;
+
   /// How long keystrokes gather before they are sent as one POST.
   static const coalesce = Duration(milliseconds: 15);
 
@@ -112,6 +116,13 @@ class SessionController extends ChangeNotifier {
     switch (event) {
       case StatusEvent(:final session):
         this.session = session;
+        _hostSize = (session.cols, session.rows);
+        // Opening a session is using it. Another device may have sized the
+        // PTY since, and its agent would draw for that height on this screen.
+        if (!_claimedOnOpen) {
+          _claimedOnOpen = true;
+          _claimIfSizeDiffers();
+        }
         connected = true;
         streamError = null;
         _backoff = const Duration(seconds: 1);
@@ -137,6 +148,9 @@ class SessionController extends ChangeNotifier {
 
   void _queueInput(Uint8List bytes) {
     if (session?.ended ?? false) return;
+    // Typing here is using this device, so the PTY follows it (freeze §11.4).
+    // Only the device being typed on claims, so two open ones never fight.
+    _claimIfSizeDiffers();
     _pending.add(bytes);
     _flush ??= Timer(coalesce, _send);
   }
@@ -170,6 +184,15 @@ class SessionController extends ChangeNotifier {
     _queueResize();
   }
 
+  /// Sends this terminal's size when the host's PTY has another one: a
+  /// resize from another device, or one of ours that was lost. Either left
+  /// the agent drawing for a shorter screen, with blank rows under it.
+  void _claimIfSizeDiffers() {
+    final cols = terminal.cols, rows = terminal.rows;
+    if (cols <= 0 || rows <= 0 || _hostSize == null) return;
+    if (_hostSize != (cols, rows) && _resizeTimer?.isActive != true) focus();
+  }
+
   void _queueResize() {
     _resizeTimer?.cancel();
     _resizeTimer = Timer(const Duration(milliseconds: 150), () async {
@@ -179,6 +202,7 @@ class SessionController extends ChangeNotifier {
       _focusPending = false;
       try {
         await api.resize(sessionId, cols, rows, focus: focus);
+        _hostSize = (cols, rows);
       } catch (_) {
         // A lost resize is redone by the next one; nothing to tell anyone.
       }

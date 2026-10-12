@@ -69,6 +69,11 @@ impl Vault {
                     if s.starts_with('.') {
                         bail!("hidden path segments are not allowed: {rel}");
                     }
+                    if cfg!(windows)
+                        && let Some(why) = windows_name_problem(&s)
+                    {
+                        bail!("{why}, which Windows cannot store: {rel}");
+                    }
                     out.push(part);
                 }
                 Component::CurDir => {}
@@ -364,6 +369,40 @@ pub fn hash(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
 }
 
+/// Why Windows cannot store a file or folder called `name`, or `None`
+/// (PLAN 99, W-S4). Checked only on a Windows server: elsewhere these are
+/// ordinary names. Without it `con.md` opens the console device and
+/// `a:b.md` writes an NTFS alternate data stream of `a`.
+pub fn windows_name_problem(name: &str) -> Option<&'static str> {
+    if let Some(c) = name
+        .chars()
+        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\'))
+    {
+        return Some(match c {
+            ':' => "it holds a colon",
+            _ => "it holds one of < > \" | ? * \\",
+        });
+    }
+    if name.chars().any(|c| (c as u32) < 0x20) {
+        return Some("it holds a control character");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("it ends in a dot or a space");
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0');
+    reserved.then_some("it is a reserved device name")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,5 +632,50 @@ mod tests {
     fn hashing_is_stable_and_distinguishing() {
         assert_eq!(hash("same"), hash("same"));
         assert_ne!(hash("a"), hash("b"));
+    }
+
+    #[test]
+    fn windows_refuses_what_ntfs_cannot_store_as_a_file() {
+        for bad in [
+            "a:b.md",
+            "what?.md",
+            "x*.md",
+            "pipe|.md",
+            "q\"t.md",
+            "<x>.md",
+            "back\\slash.md",
+            "tab\there.md",
+            "trailing.",
+            "trailing ",
+            "con.md",
+            "CON",
+            "Nul.txt",
+            "com1.md",
+            "LPT9.md",
+            "aux .md",
+        ] {
+            assert!(windows_name_problem(bad).is_some(), "{bad:?}");
+        }
+        for ok in [
+            "Note.md",
+            "con-artist.md",
+            "COM10.md",
+            "com0.md",
+            "lpt.md",
+            "a.b.md",
+            "Ünïcode ✓.md",
+        ] {
+            assert_eq!(windows_name_problem(ok), None, "{ok:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_vault_refuses_a_device_or_stream_name() {
+        let dir = tempdir::TempDir::new("vault").unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        assert!(vault.resolve("con.md").is_err());
+        assert!(vault.resolve("Projects/a:b.md").is_err());
+        assert!(vault.resolve("Projects/Note.md").is_ok());
     }
 }

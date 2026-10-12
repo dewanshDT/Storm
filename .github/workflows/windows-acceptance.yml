@@ -1,0 +1,142 @@
+name: Windows acceptance
+
+# Decision 99 on a real Windows machine: the runner. The Runtime Host
+# (AC-W1–W9): the branch's storm-runtime installed as the StormRuntime service
+# under NT SERVICE\StormRuntime, enrolled with a throwaway storm-server built
+# from the same commit, and driven through install, enrollment, providers,
+# sessions, process lifecycle, filesystem, the pipe, secrets, revocation and
+# uninstall by apps/runtime/tests/windows_acceptance.py. The server (AC-WS1,
+# WS2, WS5, WS6): storm-server's per-user Scheduled Task, by
+# tools/windows-server-acceptance.py. The runner is disposable, which is why
+# the harnesses may install services and tasks here.
+#
+# What a runner cannot do — a logged-in Claude Code or OpenCode taking a
+# prompt, the handoff to a phone, a reboot — is reported MANUAL, never PASS.
+# Nothing here publishes anything (decision 45).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["acceptance/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-host:
+    name: Windows Runtime Host (AC-W1–W9)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: Build storm-server and storm-runtime
+        shell: bash
+        run: |
+          (cd apps/server && cargo build)
+          (cd apps/runtime && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}\apps\server\target\debug\storm-server.exe
+          RUNTIME_BIN: ${{ github.workspace }}\apps\runtime\target\debug\storm-runtime.exe
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}\windows-acceptance
+        run: python apps/runtime/tests/windows_acceptance.py
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance-logs
+          path: ${{ runner.temp }}\windows-acceptance
+          if-no-files-found: ignore
+          retention-days: 14
+
+  server:
+    name: Windows server (Scheduled Task)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
+      - name: Build storm-server
+        shell: bash
+        run: (cd apps/server && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}\apps\server\target\debug\storm-server.exe
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}\windows-server-acceptance
+        run: python tools/windows-server-acceptance.py
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-server-acceptance-logs
+          path: ${{ runner.temp }}\windows-server-acceptance
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # deploy/install.ps1 end to end, from zips built here: the server for this
+  # user, the Runtime Host as a service, enrolled through the pipe from the
+  # server beside it (no visible secret), and a first workspace.
+  installer:
+    name: Windows installer (install.ps1)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: The script parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/deploy/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors; exit 1 }
+      - name: Build and package as a release does
+        shell: pwsh
+        run: |
+          cargo build --manifest-path apps/server/Cargo.toml
+          cargo build --manifest-path apps/runtime/Cargo.toml
+          New-Item -ItemType Directory dist, pkg/server/web, pkg/runtime | Out-Null
+          Copy-Item apps/server/target/debug/storm-server.exe, apps/server/target/debug/storm-serverw.exe pkg/server/
+          Set-Content pkg/server/web/index.html '<!doctype html><title>Storm</title>'
+          Copy-Item apps/runtime/target/debug/storm-runtime.exe pkg/runtime/
+          Compress-Archive pkg/server/* dist/storm-server-windows-x86_64.zip
+          Compress-Archive pkg/runtime/* dist/storm-runtime-windows-x86_64.zip
+          Get-ChildItem dist/*.zip | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist/checksums.txt
+      - name: Install everything
+        shell: pwsh
+        # The account from stdin, as install.sh's --password-stdin (84g).
+        run: "'ci-installer-password-1' | pwsh -NoProfile -File ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes -Workspace scratch -PasswordStdin"
+      - name: Check it
+        shell: pwsh
+        run: |
+          $ok = $true
+          function Check($what, $cond) { if ($cond) { "PASS  $what" } else { "FAIL  $what"; $script:ok = $false } }
+          Check 'the server answers' ((Invoke-WebRequest http://127.0.0.1:8484/v1/health -UseBasicParsing).StatusCode -eq 200)
+          Check 'the service runs' ((Get-Service StormRuntime).Status -eq 'Running')
+          & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" check
+          Check 'the host is enrolled with the server beside it' ($LASTEXITCODE -eq 0)
+          Check 'the first workspace exists' (Test-Path "$env:ProgramData\StormRuntime\workspaces\scratch")
+          Check 'the firewall rule is private-only' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
+          ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes
+          Check 're-running upgrades in place' ($? -and (Get-Service StormRuntime).Status -eq 'Running')
+          & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall --purge
+          & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" uninstall
+          if (-not $ok) { exit 1 }

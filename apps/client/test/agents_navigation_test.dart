@@ -93,7 +93,7 @@ void main() {
         await tester.tap(find.byKey(const Key('session-ags_live')));
         await tester.pumpAndSettle();
         expect(location(c), '/agents/s/ags_live');
-        expect(find.byKey(const Key('chip-details')), findsOneWidget);
+        expect(find.byKey(const Key('session-header')), findsOneWidget);
 
         // Live: the extra keys are a keyboard accessory — absent with the
         // keyboard down, there with Done while it is up, gone again after.

@@ -4,6 +4,10 @@
 //! the env file, widen hardening for a custom data root, and enable the unit
 //! so the server comes back after a reboot — the Tailscale-shaped half.
 
+// Windows installs with `install_windows`; `serve` still uses the private
+// directory rules here.
+#![cfg_attr(windows, allow(dead_code))]
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

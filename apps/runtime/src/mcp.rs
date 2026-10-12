@@ -10,7 +10,8 @@
 //!   asks before each gateway tool;
 //! - the **session handles**: a random value per session that pairs a bridge
 //!   with its session on the daemon's socket, never accepted off the host;
-//! - the **daemon socket** (`run/mcp.sock`, in a `0700` directory): one line
+//! - the **daemon socket** (`run/mcp.sock`, in a `0700` directory; a named
+//!   pipe on Windows, AM55): one line
 //!   in from a bridge, the server's answer streamed back, **at most once** —
 //!   while the link is down a call fails at once with `storm_unreachable`.
 //!
@@ -58,31 +59,22 @@ fn slug_ok(slug: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// Creates a directory `0700`, created with that mode (the A2 pattern).
+/// Creates a directory private to this account (`0700`, created with that
+/// mode: the A2 pattern), and makes it so if it already existed.
 pub fn private_dir(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    if !dir.exists() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("tightening {}", dir.display()))?;
-    Ok(())
+    crate::platform::tighten_private_dir(dir).with_context(|| format!("creating {}", dir.display()))
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let mut f = crate::platform::open_private(
+        path,
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )
+    .with_context(|| format!("creating {}", path.display()))?;
     f.write_all(bytes)?;
     Ok(())
 }
@@ -337,15 +329,8 @@ mod tests {
         assert_eq!(gh["args"], json!(["mcp-bridge", "github"]));
         assert_eq!(gh["env"][HANDLE_ENV], "handle-1");
         assert_eq!(config["mcpServers"].as_object().unwrap().len(), 2);
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&session).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        crate::platform::assert_private(&session, 0o700);
+        crate::platform::assert_private(&path, 0o600);
     }
 
     #[test]

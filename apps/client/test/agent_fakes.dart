@@ -14,6 +14,7 @@ Map<String, dynamic> agentHost({
   List<String> providers = const ['claude-code', 'opencode', 'shell'],
   List<String> workspaces = const ['storm', 'site'],
   List<String>? workspaceRoots,
+  List<String>? resumes = const ['claude-code', 'opencode'],
 }) => {
   'id': id,
   'name': name,
@@ -26,6 +27,7 @@ Map<String, dynamic> agentHost({
     'workspaces': workspaces,
     'workspace_roots': ?workspaceRoots,
     'max_sessions': 8,
+    'resume': ?resumes,
   },
 };
 
@@ -42,6 +44,8 @@ Map<String, dynamic> agentSession(
   String? endReason,
   int? exitCode,
   List<Map<String, dynamic>>? integrations,
+  String? harnessSession,
+  String? resumedFrom,
 }) => {
   'id': id,
   'host_id': hostId,
@@ -64,6 +68,8 @@ Map<String, dynamic> agentSession(
   'write_vault_id': writeVaultId,
   'wrote_count': wroteCount,
   'integrations': ?integrations,
+  'harness_session': harnessSession,
+  'resumed_from': resumedFrom,
 };
 
 class FakeAgentServer {
@@ -140,6 +146,7 @@ class FakeAgentServer {
     if (path == '/v1/agent/sessions' && req.method == 'POST') {
       final body = jsonDecode(req.body) as Map<String, dynamic>;
       final ctx = body['context'] as Map<String, dynamic>?;
+      final resumed = session(body['resume_of'] as String? ?? '');
       final made = agentSession(
         'ags_new${sessions.length}',
         status: 'starting',
@@ -149,6 +156,8 @@ class FakeAgentServer {
         provider: body['provider'] as String? ?? defaultProvider,
         context: ctx == null ? null : {...ctx, 'title': 'Context note'},
         writeVaultId: body['write_vault_id'] as String?,
+        harnessSession: resumed?['harness_session'] as String?,
+        resumedFrom: resumed?['id'] as String?,
       );
       sessions.add(made);
       return _json({

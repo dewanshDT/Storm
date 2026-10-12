@@ -75,10 +75,15 @@ class AgentOverview {
       if (!s.ended) s,
   ];
 
-  List<AgentSession> get ended => [
-    for (final s in sessions)
-      if (s.ended) s,
-  ];
+  /// Less any session a later one resumed: that conversation is listed
+  /// once, under its latest session.
+  List<AgentSession> get ended {
+    final resumed = {for (final s in sessions) ?s.resumedFrom};
+    return [
+      for (final s in sessions)
+        if (s.ended && !resumed.contains(s.id)) s,
+    ];
+  }
 
   List<AgentHost> get online => [
     for (final h in hosts)
@@ -90,6 +95,26 @@ class AgentOverview {
 
   AgentSession? byId(String id) =>
       sessions.where((s) => s.id == id).firstOrNull;
+
+  /// Why [s]'s conversation can't be reopened now, or null when it can or
+  /// there is none to reopen (decision 89).
+  String? resumeBlocker(AgentSession s) {
+    if (!s.ended || !s.hasConversation) return null;
+    final host = hosts.where((h) => h.id == s.hostId).firstOrNull;
+    if (host == null || !host.online) {
+      return "Can't resume while ${host?.name ?? 'its host'} is offline";
+    }
+    if (!host.resumes.contains(s.provider)) {
+      return 'Update storm-runtime on ${host.name} to resume';
+    }
+    final open = sessions.any(
+      (o) => !o.ended && o.harnessSession == s.harnessSession,
+    );
+    return open ? 'This conversation is open in another session' : null;
+  }
+
+  bool canResume(AgentSession s) =>
+      s.ended && s.hasConversation && resumeBlocker(s) == null;
 }
 
 /// How often a visible list re-asks the server.
