@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_storm-server");
+#[cfg(unix)]
 const SCRIPT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/storm-backup.sh");
 
 fn storage_root(state: &Path) -> std::process::Output {
@@ -70,6 +71,8 @@ fn an_unreadable_registry_is_an_error_not_a_fallback() {
     assert_ne!(out.status.code(), Some(3), "{out:?}");
 }
 
+// The script needs bash and rsync; Windows backs up with `storm-server backup`.
+#[cfg(unix)]
 #[test]
 fn the_backup_copies_the_stored_root_when_the_env_file_disagrees() {
     // Prod's shape: the env file names an empty directory, the registry the
@@ -107,4 +110,39 @@ fn the_backup_copies_the_stored_root_when_the_env_file_disagrees() {
     );
     // The drift is in the log, not hidden by it.
     assert!(log.contains("stored; storm.env says"), "{log}");
+}
+
+/// `storm-server backup` (decision 99, W-S3), which Windows' nightly task
+/// runs: the same rule as the script, that the stored root wins over the
+/// flag, and snapshots that open.
+#[test]
+fn the_native_backup_copies_the_stored_root_when_the_flag_disagrees() {
+    let tmp = tempdir::TempDir::new("storm-backup-native").unwrap();
+    let stale = tmp.path().join("flag-root");
+    let real = tmp.path().join("notes");
+    let state = tmp.path().join("state");
+    let dest = tmp.path().join("backups");
+    fs::create_dir_all(&stale).unwrap();
+    fs::create_dir_all(real.join("personal")).unwrap();
+    fs::write(real.join("personal/Note.md"), "# kept\n").unwrap();
+    write_registry(&state, &real);
+
+    let out = Command::new(BIN)
+        .arg("backup")
+        .arg("--vault-root")
+        .arg(&stale)
+        .arg("--state")
+        .arg(&state)
+        .arg("--dest")
+        .arg(&dest)
+        .output()
+        .expect("running storm-server backup");
+    assert!(out.status.success(), "{out:?}");
+    let day = fs::read_dir(&dest).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(
+        fs::read_to_string(day.join("vaults").join("personal").join("Note.md")).unwrap(),
+        "# kept\n",
+        "the backup must hold the notes the server serves"
+    );
+    assert!(day.join("index").is_dir());
 }

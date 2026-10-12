@@ -6,7 +6,8 @@
 //! session runs, never by reading the terminal:
 //!
 //! - **`claude-code`**: a fresh session is started with `--session-id <uuid>`,
-//!   and every session gets a `SessionStart` hook (through `--settings`) that
+//!   and every session gets a `SessionStart` hook (through `--settings`, a
+//!   file in the session's directory) that
 //!   runs `storm-runtime harness-session`. The hook fires on startup, resume,
 //!   `/clear` and compaction, with the id the conversation now has.
 //! - **`opencode`**: no id can be chosen up front. `OPENCODE_CONFIG_DIR`
@@ -109,7 +110,13 @@ pub fn launch(
             let settings = json!({
                 "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hook}]}]}
             });
-            args.extend(["--settings".into(), settings.to_string().into()]);
+            // A file, not inline JSON: npm installs Claude Code on Windows as
+            // `claude.cmd`, and a batch file's arguments may hold no `"`
+            // (AM53; found by the Windows acceptance run).
+            private_dir(dir)?;
+            let path = dir.join("claude-settings.json");
+            write_private(&path, settings.to_string().as_bytes())?;
+            args.extend(["--settings".into(), path.into_os_string()]);
             Ok((LaunchExtras { args, env }, Some(id)))
         }
         "opencode" => {
@@ -198,7 +205,7 @@ pub(crate) fn send(socket: impl AsRef<Path>, handle: String, id: String) -> Resu
         harness_session: id,
     })?;
     line.push(b'\n');
-    let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+    let mut stream = crate::platform::ipc::connect_blocking(socket.as_ref().as_os_str())?;
     stream.write_all(&line)?;
     Ok(())
 }
@@ -247,7 +254,10 @@ mod tests {
             .collect();
         assert_eq!(args[..2], ["--session-id".to_string(), id]);
         assert_eq!(args[2], "--settings");
-        let settings: serde_json::Value = serde_json::from_str(&args[3]).unwrap();
+        assert_eq!(Path::new(&args[3]), dir.path().join("claude-settings.json"));
+        crate::platform::assert_private(Path::new(&args[3]), 0o600);
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&args[3]).unwrap()).unwrap();
         assert_eq!(
             settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             r"'/opt/it'\''s/storm-runtime' harness-session"
@@ -308,12 +318,7 @@ mod tests {
         )));
         let plugin = std::fs::read_to_string(config.join("plugin/storm.js")).unwrap();
         assert!(plugin.contains(r#"spawn("/usr/bin/storm-runtime", ["harness-session", id]"#));
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(config.join("plugin/storm.js"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        crate::platform::assert_private(&config.join("plugin/storm.js"), 0o600);
     }
 
     #[test]

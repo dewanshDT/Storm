@@ -238,7 +238,7 @@ impl<D: Daemon> Bridge<D> {
     }
 }
 
-/// The real daemon: the host's unix socket.
+/// The real daemon: the host's local socket (a named pipe on Windows).
 pub struct SocketDaemon {
     pub socket: PathBuf,
     pub handle: String,
@@ -247,8 +247,10 @@ pub struct SocketDaemon {
 
 impl SocketDaemon {
     async fn open(&self, line: Value) -> Option<mpsc::Receiver<Value>> {
-        let stream = tokio::net::UnixStream::connect(&self.socket).await.ok()?;
-        let (read, mut write) = stream.into_split();
+        let stream = crate::platform::ipc::connect(self.socket.as_os_str())
+            .await
+            .ok()?;
+        let (read, mut write) = tokio::io::split(stream);
         let mut bytes = serde_json::to_vec(&line).ok()?;
         bytes.push(b'\n');
         write.write_all(&bytes).await.ok()?;

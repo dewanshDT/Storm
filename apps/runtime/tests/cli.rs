@@ -2,7 +2,8 @@
 //!
 //! Each test runs `/bin/sh` through the same `CliProvider` the built-in
 //! providers use, and observes it only through the contract: output as it
-//! lands, and the one ending.
+//! lands, and the one ending. Windows has its own: `tests/windows.rs`.
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};

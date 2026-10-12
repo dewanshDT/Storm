@@ -90,6 +90,19 @@ On macOS by hand: download `storm-server-<v>-macos-universal.tar.gz` from the
 release and run `./storm-server up` as yourself — a LaunchAgent with your
 notes in `~/Storm`.
 
+On **Windows**, in PowerShell (as administrator for the Runtime Host):
+
+```powershell
+irm https://dewanshdt.github.io/Storm/install.ps1 | iex
+```
+
+It installs the server, the Runtime Host, or both. The server runs as you at
+logon, with no console window and your notes in `%USERPROFILE%\Storm`; the
+Runtime Host is the `StormRuntime` service under its own virtual account. By
+hand, `storm-server-windows-x86_64.zip` gives `.\storm-server.exe up`, and
+`storm-runtime-windows-x86_64.zip` gives `.\storm-runtime.exe install`
+(decision 99; [`deploy/README.md`](deploy/README.md#windows)).
+
 That URL is the **apt repository** root (not the marketing site). `up` creates
 the `storm` user and data root (`/srv/storm`), writes `/etc/storm/storm.env`
 and enables the service; the web client is served from the same port.

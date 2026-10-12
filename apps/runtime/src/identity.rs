@@ -14,7 +14,6 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -201,20 +200,14 @@ impl HostKey {
     /// modes. `create_new`, so an existing key is never overwritten.
     pub fn save(&self, state_dir: &Path) -> Result<()> {
         let dir = state_dir.join(IDENTITY_DIR);
-        if !dir.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
-        }
+        crate::platform::create_private_dir(&dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
         let path = Self::path(state_dir, &self.key_id);
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        let mut file = crate::platform::open_private(
+            &path,
+            fs::OpenOptions::new().write(true).create_new(true),
+        )
+        .with_context(|| format!("creating {}", path.display()))?;
         file.write_all(self.signing.as_bytes())?;
         file.sync_all()?;
         Ok(())
@@ -271,13 +264,14 @@ impl HostConfig {
     pub fn save(&self, state_dir: &Path) -> Result<()> {
         let path = Self::path(state_dir);
         let tmp = path.with_extension("json.tmp");
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("creating {}", tmp.display()))?;
+        let mut file = crate::platform::open_private(
+            &tmp,
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+        )
+        .with_context(|| format!("creating {}", tmp.display()))?;
         file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
         file.sync_all()?;
         fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
@@ -315,10 +309,7 @@ impl HostConfig {
             ),
         };
         let dest = state_dir.join(REVOKED_DIR).join(name);
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&dest)
+        crate::platform::create_private_dir(&dest)
             .with_context(|| format!("creating {}", dest.display()))?;
         fs::rename(&revoked, dest.join(REVOKED_FILE))
             .with_context(|| format!("moving {} to {}", revoked.display(), dest.display()))?;
@@ -336,7 +327,7 @@ impl HostConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::platform::assert_private;
 
     fn vectors() -> serde_json::Value {
         serde_json::from_str(include_str!("../../../docs/runtime-vectors.json")).unwrap()
@@ -402,9 +393,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = HostKey::generate();
         key.save(dir.path()).unwrap();
-        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode(&dir.path().join(IDENTITY_DIR)), 0o700);
-        assert_eq!(mode(&HostKey::path(dir.path(), &key.key_id)), 0o600);
+        assert_private(&dir.path().join(IDENTITY_DIR), 0o700);
+        assert_private(&HostKey::path(dir.path(), &key.key_id), 0o600);
         assert!(
             key.save(dir.path()).is_err(),
             "create_new: no silent replacement"
@@ -427,12 +417,7 @@ mod tests {
         };
         config.save(dir.path()).unwrap();
         assert_eq!(HostConfig::load(dir.path()).unwrap(), config);
-        let mode = fs::metadata(HostConfig::path(dir.path()))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        assert_private(&HostConfig::path(dir.path()), 0o600);
     }
 
     #[test]
@@ -484,8 +469,7 @@ mod tests {
         assert_eq!(kept, old);
         assert!(dest.join(format!("{}.key", key.key_id)).exists());
         assert!(!HostKey::path(dir.path(), &key.key_id).exists());
-        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
+        assert_private(&dest, 0o700);
     }
 
     #[test]
