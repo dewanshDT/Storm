@@ -155,6 +155,7 @@ class SyncEngine extends ChangeNotifier {
 
   Future<void> start() async {
     _pending = await cache.pendingCount(vaultId);
+    if (_disposed) return;
     notifyListeners();
     if (!await _proveServer()) return;
     await sync();
@@ -216,7 +217,7 @@ class SyncEngine extends ChangeNotifier {
   }
 
   void _setOnline(bool value) {
-    if (_online == value) return;
+    if (_disposed || _online == value) return;
     _online = value;
     notifyListeners();
     // Coming back online is the moment queued edits must go out.
@@ -568,8 +569,13 @@ class SyncEngine extends ChangeNotifier {
     notifyListeners();
     try {
       await _drainOutbox();
+      if (_disposed) return;
       await _pull();
-      if (_online) _lastSyncedAt = DateTime.now();
+      if (_online && !_disposed) _lastSyncedAt = DateTime.now();
+    } catch (_) {
+      // Sign-out or a server/vault switch closes the cache under an in-flight
+      // sync; a query already sent to it can still fail.
+      if (!_disposed) rethrow;
     } finally {
       _syncing = false;
       if (!_disposed) notifyListeners();
@@ -587,6 +593,7 @@ class SyncEngine extends ChangeNotifier {
 
     final touched = <String>{};
     for (final item in queued) {
+      if (_disposed) return;
       try {
         if (item.op == 'delete') {
           await api.deleteNote(vaultId, item.noteId);
@@ -638,7 +645,7 @@ class SyncEngine extends ChangeNotifier {
     }
 
     await _refreshPending();
-    if (touched.isNotEmpty) _changes.add(touched);
+    _emit(touched);
   }
 
   /// How many changes to request per page.
@@ -658,21 +665,23 @@ class SyncEngine extends ChangeNotifier {
     // Bounded so a server that keeps changing can't spin here forever; the
     // next sync picks up whatever is left.
     for (var page = 0; page < 100; page++) {
+      if (_disposed) return;
       final SyncBatch batch;
       try {
         batch = await api.sync(vaultId, since: since, limit: _pageSize);
         _setOnline(true);
       } catch (_) {
         _setOnline(false);
-        if (touched.isNotEmpty) _changes.add(touched);
+        _emit(touched);
         return;
       }
 
       final applied = await _applyChanges(batch.changes, touched);
+      if (_disposed) return;
       if (!applied) {
         // A request failed mid-page. Everything up to here is committed;
         // leave `since` where it is so the rest is retried.
-        if (touched.isNotEmpty) _changes.add(touched);
+        _emit(touched);
         return;
       }
 
@@ -687,13 +696,19 @@ class SyncEngine extends ChangeNotifier {
       await cache.setLastSeq(vaultId, since);
     }
 
+    if (_disposed) return;
     await cache.evict(vaultId);
-    if (touched.isNotEmpty) _changes.add(touched);
+    _emit(touched);
+  }
+
+  void _emit(Set<String> touched) {
+    if (touched.isNotEmpty && !_disposed) _changes.add(touched);
   }
 
   /// Applies one page. Returns false if the server became unreachable.
   Future<bool> _applyChanges(List<Change> changes, Set<String> touched) async {
     for (final change in changes) {
+      if (_disposed) return false;
       if (change.kind == 'deleted') {
         await cache.removeNote(vaultId, change.noteId);
         touched.add(change.noteId);
@@ -707,11 +722,13 @@ class SyncEngine extends ChangeNotifier {
 
       // Don't overwrite a note whose local edit hasn't been sent yet.
       if (await cache.outboxFor(vaultId, change.noteId) != null) continue;
+      if (_disposed) return false;
 
       final Note fresh;
       try {
         fresh = await api.note(vaultId, change.noteId);
       } on StormApiException catch (e) {
+        if (_disposed) return false;
         if (e.isNotFound) {
           await cache.removeNote(vaultId, change.noteId);
           touched.add(change.noteId);
@@ -721,6 +738,7 @@ class SyncEngine extends ChangeNotifier {
         _setOnline(false);
         return false; // leave lastSeq alone so this page is retried
       }
+      if (_disposed) return false;
 
       // Storing is local, and failing to store must not stall the cursor.
       // Conflating the two meant a bad cache schema pinned `lastSeq` forever:
@@ -779,13 +797,6 @@ class SyncEngine extends ChangeNotifier {
       final channel = WebSocketChannel.connect(uri);
       _ws = channel;
 
-      // `connect` reports a failed handshake through `ready`, not by
-      // throwing. With nothing listening to it, an unreachable host — no DNS,
-      // no route, server down — becomes an *unhandled* async error in the
-      // zone. Reconnection is driven by the stream's `onError` below; this
-      // exists purely so the rejection is observed.
-      unawaited(channel.ready.catchError((Object _) {}));
-
       _wsSub = channel.stream.listen(
         (_) {
           _setOnline(true);
@@ -799,6 +810,10 @@ class SyncEngine extends ChangeNotifier {
         onDone: _scheduleReconnect,
         cancelOnError: true,
       );
+
+      // The server subscribes before answering the upgrade, so from here no
+      // change is missed. A failed handshake also errors the stream.
+      await channel.ready;
     } catch (_) {
       _scheduleReconnect();
     }
@@ -816,6 +831,10 @@ class SyncEngine extends ChangeNotifier {
       request.headers['Accept'] = 'text/event-stream';
 
       final streamed = await client.send(request);
+      if (_disposed) {
+        unawaited(streamed.stream.listen(null).cancel());
+        return;
+      }
 
       if (streamed.statusCode != 200) {
         _scheduleReconnect();
@@ -850,6 +869,13 @@ class SyncEngine extends ChangeNotifier {
       }
     }
   }
+
+  /// Simulates a change frame arriving on the feed, for tests.
+  @visibleForTesting
+  void debugSimulateChangeFrame() => _handleSseLine('event: change');
+
+  @visibleForTesting
+  bool get isDisposed => _disposed;
 
   /// Simulates the change feed closing, for tests.
   @visibleForTesting
@@ -922,6 +948,7 @@ class SyncEngine extends ChangeNotifier {
   }
 
   Future<void> _refreshPending() async {
+    if (_disposed) return;
     _pending = await cache.pendingCount(vaultId);
     if (!_disposed) notifyListeners();
   }
