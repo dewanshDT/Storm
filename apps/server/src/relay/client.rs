@@ -168,7 +168,12 @@ async fn run_once(
     let connected = tokio::select! {
         biased;
         _ = shutdown.changed() => return Outcome::Failed,
-        result = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)) => {
+        // Nagle off: a relayed exchange is several small writes, and with it on
+        // each waits out the relay's delayed ACK, ~40 ms a request (decision 91).
+        result = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(&url, None, true),
+        ) => {
             match result {
                 Ok(result) => result,
                 Err(_) => {
