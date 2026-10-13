@@ -85,9 +85,15 @@ impl Harness {
     }
 
     async fn dial(&self, path: &str) -> Conn {
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{}{path}", self.addr))
-            .await
-            .unwrap();
+        // Nagle off on this end, as on a real server's tunnel, so a delay the
+        // latency test measures can only be the relay's own sockets.
+        let (socket, _) = tokio_tungstenite::connect_async_with_config(
+            format!("ws://{}{path}", self.addr),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
         Conn { socket }
     }
 
@@ -298,6 +304,56 @@ async fn a_request_and_response_travel_client_relay_server_client_with_bodies() 
         }
         Frame::Text(value) => panic!("expected a body chunk, got {value}"),
     }
+}
+
+// ------------------------------------------------------------------ latency
+
+/// A relayed exchange is several small frames each way. With Nagle on the
+/// relay's sockets, each frame after the first waited out the peer's delayed
+/// ACK: about 40 ms a request on localhost, against well under 1 ms direct
+/// (P1, decision 91).
+#[tokio::test]
+async fn a_relayed_exchange_does_not_wait_on_delayed_acks() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let mut samples = Vec::new();
+    for i in 0..21 {
+        let started = std::time::Instant::now();
+        let stream_id = client.open_stream(&format!("attempt-{i}")).await;
+        server.expect_stream_open_and_ack().await;
+
+        client.send(request_head(stream_id, "/v1/notes")).await;
+        client.send_body(0x01, stream_id, b"{\"body\":1}").await;
+        client.send_body(0x01, stream_id, b"").await;
+        server.recv().await;
+        server.next_frame().await;
+        server.next_frame().await;
+
+        server
+            .send(json!({
+                "v": 1, "type": "HTTP_RESPONSE_HEAD",
+                "stream_id": stream_id, "status": 200, "headers": {},
+            }))
+            .await;
+        server.send_body(0x02, stream_id, b"{}").await;
+        server
+            .send(json!({ "v": 1, "type": "CLOSE", "stream_id": stream_id }))
+            .await;
+        client.recv().await;
+        client.next_frame().await;
+        let closed = client.recv().await;
+        assert_eq!(closed["type"], "CLOSE", "{closed}");
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    assert!(
+        median < Duration::from_millis(15),
+        "median relayed exchange took {median:?}; TCP_NODELAY missing?"
+    );
 }
 
 /// The end-of-body frame (§5.2) is a `0x01` with an empty payload. It is the
