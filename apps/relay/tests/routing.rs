@@ -1120,3 +1120,74 @@ async fn a_client_that_keeps_reading_receives_many_times_the_budget() {
     // 1.6 MiB through a 64 KiB budget, and the origin was never told to stop.
     assert!(server.is_silent_for(FAST).await);
 }
+
+// ------------------------------------------------- §9 failure handling (94)
+
+#[tokio::test]
+async fn a_server_dying_mid_response_body_is_trunk_lost_on_that_stream_not_a_clean_end() {
+    // A `CLOSE` here would read as a complete response, and the client would
+    // take a truncated note body for the whole of it.
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+    client.send(request_head(stream_id, "/v1/notes/x")).await;
+    assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+    server
+        .send(json!({
+            "v": 1, "type": "HTTP_RESPONSE_HEAD",
+            "stream_id": stream_id, "status": 200, "headers": {},
+        }))
+        .await;
+    assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+    server.send_body(0x02, stream_id, b"half a bo").await;
+    assert!(matches!(client.next_frame().await, Frame::Body { .. }));
+
+    drop(server);
+
+    let reply = client.recv().await;
+    assert_error(&reply, "trunk_lost");
+    assert_eq!(reply["stream_id"], stream_id, "{reply}");
+}
+
+#[tokio::test]
+async fn a_hello_after_the_server_went_away_is_server_unreachable() {
+    // Server offline, relay up: the client must be told the *server* is
+    // unreachable, which is a different thing to show than a dead relay.
+    let harness = Harness::plain().await;
+    let server = harness.server().await;
+    drop(server);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !harness.relay.registrations.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "registration never released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let mut client = harness.dial(&format!("/connect/{SERVER_ID}")).await;
+    client
+        .send(json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID }))
+        .await;
+    assert_error(&client.recv().await, "server_unreachable");
+}
+
+#[tokio::test]
+async fn a_restarted_server_is_reachable_again_on_a_fresh_client_trunk() {
+    // Restart = the old trunk dies, a new one registers under the same key.
+    // Clients re-race from scratch rather than resuming (§9).
+    let harness = Harness::plain().await;
+    let server = harness.server().await;
+    let mut client = harness.client().await;
+    drop(server);
+    assert_error(&client.recv().await, "trunk_lost");
+
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("again").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+}

@@ -61,6 +61,9 @@ const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(20);
 /// wedged peer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a closing trunk waits for queued frames to reach the socket.
+const WRITER_DRAIN: Duration = Duration::from_secs(1);
+
 /// Everything a trunk needs to serve. Cheap to clone — the router is `Router<()>`
 /// over an `Arc` state, which is what makes in-process dispatch free.
 #[derive(Clone)]
@@ -374,6 +377,7 @@ async fn serve_trunk(
     });
 
     let mut streams: HashMap<u32, StreamEntry> = HashMap::new();
+    let silence_limit = liveness_deadline(heartbeat_secs);
 
     loop {
         let message = tokio::select! {
@@ -387,13 +391,27 @@ async fn serve_trunk(
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 break;
             }
-            message = stream.next() => match message {
-                Some(Ok(message)) => message,
-                Some(Err(e)) => {
+            // The relay answers every PING, so silence this long is a relay
+            // that is gone without the socket saying so: a network change, a
+            // sleep, a NAT that dropped the mapping (decision 94). Waiting for
+            // TCP to notice keeps the relay advertised for many minutes.
+            message = tokio::time::timeout(silence_limit, stream.next()) => match message {
+                Ok(Some(Ok(message))) => message,
+                Ok(Some(Err(e))) => {
                     tracing::warn!(error = %e, "relay trunk read failed");
                     break;
                 }
-                None => break,
+                Ok(None) => {
+                    tracing::warn!("relay closed the trunk");
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        silent_secs = silence_limit.as_secs(),
+                        "relay silent past the heartbeat deadline; dropping the trunk"
+                    );
+                    break;
+                }
             },
         };
 
@@ -419,7 +437,18 @@ async fn serve_trunk(
     }
     heartbeat.abort();
     drop(outbound);
-    let _ = writer.await;
+    // A writer blocked on a peer that stopped reading would hold the
+    // supervisor here, and with it the reconnect.
+    let writer_abort = writer.abort_handle();
+    if tokio::time::timeout(WRITER_DRAIN, writer).await.is_err() {
+        writer_abort.abort();
+    }
+}
+
+/// Three missed heartbeats, the same allowance the relay gives a server
+/// (§4.2's 45 s at the default 15 s interval).
+fn liveness_deadline(heartbeat_secs: u64) -> Duration {
+    Duration::from_secs(heartbeat_secs.max(1) * 3)
 }
 
 async fn write_loop(mut sink: Sink, mut outbound: mpsc::Receiver<Message>) {

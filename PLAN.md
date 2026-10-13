@@ -5780,6 +5780,61 @@ failed about 1 run in 4 on PRs that never touched the web client)*
   case needs to see a reload that opens a new context (a `target=_blank`
   form, say).
 
+**94. Relay failure handling: a silent relay is dropped, and each §9 case has
+a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was
+established with a test first, then fixed where wrong.
+- **Defect fixed — storm-server never gave up on a relay that went quiet.**
+  The tunnel PINGed every heartbeat but never required an answer, so a relay
+  lost to a sleep, a network change or a dropped NAT mapping (socket open,
+  nobody behind it) stayed registered and advertised on `GET /v1/server`
+  until TCP noticed, which takes many minutes. `serve_trunk` now drops the
+  trunk after **three heartbeats of inbound silence** (45 s at the default
+  15 s), the same allowance the relay gives a server, and redials. The relay
+  answers every PING, so a live relay is never dropped. A closing trunk waits
+  at most 1 s for its writer, so a peer that stopped reading cannot hold the
+  supervisor and its reconnect.
+- **Covered, already correct:**
+  - The relay vanishing mid-response aborts the in-flight handler, stops
+    advertising the relay, leaves the LAN listener alone, and redials after
+    the 1 s served-then-closed backoff.
+  - A relay `CLOSE` or `ERROR` for one stream cancels only that handler.
+  - A server dying mid-body is `trunk_lost` on that stream at the client,
+    never a clean `CLOSE`. A `HELLO` after the server left is
+    `server_unreachable`. A restarted server is reachable on a fresh client
+    trunk.
+  - In Dart, a trunk dying mid-response, or a stream-scoped `trunk_lost`, is
+    a body error (`SrpTransportException`), never a short successful body.
+    The request is not re-sent, and a dead trunk is never reused.
+- **Simulated, not reproduced:** network transition and laptop sleep are
+  tested as trunk death and inbound silence on localhost. No real Wi-Fi to
+  cellular switch, suspend or NAT has been exercised; that needs the phase 4
+  VPS.
+- **Open, not fixed here:**
+  - `SrpTrunk` reports every trunk-level `ERROR` as `relay_error`, so
+    `server_unreachable` (relay up, server down) is indistinguishable from a
+    dead relay. `ConnectionStatus` has only `offline`. The relay TODO's
+    ticked "server offline vs relay unavailable" box is overstated. The test
+    is written and skipped (`srp_failure_test.dart`).
+  - The Dart trunk PINGs but has no liveness deadline either, so a half-open
+    socket after a network change hangs relayed requests until their own
+    timeouts.
+  - A server-side response body that *errors* mid-stream ends with a clean
+    `CLOSE`, so the client takes a truncated body as complete. SRP has no
+    server→relay error (§6: `ERROR` is relay→either), so the fix is a
+    protocol amendment, not an implementation change.
+- Tests: server `a_relay_vanishing_mid_response_cancels_the_handler_and_the_trunk_comes_back`,
+  `a_relay_closing_a_stream_mid_response_cancels_only_that_handler`,
+  `a_relay_erroring_a_stream_mid_response_cancels_that_handler`,
+  `a_relay_gone_silent_is_dropped_at_the_heartbeat_deadline_and_redialled`
+  (fails without the fix), `a_relay_that_answers_heartbeats_is_kept_past_the_deadline`.
+  Relay: `a_server_dying_mid_response_body_is_trunk_lost_on_that_stream_not_a_clean_end`,
+  `a_hello_after_the_server_went_away_is_server_unreachable`,
+  `a_restarted_server_is_reachable_again_on_a_fresh_client_trunk`. Client:
+  `test/srp_failure_test.dart`.
+*Revisit if:* the relay's heartbeat interval stops being echoed in
+`REGISTERED`, or a relay stops answering PING. Either makes inbound silence a
+false signal.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
