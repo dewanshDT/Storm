@@ -40,7 +40,12 @@ class SrpHttpClient extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
-    final stream = await trunk.openStream();
+    final SrpStream stream;
+    try {
+      stream = await trunk.openStream();
+    } on SrpOpenRefused catch (e) {
+      throw SrpTransportException(e.code, e.message);
+    }
 
     // Subscribe to the response before the request head goes out. `stream`
     // delivers events synchronously, so a response that starts the instant the

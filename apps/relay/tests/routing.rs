@@ -679,6 +679,8 @@ async fn past_the_in_flight_cap_open_stream_is_rate_limited_immediately() {
         .await;
     let reply = client.recv().await;
     assert_error(&reply, "rate_limited");
+    assert_eq!(reply["attempt_id"], "over", "{reply}");
+    assert!(reply.get("stream_id").is_none(), "{reply}");
     // *Immediately*, never queued (§5.1): an overloaded relay and a slow server
     // want opposite responses from a client, so they must not look alike.
     assert!(
@@ -697,6 +699,36 @@ async fn past_the_in_flight_cap_open_stream_is_rate_limited_immediately() {
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     client.open_stream("after-the-ack").await;
+}
+
+/// A refused open names its attempt, so a client can fail exactly that request
+/// and keep the trunk (§5.1, decision 106). `attempt_id` is untyped on the
+/// wire, so it comes back as whatever JSON was sent.
+#[tokio::test]
+async fn a_refused_open_names_its_attempt_and_the_trunk_carries_on() {
+    let mut config = config();
+    config.max_in_flight_streams = 1;
+    config.stream_ack_timeout = Duration::from_secs(30);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let first = client.open_stream("first").await;
+    client
+        .send(json!({ "v": 1, "type": "OPEN_STREAM", "attempt_id": { "n": 2 } }))
+        .await;
+    let reply = client.recv().await;
+    assert_error(&reply, "rate_limited");
+    assert_eq!(reply["attempt_id"], json!({ "n": 2 }), "{reply}");
+    assert!(reply.get("stream_id").is_none(), "{reply}");
+
+    assert_eq!(server.expect_stream_open_and_ack().await, first);
+    client.send(request_head(first, "/v1/notes/x")).await;
+    assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+    server.send(response_head(first)).await;
+    assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+
+    client.open_stream("third").await;
 }
 
 #[tokio::test]
@@ -1123,6 +1155,77 @@ async fn a_client_that_stops_reading_loses_its_stream_at_the_byte_budget() {
     assert_eq!(closed["type"], "CLOSE", "{closed}");
     assert_eq!(closed["stream_id"], stream_id, "{closed}");
     drop(client);
+}
+
+/// The backlogged client is told, and the error reaches it past its own full
+/// queue (§5.4, decision 106). Before, it was sent nothing: a body already
+/// started never ended, and no client can turn silence into an error.
+#[tokio::test]
+async fn a_backlogged_client_is_told_its_stream_failed_and_its_other_streams_go_on() {
+    let mut config = config();
+    config.max_client_buffer_bytes = 256 * 1024;
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let flooded = client.open_stream("flooded").await;
+    server.expect_stream_open_and_ack().await;
+    let other = client.open_stream("other").await;
+    server.expect_stream_open_and_ack().await;
+
+    server.send(response_head(other)).await;
+    server.send(response_head(flooded)).await;
+    let chunk = vec![0u8; 256 * 1024];
+    for _ in 0..128 {
+        server.send_body(0x02, flooded, &chunk).await;
+    }
+    let closed = tokio::time::timeout(Duration::from_secs(10), server.recv())
+        .await
+        .expect("a client that stopped reading was never dropped");
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], flooded, "{closed}");
+
+    // The client reads again. Whatever was already in the socket buffers comes
+    // first; then the error, and nothing more for that stream.
+    let mut errored = false;
+    loop {
+        match client.next_frame().await {
+            Frame::Body { stream_id, .. } if stream_id == flooded => {
+                assert!(!errored, "a body frame followed the stream's error");
+            }
+            Frame::Body { stream_id, .. } => panic!("unexpected body for {stream_id}"),
+            Frame::Text(value) if value["type"] == "ERROR" => {
+                assert_error(&value, "client_backlogged");
+                assert_eq!(value["stream_id"], flooded, "{value}");
+                errored = true;
+                break;
+            }
+            Frame::Text(value) => {
+                assert_eq!(value["type"], "HTTP_RESPONSE_HEAD", "{value}");
+            }
+        }
+    }
+    assert!(errored);
+
+    // The trunk and its other stream are untouched.
+    server.send_body(0x02, other, b"still here").await;
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": other }))
+        .await;
+    match client.next_frame().await {
+        Frame::Body {
+            stream_id, payload, ..
+        } => {
+            assert_eq!(stream_id, other);
+            assert_eq!(payload, b"still here");
+        }
+        Frame::Text(value) => panic!("expected the other stream's body, got {value}"),
+    }
+    let end = client.recv().await;
+    assert_eq!(end["type"], "CLOSE", "{end}");
+    assert_eq!(end["stream_id"], other, "{end}");
+
+    client.open_stream("afterwards").await;
+    server.expect_stream_open_and_ack().await;
 }
 
 #[tokio::test]

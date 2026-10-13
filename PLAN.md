@@ -6222,6 +6222,67 @@ whole body: a read error mid-note became a truncated note with a 200.
   mid-body on demand.
 *Revisit if:* SRP v2 lets the origin send stream-scoped `ERROR`s directly.
 
+**106. A backlogged client is told its stream failed; a refused open names its
+attempt.** *(2026-10-13, found building the Rust SRP client, decision 105a.)*
+Two relay→client signals were missing, and each left a client guessing.
+- **Defect: a backlogged client's stream hung for ever.**
+  `drop_backlogged_client` closed the stream and sent `CLOSE` to the origin,
+  and sent the client nothing: a started body never ended, a pending head
+  never came, and no client can turn silence into an error. The relay now
+  ends the stream with a new stream-scoped `ERROR{client_backlogged}`.
+- **Delivered past the full queue, not into it.** The client trunk's writer
+  has a second lane (`Tx::end_stream`) it drains first: the `ERROR` overtakes
+  what is queued, the writer discards the ended stream's queued body frames
+  (refunding the byte budget), and every other stream's frames go on in order.
+  Rejected: discarding the trunk's queue (wedges or truncates the other
+  streams), queueing the `ERROR` behind the backlog (never arrives at a stalled
+  client), and dropping the whole client trunk (kills healthy streams for one
+  slow download). Dropping the trunk is the fallback only if the lane itself
+  (256) overflows — the relay kills the writer and reader, and the client sees
+  trunk loss. A plain `CLOSE` never takes the lane, since overtaking its body
+  would present a truncated body as complete; with no room for it the stream
+  is ended `client_backlogged` instead. `server_timeout`, `stream_aborted` and
+  the per-stream `trunk_lost`/`trunk_superseded` use the lane too, so no
+  stream-ending `ERROR` is lost to a full queue any more.
+- **Defect: `rate_limited` on `OPEN_STREAM` could not be attributed.** It was
+  trunk-scoped with no id, while the trunk stayed up. The Dart client took it
+  as fatal and dropped the trunk; the Rust client failed its oldest pending
+  open, relying on the relay answering in order. The relay now echoes the
+  open's `attempt_id` (as the JSON sent). The Dart client fails only that
+  attempt (`SrpOpenRefused` → `SrpTransportException('rate_limited')`) and
+  keeps the trunk; an `ERROR` without one is still fatal.
+- **SRP §5.1** gains "A refused open names its attempt and does not end the
+  trunk"; **§5.4** gains the backlogged-client rules; **§6** adds
+  `client_backlogged` and `ERROR`'s `attempt_id?`.
+- **Compatibility.** Old Dart client, new relay: ignores `attempt_id`, drops
+  the trunk as before; reads `client_backlogged` as any stream-scoped error,
+  i.e. a body error (§5.4 rule 3). Old Rust client, new relay: serde ignores
+  the extra field and FIFO attribution is still right; an unknown stream code
+  becomes `SrpError::Relay(code)`, a body error. New clients, old relay: no
+  `attempt_id`, so Dart drops the trunk and Rust falls back to FIFO — both
+  unchanged — and backlogged streams still hang, as before. The origin sees
+  nothing new.
+- **Rust client follow-up** (`feat/runtime-srp-client`, not on this branch):
+  `codec::RelayError` gains `attempt_id: Option<serde_json::Value>`, and the
+  trunk-scoped `rate_limited` arm removes the pending open whose `attempt_id`
+  matches, falling back to `pop_front` only when the field is absent.
+- Tests: relay
+  `a_backlogged_client_is_told_its_stream_failed_and_its_other_streams_go_on`
+  (no body frame for the stream follows its error; the other stream's body
+  and `CLOSE` arrive; a later open works),
+  `a_refused_open_names_its_attempt_and_the_trunk_carries_on` (an object
+  `attempt_id` echoed whole), and `attempt_id` asserted in
+  `past_the_in_flight_cap_open_stream_is_rate_limited_immediately` — all three
+  fail on the old code; unit `a_stream_end_that_finds_no_room_drops_the_trunk`,
+  `only_an_ended_streams_body_frames_are_discarded`. Dart: `a refused open
+  fails only its own request, and the next request on the trunk works` (fails
+  on the old client), `a refusal that names no attempt still drops the trunk`,
+  `a stream dropped for a backlogged client is a body error, and the trunk
+  stays up`.
+*Revisit if:* SRP gains per-stream flow control (67) — a window would stop a
+slow reader before its queue fills, and `client_backlogged` would become rare
+rather than the only bound.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
