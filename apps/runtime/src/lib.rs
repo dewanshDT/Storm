@@ -73,6 +73,7 @@ pub mod provider;
 mod pty;
 pub mod scrollback;
 pub mod serve;
+pub mod srp;
 pub mod status;
 pub mod terminal;
 pub mod transport;
