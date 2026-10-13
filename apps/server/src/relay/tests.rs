@@ -71,6 +71,9 @@ impl FakeRelay {
                     let Ok((socket, _)) = listener.accept().await else {
                         return;
                     };
+                    // As the real relay does, so a delay measured through the
+                    // tunnel can only be the server's own socket.
+                    socket.set_nodelay(true).unwrap();
                     attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
                         continue;
@@ -684,6 +687,38 @@ async fn a_tunnelled_get_reaches_the_router_and_comes_back_intact() {
         "ok",
         "and so does the body: {}",
         String::from_utf8_lossy(&response.body)
+    );
+
+    tunnels.shutdown().await;
+}
+
+/// A tunnelled response is a head, body chunks and a `CLOSE`, written one after
+/// another. With Nagle on the tunnel, each after the first waited out the
+/// relay's delayed ACK: about 40 ms a request on localhost (P1, decision 91).
+#[tokio::test]
+async fn a_tunnelled_request_does_not_wait_on_delayed_acks() {
+    let dir = tempdir::TempDir::new("storm-relay-latency").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+
+    let (_registered, tunnels) = start_tunnel(&relay.url, router.clone(), identity);
+    let _ = relay.await_registration().await;
+
+    let mut samples = Vec::new();
+    for stream_id in 1..=21 {
+        let started = std::time::Instant::now();
+        let response = relay
+            .request(stream_id, TunnelRequest::get("/v1/health"))
+            .await;
+        assert_eq!(response.status, 200);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    assert!(
+        median < Duration::from_millis(15),
+        "median tunnelled request took {median:?}; TCP_NODELAY missing?"
     );
 
     tunnels.shutdown().await;
