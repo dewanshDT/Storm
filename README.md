@@ -76,7 +76,9 @@ It shows its plan (every `sudo` step included) before changing anything, and
 re-running it is how you upgrade, check status, pair a device, enroll a
 runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
-`--dry-run`; `sh install.sh --help` lists the rest.
+`--dry-run`; `sh install.sh --help` lists the rest. **MCP only** (`--mcp`)
+will put just `storm-runtime` on a laptop's PATH for an AI app's
+`mcp-connect` (below); it is offered once a release carries `mcp-connect`.
 
 ### By hand (server on Debian / Ubuntu)
 
@@ -217,6 +219,32 @@ Off by default and switched at runtime from **Server ▸ AI access**; agents
 authenticate with MCP keys minted in the app. Updates carry a `base_version`
 into the same three-way merge the clients use. See
 [`apps/server/README.md`](apps/server/README.md#mcp).
+
+**Connecting an AI app: `storm-runtime mcp-connect`** *(unreleased: it lands
+with the next release; until then use the HTTP config)*. A stdio adapter the
+AI app starts itself. It dials the server's LAN address first and falls back
+to the server's relays, so one config works at home and away, and before it
+sends the key anywhere it checks the server answers to the pinned public key.
+The key comes from `STORM_MCP_KEY` (or `--key-file`), never an argument. When
+it cannot get through, the client sees a JSON-RPC error carrying a
+`storm_error` code rather than a hang. Making a key under **Settings ▸ Devices
+& access** shows both lines, filled in for your server:
+
+```sh
+claude mcp add storm -e STORM_MCP_KEY=stk_… -- \
+  storm-runtime mcp-connect --server srv_… --pk <server key> \
+    --addr http://192.168.1.20:8484 --relay wss://relay.example.net
+```
+
+```json
+{"mcpServers": {"storm": {"command": "storm-runtime",
+  "args": ["mcp-connect", "--server", "srv_…", "--pk", "…",
+           "--addr", "http://192.168.1.20:8484", "--relay", "wss://relay.example.net"],
+  "env": {"STORM_MCP_KEY": "stk_…"}}}}
+```
+
+The raw HTTP entry (`"type": "http"`, `http://<host>:<port>/mcp`, the key as a
+Bearer token) still works on the LAN, with no adapter and no identity check.
 
 ## Status
 

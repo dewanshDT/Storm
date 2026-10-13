@@ -6433,6 +6433,55 @@ by the same checks that prove `/mcp` itself.
 do), or `/mcp` becomes stateful (one long-lived adapter per suite would then
 also be testing session reuse).
 
+**105e. mcp-connect in Settings and the installer (S5).** *(2026-10-13,
+"MCP over the Relay — mcp-connect", the product surface; stacked on 101)*
+- **Why.** External MCP clients reach Storm through `storm-runtime
+  mcp-connect` (the stdio adapter 95 recommended, built in parallel), on the
+  LAN too, so one config works at home and away. Nobody should assemble that
+  config by hand: it carries a server id, a public key and relay URLs.
+- **The key reveal writes it.** Settings ▸ Devices & access ▸ New key now
+  offers a `claude mcp add … -- storm-runtime mcp-connect …` line and the
+  stdio JSON entry first (`lib/ui/settings/mcp_connect_config.dart`); the old
+  `type: http` entry moves under *Other clients (HTTP, LAN only)*. Still shown
+  once. Filled from what the device pinned at pairing, never from an
+  unverified answer: `--server` = `Settings.serverId`, `--pk` =
+  `serverPublicKey`, `--addr` = `baseUrl` (the pairing address; a relayed
+  route lives only in `StormConnection`, so it can never leak into `addr`),
+  `--relay` = each registered relay's `url` from `Settings.relays`, the copy
+  of `GET /v1/server` the connection keeps current. A device with no pinned
+  identity gets the HTTP entry alone.
+- **The key is in env, never argv** (`STORM_MCP_KEY`): `-e` for Claude Code,
+  `env` in JSON. Shell words are quoted only when they need it, and a value
+  starting with `-` is written `--flag=value`, since a base64url key does one
+  time in 64 and clap would read it as a flag.
+- **Installer: MCP only** (`--mcp`, and on the first screen). Downloads the
+  runtime's release asset (the `x86_64-linux` binary, or the macOS universal
+  tarball), verifies it against `checksums.txt` and copies it to
+  `/usr/local/bin/storm-runtime`: no package, account, service or
+  enrollment. On Linux a machine with the `storm-runtime` package needs
+  nothing (a note, no steps), and the Runtime Host's detection now ignores
+  the MCP copy (`rt_on_path`), which would otherwise read as an installed
+  host. A Homebrew link at that path is left alone. The last step runs
+  `mcp-connect --help`, so a binary that predates it fails visibly.
+  **Unavailable until a release has `mcp-connect`:** `STORM_MCP_CONNECT_SINCE`
+  is empty, which the checklist shows as the reason; set it in the release
+  that ships it. `--from-dir` skips the gate (someone's own build).
+  `install.ps1 -Mcp` mirrors it on Windows: `%LOCALAPPDATA%\Programs\Storm`,
+  on the user PATH, no administrator.
+- **Docs** (README, `deploy/README.md` *MCP clients*, `docs/storm-mcp.md`)
+  describe it as unreleased. `apps/www` is untouched.
+- Tests: `test/mcp_connect_snippet_test.dart` (relays present and absent, the
+  key only in env, the documented shape, a real `sh` splitting the line back
+  into the intended words, the reveal with and without an identity);
+  `tools/installer-tests/mcp.bats` (15: the gate, plans and runs on both
+  OSes, nothing but the copy, the check, the Runtime Host and Homebrew cases,
+  status/upgrade/uninstall, the first screen).
+- Open: whether Claude Desktop on macOS finds `/usr/local/bin` on its PATH
+  (the hint says to use the full path); the `claude mcp add` line is POSIX
+  shell, so Windows users take the JSON entry.
+*Revisit if:* mcp-connect's flags change, or it learns the relay set itself
+from the server (then `--relay` becomes optional here).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

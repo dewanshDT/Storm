@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Installs Storm on Windows: the server, the Runtime Host, or both (decision 99).
+  Installs Storm on Windows: the server, the Runtime Host, or both (decision 99);
+  or, MCP only, storm-runtime on your PATH for AI apps (decision 105e).
 
 .DESCRIPTION
   The Windows counterpart of install.sh (decision 84). It downloads the release
@@ -13,6 +14,9 @@
     then enrollment: straight from the server on this machine, or by pasting the
     app's enrollment string at a hidden prompt. It never reaches a command line,
     the screen or a log. Optionally a first workspace (a folder name or a git URL).
+  - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
+    PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
+    enrollment, no administrator.
 
   Re-running it upgrades. It never deletes notes or workspaces, and sends nothing
   anywhere but GitHub.
@@ -27,6 +31,8 @@
   Install the server.
 .PARAMETER Runtime
   Install the Runtime Host. Needs an elevated PowerShell.
+.PARAMETER Mcp
+  MCP only: put storm-runtime on your PATH for AI apps. No service.
 .PARAMETER Version
   A release tag such as v0.8.0. Default: the latest release.
 .PARAMETER FromDir
@@ -45,6 +51,7 @@
 param(
     [switch]$Server,
     [switch]$Runtime,
+    [switch]$Mcp,
     [string]$Version,
     [string]$FromDir,
     [string]$Workspace,
@@ -80,17 +87,19 @@ function Ask($question, $default) {
 
 # --- what to install -----------------------------------------------------------
 
-if (-not $Server -and -not $Runtime) {
-    if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, or both' }
+if (-not $Server -and -not $Runtime -and -not $Mcp) {
+    if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, -Mcp' }
     Say 'Storm for Windows. What should this machine run?'
     Say '  1) the server and the Runtime Host'
     Say '  2) the server only'
     Say '  3) the Runtime Host only (for a server elsewhere)'
+    Say '  4) MCP only: let AI apps here reach your Storm (no service)'
     switch (Ask 'Choose' '1') {
         '1' { $Server = $true; $Runtime = $true }
         '2' { $Server = $true }
         '3' { $Runtime = $true }
-        default { Fail 'choose 1, 2 or 3' }
+        '4' { $Mcp = $true }
+        default { Fail 'choose 1, 2, 3 or 4' }
     }
 }
 
@@ -106,6 +115,7 @@ if (-not $Version -and -not $FromDir) {
 $serverBin = Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-server.exe'
 $runtimeBin = Join-Path $env:ProgramFiles 'StormRuntime\storm-runtime.exe'
 $dataState = Join-Path $env:USERPROFILE 'Storm\state'
+$mcpDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm'
 
 Step "Plan ($(if ($Version) { $Version } else { "from $FromDir" }))"
 if ($Server) {
@@ -116,6 +126,9 @@ if ($Runtime) {
     Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service) [administrator]"
     Say "  enroll   : $(if ($Server) { 'with the server on this machine' } else { 'paste the enrollment string from the app (hidden)' })"
     if ($Workspace) { Say "  workspace: $Workspace" }
+}
+if ($Mcp) {
+    Say "  mcp      : $RuntimeZip, checked; storm-runtime.exe into $mcpDir, on your PATH (no service)"
 }
 if ($DryRun) { return }
 
@@ -231,6 +244,23 @@ if ($Runtime) {
             Say "warning: $Workspace is neither a folder name nor a git URL; skipped"
         }
     }
+}
+
+# --- MCP only -------------------------------------------------------------------
+
+if ($Mcp) {
+    Step 'MCP connector'
+    $dir = Checked $RuntimeZip
+    New-Item -ItemType Directory -Force -Path $mcpDir | Out-Null
+    Copy-Item (Join-Path $dir 'storm-runtime.exe') (Join-Path $mcpDir 'storm-runtime.exe') -Force
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not (($userPath -split ';') -contains $mcpDir)) {
+        [Environment]::SetEnvironmentVariable('Path', ((@($userPath, $mcpDir) | Where-Object { $_ }) -join ';'), 'User')
+        Say 'Added it to your PATH: apps started from now on find storm-runtime.'
+    }
+    & (Join-Path $mcpDir 'storm-runtime.exe') mcp-connect --help *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'this storm-runtime has no mcp-connect: it predates it' }
+    Say 'In the Storm app: Settings > Devices & access > New key shows the line to paste into your AI app.'
 }
 
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue

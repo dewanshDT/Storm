@@ -226,7 +226,8 @@ One global destination: the settings navigation in the sidebar beside a 680
 column (desk, the rail stays), or a list and pushed pages with "‹ Settings"
 and no AppBar (phone). Order (§5.1): **This device** (preset, text size, note
 font, Read mode) · **Devices & access** (signed-in devices with revoke; access
-keys, shown once) · **Storm** › **Vaults** (tile → colour, count, path; a
+keys, shown once with a `claude mcp add` line and a stdio JSON entry for
+`storm-runtime mcp-connect`, the HTTP entry under a disclosure) · **Storm** › **Vaults** (tile → colour, count, path; a
 missing vault greyed and removable) · **AI access** (MCP read / write, and
 "Storm agents": allow writes when chosen at launch — independent of
 `mcp_writable`) · **Integrations** (connections, tests, tools review; a

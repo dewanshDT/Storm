@@ -105,11 +105,12 @@ make_assets() {
     echo "readme" >"$stage/$d/README-macos.txt"
   done
   local names="$*"
-  [ -n "$names" ] || names="server-tar runtime-tar app-zip apk server-deb runtime-deb"
+  [ -n "$names" ] || names="server-tar runtime-tar runtime-linux app-zip apk server-deb runtime-deb"
   for n in $names; do
     case "$n" in
       server-tar) tar -C "$stage/server" -czf "$ASSETS/storm-server-$v-macos-universal.tar.gz" . ;;
       runtime-tar) tar -C "$stage/runtime" -czf "$ASSETS/storm-runtime-$v-macos-universal.tar.gz" . ;;
+      runtime-linux) cp "$FAKE_DIR/tools/storm-runtime" "$ASSETS/storm-runtime-$v-x86_64-linux" ;;
       app-zip) echo "zip" >"$ASSETS/Storm-$v-macos-arm64.zip" ;;
       apk) echo "apk" >"$ASSETS/storm-$v.apk" ;;
       server-deb) echo "deb" >"$ASSETS/storm-server_$v-1_amd64.deb" ;;

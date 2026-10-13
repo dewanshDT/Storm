@@ -12,6 +12,7 @@ import 'package:http/testing.dart';
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/ui/settings/access_page.dart';
+import 'package:storm/ui/settings/mcp_connect_config.dart';
 
 /// A14, client side.
 ///
@@ -89,12 +90,9 @@ void main() {
 
   copyButtonTests();
 
-  group('the MCP config snippet', () {
+  group('the HTTP MCP config snippet', () {
     test('is valid JSON carrying the key as a Bearer header', () {
-      final snippet = RevealMcpKeyDialog.configSnippet(
-        'http://192.168.1.20:8484',
-        'stk_abc123',
-      );
+      final snippet = httpMcpConfig('http://192.168.1.20:8484', 'stk_abc123');
 
       // Parsed rather than string-matched: the whole reason this is generated
       // is that a human assembling it by hand gets it subtly wrong, so the
@@ -119,10 +117,7 @@ void main() {
       // A key is accepted on /mcp and nowhere else (A14.2). A snippet aimed at
       // the wrong path would hand someone a credential that 401s and no way to
       // tell why.
-      final snippet = RevealMcpKeyDialog.configSnippet(
-        'http://server:8484',
-        'stk_x',
-      );
+      final snippet = httpMcpConfig('http://server:8484', 'stk_x');
       expect(snippet, contains('"url": "http://server:8484/mcp"'));
     });
   });
@@ -220,10 +215,11 @@ void copyButtonTests() {
       await tester.pumpWidget(host(created));
       await tester.pumpAndSettle();
 
+      // No pinned identity here, so the HTTP snippet is the only one.
       // The snippet is tall enough to push its button off the test surface.
-      await tester.ensureVisible(find.byKey(const Key('copy-config')));
+      await tester.ensureVisible(find.byKey(const Key('copy-http')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('copy-config')));
+      await tester.tap(find.byKey(const Key('copy-http')));
       await tester.pumpAndSettle();
 
       final copied =
