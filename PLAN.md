@@ -6145,6 +6145,72 @@ whole body: a read error mid-note became a truncated note with a 200.
   mid-body on demand.
 *Revisit if:* SRP v2 lets the origin send stream-scoped `ERROR`s directly.
 
+**105a. storm-runtime gains an SRP v1 client (mcp-connect S1).**
+*(2026-10-13, decision 105's first slice; vault *MCP over the Relay —
+mcp-connect*.)* `mcp-connect` must reach a server through a relay, and §11's
+Runtime Hosts behind a relay will need the same thing, so the client half of
+SRP now exists in Rust: `apps/runtime/src/srp/` (`codec.rs`, `trunk.rs`,
+`error.rs`). A port of the Dart `SrpTrunk`, with nothing new on the wire.
+- **The codec is a copy, not a dependency** (R6): it is the fourth
+  re-derivation, beside `apps/server/src/relay/proto.rs`, `apps/relay` and
+  `srp_codec.dart`. `tests/srp_vectors.rs` reads `docs/srp-vectors.json`.
+  A client never signs relay-auth, so the test covers the `server_id` rule it
+  dials with and the client challenge (message, signatures, key parsing) that
+  S2 will check the race winner with. `validate_server_id` is reused from
+  `identity.rs`, which `runtime-vectors.json` already pins.
+- **API.** `SrpTrunk::connect(relay_url, server_id)` / `connect_with(..,
+  TrunkConfig)` dials `<relay>/connect/<server_id>` with `TCP_NODELAY` (91)
+  and completes `HELLO`/`READY` inside 8 s, which outlasts the relay's 5 s
+  hold (97). `ws://` is refused unless the host is loopback.
+  `trunk.request(method, path_and_query, headers, body: Bytes)` does
+  `OPEN_STREAM` → `STREAM_READY`, the head (headers as an object, never a
+  `relay_peer_ip`), the body in frames of at most 256 KiB (100), then always
+  one empty end-of-body frame, a `GET` included (92). It returns an
+  `SrpResponse { status, headers, body: SrpBody }` once the head arrives.
+- **The body streams.** `SrpBody` is a `Stream` of chunks, with
+  `chunk()`/`collect()`. It ends cleanly only on the origin's plain `CLOSE`.
+  `ERROR{stream_aborted}`, the raw `CLOSE{aborted: true}`, any other
+  stream-scoped `ERROR` or a lost trunk is an `Err`, never a short body (101).
+  Streaming rather than a collected `Vec` because §11 needs SSE. Each
+  stream's channel is unbounded, so the trunk's one reader never waits on a
+  slow consumer and one stream cannot stall the others. Dropping a body early
+  sends `CLOSE{stream_id}`. Uploads are bounded by a 64-frame outbound queue.
+- **Liveness** follows 97: `PING` every 15 s; with nothing heard for 45 s
+  the trunk dies as `relay_silent`. Every stream still open, or still
+  waiting for `STREAM_READY`, ends with `trunk_lost`. There is no
+  open timeout: the relay answers `OPEN_STREAM` at once, so a relay that
+  does not answer is caught by the heartbeat.
+- **A `rate_limited` open no longer kills the trunk** (97's "Not changed").
+  The relay refuses an over-cap `OPEN_STREAM` with a *trunk-scoped* `ERROR`
+  that names no attempt (`connect.rs`), and keeps the trunk. It answers
+  opens in order, so the client keeps pending opens in wire order (a lock
+  spans the queue push and the send) and fails the oldest one.
+- **`SrpError::code()`** is stable, because it surfaces as
+  `error.data.storm_error`. The codes are `server_offline`
+  (`server_unreachable` at `HELLO`), `relay_down`, `relay_silent`,
+  `handshake_timeout`, `trunk_lost`, `trunk_superseded`, `stream_aborted`,
+  `server_timeout`, `rate_limited`, `stream_closed`, `protocol_error`,
+  `trunk_closed` (closed by this side), `invalid_relay_target`, and
+  `relay_error` for a code this build does not know.
+- Tests: `tests/srp_trunk.rs` runs 18 cases against a Rust fake relay that
+  answers a request only when its end-of-body frame arrives. The fake has
+  no timers; heartbeat timings are injected. The cases: end of body on every
+  request, `GET` included; 16 MiB + 12 345 bytes in ≤ 256 KiB frames,
+  byte-exact both ways; an aborted response, as `ERROR` and as the raw flag,
+  failing only its own stream; a silent relay, which is `relay_silent`, with
+  both a pre-head and a mid-body stream `trunk_lost`; `server_unreachable`
+  as `server_offline`; eight interleaved streams without cross-talk; a
+  `rate_limited` open that the trunk survives; the server's trunk lost;
+  an early drop sending `CLOSE`; `close()`. There are also 10 unit tests and
+  7 vector tests. Mutations were checked: dropping the end-of-body frame
+  hangs 11 tests, and treating an abort as a clean end fails 1–3.
+  `tests/srp_live.rs` (ignored) passed against a real `storm-relay` and
+  storm-server on 18860/18861: `/v1/server`, a `POST` identity challenge
+  verified, 16 concurrent `GET`s, and an unregistered id as `server_offline`.
+*Revisit if:* SRP gains per-stream flow control (67), which would bound the
+per-stream body buffer by window; or the relay starts naming the refused
+attempt in its `rate_limited` reply, which would replace the FIFO inference.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
