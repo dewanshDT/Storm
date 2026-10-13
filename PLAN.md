@@ -6059,6 +6059,26 @@ relay further.** *(2026-10-12, relay completion loop.)*
   (fails on the old code: the fake relay's 16 MiB limit drops the trunk),
   `a_chunked_upload_sent_back_to_back_lands_whole`.
 
+**100. The Dart client sends a request body in frames of at most 256 KiB.**
+*(2026-10-12, relay TODO §4; found by decision 98, PR #157.)* `SrpHttpClient`
+sent each chunk `finalize()` yielded as one `0x01` frame — in practice the
+whole body — so an upload over 16 MiB exceeded the WebSocket frame limit and
+the relay closed **that client's trunk** (measured at 17 and 24 MiB through a
+real `storm-relay`). `SrpTrunk.sendBody` now splits every chunk at
+`maxBodyFramePayload` (256 KiB, `srp_codec.dart`), the size the server uses
+for response bodies (`proto::MAX_BODY_FRAME_PAYLOAD`, 98). #150's end-of-body
+rule is unchanged: non-empty chunks only, then exactly one empty frame. The
+client never sends `0x02`, and receiving a body as many small frames is what
+98's live download tests already exercise.
+- Test: `a body over 16 MiB goes out in bounded frames, whole and in order`
+  (`test/srp_tunnel_test.dart`) — 20 MiB as 80 frames of 256 KiB, byte-exact
+  at the fake relay, then one end of body; the old trunk sends 1 frame.
+- **The §5.2 "Body frame size" wording is #157's** and is not duplicated here.
+  #157's live upload test (`relay_live_test.dart`, skipped there for this
+  defect) should be un-skipped once both are on `staging`.
+*Revisit if:* SRP gains per-stream flow control (67), which would bound
+frames by window rather than by a constant.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

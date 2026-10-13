@@ -24,6 +24,10 @@ const int bodyResponse = 0x02; // HTTP_RESPONSE_BODY_CHUNK
 /// The fixed size of a binary frame's header: one kind byte, four id bytes.
 const int binaryHeaderLen = 5;
 
+/// The largest body payload this client puts in one binary frame (§5.2). A
+/// frame over 16 MiB makes the relay close the whole trunk (decision 100).
+const int maxBodyFramePayload = 256 * 1024;
+
 /// The largest `attempt_id` echoed by the relay (§5.1). The relay bounds it at
 /// 256 bytes; the client picks values inside that, so this is a guard against
 /// drift rather than a value a caller would normally hit.
