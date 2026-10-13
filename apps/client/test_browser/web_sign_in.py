@@ -124,7 +124,9 @@ class Browser:
         return r.get("result", {}).get("value")
 
     def loads(self):
-        return sum(1 for e in self.events if e["method"] == "browsingContext.load")
+        # Firefox preloads about:newtab in a hidden browser, which reports its own load.
+        return sum(1 for e in self.events
+                   if e["method"] == "browsingContext.load" and e["params"]["context"] == self.ctx)
 
     def console(self):
         return [e["params"].get("text", "") for e in self.events if e["method"] == "log.entryAdded"]

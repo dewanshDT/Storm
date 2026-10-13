@@ -3,7 +3,9 @@
 ///
 /// Flow:
 /// 1. User scans a `storm://pair` QR, or pastes the URI (slice 14).
-/// 2. Client verifies the server's identity via the challenge step.
+/// 2. Client reaches the server — at the QR's address, or through one of the
+///    QR's relays when that does not answer (decision 96) — and verifies its
+///    identity via the challenge step before sending anything else.
 /// 3. Client consumes the pairing nonce → device credentials.
 /// 4. Client creates the owner account (first user).
 /// 5. Client logs in → session tokens.
@@ -17,8 +19,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
-import '../api/ed25519_verify.dart';
-import '../api/server_verifier.dart';
+import '../api/pairing_route.dart';
 import '../state/app_state.dart';
 import 'scan_pairing_screen.dart';
 import 'tokens.dart';
@@ -51,7 +52,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   // Step 4: login.
   bool _loggingIn = false;
 
-  // Server info from verification.
+  // The proven transport, and the server info fetched over it.
+  PairingRoute? _route;
   ServerInfo? _serverInfo;
 
   // Device credentials from pairing.
@@ -59,6 +61,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   @override
   void dispose() {
+    _route?.close();
     _uriController.dispose();
     _passwordController.dispose();
     super.dispose();
@@ -112,44 +115,15 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       _error = null;
     });
 
+    _route?.close();
+    _route = null;
     try {
-      final authApi = AuthApi(baseUrl: uri.baseUrl);
-
-      // 1. Fetch server identity and verify it matches the QR.
-      final serverInfo = await authApi.serverInfo();
-      if (serverInfo.serverId != uri.serverId) {
-        setState(() {
-          _error = 'Server id mismatch. This QR may be for a different server.';
-          _verifying = false;
-        });
-        return;
-      }
-      if (serverInfo.publicKey != uri.publicKey) {
-        setState(() {
-          _error =
-              'Server public key mismatch. This QR may be for a different server.';
-          _verifying = false;
-        });
-        return;
-      }
-
-      // 2. Challenge — send a random nonce, verify the Ed25519 signature.
-      final challengeNonce = randomNonce();
-      final answer = await authApi.challenge(challengeNonce);
-      final valid = await verifyChallenge(
-        publicKeyB64: uri.publicKey,
-        signatureB64: answer.signature,
-        serverId: uri.serverId,
-        nonce: challengeNonce,
-      );
-      if (!valid) {
-        setState(() {
-          _error =
-              'Server failed the cryptographic challenge. Connection may be intercepted.';
-          _verifying = false;
-        });
-        return;
-      }
+      // 1–2. Reach the server and prove it holds the QR's key. Nothing below
+      // is sent until this has returned.
+      final route = await openPairingRoute(uri);
+      _route = route;
+      final authApi = route.authApi;
+      final serverInfo = route.serverInfo;
 
       // 3. Consume the pairing nonce.
       final packageInfo = await PackageInfo.fromPlatform();
@@ -178,8 +152,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 serverId: serverInfo.serverId,
                 serverKeyId: serverInfo.keyId,
                 serverPublicKey: serverInfo.publicKey,
+                relays: pairedRelays(uri, serverInfo),
               ),
             );
+        route.close();
+        _route = null;
         if (!mounted) return;
         setState(() => _verifying = false);
         if (widget.rePair) Navigator.of(context).pop(true);
@@ -189,6 +166,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       setState(() {
         _serverInfo = serverInfo;
         _pairResult = pairResult;
+        _verifying = false;
+      });
+    } on PairingRouteException catch (e) {
+      setState(() {
+        _error = _routeError(uri, e);
         _verifying = false;
       });
     } on AuthApiException catch (e) {
@@ -246,8 +228,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     });
 
     try {
-      final uri = _parsedUri!;
-      final authApi = AuthApi(baseUrl: uri.baseUrl);
+      final authApi = _route!.authApi;
       // Device tier: the credential from pairing, a step earlier in this flow.
       final pair = _pairResult!;
       await authApi.setUpAccount(
@@ -284,7 +265,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     try {
       final uri = _parsedUri!;
       final pair = _pairResult!;
-      final authApi = AuthApi(baseUrl: uri.baseUrl);
+      final authApi = _route!.authApi;
       final tokens = await authApi.login(
         deviceId: pair.deviceId,
         deviceSecret: pair.deviceSecret,
@@ -308,6 +289,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               serverId: _serverInfo!.serverId,
               serverKeyId: _serverInfo!.keyId,
               serverPublicKey: _serverInfo!.publicKey,
+              relays: pairedRelays(uri, _serverInfo!),
               // Session tokens.
               accessToken: tokens.accessToken,
               refreshToken: tokens.refreshToken,
@@ -316,6 +298,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               // Clear legacy token — we're paired now.
             ),
           );
+      _route?.close();
+      _route = null;
       if (widget.rePair && mounted) Navigator.of(context).pop(true);
     } on AuthApiException catch (e) {
       setState(() {
@@ -328,6 +312,32 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         _loggingIn = false;
       });
     }
+  }
+
+  /// The message for a failed reach, naming what was dialled so the person
+  /// knows whether to look at the server, the relay, or the network between.
+  static String _routeError(PairingUri uri, PairingRouteException e) {
+    final relay = e.relayHost;
+    return switch (e.failure) {
+      PairingFailure.serverUnreachable when relay != null =>
+        "The relay $relay has your server, but the server didn't answer "
+            'through it. Try again in a moment.',
+      PairingFailure.serverUnreachable =>
+        "Couldn't reach the server at ${uri.address}.",
+      PairingFailure.relayUnreachable =>
+        "Couldn't reach the server at ${uri.address}, or its relay $relay.\n\n"
+            'Check this device has internet access, or pair on the same '
+            'network as the server.',
+      PairingFailure.serverNotOnRelay =>
+        'The relay $relay answered, but your server is not connected to it.\n\n'
+            'Check the server is running and online.',
+      PairingFailure.identityFailed =>
+        'Server failed the cryptographic challenge'
+            '${relay == null ? '' : ' through the relay $relay'}. '
+            'Connection may be intercepted.',
+      PairingFailure.identityMismatch =>
+        'Server identity mismatch. This QR may be for a different server.',
+    };
   }
 
   // ---- UI ----
@@ -465,6 +475,20 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                         )
                       : const Text('Verify & Pair'),
                 ),
+                if (_verifying && pairingRelays(_parsedUri!).isNotEmpty) ...[
+                  SizedBox(height: t.sp * 1.5),
+                  Text(
+                    key: const Key('pairing-via-relay'),
+                    'Connecting to ${_parsedUri!.address}, or through '
+                    '${_relayHosts(_parsedUri!)} if it is not on this network.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.text3,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -497,7 +521,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 ),
                 SizedBox(height: t.sp * 1),
                 Text(
-                  'Paired with ${_parsedUri?.address ?? 'server'}.',
+                  _route?.viaRelay ?? false
+                      ? 'Paired with ${_parsedUri?.address ?? 'server'} '
+                            'through the relay ${_route!.relayHost}.'
+                      : 'Paired with ${_parsedUri?.address ?? 'server'}.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
@@ -554,6 +581,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   }
 
   // ---- helpers ----
+
+  static String _relayHosts(PairingUri uri) => pairingRelays(
+    uri,
+  ).map((r) => Uri.tryParse(r.url)?.host ?? r.url).join(', ');
 
   static String _platformName() {
     switch (defaultTargetPlatform) {
