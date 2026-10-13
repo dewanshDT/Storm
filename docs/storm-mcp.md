@@ -183,6 +183,16 @@ established: `_storm/vault.md`, the hidden per-vault config note, gains a
 reads vault colour. No schema change, no endpoint, stays greppable — the
 same reasoning that put colour and property types there in the first place.
 
+## Connecting a client (decision 105e)
+
+*Unreleased.* External clients reach `/mcp` through `storm-runtime
+mcp-connect`, a stdio adapter that tries the server's LAN address first and
+its relays after, checks the server's identity against the pinned key before
+sending the access key, reads the key from `STORM_MCP_KEY` or `--key-file`,
+and reports failures as JSON-RPC errors carrying `storm_error`. The app's key
+reveal writes the config; `deploy/README.md` (*MCP clients*) has the details.
+The raw `type: http` entry stays for LAN-only clients.
+
 ## Security
 
 Single shared bearer token (decision 4) — MCP clients authenticate with it
