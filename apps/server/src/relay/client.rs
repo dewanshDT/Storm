@@ -647,16 +647,18 @@ async fn serve_one(
         }
         // `send`, not `try_send`: a full queue must slow this task down, not
         // drop a chunk out of the middle of a response body.
-        if outbound
-            .send(Message::binary(proto::encode_body_frame(
-                proto::FRAME_RESPONSE_BODY,
-                stream_id,
-                &chunk,
-            )))
-            .await
-            .is_err()
-        {
-            return;
+        for piece in chunk.chunks(proto::MAX_BODY_FRAME_PAYLOAD) {
+            if outbound
+                .send(Message::binary(proto::encode_body_frame(
+                    proto::FRAME_RESPONSE_BODY,
+                    stream_id,
+                    piece,
+                )))
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
     }
 

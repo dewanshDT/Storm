@@ -152,8 +152,10 @@ test-live:
 		http://127.0.0.1:$(PORT) "$$ROOT/.dev/live-server.log")"; \
 	export STORM_SESSION STORM_DEVICE; \
 	echo "--- server e2e ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- mcp e2e ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
 	echo "--- agent runtime e2e (its own server and host; decision 77c) ---"; \
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
@@ -218,6 +220,8 @@ test-live:
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
 		--dart-define=STORM_SESSION="$$STORM_SESSION" \
+		--dart-define=STORM_BASE=http://127.0.0.1:$(PORT) \
+		--dart-define=STORM_LIVE_LOG="$$ROOT/.dev/live-server.log" \
 		--dart-define=STORM_RELAY_ORIGIN=http://127.0.0.1:$(PORT) \
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
 		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
