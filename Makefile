@@ -10,6 +10,7 @@
 
 SERVER := apps/server
 RELAY  := apps/relay
+RELAY_CF := apps/relay-cf
 RUNTIME := apps/runtime
 CLIENT := apps/client
 WWW    := apps/www
@@ -66,7 +67,7 @@ lint:
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-runtime test-client
+test: test-server test-relay test-relay-cf test-runtime test-client
 
 ## test-server: Rust unit tests
 test-server:
@@ -78,6 +79,13 @@ test-server:
 # workspace) and a crate outside `make check` is one CI compiles first.
 test-relay:
 	cd $(RELAY) && cargo test
+
+## test-relay-cf: the Cloudflare relay's typecheck + workerd tests (needs Node 22)
+#
+# Decision 108b. `npm ci` from the committed lockfile, then tsc and the vitest
+# suite, which runs inside workerd and reads docs/srp-vectors.json.
+test-relay-cf:
+	cd $(RELAY_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
 
 ## test-runtime: storm-runtime unit + provider-contract tests
 #
@@ -440,7 +448,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-client test-live test-browser test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-relay-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check
