@@ -6387,6 +6387,52 @@ marker to `/v1/server`'s relay entries); every relay in use has decision 106
 (the FIFO fallback for an unnamed `rate_limited` can go); or SRP gains E2E,
 which would change what "public" costs.
 
+**105d. mcp-connect's live acceptance runs in `make test-live`
+(mcp-connect S4).** *(2026-10-13, decision 105's fourth slice.)* The adapter
+is now proven against the real server and the real relay on every live run,
+by the same checks that prove `/mcp` itself.
+- **The MCP suite runs three times.** `apps/server/tests/mcp_e2e.py` gained an
+  adapter mode: with `MCP_CONNECT_BIN` set, every `/mcp` call goes over stdio
+  to one long-lived `storm-runtime mcp-connect` (`MCP_CONNECT_ADDR`,
+  `MCP_CONNECT_RELAY` pick the route) instead of HTTP, and an HTTP refusal
+  comes back as `data.status`, which the harness turns back into the status
+  each check already expects. A call with another key gets a one-shot
+  adapter; the one call with no key at all stays on HTTP, since the adapter
+  cannot send none. REST fixtures stay on `STORM_BASE`, which makes them the
+  concurrent LAN side. `make test-live` runs it over HTTP (86), through the
+  adapter direct (89: the 86 plus a clean exit, every call on the expected
+  route, and no key in the log), and through the real `storm-relay` with
+  `--addr` a closed port (89). Driving the existing suite rather than a copy
+  is the point: a check added to it later is an adapter check too.
+- **Re-runnable against one server.** A run through the adapter names its
+  fixtures for the run (`MCP/Tornado-direct.md`, `demo/run-relay.spec.ts`)
+  and starts by setting `/mcp` read-only, since an earlier run ends
+  read-write. The HTTP run is unchanged.
+- **`tests/mcp_connect_live.py` is in `make test-live`** (39 checks, its own
+  servers and relays on 18870–18879). Its server binds `127.0.0.1`, not a
+  wildcard, so rmcp's `allowed_hosts` is enforced and a relayed call proves
+  the `Host` is accepted. S3's suite runs direct and relayed. Then: a relay
+  alone; the registered relay set cached under `XDG_STATE_HOME`; a dead seed
+  relay still connecting through the cached ones; a `base_version` diff3
+  merge over the relay against a concurrent LAN edit (`merged: true`, both
+  edits kept, and the LAN reads the merge); an impostor storm-server at
+  `--addr` losing to the relay, which proves the real one; an impostor alone,
+  and an impostor beside a dead relay, both `identity_failed`; a relay
+  without the server `server_offline`; no relay `relay_down`.
+- **The relay's per-IP `HELLO` limit shapes the harness.** A relay allows one
+  address 10 `HELLO`s a minute (token bucket), and every mcp-connect process
+  that tries a relay spends one, losers included. A harness spawning a
+  process per check ran out (`rate_limited`) in its first draft. So
+  `mcp_connect_live.py` runs two relays and gives each connect a fresh state
+  directory unless the check is about the cache, since a cached set of two
+  relays dials both. A real MCP client runs one process for its session and
+  is far from the limit.
+- **No server or relay defect found.** `make test-live PORT=18880
+  AUTH_PORT=18881 RELAY_PORT=18887` and `make check` green.
+*Revisit if:* the relay's `HELLO` limit becomes configurable (one relay would
+do), or `/mcp` becomes stateful (one long-lived adapter per suite would then
+also be testing session reuse).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

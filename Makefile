@@ -217,6 +217,23 @@ test-live:
 		-H 'Content-Type: application/json' \
 		-d '{"relays":["ws://127.0.0.1:$(RELAY_PORT)"]}' \
 		http://127.0.0.1:$(PORT)/v1/config/relays; \
+	echo "--- mcp e2e through mcp-connect, direct (decision 105d) ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) VAULT_ROOT="$$ROOT/.dev/live-vaults" \
+	MCP_CONNECT_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_CONNECT_ADDR=http://127.0.0.1:$(PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- mcp e2e through mcp-connect and the real relay, the address unreachable ---"; \
+	CLOSED=$$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'); \
+	STORM_BASE=http://127.0.0.1:$(PORT) VAULT_ROOT="$$ROOT/.dev/live-vaults" \
+	MCP_CONNECT_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_CONNECT_ADDR=http://127.0.0.1:$$CLOSED \
+	MCP_CONNECT_RELAY=ws://127.0.0.1:$(RELAY_PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- mcp-connect live: relay cache, LAN merge over the relay, impostors (own servers, 18870-18879) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 "$$ROOT/$(RUNTIME)/tests/mcp_connect_live.py"; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
 		--dart-define=STORM_SESSION="$$STORM_SESSION" \
