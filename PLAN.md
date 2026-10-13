@@ -5731,6 +5731,44 @@ operator: agent pages give too much of the screen to the top bar)*
   - The back bubble in a session, and the place picker elsewhere.
 - The acceptance shots `phone-06` to `phone-09` are retaken.
 
+**92. SRP §5.2 ends a request body with an empty `0x01` frame.** *(2026-10-12,
+P2 from the relay TODO, measured 2026-10-03)*
+- **The defect.** §5.2 defined body chunks but never their end. storm-server
+  dispatches `GET`/`HEAD`/`OPTIONS`/`TRACE` at the head and waits for a
+  zero-length `0x01` frame for everything else; the Dart client sent no
+  terminator. **Every relayed POST or PUT with a body hung until the
+  caller's timeout** — every note save, create and move from the app over a
+  relay. Confirmed against a real `storm-relay` + storm-server from the Dart
+  client: `createNote` and `saveNote` timed out at 10 s, while a POST with
+  no body happened to work, because `http`'s `finalize()` yields one empty
+  chunk and the client sent it as a frame.
+- **The rule, now normative in `docs/srp-v1.md` §5.2:** a client sends
+  exactly one empty `0x01` frame after the last non-empty chunk of **every**
+  request, a `GET` included; never an empty frame for anything else (an
+  empty chunk from the body source is skipped); nothing after it. The relay
+  forwards it verbatim. An origin treats it as end of input and **may**
+  dispatch the four body-less methods at the head, which keeps clients from
+  before this rule working for reads. `CLOSE` is not an end of body: it
+  abandons the stream. No signed bytes changed; the vectors are untouched.
+- **Why one rule for every method rather than "only bodied ones":** no party
+  has to decide from the method whether a body is coming, and the existing
+  server already accepts it. The server is unchanged.
+- **Why every unit test was green:** the client's fake relay answered 20 ms
+  after the head, not at end of body. It now serves on the empty frame, as
+  the origin does.
+- Tests: client `test_live/relay_live_test.dart` (a GET, a POST with a JSON
+  body, a PUT with `base_version` and a body-less POST, through a real
+  relay; the two bodied ones fail on the old client), run by `make
+  test-live`, which now builds and starts `storm-relay` on `RELAY_PORT`
+  (8487) and registers the first server with it; client unit tests
+  `every request ends its body with one empty 0x01 frame (§5.2)` and `an
+  empty chunk mid-body is skipped, not sent as end of body` (both fail on
+  the old client, as does the existing body round-trip once the fake waits
+  for the end); relay
+  `an_empty_request_body_frame_reaches_the_server_as_end_of_body`.
+- **Unblocks** relay TODO §5 (MCP over the tunnel: tool calls are bodied
+  POSTs). P1 (`TCP_NODELAY`) is separate.
+
 **93. The pairing QR carries the registered relay set.** *(2026-10-12, relay
 TODO §2's last pairing box; SRP v1 §4.3 names two carriers and only
 `GET /v1/server` existed)*

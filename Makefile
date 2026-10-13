@@ -26,6 +26,9 @@ PORT  ?= 8484
 # pairing nonce and creates the first user, both of which are once-per-server
 # and both of which `auth_e2e.py` has already used up on $(PORT).
 AUTH_PORT ?= 8485
+# A real storm-relay for the client's relayed suite (PLAN decision 92). Not
+# 8486, the relay's own default, so a dev relay left running is not borrowed.
+RELAY_PORT ?= 8487
 
 .DEFAULT_GOAL := help
 
@@ -117,6 +120,7 @@ test-browser:
 ## test-live: integration suites against a real server, started and torn down
 test-live:
 	@cd $(SERVER) && cargo build --quiet
+	@cd $(RELAY) && cargo build --quiet
 	@cd $(RUNTIME) && cargo build --quiet
 	@set -e; \
 	ROOT="$$PWD"; \
@@ -197,9 +201,24 @@ test-live:
 		[ $$i -eq 60 ] && { echo "second auth server did not start" >&2; exit 1; }; \
 		sleep 0.5; \
 	done; \
+	echo "--- a real relay, registered by the first server ---"; \
+	"$$ROOT/$(RELAY)/target/debug/storm-relay" --bind 127.0.0.1:$(RELAY_PORT) \
+		> "$$ROOT/.dev/live-relay.log" 2>&1 & \
+	RELAY_PID=$$!; \
+	trap 'kill $$SERVER_PID $$AUTH_PID $$RELAY_PID 2>/dev/null; true' EXIT; \
+	for i in $$(seq 1 60); do \
+		curl -s -o /dev/null http://127.0.0.1:$(RELAY_PORT)/ && break; \
+		[ $$i -eq 60 ] && { echo "relay did not start" >&2; cat "$$ROOT/.dev/live-relay.log" >&2; exit 1; }; \
+		sleep 0.5; \
+	done; \
+	curl -sf -o /dev/null -X PUT -H "Authorization: $$STORM_SESSION" \
+		-H 'Content-Type: application/json' \
+		-d '{"relays":["ws://127.0.0.1:$(RELAY_PORT)"]}' \
+		http://127.0.0.1:$(PORT)/v1/config/relays; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
 		--dart-define=STORM_SESSION="$$STORM_SESSION" \
+		--dart-define=STORM_RELAY_ORIGIN=http://127.0.0.1:$(PORT) \
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
 		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
 

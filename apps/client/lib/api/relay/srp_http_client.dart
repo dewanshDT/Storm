@@ -62,11 +62,14 @@ class SrpHttpClient extends http.BaseClient {
         headers: headers,
       );
 
-      // Body goes out as 0x01 chunks. `finalize` may be empty for GET/HEAD.
+      // An empty 0x01 frame means end of body (§5.2), so an empty chunk from
+      // `finalize` must not go out as one — and the real end must, always.
       final body = request.finalize();
       await for (final chunk in body) {
+        if (chunk.isEmpty) continue;
         trunk.sendBody(stream, chunk);
       }
+      trunk.endBody(stream);
 
       // The response is the head, which may have already arrived. If the trunk
       // finished this stream first (a refused open, trunk loss), surface that

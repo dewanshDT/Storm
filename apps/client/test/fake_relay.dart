@@ -59,6 +59,9 @@ class FakeRelay {
   FakeHandler? handler;
 
   final _streams = <int, _RequestState>{};
+
+  /// Every `0x01` frame the client sent, as `(stream_id, payload length)`.
+  final requestBodyFrames = <(int, int)>[];
   int _nextStream = 1;
 
   int get port => _server!.port;
@@ -91,12 +94,18 @@ class FakeRelay {
     }
     if (frame is List<int>) {
       final decoded = decodeBodyFrame(frame);
-      // A 0x01 chunk contributes to the in-flight request body.
       if (decoded != null && decoded.kind == bodyRequest) {
-        _streams
-            .putIfAbsent(decoded.streamId, _RequestState.new)
-            .body
-            .addAll(decoded.payload);
+        requestBodyFrames.add((decoded.streamId, decoded.payload.length));
+        // An empty 0x01 frame ends the body (§5.2): serve then, as the origin
+        // does. Any other 0x01 chunk contributes to the body.
+        if (decoded.payload.isEmpty) {
+          unawaited(_serve(decoded.streamId));
+        } else {
+          _streams
+              .putIfAbsent(decoded.streamId, _RequestState.new)
+              .body
+              .addAll(decoded.payload);
+        }
       }
     }
   }
@@ -129,15 +138,6 @@ class FakeRelay {
         state.method = frame.body['method'] as String?;
         state.path = frame.body['path'] as String?;
         state.headers = _headersOf(frame.body['headers']);
-        // Serve once the client's body chunks have drained. A bounded delay is
-        // deterministic for the small payloads these tests send; the head and
-        // the 0x01 chunks arrive as separate frames, so the serve must not run
-        // on the head frame itself.
-        unawaited(
-          Future<void>.delayed(const Duration(milliseconds: 20), () {
-            _serve(streamId);
-          }),
-        );
       case 'CLOSE':
       // Client ended a stream; nothing more to do for it.
       default:

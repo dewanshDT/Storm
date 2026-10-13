@@ -11,6 +11,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:storm/api/relay/srp_codec.dart';
 import 'package:storm/api/relay/srp_http_client.dart';
 import 'package:storm/api/relay/srp_trunk.dart';
@@ -141,6 +142,61 @@ void main() {
       expect(response.statusCode, 201);
       final echoed = response.bodyBytes;
       expect(echoed, payload);
+    } finally {
+      trunk.dispose();
+      await relay.close();
+    }
+  });
+
+  test(
+    'every request ends its body with one empty 0x01 frame (§5.2)',
+    () async {
+      await _withRelay((relay) async {
+        final trunk = _trunk(relay);
+        final client = SrpHttpClient(trunk);
+        try {
+          await client.get(Uri.parse('http://x/v1/vaults'));
+          await client.post(Uri.parse('http://x/v1/notes'), body: '{"a":1}');
+
+          final ends = relay.requestBodyFrames.where((f) => f.$2 == 0).toList();
+          expect(ends.length, 2, reason: 'one end of body per request');
+          // The GET sends nothing but its end of body.
+          final getStream = ends.first.$1;
+          expect(relay.requestBodyFrames.where((f) => f.$1 == getStream), [
+            (getStream, 0),
+          ]);
+          // The POST's end comes after its body.
+          final postFrames = relay.requestBodyFrames
+              .where((f) => f.$1 == ends.last.$1)
+              .toList();
+          expect(postFrames.last.$2, 0);
+          expect(postFrames.first.$2, greaterThan(0));
+        } finally {
+          trunk.dispose();
+        }
+      });
+    },
+  );
+
+  test('an empty chunk mid-body is skipped, not sent as end of body', () async {
+    final relay = FakeRelay(
+      handler: (m, p, h, body) async => FakeResponse(200, {}, body),
+    );
+    await relay.start();
+    final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+    final client = SrpHttpClient(trunk);
+    try {
+      final request = http.StreamedRequest('POST', Uri.parse('http://x/v1/n'));
+      request.sink
+        ..add(utf8.encode('abc'))
+        ..add(const <int>[])
+        ..add(utf8.encode('def'))
+        ..close();
+      final response = await http.Response.fromStream(
+        await client.send(request),
+      );
+      expect(response.body, 'abcdef');
+      expect(relay.requestBodyFrames.where((f) => f.$2 == 0).length, 1);
     } finally {
       trunk.dispose();
       await relay.close();
