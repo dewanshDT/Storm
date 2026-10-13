@@ -10,6 +10,8 @@
 
 SERVER := apps/server
 RELAY  := apps/relay
+CONFORMANCE := tools/relay-conformance
+
 RELAY_CF := apps/relay-cf
 RUNTIME := apps/runtime
 CLIENT := apps/client
@@ -56,6 +58,7 @@ check: fmt-check lint test
 fmt-check:
 	cd $(SERVER) && cargo fmt --check
 	cd $(RELAY) && cargo fmt --check
+	cd $(CONFORMANCE) && cargo fmt --check
 	cd $(RUNTIME) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
@@ -63,6 +66,7 @@ fmt-check:
 lint:
 	cd $(SERVER) && cargo clippy --all-targets -- -D warnings
 	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
+	cd $(CONFORMANCE) && cargo clippy --all-targets -- -D warnings
 	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
@@ -79,6 +83,26 @@ test-server:
 # workspace) and a crate outside `make check` is one CI compiles first.
 test-relay:
 	cd $(RELAY) && cargo test
+	cd $(CONFORMANCE) && cargo test
+
+## relay-conformance: the SRP v1 conformance suite against any relay (RELAY_URL=ws://...)
+#
+# Black-box: the relay is known only by its URL, and must have been started
+# with tools/relay-conformance's fixture contract (README there). Optional:
+# RELAY_TOFU_URL, a second relay in trust-on-first-use mode.
+relay-conformance:
+	@test -n "$(RELAY_URL)" || { \
+		echo "usage: make relay-conformance RELAY_URL=ws://host:port [RELAY_TOFU_URL=ws://...]" >&2; \
+		exit 2; }
+	@cd $(CONFORMANCE) && cargo build --release --quiet
+	RELAY_URL="$(RELAY_URL)" RELAY_TOFU_URL="$(RELAY_TOFU_URL)" \
+		$(CONFORMANCE)/target/release/relay-conformance
+
+## relay-conformance-local: start storm-relay with the fixture contract (ports 18900-18901) and run the suite
+relay-conformance-local:
+	@cd $(RELAY) && cargo build --release --quiet
+	@cd $(CONFORMANCE) && cargo build --release --quiet
+	bash $(CONFORMANCE)/local.sh "$$PWD/$(RELAY)/target/release/storm-relay"
 
 ## test-relay-cf: the Cloudflare relay's typecheck + workerd tests (needs Node 22)
 #
@@ -255,6 +279,7 @@ test-live:
 fmt:
 	cd $(SERVER) && cargo fmt
 	cd $(RELAY) && cargo fmt
+	cd $(CONFORMANCE) && cargo fmt
 	cd $(RUNTIME) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
