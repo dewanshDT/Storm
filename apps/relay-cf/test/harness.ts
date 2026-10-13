@@ -59,7 +59,13 @@ export class Peer {
 
   resumeReading() {
     this.answerPings = true;
-    for (; this.unanswered > 0; this.unanswered--) this.ws.send(JSON.stringify({ v: 1, type: "PONG" }));
+    for (; this.unanswered > 0; this.unanswered--) this.pong();
+  }
+
+  // workerd still delivers messages that arrived before a close, and throws
+  // on a send after it; a PING queued behind the close goes unanswered.
+  private pong() {
+    if (this.ws.readyState === WebSocket.READY_STATE_OPEN) this.ws.send(JSON.stringify({ v: 1, type: "PONG" }));
   }
 
   private constructor(readonly ws: WebSocket) {
@@ -68,7 +74,7 @@ export class Peer {
         const value = JSON.parse(event.data);
         if (value.type === "PING") {
           this.pingsSeen++;
-          if (this.answerPings) this.ws.send(JSON.stringify({ v: 1, type: "PONG" }));
+          if (this.answerPings) this.pong();
           else this.unanswered++;
           return;
         }

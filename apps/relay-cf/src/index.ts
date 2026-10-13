@@ -4,6 +4,7 @@ import { HelloLimiter } from "./limiter";
 import { log } from "./log";
 import { error, parseFrame, PONG, ProtocolError, stringField, type ErrorCode } from "./proto";
 import { RelayRoom } from "./room";
+import { trySend } from "./send";
 
 export { HelloLimiter, RelayRoom };
 
@@ -19,7 +20,7 @@ const H_PUBLIC_BASE = "x-storm-public-base";
 function refuse(code: ErrorCode): Response {
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
-  server.send(error(code));
+  trySend(server, error(code));
   server.close(1000);
   return new Response(null, { status: 101, webSocket: client });
 }
@@ -67,12 +68,19 @@ async function register(env: Env, url: URL): Promise<Response> {
   let serverGone = false;
 
   const close = (ws: WebSocket, code?: ErrorCode) => {
+    if (code) trySend(ws, error(code));
     try {
-      if (code) ws.send(error(code));
       ws.close(1000);
-    } catch {
-      // already closed
-    }
+    } catch {}
+  };
+  // Either side of this hop can be gone while the other's frames are still
+  // being delivered; the frame is dropped and both sides are closed, and
+  // closing the room's side is what runs the room's cleanup for this trunk.
+  const carry = (to: WebSocket, from: WebSocket, data: string | ArrayBuffer): boolean => {
+    if (trySend(to, data)) return true;
+    close(to);
+    close(from);
+    return false;
   };
 
   const openRoom = async (first: string, serverId: string) => {
@@ -85,17 +93,10 @@ async function register(env: Env, url: URL): Promise<Response> {
       if (!ws) throw new Error(`room answered ${response.status}`);
       ws.binaryType = "arraybuffer";
       ws.accept();
-      ws.addEventListener("message", (e) => {
-        try {
-          server.send(e.data);
-        } catch {
-          close(ws);
-        }
-      });
+      ws.addEventListener("message", (e) => void carry(server, ws, e.data));
       ws.addEventListener("close", () => close(server));
       ws.addEventListener("error", () => close(server));
-      ws.send(first);
-      for (const data of pending ?? []) ws.send(data);
+      for (const data of [first, ...(pending ?? [])]) if (!carry(ws, server, data)) return;
       room = ws;
       if (serverGone) close(ws);
     } catch (e) {
@@ -106,7 +107,7 @@ async function register(env: Env, url: URL): Promise<Response> {
 
   server.addEventListener("message", (event) => {
     if (room) {
-      room.send(event.data);
+      carry(room, server, event.data);
       return;
     }
     if (pending) {
@@ -119,7 +120,7 @@ async function register(env: Env, url: URL): Promise<Response> {
       const frame = parseFrame(event.data);
       // A PING before REGISTER_SERVER is answered like any other (§4.2).
       if (frame.type === "PING") {
-        server.send(PONG);
+        trySend(server, PONG);
         return;
       }
       if (frame.type === "PONG") return;

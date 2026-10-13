@@ -6711,6 +6711,33 @@ a var for parity and the suite. Not deployed: no account id, no routes, out of
 `server_id` on the upgrade so the Worker can splice); SRP gains flow control
 (67), which replaces the watermark; or a runtime exposes a send-buffer size,
 which makes it unnecessary.
+*108b addendum (2026-10-14):* a CI run of PR #174 failed with `Can't call
+WebSocket send() after close()`. Under load the 256 KiB test's server trunk
+was dropped at the 1.5 s test heartbeat deadline although it had sent frames
+well inside it: the room only recorded a frame as "seen" when it also wrote
+the attachment, at most once a second, so a frame less than a second after the
+last write was ignored. The test then wrote to the closed trunk. The deadline
+now counts from the newest frame held in memory (`Entry.seen`), and the
+attachment is still written at most once a second. The test sending after the
+close was a symptom, but the same exposure was in the relay. workerd's
+`WebSocket.send` throws once a socket is closing, whichever side closed it, and
+still delivers messages that arrived before the close. The Worker's `/register`
+hop forwarded server frames with a bare `send`. The room swallowed a failed
+send and left the peer's streams open until its close event. Every send now goes
+through `trySend` (`src/send.ts`): a closed or closing socket returns `false`,
+never throws. In the room, a refused send ends that peer at once, exactly as
+its `webSocketClose` would: the origin gets `CLOSE` for a client's streams, a
+server's clients get `ERROR{trunk_lost}`. Each drop forgets the entry before it
+sends anything, so the cleanup cannot recurse or run twice. A new stream's
+`STREAM_READY` goes out before the stream exists, and `REGISTERED` before the
+old trunk is superseded, so a peer already gone leaves nothing to undo. The
+`/register` hop closes both sides when one is gone. The test harness's PING
+answer had the same bare `send`. `closed-peer.test.ts` closes a peer inside the
+room and then makes the room send to it, both ways. A routing test sends
+frames 0.9 s apart past the deadline. All three fail on the old code, and the
+suite is now 92 cases. 30 serial runs passed before and after the change.
+Under load (four suites in parallel per tree, 32 runs each), the old code
+failed 6/32 and 4/32 on the CI error and the new code 0/32.
 
 **108c. Acceptance: both relays pass one suite and the whole live suite, and
 the spec says what they agree on.** *(2026-10-14, phase 5 step 1, slice C of

@@ -31,6 +31,7 @@ import {
   type Body,
   type ErrorCode,
 } from "./proto";
+import { trySend } from "./send";
 
 const H_SERVER_ID = "x-storm-server-id";
 const H_PEER_IP = "x-storm-peer-ip";
@@ -90,6 +91,8 @@ type Att = ServerAtt | ClientAtt;
 interface Entry<A extends Att = Att> {
   ws: WebSocket;
   att: A;
+  // A server's newest frame; att.seen is its copy written at most once a second.
+  seen?: number;
 }
 
 interface Stream {
@@ -256,7 +259,14 @@ export class RelayRoom extends DurableObject<Env> {
 
   private gone(ws: WebSocket): void {
     const entry = this.entryOf(ws);
-    if (!entry) return;
+    if (entry) this.lost(entry);
+  }
+
+  // Also reached from a send that found the peer already closing, before its
+  // close event runs. Each drop forgets the entry before it sends anything, so
+  // a second loss of the same peer, or one met while telling others, is a no-op.
+  private lost(entry: Entry): void {
+    if (this.entries.get(idOf(entry.att)) !== entry) return;
     if (entry.att.k === "s") this.dropServer(entry as Entry<ServerAtt>, null, "closed");
     else this.dropClient(entry as Entry<ClientAtt>, null);
   }
@@ -300,6 +310,7 @@ export class RelayRoom extends DurableObject<Env> {
     const att = entry.att;
     if (att.ph === 2) {
       const now = Date.now();
+      entry.seen = now;
       if (now - att.seen >= SEEN_WRITE_MS) {
         att.seen = now;
         this.persist(entry);
@@ -317,7 +328,7 @@ export class RelayRoom extends DurableObject<Env> {
     // answered in order (§4.2, decision 108c). The auto-response covers only
     // the canonical bytes.
     if (frame.type === "PING") {
-      this.send(entry.ws, PONG);
+      this.send(entry, PONG);
       return;
     }
     if (frame.type === "PONG") {
@@ -394,7 +405,7 @@ export class RelayRoom extends DurableObject<Env> {
     att.nonce = nonce;
     att.rec = record;
     this.persist(entry);
-    this.send(entry.ws, control("CHALLENGE", { nonce }));
+    this.send(entry, control("CHALLENGE", { nonce }));
   }
 
   private async completeRegistration(entry: Entry<ServerAtt>, body: Body): Promise<void> {
@@ -436,6 +447,21 @@ export class RelayRoom extends DurableObject<Env> {
     }
 
     const now = Date.now();
+    att.ph = 2;
+    att.seen = now;
+    delete att.pk;
+    delete att.nonce;
+    delete att.rec;
+    this.persist(entry);
+    const registered = control("REGISTERED", {
+      trunk_id: att.tid,
+      public_address: `${att.base}/connect/${att.sid}`,
+      heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+    });
+    // A server gone before REGISTERED reached it supersedes nothing.
+    if (!this.send(entry, registered)) return;
+    log("server_registered", { server_id: att.sid, trunk_id: att.tid });
+
     for (const other of this.servers()) {
       if (other !== entry && other.att.ph === 2 && other.att.sup === undefined) {
         other.att.sup = now + this.config.supersessionDrainMs;
@@ -443,22 +469,6 @@ export class RelayRoom extends DurableObject<Env> {
         log("server_superseded", { server_id: att.sid, trunk_id: other.att.tid, reason: `replaced by ${att.tid}` });
       }
     }
-
-    att.ph = 2;
-    att.seen = now;
-    delete att.pk;
-    delete att.nonce;
-    delete att.rec;
-    this.persist(entry);
-    this.send(
-      entry.ws,
-      control("REGISTERED", {
-        trunk_id: att.tid,
-        public_address: `${att.base}/connect/${att.sid}`,
-        heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
-      }),
-    );
-    log("server_registered", { server_id: att.sid, trunk_id: att.tid });
 
     for (const client of this.clients()) {
       if (client.att.ph === 1) this.ready(client, att.tid);
@@ -544,7 +554,7 @@ export class RelayRoom extends DurableObject<Env> {
     const att = entry.att;
     if (this.entries.get(att.tid) !== entry) return;
     this.forget(att);
-    this.close(entry.ws, code);
+    this.close(entry, code);
     if (att.ph === 2) {
       this.failClientsOf(att.tid, fail);
       log("server_closed", { server_id: att.sid, trunk_id: att.tid, reason, code: fail });
@@ -568,10 +578,9 @@ export class RelayRoom extends DurableObject<Env> {
       this.sql.exec("DELETE FROM streams WHERE tid = ?", tid);
     }
     for (const client of this.clients()) {
-      if (client.att.ph !== 2 || client.att.tid !== tid) continue;
-      if (!told.has(client.att.ctk)) this.send(client.ws, error(code));
+      if (client.att.ph !== 2 || client.att.tid !== tid || this.entries.get(client.att.ctk) !== client) continue;
       this.forget(client.att);
-      this.close(client.ws, null);
+      this.close(client, told.has(client.att.ctk) ? null : code);
       log("client_closed", { client_trunk_id: client.att.ctk, code });
     }
   }
@@ -583,7 +592,7 @@ export class RelayRoom extends DurableObject<Env> {
     const frame = typeof message === "string" ? parseFrame(message) : null;
     if (frame?.type === "PING") {
       if (att.ph === 2) this.sendCounted(entry, PONG, PONG.length, this.config.maxClientBufferBytes);
-      else this.send(entry.ws, PONG);
+      else this.send(entry, PONG);
       return;
     }
     if (frame?.type === "PONG") {
@@ -659,6 +668,10 @@ export class RelayRoom extends DurableObject<Env> {
     }
     server.att.next = streamId + 1;
     this.persist(server);
+    const ready = control("STREAM_READY", { attempt_id: attemptId, stream_id: streamId });
+    // Before the stream exists, so a client already gone leaves the origin
+    // nothing to be told about.
+    if (!this.sendCounted(entry, ready, ready.length, config.maxClientBufferBytes)) return;
     const deadline = Date.now() + config.streamAckTimeoutMs;
     table.set(streamId, { ctk: entry.att.ctk, acked: false, deadline });
     this.sql.exec(
@@ -668,8 +681,6 @@ export class RelayRoom extends DurableObject<Env> {
       entry.att.ctk,
       deadline,
     );
-    const ready = control("STREAM_READY", { attempt_id: attemptId, stream_id: streamId });
-    this.sendCounted(entry, ready, ready.length, config.maxClientBufferBytes);
     const open = control("STREAM_OPEN", { stream_id: streamId });
     this.sendCounted(server, open, open.length, config.maxServerBufferBytes);
     this.arm();
@@ -743,14 +754,14 @@ export class RelayRoom extends DurableObject<Env> {
     const att = entry.att;
     if (this.entries.get(att.ctk) !== entry) return;
     this.forget(att);
-    this.close(entry.ws, code);
+    this.close(entry, code);
     if (att.tid) {
-      const server = this.entries.get(att.tid);
       const table = this.streams.get(att.tid);
       if (table) {
         for (const [streamId, stream] of [...table]) {
           if (stream.ctk !== att.ctk) continue;
           this.removeStream(att.tid, streamId);
+          const server = this.entries.get(att.tid);
           if (server) this.sendCounted(server, closeStream(streamId), 0, this.config.maxServerBufferBytes);
         }
       }
@@ -771,17 +782,18 @@ export class RelayRoom extends DurableObject<Env> {
     return f.m.length === 0 || f.s - f.a + size <= budget;
   }
 
-  private sendCounted(entry: Entry, data: string | ArrayBuffer, size: number, budget: number): void {
+  private sendCounted(entry: Entry, data: string | ArrayBuffer, size: number, budget: number): boolean {
     const f = entry.att.f;
     f.s += size;
-    this.send(entry.ws, data);
+    if (!this.send(entry, data)) return false;
     const last = f.m.length > 0 ? f.m[f.m.length - 1] : f.a;
     if (f.s - last >= Math.max(1, Math.floor(budget / 8))) {
       f.m.push(f.s);
       this.held += f.s - last;
-      this.send(entry.ws, PING);
+      if (!this.send(entry, PING)) return false;
       this.persist(entry);
     }
+    return true;
   }
 
   private watermarkAnswered(entry: Entry): void {
@@ -835,6 +847,8 @@ export class RelayRoom extends DurableObject<Env> {
     }
     for (const [tid, table] of this.streams) {
       for (const [streamId, stream] of [...table]) {
+        // An earlier send in this loop may have ended a peer and its streams.
+        if (this.streams.get(tid)?.get(streamId) !== stream) continue;
         if (stream.acked || stream.deadline === null || stream.deadline > now) continue;
         // No retry (§5.1): the client decides whether to try again.
         this.removeStream(tid, streamId);
@@ -854,7 +868,7 @@ export class RelayRoom extends DurableObject<Env> {
   // Any frame keeps a trunk alive, including the PINGs the runtime answered
   // without waking this object.
   private lastSeen(server: Entry<ServerAtt>): number {
-    let seen = server.att.seen;
+    let seen = Math.max(server.att.seen, server.seen ?? 0);
     try {
       const auto = this.ctx.getWebSocketAutoResponseTimestamp(server.ws);
       if (auto) seen = Math.max(seen, auto.getTime());
@@ -932,18 +946,19 @@ export class RelayRoom extends DurableObject<Env> {
     return false;
   }
 
-  private send(ws: WebSocket, data: string | ArrayBuffer): void {
-    try {
-      ws.send(data);
-    } catch {
-      // closed under us; its close event does the cleanup
-    }
+  // Every frame the room sends goes through here. A peer found closed is
+  // ended now, never thrown at; its close event, when it runs, finds it gone.
+  private send(entry: Entry, data: string | ArrayBuffer): boolean {
+    if (trySend(entry.ws, data)) return true;
+    this.lost(entry);
+    return false;
   }
 
-  private close(ws: WebSocket, code: ErrorCode | null): void {
-    if (code) this.send(ws, error(code));
+  // Only for an entry already forgotten, so a failed send here ends nothing.
+  private close(entry: Entry, code: ErrorCode | null): void {
+    if (code) this.send(entry, error(code));
     try {
-      ws.close(1000);
+      entry.ws.close(1000);
     } catch {}
   }
 }
