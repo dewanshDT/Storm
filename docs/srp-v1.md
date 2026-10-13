@@ -307,6 +307,12 @@ is not `ws://` or `wss://` plus a host, and MUST NOT refuse the QR for it. A
 relay URL learned from a QR confers no trust: whatever answers through it
 faces the same identity challenge as any other candidate.
 
+A client that **pairs** through a QR's relay — its `addr` unreachable — MUST
+complete that challenge against the QR's key before it sends the pairing
+nonce or any credential, and MUST NOT pair through a plaintext `ws://` relay
+that is not on the local machine: the challenge proves who answers, not that
+the path is private.
+
 `public_address` is `<scheme>://<relay-host>/connect/<server_id>` — **derived,
 not allocated**. Any client holding a `server_id` can construct it, and the
 relay hands out no opaque identifier.
