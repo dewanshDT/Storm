@@ -299,6 +299,20 @@ client is away from the LAN — has no path back to a working address. The
 client refreshes from it whenever the server is reachable **by any path at
 all**, including a relay it already knows.
 
+**In the pairing QR**, the set travels as one `relay=<url>` query parameter
+per relay on the `storm://pair` URI, percent-encoded, after `addr`; a server
+with no registered relays emits no `relay` key. `POST /v1/pairings` returns
+the same list as `relays: [url, …]`. A client MUST ignore a `relay` value that
+is not `ws://` or `wss://` plus a host, and MUST NOT refuse the QR for it. A
+relay URL learned from a QR confers no trust: whatever answers through it
+faces the same identity challenge as any other candidate.
+
+A client that **pairs** through a QR's relay — its `addr` unreachable — MUST
+complete that challenge against the QR's key before it sends the pairing
+nonce or any credential, and MUST NOT pair through a plaintext `ws://` relay
+that is not on the local machine: the challenge proves who answers, not that
+the path is private.
+
 `public_address` is `<scheme>://<relay-host>/connect/<server_id>` — **derived,
 not allocated**. Any client holding a `server_id` can construct it, and the
 relay hands out no opaque identifier.
@@ -392,6 +406,15 @@ header alone) ends the request body for its stream. The rules:
 that closes instead of ending its body gets no response. A body with no end
 leaves the origin's handler waiting for input until a timeout, which is what
 made every relayed write hang before this rule was written down.
+
+**Body frame size.** A sender — client or origin, in either direction —
+**MUST** split a body into binary frames of at most **16 MiB** each, header
+included: the WebSocket libraries every implementation uses refuse a larger
+frame by closing the connection, and the connection is the whole trunk, not
+the one stream. A sender **SHOULD** split at **256 KiB** of payload, so that
+concurrent streams on one trunk interleave and no single frame delays a change
+feed behind a download. The relay forwards each frame as it arrives and never
+merges or splits them.
 
 **`relay_peer_ip`.** The relay attaches the client trunk's real source address
 as a sibling field on `HTTP_REQUEST_HEAD` when it re-emits the message

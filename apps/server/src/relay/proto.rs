@@ -21,6 +21,13 @@ pub const FRAME_RESPONSE_BODY: u8 = 0x02;
 /// The fixed size of a binary frame's header: one kind byte, four id bytes.
 pub const BINARY_HEADER_LEN: usize = 5;
 
+/// The largest body payload this server puts in one binary frame (§5.2).
+///
+/// A WebSocket peer refuses a frame over 16 MiB by closing the connection, and
+/// at the relay that connection is the whole trunk: one large download used to
+/// cut off every relayed client of this server (decision 98).
+pub const MAX_BODY_FRAME_PAYLOAD: usize = 256 * 1024;
+
 // ---------------------------------------------------------------------------
 // Headers
 // ---------------------------------------------------------------------------
