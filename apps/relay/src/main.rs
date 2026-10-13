@@ -2,16 +2,19 @@
 //!
 //! Configuration is flags (with `STORM_RELAY_*` env fallbacks) plus one
 //! optional file, the allowlist. Flags rather than a config file for the relay
-//! itself because there are three knobs and two of them are addresses; the
+//! itself because every knob is one scalar, and the timers and limits rarely
+//! move from their defaults; the
 //! allowlist is a file because it is the one thing that grows, gets diffed
 //! after a refused registration, and wants comments next to each entry.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use storm_relay::config;
 use storm_relay::state::Bindings;
 use storm_relay::tls::CertStore;
 use storm_relay::{Allowlist, CONNECT_PATH, Config, REGISTER_PATH, Relay};
@@ -61,6 +64,85 @@ struct Args {
     /// PEM private key for --tls-cert.
     #[arg(long, env = "STORM_RELAY_TLS_KEY", requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+
+    #[command(flatten)]
+    limits: Limits,
+}
+
+/// The §4–§6 timers and abuse limits. Each defaults to the value in `config`;
+/// the conformance suite (`tools/relay-conformance`) starts the relay with
+/// them shortened, which is the only reason most of them are flags at all.
+#[derive(clap::Args, Debug)]
+#[command(next_help_heading = "Timers and limits")]
+struct Limits {
+    /// How long a CHALLENGE nonce stays answerable (§4).
+    #[arg(long, env = "STORM_RELAY_CHALLENGE_TTL_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_CHALLENGE_TTL))]
+    challenge_ttl_ms: u64,
+
+    /// How long a HELLO waits for a server trunk before server_unreachable (§5).
+    #[arg(long, env = "STORM_RELAY_HELLO_WAIT_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_HELLO_WAIT))]
+    hello_wait_ms: u64,
+
+    /// How long a STREAM_OPEN waits for STREAM_ACK before server_timeout (§5.1).
+    #[arg(long, env = "STORM_RELAY_STREAM_ACK_TIMEOUT_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_STREAM_ACK_TIMEOUT))]
+    stream_ack_timeout_ms: u64,
+
+    /// How long a server trunk may send nothing before it is dead (§4.2).
+    #[arg(long, env = "STORM_RELAY_HEARTBEAT_DEADLINE_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_HEARTBEAT_DEADLINE))]
+    heartbeat_deadline_ms: u64,
+
+    /// How long a superseded trunk's streams get before trunk_superseded (§4.2).
+    #[arg(long, env = "STORM_RELAY_SUPERSESSION_DRAIN_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_SUPERSESSION_DRAIN))]
+    supersession_drain_ms: u64,
+
+    /// HELLOs one source IP may make per window (§6).
+    #[arg(long, env = "STORM_RELAY_HELLO_RATE_LIMIT", value_name = "N",
+          default_value_t = config::DEFAULT_HELLO_RATE_LIMIT)]
+    hello_rate_limit: usize,
+
+    /// The window for --hello-rate-limit.
+    #[arg(long, env = "STORM_RELAY_HELLO_RATE_WINDOW_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_HELLO_RATE_WINDOW))]
+    hello_rate_window_ms: u64,
+
+    /// Un-acked STREAM_OPENs one client trunk may hold (§5.1).
+    #[arg(long, env = "STORM_RELAY_MAX_IN_FLIGHT_STREAMS", value_name = "N",
+          default_value_t = config::DEFAULT_MAX_IN_FLIGHT_STREAMS)]
+    max_in_flight_streams: usize,
+
+    /// Open streams one server trunk may carry across all its clients (§6).
+    #[arg(long, env = "STORM_RELAY_MAX_TOTAL_STREAMS", value_name = "N",
+          default_value_t = config::DEFAULT_MAX_TOTAL_STREAMS)]
+    max_total_streams: usize,
+
+    /// Bytes queued toward one client trunk before its streams are dropped (§5.4).
+    #[arg(long, env = "STORM_RELAY_MAX_CLIENT_BUFFER_BYTES", value_name = "BYTES",
+          default_value_t = config::DEFAULT_MAX_CLIENT_BUFFER_BYTES)]
+    max_client_buffer_bytes: usize,
+}
+
+const fn millis(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
+impl Limits {
+    fn apply(&self, config: &mut Config) {
+        config.challenge_ttl = Duration::from_millis(self.challenge_ttl_ms);
+        config.hello_wait = Duration::from_millis(self.hello_wait_ms);
+        config.stream_ack_timeout = Duration::from_millis(self.stream_ack_timeout_ms);
+        config.heartbeat_deadline = Duration::from_millis(self.heartbeat_deadline_ms);
+        config.supersession_drain = Duration::from_millis(self.supersession_drain_ms);
+        config.hello_rate_limit = self.hello_rate_limit;
+        config.hello_rate_window = Duration::from_millis(self.hello_rate_window_ms);
+        config.max_in_flight_streams = self.max_in_flight_streams;
+        config.max_total_streams = self.max_total_streams;
+        config.max_client_buffer_bytes = self.max_client_buffer_bytes;
+    }
 }
 
 #[tokio::main]
@@ -118,6 +200,7 @@ async fn main() -> Result<()> {
     }
 
     let mut config = Config::new(args.bind, &public_base);
+    args.limits.apply(&mut config);
     match (&allowlist, &bindings) {
         (Some(list), _) => tracing::info!(
             entries = list.len(),
