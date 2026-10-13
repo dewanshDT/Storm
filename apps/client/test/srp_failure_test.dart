@@ -22,6 +22,10 @@ enum _Script {
   /// Head, one body chunk, then `ERROR{stream_aborted, stream_id}`: the
   /// origin's body failed after its head (§5.4, decision 101).
   abortedMidBody,
+
+  /// Head, one body chunk, then `ERROR{client_backlogged, stream_id}`: the
+  /// relay dropped the stream because this client fell behind (decision 106).
+  backloggedMidBody,
 }
 
 /// A relay that answers `HELLO` (or refuses it) and then follows a script.
@@ -93,6 +97,13 @@ class _ScriptedRelay {
             socket.add(
               SrpControl.encode('ERROR', {
                 'code': 'stream_aborted',
+                'stream_id': 1,
+              }),
+            );
+          case _Script.backloggedMidBody:
+            socket.add(
+              SrpControl.encode('ERROR', {
+                'code': 'client_backlogged',
                 'stream_id': 1,
               }),
             );
@@ -178,6 +189,23 @@ void main() {
       }
     },
   );
+
+  test('a stream dropped for a backlogged client is a body error, and the '
+      'trunk stays up', () async {
+    final relay = _ScriptedRelay(script: _Script.backloggedMidBody);
+    await relay.start();
+    final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+    final client = SrpHttpClient(trunk);
+    try {
+      final error = await _bodyError(client);
+      expect(error, isA<SrpTransportException>());
+      expect((error! as SrpTransportException).code, 'client_backlogged');
+      expect(trunk.isConnected, isTrue);
+    } finally {
+      trunk.dispose();
+      await relay.close();
+    }
+  });
 
   test('a dead trunk is replaced by a fresh one, not reused', () async {
     final relay = _ScriptedRelay(script: _Script.dieMidBody);
