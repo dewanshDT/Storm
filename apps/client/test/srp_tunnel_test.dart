@@ -9,6 +9,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -202,6 +203,45 @@ void main() {
       await relay.close();
     }
   });
+
+  test(
+    'a body over 16 MiB goes out in bounded frames, whole and in order',
+    () async {
+      const size = 20 * 1024 * 1024;
+      final sent = Uint8List(size);
+      for (var i = 0; i < size; i++) {
+        sent[i] = (i * 31 + (i >> 16)) & 0xff;
+      }
+      List<int>? received;
+      final relay = FakeRelay(
+        handler: (m, p, h, body) async {
+          received = body;
+          return FakeResponse(200, {}, utf8.encode('${body.length}'));
+        },
+      );
+      await relay.start();
+      final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+      final client = SrpHttpClient(trunk);
+      try {
+        final response = await client.post(
+          Uri.parse('http://x/v1/attachments'),
+          body: sent,
+        );
+        expect(response.body, '$size');
+        expect(received, sent, reason: 'whole and in order');
+
+        final frames = relay.requestBodyFrames;
+        expect(frames.last.$2, 0, reason: 'then exactly one end of body');
+        expect(frames.where((f) => f.$2 == 0).length, 1);
+        final chunks = frames.sublist(0, frames.length - 1);
+        expect(chunks.length, size ~/ maxBodyFramePayload);
+        expect(chunks.every((f) => f.$2 == maxBodyFramePayload), isTrue);
+      } finally {
+        trunk.dispose();
+        await relay.close();
+      }
+    },
+  );
 
   test(
     'a refused open surfaces as a transport error, not an HTTP response',

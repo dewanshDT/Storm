@@ -875,6 +875,9 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &nonce,
         &session.expires,
         &addr,
+        // A separate process from the server: it cannot know what the running
+        // one is registered with. The client learns it from `/v1/server`.
+        Vec::new(),
     );
 
     // Whether a block actually reached the terminal, which is not the same
@@ -1086,6 +1089,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 &nonce,
                 &session.expires,
                 &listen_addr,
+                // Before the tunnels start, so nothing is registered yet.
+                Vec::new(),
             );
             tracing::info!(
                 uri = %qr.to_uri(),

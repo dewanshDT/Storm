@@ -40,4 +40,27 @@ void main() {
     });
     expect(fromServer.toUri(), invite.toUri());
   });
+
+  test('relays survive the round trip from server JSON to a parsed QR', () {
+    final fromServer = PairingInvite.fromJson(const {
+      'sid': 'srv_ABC',
+      'pk': 'PUBKEY',
+      'n': 'NONCE',
+      'exp': '2026-08-18T20:00:00Z',
+      'addr': '192.168.91.51:8585',
+      'relays': ['wss://relay.example.com', 'ws://10.0.0.5:8787'],
+    });
+    expect(
+      fromServer.toUri(),
+      endsWith(
+        '&relay=wss%3A%2F%2Frelay.example.com&relay=ws%3A%2F%2F10.0.0.5%3A8787',
+      ),
+      reason: "the same bytes as the server's encode_qr",
+    );
+    expect(PairingUri.parse(fromServer.toUri())!.relays, fromServer.relays);
+  });
+
+  test('an invite with no relays renders the URI older clients read', () {
+    expect(invite.toUri(), endsWith('&addr=192.168.91.51:8585'));
+  });
 }

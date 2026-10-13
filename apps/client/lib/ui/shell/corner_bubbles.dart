@@ -35,6 +35,7 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
     syncing: engine.isSyncing,
     pending: engine.pendingCount,
     tier: engine.connectionTier,
+    connection: engine.connectionStatus,
   );
 
   @override

@@ -5852,6 +5852,260 @@ relay further.** *(2026-10-12, relay completion loop.)*
   (fails on the old code: the fake relay's 16 MiB limit drops the trunk),
   `a_chunked_upload_sent_back_to_back_lands_whole`.
 
+**97. The Dart trunk tells server offline from relay down, and drops a
+silent relay.** *(2026-10-12, two gaps found by decision 94's §9 work)*
+- **Server offline vs relay unavailable.** `SrpTrunk` turned every
+  trunk-level `ERROR` into `relay_error`, and `ConnectionStatus` had only
+  `offline`, so a relay saying `server_unreachable` and a relay that did not
+  answer at all looked the same — the relay TODO's §4 box claiming the split
+  was overstated. Now the trunk keeps the relay's code (`_relayErrorCode`,
+  `SrpHandshakeFailed.code`, `lossReason` — the shape PR #153 also adds, so
+  the two merge) and reports the server-side codes (`server_unreachable`,
+  `server_timeout`, `trunk_lost`, §6) on `onServerUnreachable`, for the
+  trunk or for one stream. `StormConnection` gains
+  `ConnectionStatus.serverOffline` and a `statusChanges` stream; the status
+  dot gets `DotStatus.serverOffline` (the same grey — nothing syncs — but
+  the line reads "Server offline, relay reachable"). `offline` now means no
+  path answered, the relays included.
+- **The verdict can land after the race.** The relay holds `HELLO` up to
+  5 s for a server mid-restart, and the race gives up after
+  `publicRelayDelay` (2 s). The trunk is left alive on a failed race, so the
+  relay's answer still arrives and moves the status `offline` →
+  `serverOffline`; `SyncEngine` follows `statusChanges` and repaints. The
+  trunk's handshake timeout goes from 5 s to 8 s so it outlasts the hold
+  instead of racing it, and a handshake that times out now fails the trunk
+  rather than leaving it dialling beside a second socket. `StormConnection`
+  replaces a dead trunk instead of handing it out again.
+- **A silent relay.** The trunk sent `PING` every 15 s but never required an
+  answer, so after a network change or a sleep a half-open socket hung every
+  relayed request until that request's own timeout. It now drops the trunk
+  after `silenceLimit` (default three heartbeats, 45 s — the allowance the
+  relay gives a server, §4.2) with nothing heard; any frame counts, and the
+  relay answers every client `PING` (`connect.rs`). SRP-level, not
+  WebSocket ping: it works on the web, where the browser owns WebSocket
+  pings. Every open stream fails with `trunk_lost` (a body error, never a
+  short body read as success), and the change feed's error sends
+  `SyncEngine` through its reconnect, which re-races from scratch.
+- Tests (`test/srp_liveness_test.dart`): the code survives (`relay_error`
+  on `onTrunkLost`, `server_unreachable` as the code and on
+  `onServerUnreachable`), a `rate_limited` refusal is not server offline,
+  `StormConnection` reports `serverOffline` both when the refusal is
+  immediate and when it lands after the race gave up, `reset` forgets it,
+  the dot and its line; a silent relay fails the request in flight with
+  `relay_silent` (hangs on the old trunk), a relay answering heartbeats is
+  kept, a timed-out handshake does not dial twice. **PR #151's skipped
+  test** (`server offline behind a live relay is told apart…`) expects the
+  code on `onTrunkLost`; on rebase it should read `lossReason` instead.
+- **Not changed:** a trunk-level `ERROR{rate_limited}` (the relay's refusal
+  of one `OPEN_STREAM`) still kills the whole client trunk (67's open item).
+
+**100. The Dart client sends a request body in frames of at most 256 KiB.**
+*(2026-10-12, relay TODO §4; found by decision 98, PR #157.)* `SrpHttpClient`
+sent each chunk `finalize()` yielded as one `0x01` frame — in practice the
+whole body — so an upload over 16 MiB exceeded the WebSocket frame limit and
+the relay closed **that client's trunk** (measured at 17 and 24 MiB through a
+real `storm-relay`). `SrpTrunk.sendBody` now splits every chunk at
+`maxBodyFramePayload` (256 KiB, `srp_codec.dart`), the size the server uses
+for response bodies (`proto::MAX_BODY_FRAME_PAYLOAD`, 98). #150's end-of-body
+rule is unchanged: non-empty chunks only, then exactly one empty frame. The
+client never sends `0x02`, and receiving a body as many small frames is what
+98's live download tests already exercise.
+- Test: `a body over 16 MiB goes out in bounded frames, whole and in order`
+  (`test/srp_tunnel_test.dart`) — 20 MiB as 80 frames of 256 KiB, byte-exact
+  at the fake relay, then one end of body; the old trunk sends 1 frame.
+- **The §5.2 "Body frame size" wording is #157's** and is not duplicated here.
+  #157's live upload test (`relay_live_test.dart`, skipped there for this
+  defect) should be un-skipped once both are on `staging`.
+*Revisit if:* SRP gains per-stream flow control (67), which would bound
+frames by window rather than by a constant.
+
+**93. The pairing QR carries the registered relay set.** *(2026-10-12, relay
+TODO §2's last pairing box; SRP v1 §4.3 names two carriers and only
+`GET /v1/server` existed)*
+- **Wire.** `storm://pair?…&addr=…` gains one `relay=<url>` per relay,
+  percent-encoded (`url::form_urlencoded`), in the order `/v1/server` lists
+  them. **No relays, no key:** a server without relays issues the URI it always
+  did, and a client that predates the key ignores it. `POST /v1/pairings`
+  (`PairingQrPayload`) gains `relays: [url, …]` beside `addr`.
+- **Registered, never configured** — the same `registered_relays` snapshot
+  `server_info` reads, so the QR and `/v1/server` agree at the instant of
+  issue. `public_address` is not sent: the client derives it as
+  `registry::public_address` does (`RelayAdvert.derive`).
+- **Boot and `storm-server pair` QRs carry none.** The boot QR is minted
+  before any tunnel starts, and `pair` is a separate process that cannot know
+  what the running server registered with. Both devices learn the set from
+  `/v1/server` on their first connection.
+- **The client.** `PairingUri.relays` reads every `relay` key and drops one
+  that is not `ws(s)://host` (the server's `normalize_relay_url` rule) rather
+  than refusing the QR — pairing dials the LAN address; a relay is only an
+  extra candidate. At pairing, `Settings.relays` is seeded with
+  `pairedRelays`: the list `GET /v1/server` returned during pairing (live,
+  from the server that then passed the challenge), or the QR's when that is
+  empty (D3: a stale entry costs part of one race, none costs reachability).
+  Before this, pairing read `/v1/server` and **dropped its relays**, so a
+  device paired on the LAN knew no relay until its first connection race.
+- **No trust from a QR relay.** It is a race candidate like any other: the
+  privacy ordering is unchanged and whatever answers through it must pass
+  the challenge against the QR's public key.
+- **Not done here:** pairing *through* a relay. The pairing screen still
+  dials only `addr`, so a QR scanned off the LAN fails; the field now carries
+  what that flow would need.
+- Tests: server `qr_payload_encodes_as_storm_uri` (no relays → old URI),
+  `qr_payload_carries_one_encoded_relay_key_per_relay`,
+  `pairing_qr_carries_registered_relays_never_configured_ones`; client
+  `pairing_uri_test` (old URI, the server's exact bytes, malformed relays
+  dropped, live set wins), `pairing_invite_test` (JSON → URI → parse),
+  `storm_connection_test` (a QR-seeded device reaches the server through a
+  relay before any refresh; a QR relay still faces the challenge).
+
+**96. Pairing reaches its server through the QR's relays.** *(2026-10-12,
+relay TODO §4; stacked on 93, which put the relays in the QR)*
+- **The flow.** `openPairingRoute` (`lib/api/pairing_route.dart`) runs the
+  same `StormConnection` race the app uses afterwards — the QR's address and
+  its self-hosted relays together, a public relay only on failure — with the
+  QR's `sid` and `pk` pinned, so the race's challenge is the pairing
+  challenge. Only a verified route exists; pairing, account set-up and login
+  all go over its `authApi`, the transport the challenge was answered on.
+  Before this, pairing dialled `addr` alone, so a QR scanned off the LAN
+  could not pair.
+- **Nothing sensitive before the challenge passes.** Through a relay the
+  pairing flow sends `HELLO {server_id}`, `GET /v1/server` and a fresh
+  challenge nonce, all public; the pairing nonce, the device secret and the
+  password are sent only on a route whose server signed
+  `storm-challenge:v1:<sid>:<nonce>` under the QR's key. A relay that answers
+  for an impostor is `identityFailed`, named, and sent nothing more.
+- **Only `wss://` relays (or loopback) carry pairing.** The challenge proves
+  who answers, not that no one else reads it; a password crossing the
+  internet over a plain `ws://` relay would be readable on the path.
+  `pairingRelays` drops the rest. A relay operator still reads what crosses
+  its relay in plaintext — the accepted relay trust model (no end-to-end
+  encryption yet), now including the pairing nonce and password.
+- **Failures say what to look at.** When nothing is proven, each relay is
+  dialled once more on its own (`probeRelay`, `HELLO` only, 8 s — longer than
+  the relay's own 5 s hold) and the screen distinguishes: the server at
+  `addr` unreachable (no relays); the relay unreachable; the relay up but the
+  server not connected to it (`ERROR{server_unreachable}` — `SrpHandshakeFailed`
+  now carries the relay's code); the relay has the server but the exchange
+  failed; and the identity check failing, naming the relay it came through.
+- **Timing.** The race gets 10 s rather than a reconnect's 2 s (a phone on
+  mobile data: TLS, `HELLO`, `OPEN_STREAM`, then the request), and the whole
+  attempt 30 s, after which it is unreachable rather than a spinner.
+- **Needs 92 to work against a real relay.** The challenge, `/v1/pair` and
+  login are POSTs with bodies; without the end-of-body frame (#150) they hang
+  through a real relay. The unit tests use the fake relay, which answered on
+  a timer before 92 and so does not depend on it.
+- Tests (`test/pairing_route_test.dart`): direct wins on the LAN; off the LAN
+  the QR relay carries pairing and only identity questions precede the route;
+  an impostor through a relay is refused and sent nothing else; a key-holder
+  naming another id is a mismatch; plain `ws://` relays off this machine are
+  dropped; the four unreachable diagnoses; **through a real `SrpTrunk`** over
+  the fake relay, `/v1/pair` completes and comes after the challenge; and
+  `probeRelay` tells `server_unreachable` from no answer.
+
+**91. `TCP_NODELAY` on every relay socket (P1).** *(2026-10-12, relay TODO
+§12.)* A relayed exchange is several small writes each way — the head, body
+chunks, a `CLOSE` — and nothing turned Nagle off, so each write after the
+first waited out the peer's delayed ACK. Measured 2026-10-03 against a real
+relay on localhost: **~42 ms p50 per request**, against 0.4 ms direct.
+- **The relay** sets it on every accepted socket: the plain listener is
+  wrapped (`PlainListener`; axum's `tap_io` cannot carry `PeerAddr`'s
+  `Connected` impl without overlapping axum's own), and the TLS accept loop
+  sets it before the handshake task, never inside `Listener::accept`.
+- **storm-server's tunnel** dials with `connect_async_with_config(.., true)`,
+  under the same connect deadline.
+- **The Dart client needs nothing**: `WebSocketChannel.connect` goes through
+  dart:io's `HttpClient`, which sets `tcpNoDelay` on every TCP socket it
+  opens (`_http/http_impl.dart`, Dart 3.12.2). Browsers do the same.
+- Tests: relay `a_relayed_exchange_does_not_wait_on_delayed_acks` (82 ms
+  median without the fix, under 1 ms with it) and server
+  `a_tunnelled_request_does_not_wait_on_delayed_acks` (42 ms without, under
+  1 ms with). Both assert a median under 15 ms over 21 exchanges, with Nagle
+  off on the test's own end so only the code under test can add the delay.
+*Revisit if:* a relayed exchange is ever batched into one write, which would
+make Nagle irrelevant — not a reason to turn it back on.
+
+**109. The browser test counts page loads in its own tab only; the "second
+load" was Firefox preloading a new tab.** *(2026-10-14; CI job `browser`
+failed about 1 run in 4 on PRs that never touched the web client)*
+- **The flake.** A different case failed each time. Every failure signed in
+  fine (`/notes`, token stored) but counted `page loads=2`. It hit cases that
+  never submit a form, such as the inline-menu stand-in, so it could not be
+  the form guard (90) letting a native submit through.
+- **The cause: the test's measurement, not the product.** `loads()` counted
+  every `browsingContext.load` event in the session. With the event's context
+  and URL logged, the second load was always `about:newtab`, from a context
+  that is not the tab under test and is not in `getTree`. That is Firefox's
+  preloaded new-tab page (`browser.newtab.preload`), loaded in a hidden
+  browser about 50 ms after the first navigation starts. Whether its load
+  event arrives after `session.subscribe` is a race, hence the
+  intermittency. The app's own tab always had exactly one load.
+- **The fix.** `loads()` counts load events of the tested context only. A
+  native submit that reloads the app navigates that same context, so the
+  assertion keeps its teeth.
+- **Tests.** `make test-browser` looped locally (Firefox 158, 3 runs at a
+  time). Before: 29 of 30 runs failed (71 of 240 cases, every one
+  `page loads=2`). After: 0 of 30. With `form_guard.js` removed from the
+  build, the fixed test still fails both native-submit cases (`/login`, no
+  token, `page loads=2`), so it still catches a real reload.
+- *Revisit if:* the test ever opens a second tab or window on purpose, or a
+  case needs to see a reload that opens a new context (a `target=_blank`
+  form, say).
+
+**94. Relay failure handling: a silent relay is dropped, and each §9 case has
+a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was
+established with a test first, then fixed where wrong.
+- **Defect fixed — storm-server never gave up on a relay that went quiet.**
+  The tunnel PINGed every heartbeat but never required an answer, so a relay
+  lost to a sleep, a network change or a dropped NAT mapping (socket open,
+  nobody behind it) stayed registered and advertised on `GET /v1/server`
+  until TCP noticed, which takes many minutes. `serve_trunk` now drops the
+  trunk after **three heartbeats of inbound silence** (45 s at the default
+  15 s), the same allowance the relay gives a server, and redials. The relay
+  answers every PING, so a live relay is never dropped. A closing trunk waits
+  at most 1 s for its writer, so a peer that stopped reading cannot hold the
+  supervisor and its reconnect.
+- **Covered, already correct:**
+  - The relay vanishing mid-response aborts the in-flight handler, stops
+    advertising the relay, leaves the LAN listener alone, and redials after
+    the 1 s served-then-closed backoff.
+  - A relay `CLOSE` or `ERROR` for one stream cancels only that handler.
+  - A server dying mid-body is `trunk_lost` on that stream at the client,
+    never a clean `CLOSE`. A `HELLO` after the server left is
+    `server_unreachable`. A restarted server is reachable on a fresh client
+    trunk.
+  - In Dart, a trunk dying mid-response, or a stream-scoped `trunk_lost`, is
+    a body error (`SrpTransportException`), never a short successful body.
+    The request is not re-sent, and a dead trunk is never reused.
+- **Simulated, not reproduced:** network transition and laptop sleep are
+  tested as trunk death and inbound silence on localhost. No real Wi-Fi to
+  cellular switch, suspend or NAT has been exercised; that needs the phase 4
+  VPS.
+- **Open, not fixed here:**
+  - `SrpTrunk` reports every trunk-level `ERROR` as `relay_error`, so
+    `server_unreachable` (relay up, server down) is indistinguishable from a
+    dead relay. `ConnectionStatus` has only `offline`. The relay TODO's
+    ticked "server offline vs relay unavailable" box is overstated. The test
+    is written and skipped (`srp_failure_test.dart`).
+  - The Dart trunk PINGs but has no liveness deadline either, so a half-open
+    socket after a network change hangs relayed requests until their own
+    timeouts.
+  - A server-side response body that *errors* mid-stream ends with a clean
+    `CLOSE`, so the client takes a truncated body as complete. SRP has no
+    server→relay error (§6: `ERROR` is relay→either), so the fix is a
+    protocol amendment, not an implementation change.
+- Tests: server `a_relay_vanishing_mid_response_cancels_the_handler_and_the_trunk_comes_back`,
+  `a_relay_closing_a_stream_mid_response_cancels_only_that_handler`,
+  `a_relay_erroring_a_stream_mid_response_cancels_that_handler`,
+  `a_relay_gone_silent_is_dropped_at_the_heartbeat_deadline_and_redialled`
+  (fails without the fix), `a_relay_that_answers_heartbeats_is_kept_past_the_deadline`.
+  Relay: `a_server_dying_mid_response_body_is_trunk_lost_on_that_stream_not_a_clean_end`,
+  `a_hello_after_the_server_went_away_is_server_unreachable`,
+  `a_restarted_server_is_reachable_again_on_a_fresh_client_trunk`. Client:
+  `test/srp_failure_test.dart`.
+*Revisit if:* the relay's heartbeat interval stops being echoed in
+`REGISTERED`, or a relay stops answering PING. Either makes inbound silence a
+false signal.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
