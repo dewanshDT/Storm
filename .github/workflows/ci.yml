@@ -54,6 +54,26 @@ jobs:
       # relay's share of the check that three wire implementations agree.
       - run: cargo test
 
+  # The Cloudflare relay (decision 108b): a second SRP v1 implementation, in
+  # TypeScript, so its own job. The tests run inside workerd and read
+  # docs/srp-vectors.json, the fourth implementation that file holds to.
+  relay-cf:
+    name: relay-cf (workers)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/relay-cf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/relay-cf/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
   # The Runtime Host: its own crate and its own job, for the relay's reason —
   # it never depends on apps/server and no workspace joins them (decision 77).
   runtime:
