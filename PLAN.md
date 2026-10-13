@@ -5977,6 +5977,50 @@ TODO §2's last pairing box; SRP v1 §4.3 names two carriers and only
   `storm_connection_test` (a QR-seeded device reaches the server through a
   relay before any refresh; a QR relay still faces the challenge).
 
+**96. Pairing reaches its server through the QR's relays.** *(2026-10-12,
+relay TODO §4; stacked on 93, which put the relays in the QR)*
+- **The flow.** `openPairingRoute` (`lib/api/pairing_route.dart`) runs the
+  same `StormConnection` race the app uses afterwards — the QR's address and
+  its self-hosted relays together, a public relay only on failure — with the
+  QR's `sid` and `pk` pinned, so the race's challenge is the pairing
+  challenge. Only a verified route exists; pairing, account set-up and login
+  all go over its `authApi`, the transport the challenge was answered on.
+  Before this, pairing dialled `addr` alone, so a QR scanned off the LAN
+  could not pair.
+- **Nothing sensitive before the challenge passes.** Through a relay the
+  pairing flow sends `HELLO {server_id}`, `GET /v1/server` and a fresh
+  challenge nonce, all public; the pairing nonce, the device secret and the
+  password are sent only on a route whose server signed
+  `storm-challenge:v1:<sid>:<nonce>` under the QR's key. A relay that answers
+  for an impostor is `identityFailed`, named, and sent nothing more.
+- **Only `wss://` relays (or loopback) carry pairing.** The challenge proves
+  who answers, not that no one else reads it; a password crossing the
+  internet over a plain `ws://` relay would be readable on the path.
+  `pairingRelays` drops the rest. A relay operator still reads what crosses
+  its relay in plaintext — the accepted relay trust model (no end-to-end
+  encryption yet), now including the pairing nonce and password.
+- **Failures say what to look at.** When nothing is proven, each relay is
+  dialled once more on its own (`probeRelay`, `HELLO` only, 8 s — longer than
+  the relay's own 5 s hold) and the screen distinguishes: the server at
+  `addr` unreachable (no relays); the relay unreachable; the relay up but the
+  server not connected to it (`ERROR{server_unreachable}` — `SrpHandshakeFailed`
+  now carries the relay's code); the relay has the server but the exchange
+  failed; and the identity check failing, naming the relay it came through.
+- **Timing.** The race gets 10 s rather than a reconnect's 2 s (a phone on
+  mobile data: TLS, `HELLO`, `OPEN_STREAM`, then the request), and the whole
+  attempt 30 s, after which it is unreachable rather than a spinner.
+- **Needs 92 to work against a real relay.** The challenge, `/v1/pair` and
+  login are POSTs with bodies; without the end-of-body frame (#150) they hang
+  through a real relay. The unit tests use the fake relay, which answered on
+  a timer before 92 and so does not depend on it.
+- Tests (`test/pairing_route_test.dart`): direct wins on the LAN; off the LAN
+  the QR relay carries pairing and only identity questions precede the route;
+  an impostor through a relay is refused and sent nothing else; a key-holder
+  naming another id is a mismatch; plain `ws://` relays off this machine are
+  dropped; the four unreachable diagnoses; **through a real `SrpTrunk`** over
+  the fake relay, `/v1/pair` completes and comes after the challenge; and
+  `probeRelay` tells `server_unreachable` from no answer.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

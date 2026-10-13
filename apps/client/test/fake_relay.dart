@@ -37,7 +37,11 @@ typedef FakeHandler =
 /// Stands up a local WebSocket relay on an ephemeral port and exposes what it
 /// has been asked to do.
 class FakeRelay {
-  FakeRelay({this.onHandshake, this.handler});
+  FakeRelay({this.onHandshake, this.handler, this.helloError});
+
+  /// When set, `HELLO` is refused with a trunk-scoped `ERROR` of this code —
+  /// `server_unreachable` is what a relay with no trunk for the id answers.
+  final String? helloError;
 
   /// Fired when the client trunk sends a control message (for the test to
   /// assert on what it saw). Each frame is decoded; the first is `HELLO`.
@@ -113,6 +117,11 @@ class FakeRelay {
     switch (frame.type) {
       case 'HELLO':
         onHandshake?.call(Map<String, dynamic>.from(frame.body));
+        final refusal = helloError;
+        if (refusal != null) {
+          _send(SrpControl.encode('ERROR', {'code': refusal}));
+          return;
+        }
         _send('{"v":1,"type":"READY","client_trunk_id":"ctk_fake"}');
       case 'OPEN_STREAM':
         final attemptId = frame.body['attempt_id'];
