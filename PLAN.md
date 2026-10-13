@@ -6593,6 +6593,125 @@ reads as a spec violation. It reads `docs/srp-vectors.json` for the invalid
 knob the contract does not name — add it to `relay.env` and storm-relay
 together.
 
+**108b. The hosted relay: SRP v1 on Cloudflare Workers + Durable Objects.**
+*(2026-10-13, phase 5 step 1, slice B of decision 108; vault: *Hosted Relay —
+Cloudflare*.)* `apps/relay-cf`, a standalone TypeScript Worker, wire-identical
+to `storm-relay`: `/register` and `/connect/<server_id>`, the same handshake,
+frames, codes and `public_address` shape, and the same `STORM_RELAY_*` knobs
+as the conformance fixture contract (108a). Allowlist-only by default; TOFU is
+a var for parity and the suite. Not deployed: no account id, no routes, out of
+`release.yml`.
+- **One Durable Object per `server_id`** (`RelayRoom`, `idFromName`,
+  SQLite-backed) holds the server trunk, a superseded one while it drains, and
+  every client trunk of that server, all hibernatable (`acceptWebSocket` with
+  `s:<trunk_id>` / `c:<client_trunk_id>` tags). A frame is routed without
+  leaving the object. The `HELLO` limit is a token bucket in its own DO per
+  `CF-Connecting-IP` (`HelloLimiter`), persisted and deleted after two idle
+  windows.
+- **`/register` is the one hop that is not spliced.** It names no `server_id`,
+  so the Worker must read `REGISTER_SERVER` to pick the room; a WebSocket
+  cannot be handed on after its first message, so the Worker carries that
+  trunk's frames for its life. Client trunks go to the room whole. Rejected: a
+  per-connection handshake DO with an RPC hop per frame (two objects billed
+  per frame), and a `?server_id=` hint (a wire change; see below).
+- **Hibernation evicts memory, so nothing lives only there.** Per socket, the
+  attachment holds the phase, deadlines, the server's next `stream_id`, the
+  last-seen time (written at most once a second), the drain deadline, and the
+  read watermarks below. SQLite holds the stream table (owner, acked, ack
+  deadline), nonces (expiry, spent) and TOFU bindings. The constructor rebuilds
+  the routing maps from `getWebSockets()` and the table, dropping rows whose
+  sockets did not survive. Each socket's frames are handled in order across
+  the WebCrypto await in `CHALLENGE_RESPONSE`.
+- **Timers are one alarm**, set to the earliest of: handshake deadline, `HELLO`
+  wait, ack deadline, drain end, heartbeat deadline. **PING uses
+  `setWebSocketAutoResponse`**: storm-server, the Dart and the Rust clients all
+  send exactly `{"v":1,"type":"PING"}`, and the reply is `{"v":1,"type":"PONG"}`,
+  so the runtime answers without waking the object, and the heartbeat reads
+  `getWebSocketAutoResponseTimestamp` as well as the last frame. Any other
+  spelling of PING still reaches the handler. A trunk past its deadline is
+  also refused at `HELLO`/`OPEN_STREAM` time, in case the alarm runs late.
+- **"A client that fell behind", without a send buffer.** `WebSocket.send`
+  never blocks or fails, and workerd queues without bound: 300 MiB sent to a
+  paused reader grew the process to 420 MB with no error, and a Durable Object
+  has 128 MB, so one slow client could take its server's whole room down. The
+  relay now measures what each peer has *read* with SRP's own messages: after
+  every `budget/8` bytes to a socket it sends a `PING` and records the byte
+  count; a peer answers in order, so each `PONG` proves everything before that
+  mark was read. **Backlog = bytes sent − bytes proved read.** A frame that
+  would take it past `STORM_RELAY_MAX_CLIENT_BUFFER_BYTES` ends its stream
+  under decision 106: `ERROR{client_backlogged, stream_id}` to the client,
+  `CLOSE` to the origin, later frames for it dropped, other streams untouched.
+  With no mark outstanding any one frame is admitted (storm-relay's "empty
+  queue"). The `ERROR` cannot overtake what the runtime already holds (106's
+  rule 2 makes overtaking a MAY); after 256 such ends unanswered the client
+  trunk is closed (rule 3). A room-wide bound (`MAX_ROOM_BUFFER_BYTES`, 64
+  MiB) covers several slow readers at once. Attachments carry the marks, so a
+  backlog survives hibernation.
+- **The same blindness server-ward.** storm-relay slows an uploading client by
+  not reading its socket; a Durable Object cannot stop reading. An upload that
+  would take the origin's unread bytes past `MAX_SERVER_BUFFER_BYTES` (32
+  MiB, room for one 16 MiB frame and its end of body) ends that stream with a
+  stream-scoped `ERROR{rate_limited}` and `CLOSE` to the origin.
+- **Deviations, written down, with proposed spec text** (not applied to
+  `docs/srp-v1.md`; the operator decides):
+  1. *§5.2 "the relay derives the address from the socket, never from a
+     header."* Here it is `CF-Connecting-IP`, which Cloudflare's edge sets
+     and overwrites, and which the Worker overwrites `relay_peer_ip` from
+     unconditionally (a client-sent field, even `null`, is still
+     `protocol_error`). Proposed: "…from the connection as the relay's own
+     front end received it — the TCP peer, or an address the relay's
+     provider edge attests and a client cannot set — never from a header a
+     client can set." Under `wrangler dev` a client *can* set it; only a
+     deployed relay may rely on it.
+  2. *The watermark needs PING answered.* §4.2/§6 never say a peer MUST
+     answer a PING. Every implementation does; a client that did not would
+     see its streams ended `client_backlogged` after one budget. Proposed for
+     §4.2: "Either party MUST answer every PING with a PONG, in the order
+     received. A relay MAY send PING on any trunk and use the answers to
+     learn how much its peer has read." A client can also send PONGs it owes
+     nothing for and so raise its own budget; the room bound limits that to
+     its own server's room. A `PING` that carries a token the `PONG` echoes
+     would close it, as a later, compatible change.
+  3. *`rate_limited` on a stream.* §6 defines it on an open (`attempt_id`)
+     and trunk-wide. Proposed: "A relay that cannot hold more for the origin
+     MAY end the stream being written with `ERROR{rate_limited, stream_id}`
+     and `CLOSE{stream_id}` toward the origin." Clients already fail a stream
+     on any stream-scoped `ERROR` (§5.4 rule 3).
+  4. *A PING during a handshake* (before `REGISTERED` or `READY`) gets PONG
+     from the auto-response, where storm-relay answers `protocol_error`. The
+     spec says nothing either way; proposed: "a PING MAY be answered at any
+     point on a trunk."
+  5. *Frames before `READY`* (sent while a `HELLO` is held) are refused with
+     `protocol_error`; storm-relay reads them after `READY`. Unspecified;
+     every client waits for `READY`.
+  6. *Not built, as in storm-relay:* §6's bandwidth cap per `server_id`, and
+     §4.1's account-owned binding for a public relay. Step 1 is invite-only
+     by allowlist (the self-hosted-allowlist row of §4.1); both are step 2,
+     with Q14's numbers.
+- **What is logged** (`src/log.ts`): lifecycle and error codes, never a
+  payload, header, path, nonce, signature, key or client address.
+- Tests: 85 vitest cases inside workerd (`npm test`, in `make check` and the
+  `relay-cf` CI job, `npm ci` from the lockfile): `docs/srp-vectors.json` in
+  full (the fourth implementation it holds), registration and bindings in both
+  modes, every §5/§6 behaviour above, the backlog and room bounds, and
+  hibernation — `evictDurableObject` mid-stream, then the stream continues,
+  an unacked open still times out, a held `HELLO` is answered, a drain ends,
+  auto-answered PINGs keep a trunk, a backlog is remembered. Mutating the
+  attachment write or the stream-table reload fails four of them. **The 108a
+  suite passes 54/54** against two `wrangler dev` instances (allowlist and
+  TOFU, with `RELAY_MULTI_IP` and `RELAY_LATENCY`); its first run failed two
+  §5.2 checks at a 16 MiB server-ward budget, which is why it is 32 MiB.
+  **Smoke against a real storm-server** registered through
+  `PUT /v1/config/relays` in allowlist mode (`scripts/smoke.mjs`): identity
+  challenge verified end to end, 16 concurrent requests, a 1 MiB note written
+  and read, a 20 MiB attachment both ways, the change feed delivering a LAN
+  edit, `server_unreachable` for an unknown id, and the trunk still up after
+  65 s idle (past the 45 s deadline, on auto-answered PINGs).
+*Revisit if:* the `/register` hop costs real CPU (then propose an optional
+`server_id` on the upgrade so the Worker can splice); SRP gains flow control
+(67), which replaces the watermark; or a runtime exposes a send-buffer size,
+which makes it unnecessary.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

@@ -1,0 +1,26 @@
+// storm-relay-cf: SRP v1 on Workers + Durable Objects (PLAN.md decision 108b).
+// No account_id and no routes on purpose: deploying is the operator's step,
+// with their account (slice C writes the runbook). Every STORM_RELAY_* var is
+// documented in README.md; secrets and local overrides go in .dev.vars.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "storm-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "RelayRoom" },
+      { "name": "HELLO_LIMITER", "class_name": "HelloLimiter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RelayRoom", "HelloLimiter"] }
+  ],
+  "vars": {
+    "STORM_RELAY_BINDING": "allowlist"
+  },
+  "dev": {
+    "ip": "127.0.0.1",
+    "port": 18910
+  }
+}
