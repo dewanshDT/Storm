@@ -47,12 +47,28 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/relay
+          workspaces: |
+            apps/relay
+            tools/relay-conformance
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       # Includes `tests/vectors.rs`, which reads `docs/srp-vectors.json`: the
       # relay's share of the check that three wire implementations agree.
       - run: cargo test
+      # The black-box SRP v1 suite every relay must pass (decision 108a),
+      # against the release build started with its fixture contract.
+      - name: relay-conformance (fmt, clippy, unit)
+        working-directory: tools/relay-conformance
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - run: make relay-conformance-local
+        working-directory: .
+      - name: relay logs on failure
+        if: failure()
+        working-directory: .
+        run: cat .dev/conformance-relay.log .dev/conformance-relay-tofu.log || true
 
   # The Runtime Host: its own crate and its own job, for the relay's reason —
   # it never depends on apps/server and no workspace joins them (decision 77).
