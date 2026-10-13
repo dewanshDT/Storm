@@ -85,9 +85,15 @@ impl Harness {
     }
 
     async fn dial(&self, path: &str) -> Conn {
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{}{path}", self.addr))
-            .await
-            .unwrap();
+        // Nagle off on this end, as on a real server's tunnel, so a delay the
+        // latency test measures can only be the relay's own sockets.
+        let (socket, _) = tokio_tungstenite::connect_async_with_config(
+            format!("ws://{}{path}", self.addr),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
         Conn { socket }
     }
 
@@ -298,6 +304,56 @@ async fn a_request_and_response_travel_client_relay_server_client_with_bodies() 
         }
         Frame::Text(value) => panic!("expected a body chunk, got {value}"),
     }
+}
+
+// ------------------------------------------------------------------ latency
+
+/// A relayed exchange is several small frames each way. With Nagle on the
+/// relay's sockets, each frame after the first waited out the peer's delayed
+/// ACK: about 40 ms a request on localhost, against well under 1 ms direct
+/// (P1, decision 91).
+#[tokio::test]
+async fn a_relayed_exchange_does_not_wait_on_delayed_acks() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let mut samples = Vec::new();
+    for i in 0..21 {
+        let started = std::time::Instant::now();
+        let stream_id = client.open_stream(&format!("attempt-{i}")).await;
+        server.expect_stream_open_and_ack().await;
+
+        client.send(request_head(stream_id, "/v1/notes")).await;
+        client.send_body(0x01, stream_id, b"{\"body\":1}").await;
+        client.send_body(0x01, stream_id, b"").await;
+        server.recv().await;
+        server.next_frame().await;
+        server.next_frame().await;
+
+        server
+            .send(json!({
+                "v": 1, "type": "HTTP_RESPONSE_HEAD",
+                "stream_id": stream_id, "status": 200, "headers": {},
+            }))
+            .await;
+        server.send_body(0x02, stream_id, b"{}").await;
+        server
+            .send(json!({ "v": 1, "type": "CLOSE", "stream_id": stream_id }))
+            .await;
+        client.recv().await;
+        client.next_frame().await;
+        let closed = client.recv().await;
+        assert_eq!(closed["type"], "CLOSE", "{closed}");
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    assert!(
+        median < Duration::from_millis(15),
+        "median relayed exchange took {median:?}; TCP_NODELAY missing?"
+    );
 }
 
 // --------------------------------------------------- the cross-talk trap (§3)
@@ -1063,4 +1119,75 @@ async fn a_client_that_keeps_reading_receives_many_times_the_budget() {
     assert_eq!(received, CHUNKS * chunk.len());
     // 1.6 MiB through a 64 KiB budget, and the origin was never told to stop.
     assert!(server.is_silent_for(FAST).await);
+}
+
+// ------------------------------------------------- §9 failure handling (94)
+
+#[tokio::test]
+async fn a_server_dying_mid_response_body_is_trunk_lost_on_that_stream_not_a_clean_end() {
+    // A `CLOSE` here would read as a complete response, and the client would
+    // take a truncated note body for the whole of it.
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+    client.send(request_head(stream_id, "/v1/notes/x")).await;
+    assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+    server
+        .send(json!({
+            "v": 1, "type": "HTTP_RESPONSE_HEAD",
+            "stream_id": stream_id, "status": 200, "headers": {},
+        }))
+        .await;
+    assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+    server.send_body(0x02, stream_id, b"half a bo").await;
+    assert!(matches!(client.next_frame().await, Frame::Body { .. }));
+
+    drop(server);
+
+    let reply = client.recv().await;
+    assert_error(&reply, "trunk_lost");
+    assert_eq!(reply["stream_id"], stream_id, "{reply}");
+}
+
+#[tokio::test]
+async fn a_hello_after_the_server_went_away_is_server_unreachable() {
+    // Server offline, relay up: the client must be told the *server* is
+    // unreachable, which is a different thing to show than a dead relay.
+    let harness = Harness::plain().await;
+    let server = harness.server().await;
+    drop(server);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !harness.relay.registrations.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "registration never released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let mut client = harness.dial(&format!("/connect/{SERVER_ID}")).await;
+    client
+        .send(json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID }))
+        .await;
+    assert_error(&client.recv().await, "server_unreachable");
+}
+
+#[tokio::test]
+async fn a_restarted_server_is_reachable_again_on_a_fresh_client_trunk() {
+    // Restart = the old trunk dies, a new one registers under the same key.
+    // Clients re-race from scratch rather than resuming (§9).
+    let harness = Harness::plain().await;
+    let server = harness.server().await;
+    let mut client = harness.client().await;
+    drop(server);
+    assert_error(&client.recv().await, "trunk_lost");
+
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("again").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
 }
