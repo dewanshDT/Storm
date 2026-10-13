@@ -1,0 +1,21 @@
+{
+  "name": "storm-relay-cf",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Storm Relay Protocol v1 relay on Cloudflare Workers + Durable Objects",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.1",
+    "@cloudflare/workers-types": "5.20261013.1",
+    "vitest": "5.0.4",
+    "typescript": "5.9.3",
+    "wrangler": "4.150.0"
+  }
+}
