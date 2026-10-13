@@ -20,11 +20,25 @@ What it is really for, beyond "the tools answer":
     protocol error clients may never show it;
   * no absolute filesystem path is ever in a payload.
 
+**Through `storm-runtime mcp-connect`** (decision 105d): with
+`MCP_CONNECT_BIN` set, every `/mcp` call goes over stdio to one long-lived
+adapter instead, which reaches the server at `MCP_CONNECT_ADDR` and/or
+through `MCP_CONNECT_RELAY`. The same checks then prove the adapter, and
+`make test-live` runs them direct and through a real relay. A call with
+another key gets a one-shot adapter of its own; a call with no key at all
+goes over HTTP, since the adapter cannot send one. REST fixtures always use
+`STORM_BASE`.
+
 Exits non-zero if any check fails.
 """
 import json
 import os
+import queue
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -116,6 +130,89 @@ def rest_raw(method, path, data):
         return e.code, e.read().decode(errors="replace")
 
 
+ADAPTER_BIN = os.environ.get("MCP_CONNECT_BIN")
+# Each run through the adapter is another run against the same server, so the
+# fixtures it creates are named for the run.
+RUN = ("-relay" if os.environ.get("MCP_CONNECT_RELAY") else "-direct") if ADAPTER_BIN else ""
+TORNADO = f"MCP/Tornado{RUN}.md"
+SCRIPT = f"demo/run{RUN}.spec.ts"
+
+
+class Adapter:
+    """One `storm-runtime mcp-connect`, as an MCP client would run it."""
+
+    def __init__(self, key):
+        with urllib.request.urlopen(f"{BASE}/v1/server") as r:
+            info = json.loads(r.read())
+        argv = [ADAPTER_BIN, "mcp-connect",
+                "--server", info["server_id"], "--pk", info["public_key"]]
+        if os.environ.get("MCP_CONNECT_ADDR"):
+            argv += ["--addr", os.environ["MCP_CONNECT_ADDR"]]
+        if os.environ.get("MCP_CONNECT_RELAY"):
+            argv += ["--relay", os.environ["MCP_CONNECT_RELAY"]]
+        # Its relay cache goes here, not into the person's own state.
+        state = tempfile.mkdtemp(prefix="mcp-e2e-adapter-")
+        self.stderr = open(os.path.join(state, "stderr.log"), "w+")
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.stderr,
+            env={**os.environ, "STORM_MCP_KEY": key.removeprefix("Bearer "),
+                 "XDG_STATE_HOME": state, "HOME": state, "LOCALAPPDATA": state},
+        )
+        self.lines = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
+
+    def request(self, payload):
+        self.proc.stdin.write((json.dumps(payload) + "\n").encode())
+        self.proc.stdin.flush()
+        while True:
+            line = self.lines.get(timeout=180)
+            if line is None:
+                self.stderr.seek(0)
+                raise RuntimeError(f"mcp-connect exited: {self.stderr.read()}")
+            answer = json.loads(line)
+            if isinstance(answer, dict) and answer.get("id") == payload["id"]:
+                return answer
+
+    def close(self):
+        self.proc.stdin.close()
+        self.proc.wait(timeout=30)
+
+
+_adapter = None
+
+
+def through_adapter(payload, token):
+    """`rpc` over mcp-connect: an HTTP refusal comes back as a JSON-RPC error
+    carrying `data.status`, which is turned back into that status."""
+    global _adapter
+    if token is None:
+        if _adapter is None:
+            _adapter = Adapter(KEY)
+        answer = _adapter.request(payload)
+    else:
+        once = Adapter(token)
+        try:
+            answer = once.request(payload)
+        finally:
+            once.close()
+    data = (answer.get("error") or {}).get("data") or {}
+    if "status" in data:
+        return data["status"], json.dumps(answer).encode()
+    if "storm_error" in data:
+        # The adapter got no HTTP answer at all: a status no check expects.
+        return 0, answer
+    seen_payloads.append(answer)
+    return 200, answer
+
+
 def rpc(method, params=None, token=None, bearer=True):
     """One JSON-RPC call to /mcp. Returns (status, body)."""
     global _id
@@ -123,6 +220,9 @@ def rpc(method, params=None, token=None, bearer=True):
     payload = {"jsonrpc": "2.0", "id": _id, "method": method}
     if params is not None:
         payload["params"] = params
+
+    if ADAPTER_BIN and bearer:
+        return through_adapter(payload, token)
 
     req = urllib.request.Request(
         f"{BASE}/mcp", data=json.dumps(payload).encode(), method="POST"
@@ -173,6 +273,24 @@ try:
 except RuntimeError as e:
     print(f"could not authenticate: {e}")
     sys.exit(1)
+
+if ADAPTER_BIN and os.environ.get("MCP_CONNECT_RELAY"):
+    # Registration is the server's own background task.
+    relay = os.environ["MCP_CONNECT_RELAY"].rstrip("/")
+    for _ in range(120):
+        with urllib.request.urlopen(f"{BASE}/v1/server") as r:
+            if relay in [x["url"].rstrip("/") for x in json.loads(r.read())["relays"]]:
+                break
+        time.sleep(0.25)
+    else:
+        print(f"the server never registered with {relay}")
+        sys.exit(1)
+if ADAPTER_BIN:
+    # The suite starts from a read-only endpoint, and an earlier run ended
+    # read-write.
+    rest("PUT", "/v1/config/mcp", {"enabled": True, "writable": False})
+    print(f"(through mcp-connect: addr={os.environ.get('MCP_CONNECT_ADDR') or '-'}"
+          f" relay={os.environ.get('MCP_CONNECT_RELAY') or '-'})")
 
 print("== handshake ==")
 status, body = rpc(
@@ -243,7 +361,7 @@ status, created = rest(
     "POST",
     f"/v1/vaults/{vault}/notes",
     {
-        "path": "MCP/Tornado.md",
+        "path": TORNADO,
         "content": "---\ntags:\n  - weather\n---\n\n# Tornado\n\nA rotating column of air.\n",
     },
 )
@@ -293,7 +411,7 @@ check(
 result, raw = call("get_note", {"vault": vault, "note_id": note_id})
 sc = structured(result)
 check("get_note returns the content", "violently rotating" in sc.get("content", ""), sc)
-check("get_note returns the vault-relative path", sc.get("path") == "MCP/Tornado.md", sc)
+check("get_note returns the vault-relative path", sc.get("path") == TORNADO, sc)
 
 result, raw = call("get_related_notes", {"vault": vault, "note_id": note_id})
 sc = structured(result)
@@ -382,7 +500,7 @@ rest(
 result, _ = call("search", {"vault": vault, "query": "rotating"})
 paths = [h["path"] for h in structured(result).get("hits", [])]
 check("search does not return _storm/", not any(p.startswith("_storm/") for p in paths), paths)
-check("search still returns the user's note", "MCP/Tornado.md" in paths, paths)
+check("search still returns the user's note", TORNADO in paths, paths)
 
 result, _ = call("list_tags", {"vault": vault})
 tags = [t["tag"] for t in structured(result).get("tags", [])]
@@ -487,21 +605,21 @@ check("and it is gone", (result or {}).get("isError") is True, result)
 print("== scripts writable ==")
 result, raw = call(
     "create_script",
-    {"name": "demo/run.spec.ts", "content": "const x = 1;\n"},
+    {"name": SCRIPT, "content": "const x = 1;\n"},
 )
 sc = structured(result)
-check("create_script stores under scripts/", sc.get("path") == "scripts/demo/run.spec.ts", sc)
+check("create_script stores under scripts/", sc.get("path") == f"scripts/{SCRIPT}", sc)
 check("create_script reports the size", sc.get("size") == len("const x = 1;\n"), sc)
 
-result, raw = call("create_script", {"name": "demo/run.spec.ts", "content": "const y = 2;\n"})
+result, raw = call("create_script", {"name": SCRIPT, "content": "const y = 2;\n"})
 check("create_script refuses an existing name", (result or {}).get("isError") is True, raw)
 
 result, raw = call(
     "update_script",
-    {"name": "demo/run.spec.ts", "content": "const z = 3;\n"},
+    {"name": SCRIPT, "content": "const z = 3;\n"},
 )
 check("update_script replaces the content", structured(result).get("size", 0) == len("const z = 3;\n"), raw)
-result, _ = call("get_script", {"name": "demo/run.spec.ts"})
+result, _ = call("get_script", {"name": SCRIPT})
 check("and the new text is readable back", "const z = 3;" in structured(result).get("content", ""), structured(result))
 
 result, raw = call("update_script", {"name": "demo/missing.ts", "content": "x\n"})
@@ -514,12 +632,12 @@ for bad in ["tool.bat", "evil.exe", "notes/notes.md", "demo/../../escape.sh", "/
 
 # One store, two surfaces: the script written over MCP is a plain attachment
 # over REST, in the same vault.
-result, _ = call("get_script", {"name": "demo/run.spec.ts"})
+result, _ = call("get_script", {"name": SCRIPT})
 check("the script exists in the kit vault", (result or {}).get("isError") is not True, result)
 status, body = rest("GET", f"/v1/vaults/{kit}/attachments")
 check(
     "and shows up as an attachment over REST",
-    any(a["path"] == "scripts/demo/run.spec.ts" for a in body.get("attachments", [])),
+    any(a["path"] == f"scripts/{SCRIPT}" for a in body.get("attachments", [])),
     body,
 )
 
@@ -567,6 +685,19 @@ check(
     ),
     "the spec requires an object; rmcp will happily send an array",
 )
+
+if _adapter is not None:
+    print("== through mcp-connect ==")
+    _adapter.close()
+    check("mcp-connect exits cleanly when stdin closes", _adapter.proc.returncode == 0,
+          _adapter.proc.returncode)
+    _adapter.stderr.seek(0)
+    log = _adapter.stderr.read()
+    # With a relay given, the address (if any) is one that cannot answer.
+    route = "relay" if os.environ.get("MCP_CONNECT_RELAY") else "direct"
+    check(f"every call went {route}", f"reached the server by {route}" in log
+          and f"by {'direct' if route == 'relay' else 'relay'}" not in log, log)
+    check("the key never reached its log", KEY.removeprefix("Bearer ") not in log)
 
 print(f"\n{ok} passed, {fail} failed")
 sys.exit(1 if fail else 0)

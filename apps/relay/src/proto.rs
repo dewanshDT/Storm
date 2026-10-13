@@ -127,6 +127,10 @@ pub struct ErrorBody {
     /// Present when the failure belongs to one stream rather than the trunk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<u32>,
+    /// The `OPEN_STREAM` this refuses (§5.1). Echoed as sent, like
+    /// `STREAM_READY` echoes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<serde_json::Value>,
 }
 
 /// The §6 codes this relay can actually emit.
@@ -141,6 +145,7 @@ pub enum ErrorCode {
     StreamClosed,
     TrunkSuperseded,
     StreamAborted,
+    ClientBacklogged,
 }
 
 impl ErrorCode {
@@ -155,6 +160,7 @@ impl ErrorCode {
             Self::StreamClosed => "stream_closed",
             Self::TrunkSuperseded => "trunk_superseded",
             Self::StreamAborted => "stream_aborted",
+            Self::ClientBacklogged => "client_backlogged",
         }
     }
 
@@ -177,6 +183,7 @@ impl ErrorCode {
             Self::StreamClosed => "stream closed",
             Self::TrunkSuperseded => "trunk superseded",
             Self::StreamAborted => "stream aborted",
+            Self::ClientBacklogged => "client backlogged",
         }
     }
 
@@ -185,6 +192,7 @@ impl ErrorCode {
             code: self.code(),
             message: self.message(),
             stream_id: None,
+            attempt_id: None,
         }
     }
 
@@ -193,6 +201,14 @@ impl ErrorCode {
             code: self.code(),
             message: self.message(),
             stream_id: Some(stream_id),
+            attempt_id: None,
+        }
+    }
+
+    pub fn body_on_attempt(self, attempt_id: serde_json::Value) -> ErrorBody {
+        ErrorBody {
+            attempt_id: Some(attempt_id),
+            ..self.body()
         }
     }
 }
@@ -290,6 +306,10 @@ pub fn error(code: ErrorCode) -> String {
 
 pub fn error_on_stream(code: ErrorCode, stream_id: u32) -> String {
     Control::new("ERROR", code.body_on_stream(stream_id)).to_json()
+}
+
+pub fn error_on_attempt(code: ErrorCode, attempt_id: serde_json::Value) -> String {
+    Control::new("ERROR", code.body_on_attempt(attempt_id)).to_json()
 }
 
 pub fn pong() -> String {

@@ -1,0 +1,251 @@
+{
+  "about": "Fixed server identities for the SRP v1 relay conformance suite. Every server_id here is on fixtures/allowlist with its pubkey; `intruder` is a key on no line, and `unlisted_server_id` is an id on no line. Test keys only: the private seeds are public.",
+  "derivation": "seed = SHA-256(\"storm-relay-conformance:v1:\" + name), where name is the server_id or \"intruder\"; Ed25519 (RFC 8032); every binary field base64url without padding",
+  "intruder": {
+    "pubkey_b64": "pYcnGbD7h3anKb1YsV7kS-A-jwhHLqkfdPSLm27kuZQ",
+    "seed_b64": "Gwn7aipdxKw5TrR-8fKc-0cbCHq8n-tLYEtlO9qPAaE"
+  },
+  "servers": [
+    {
+      "pubkey_b64": "MJLg_UtehlIxwPJrh9JA6Et11-l93Ss4gYEPsDK0vCo",
+      "seed_b64": "aN9OC6N_rx_Rge5zvsuy8t8ioixQgU7V73zg2KrcG0w",
+      "server_id": "srv_conf_00"
+    },
+    {
+      "pubkey_b64": "M4Nmic4A95UjzLhoqIRlIQj34HrTgl-Dn9eeFBivDY4",
+      "seed_b64": "uMCYCCYNwKAjMmvqFwjiwnOpTRe23EGifJABRDqUkJg",
+      "server_id": "srv_conf_01"
+    },
+    {
+      "pubkey_b64": "DlecZ1noB4gFJN8wuw4Qn4QGtSf_kNPszDPRfwcB7-0",
+      "seed_b64": "KOhGgmrQZCxUOqUGhjsMoQEyjKzKqmS7J-dWpwFDCl8",
+      "server_id": "srv_conf_02"
+    },
+    {
+      "pubkey_b64": "5hkC1AgOcHW7iqtSVOOVB_faXdMeGtJJS7rff9P8wt4",
+      "seed_b64": "__wZJ1yEtDIgGK5zw_emSDJzuLF89rN7QaPc92T9JiM",
+      "server_id": "srv_conf_03"
+    },
+    {
+      "pubkey_b64": "9oDkenqNrGfCTFUers1m6Q7HrkhdJ5WUWSjr-gxdFoU",
+      "seed_b64": "craMsECRmjydrmtjmn1ouWI7zC28EhBENSDbAAvJam0",
+      "server_id": "srv_conf_04"
+    },
+    {
+      "pubkey_b64": "LXNmhyT8CrGpr5TSbDg1Q9QYZhH_g1Po040p-h7K_sk",
+      "seed_b64": "MV7m7LanM0v4aq8IBXUlskGpA_a5EeWDsocX-br1qFQ",
+      "server_id": "srv_conf_05"
+    },
+    {
+      "pubkey_b64": "eacsxvzp3x6DqEtaFIJhdYLKpwLAgo-J0bXEw473ArA",
+      "seed_b64": "lLuAkFjb1N47OLXtOSOzVnvGwgZgVd1wOONFf1DgpOU",
+      "server_id": "srv_conf_06"
+    },
+    {
+      "pubkey_b64": "ZcTxW1gWMwQ2xECI_0JIQ5Y3-2KsHLjiaAAFCbSp0Jw",
+      "seed_b64": "ZWxhiMJ4BTmZg11Abhy5sHtmYgMbB_QPQC_PTkB3VPU",
+      "server_id": "srv_conf_07"
+    },
+    {
+      "pubkey_b64": "Tc-_jl5HFdMz6UcQRqFtJT-Cay1MLlHXCZ3MFExdnLA",
+      "seed_b64": "7C_QjLBJozTYxtw4SS8d40GORBFYdTgxs3PgnP72vcs",
+      "server_id": "srv_conf_08"
+    },
+    {
+      "pubkey_b64": "Nc1_AC4Nq0_TOEtfaAAGjgvDx0FNTLK1aaE3d8KL_KI",
+      "seed_b64": "Op5rQTqKVbo8s0U50Yqb7hkMbmvvubWRMUAyuTZJX88",
+      "server_id": "srv_conf_09"
+    },
+    {
+      "pubkey_b64": "AWegiZQB_jO_HCSE9u2jk3ZM8pQtgw4RFVspgLsas4s",
+      "seed_b64": "B9qq-v7XSlFgZxafQcaRKAlnJNDWxTYeFzf0Kk1sWEo",
+      "server_id": "srv_conf_10"
+    },
+    {
+      "pubkey_b64": "Gjs9xNJbqPAgVtVACLwKsr5lvIZ6tzUoa_X4yC4_O8g",
+      "seed_b64": "Y_5bNE8hu1EMT6ZazD6HM0ijVlt1dNTLTC-_UC2N1A4",
+      "server_id": "srv_conf_11"
+    },
+    {
+      "pubkey_b64": "wAwtwlc5W2b7Bggq8SNdR7AfJ2Q5IgUdAufbGX5e9No",
+      "seed_b64": "h6Y1tSy-jXyN-PKIv5yFBktstQWaNizSA7eABoLsxzU",
+      "server_id": "srv_conf_12"
+    },
+    {
+      "pubkey_b64": "iaB6GdEV2NO2ZTfdgYK6_9Lggdk4QcZQAu07pHmLx_U",
+      "seed_b64": "lY6lutoOcI1le5Z69InqsgGEOgu1z6ZmdjAGE4etM58",
+      "server_id": "srv_conf_13"
+    },
+    {
+      "pubkey_b64": "t70THz1wbcKroB0b5I6h9HFtbR3FURJ7jIxCqDHWqRk",
+      "seed_b64": "NWwnN2HrkfARExeg6mcIH1sdUHpH0rppy1cXervgUS8",
+      "server_id": "srv_conf_14"
+    },
+    {
+      "pubkey_b64": "Yf76ILV3uJqwI1S8AwOtMQSb229hVCRZItb9I_CzVvM",
+      "seed_b64": "2yelvawBcTvJBKVPK23c7I05v6Q0K9vKd9ctPpjAzgw",
+      "server_id": "srv_conf_15"
+    },
+    {
+      "pubkey_b64": "SQfkceECafnBCKAGp6jljqjGB7qYR6m-jQQVijU9g50",
+      "seed_b64": "RUD5oovlA_A_3k_leoZ1mdDPpmOP09Vg0O60Y0SDFGk",
+      "server_id": "srv_conf_16"
+    },
+    {
+      "pubkey_b64": "iHMc7F_fnhGAp-ZG75hLmpgn-CWsRNScWqSgcUdU2LY",
+      "seed_b64": "zSw-i4pkCzMSY2Z_9mRslApaFSCXEx2iYQZH2Acg4iY",
+      "server_id": "srv_conf_17"
+    },
+    {
+      "pubkey_b64": "PvhjoeGuSgySN7a5ENYQlbs7x_n15ukJwnXDSS8p5Jc",
+      "seed_b64": "q6HCfPClldGYxSBkIhUM4AnxoT-X-g_8lOT3UmBT20o",
+      "server_id": "srv_conf_18"
+    },
+    {
+      "pubkey_b64": "HrAekqNiFckFyX3aR0oGpXygNvMo2PrLLGHiJY-SRMk",
+      "seed_b64": "0QnmVi133Wccgn9mBg158CxZLvV1YqFc580pA1agEFE",
+      "server_id": "srv_conf_19"
+    },
+    {
+      "pubkey_b64": "oC-7MThSxFbofY1qVQzUU9uXgaj5LkV0Q7E12w-1kV4",
+      "seed_b64": "HubbOROXxuiROZjjr_klAbeYcHOhKHth0-Hk1eVYsiM",
+      "server_id": "srv_conf_20"
+    },
+    {
+      "pubkey_b64": "WXIlfvMtqDNZdkbY2QmEHldxwUI6iSk_bVe4zuVR0vs",
+      "seed_b64": "0YVnA3FQfvdcA-JxoSsYpattBWulqZvIXQmGEU-nWrA",
+      "server_id": "srv_conf_21"
+    },
+    {
+      "pubkey_b64": "PNFhd02eiXokA7bnqIzEZtyV6uAwFuQnvjKKcMFiqmo",
+      "seed_b64": "PCmae8gRNnkq-_oPtiNgzyzyVS9BHpP7JuskF6DL6Ac",
+      "server_id": "srv_conf_22"
+    },
+    {
+      "pubkey_b64": "2_CeEOXA1gBiCfcL5PIKxf8l0YENp-D3RsCjcnlRFBU",
+      "seed_b64": "oK3s5k3y95wVZIc_N8zxdJYKRhSUhux_HjGsHgbraaI",
+      "server_id": "srv_conf_23"
+    },
+    {
+      "pubkey_b64": "jB5oIPuRdmw2ho0jT2I0FTX-P2hnnk1ipWoh9KytQfY",
+      "seed_b64": "3aO6-BsUHSII6BJcEj9VOZzPZdG6e3U7n4LdVDNZ8S0",
+      "server_id": "srv_conf_24"
+    },
+    {
+      "pubkey_b64": "9BIWAcoNXHhv7EVBGbxGkjRaA3PSb1fT0qCt7XORGI4",
+      "seed_b64": "LTYbWZo7HyuCDo7xUyhvPxYVP-WTZk8VPJJ-pjkNLgo",
+      "server_id": "srv_conf_25"
+    },
+    {
+      "pubkey_b64": "OerHz7vvvDsQ9yGyHd_xl-rpCk7608VZQwCwA14kU2Y",
+      "seed_b64": "0bQ3ImmYPO8X4Yn92rqjn0_0csKgMK-oDhJ8-4tSqjs",
+      "server_id": "srv_conf_26"
+    },
+    {
+      "pubkey_b64": "-qdkF1OvjiRV6HzD3FA37TSMgsMRIix4L_EdsubN49E",
+      "seed_b64": "jLOkwh6AzCAro7swiy0CMsOq0-qVscARGevfmfM_BRk",
+      "server_id": "srv_conf_27"
+    },
+    {
+      "pubkey_b64": "Q-NiYP0K-DllxUzXKt1aeuID22EErJ_LTrwf7o6U2D4",
+      "seed_b64": "a4icKBzLb4hPxVPXcK9xz4v9eba_ZzHQjBKfi3RvpvY",
+      "server_id": "srv_conf_28"
+    },
+    {
+      "pubkey_b64": "QxTqKx-C7wQZqKLhRD3bKqsoJXeWVNRnMN9wyMovZ1A",
+      "seed_b64": "-WZ7926IyPRvcPpe58eBhmiRvb7I9tQm_cHH6l_T-zw",
+      "server_id": "srv_conf_29"
+    },
+    {
+      "pubkey_b64": "3QImjPWotw5p9J9n7FRcmGvxCna8PZoOpqi0cGu2OKo",
+      "seed_b64": "_xCWxR4qpZmAvuNqX0_a3WLCOoUiN99mXad4LVra45U",
+      "server_id": "srv_conf_30"
+    },
+    {
+      "pubkey_b64": "e6CodXJj4boKz30l_XPRCTmHFdYkIcJazWAA44ihqXA",
+      "seed_b64": "mLhts6LQyrMj1aBb1jwreQE5EdoOAJ1bF62zwy0AnUU",
+      "server_id": "srv_conf_31"
+    },
+    {
+      "pubkey_b64": "hDyM_km96DEqD5j6DaSlMtNTmo8FwpTskg3YPraEqdk",
+      "seed_b64": "eRLJgVUF33K-TwqNVQL-FrghezfGVweiPm3AbLuCyfg",
+      "server_id": "srv_conf_32"
+    },
+    {
+      "pubkey_b64": "rMDJT5cxG305jIAqwb41Ui59h3808Yxt355-xR2JDwg",
+      "seed_b64": "VR7KvR0FABL1tESPgmDO4qhQqWXy-vGspt_NHsN6-NY",
+      "server_id": "srv_conf_33"
+    },
+    {
+      "pubkey_b64": "XYcnpQu9YIjCxswhidKPp8PlhvlSYOUL3bYjy4tXaRo",
+      "seed_b64": "vykmizcTpZMrYvFyvlJBjeBqqaSgnUQDmVxdDOQC66U",
+      "server_id": "srv_conf_34"
+    },
+    {
+      "pubkey_b64": "Kx_zjmbUNmD6EpoH8pUzvTTd9rZtz_oy6_NXzR1esUE",
+      "seed_b64": "6D7PKlZQ9bLxl9_9Cz_vIMNHr_1u8TcMMQwc9WA1bk8",
+      "server_id": "srv_conf_35"
+    },
+    {
+      "pubkey_b64": "n200EMz4OAejPAW9oqmEhWwMPrTbM16RbYA9WMIfx_g",
+      "seed_b64": "HoNVvrbv5-x3G8OWCFyiNZ0DYqWPBa6RE_T3aL-VgcQ",
+      "server_id": "srv_conf_36"
+    },
+    {
+      "pubkey_b64": "cuzA_n4_ygUA19KCy487FP5xJzHRUdhZltQ9Zusbhhc",
+      "seed_b64": "-Xy3NIMMaaMhcRkjkWKBA-NVhg4Uplix3toGQss-gxE",
+      "server_id": "srv_conf_37"
+    },
+    {
+      "pubkey_b64": "vPctbRZ3OfCPJp6J9jfWtM6uYhHDdL9OK4qI64H5GMY",
+      "seed_b64": "IWWYQKdmK54sbgWm8xrXvMg3ybCHVcjdWNaTVLQz1eU",
+      "server_id": "srv_conf_38"
+    },
+    {
+      "pubkey_b64": "M7eb4WC-fJ8P0XwYnMI9_UX7Pm7io3d43RFfgQriwCI",
+      "seed_b64": "zhLWt-zI7XtGKv5ekKVEcWXeMLTr_mnR5dRbBohuvuY",
+      "server_id": "srv_conf_39"
+    },
+    {
+      "pubkey_b64": "fzajqO7LZ4cdiCsz7F1p9l-F_fqxVqOVoViDTgzQIxk",
+      "seed_b64": "YwqhJ5PFxKKh3auYpaNnIft20DfKhvijX1flfV-NOS8",
+      "server_id": "srv_conf_40"
+    },
+    {
+      "pubkey_b64": "Y2A8S1fYN-i_3wNTQlYubgd7_4NVk-Vq5QBIqxVf-40",
+      "seed_b64": "SxF29xKD6U_ygWQ4a6NBYPWZD84YsQyFJX8MGIeRaks",
+      "server_id": "srv_conf_41"
+    },
+    {
+      "pubkey_b64": "pJuIptRRz7zpB5wlTvVNEsbSGBMXHesWTG0oGJ375Xw",
+      "seed_b64": "wj8FCv7KvoLLxZVjr88awl6SQOuIn6owGKHCBxKP5Mo",
+      "server_id": "srv_conf_42"
+    },
+    {
+      "pubkey_b64": "rnJVBZNta4QcJlX7JhgRCOd6Iyr9Dtd7oX8CqhTKVvA",
+      "seed_b64": "S1Kwcs5bmHMF1c_1oxNARy0jn1w0-5BbyqXlzSuDN5M",
+      "server_id": "srv_conf_43"
+    },
+    {
+      "pubkey_b64": "9NA_MqEiDo_YdSyYidP_9VBbgsItR-wsezg77THVRpw",
+      "seed_b64": "cEZWLoPhq1XhzsE60ZmZgz5_AhF1SylVu1D7QVCAwB8",
+      "server_id": "srv_conf_44"
+    },
+    {
+      "pubkey_b64": "E70v3dsrzxLgnxMxNep116PbVLMquHg6CgFeTy0C_rU",
+      "seed_b64": "HhV3PnB7zOuwIa--2nrBkNXNtVrJ3VLB4oF8_jJgv2Q",
+      "server_id": "srv_conf_45"
+    },
+    {
+      "pubkey_b64": "RZwZFt3llc_1kaWKczu8rWkFoeeEraOD-uP-_HjbK1E",
+      "seed_b64": "Wnjkv64UtvsOZAyu4M2NdG_-pjwtEGGsHp1aH4g5O38",
+      "server_id": "srv_conf_46"
+    },
+    {
+      "pubkey_b64": "bNb1ubwGu9ui19YkA8waZ6BLorqWUDNDmI9PhraPfIY",
+      "seed_b64": "djcALJmPVgU3DKIzhCb9YTUprUbBS5MzRr9zPk_y1yY",
+      "server_id": "srv_conf_47"
+    }
+  ],
+  "unlisted_server_id": "srv_conf_unlisted"
+}

@@ -282,6 +282,59 @@ void main() {
     await relay.close();
   });
 
+  test('a refused open fails only its own request, and the next request on '
+      'the trunk works', () async {
+    await _withRelay((relay) async {
+      final trunk = _trunk(relay);
+      final client = SrpHttpClient(trunk);
+      final lost = <String>[];
+      trunk.onTrunkLost.listen(lost.add);
+      await trunk.connect();
+
+      relay.refuseOpens = 1;
+      await expectLater(
+        client.get(Uri.parse('http://relay.invalid/v1/notes/a')),
+        throwsA(
+          isA<SrpTransportException>().having(
+            (e) => e.code,
+            'code',
+            'rate_limited',
+          ),
+        ),
+      );
+      expect(trunk.isConnected, isTrue);
+
+      final response = await client.get(
+        Uri.parse('http://relay.invalid/v1/notes/b'),
+      );
+      expect(response.statusCode, 200);
+      expect(utf8.decode(response.bodyBytes), 'ok:/v1/notes/b');
+      expect(trunk.isConnected, isTrue);
+      expect(lost, isEmpty);
+      trunk.dispose();
+    });
+  });
+
+  test('a refusal that names no attempt still drops the trunk, as from a '
+      'relay that predates decision 106', () async {
+    await _withRelay((relay) async {
+      final trunk = _trunk(relay);
+      final client = SrpHttpClient(trunk);
+      await trunk.connect();
+
+      relay
+        ..refuseOpens = 1
+        ..refusalNamesAttempt = false;
+      await expectLater(
+        client.get(Uri.parse('http://relay.invalid/v1/notes/a')),
+        throwsA(isA<SrpStreamAborted>()),
+      );
+      expect(trunk.isConnected, isFalse);
+      expect(trunk.lossReason, 'rate_limited');
+      trunk.dispose();
+    });
+  });
+
   test('binary framing round-trips per the spec (big-endian id)', () {
     final frame = encodeBodyFrame(bodyResponse, 0x01020304, [1, 2, 3]);
     expect(frame.sublist(0, 5), [bodyResponse, 1, 2, 3, 4]);

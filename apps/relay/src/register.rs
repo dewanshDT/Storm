@@ -362,7 +362,7 @@ fn forward_response_body(
     // (§5.2) — buffering a response whole would break streaming *and* let one
     // large download hold the relay's memory.
     if client.try_send_raw(raw).is_err() {
-        drop_backlogged_client(session, stream_id);
+        drop_backlogged_client(session, stream_id, &client);
     }
     Ok(())
 }
@@ -375,7 +375,7 @@ fn deliver(session: &Session, stream_id: u32, json: String) -> Result<(), Fault>
         return Ok(());
     };
     if client.try_send_json(json).is_err() {
-        drop_backlogged_client(session, stream_id);
+        drop_backlogged_client(session, stream_id, &client);
     }
     Ok(())
 }
@@ -386,9 +386,17 @@ fn deliver(session: &Session, stream_id: u32, json: String) -> Result<(), Fault>
 /// one origin, so waiting on any single client would stall the responses of
 /// every other client on that server. Dropping the stream is the bounded
 /// alternative — the cost lands on the client that caused it.
-fn drop_backlogged_client(session: &Session, stream_id: u32) {
+///
+/// The client is told, with `ERROR{client_backlogged}` on the stream (§5.4).
+/// Silence would leave a started body that never ends and a pending head that
+/// never comes, and a client cannot turn silence into an error.
+fn drop_backlogged_client(session: &Session, stream_id: u32, client: &Tx) {
     tracing::info!(stream_id, "client cannot keep up; dropping its stream");
     session.trunk.close_stream(stream_id);
+    client.end_stream(
+        stream_id,
+        proto::error_on_stream(ErrorCode::ClientBacklogged, stream_id),
+    );
     let _ = session
         .trunk
         .tx()
@@ -414,12 +422,23 @@ fn server_close(session: &Session, frame: Frame) -> Result<bool, Fault> {
     let closing = session.trunk.client_for(stream_id);
     session.trunk.close_stream(stream_id);
     if let Some(client) = closing {
-        let end = if aborted {
-            proto::error_on_stream(ErrorCode::StreamAborted, stream_id)
-        } else {
-            proto::close_stream(stream_id)
-        };
-        let _ = client.try_send_json(end);
+        if aborted {
+            client.end_stream(
+                stream_id,
+                proto::error_on_stream(ErrorCode::StreamAborted, stream_id),
+            );
+        } else if client
+            .try_send_json(proto::close_stream(stream_id))
+            .is_err()
+        {
+            // The end of a body is ordered behind the body, so it cannot jump
+            // the queue the way an error can. Without room for it the client
+            // has lost the stream like any other backlogged one.
+            client.end_stream(
+                stream_id,
+                proto::error_on_stream(ErrorCode::ClientBacklogged, stream_id),
+            );
+        }
     }
     Ok(false)
 }

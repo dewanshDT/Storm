@@ -361,12 +361,32 @@ refuse a `stream_id` it already has open, with `ERROR{stream_closed}`, rather
 than acknowledging it twice.
 
 `attempt_id` is client-generated and echoed back **only** so the client can
-correlate concurrent opens before it learns the relay-assigned `stream_id`. It
-has no meaning on the wire afterwards, and the relay never routes on it.
+correlate concurrent opens before it learns the relay-assigned `stream_id` —
+in `STREAM_READY`, or in the `ERROR` that refuses the open. It has no meaning
+on the wire afterwards, and the relay never routes on it. The relay echoes it
+as the JSON value the client sent.
 
 In-flight `STREAM_OPEN`s MUST be capped per trunk (e.g. 20); past that,
 `OPEN_STREAM` gets `ERROR{rate_limited}` immediately rather than queueing — a
 slow server and an overloaded one should fail differently, not compound.
+
+**A refused open names its attempt and does not end the trunk.**
+
+```
+Client → Relay:  OPEN_STREAM { attempt_id }
+Relay → Client:  ERROR { code: "rate_limited", attempt_id }   // no stream_id
+```
+
+1. A relay refusing an `OPEN_STREAM` **MUST** answer with an `ERROR` carrying
+   that open's `attempt_id` and no `stream_id`, and **MUST** keep the trunk
+   open. The trunk's other streams, and later opens, are unaffected.
+2. A client receiving an `ERROR` with an `attempt_id` and no `stream_id`
+   **MUST** fail only that pending open and **MUST NOT** treat the error as
+   trunk-scoped. An `attempt_id` it is not waiting on is ignored.
+3. An `ERROR` with neither field is trunk-scoped, as before. A relay that
+   predates rule 1 refuses an open that way; a client MAY attribute such a
+   `rate_limited` to its oldest pending open (the relay answers opens in the
+   order they arrive) or MAY drop the trunk, and either is conformant.
 
 ### 5.2 HTTP request and response over a stream
 
@@ -536,6 +556,30 @@ truncation goes undetected exactly as it did before, and nothing else breaks.
 A client that predates the rule already ends a stream on a stream-scoped
 `ERROR` with an unknown code.
 
+**A stream the relay drops for a client that fell behind is failed, never
+silenced.** The relay never waits on a client from the task that reads an
+origin's trunk, so a client whose queue at the relay is full loses the stream
+the next frame was for:
+
+1. The relay **MUST** end it toward the client with
+   `ERROR { code: "client_backlogged", stream_id }`, and send
+   `CLOSE { stream_id }` toward the origin. Rule 3 above applies: a body
+   already started is an error, and a pending head fails.
+2. That `ERROR` **MUST** be delivered although the client's queue is full. It
+   MAY overtake frames already queued for the stream, which the relay SHOULD
+   then discard, but it **MUST NOT** displace frames of the trunk's other
+   streams, which carry on in order.
+3. If the relay cannot deliver even that, it **MUST** close the client trunk;
+   the client then fails every stream on it as trunk loss. It **MUST NOT**
+   drop the stream silently.
+4. A plain `CLOSE { stream_id }` is never moved ahead of the body it ends. A
+   relay with no room for one ends the stream by rule 1 instead.
+5. A client **MUST** ignore frames for a `stream_id` it has already ended.
+
+The same delivery rule holds for every stream-ending `ERROR` the relay sends
+(`server_timeout`, `stream_aborted`, `trunk_lost`, `trunk_superseded`): none is
+lost to a full queue.
+
 ## 6. Message catalog and error codes
 
 Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
@@ -558,7 +602,7 @@ Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
 | *(binary `0x01` / `0x02`)* | either | `stream_id`, bytes; an empty `0x01` ends the request body (§5.2) |
 | `PING` / `PONG` | either | — |
 | `CLOSE` | either | `stream_id`? (absent = whole trunk); `aborted`? — origin only: the response failed after its head (§5.4) |
-| `ERROR` | relay→either | `code`, `message`, `stream_id`? |
+| `ERROR` | relay→either | `code`, `message`, `stream_id`?, `attempt_id`? — the refused `OPEN_STREAM` (§5.1); with neither id the error is trunk-scoped |
 
 ### Error codes
 
@@ -572,9 +616,10 @@ Codes are **strings**, not numbers.
 | `server_timeout` | Server did not ACK `STREAM_OPEN` within 5 s. |
 | `trunk_lost` | Server trunk died — heartbeat timeout, closed, or superseded. |
 | `trunk_superseded` | Replaced by a newer registration; drain window elapsed. |
-| `rate_limited` | An abuse-control limit was hit. |
+| `rate_limited` | An abuse-control limit was hit. Refusing an `OPEN_STREAM`, it carries that open's `attempt_id` and the trunk stays up (§5.1). |
 | `stream_closed` | Operation on a dead `stream_id`. |
 | `stream_aborted` | The origin abandoned a response after its head (§5.4): the body is incomplete. Stream-scoped only. |
+| `client_backlogged` | This client fell too far behind reading its trunk, and the relay dropped the stream (§5.4): the body is incomplete. Stream-scoped only, and only ever sent to the client that fell behind. |
 
 **There is deliberately no code for a relay-side fault.** Every code above is
 peer-attributable, so a relay that cannot proceed for its own reasons — a
