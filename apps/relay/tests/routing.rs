@@ -306,6 +306,40 @@ async fn a_request_and_response_travel_client_relay_server_client_with_bodies() 
     }
 }
 
+/// The end-of-body frame (§5.2) is a `0x01` with an empty payload. It is the
+/// only thing that lets the origin answer a bodied request, so the relay must
+/// carry it like any other chunk rather than drop it as empty.
+#[tokio::test]
+async fn an_empty_request_body_frame_reaches_the_server_as_end_of_body() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let stream_id = client.open_stream("attempt-end").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+
+    client.send(request_head(stream_id, "/v1/notes")).await;
+    client.send_body(0x01, stream_id, b"{}").await;
+    client.send_body(0x01, stream_id, b"").await;
+
+    let head = server.recv().await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+    for expected in [&b"{}"[..], &b""[..]] {
+        match server.next_frame().await {
+            Frame::Body {
+                kind,
+                stream_id: id,
+                payload,
+            } => {
+                assert_eq!(kind, 0x01);
+                assert_eq!(id, stream_id);
+                assert_eq!(payload, expected);
+            }
+            Frame::Text(value) => panic!("expected a body frame, got {value}"),
+        }
+    }
+}
+
 // ------------------------------------------------------------------ latency
 
 /// A relayed exchange is several small frames each way. With Nagle on the
@@ -354,40 +388,6 @@ async fn a_relayed_exchange_does_not_wait_on_delayed_acks() {
         median < Duration::from_millis(15),
         "median relayed exchange took {median:?}; TCP_NODELAY missing?"
     );
-}
-
-/// The end-of-body frame (§5.2) is a `0x01` with an empty payload. It is the
-/// only thing that lets the origin answer a bodied request, so the relay must
-/// carry it like any other chunk rather than drop it as empty.
-#[tokio::test]
-async fn an_empty_request_body_frame_reaches_the_server_as_end_of_body() {
-    let harness = Harness::plain().await;
-    let mut server = harness.server().await;
-    let mut client = harness.client().await;
-
-    let stream_id = client.open_stream("attempt-end").await;
-    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
-
-    client.send(request_head(stream_id, "/v1/notes")).await;
-    client.send_body(0x01, stream_id, b"{}").await;
-    client.send_body(0x01, stream_id, b"").await;
-
-    let head = server.recv().await;
-    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
-    for expected in [&b"{}"[..], &b""[..]] {
-        match server.next_frame().await {
-            Frame::Body {
-                kind,
-                stream_id: id,
-                payload,
-            } => {
-                assert_eq!(kind, 0x01);
-                assert_eq!(id, stream_id);
-                assert_eq!(payload, expected);
-            }
-            Frame::Text(value) => panic!("expected a body frame, got {value}"),
-        }
-    }
 }
 
 // --------------------------------------------------- the cross-talk trap (§3)
@@ -1224,4 +1224,67 @@ async fn a_restarted_server_is_reachable_again_on_a_fresh_client_trunk() {
     let mut client = harness.client().await;
     let stream_id = client.open_stream("again").await;
     assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+}
+
+// ------------------------------------------------------- aborted responses
+
+/// The origin's body failed after the head (§5.4, decision 101). The client
+/// must learn the body is incomplete, and nothing else on the trunk may notice.
+#[tokio::test]
+async fn an_aborted_response_reaches_only_its_client_as_stream_aborted() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut broken = harness.client().await;
+    let mut healthy = harness.client().await;
+
+    let broken_id = broken.open_stream("broken").await;
+    server.expect_stream_open_and_ack().await;
+    let healthy_id = healthy.open_stream("healthy").await;
+    server.expect_stream_open_and_ack().await;
+
+    for (client, id) in [(&mut broken, broken_id), (&mut healthy, healthy_id)] {
+        client.send(request_head(id, "/v1/notes/x")).await;
+        assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+        server
+            .send(json!({
+                "v": 1, "type": "HTTP_RESPONSE_HEAD",
+                "stream_id": id, "status": 200, "headers": {},
+            }))
+            .await;
+        assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+    }
+
+    server.send_body(0x02, broken_id, b"half a bo").await;
+    assert!(matches!(broken.next_frame().await, Frame::Body { .. }));
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": broken_id, "aborted": true }))
+        .await;
+    let reply = broken.recv().await;
+    assert_error(&reply, "stream_aborted");
+    assert_eq!(reply["stream_id"], broken_id, "{reply}");
+
+    server.send_body(0x02, healthy_id, b"whole").await;
+    assert!(matches!(healthy.next_frame().await, Frame::Body { .. }));
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": healthy_id }))
+        .await;
+    let end = healthy.recv().await;
+    assert_eq!(
+        end["type"], "CLOSE",
+        "a complete response still ends with CLOSE: {end}"
+    );
+}
+
+#[tokio::test]
+async fn an_aborted_flag_that_is_not_a_boolean_is_a_protocol_error() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": stream_id, "aborted": "yes" }))
+        .await;
+    assert_error(&server.recv().await, "protocol_error");
 }

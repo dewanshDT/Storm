@@ -512,6 +512,30 @@ trunk. `CLOSE {}` with no `stream_id` ends the whole trunk. Tearing down a
 trunk implicitly closes every stream on it; streams do not survive trunk loss,
 and clients resume via their existing sync cursor rather than via trunk state.
 
+**A response that fails partway is aborted, never closed.** `CLOSE { stream_id }`
+from the origin after `HTTP_RESPONSE_HEAD` means the body is complete. An origin
+whose response body fails after the head — a read error, a handler that panics
+mid-stream — has already sent a status, so the only honest signal left is at
+the stream level:
+
+1. The origin **MUST** end such a stream with
+   `CLOSE { stream_id, aborted: true }`, never with a plain `CLOSE`. `aborted`,
+   when present, **MUST** be a boolean; `false` means the same as absent.
+2. The relay **MUST** turn it into `ERROR { code: "stream_aborted", stream_id }`
+   toward the client, and **MUST NOT** treat it as a trunk fault: the other
+   streams on the trunk carry on.
+3. A client **MUST** treat a stream ended by any stream-scoped `ERROR` as a
+   failed response: after the head, as an error on the body, never as a body
+   that ended. Bytes already received are not a usable response.
+
+`aborted` rides `CLOSE` rather than an origin-sent `ERROR` for compatibility:
+`ERROR` is relay-originated (§6), and a relay that predates this rule treats an
+origin's `ERROR` as a protocol error and drops the whole trunk. That relay
+reads `CLOSE { stream_id, aborted: true }` as a plain `CLOSE` instead — the
+truncation goes undetected exactly as it did before, and nothing else breaks.
+A client that predates the rule already ends a stream on a stream-scoped
+`ERROR` with an unknown code.
+
 ## 6. Message catalog and error codes
 
 Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
@@ -533,7 +557,7 @@ Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
 | `HTTP_RESPONSE_HEAD` | server→relay→client | `stream_id`, `status`, `headers` |
 | *(binary `0x01` / `0x02`)* | either | `stream_id`, bytes; an empty `0x01` ends the request body (§5.2) |
 | `PING` / `PONG` | either | — |
-| `CLOSE` | either | `stream_id`? (absent = whole trunk) |
+| `CLOSE` | either | `stream_id`? (absent = whole trunk); `aborted`? — origin only: the response failed after its head (§5.4) |
 | `ERROR` | relay→either | `code`, `message`, `stream_id`? |
 
 ### Error codes
@@ -550,6 +574,7 @@ Codes are **strings**, not numbers.
 | `trunk_superseded` | Replaced by a newer registration; drain window elapsed. |
 | `rate_limited` | An abuse-control limit was hit. |
 | `stream_closed` | Operation on a dead `stream_id`. |
+| `stream_aborted` | The origin abandoned a response after its head (§5.4): the body is incomplete. Stream-scoped only. |
 
 **There is deliberately no code for a relay-side fault.** Every code above is
 peer-attributable, so a relay that cannot proceed for its own reasons — a

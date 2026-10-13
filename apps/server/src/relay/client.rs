@@ -658,7 +658,18 @@ async fn serve_one(
     // than needing a second, unauthenticated path of its own.
     let mut body = response.into_body().into_data_stream();
     while let Some(chunk) = body.next().await {
-        let Ok(chunk) = chunk else { break };
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                // A plain `CLOSE` here would tell the client the body is
+                // complete, and it would keep a truncated note (decision 101).
+                tracing::warn!(stream_id, error = %e, "response body failed mid-stream");
+                let _ = outbound
+                    .send(Message::text(proto::abort_stream(stream_id)))
+                    .await;
+                return;
+            }
+        };
         if chunk.is_empty() {
             continue;
         }

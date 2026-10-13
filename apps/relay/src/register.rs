@@ -404,10 +404,22 @@ fn server_close(session: &Session, frame: Frame) -> Result<bool, Fault> {
         return Err(ErrorCode::ProtocolError.into());
     }
     let stream_id = proto::stream_id_of(&frame.body)?;
+    // The origin's response failed after its head (§5.4). Forwarded as a plain
+    // `CLOSE`, the client would keep a truncated body as complete.
+    let aborted = match frame.body.get("aborted") {
+        None => false,
+        Some(serde_json::Value::Bool(aborted)) => *aborted,
+        Some(_) => return Err(ErrorCode::ProtocolError.into()),
+    };
     let closing = session.trunk.client_for(stream_id);
     session.trunk.close_stream(stream_id);
     if let Some(client) = closing {
-        let _ = client.try_send_json(proto::close_stream(stream_id));
+        let end = if aborted {
+            proto::error_on_stream(ErrorCode::StreamAborted, stream_id)
+        } else {
+            proto::close_stream(stream_id)
+        };
+        let _ = client.try_send_json(end);
     }
     Ok(false)
 }

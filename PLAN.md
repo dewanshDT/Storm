@@ -6192,6 +6192,36 @@ established with a test first, then fixed where wrong.
 `REGISTERED`, or a relay stops answering PING. Either makes inbound silence a
 false signal.
 
+**101. A response that fails after its head is aborted, never closed (P6).**
+*(2026-10-12, relay TODO §9/§12.)* storm-server's tunnel ended every relayed
+response with `CLOSE { stream_id }`, including one whose body stream failed
+partway (`serve_one` broke out of the loop and fell through to the normal
+`CLOSE`). The relay forwarded it, and the client took the bytes it had as the
+whole body: a read error mid-note became a truncated note with a 200.
+- **SRP §5.4 gains "A response that fails partway is aborted, never closed":**
+  the origin ends such a stream with `CLOSE { stream_id, aborted: true }`; the
+  relay turns that into `ERROR { code: "stream_aborted", stream_id }` toward
+  the client and leaves the trunk alone; a client treats any stream-scoped
+  `ERROR` after the head as a body error. `stream_aborted` joins §6's codes,
+  and `aborted` that is not a boolean is a `protocol_error`.
+- **Why a flag on `CLOSE`, not an origin-sent `ERROR`:** `ERROR` is
+  relay-originated in §6, and a relay that predates this rule answers an
+  origin's `ERROR` with `protocol_error` and drops the whole trunk — every
+  relayed client of that server. That relay reads the flagged `CLOSE` as a
+  plain one, which is today's behaviour and breaks nothing else. A client that
+  predates the rule already ends a stream on a stream-scoped `ERROR` of any
+  code, so the Dart client needed no change, only a test.
+- Server: `proto::abort_stream`; `serve_one` sends it on a body error.
+  Relay: `ErrorCode::StreamAborted`; `server_close` maps the flag.
+- Tests: `a_response_body_that_fails_midway_is_aborted_not_closed` (server),
+  `an_aborted_response_reaches_only_its_client_as_stream_aborted` and
+  `an_aborted_flag_that_is_not_a_boolean_is_a_protocol_error` (relay) — all
+  three fail on the old code; Dart `an aborted response is a body error, and
+  only that stream ends` (passes on the old client too, by design above).
+- Not covered: a live test through the real relay — no real route fails
+  mid-body on demand.
+*Revisit if:* SRP v2 lets the origin send stream-scoped `ERROR`s directly.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

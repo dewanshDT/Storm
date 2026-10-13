@@ -140,6 +140,7 @@ pub enum ErrorCode {
     RateLimited,
     StreamClosed,
     TrunkSuperseded,
+    StreamAborted,
 }
 
 impl ErrorCode {
@@ -153,6 +154,7 @@ impl ErrorCode {
             Self::RateLimited => "rate_limited",
             Self::StreamClosed => "stream_closed",
             Self::TrunkSuperseded => "trunk_superseded",
+            Self::StreamAborted => "stream_aborted",
         }
     }
 
@@ -174,6 +176,7 @@ impl ErrorCode {
             Self::RateLimited => "rate limited",
             Self::StreamClosed => "stream closed",
             Self::TrunkSuperseded => "trunk superseded",
+            Self::StreamAborted => "stream aborted",
         }
     }
 
