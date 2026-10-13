@@ -1992,45 +1992,39 @@ async fn a_relayed_write_whose_stream_closes_before_its_body_ends_writes_nothing
     t.tunnels.shutdown().await;
 }
 
-#[tokio::test]
-async fn a_body_that_outruns_its_handler_is_closed_not_truncated() {
-    // Before decision 95 a full body channel was dropped, which the handler
-    // read as end-of-body: it served the first 32 chunks as the whole request.
-    let dir = tempdir::TempDir::new("storm-relay-body-shed").unwrap();
-    let identity = test_identity(dir.path());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let served = Arc::new(std::sync::Mutex::new(None::<usize>));
-    let router = Router::new().route(
+/// A route that holds its body unread until `release`, then records how many
+/// bytes and which digest it got.
+fn held_upload_router(
+    release: Arc<tokio::sync::Notify>,
+    served: Arc<std::sync::Mutex<Option<(usize, blake3::Hash)>>>,
+) -> Router {
+    Router::new().route(
         "/upload",
-        axum::routing::post({
-            let release = release.clone();
-            let served = served.clone();
-            move |body: axum::body::Body| async move {
-                release.notified().await;
-                if let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await {
-                    *served.lock().unwrap() = Some(bytes.len());
-                }
-                "stored"
+        axum::routing::post(move |body: axum::body::Body| async move {
+            release.notified().await;
+            if let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await {
+                *served.lock().unwrap() = Some((bytes.len(), blake3::hash(&bytes)));
             }
+            "stored"
         }),
-    );
-    let mut relay = FakeRelay::start(Behaviour::Normal).await;
-    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
-    let _ = relay.await_registration().await;
+    )
+}
 
+/// Opens stream 3 as `POST /upload` and sends `frames` request-body frames of
+/// `frame` bytes back to back, then the end of body — a client at line rate.
+async fn upload_at_line_rate(relay: &mut FakeRelay, frames: usize, frame: &[u8]) {
     relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":3}));
     assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
     relay.send(serde_json::json!({
         "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":3,"method":"POST","path":"/upload","headers":{},
     }));
-    let chunk = vec![b'x'; 1024];
-    for _ in 0..64 {
+    for _ in 0..frames {
         relay
             .to_server
             .send(Message::binary(proto::encode_body_frame(
                 proto::FRAME_REQUEST_BODY,
                 3,
-                &chunk,
+                frame,
             )))
             .unwrap();
     }
@@ -2042,6 +2036,53 @@ async fn a_body_that_outruns_its_handler_is_closed_not_truncated() {
             b"",
         )))
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_large_upload_at_line_rate_reaches_a_slow_handler_whole() {
+    // 20 MiB as the Dart client sends it, 80 frames of 256 KiB, to a handler
+    // that has not started reading. Decision 95 bounded the buffer at 32
+    // chunks and shed this ordinary upload; decision 102 bounds it in bytes.
+    let dir = tempdir::TempDir::new("storm-relay-body-line-rate").unwrap();
+    let identity = test_identity(dir.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let served = Arc::new(std::sync::Mutex::new(None));
+    let router = held_upload_router(release.clone(), served.clone());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let frame: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    upload_at_line_rate(&mut relay, 80, &frame).await;
+    // Every frame is buffered before the handler reads a byte.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    release.notify_waiters();
+
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["status"], 200);
+    let expected = blake3::hash(&frame.repeat(80));
+    assert_eq!(*served.lock().unwrap(), Some((80 * frame.len(), expected)));
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_body_over_its_buffer_budget_is_closed_not_truncated() {
+    // Before decision 95 a full body channel was dropped, which the handler
+    // read as end-of-body: it served the prefix as the whole request.
+    let dir = tempdir::TempDir::new("storm-relay-body-shed").unwrap();
+    let identity = test_identity(dir.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let served = Arc::new(std::sync::Mutex::new(None));
+    let router = held_upload_router(release.clone(), served.clone());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let frame = vec![b'x'; 1024 * 1024];
+    let frames = super::client::STREAM_BODY_BUDGET / frame.len() + 1;
+    upload_at_line_rate(&mut relay, frames, &frame).await;
 
     let closed = relay.next_control().await;
     assert_eq!(closed["type"], "CLOSE", "{closed}");

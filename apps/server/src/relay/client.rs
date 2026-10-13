@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -45,8 +46,22 @@ const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// touches the bound.
 pub(super) const OUTBOUND_CAPACITY: usize = 256;
 
-/// Request-body chunks buffered per stream before the sender is shed.
-const BODY_CAPACITY: usize = 32;
+/// Request-body bytes one stream may have buffered and not yet read by its
+/// handler before the stream is shed (decision 102).
+///
+/// A sender is never slowed down — awaiting in the trunk's read loop would
+/// stall every other stream — so a client uploads at line rate and the
+/// handler catches up from this buffer. It must therefore hold a whole
+/// attachment: anything less sheds an ordinary upload whose handler starts
+/// late. One more maximal WebSocket frame covers the frame that crosses the
+/// line; a body that really is larger is refused by the route's own limit.
+pub(super) const STREAM_BODY_BUDGET: usize = crate::api::MAX_ATTACHMENT_BYTES + 16 * 1024 * 1024;
+
+/// Request-body bytes all of one trunk's streams may have buffered together.
+///
+/// Two maximal attachments in flight at once. Without a trunk-wide bound, the
+/// per-stream one times the relay's stream cap (1000) is no bound at all.
+const TRUNK_BODY_BUDGET: usize = 2 * crate::api::MAX_ATTACHMENT_BYTES;
 
 /// How long registration may take before the attempt is abandoned. Covers the
 /// whole handshake, not one frame, so a relay that accepts a socket and then
@@ -333,7 +348,7 @@ async fn register(
 struct StreamEntry {
     /// `None` once the request head has arrived and the body is complete, or
     /// for a stream whose request carries no body at all.
-    body: Option<mpsc::Sender<Bytes>>,
+    body: Option<BodySender>,
     /// Dropped on close, which aborts the dispatch task with it.
     task: Option<tokio::task::AbortHandle>,
     /// A head is accepted once per stream.
@@ -379,6 +394,8 @@ async fn serve_trunk(
     let mut streams: HashMap<u32, StreamEntry> = HashMap::new();
     let silence_limit = liveness_deadline(heartbeat_secs);
 
+    let budget = BodyBudget::new(STREAM_BODY_BUDGET, TRUNK_BODY_BUDGET);
+
     loop {
         let message = tokio::select! {
             biased;
@@ -417,7 +434,7 @@ async fn serve_trunk(
 
         match message {
             Message::Text(text) => {
-                if !handle_control(&text, &mut streams, &outbound, tunnel).await {
+                if !handle_control(&text, &mut streams, &outbound, tunnel, &budget).await {
                     break;
                 }
             }
@@ -466,6 +483,7 @@ async fn handle_control(
     streams: &mut HashMap<u32, StreamEntry>,
     outbound: &mpsc::Sender<Message>,
     tunnel: &Tunnel,
+    budget: &BodyBudget,
 ) -> bool {
     let message = match proto::parse_text(text) {
         Ok(message) => message,
@@ -505,7 +523,7 @@ async fn handle_control(
                 return true;
             }
             entry.head_seen = true;
-            start_dispatch(entry, head, outbound.clone(), tunnel);
+            start_dispatch(entry, head, outbound.clone(), tunnel, budget);
         }
         Inbound::Close {
             stream_id: Some(id),
@@ -559,17 +577,16 @@ fn start_dispatch(
     head: RequestHead,
     outbound: mpsc::Sender<Message>,
     tunnel: &Tunnel,
+    budget: &BodyBudget,
 ) {
     let stream_id = head.stream_id;
 
     let body = if is_bodyless(&head.method) {
         Body::empty()
     } else {
-        let (tx, rx) = mpsc::channel::<Bytes>(BODY_CAPACITY);
+        let (tx, body) = budget.channel();
         entry.body = Some(tx);
-        Body::from_stream(
-            tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<Bytes, std::io::Error>),
-        )
+        body
     };
 
     let request = match dispatch::build_request(&head, &tunnel.host_header, body) {
@@ -691,24 +708,21 @@ fn handle_body_frame(
     let Some(sender) = entry.body.as_ref() else {
         return;
     };
-    // **`try_send`, and shed the stream if it is full.** Awaiting here would
+    // **Never awaited, and shed past the byte budget.** Awaiting here would
     // block the trunk's read loop on one slow handler, which is head-of-line
-    // blocking for every other stream on the trunk. The bound is real
-    // backpressure in the direction that matters (responses); in this
-    // direction a producer outrunning its own handler by 32 chunks is a
-    // stream to end, not a reason to stall the socket.
+    // blocking for every other stream on the trunk (decision 102).
     //
     // **Shed means abort, never end the body.** Dropping the sender would read
     // as end-of-body, and the handler would serve the prefix as the whole
     // request: a truncated note or attachment saved as if complete (decision 95).
-    match sender.try_send(Bytes::copy_from_slice(payload)) {
+    match sender.push(payload) {
         Ok(()) => {}
         // The handler answered without reading the rest; its response stands.
-        Err(mpsc::error::TrySendError::Closed(_)) => entry.body = None,
-        Err(mpsc::error::TrySendError::Full(_)) => {
+        Err(Refused::Closed) => entry.body = None,
+        Err(Refused::OverBudget) => {
             tracing::warn!(
                 stream_id,
-                "request body outran its handler; closing the stream"
+                "request body over its buffer budget; closing the stream"
             );
             close_stream(streams, stream_id);
             let _ = outbound.try_send(Message::text(proto::close_stream(stream_id)));
@@ -716,9 +730,170 @@ fn handle_body_frame(
     }
 }
 
+/// Byte accounting for the request bodies one trunk has buffered for its
+/// handlers (decision 102). Only the trunk's read loop adds; only a body's
+/// reader, or its drop, takes away.
+struct BodyBudget {
+    per_stream: usize,
+    per_trunk: usize,
+    trunk: Arc<AtomicUsize>,
+}
+
+impl BodyBudget {
+    fn new(per_stream: usize, per_trunk: usize) -> Self {
+        Self {
+            per_stream,
+            per_trunk,
+            trunk: Arc::default(),
+        }
+    }
+
+    fn channel(&self) -> (BodySender, Body) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let reader = BodyReader {
+            rx,
+            queued: queued.clone(),
+            trunk: self.trunk.clone(),
+        };
+        let sender = BodySender {
+            tx,
+            queued,
+            trunk: self.trunk.clone(),
+            per_stream: self.per_stream,
+            per_trunk: self.per_trunk,
+        };
+        (sender, Body::from_stream(reader))
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Refused {
+    /// The handler dropped its body: it has answered.
+    Closed,
+    OverBudget,
+}
+
+struct BodySender {
+    tx: mpsc::UnboundedSender<Bytes>,
+    queued: Arc<AtomicUsize>,
+    trunk: Arc<AtomicUsize>,
+    per_stream: usize,
+    per_trunk: usize,
+}
+
+impl BodySender {
+    fn push(&self, chunk: &[u8]) -> Result<(), Refused> {
+        let len = chunk.len();
+        if self.queued.load(Ordering::SeqCst) + len > self.per_stream
+            || self.trunk.load(Ordering::SeqCst) + len > self.per_trunk
+        {
+            return Err(Refused::OverBudget);
+        }
+        self.queued.fetch_add(len, Ordering::SeqCst);
+        self.trunk.fetch_add(len, Ordering::SeqCst);
+        if self.tx.send(Bytes::copy_from_slice(chunk)).is_err() {
+            // `swap`, as the reader's drop does, so the bytes leave the trunk's
+            // count exactly once whichever side got there first.
+            let back = self.queued.swap(0, Ordering::SeqCst);
+            self.trunk.fetch_sub(back, Ordering::SeqCst);
+            return Err(Refused::Closed);
+        }
+        Ok(())
+    }
+}
+
+struct BodyReader {
+    rx: mpsc::UnboundedReceiver<Bytes>,
+    queued: Arc<AtomicUsize>,
+    trunk: Arc<AtomicUsize>,
+}
+
+impl futures_util::Stream for BodyReader {
+    type Item = Result<Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx).map(|chunk| {
+            chunk.map(|chunk| {
+                self.queued.fetch_sub(chunk.len(), Ordering::SeqCst);
+                self.trunk.fetch_sub(chunk.len(), Ordering::SeqCst);
+                Ok(chunk)
+            })
+        })
+    }
+}
+
+impl Drop for BodyReader {
+    /// A handler that stops reading, or a stream that is aborted, gives its
+    /// unread bytes back to the trunk.
+    fn drop(&mut self) {
+        let left = self.queued.swap(0, Ordering::SeqCst);
+        self.trunk.fetch_sub(left, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn drain(body: Body) -> usize {
+        axum::body::to_bytes(body, usize::MAX).await.unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn a_stream_is_refused_past_its_own_budget_not_truncated() {
+        let budget = BodyBudget::new(10, 100);
+        let (tx, body) = budget.channel();
+        assert_eq!(tx.push(&[0; 6]), Ok(()));
+        assert_eq!(tx.push(&[0; 5]), Err(Refused::OverBudget));
+        assert_eq!(budget.trunk.load(Ordering::SeqCst), 6);
+        drop(tx);
+        assert_eq!(drain(body).await, 6);
+        assert_eq!(budget.trunk.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn the_trunk_budget_sheds_only_the_stream_that_would_exceed_it() {
+        let budget = BodyBudget::new(60, 100);
+        let (a, a_body) = budget.channel();
+        let (b, b_body) = budget.channel();
+        let (c, _c_body) = budget.channel();
+        assert_eq!(a.push(&[0; 50]), Ok(()));
+        assert_eq!(b.push(&[0; 40]), Ok(()));
+        assert_eq!(c.push(&[0; 20]), Err(Refused::OverBudget));
+        assert_eq!(c.push(&[0; 10]), Ok(()), "what fits still fits");
+
+        drop((a, b));
+        assert_eq!(drain(a_body).await, 50);
+        assert_eq!(drain(b_body).await, 40);
+        assert_eq!(budget.trunk.load(Ordering::SeqCst), 10);
+    }
+
+    #[tokio::test]
+    async fn read_bytes_free_the_budget_for_more() {
+        let budget = BodyBudget::new(10, 10);
+        let (tx, body) = budget.channel();
+        let mut reader = body.into_data_stream();
+        for _ in 0..5 {
+            assert_eq!(tx.push(&[0; 10]), Ok(()));
+            assert_eq!(reader.next().await.unwrap().unwrap().len(), 10);
+        }
+        assert_eq!(budget.trunk.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_abandoned_body_gives_its_bytes_back_to_the_trunk() {
+        let budget = BodyBudget::new(100, 100);
+        let (tx, body) = budget.channel();
+        assert_eq!(tx.push(&[0; 30]), Ok(()));
+        drop(body);
+        assert_eq!(budget.trunk.load(Ordering::SeqCst), 0);
+        assert_eq!(tx.push(&[0; 30]), Err(Refused::Closed));
+        assert_eq!(budget.trunk.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn the_register_endpoint_is_derived_from_the_relay_url() {
