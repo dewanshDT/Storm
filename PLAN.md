@@ -5769,6 +5769,89 @@ P2 from the relay TODO, measured 2026-10-03)*
 - **Unblocks** relay TODO §5 (MCP over the tunnel: tool calls are bodied
   POSTs). P1 (`TCP_NODELAY`) is separate.
 
+**93. The pairing QR carries the registered relay set.** *(2026-10-12, relay
+TODO §2's last pairing box; SRP v1 §4.3 names two carriers and only
+`GET /v1/server` existed)*
+- **Wire.** `storm://pair?…&addr=…` gains one `relay=<url>` per relay,
+  percent-encoded (`url::form_urlencoded`), in the order `/v1/server` lists
+  them. **No relays, no key:** a server without relays issues the URI it always
+  did, and a client that predates the key ignores it. `POST /v1/pairings`
+  (`PairingQrPayload`) gains `relays: [url, …]` beside `addr`.
+- **Registered, never configured** — the same `registered_relays` snapshot
+  `server_info` reads, so the QR and `/v1/server` agree at the instant of
+  issue. `public_address` is not sent: the client derives it as
+  `registry::public_address` does (`RelayAdvert.derive`).
+- **Boot and `storm-server pair` QRs carry none.** The boot QR is minted
+  before any tunnel starts, and `pair` is a separate process that cannot know
+  what the running server registered with. Both devices learn the set from
+  `/v1/server` on their first connection.
+- **The client.** `PairingUri.relays` reads every `relay` key and drops one
+  that is not `ws(s)://host` (the server's `normalize_relay_url` rule) rather
+  than refusing the QR — pairing dials the LAN address; a relay is only an
+  extra candidate. At pairing, `Settings.relays` is seeded with
+  `pairedRelays`: the list `GET /v1/server` returned during pairing (live,
+  from the server that then passed the challenge), or the QR's when that is
+  empty (D3: a stale entry costs part of one race, none costs reachability).
+  Before this, pairing read `/v1/server` and **dropped its relays**, so a
+  device paired on the LAN knew no relay until its first connection race.
+- **No trust from a QR relay.** It is a race candidate like any other: the
+  privacy ordering is unchanged and whatever answers through it must pass
+  the challenge against the QR's public key.
+- **Not done here:** pairing *through* a relay. The pairing screen still
+  dials only `addr`, so a QR scanned off the LAN fails; the field now carries
+  what that flow would need.
+- Tests: server `qr_payload_encodes_as_storm_uri` (no relays → old URI),
+  `qr_payload_carries_one_encoded_relay_key_per_relay`,
+  `pairing_qr_carries_registered_relays_never_configured_ones`; client
+  `pairing_uri_test` (old URI, the server's exact bytes, malformed relays
+  dropped, live set wins), `pairing_invite_test` (JSON → URI → parse),
+  `storm_connection_test` (a QR-seeded device reaches the server through a
+  relay before any refresh; a QR relay still faces the challenge).
+
+**96. Pairing reaches its server through the QR's relays.** *(2026-10-12,
+relay TODO §4; stacked on 93, which put the relays in the QR)*
+- **The flow.** `openPairingRoute` (`lib/api/pairing_route.dart`) runs the
+  same `StormConnection` race the app uses afterwards — the QR's address and
+  its self-hosted relays together, a public relay only on failure — with the
+  QR's `sid` and `pk` pinned, so the race's challenge is the pairing
+  challenge. Only a verified route exists; pairing, account set-up and login
+  all go over its `authApi`, the transport the challenge was answered on.
+  Before this, pairing dialled `addr` alone, so a QR scanned off the LAN
+  could not pair.
+- **Nothing sensitive before the challenge passes.** Through a relay the
+  pairing flow sends `HELLO {server_id}`, `GET /v1/server` and a fresh
+  challenge nonce, all public; the pairing nonce, the device secret and the
+  password are sent only on a route whose server signed
+  `storm-challenge:v1:<sid>:<nonce>` under the QR's key. A relay that answers
+  for an impostor is `identityFailed`, named, and sent nothing more.
+- **Only `wss://` relays (or loopback) carry pairing.** The challenge proves
+  who answers, not that no one else reads it; a password crossing the
+  internet over a plain `ws://` relay would be readable on the path.
+  `pairingRelays` drops the rest. A relay operator still reads what crosses
+  its relay in plaintext — the accepted relay trust model (no end-to-end
+  encryption yet), now including the pairing nonce and password.
+- **Failures say what to look at.** When nothing is proven, each relay is
+  dialled once more on its own (`probeRelay`, `HELLO` only, 8 s — longer than
+  the relay's own 5 s hold) and the screen distinguishes: the server at
+  `addr` unreachable (no relays); the relay unreachable; the relay up but the
+  server not connected to it (`ERROR{server_unreachable}` — `SrpHandshakeFailed`
+  now carries the relay's code); the relay has the server but the exchange
+  failed; and the identity check failing, naming the relay it came through.
+- **Timing.** The race gets 10 s rather than a reconnect's 2 s (a phone on
+  mobile data: TLS, `HELLO`, `OPEN_STREAM`, then the request), and the whole
+  attempt 30 s, after which it is unreachable rather than a spinner.
+- **Needs 92 to work against a real relay.** The challenge, `/v1/pair` and
+  login are POSTs with bodies; without the end-of-body frame (#150) they hang
+  through a real relay. The unit tests use the fake relay, which answered on
+  a timer before 92 and so does not depend on it.
+- Tests (`test/pairing_route_test.dart`): direct wins on the LAN; off the LAN
+  the QR relay carries pairing and only identity questions precede the route;
+  an impostor through a relay is refused and sent nothing else; a key-holder
+  naming another id is a mismatch; plain `ws://` relays off this machine are
+  dropped; the four unreachable diagnoses; **through a real `SrpTrunk`** over
+  the fake relay, `/v1/pair` completes and comes after the challenge; and
+  `probeRelay` tells `server_unreachable` from no answer.
+
 **91. `TCP_NODELAY` on every relay socket (P1).** *(2026-10-12, relay TODO
 §12.)* A relayed exchange is several small writes each way — the head, body
 chunks, a `CLOSE` — and nothing turned Nagle off, so each write after the
