@@ -5891,6 +5891,53 @@ closes the stream.** *(2026-10-12, relay TODO §5, stacked on 92)*
   `a_body_that_outruns_its_handler_is_closed_not_truncated` (fails on the
   old code), `a_response_leaves_the_server_chunk_by_chunk`.
 
+**97. The Dart trunk tells server offline from relay down, and drops a
+silent relay.** *(2026-10-12, two gaps found by decision 94's §9 work)*
+- **Server offline vs relay unavailable.** `SrpTrunk` turned every
+  trunk-level `ERROR` into `relay_error`, and `ConnectionStatus` had only
+  `offline`, so a relay saying `server_unreachable` and a relay that did not
+  answer at all looked the same — the relay TODO's §4 box claiming the split
+  was overstated. Now the trunk keeps the relay's code (`_relayErrorCode`,
+  `SrpHandshakeFailed.code`, `lossReason` — the shape PR #153 also adds, so
+  the two merge) and reports the server-side codes (`server_unreachable`,
+  `server_timeout`, `trunk_lost`, §6) on `onServerUnreachable`, for the
+  trunk or for one stream. `StormConnection` gains
+  `ConnectionStatus.serverOffline` and a `statusChanges` stream; the status
+  dot gets `DotStatus.serverOffline` (the same grey — nothing syncs — but
+  the line reads "Server offline, relay reachable"). `offline` now means no
+  path answered, the relays included.
+- **The verdict can land after the race.** The relay holds `HELLO` up to
+  5 s for a server mid-restart, and the race gives up after
+  `publicRelayDelay` (2 s). The trunk is left alive on a failed race, so the
+  relay's answer still arrives and moves the status `offline` →
+  `serverOffline`; `SyncEngine` follows `statusChanges` and repaints. The
+  trunk's handshake timeout goes from 5 s to 8 s so it outlasts the hold
+  instead of racing it, and a handshake that times out now fails the trunk
+  rather than leaving it dialling beside a second socket. `StormConnection`
+  replaces a dead trunk instead of handing it out again.
+- **A silent relay.** The trunk sent `PING` every 15 s but never required an
+  answer, so after a network change or a sleep a half-open socket hung every
+  relayed request until that request's own timeout. It now drops the trunk
+  after `silenceLimit` (default three heartbeats, 45 s — the allowance the
+  relay gives a server, §4.2) with nothing heard; any frame counts, and the
+  relay answers every client `PING` (`connect.rs`). SRP-level, not
+  WebSocket ping: it works on the web, where the browser owns WebSocket
+  pings. Every open stream fails with `trunk_lost` (a body error, never a
+  short body read as success), and the change feed's error sends
+  `SyncEngine` through its reconnect, which re-races from scratch.
+- Tests (`test/srp_liveness_test.dart`): the code survives (`relay_error`
+  on `onTrunkLost`, `server_unreachable` as the code and on
+  `onServerUnreachable`), a `rate_limited` refusal is not server offline,
+  `StormConnection` reports `serverOffline` both when the refusal is
+  immediate and when it lands after the race gave up, `reset` forgets it,
+  the dot and its line; a silent relay fails the request in flight with
+  `relay_silent` (hangs on the old trunk), a relay answering heartbeats is
+  kept, a timed-out handshake does not dial twice. **PR #151's skipped
+  test** (`server offline behind a live relay is told apart…`) expects the
+  code on `onTrunkLost`; on rebase it should read `lossReason` instead.
+- **Not changed:** a trunk-level `ERROR{rate_limited}` (the relay's refusal
+  of one `OPEN_STREAM`) still kills the whole client trunk (67's open item).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
