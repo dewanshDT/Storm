@@ -124,7 +124,9 @@ class Browser:
         return r.get("result", {}).get("value")
 
     def loads(self):
-        return sum(1 for e in self.events if e["method"] == "browsingContext.load")
+        # Firefox preloads about:newtab in a hidden browser, which reports its own load.
+        return sum(1 for e in self.events
+                   if e["method"] == "browsingContext.load" and e["params"]["context"] == self.ctx)
 
     def console(self):
         return [e["params"].get("text", "") for e in self.events if e["method"] == "log.entryAdded"]
@@ -238,8 +240,12 @@ async def sign_in_again(base):
         await b.type_password()
         ok, state = await b.signed_in()
         check("a first sign-in, before signing in again", ok, f"state={state}")
-        await b.js("['flutter.storm.accessToken', 'flutter.storm.refreshToken']"
-                   ".forEach(k => localStorage.removeItem(k)); true")
+        # Cleared as the next page starts, not from the running app: the app
+        # holds the tokens in memory and writes them back with any settings
+        # save, such as recording the vault it has just landed on.
+        await b.cmd("script.addPreloadScript", functionDeclaration=(
+            "() => ['flutter.storm.accessToken', 'flutter.storm.refreshToken']"
+            ".forEach(k => localStorage.removeItem(k))"))
         await b.open(base + "/")
         await b.type_password()
         ok, state = await b.signed_in()
