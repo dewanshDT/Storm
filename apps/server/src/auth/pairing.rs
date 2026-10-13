@@ -134,12 +134,19 @@ pub struct QrPayload {
     pub exp: String,
     /// Address hint — the address the server believes it is reachable at.
     pub addr: String,
+    /// The relays the server is **registered** with as the QR is issued (SRP
+    /// v1 §4.3) — a snapshot, refreshed later from `GET /v1/server`.
+    pub relays: Vec<String>,
 }
 
 impl QrPayload {
     /// Encodes as a `storm://pair` URI.
+    ///
+    /// One `relay=` per relay, percent-encoded, and none at all when the set is
+    /// empty, so a server with no relays issues the same URI as before the
+    /// field existed. A client that predates it ignores the unknown key.
     pub fn to_uri(&self) -> String {
-        format!(
+        let mut uri = format!(
             "storm://pair?v={version}&sid={sid}&pk={pk}&n={nonce}&exp={exp}&addr={addr}",
             version = QR_VERSION,
             sid = self.sid,
@@ -147,7 +154,12 @@ impl QrPayload {
             nonce = self.n,
             exp = self.exp,
             addr = self.addr,
-        )
+        );
+        for relay in &self.relays {
+            uri.push_str("&relay=");
+            uri.extend(url::form_urlencoded::byte_serialize(relay.as_bytes()));
+        }
+        uri
     }
 }
 
@@ -371,6 +383,7 @@ pub fn encode_qr(
     nonce: &str,
     expires: &str,
     addr: &str,
+    relays: Vec<String>,
 ) -> QrPayload {
     QrPayload {
         sid: server_id.to_string(),
@@ -378,6 +391,7 @@ pub fn encode_qr(
         n: nonce.to_string(),
         exp: expires.to_string(),
         addr: addr.to_string(),
+        relays,
     }
 }
 
@@ -434,11 +448,35 @@ mod tests {
             n: "AAAA".into(),
             exp: "2026-08-16T12:00:00Z".into(),
             addr: "http://192.168.1.100:8080".into(),
+            relays: Vec::new(),
         };
         let uri = payload.to_uri();
         assert!(uri.starts_with("storm://pair?v=1&sid=srv_test&pk=dGVzdA&n=AAAA"));
         assert!(uri.contains("exp=2026-08-16T12:00:00Z"));
-        assert!(uri.contains("addr=http://192.168.1.100:8080"));
+        assert!(
+            uri.ends_with("addr=http://192.168.1.100:8080"),
+            "no relays, no relay key: the URI an older client already reads"
+        );
+    }
+
+    #[test]
+    fn qr_payload_carries_one_encoded_relay_key_per_relay() {
+        let payload = encode_qr(
+            "srv_test",
+            "dGVzdA",
+            "AAAA",
+            "2026-08-16T12:00:00Z",
+            "192.168.1.100:8484",
+            vec![
+                "wss://relay.example.com".into(),
+                "ws://10.0.0.5:8787".into(),
+            ],
+        );
+        let uri = payload.to_uri();
+        assert!(uri.contains("&addr=192.168.1.100:8484&"));
+        assert!(
+            uri.ends_with("&relay=wss%3A%2F%2Frelay.example.com&relay=ws%3A%2F%2F10.0.0.5%3A8787")
+        );
     }
 
     #[test]
