@@ -972,6 +972,9 @@ pub struct PairingQrPayload {
     pub n: String,
     pub exp: String,
     pub addr: String,
+    /// Relay URLs the server is registered with right now — the same set
+    /// `GET /v1/server` reports, frozen into the QR (SRP v1 §4.3).
+    pub relays: Vec<String>,
 }
 
 /// Creates a new pairing session and returns the QR payload.
@@ -991,13 +994,22 @@ pub async fn issue_pairing_qr(
     let (nonce, session) =
         crate::auth::pairing::create(&mut auth_db, purpose, user_id, peer_ip, &now)
             .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(auth_db);
 
+    let relays = state
+        .vaults
+        .read()
+        .await
+        .registry
+        .registered_relays
+        .snapshot();
     let qr = crate::auth::pairing::encode_qr(
         &state.identity.server_id,
         &state.identity.public_key_b64(),
         &nonce,
         &session.expires,
         &state.listen_addr,
+        relays,
     );
 
     Ok(PairingQrPayload {
@@ -1006,6 +1018,7 @@ pub async fn issue_pairing_qr(
         n: qr.n,
         exp: qr.exp,
         addr: qr.addr,
+        relays: qr.relays,
     })
 }
 
@@ -3416,5 +3429,47 @@ mod tests {
             assert_eq!(vaults.registry.relays.len(), 2, "still configured");
         }
         assert!(must(server_info(&state).await).relays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pairing_qr_carries_registered_relays_never_configured_ones() {
+        let dir = tempdir::TempDir::new("storm-ops-pair-relays").unwrap();
+        let state = server_state(dir.path());
+        {
+            let mut vaults = state.vaults.write().await;
+            vaults
+                .registry
+                .set_relays(&[
+                    "wss://relay.example.com".to_string(),
+                    "wss://relay.two.example".to_string(),
+                ])
+                .unwrap();
+        }
+
+        let qr = must(issue_pairing_qr(&state, "add_device", None, None).await);
+        assert!(
+            qr.relays.is_empty(),
+            "a configured relay that never registered is a dead path"
+        );
+
+        state
+            .vaults
+            .read()
+            .await
+            .registry
+            .registered_relays
+            .mark_registered("wss://relay.two.example")
+            .unwrap();
+        let qr = must(issue_pairing_qr(&state, "add_device", None, None).await);
+        assert_eq!(qr.relays, vec!["wss://relay.two.example".to_string()]);
+        assert_eq!(
+            qr.relays,
+            must(server_info(&state).await)
+                .relays
+                .into_iter()
+                .map(|r| r.url)
+                .collect::<Vec<_>>(),
+            "the QR and GET /v1/server advertise the same set"
+        );
     }
 }

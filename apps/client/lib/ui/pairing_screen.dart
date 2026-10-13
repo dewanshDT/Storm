@@ -178,6 +178,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 serverId: serverInfo.serverId,
                 serverKeyId: serverInfo.keyId,
                 serverPublicKey: serverInfo.publicKey,
+                relays: pairedRelays(uri, serverInfo),
               ),
             );
         if (!mounted) return;
@@ -308,6 +309,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               serverId: _serverInfo!.serverId,
               serverKeyId: _serverInfo!.keyId,
               serverPublicKey: _serverInfo!.publicKey,
+              relays: pairedRelays(uri, _serverInfo!),
               // Session tokens.
               accessToken: tokens.accessToken,
               refreshToken: tokens.refreshToken,
