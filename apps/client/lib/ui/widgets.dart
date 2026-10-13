@@ -39,7 +39,7 @@ class StatusDot extends StatelessWidget {
         color: switch (status) {
           DotStatus.synced => t.green,
           DotStatus.syncing => t.amber,
-          DotStatus.offline => t.text3,
+          DotStatus.offline || DotStatus.serverOffline => t.text3,
           DotStatus.untrusted => t.danger,
           DotStatus.relayed => t.accent,
         },
@@ -57,7 +57,7 @@ class StatusDot extends StatelessWidget {
 /// re-derive per preset — and the accent test measures this exact pairing.
 const kTileInk = Color(0xFF1A1626);
 
-enum DotStatus { synced, syncing, offline, untrusted, relayed }
+enum DotStatus { synced, syncing, offline, serverOffline, untrusted, relayed }
 
 /// The one place the engine's three flags become a dot, so the vault bubble,
 /// the vault card and the popover cannot disagree about what "synced" is.
@@ -71,12 +71,19 @@ DotStatus dotStatusFor({
   required int pending,
   bool identityFailed = false,
   CandidateTier? tier,
+  ConnectionStatus? connection,
 }) {
   // Outranks offline: a server that failed the challenge is reachable, and
   // reporting that as "offline" would tell the user to check their wifi when
   // the actual answer is that something is answering for their server.
   if (identityFailed) return DotStatus.untrusted;
-  if (!online) return DotStatus.offline;
+  // Same grey as offline — nothing syncs either way — but a different line:
+  // a relay answered for the server, so the user's network is not the problem.
+  if (!online) {
+    return connection == ConnectionStatus.serverOffline
+        ? DotStatus.serverOffline
+        : DotStatus.offline;
+  }
   if (syncing || pending > 0) return DotStatus.syncing;
   if (tier != null && tier != CandidateTier.direct) return DotStatus.relayed;
   return DotStatus.synced;
