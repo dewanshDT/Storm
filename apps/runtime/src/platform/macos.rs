@@ -33,6 +33,13 @@ pub fn default_path() -> Option<std::ffi::OsString> {
     Some(super::launchd::path_for_home(&home).into())
 }
 
+/// `~/Library/Application Support/Storm`.
+pub fn user_state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| std::path::Path::new(&h).join("Library/Application Support/Storm"))
+}
+
 /// `select(2)`, not `poll(2)`: macOS's `poll` "does not support devices"
 /// (its man page, BUGS), and answers a PTY master with `POLLNVAL` at once. A
 /// wait built on it never waits, and the write after it blocks for as long as

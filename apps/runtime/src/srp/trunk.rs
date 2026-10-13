@@ -566,11 +566,27 @@ impl Core {
                         self.end_stream(stream_id, Some(error));
                         Ok(())
                     }
-                    // The relay refuses an over-cap OPEN_STREAM with a
-                    // trunk-scoped ERROR and keeps the trunk (connect.rs). It
-                    // answers opens in order, so it is the oldest pending one.
+                    // The relay refuses an over-cap OPEN_STREAM and keeps the
+                    // trunk. Since decision 106 it names the attempt; an older
+                    // relay does not, but answers opens in order, so then it
+                    // is the oldest pending one.
                     None if error == SrpError::RateLimited => {
-                        let refused = self.lock().pending.pop_front();
+                        let refused =
+                            {
+                                let mut state = self.lock();
+                                match &e.attempt_id {
+                                    Some(id) => {
+                                        match state.pending.iter().position(|p| {
+                                            id.as_str() == Some(p.attempt_id.as_str())
+                                        }) {
+                                            Some(i) => state.pending.remove(i),
+                                            // Already answered or abandoned.
+                                            None => return Ok(()),
+                                        }
+                                    }
+                                    None => state.pending.pop_front(),
+                                }
+                            };
                         match refused {
                             Some(p) => {
                                 let _ = p.ready.send(Err(SrpError::RateLimited));
@@ -811,6 +827,7 @@ mod tests {
             ("trunk_lost", "trunk_lost"),
             ("trunk_superseded", "trunk_superseded"),
             ("stream_aborted", "stream_aborted"),
+            ("client_backlogged", "client_backlogged"),
             ("rate_limited", "rate_limited"),
             ("stream_closed", "stream_closed"),
             ("protocol_error", "protocol_error"),

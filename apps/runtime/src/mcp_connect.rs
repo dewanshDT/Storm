@@ -26,8 +26,9 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::race::{RaceConnector, RaceOptions};
 use crate::transport::{
-    Connector, DirectConnector, HttpRequest, HttpResponse, ServerPin, Transport, TransportError,
+    Connector, HttpRequest, HttpResponse, ServerPin, Transport, TransportError,
 };
 
 /// Where the `stk_` key comes from when `--key-file` is not given.
@@ -151,7 +152,7 @@ impl<C: Connector> Adapter<C> {
     /// Held across the connect so concurrent requests share one.
     async fn transport(&self) -> Result<Arc<C::Transport>, TransportError> {
         let mut current = self.current.lock().await;
-        if let Some(t) = current.as_ref() {
+        if let Some(t) = current.as_ref().filter(|t| !t.is_closed()) {
             return Ok(t.clone());
         }
         let t = Arc::new(self.connector.connect().await?);
@@ -411,16 +412,10 @@ pub fn read_key(key_file: Option<&Path>, env: Option<String>) -> anyhow::Result<
 pub async fn run(options: Options) -> anyhow::Result<()> {
     let key = read_key(options.key_file.as_deref(), std::env::var(KEY_ENV).ok())?;
     let pin = ServerPin::new(&options.server, &options.pk)?;
-    if !options.relays.is_empty() {
-        tracing::warn!(
-            "--relay is not used yet: this build reaches the server only at --addr \
-             (relays arrive with mcp-connect S2)"
-        );
+    if options.addr.is_none() && options.relays.is_empty() {
+        bail!("give the server's --addr, a --relay, or both");
     }
-    let addr = options
-        .addr
-        .ok_or_else(|| anyhow!("--addr is required: this build cannot reach a server by relay"))?;
-    let connector = DirectConnector::new(&addr, pin)?;
+    let connector = RaceConnector::new(pin, RaceOptions::new(options.addr, options.relays))?;
     serve(
         Arc::new(Adapter::new(connector, &key)),
         tokio::io::stdin(),

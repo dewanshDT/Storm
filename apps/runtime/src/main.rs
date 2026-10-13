@@ -69,9 +69,12 @@ enum Command {
         #[arg(long)]
         pk: String,
         /// The server's own address, e.g. `http://192.168.1.10:8484`.
+        /// Optional when a --relay is given.
         #[arg(long)]
         addr: Option<String>,
-        /// A relay that reaches the server (`wss://…`). Repeatable.
+        /// A relay that reaches the server (`wss://…`). Repeatable. Only a
+        /// seed: the server's current relays are learned on each connect
+        /// and cached.
         #[arg(long = "relay")]
         relays: Vec<String>,
         /// A file holding the `stk_` key, instead of STORM_MCP_KEY.

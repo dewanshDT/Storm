@@ -121,6 +121,10 @@ pub struct RelayError {
     pub message: Option<String>,
     #[serde(default)]
     pub stream_id: Option<u32>,
+    /// The refused `OPEN_STREAM`'s `attempt_id`, echoed as sent (decision
+    /// 106). Absent from a relay older than that.
+    #[serde(default)]
+    pub attempt_id: Option<serde_json::Value>,
 }
 
 /// A frame this client refuses to interpret. No detail, like the relay's.

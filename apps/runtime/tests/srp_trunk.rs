@@ -84,6 +84,9 @@ type Handler = Arc<dyn Fn(&Req) -> Reply + Send + Sync>;
 struct Script {
     hello: Hello,
     refuse_opens: usize,
+    /// Holds the first open until a second arrives, then refuses the
+    /// second by its `attempt_id` (decision 106) before readying the first.
+    refuse_second_by_id: bool,
     /// Requests are held until this many are complete, then answered with
     /// their frames interleaved — so cross-talk would show.
     batch: usize,
@@ -95,6 +98,7 @@ impl Script {
         Self {
             hello: Hello::Ready,
             refuse_opens: 0,
+            refuse_second_by_id: false,
             batch: 1,
             handler: Arc::new(handler),
         }
@@ -189,6 +193,7 @@ async fn serve(
     let (mut tx, mut rx) = ws.split();
     let mut silent = false;
     let mut refused = 0;
+    let mut held: Option<Value> = None;
     let mut next_stream = 100u32;
     let mut heads: HashMap<u32, Value> = HashMap::new();
     let mut bodies: HashMap<u32, Vec<u8>> = HashMap::new();
@@ -219,6 +224,25 @@ async fn serve(
                         }
                         Hello::Ignore => silent = true,
                     },
+                    "OPEN_STREAM" if script.refuse_second_by_id && held.is_none() => {
+                        held = Some(v["attempt_id"].clone());
+                    }
+                    "OPEN_STREAM" if script.refuse_second_by_id => {
+                        let _ = tx
+                            .send(control(
+                                "ERROR",
+                                json!({"code": "rate_limited", "message": "rate limited",
+                                       "attempt_id": v["attempt_id"]}),
+                            ))
+                            .await;
+                        next_stream += 1;
+                        let _ = tx
+                            .send(control(
+                                "STREAM_READY",
+                                json!({"attempt_id": held.take(), "stream_id": next_stream}),
+                            ))
+                            .await;
+                    }
                     "OPEN_STREAM" => {
                         if refused < script.refuse_opens {
                             refused += 1;
@@ -551,7 +575,7 @@ async fn concurrent_streams_do_not_cross_talk() {
     }
 }
 
-async fn an_aborted_response_fails_only_its_own_body(end: End) {
+async fn an_aborted_response_fails_only_its_own_body(end: End, expected: SrpError) {
     let mut script = Script::new(move |req: &Req| match req.path.as_str() {
         "/abort" => Reply {
             status: 200,
@@ -583,7 +607,7 @@ async fn an_aborted_response_fails_only_its_own_body(end: End) {
     );
     assert_eq!(
         within(aborted.body.chunk()).await.unwrap().unwrap_err(),
-        SrpError::StreamAborted,
+        expected,
         "bytes already received are not a usable response"
     );
     assert!(within(aborted.body.chunk()).await.is_none());
@@ -604,12 +628,16 @@ async fn an_aborted_response_fails_only_its_own_body(end: End) {
 
 #[tokio::test]
 async fn a_stream_aborted_error_fails_only_its_own_body() {
-    an_aborted_response_fails_only_its_own_body(End::Error("stream_aborted")).await;
+    an_aborted_response_fails_only_its_own_body(
+        End::Error("stream_aborted"),
+        SrpError::StreamAborted,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn an_aborted_flag_on_close_is_a_body_error_too() {
-    an_aborted_response_fails_only_its_own_body(End::CloseAborted).await;
+    an_aborted_response_fails_only_its_own_body(End::CloseAborted, SrpError::StreamAborted).await;
 }
 
 #[tokio::test]
@@ -749,6 +777,37 @@ async fn a_refused_open_is_rate_limited_and_the_trunk_survives() {
         .await
         .unwrap();
     assert_eq!(within(resp.body.collect()).await.unwrap(), b"GET /two 0");
+}
+
+/// Decision 106: the refusal names its attempt, so it fails that open and
+/// not the oldest one, which the FIFO inference would have.
+#[tokio::test]
+async fn a_refusal_naming_its_attempt_fails_that_open_only() {
+    let mut script = Script::new(echo);
+    script.refuse_second_by_id = true;
+    let fake = FakeRelay::start(script).await;
+    let trunk = connect(&fake).await;
+
+    let (first, second) = within(async {
+        tokio::join!(
+            trunk.request("GET", "/first", &[], Bytes::new()),
+            trunk.request("GET", "/second", &[], Bytes::new()),
+        )
+    })
+    .await;
+    assert_eq!(second.unwrap_err(), SrpError::RateLimited);
+    let first = first.expect("the first open was failed for the second's refusal");
+    assert_eq!(within(first.body.collect()).await.unwrap(), b"GET /first 0");
+    assert!(!trunk.is_closed());
+}
+
+#[tokio::test]
+async fn a_backlogged_client_gets_a_body_error_not_a_short_body() {
+    an_aborted_response_fails_only_its_own_body(
+        End::Error("client_backlogged"),
+        SrpError::ClientBacklogged,
+    )
+    .await;
 }
 
 #[tokio::test]

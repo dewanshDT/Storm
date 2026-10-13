@@ -26,6 +26,9 @@ pub enum SrpError {
     /// The origin abandoned the response after its head: the body is
     /// incomplete.
     StreamAborted,
+    /// The relay dropped this stream because this client fell behind reading
+    /// it (decision 106). Like an abort: the body is incomplete.
+    ClientBacklogged,
     /// The server did not acknowledge the stream within the relay's 5 s.
     ServerTimeout,
     /// The relay refused an open or a `HELLO` under its abuse limits.
@@ -51,6 +54,7 @@ impl SrpError {
             Self::TrunkLost => "trunk_lost",
             Self::TrunkSuperseded => "trunk_superseded",
             Self::StreamAborted => "stream_aborted",
+            Self::ClientBacklogged => "client_backlogged",
             Self::ServerTimeout => "server_timeout",
             Self::RateLimited => "rate_limited",
             Self::StreamClosed => "stream_closed",
@@ -68,6 +72,7 @@ impl SrpError {
             "trunk_lost" => Self::TrunkLost,
             "trunk_superseded" => Self::TrunkSuperseded,
             "stream_aborted" => Self::StreamAborted,
+            "client_backlogged" => Self::ClientBacklogged,
             "rate_limited" => Self::RateLimited,
             "stream_closed" => Self::StreamClosed,
             "protocol_error" => Self::ProtocolError,
@@ -89,6 +94,9 @@ impl fmt::Display for SrpError {
             Self::TrunkLost => f.write_str("the relay connection was lost mid-request"),
             Self::TrunkSuperseded => f.write_str("the server reconnected to the relay; retry"),
             Self::StreamAborted => f.write_str("the server abandoned the response partway"),
+            Self::ClientBacklogged => {
+                f.write_str("the relay dropped the response: this client fell behind reading it")
+            }
             Self::ServerTimeout => f.write_str("the server did not accept the request in time"),
             Self::RateLimited => f.write_str("the relay is rate-limiting this connection"),
             Self::StreamClosed => f.write_str("the request was closed before a response"),

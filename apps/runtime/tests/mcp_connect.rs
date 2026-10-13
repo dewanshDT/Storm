@@ -129,10 +129,15 @@ async fn run(
     env_key: Option<&str>,
     lines: &[Value],
 ) -> (std::process::ExitStatus, Vec<Value>, String) {
+    // The relay cache goes here, never into the person's own state.
+    let state = tempfile::tempdir().unwrap();
     let mut cmd = std::process::Command::new(BIN);
     cmd.arg("mcp-connect")
         .args(args)
         .env_remove("STORM_MCP_KEY")
+        .env("XDG_STATE_HOME", state.path())
+        .env("HOME", state.path())
+        .env("LOCALAPPDATA", state.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -282,6 +287,20 @@ async fn a_server_that_is_down_is_server_offline() {
     .await;
     assert_eq!(out.len(), 1);
     assert_eq!(out[0]["error"]["data"]["storm_error"], "server_offline");
+}
+
+#[tokio::test]
+async fn with_neither_an_address_nor_a_relay_it_refuses_to_start() {
+    let pk = pk();
+    let (status, out, stderr) = run(
+        &["--server", SERVER, "--pk", &pk],
+        Some("stk_secret"),
+        &conversation(),
+    )
+    .await;
+    assert!(!status.success());
+    assert!(out.is_empty());
+    assert!(stderr.contains("--relay"), "{stderr}");
 }
 
 #[tokio::test]

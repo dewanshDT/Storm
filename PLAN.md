@@ -6297,6 +6297,96 @@ SRP now exists in Rust: `apps/runtime/src/srp/` (`codec.rs`, `trunk.rs`,
 per-stream body buffer by window; or the relay starts naming the refused
 attempt in its `rate_limited` reply, which would replace the FIFO inference.
 
+**105b. mcp-connect races the address and the relays, and proves the winner
+(mcp-connect S2).** *(2026-10-13, decision 105's second slice; vault *MCP over
+the Relay — mcp-connect*.)* S3's `Connector` now has a real implementation
+behind it: `src/race.rs` (`RaceConnector`, returning a `RaceTransport` enum of
+`Direct | Srp`) and `transport::SrpTransport` over S1's `SrpTrunk`.
+`--relay` is used, and `--addr` is optional once a relay is given (neither is
+refused at startup).
+- **The race copies `storm_connection.dart`** (SRP §2):
+  1. The address and every self-hosted relay race together. A public relay
+     is tried only once **all** of those have failed, so a fast public relay
+     never beats a slow self-hosted one. The app also starts the public round
+     after a 2 s timer; this does not, because the adapter has no UI to keep
+     responsive and the timer is exactly how a public relay would beat a
+     slow self-hosted one. Each candidate gets 20 s to connect and prove
+     itself (`server_silent` after), which bounds the wait.
+  2. A candidate wins only once `verify_identity` passes **over its own
+     path**: the challenge is the first thing on a new trunk, so the trunk
+     that proved the key is the one that carries it (this closes 105c's open
+     item for relayed paths). An impostor on one path is one failed
+     candidate; another path can still win.
+  3. The losers are dropped as soon as one wins, which closes their trunks.
+  4. When nothing wins, the code is the most telling failure:
+     `identity_failed` (something answered and could not prove the key) >
+     `server_offline` (a relay is up without the server, or the address
+     refused) > the rest (`relay_down`, `unreachable`, `rate_limited`, …),
+     the earliest candidate breaking a tie. The detail lists every
+     candidate's failure.
+- **Public or self-hosted.** There is no marker on the wire: `/v1/server`'s
+  relay entries are `{url, public_address}` only. The app decides by host —
+  `publicRelayHosts`, the hosts of relays Storm runs, which is empty in
+  production because no Storm relay exists yet — and treats everything else
+  as the operator's, which is the safe direction to err. The adapter does
+  the same with `race::PUBLIC_RELAY_HOSTS`, also empty. When a Storm relay
+  ships, its host goes in both lists.
+- **The relay set refreshes (Q11).** After a win, `GET /v1/server` over the
+  winner (no key; it is the `none` tier) gives the **registered** relays,
+  which replace that `server_id`'s entry in a small JSON file, a mirror and
+  not a merge, since the server is its only writer. The next connect races
+  the flags ∪ the cache, flags first; the flags are only the seed. The file
+  is `mcp-connect-relays.json` in `platform::user_state_dir()`
+  (`$XDG_STATE_HOME/storm`, `~/Library/Application Support/Storm`,
+  `%LOCALAPPDATA%\Storm`), private, written beside and renamed. A failed
+  refresh changes nothing.
+- **`SrpTransport`** collects the body, maps `SrpError::code()` straight onto
+  `TransportError.code`, and sends `Host: localhost`. storm-server's dispatch
+  replaces a relayed `Host` with its bind address anyway (`relay/dispatch.rs`),
+  so what the client sends is never what rmcp checks. `localhost` is chosen
+  because it is on every `mcp::allowed_hosts` list, so a server that did not
+  rewrite would still accept it. Verified against a real server bound to
+  `127.0.0.1`, where `allowed_hosts` is enforced (105d).
+- **An idle limit on relayed requests.** No bytes for 120 s, the direct
+  path's `read_timeout`, is `server_silent`, never resent. A relay before
+  decision 106 drops a backlogged client's stream (`drop_backlogged_client`,
+  105a's finding) and tells the client nothing, so without this a call could
+  hang for ever; against a 106 relay it is a backstop.
+- **Decision 106's two client signals, in the Rust client.**
+  `ERROR{rate_limited, attempt_id}` with no `stream_id` fails the pending
+  open whose `attempt_id` matches (an id no longer pending is ignored) and
+  keeps the trunk; without `attempt_id` (an older relay) the oldest pending
+  open is failed, as 105a did. `ERROR{client_backlogged, stream_id}` is
+  `SrpError::ClientBacklogged`, code `client_backlogged`: a body error like
+  `stream_aborted`, never a clean end, and it reaches `storm_error` as
+  itself. Tests in `tests/srp_trunk.rs`: a relay that holds the first open,
+  refuses the second by id and then readies the first (the FIFO rule would
+  fail the wrong one), and a `client_backlogged` after a partial body that
+  fails only its own stream.
+- **A dead trunk is replaced before the next request.** `Transport` gained
+  `is_closed()` (default `false`; a trunk's `is_closed` for SRP). The adapter
+  reconnects on a closed transport, so a trunk that died while idle costs no
+  request. A trunk that dies mid-call is still that call's one error
+  (`trunk_lost`), never resent, and the next request re-races.
+- Tests: `src/race.rs` (11): the public round under a paused clock (a timer
+  would fire during the test's virtual 30 s), public only after every other
+  candidate failed, an impostor not stopping another path, the error ranking,
+  losers dropped, the candidate deadline, the tier rule, and the cache.
+  `tests/mcp_race.rs` (10, the adapter over real trunks to fake relays and
+  real HTTP to fake servers, all answering on events): an impostor at the
+  address and one behind a relay, each never seeing the key while the other
+  path wins; an impostor everywhere is `identity_failed`; a fast public relay
+  losing to a slow self-hosted one; the public relay used only after the
+  address and the self-hosted relay fail; `server_offline` vs `relay_down`
+  and the two together; a trunk lost mid-call; an idle relayed call; the
+  cache written and then used with no flags; one `Host`, `localhost`, on
+  every relayed head. `tests/mcp_connect.rs` gained the no-path refusal and
+  points the binary's state at a temporary directory.
+*Revisit if:* a Storm-run public relay ships (fill both host lists, or add a
+marker to `/v1/server`'s relay entries); every relay in use has decision 106
+(the FIFO fallback for an unnamed `rate_limited` can go); or SRP gains E2E,
+which would change what "public" costs.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

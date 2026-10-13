@@ -2,9 +2,10 @@
 //! (mcp-connect, decision 105c).
 //!
 //! A [`Transport`] carries a request to the server and its answer back: the
-//! LAN directly ([`DirectTransport`]), or a relay's trunk. A [`Connector`]
-//! finds a path and **proves the server's identity on it before returning
-//! it**, so a caller never holds a transport to a server it has not verified.
+//! LAN directly ([`DirectTransport`]), or a relay's trunk ([`SrpTransport`]).
+//! A [`Connector`] finds a path and **proves the server's identity on it
+//! before returning it**, so a caller never holds a transport to a server it
+//! has not verified.
 
 use std::future::Future;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
 
 use crate::identity::{challenge_message, decode_public_key, validate_server_id, verify};
+use crate::srp::{SrpError, SrpTrunk};
 
 pub struct HttpRequest {
     pub method: String,
@@ -69,6 +71,12 @@ pub trait Transport: Send + Sync {
         &self,
         req: HttpRequest,
     ) -> impl Future<Output = Result<HttpResponse, TransportError>> + Send;
+
+    /// Whether this path is known dead, so a caller reconnects before its
+    /// next request instead of spending that request to find out.
+    fn is_closed(&self) -> bool {
+        false
+    }
 }
 
 pub trait Connector: Send + Sync {
@@ -159,6 +167,9 @@ impl DirectTransport {
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             anyhow::bail!("--addr must be an http:// or https:// URL");
         }
+        // reqwest panics building a client with no process provider; `ring`
+        // as everywhere else. Idempotent.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // No whole-request timeout, which would cut a slow tool off; a
@@ -226,6 +237,89 @@ impl Transport for DirectTransport {
             headers,
             body,
         })
+    }
+}
+
+/// The `Host` a relayed request carries. storm-server rewrites it to its
+/// bind address (`relay/dispatch.rs`); `localhost` is also on every
+/// `mcp::allowed_hosts` list, so a server that did not rewrite it still
+/// accepts it.
+pub const RELAYED_HOST: &str = "localhost";
+
+/// How long a relayed request may go without a byte before it is given up,
+/// the direct path's `read_timeout`. A relay that drops a stream without
+/// telling the client (`drop_backlogged_client`) would otherwise hang it.
+pub const IDLE_LIMIT: Duration = Duration::from_secs(120);
+
+/// One request per stream on an SRP trunk (decision 105a).
+#[derive(Clone)]
+pub struct SrpTransport {
+    trunk: SrpTrunk,
+    idle: Duration,
+}
+
+impl SrpTransport {
+    pub fn new(trunk: SrpTrunk, idle: Duration) -> Self {
+        Self { trunk, idle }
+    }
+
+    pub fn trunk(&self) -> &SrpTrunk {
+        &self.trunk
+    }
+}
+
+fn srp_error(e: SrpError) -> TransportError {
+    TransportError::new(e.code(), e.to_string())
+}
+
+impl Transport for SrpTransport {
+    async fn send(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let silent = || {
+            TransportError::new(
+                "server_silent",
+                format!(
+                    "nothing from the server through the relay for {}s",
+                    self.idle.as_secs()
+                ),
+            )
+        };
+        let mut headers: Vec<(String, String)> = req
+            .headers
+            .into_iter()
+            .filter(|(n, _)| !n.eq_ignore_ascii_case("host"))
+            .collect();
+        headers.push(("host".into(), RELAYED_HOST.into()));
+        let response = tokio::time::timeout(
+            self.idle,
+            self.trunk.request(
+                &req.method,
+                &req.path_and_query,
+                &headers,
+                bytes::Bytes::from(req.body),
+            ),
+        )
+        .await
+        .map_err(|_| silent())?
+        .map_err(srp_error)?;
+        let mut body = Vec::new();
+        let mut stream = response.body;
+        loop {
+            match tokio::time::timeout(self.idle, stream.chunk()).await {
+                Err(_) => return Err(silent()),
+                Ok(None) => break,
+                Ok(Some(Err(e))) => return Err(srp_error(e)),
+                Ok(Some(Ok(chunk))) => body.extend_from_slice(&chunk),
+            }
+        }
+        Ok(HttpResponse {
+            status: response.status,
+            headers: response.headers,
+            body,
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.trunk.is_closed()
     }
 }
 
@@ -348,6 +442,22 @@ mod tests {
         let key = SigningKey::from_bytes(&[7; 32]);
         let e = verify_identity(&Down, &pin(&key)).await.unwrap_err();
         assert_eq!(e.code, "relay_down");
+    }
+
+    #[test]
+    fn a_relay_failure_keeps_its_own_code() {
+        for e in [
+            SrpError::ClientBacklogged,
+            SrpError::StreamAborted,
+            SrpError::ServerOffline,
+            SrpError::TrunkLost,
+        ] {
+            assert_eq!(srp_error(e.clone()).code, e.code());
+        }
+        assert_eq!(
+            srp_error(SrpError::ClientBacklogged).code,
+            "client_backlogged"
+        );
     }
 
     #[tokio::test]

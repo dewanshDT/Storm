@@ -49,6 +49,7 @@
 //! ## mcp-connect (decision 105)
 //!
 //! - [`transport`]: one HTTP exchange with the server over a verified path.
+//! - [`race`]: which path (the address or a relay) reaches the server.
 //! - [`mcp_connect`]: `storm-runtime mcp-connect`, an external MCP client's
 //!   stdio server for the server's own `/mcp`.
 //!
@@ -71,6 +72,7 @@ pub mod mcp_connect;
 pub mod platform;
 pub mod provider;
 mod pty;
+pub mod race;
 pub mod scrollback;
 pub mod serve;
 pub mod srp;
