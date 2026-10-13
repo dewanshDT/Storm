@@ -58,7 +58,13 @@ class SyncEngine extends ChangeNotifier {
     required this.connection,
     required this.cache,
     required this.vaultId,
-  });
+  }) {
+    // A relay's verdict on the server can land after `connect` returned, so
+    // the status is followed rather than read once.
+    _statusSub = connection.statusChanges.listen((_) => notifyListeners());
+  }
+
+  StreamSubscription<ConnectionStatus>? _statusSub;
 
   /// How the server is reached, and the only object that knows.
   ///
@@ -141,7 +147,8 @@ class SyncEngine extends ChangeNotifier {
   /// Whether the active connection is relayed (vs direct LAN).
   bool get isRelayed => connection.isRelayed;
 
-  /// The connection status from the seam (idle, connecting, connected, unproven, offline).
+  /// The connection status from the seam (idle, connecting, connected,
+  /// unproven, offline, serverOffline).
   ConnectionStatus get connectionStatus => connection.status;
 
   // ---- lifecycle -----------------------------------------------------
@@ -198,6 +205,7 @@ class SyncEngine extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _statusSub?.cancel();
     _pullDebounce?.cancel();
     _reconnect?.cancel();
     _wsSub?.cancel();

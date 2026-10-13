@@ -71,8 +71,17 @@ String syncLine(DotStatus status, int pending, DateTime? lastSynced) =>
         pending > 0
             ? 'Offline · $pending edit${pending == 1 ? '' : 's'} queued'
             : 'Offline · showing your cached copy',
+      DotStatus.serverOffline => _serverOfflineLine(pending),
       DotStatus.untrusted => 'Server identity failed · not syncing',
     };
+
+/// A relay answered for the server and said it is not there, so the user's
+/// own network is not what to check.
+String _serverOfflineLine(int pending) {
+  const lead = 'Server offline, relay reachable';
+  if (pending == 0) return '$lead · showing your cached copy';
+  return '$lead · $pending edit${pending == 1 ? '' : 's'} queued';
+}
 
 /// `0.4.0+12` → `(0, 4)`; null when it does not start with two numbers.
 (int, int)? _majorMinor(String version) {
@@ -112,6 +121,7 @@ final healthRowsProvider = Provider.autoDispose<List<HealthRow>>((ref) {
     syncing: engine.isSyncing,
     pending: engine.pendingCount,
     tier: engine.connectionTier,
+    connection: engine.connectionStatus,
   );
   final rows = <HealthRow>[
     HealthRow(switch (status) {
