@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -192,6 +193,11 @@ class FakeServer {
   /// For the tests that assert a request was *not* sent — "the engine stayed
   /// silent" cannot be shown by inspecting a response that never came.
   int requests = 0;
+
+  /// Holds `/v1/sync` and note fetches until completed, so a test can act
+  /// while a pull is in flight.
+  Completer<void>? syncGate;
+  Completer<void>? noteGate;
 
   http.Client get client => MockClient((request) async {
     requests++;
@@ -462,6 +468,7 @@ class FakeServer {
     }
 
     if (path == '/v1/sync') {
+      await syncGate?.future;
       final since = int.parse(request.url.queryParameters['since'] ?? '0');
       return http.Response(
         jsonEncode({
@@ -570,6 +577,7 @@ class FakeServer {
     }
 
     if (request.method == 'GET' && path.startsWith('/v1/notes/')) {
+      await noteGate?.future;
       final note = vaultNotes[id];
       if (note == null) {
         return http.Response('{"error":"no such note"}', 404, headers: j(''));
