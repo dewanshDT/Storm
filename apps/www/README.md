@@ -58,7 +58,7 @@ will:
 - **The MCP tools on `/` are the server's.** Every `#[tool]` in
   `apps/server/src/mcp.rs` must be in `index.astro`'s `mcpReadTools`,
   `mcpWriteTools` or `mcpAgentTools`, and nothing else. A new tool fails CI
-  until the page names it (decision 105).
+  until the page names it (decision 107).
 
 It runs in the `www` CI job, which is why that job checks out with
 `fetch-depth: 0`.
@@ -103,7 +103,7 @@ build (`www` job in `ci.yml`); there is no deploy workflow.
 
 - Deploy into the apt Pages site root
 - Duplicate operator runbooks — link or quote `deploy/`
-- Add a documentation corpus outside the M27 plan (decision 105): docs go
+- Add a documentation corpus outside the M27 plan (decision 107): docs go
   to `/docs` from `docs/site/`, moved out of `deploy/README.md` rather than
   copied
 - Invent install commands, platforms, or MCP tools
