@@ -5846,6 +5846,51 @@ P2 from the relay TODO, measured 2026-10-03)*
 - **Unblocks** relay TODO §5 (MCP over the tunnel: tool calls are bodied
   POSTs). P1 (`TCP_NODELAY`) is separate.
 
+**95. MCP crosses the relay unchanged; a body that outruns its handler
+closes the stream.** *(2026-10-12, relay TODO §5, stacked on 92)*
+- **Verified, not assumed (R10, R13).** A tunnelled `/mcp` call is the same
+  request on the same `Router`: `initialize`, `tools/list`, `get_vault` and
+  `get_note` answer byte-for-byte as on the LAN; an `update_note` written
+  against a stale `base_version` over the relay diff3-merges with a LAN edit;
+  a 4xx inside a tool stays HTTP 200 with `isError: true`; `mcp_enabled` off
+  is the same 404 and `mcp_writable` off lists no write tool and refuses one,
+  identically on both paths; an `stk_` key reaches `/mcp` over the relay and
+  is still 401 on REST; the `Host` rewrite keeps rmcp's rebinding check
+  passing on a concrete bind, where the relay's hostname is refused directly.
+  MCP answers plain JSON (`with_json_response`), so "streaming"
+  is the dispatch's: a response body leaves chunk by chunk, before the
+  handler has produced the next one; the relay never times out an acked
+  stream (`an_acked_stream_that_stays_silent_is_never_timed_out`).
+- **The defect.** When a stream's request-body queue (32 chunks) filled
+  because its handler had not started reading, the tunnel dropped the sender
+  — which the handler reads as **end of body**, so it served the prefix as
+  the whole request. A large note or attachment uploaded over a relay could
+  be saved truncated with a 200. Now a full queue **aborts the dispatch and
+  sends `CLOSE{stream_id}`**: the caller sees a transport failure, never a
+  shortened request and never a tool error. A *closed* queue (the handler
+  answered without reading the rest, e.g. a 401) still lets that response
+  stand.
+- **A request cut off mid-body does not run**: `CLOSE` before the empty
+  `0x01` frame aborts the dispatch, and nothing is written.
+- **Open — how an external MCP client reaches a relayed server.** Claude
+  Code and friends speak HTTP, not SRP, so they cannot dial a relay. Not
+  built here; the vault's *MCP Integration* says only "MCP Client → Storm MCP
+  → Storm Relay". Recommended: a Rust SRP client in `storm-runtime` (which
+  relay TODO §11 already needs for Runtime Hosts behind a relay) exposing a
+  loopback `/mcp` that forwards over a trunk, verifying the server's identity
+  as the app does. Rejected: an HTTP ingress on the relay itself — it would
+  terminate the client's request in plaintext with no challenge-on-connect.
+- Tests (`apps/server/src/relay/tests.rs`):
+  `mcp_over_the_tunnel_answers_exactly_as_on_the_lan`,
+  `a_relayed_mcp_write_merges_against_a_concurrent_lan_edit`,
+  `a_tool_error_over_the_tunnel_is_still_a_tool_error`,
+  `the_mcp_switches_gate_a_relayed_call_as_they_gate_a_lan_one`,
+  `an_mcp_key_works_over_the_tunnel_on_mcp_and_nowhere_else`,
+  `a_relayed_mcp_call_passes_rebinding_protection_on_a_concrete_bind`,
+  `a_relayed_write_whose_stream_closes_before_its_body_ends_writes_nothing`,
+  `a_body_that_outruns_its_handler_is_closed_not_truncated` (fails on the
+  old code), `a_response_leaves_the_server_chunk_by_chunk`.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

@@ -3363,7 +3363,12 @@ pub(crate) mod tests {
         dir: &FsPath,
         policy: Arc<dyn crate::auth::authz::VaultPolicy>,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_full(dir, policy, crate::auth::ratelimit::LoginLimiter::new())
+        test_router_full(
+            dir,
+            policy,
+            crate::auth::ratelimit::LoginLimiter::new(),
+            vec![],
+        )
     }
 
     /// As [`test_router_with_state`], but with the login limiter's numbers
@@ -3374,13 +3379,33 @@ pub(crate) mod tests {
         dir: &FsPath,
         limiter: crate::auth::ratelimit::LoginLimiter,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_full(dir, Arc::new(crate::auth::authz::StormPolicy), limiter)
+        test_router_full(
+            dir,
+            Arc::new(crate::auth::authz::StormPolicy),
+            limiter,
+            vec![],
+        )
+    }
+
+    /// As [`test_router_with_state`], but with rmcp's DNS-rebinding list set,
+    /// the way a server bound to a concrete address has it.
+    pub(crate) fn test_router_with_mcp_hosts(
+        dir: &FsPath,
+        allowed_hosts: Vec<String>,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_full(
+            dir,
+            Arc::new(crate::auth::authz::StormPolicy),
+            crate::auth::ratelimit::LoginLimiter::new(),
+            allowed_hosts,
+        )
     }
 
     fn test_router_full(
         dir: &FsPath,
         policy: Arc<dyn crate::auth::authz::VaultPolicy>,
         login_limiter: crate::auth::ratelimit::LoginLimiter,
+        allowed_hosts: Vec<String>,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -3422,12 +3447,7 @@ pub(crate) mod tests {
             gateway,
         });
         (
-            router(
-                state.clone(),
-                crate::mcp::McpOptions {
-                    allowed_hosts: vec![],
-                },
-            ),
+            router(state.clone(), crate::mcp::McpOptions { allowed_hosts }),
             identity,
             state,
         )
