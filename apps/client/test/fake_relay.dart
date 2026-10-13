@@ -60,6 +60,14 @@ class FakeRelay {
 
   final _streams = <int, _RequestState>{};
 
+  /// How many of the next `OPEN_STREAM`s to refuse with `rate_limited`, as a
+  /// relay at its in-flight cap does (§5.1).
+  int refuseOpens = 0;
+
+  /// Whether a refusal names its `attempt_id` (decision 106). False is a
+  /// relay that predates it: a trunk-scoped `ERROR` naming nothing.
+  bool refusalNamesAttempt = true;
+
   /// Every `0x01` frame the client sent, as `(stream_id, payload length)`.
   final requestBodyFrames = <(int, int)>[];
   int _nextStream = 1;
@@ -125,6 +133,17 @@ class FakeRelay {
         _send('{"v":1,"type":"READY","client_trunk_id":"ctk_fake"}');
       case 'OPEN_STREAM':
         final attemptId = frame.body['attempt_id'];
+        if (refuseOpens > 0) {
+          refuseOpens--;
+          _send(
+            SrpControl.encode('ERROR', {
+              'code': 'rate_limited',
+              'message': 'rate limited',
+              if (refusalNamesAttempt) 'attempt_id': attemptId,
+            }),
+          );
+          return;
+        }
         final streamId = _nextStream++;
         _send(
           SrpControl.encode('STREAM_READY', {

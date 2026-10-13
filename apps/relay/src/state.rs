@@ -291,9 +291,9 @@ impl ServerTrunk {
 
         let mut told: HashMap<&str, ()> = HashMap::new();
         for (stream_id, stream) in &streams {
-            let _ = stream
+            stream
                 .client
-                .try_send_json(proto::error_on_stream(code, *stream_id));
+                .end_stream(*stream_id, proto::error_on_stream(code, *stream_id));
             told.insert(stream.client_trunk_id.as_str(), ());
         }
         for (client_trunk_id, tx) in &clients {

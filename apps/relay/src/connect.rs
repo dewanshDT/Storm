@@ -194,9 +194,13 @@ async fn trunk_loop(
     peer: SocketAddr,
 ) -> Fault {
     loop {
-        let incoming = match trunk::recv(rx).await {
-            Ok(incoming) => incoming,
-            Err(fault) => return fault,
+        let incoming = tokio::select! {
+            biased;
+            () = tx.killed() => return Fault::Disconnected,
+            incoming = trunk::recv(rx) => match incoming {
+                Ok(incoming) => incoming,
+                Err(fault) => return fault,
+            },
         };
 
         let outcome = match incoming {
@@ -254,7 +258,11 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
             );
             // One code for both bounds. Which limit a caller hit is the relay's
             // business, and §6 has exactly one code for "a limit was hit".
-            return tx.send_json(proto::error(ErrorCode::RateLimited)).await;
+            // The `attempt_id` names the open this refuses; without it a client
+            // can only guess, and the trunk carries on either way (§5.1).
+            return tx
+                .send_json(proto::error_on_attempt(ErrorCode::RateLimited, attempt_id))
+                .await;
         }
     };
 
@@ -289,7 +297,10 @@ fn arm_ack_timeout(trunk: Arc<ServerTrunk>, client: Tx, stream_id: u32, relay: &
         trunk.close_stream(stream_id);
         // No retry (§5.1). The client owns the decision to try again; a relay
         // retrying would duplicate a request whose side effects it cannot see.
-        let _ = client.try_send_json(proto::error_on_stream(ErrorCode::ServerTimeout, stream_id));
+        client.end_stream(
+            stream_id,
+            proto::error_on_stream(ErrorCode::ServerTimeout, stream_id),
+        );
         let _ = trunk.tx().try_send_json(proto::close_stream(stream_id));
     });
 }
