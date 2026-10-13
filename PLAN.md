@@ -6712,6 +6712,99 @@ a var for parity and the suite. Not deployed: no account id, no routes, out of
 (67), which replaces the watermark; or a runtime exposes a send-buffer size,
 which makes it unnecessary.
 
+**108c. Acceptance: both relays pass one suite and the whole live suite, and
+the spec says what they agree on.** *(2026-10-14, phase 5 step 1, slice C of
+decision 108; vault: *Hosted Relay — Cloudflare*.)*
+- **From make, both relays.** `make relay-conformance-cf` starts two
+  `wrangler dev` instances with the fixture contract
+  (`apps/relay-cf/scripts/dev-relay.sh`, allowlist on 18910, TOFU on 18911)
+  and runs the 108a suite with `RELAY_MULTI_IP=1` and without
+  `RELAY_LATENCY`; a `relay-conformance-cf` CI job runs it beside `relay-cf`.
+  `make test-live RELAY_IMPL=cf` (default `rust`) starts the Worker in
+  allowlist mode with the dev server's own `GET /v1/server` key instead of
+  storm-relay and registers the server exactly as before; every relayed suite
+  then crosses the Worker. `mcp_connect_live.py` takes the same switch: its
+  two relays become two Workers allowlisting its server, started after the
+  server so its key is known. Two still, for the reason they were two: the
+  Worker's `HELLO` limit is storm-relay's 10 a minute per address, and the
+  live suites run at production limits.
+- **Results.** Conformance: storm-relay 55/55, the Worker 54/54 (+1 latency
+  skipped). `make test-live`, identical on both (`rust` / `cf`): server e2e
+  81, mcp e2e 86, agent 93, gateway 95, auth 72, mcp-connect direct 89 and
+  over the relay 89, `mcp_connect_live.py` 39, client integration 30 (+1
+  skip, the agent host test needing its own env) including the relay live
+  tests — 20 MiB upload, 17 MiB download, the change feed, MCP through the
+  relay. The first `cf` run was green before any fix: nothing in the live
+  suite fails only on the Worker.
+- **Spec amendments** (`docs/srp-v1.md`, each marked *(108c)*), so both
+  relays are held to text rather than to each other:
+  - The suite's readings (108a) become rules: a foreign, unissued or closed
+    `stream_id` from a client is `stream_closed`, never forwarded, trunk
+    kept (§3); a nonce is answerable for its TTL only, and a late response is
+    `auth_failed` or the socket closes without `REGISTERED` (§4); the drain
+    is the whole window (§4.2); the `HELLO` wait is the whole wait; a refused
+    `HELLO` is trunk-scoped `rate_limited`, before or after the `HELLO` is
+    read (§5); the in-flight cap is per client trunk (§5.1); a stream-ending
+    `ERROR` may overtake its stream's queued frames, which may trail it, the
+    others keeping order (§5.4); the direction column is normative, a
+    message from the wrong party is `protocol_error` (§6); `protocol_error`
+    is trunk-scoped, closes the connection and has one fixed message (§6);
+    the concurrent-stream bound is per server trunk, refused by `attempt_id`
+    (§6).
+  - The Worker's (108b): `relay_peer_ip` comes from the TCP peer or an
+    address the provider edge attests and a client cannot set (§5.2); every
+    `PING` is answered with a `PONG` in order, never dropped on a full queue,
+    and a relay may `PING` any trunk to learn what its peer has read (§4.2);
+    a relay that cannot hold more for the origin may end a stream
+    `ERROR{rate_limited, stream_id}` + `CLOSE` to the origin (§5.4, §6); a
+    `PING` may arrive at any point on a trunk, handshake included (§4.2); a
+    client sends nothing but `PING`/`PONG` before `READY`, and a relay may
+    refuse it with `protocol_error` (§5).
+  - The Worker's (4) asked only that answering be allowed; with (2) a MUST,
+    refusing a handshake `PING` (storm-relay's behaviour) would break it, so
+    the text makes answering the rule and storm-relay changed.
+- **Implementations changed for them, each with a test:**
+  - **storm-server dropped `PONG`s** (a defect): it answered a relay's `PING`
+    with `try_send` onto the bounded outbound queue, so behind a full queue
+    the `PONG` was lost — exactly when the Worker's watermark needs it, and a
+    lost one reads as a server that stopped reading. `PONG`s are now owed
+    through a counter the writer drains ahead of the queue
+    (`a_relay_ping_is_answered_even_behind_a_full_outbound_queue`, red
+    before).
+  - **storm-relay** refused a `PING` before `REGISTER_SERVER`, mid-handshake
+    or before `HELLO` with `protocol_error`; it now answers it
+    (`recv_handshake_control`; two tests).
+  - **The Worker** refused the same three: the `/register` hop's first frame
+    had to be `REGISTER_SERVER`, and the room answered only the
+    auto-response's exact bytes before `READY`/`REGISTERED` (any other
+    spelling, or a client `PING` during the `HELLO` wait, was
+    `protocol_error`). Both answer now (two workerd tests; 87 in all).
+  - Both clients already answered a relay's `PING` before and after `READY`,
+    treated a stream-scoped `rate_limited` as that stream's failure, and wait
+    for `READY`; tests now pin each (Rust `srp_trunk`, Dart
+    `srp_tunnel_test`/`srp_failure_test`).
+  - The suite gains `a_ping_is_answered_at_any_point_on_a_trunk` (§4.2), red
+    on both relays before the fixes above.
+- **Deploy runbook**: `apps/relay-cf/DEPLOY.md` and a section in
+  `deploy/README.md` — the operator's own account on the Free plan (SQLite
+  Durable Objects), `wrangler login`/`deploy --env=""`, a custom domain, the
+  allowlist as a secret from `GET /v1/server` (`storm-server status` does not
+  print the identity), `STORM_RELAY_PUBLIC_BASE`, Settings › Connection ›
+  Relays, verifying with the suite against a separate `conformance` Worker
+  (and `conformance-tofu` for the TOFU checks, or skip them), the host into
+  `PUBLIC_RELAY_HOSTS` (the app now has one constant, `kPublicRelayHosts`,
+  for it), what is logged (Workers Logs off; Q15 open), and the Free plan's
+  limits (relay errors; local Storm unaffected). `wrangler.jsonc` gains the
+  two `conformance` environments. Not in `release.yml` or `apt-repo.yml`.
+- **Not verifiable here, only on a real deploy:** that the edge overwrites a
+  client-sent `CF-Connecting-IP` (under `wrangler dev` a client can set it),
+  that it carries a 16 MiB WebSocket message, and whether the `/register`
+  hop stays inside the Free plan's CPU limit for a busy trunk. The runbook
+  says how to check each.
+*Revisit if:* a deploy shows the `/register` hop's CPU (then an optional
+`server_id` on the upgrade); or step 2 (relay accounts, Q14, Q15) changes
+who may register.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

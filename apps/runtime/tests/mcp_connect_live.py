@@ -17,6 +17,10 @@ Usage:
     RUNTIME_BIN=apps/runtime/target/debug/storm-runtime \\
         python3 apps/runtime/tests/mcp_connect_live.py
 
+With `RELAY_IMPL=cf` and `RELAY_CF_DEV=apps/relay-cf/scripts/dev-relay.sh`,
+both relays are the Worker relay under `wrangler dev`, in allowlist mode with
+this server's key, at its default `HELLO` limit (decision 108c).
+
 Exits non-zero if any check fails.
 """
 import json
@@ -36,6 +40,7 @@ import storm_auth  # noqa: E402
 SERVER_BIN = os.environ["SERVER_BIN"]
 RELAY_BIN = os.environ["RELAY_BIN"]
 RUNTIME_BIN = os.environ["RUNTIME_BIN"]
+RELAY_IMPL = os.environ.get("RELAY_IMPL", "rust")
 
 ok = 0
 fail = 0
@@ -192,6 +197,18 @@ def the_suite(mode, path, sid, pk, key):
     return vault_id
 
 
+def start_relay(port, name, sid, pk, start, work):
+    """storm-relay, or with RELAY_IMPL=cf the Worker relay under wrangler dev
+    with this server allowlisted (decision 108c)."""
+    if RELAY_IMPL != "cf":
+        return start([RELAY_BIN, "--bind", f"127.0.0.1:{port}"], f"{name}.log")
+    allowlist = os.path.join(work, f"{name}.allowlist")
+    with open(allowlist, "w") as f:
+        f.write(f"{sid} {pk}\n")
+    return start([os.environ["RELAY_CF_DEV"], str(port), "allowlist", allowlist,
+                  os.path.join(work, f"{name}-cf")], f"{name}.log")
+
+
 def main():
     work = tempfile.mkdtemp(prefix="mcp-connect-live-")
     procs = []
@@ -218,8 +235,6 @@ def main():
         log_path = start([SERVER_BIN, "serve", "--host", "127.0.0.1", "--port", str(port),
                           "--vault-root", os.path.join(work, "vaults"),
                           "--state", os.path.join(work, "state"), "--mcp"], "server.log")
-        relay_log = start([RELAY_BIN, "--bind", f"127.0.0.1:{relay_port}"], "relay.log")
-        other_log = start([RELAY_BIN, "--bind", f"127.0.0.1:{other_port}"], "other-relay.log")
         os.makedirs(os.path.join(work, "impostor-vaults", "primary"))
         impostor_log = start([SERVER_BIN, "serve", "--host", "127.0.0.1",
                               "--port", str(impostor_port),
@@ -227,8 +242,6 @@ def main():
                               "--state", os.path.join(work, "impostor-state"), "--mcp"],
                              "impostor.log")
         wait_for(f"{base}/v1/health", "the server", log_path)
-        wait_for(f"http://127.0.0.1:{relay_port}/", "the relay", relay_log)
-        wait_for(f"http://127.0.0.1:{other_port}/", "the other relay", other_log)
         wait_for(f"{impostor}/v1/health", "the impostor", impostor_log)
 
         os.environ.pop("STORM_SESSION", None)
@@ -237,6 +250,11 @@ def main():
         with urllib.request.urlopen(f"{base}/v1/server") as r:
             info = json.loads(r.read())
         sid, pk = info["server_id"], info["public_key"]
+
+        relay_log = start_relay(relay_port, "relay", sid, pk, start, work)
+        other_log = start_relay(other_port, "other-relay", sid, pk, start, work)
+        wait_for(f"http://127.0.0.1:{relay_port}/", "the relay", relay_log)
+        wait_for(f"http://127.0.0.1:{other_port}/", "the other relay", other_log)
 
         status, _ = rest(base, "PUT", "/v1/config/relays", session, {"relays": [relay, other]})
         check("the relays are configured", status == 200, status)

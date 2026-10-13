@@ -387,6 +387,14 @@ lives in this repo**; the design rationale stays in the personal vault under
   `ReadWritePaths` entry is missing, so an NFS vault root that mounts late
   was a `226/NAMESPACE` loop, and with 0.2.9's live restart limit a dead
   server. `[Unit]` keys under `[Service]` are ignored with only a warning.
+- **Every `PING` is answered, at any point on a trunk, and a `PONG` is never
+  dropped** (SRP §4.2, decision 108c). The Worker relay `PING`s to measure
+  what a peer has read, so a `PONG` lost on a full queue reads as a stalled
+  reader. storm-server owes them through `Pongs`, outside the bounded queue.
+- **Two relays, one spec.** `apps/relay` and `apps/relay-cf` both pass
+  `tools/relay-conformance` (`make relay-conformance-local`,
+  `make relay-conformance-cf`). A behaviour the spec leaves open is amended
+  into `docs/srp-v1.md` in the same change, never settled in one relay's code.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.

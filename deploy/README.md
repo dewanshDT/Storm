@@ -436,13 +436,38 @@ and a `ws://` public base, and warns about a `wss://` base without
 `--tls-cert`. **storm-server trusts the public web PKI only**, so the relay
 needs a real certificate; a self-signed one will not register.
 
-**Pointing a server at it.** There is no app screen for this yet. As an
-owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`.
+**Pointing a server at it.** In the app, Settings › Connection › Relays ›
+Add relay. Or, as the owner, `PUT /v1/config/relays` with
+`{"relays": ["wss://relay.example.com"]}`.
 The server connects to an added relay and disconnects from a removed one (with
 a `DEREGISTER`) right away, without a restart; relays in both lists are left
 alone (decision 74). `GET /v1/server` lists the relays it has actually
 registered with, which is the check that it worked; the `PUT` itself returns
 before any connection is attempted. Clients learn the relay from the server when they pair.
+
+### On Cloudflare instead (optional)
+
+`apps/relay-cf` is the same relay as a Cloudflare Worker with Durable
+Objects, for an operator who would rather not run a public box (PLAN decision
+108). It deploys to **your own** Cloudflare account, on the Free plan, with
+`wrangler`; nothing in Storm's release or apt pipeline touches it. The runbook
+is `apps/relay-cf/DEPLOY.md`. In short:
+
+1. `cd apps/relay-cf && npm ci && npx wrangler login && npx wrangler deploy --env=""`.
+2. Add a custom domain to the Worker (`relay.example.com`).
+3. `npx wrangler secret put STORM_RELAY_ALLOWLIST --env=""` with one
+   `<server_id> <public_key>` line per server, both from `GET /v1/server`.
+   Allowlist only, never TOFU, on a public address.
+4. Set `STORM_RELAY_PUBLIC_BASE=wss://relay.example.com`.
+5. Settings › Connection › Relays › Add relay, then check `GET /v1/server`
+   lists it.
+6. Add the host to `PUBLIC_RELAY_HOSTS` in both the app and mcp-connect, so
+   clients race it after direct and self-hosted relays.
+
+Here Cloudflare's edge is the relay and attests each client's address
+(`CF-Connecting-IP`), so the "no proxy in front" rule above is met as long as
+you put nothing else in front of the Worker. Past the Free plan's daily limits
+the relay errors until the day resets; the server and the LAN are unaffected.
 
 ## MCP clients: `storm-runtime mcp-connect`
 

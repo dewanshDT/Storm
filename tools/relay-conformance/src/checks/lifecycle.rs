@@ -20,6 +20,7 @@ pub fn checks() -> Vec<Check> {
         check!("§5", hello_with_no_live_trunk_is_server_unreachable),
         check!("§5", hello_waits_for_a_server_mid_restart),
         check!("§4.2", a_server_ping_is_answered),
+        check!("§4.2", a_ping_is_answered_at_any_point_on_a_trunk),
         check!("§4.2", a_heartbeating_server_outlives_the_deadline),
         check!("§4.2", a_silent_server_is_dead_at_the_deadline),
         check!("§4.2", deregister_frees_the_server_id_at_once),
@@ -90,6 +91,38 @@ async fn a_server_ping_is_answered(ctx: &Ctx) -> Result<()> {
     for _ in 0..3 {
         server.send_json(json!({ "v": 1, "type": "PING" })).await?;
         server.wait_for("PONG", STEP, |f| f.is_type("PONG")).await?;
+    }
+    Ok(())
+}
+
+/// Every `PING` is answered in order, before `REGISTERED` or `READY` too
+/// (decision 108c).
+async fn a_ping_is_answered_at_any_point_on_a_trunk(ctx: &Ctx) -> Result<()> {
+    let ping = || json!({ "v": 1, "type": "PING" });
+    let identity = ctx.identity();
+    let mut server = ctx.dial_register(&ctx.relay).await?;
+    server.show_heartbeats(true);
+    server.send_json(ping()).await?;
+    server.recv_type("PONG", STEP).await?;
+    let nonce = Ctx::challenge(&mut server, &identity.server_id, &identity.pubkey_b64()).await?;
+    server.send_json(ping()).await?;
+    server.recv_type("PONG", STEP).await?;
+    Ctx::respond(&mut server, &identity.relay_auth(&nonce)).await?;
+    server.recv_type("REGISTERED", STEP).await?;
+    server.start_heartbeat(ctx.heartbeat_interval());
+    server.show_heartbeats(false);
+
+    let mut client = ctx.dial_connect(&ctx.relay, &identity.server_id).await?;
+    client.show_heartbeats(true);
+    client.send_json(ping()).await?;
+    client.recv_type("PONG", STEP).await?;
+    hello(&client, &identity.server_id).await?;
+    client.recv_type("READY", STEP).await?;
+    for _ in 0..3 {
+        client.send_json(ping()).await?;
+    }
+    for _ in 0..3 {
+        client.recv_type("PONG", STEP).await?;
     }
     Ok(())
 }

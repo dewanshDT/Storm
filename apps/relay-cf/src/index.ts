@@ -2,7 +2,7 @@ import { validateServerId } from "./auth";
 import { ConfigError, configFor, type Env } from "./config";
 import { HelloLimiter } from "./limiter";
 import { log } from "./log";
-import { error, parseFrame, ProtocolError, stringField, type ErrorCode } from "./proto";
+import { error, parseFrame, PONG, ProtocolError, stringField, type ErrorCode } from "./proto";
 import { RelayRoom } from "./room";
 
 export { HelloLimiter, RelayRoom };
@@ -113,17 +113,24 @@ async function register(env: Env, url: URL): Promise<Response> {
       pending.push(event.data);
       return;
     }
-    pending = [];
-    clearTimeout(timeout);
     let serverId: string;
     try {
       if (typeof event.data !== "string") throw new ProtocolError();
       const frame = parseFrame(event.data);
+      // A PING before REGISTER_SERVER is answered like any other (§4.2).
+      if (frame.type === "PING") {
+        server.send(PONG);
+        return;
+      }
+      if (frame.type === "PONG") return;
+      pending = [];
+      clearTimeout(timeout);
       if (frame.type !== "REGISTER_SERVER") throw new ProtocolError();
       serverId = stringField(frame.body, "server_id");
       stringField(frame.body, "pubkey");
       if (!validateServerId(serverId)) throw new ProtocolError();
     } catch {
+      pending = [];
       log("protocol_error", { reason: "register: first frame" });
       close(server, "protocol_error");
       return;

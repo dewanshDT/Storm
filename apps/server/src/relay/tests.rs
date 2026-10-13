@@ -55,6 +55,8 @@ struct FakeRelay {
     attempts: Arc<std::sync::atomic::AtomicUsize>,
     /// Drops the live trunk's socket without a `CLOSE`: the relay vanishing.
     vanish: Arc<tokio::sync::Notify>,
+    /// While `false` the relay stops reading the trunk but still writes to it.
+    reading: tokio::sync::watch::Sender<bool>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -71,10 +73,12 @@ impl FakeRelay {
         let (to_server, mut commands) = mpsc::unbounded_channel::<Message>();
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let vanish = Arc::new(tokio::sync::Notify::new());
+        let (reading, reading_rx) = tokio::sync::watch::channel(true);
 
         let task = tokio::spawn({
             let attempts = attempts.clone();
             let vanish = vanish.clone();
+            let mut reading_rx = reading_rx;
             async move {
                 loop {
                     let Ok((socket, _)) = listener.accept().await else {
@@ -164,13 +168,14 @@ impl FakeRelay {
                                 let _ = events_tx.send(Event::Disconnected);
                                 break;
                             }
+                            Ok(()) = reading_rx.changed() => continue,
                             command = commands.recv() => match command {
                                 Some(message) => {
                                     if ws.send(message).await.is_err() { break; }
                                 }
                                 None => break,
                             },
-                            incoming = ws.next() => match incoming {
+                            incoming = ws.next(), if *reading_rx.borrow() => match incoming {
                                 Some(Ok(Message::Text(text))) => {
                                     let value: serde_json::Value =
                                         serde_json::from_str(&text).unwrap();
@@ -200,6 +205,7 @@ impl FakeRelay {
             to_server,
             attempts,
             vanish,
+            reading,
             _task: task,
         }
     }
@@ -712,6 +718,48 @@ async fn a_tunnelled_get_reaches_the_router_and_comes_back_intact() {
         "and so does the body: {}",
         String::from_utf8_lossy(&response.body)
     );
+
+    tunnels.shutdown().await;
+}
+
+/// SRP §4.2 (decision 108c): every `PING` is answered, including one a relay
+/// sends while the trunk's outbound queue is full. A relay may `PING` to learn
+/// how much the server has read, so a dropped `PONG` reads as a stalled server.
+#[tokio::test]
+async fn a_relay_ping_is_answered_even_behind_a_full_outbound_queue() {
+    static BIG: std::sync::OnceLock<Bytes> = std::sync::OnceLock::new();
+    let dir = tempdir::TempDir::new("storm-relay-ping").unwrap();
+    let identity = test_identity(dir.path());
+    let router = Router::new().route(
+        "/big",
+        axum::routing::get(|| async {
+            BIG.get_or_init(|| Bytes::from(vec![0u8; 4 << 20])).clone()
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.reading.send_replace(false);
+    for stream_id in 1..=24u32 {
+        relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+            "method":"GET","path":"/big","headers":{}
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    relay.send(serde_json::json!({"v":1,"type":"PING"}));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    relay.reading.send_replace(true);
+
+    loop {
+        match relay.next_event().await {
+            Event::Text(value) if value["type"] == "PONG" => break,
+            Event::Disconnected => panic!("the trunk dropped before the PONG"),
+            _ => {}
+        }
+    }
 
     tunnels.shutdown().await;
 }

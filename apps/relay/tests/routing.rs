@@ -562,6 +562,22 @@ async fn even_a_null_relay_peer_ip_from_a_client_is_refused() {
 
 // -------------------------------------------------------------- failure modes
 
+/// Decision 108c: a `PING` may arrive at any point on a trunk, before `HELLO`
+/// included, and is answered in order.
+#[tokio::test]
+async fn a_ping_before_hello_is_answered_and_hello_still_succeeds() {
+    let harness = Harness::plain().await;
+    let _server = harness.server().await;
+    let mut client = harness.dial(&format!("/connect/{SERVER_ID}")).await;
+    client.send(json!({ "v": 1, "type": "PING" })).await;
+    assert_eq!(client.recv().await["type"], "PONG");
+    client
+        .send(json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID }))
+        .await;
+    let ready = client.recv().await;
+    assert_eq!(ready["type"], "READY", "{ready}");
+}
+
 #[tokio::test]
 async fn hello_for_an_unregistered_server_id_is_server_unreachable() {
     let harness = Harness::plain().await;

@@ -36,9 +36,10 @@ use crate::transport::{
 };
 
 /// Hosts of relays Storm itself runs: the only relays raced last. Empty, as
-/// the app's `publicRelayHosts` is in production: no Storm relay exists yet,
-/// and a relay not on this list is the operator's, which is the safe
-/// direction to err (it races something they already trust, never ours).
+/// the app's `kPublicRelayHosts` is, until a hosted relay ships; then its host
+/// goes in both (`apps/relay-cf/DEPLOY.md`). A relay not on this list is the
+/// operator's, which is the safe direction to err (it races something they
+/// already trust, never ours).
 pub const PUBLIC_RELAY_HOSTS: &[&str] = &[];
 
 /// The cache file under [`crate::platform::user_state_dir`].

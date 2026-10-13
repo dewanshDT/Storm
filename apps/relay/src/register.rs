@@ -100,7 +100,7 @@ async fn handshake(
     relay: &Relay,
     server_trunk: &Arc<ServerTrunk>,
 ) -> Result<Session, Fault> {
-    let frame = trunk::recv_control(rx).await?;
+    let frame = trunk::recv_handshake_control(rx, tx).await?;
     if frame.ty() != "REGISTER_SERVER" {
         return Err(ErrorCode::ProtocolError.into());
     }
@@ -152,7 +152,7 @@ async fn handshake(
         .issue(&nonce, relay.config.challenge_ttl, Instant::now());
     tx.send_json(proto::challenge(nonce.clone())).await?;
 
-    let frame = trunk::recv_control(rx).await?;
+    let frame = trunk::recv_handshake_control(rx, tx).await?;
     if frame.ty() != "CHALLENGE_RESPONSE" {
         return Err(ErrorCode::ProtocolError.into());
     }

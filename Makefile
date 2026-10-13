@@ -31,6 +31,9 @@ AUTH_PORT ?= 8485
 # A real storm-relay for the client's relayed suite (PLAN decision 92). Not
 # 8486, the relay's own default, so a dev relay left running is not borrowed.
 RELAY_PORT ?= 8487
+# Which relay `test-live` runs the relayed suites through: rust (storm-relay)
+# or cf (apps/relay-cf under wrangler dev).
+RELAY_IMPL ?= rust
 
 .DEFAULT_GOAL := help
 
@@ -103,6 +106,15 @@ relay-conformance-local:
 	@cd $(CONFORMANCE) && cargo build --release --quiet
 	bash $(CONFORMANCE)/local.sh "$$PWD/$(RELAY)/target/release/storm-relay"
 
+## relay-conformance-cf: start the Worker relay under wrangler dev (ports 18910-18911) and run the suite
+#
+# Decision 108c: the same suite, allowlist and TOFU, with the 127.0.0.2
+# checks and without the latency check. Needs Node 22.
+relay-conformance-cf:
+	@cd $(CONFORMANCE) && cargo build --release --quiet
+	@cd $(RELAY_CF) && npm ci --no-audit --no-fund >/dev/null
+	bash $(CONFORMANCE)/cf.sh
+
 ## test-relay-cf: the Cloudflare relay's typecheck + workerd tests (needs Node 22)
 #
 # Decision 108b. `npm ci` from the committed lockfile, then tsc and the vitest
@@ -149,9 +161,15 @@ test-browser:
 	python3 $(CLIENT)/test_browser/web_sign_in.py "$$PWD/$(SERVER)/target/debug/storm-server" "$$PWD/$(CLIENT)/build/web"
 
 ## test-live: integration suites against a real server, started and torn down
+#
+# RELAY_IMPL=cf runs every relayed suite through the Worker relay under
+# wrangler dev, allowlisting the first server's key, instead of storm-relay
+# (decision 108c). Needs Node 22.
 test-live:
+	@case "$(RELAY_IMPL)" in rust|cf) ;; *) echo "RELAY_IMPL must be rust or cf" >&2; exit 2;; esac
 	@cd $(SERVER) && cargo build --quiet
 	@cd $(RELAY) && cargo build --quiet
+	@if [ "$(RELAY_IMPL)" = cf ]; then cd $(RELAY_CF) && npm ci --no-audit --no-fund >/dev/null; fi
 	@cd $(RUNTIME) && cargo build --quiet
 	@set -e; \
 	ROOT="$$PWD"; \
@@ -234,14 +252,23 @@ test-live:
 		[ $$i -eq 60 ] && { echo "second auth server did not start" >&2; exit 1; }; \
 		sleep 0.5; \
 	done; \
-	echo "--- a real relay, registered by the first server ---"; \
-	"$$ROOT/$(RELAY)/target/debug/storm-relay" --bind 127.0.0.1:$(RELAY_PORT) \
-		> "$$ROOT/.dev/live-relay.log" 2>&1 & \
+	echo "--- a real relay ($(RELAY_IMPL)), registered by the first server ---"; \
+	if [ "$(RELAY_IMPL)" = cf ]; then \
+		curl -sf http://127.0.0.1:$(PORT)/v1/server | python3 -c \
+			'import json, sys; i = json.load(sys.stdin); print(i["server_id"], i["public_key"])' \
+			> "$$ROOT/.dev/live-relay-allowlist"; \
+		"$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" $(RELAY_PORT) allowlist \
+			"$$ROOT/.dev/live-relay-allowlist" "$$ROOT/.dev/live-relay-cf" \
+			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
+	else \
+		"$$ROOT/$(RELAY)/target/debug/storm-relay" --bind 127.0.0.1:$(RELAY_PORT) \
+			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
+	fi; \
 	RELAY_PID=$$!; \
-	trap 'kill $$SERVER_PID $$AUTH_PID $$RELAY_PID 2>/dev/null; true' EXIT; \
-	for i in $$(seq 1 60); do \
+	trap 'kill $$SERVER_PID $$AUTH_PID $$RELAY_PID 2>/dev/null || true; wait $$RELAY_PID 2>/dev/null || true' EXIT; \
+	for i in $$(seq 1 120); do \
 		curl -s -o /dev/null http://127.0.0.1:$(RELAY_PORT)/ && break; \
-		[ $$i -eq 60 ] && { echo "relay did not start" >&2; cat "$$ROOT/.dev/live-relay.log" >&2; exit 1; }; \
+		[ $$i -eq 120 ] && { echo "relay did not start" >&2; cat "$$ROOT/.dev/live-relay.log" >&2; exit 1; }; \
 		sleep 0.5; \
 	done; \
 	curl -sf -o /dev/null -X PUT -H "Authorization: $$STORM_SESSION" \
@@ -263,6 +290,7 @@ test-live:
 	echo "--- mcp-connect live: relay cache, LAN merge over the relay, impostors (own servers, 18870-18879) ---"; \
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
+	RELAY_IMPL=$(RELAY_IMPL) RELAY_CF_DEV="$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
 		python3 "$$ROOT/$(RUNTIME)/tests/mcp_connect_live.py"; \
 	echo "--- client integration ---"; \
@@ -472,7 +500,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

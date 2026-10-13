@@ -90,6 +90,9 @@ struct Script {
     /// Requests are held until this many are complete, then answered with
     /// their frames interleaved — so cross-talk would show.
     batch: usize,
+    /// `PING`s the relay sends before `READY` and again after it (§4.2: a
+    /// relay may `PING` any trunk, and every `PING` is answered).
+    pings: usize,
     handler: Handler,
 }
 
@@ -100,6 +103,7 @@ impl Script {
             refuse_opens: 0,
             refuse_second_by_id: false,
             batch: 1,
+            pings: 0,
             handler: Arc::new(handler),
         }
     }
@@ -211,9 +215,15 @@ async fn serve(
                 match v["type"].as_str().unwrap() {
                     "HELLO" => match &script.hello {
                         Hello::Ready => {
+                            for _ in 0..script.pings {
+                                let _ = tx.send(control("PING", json!({}))).await;
+                            }
                             let _ = tx
                                 .send(control("READY", json!({"client_trunk_id": "ctk_fake"})))
                                 .await;
+                            for _ in 0..script.pings {
+                                let _ = tx.send(control("PING", json!({}))).await;
+                            }
                         }
                         Hello::Refuse(code) => {
                             let _ = tx
@@ -635,6 +645,14 @@ async fn a_stream_aborted_error_fails_only_its_own_body() {
     .await;
 }
 
+/// Decision 108c: a relay that cannot hold more for the origin may end one
+/// stream `rate_limited`. Stream-scoped, so the trunk carries on.
+#[tokio::test]
+async fn a_stream_scoped_rate_limited_fails_only_its_own_body() {
+    an_aborted_response_fails_only_its_own_body(End::Error("rate_limited"), SrpError::RateLimited)
+        .await;
+}
+
 #[tokio::test]
 async fn an_aborted_flag_on_close_is_a_body_error_too() {
     an_aborted_response_fails_only_its_own_body(End::CloseAborted, SrpError::StreamAborted).await;
@@ -701,6 +719,30 @@ async fn a_relay_that_answers_heartbeats_is_kept_past_the_silence_limit() {
     assert_eq!(
         within(resp.body.collect()).await.unwrap(),
         b"GET /v1/health 0"
+    );
+}
+
+/// Decision 108c: a relay may `PING` a client trunk, before `READY` or after,
+/// to learn how much it has read; the client answers every one.
+#[tokio::test]
+async fn every_relay_ping_is_answered_before_ready_and_after() {
+    let mut script = Script::new(echo);
+    script.pings = 3;
+    let fake = FakeRelay::start(script).await;
+    let _trunk = connect(&fake).await;
+    within(async {
+        loop {
+            let notified = fake.changed.notified();
+            if fake.log(|l| l.controls.iter().filter(|v| v["type"] == "PONG").count()) >= 6 {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await;
+    assert_eq!(
+        fake.log(|l| l.controls.iter().filter(|v| v["type"] == "PONG").count()),
+        6
     );
 }
 

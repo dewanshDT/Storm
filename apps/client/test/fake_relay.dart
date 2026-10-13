@@ -68,6 +68,10 @@ class FakeRelay {
   /// relay that predates it: a trunk-scoped `ERROR` naming nothing.
   bool refusalNamesAttempt = true;
 
+  /// `PING`s sent before `READY` and again after it: a relay may `PING` any
+  /// trunk to learn how much its peer has read (§4.2, decision 108c).
+  int pings = 0;
+
   /// Every `0x01` frame the client sent, as `(stream_id, payload length)`.
   final requestBodyFrames = <(int, int)>[];
   int _nextStream = 1;
@@ -130,7 +134,13 @@ class FakeRelay {
           _send(SrpControl.encode('ERROR', {'code': refusal}));
           return;
         }
+        for (var i = 0; i < pings; i++) {
+          _send(SrpControl.encode('PING'));
+        }
         _send('{"v":1,"type":"READY","client_trunk_id":"ctk_fake"}');
+        for (var i = 0; i < pings; i++) {
+          _send(SrpControl.encode('PING'));
+        }
       case 'OPEN_STREAM':
         final attemptId = frame.body['attempt_id'];
         if (refuseOpens > 0) {

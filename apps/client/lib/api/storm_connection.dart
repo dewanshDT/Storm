@@ -84,6 +84,12 @@ enum ConnectionStatus {
   serverOffline,
 }
 
+/// Hosts of relays Storm itself runs: the only relays raced last. Empty, as
+/// is mcp-connect's `PUBLIC_RELAY_HOSTS`, until a hosted relay ships; then its
+/// host goes in both (`apps/relay-cf/DEPLOY.md`). A relay not listed is the
+/// operator's, and is raced before any of these.
+const Set<String> kPublicRelayHosts = {};
+
 /// Resolves candidates to one working, *proven* transport.
 class StormConnection {
   StormConnection({
@@ -92,7 +98,7 @@ class StormConnection {
     this.serverId = '',
     this.publicKeyB64 = '',
     List<RelayAdvert> relays = const [],
-    this.publicRelayHosts = const {},
+    this.publicRelayHosts = kPublicRelayHosts,
     this.client,
     this.buildApi,
     this.buildAuthApi,
@@ -117,7 +123,7 @@ class StormConnection {
        publicKeyB64 = '',
        localAddress = api.baseUrl,
        _relays = const [],
-       publicRelayHosts = const {},
+       publicRelayHosts = kPublicRelayHosts,
        client = null,
        buildApi = null,
        buildAuthApi = null,

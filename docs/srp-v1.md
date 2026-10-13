@@ -10,6 +10,12 @@
 >
 > Normative language: MUST / SHOULD / MAY as in RFC 2119.
 
+> **Amended 2026-10-13 (`PLAN.md` decision 108c)** so that two relays —
+> `storm-relay` and the Cloudflare Worker — are held to written text: the
+> readings the conformance suite (`tools/relay-conformance`) had to take where
+> this file was implicit are now rules, and so are five points the Worker
+> raised. Each amendment is marked *(108c)*.
+
 > **§3–§6 were rewritten on 2026-08-28 (`PLAN.md` decision 58).** The first
 > draft described a *different protocol* — one in which the relay authenticates
 > **clients**, registering "device keypairs". That is the precise thing **R12**
@@ -142,6 +148,11 @@ many clients onto one server trunk, so a client that could assert its own
 rather than `u16` so id-reuse safety never has to be reasoned about on a
 long-lived trunk.
 
+**A client frame naming a `stream_id` that client does not own** — another
+client's, one never issued, or one already closed — gets
+`ERROR{stream_closed, stream_id}` *(108c)*. The relay MUST NOT forward it, and
+the trunk stays up: the frame is refused, not the connection.
+
 ### Version pin
 
 Every JSON control message carries a version envelope:
@@ -204,6 +215,11 @@ emits** — the relay must not accept a `server_id` carrying `:`, and a server
 must not sign a nonce carrying one. Validating only at generation assumes the
 only values you ever see are your own, and on the relay the `server_id` is
 chosen by whoever is registering.
+
+**A nonce is answerable for its TTL and no longer** *(108c)*. A relay MUST
+either keep the registration socket open past the TTL, so that a late
+`CHALLENGE_RESPONSE` is answered `auth_failed`, or close it without sending
+`REGISTERED`. It MUST NOT register a response to an expired nonce.
 
 The server reuses its **existing** Ed25519 identity. Relay registration is one
 more thing that key proves possession of; there is no new key material, and no
@@ -268,6 +284,15 @@ succeed. TOFU MUST record the pair only after a *successful* signature.
 - **Heartbeat.** `PING`/`PONG` every 15 s. Three missed (~45 s) and the relay
   MUST treat the trunk as dead, stop routing new `HELLO`/`OPEN_STREAM` to it,
   and send every client with an open stream `ERROR{trunk_lost}`.
+- **Every `PING` is answered** *(108c)*. Either party — relay, origin or
+  client — MUST answer every `PING` it receives with a `PONG`, in the order
+  received; it MUST NOT drop one because its own send queue is full. A relay
+  MAY `PING` any trunk, server or client, to learn how much its peer has read:
+  a `PONG` proves the peer read everything sent before that `PING`.
+- **A `PING` may arrive at any point on a trunk** *(108c)*: before
+  `REGISTER_SERVER` or `HELLO`, between `CHALLENGE` and `CHALLENGE_RESPONSE`,
+  or while a `HELLO` is held. It is answered there like anywhere else, and it
+  changes nothing else about the handshake.
 - **Clean shutdown.** A server SHOULD send `DEREGISTER {}` before closing, so
   the relay frees the `server_id` immediately rather than making every client
   wait out a timeout for what was a deliberate restart.
@@ -276,7 +301,8 @@ succeed. TOFU MUST record the pair only after a *successful* signature.
   who can complete it already holds the private key, so this is a reconnect,
   not a hijack. The old trunk MUST drain gracefully: in-flight streams get up
   to 30 s, then anything still open is force-closed with
-  `ERROR{trunk_superseded}`. Scoped per relay.
+  `ERROR{trunk_superseded}`. Scoped per relay. The drain is the whole window
+  *(108c)*: a relay MUST NOT end a draining trunk's streams early.
 
 ### 4.3 The relay set, and how a client learns it
 
@@ -335,6 +361,21 @@ Relay → Client:  READY { client_trunk_id }
 never clients (**R12**). Any client speaking valid SRP gets a trunk. What
 client connections need is resource limits (§6), not identity.
 
+*(108c)*:
+
+1. **The `HELLO` wait is the whole wait.** A relay holding a `HELLO` with no
+   live trunk MUST hold it for the full wait (5 s by default) before
+   `ERROR{server_unreachable}`, and MUST answer `READY` as soon as the server
+   registers within it.
+2. **A refused `HELLO` is trunk-scoped.** A client past the per-address
+   `HELLO` limit (§6) gets `ERROR{rate_limited}` with neither `stream_id` nor
+   `attempt_id`, and the relay closes the trunk. The relay MAY refuse before or
+   after reading the `HELLO`.
+3. **Nothing but `PING`/`PONG` before `READY`.** A client MUST NOT send
+   `OPEN_STREAM`, `HTTP_REQUEST_HEAD`, `CLOSE` or a body frame before it has
+   received `READY`. A relay MAY refuse such a frame with `protocol_error`; it
+   MUST NOT route it to a server.
+
 ### 5.1 Opening one stream
 
 One REST call, one MCP call, or the change feed.
@@ -366,7 +407,7 @@ in `STREAM_READY`, or in the `ERROR` that refuses the open. It has no meaning
 on the wire afterwards, and the relay never routes on it. The relay echoes it
 as the JSON value the client sent.
 
-In-flight `STREAM_OPEN`s MUST be capped per trunk (e.g. 20); past that,
+In-flight `STREAM_OPEN`s MUST be capped per **client** trunk (e.g. 20) *(108c)*; past that,
 `OPEN_STREAM` gets `ERROR{rate_limited}` immediately rather than queueing — a
 slow server and an overloaded one should fail differently, not compound.
 
@@ -447,9 +488,14 @@ new name:
    valid on the relay→server hop.
 
 Both halves live at the relay because the relay is the only party that sees the
-client hop. The relay derives the address from the socket, never from a header:
-forwarding headers are client-forgeable, and the origin server strips them at
-dispatch for that reason.
+client hop. The relay derives the address from the connection as the relay's
+own front end received it — **the TCP peer, or an address the relay's
+provider edge attests and a client cannot set** *(108c)* — never from a header
+a client controls: forwarding headers are client-forgeable, and the origin
+server strips them at dispatch for that reason. A proxy the relay's operator
+merely puts in front of it is not such an edge (decision 71); a provider whose
+edge *is* the relay and overwrites the attested address on every request is
+(decision 108b: Cloudflare's `CF-Connecting-IP`).
 
 A request arriving with no attested peer falls back to the origin's
 unattributed rate-limit bucket — bounded, not unlimited.
@@ -577,12 +623,27 @@ the next frame was for:
 5. A client **MUST** ignore frames for a `stream_id` it has already ended.
 
 The same delivery rule holds for every stream-ending `ERROR` the relay sends
-(`server_timeout`, `stream_aborted`, `trunk_lost`, `trunk_superseded`): none is
-lost to a full queue.
+(`server_timeout`, `stream_aborted`, `trunk_lost`, `trunk_superseded`,
+`rate_limited`): none is lost to a full queue. Each MAY overtake frames already
+queued for its stream, and frames of that stream already in flight MAY trail
+it *(108c)*; rule 5 makes the client ignore them. Frames of every other stream
+keep their order.
+
+**A relay that cannot hold more for the origin** *(108c)*. The relay cannot
+always slow a client that uploads faster than the origin reads. A relay whose
+bound on bytes queued toward the origin is reached MAY end the stream the next
+frame was for with `ERROR{rate_limited, stream_id}` toward the client and
+`CLOSE{stream_id}` toward the origin. It is stream-scoped: rule 3 applies to
+the client, and the trunk and its other streams carry on.
 
 ## 6. Message catalog and error codes
 
 Every control message is a JSON text frame carrying `{"v": 1, "type": ...}`.
+
+**The direction column is normative** *(108c)*. A message from a party the
+table does not name — `STREAM_ACK` from a client, `HELLO` or `OPEN_STREAM` on a
+server trunk, `REGISTER_SERVER` on a client trunk, `ERROR` from anyone but the
+relay — is `protocol_error`.
 
 | Type | Direction | Fields |
 |---|---|---|
@@ -610,14 +671,14 @@ Codes are **strings**, not numbers.
 
 | Code | Meaning |
 |---|---|
-| `protocol_error` | Malformed frame, bad or missing version, unknown type, or a client-sent `relay_peer_ip`. Close the connection. |
+| `protocol_error` | Malformed frame, bad or missing version, unknown type, a message from the wrong party, or a client-sent `relay_peer_ip`. Always trunk-scoped (no `stream_id`, no `attempt_id`); the relay closes the connection after sending it. |
 | `auth_failed` | Registration challenge failed, or a pubkey that does not match the recorded binding (§4.1). |
 | `server_unreachable` | No live trunk for `server_id` after the 5 s `HELLO` wait. |
 | `server_timeout` | Server did not ACK `STREAM_OPEN` within 5 s. |
 | `trunk_lost` | Server trunk died — heartbeat timeout, closed, or superseded. |
 | `trunk_superseded` | Replaced by a newer registration; drain window elapsed. |
-| `rate_limited` | An abuse-control limit was hit. Refusing an `OPEN_STREAM`, it carries that open's `attempt_id` and the trunk stays up (§5.1). |
-| `stream_closed` | Operation on a dead `stream_id`. |
+| `rate_limited` | An abuse-control limit was hit. Refusing an `OPEN_STREAM`, it carries that open's `attempt_id` and the trunk stays up (§5.1). Refusing a `HELLO`, it is trunk-scoped (§5). Ending a stream the relay could hold no more for, it carries that `stream_id` (§5.4). |
+| `stream_closed` | Operation on a dead `stream_id`, or one this client does not own (§3). The trunk stays up. |
 | `stream_aborted` | The origin abandoned a response after its head (§5.4): the body is incomplete. Stream-scoped only. |
 | `client_backlogged` | This client fell too far behind reading its trunk, and the relay dropped the stream (§5.4): the body is incomplete. Stream-scoped only, and only ever sent to the client that fell behind. |
 
@@ -628,8 +689,9 @@ send `protocol_error`, which misattributes blame but leaks the least, and log
 the real cause locally. Introducing an `internal_error` code would tell an
 unauthenticated caller when it has found a way to break the relay.
 
-**`protocol_error` MUST carry minimal detail**, and `auth_failed` MUST NOT say
-*which* check failed. A malformed-frame scanner should not be told which part
+**`protocol_error` MUST carry minimal detail** — one fixed `message`, the same
+whatever the cause *(108c)* — and `auth_failed` MUST NOT say *which* check
+failed. A malformed-frame scanner should not be told which part
 of its framing was wrong, and a registration attacker should not learn whether
 a signature was bad, a nonce expired, or a binding was refused.
 
@@ -638,7 +700,9 @@ a signature was bad, a nonce expired, or a binding was refused.
 Because the relay authenticates no clients, its real security surface is
 resource exhaustion. A relay MUST be able to bound:
 
-- concurrent streams per `server_id`;
+- concurrent streams per `server_id` — counted per server trunk, across all
+  its clients, and refused by the open's `attempt_id` with the trunk kept
+  (§5.1) *(108c)*;
 - `HELLO` rate per source IP — note this bounds new *trunks*, not login
   attempts, since one trunk carries many streams;
 - bandwidth per `server_id`.
