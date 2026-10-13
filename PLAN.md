@@ -6222,96 +6222,66 @@ whole body: a read error mid-note became a truncated note with a 200.
   mid-body on demand.
 *Revisit if:* SRP v2 lets the origin send stream-scoped `ERROR`s directly.
 
-**105c. `storm-runtime mcp-connect`: external MCP clients over stdio
-(mcp-connect S3).** *(2026-10-13, operator design of 2026-10-13; answers 95's
-open item; S1 is 105a, S2 105b)*
-- **What.** Claude Code, Cursor and Claude Desktop start `storm-runtime
-  mcp-connect --server srv_… --pk <b64url> --addr http://… [--relay wss://…]…`
-  as a stdio MCP server, with the `stk_` key in `STORM_MCP_KEY` or
-  `--key-file`. Each line it reads is one `POST /mcp`, and the answer is
-  written back as a line. It is meant for the LAN too, so one config works at
-  home and away, and it adds the server-identity check the plain HTTP config
-  never had. `src/transport.rs` holds a `Transport` (one `HttpRequest` in, one
-  `HttpResponse` or a `TransportError { code, detail }` out), a `Connector`
-  that returns a transport **only after `verify_identity` has passed over that
-  same transport**, and the direct implementations. `src/mcp_connect.rs` is
-  the adapter. S2 adds an `SrpTransport` and a connector that races the direct
-  address and the relays, verifying the winner. Until then `--relay` is parsed,
-  logged once as unused, and `--addr` is required.
-- **Why stdio is this simple.** `/mcp` is stateless (`with_legacy_session_mode
-  (false)`) and answers plain JSON (`with_json_response(true)`), so there is no
-  session to keep and nothing to resume.
-- **Rules.**
-  1. Nothing is sent before the challenge passes, the key included. An
-     impostor is `identity_failed`, never "offline": once a path carried an
-     answer, any failure to prove the pinned key (a 404, a wrong body, another
-     `server_id`, a bad signature) is identity.
-  2. A failed request is one JSON-RPC error (`-32001`, `data.storm_error`
-     naming the hop) and is never resent. The direct path reports
-     `server_offline` (connection refused), `unreachable` (no route, DNS, a
-     connect timeout), `server_silent` (120 s with nothing read) and
-     `stream_aborted` (failed after sending). A non-JSON-RPC HTTP answer is
-     `unauthorized` / `forbidden` / `mcp_unavailable` / `rate_limited` /
-     `http_error`, with `data.status`.
-  3. A failed transport is forgotten, so the **next** request reconnects and
-     re-verifies, with a fresh HTTP client and no pooled connection. Nothing
-     migrates mid-call.
-  4. The key never goes on argv: clap has no key flag, and a test reads
-     `--help` for one. The key is never logged, and neither is a body. Logs go
-     to stderr only.
-  5. It holds no authority: it sends the client's key, and the server decides.
-- **What rmcp 3.1.2 actually does**, measured against a real server:
-  - **No batches.** A JSON array is a 415 (`did not match any variant of
-    untagged enum JsonRpcMessage`), so the adapter splits a batch into one
-    `POST` per message and writes the answers back as one array.
-  - **A notification** gets 202 with an empty body, and nothing is written.
-  - **A stdio client sends no HTTP headers, so the adapter supplies them.**
-    `MCP-Protocol-Version` is the version `initialize`'s result negotiated, or
-    the request's own `_meta` `io.modelcontextprotocol/protocolVersion` when
-    present. rmcp refuses a `_meta` version with no header. `initialize`
-    itself is sent without the header, since rmcp refuses a header that
-    disagrees with its body. From 2026-07-28 rmcp also requires SEP-2243's
-    `Mcp-Method` and `Mcp-Name` (`-32020 missing required Mcp-Method
-    header`). The adapter always sends both, base64-wrapped (`=?base64?…?=`)
-    when the value cannot travel bare. `Mcp-Param-*` is not sent: Storm's
-    tools declare no `x-mcp-header`.
-  - **`Accept` must name both** `application/json` and `text/event-stream`,
-    or the answer is 406. rmcp may still answer with SSE in JSON mode when a
-    handler emits anything before its result, so an SSE body is unpacked
-    message by message.
-- **Concurrency.** Requests run concurrently and are matched by their own id.
-  `initialize` and notifications finish before the next line is read, so they
-  reach the server in the client's order. On EOF it waits for in-flight
-  answers, then exits 0.
-- **Not covered.** Per-connection identity on plain HTTP: the challenge and
-  later requests may use different TCP connections. This is the same exposure
-  the host's `verify_server` has, and it closes with TLS or with S2's trunk,
-  where the verified path is the connection.
-- Tests: `src/mcp_connect.rs` (14, against a fake transport verified by the
-  real `verify_identity`): `the_challenge_runs_before_the_key_is_sent`,
-  `an_impostor_is_identity_failed_and_never_sees_the_key`,
-  `a_tool_error_passes_through_untouched`,
-  `a_transport_failure_is_one_error_never_resent_and_the_next_call_reconnects`,
-  `notifications_write_nothing`, `concurrent_requests_are_answered_by_id`,
-  `eof_exits_after_the_answers_in_flight`, the header, batch, SSE, refusal
-  and key-source tests. `src/transport.rs` (5): identity pass and fail cases,
-  and a refused connection being `server_offline`. `tests/mcp_connect.rs` (5,
-  the real binary over real HTTP to an in-process fake): no key argument, a
-  `--key-file` key sent only after the challenge, an impostor never seeing
-  the key, a server that is down, and a missing key sending nothing.
-  `tests/mcp_connect_live.py` (12 checks, a real storm-server on 18870–18879):
-  `initialize`, `tools/list`, `list_vaults`, a `get_vault` round trip, a tool
-  error, a 2026-07-28 call through the header checks, a batch, a wrong pinned
-  key, and a bad key. It is run by hand for now; S4 wires the live suite into
-  `make test-live`.
-*Revisit if:* `/mcp` becomes stateful or starts streaming (the line-per-POST
-model breaks); rmcp accepts batches; or a client needs server-initiated
-requests (elicitation), which a stateless `/mcp` cannot carry back.
-*105c addendum (2026-10-14):* a pinned key is base64url, which starts with
-`-` one key in 64, and clap read `--pk -9…` as an unknown flag — CI's random
-server key hit it. `--pk` now takes hyphen-led values
-(`a_pinned_key_that_starts_with_a_hyphen_is_a_value_not_a_flag`, which fails
-without it).
+**106. A backlogged client is told its stream failed; a refused open names its
+attempt.** *(2026-10-13, found building the Rust SRP client, decision 105a.)*
+Two relay→client signals were missing, and each left a client guessing.
+- **Defect: a backlogged client's stream hung for ever.**
+  `drop_backlogged_client` closed the stream and sent `CLOSE` to the origin,
+  and sent the client nothing: a started body never ended, a pending head
+  never came, and no client can turn silence into an error. The relay now
+  ends the stream with a new stream-scoped `ERROR{client_backlogged}`.
+- **Delivered past the full queue, not into it.** The client trunk's writer
+  has a second lane (`Tx::end_stream`) it drains first: the `ERROR` overtakes
+  what is queued, the writer discards the ended stream's queued body frames
+  (refunding the byte budget), and every other stream's frames go on in order.
+  Rejected: discarding the trunk's queue (wedges or truncates the other
+  streams), queueing the `ERROR` behind the backlog (never arrives at a stalled
+  client), and dropping the whole client trunk (kills healthy streams for one
+  slow download). Dropping the trunk is the fallback only if the lane itself
+  (256) overflows — the relay kills the writer and reader, and the client sees
+  trunk loss. A plain `CLOSE` never takes the lane, since overtaking its body
+  would present a truncated body as complete; with no room for it the stream
+  is ended `client_backlogged` instead. `server_timeout`, `stream_aborted` and
+  the per-stream `trunk_lost`/`trunk_superseded` use the lane too, so no
+  stream-ending `ERROR` is lost to a full queue any more.
+- **Defect: `rate_limited` on `OPEN_STREAM` could not be attributed.** It was
+  trunk-scoped with no id, while the trunk stayed up. The Dart client took it
+  as fatal and dropped the trunk; the Rust client failed its oldest pending
+  open, relying on the relay answering in order. The relay now echoes the
+  open's `attempt_id` (as the JSON sent). The Dart client fails only that
+  attempt (`SrpOpenRefused` → `SrpTransportException('rate_limited')`) and
+  keeps the trunk; an `ERROR` without one is still fatal.
+- **SRP §5.1** gains "A refused open names its attempt and does not end the
+  trunk"; **§5.4** gains the backlogged-client rules; **§6** adds
+  `client_backlogged` and `ERROR`'s `attempt_id?`.
+- **Compatibility.** Old Dart client, new relay: ignores `attempt_id`, drops
+  the trunk as before; reads `client_backlogged` as any stream-scoped error,
+  i.e. a body error (§5.4 rule 3). Old Rust client, new relay: serde ignores
+  the extra field and FIFO attribution is still right; an unknown stream code
+  becomes `SrpError::Relay(code)`, a body error. New clients, old relay: no
+  `attempt_id`, so Dart drops the trunk and Rust falls back to FIFO — both
+  unchanged — and backlogged streams still hang, as before. The origin sees
+  nothing new.
+- **Rust client follow-up** (`feat/runtime-srp-client`, not on this branch):
+  `codec::RelayError` gains `attempt_id: Option<serde_json::Value>`, and the
+  trunk-scoped `rate_limited` arm removes the pending open whose `attempt_id`
+  matches, falling back to `pop_front` only when the field is absent.
+- Tests: relay
+  `a_backlogged_client_is_told_its_stream_failed_and_its_other_streams_go_on`
+  (no body frame for the stream follows its error; the other stream's body
+  and `CLOSE` arrive; a later open works),
+  `a_refused_open_names_its_attempt_and_the_trunk_carries_on` (an object
+  `attempt_id` echoed whole), and `attempt_id` asserted in
+  `past_the_in_flight_cap_open_stream_is_rate_limited_immediately` — all three
+  fail on the old code; unit `a_stream_end_that_finds_no_room_drops_the_trunk`,
+  `only_an_ended_streams_body_frames_are_discarded`. Dart: `a refused open
+  fails only its own request, and the next request on the trunk works` (fails
+  on the old client), `a refusal that names no attempt still drops the trunk`,
+  `a stream dropped for a backlogged client is a body error, and the trunk
+  stays up`.
+*Revisit if:* SRP gains per-stream flow control (67) — a window would stop a
+slow reader before its queue fills, and `client_backlogged` would become rare
+rather than the only bound.
 
 **105a. storm-runtime gains an SRP v1 client (mcp-connect S1).**
 *(2026-10-13, decision 105's first slice; vault *MCP over the Relay —
@@ -6468,6 +6438,97 @@ refused at startup).
 marker to `/v1/server`'s relay entries); every relay in use has decision 106
 (the FIFO fallback for an unnamed `rate_limited` can go); or SRP gains E2E,
 which would change what "public" costs.
+
+**105c. `storm-runtime mcp-connect`: external MCP clients over stdio
+(mcp-connect S3).** *(2026-10-13, operator design of 2026-10-13; answers 95's
+open item; S1 is 105a, S2 105b)*
+- **What.** Claude Code, Cursor and Claude Desktop start `storm-runtime
+  mcp-connect --server srv_… --pk <b64url> --addr http://… [--relay wss://…]…`
+  as a stdio MCP server, with the `stk_` key in `STORM_MCP_KEY` or
+  `--key-file`. Each line it reads is one `POST /mcp`, and the answer is
+  written back as a line. It is meant for the LAN too, so one config works at
+  home and away, and it adds the server-identity check the plain HTTP config
+  never had. `src/transport.rs` holds a `Transport` (one `HttpRequest` in, one
+  `HttpResponse` or a `TransportError { code, detail }` out), a `Connector`
+  that returns a transport **only after `verify_identity` has passed over that
+  same transport**, and the direct implementations. `src/mcp_connect.rs` is
+  the adapter. S2 adds an `SrpTransport` and a connector that races the direct
+  address and the relays, verifying the winner. Until then `--relay` is parsed,
+  logged once as unused, and `--addr` is required.
+- **Why stdio is this simple.** `/mcp` is stateless (`with_legacy_session_mode
+  (false)`) and answers plain JSON (`with_json_response(true)`), so there is no
+  session to keep and nothing to resume.
+- **Rules.**
+  1. Nothing is sent before the challenge passes, the key included. An
+     impostor is `identity_failed`, never "offline": once a path carried an
+     answer, any failure to prove the pinned key (a 404, a wrong body, another
+     `server_id`, a bad signature) is identity.
+  2. A failed request is one JSON-RPC error (`-32001`, `data.storm_error`
+     naming the hop) and is never resent. The direct path reports
+     `server_offline` (connection refused), `unreachable` (no route, DNS, a
+     connect timeout), `server_silent` (120 s with nothing read) and
+     `stream_aborted` (failed after sending). A non-JSON-RPC HTTP answer is
+     `unauthorized` / `forbidden` / `mcp_unavailable` / `rate_limited` /
+     `http_error`, with `data.status`.
+  3. A failed transport is forgotten, so the **next** request reconnects and
+     re-verifies, with a fresh HTTP client and no pooled connection. Nothing
+     migrates mid-call.
+  4. The key never goes on argv: clap has no key flag, and a test reads
+     `--help` for one. The key is never logged, and neither is a body. Logs go
+     to stderr only.
+  5. It holds no authority: it sends the client's key, and the server decides.
+- **What rmcp 3.1.2 actually does**, measured against a real server:
+  - **No batches.** A JSON array is a 415 (`did not match any variant of
+    untagged enum JsonRpcMessage`), so the adapter splits a batch into one
+    `POST` per message and writes the answers back as one array.
+  - **A notification** gets 202 with an empty body, and nothing is written.
+  - **A stdio client sends no HTTP headers, so the adapter supplies them.**
+    `MCP-Protocol-Version` is the version `initialize`'s result negotiated, or
+    the request's own `_meta` `io.modelcontextprotocol/protocolVersion` when
+    present. rmcp refuses a `_meta` version with no header. `initialize`
+    itself is sent without the header, since rmcp refuses a header that
+    disagrees with its body. From 2026-07-28 rmcp also requires SEP-2243's
+    `Mcp-Method` and `Mcp-Name` (`-32020 missing required Mcp-Method
+    header`). The adapter always sends both, base64-wrapped (`=?base64?…?=`)
+    when the value cannot travel bare. `Mcp-Param-*` is not sent: Storm's
+    tools declare no `x-mcp-header`.
+  - **`Accept` must name both** `application/json` and `text/event-stream`,
+    or the answer is 406. rmcp may still answer with SSE in JSON mode when a
+    handler emits anything before its result, so an SSE body is unpacked
+    message by message.
+- **Concurrency.** Requests run concurrently and are matched by their own id.
+  `initialize` and notifications finish before the next line is read, so they
+  reach the server in the client's order. On EOF it waits for in-flight
+  answers, then exits 0.
+- **Not covered.** Per-connection identity on plain HTTP: the challenge and
+  later requests may use different TCP connections. This is the same exposure
+  the host's `verify_server` has, and it closes with TLS or with S2's trunk,
+  where the verified path is the connection.
+- Tests: `src/mcp_connect.rs` (14, against a fake transport verified by the
+  real `verify_identity`): `the_challenge_runs_before_the_key_is_sent`,
+  `an_impostor_is_identity_failed_and_never_sees_the_key`,
+  `a_tool_error_passes_through_untouched`,
+  `a_transport_failure_is_one_error_never_resent_and_the_next_call_reconnects`,
+  `notifications_write_nothing`, `concurrent_requests_are_answered_by_id`,
+  `eof_exits_after_the_answers_in_flight`, the header, batch, SSE, refusal
+  and key-source tests. `src/transport.rs` (5): identity pass and fail cases,
+  and a refused connection being `server_offline`. `tests/mcp_connect.rs` (5,
+  the real binary over real HTTP to an in-process fake): no key argument, a
+  `--key-file` key sent only after the challenge, an impostor never seeing
+  the key, a server that is down, and a missing key sending nothing.
+  `tests/mcp_connect_live.py` (12 checks, a real storm-server on 18870–18879):
+  `initialize`, `tools/list`, `list_vaults`, a `get_vault` round trip, a tool
+  error, a 2026-07-28 call through the header checks, a batch, a wrong pinned
+  key, and a bad key. It is run by hand for now; S4 wires the live suite into
+  `make test-live`.
+*Revisit if:* `/mcp` becomes stateful or starts streaming (the line-per-POST
+model breaks); rmcp accepts batches; or a client needs server-initiated
+requests (elicitation), which a stateless `/mcp` cannot carry back.
+*105c addendum (2026-10-14):* a pinned key is base64url, which starts with
+`-` one key in 64, and clap read `--pk -9…` as an unknown flag — CI's random
+server key hit it. `--pk` now takes hyphen-led values
+(`a_pinned_key_that_starts_with_a_hyphen_is_a_value_not_a_flag`, which fails
+without it).
 
 **105d. mcp-connect's live acceptance runs in `make test-live`
 (mcp-connect S4).** *(2026-10-13, decision 105's fourth slice.)* The adapter

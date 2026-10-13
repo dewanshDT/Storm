@@ -88,6 +88,14 @@ class SrpStream {
     if (!_events.isClosed) _events.close();
   }
 
+  /// Called by [SrpTrunk] when the relay refuses this open (§5.1).
+  void refuse(String code, String? message) {
+    if (!_ready.isCompleted) {
+      _ready.completeError(SrpOpenRefused(code, message));
+    }
+    finish();
+  }
+
   bool get isFinal => _final;
 }
 
@@ -367,8 +375,15 @@ class SrpTrunk {
     final streamId = frame.body['stream_id'];
     final code = (frame.body['code'] as String?) ?? 'unknown';
     final message = frame.body['message'] as String?;
+    final attemptId = frame.body['attempt_id'];
+    if (streamId is! int && attemptId is String) {
+      // A refused open names its attempt and leaves the trunk up (§5.1).
+      _pendingOpens.remove(attemptId)?.refuse(code, message);
+      return;
+    }
     if (streamId is! int) {
-      // A trunk-scoped error is fatal.
+      // A trunk-scoped error is fatal. A relay that predates decision 106
+      // refuses an open this way too, and the trunk cannot tell which.
       _relayErrorCode = code;
       _fail('relay_error');
       return;
@@ -383,10 +398,11 @@ class SrpTrunk {
 
   /// Opens one stream (sends `OPEN_STREAM`, waits for `STREAM_READY`).
   ///
-  /// A refusal (`ERROR{rate_limited}`) surfaces by timing out [openTimeout]
-  /// and completing the returned stream's `finish()` — §5.1 refuses immediately
-  /// rather than queueing, so a caller that discovers the in-flight cap this
-  /// way has already turned a queueing problem into an error.
+  /// A refusal (`ERROR{rate_limited, attempt_id}`) throws [SrpOpenRefused] and
+  /// leaves the trunk up — §5.1 refuses immediately rather than queueing, so a
+  /// caller that discovers the in-flight cap this way has already turned a
+  /// queueing problem into an error. A relay that answers nothing within
+  /// [openTimeout] fails the open with [SrpStreamAborted].
   Future<SrpStream> openStream() async {
     // The trunk only comes alive on first use: `StormConnection` hands a
     // wrapped client to the app before any request is queued, so dialling here
@@ -563,4 +579,15 @@ class SrpHandshakeFailed implements Exception {
 /// The task that asked for a stream is gone before the open completed.
 class SrpStreamAborted implements Exception {
   const SrpStreamAborted();
+}
+
+/// The relay refused one `OPEN_STREAM` (§5.1) — `rate_limited` today. Only
+/// that request failed; the trunk is still up.
+class SrpOpenRefused implements Exception {
+  const SrpOpenRefused(this.code, [this.message]);
+  final String code;
+  final String? message;
+
+  @override
+  String toString() => 'SrpOpenRefused($code)';
 }

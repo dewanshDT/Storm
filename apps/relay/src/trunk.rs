@@ -10,12 +10,13 @@
 //! The two send methods are not interchangeable and the difference is the whole
 //! reason this file exists — see [`Tx::try_send_json`].
 
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt, stream::SplitStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::proto::{self, ErrorCode, Frame};
 
@@ -35,6 +36,10 @@ pub type Rx = SplitStream<WebSocket>;
 /// only as the channel's capacity.
 pub const SERVER_WARD_QUEUE: usize = 64;
 pub const CLIENT_WARD_QUEUE: usize = 256;
+
+/// Room for stream-ending `ERROR`s that overtake the ordinary queue (see
+/// [`Tx::end_stream`]). Overflowing it drops the whole trunk.
+const STREAM_END_QUEUE: usize = 256;
 
 /// Bytes queued toward one peer and not yet written to its socket.
 ///
@@ -103,9 +108,8 @@ impl From<ErrorCode> for Fault {
     }
 }
 
-/// The peer could not keep up. Never widened into an error code: which peer is
-/// too slow is the relay's business, and §6 has no honest code for it beyond
-/// `rate_limited`.
+/// The peer could not keep up. The caller ends the stream it was for with
+/// `client_backlogged`, told only to the client that fell behind.
 #[derive(Debug, Clone, Copy)]
 pub struct Backlogged;
 
@@ -114,6 +118,50 @@ pub struct Backlogged;
 pub struct Tx {
     inner: mpsc::Sender<Message>,
     budget: Arc<Budget>,
+    ends: Arc<StreamEnds>,
+}
+
+/// The lane that ends one stream on a peer whose ordinary queue may be full.
+///
+/// A stream that loses its client to backpressure has to say so (§5.4), and
+/// the frame that says it cannot wait behind the backlog that caused it. So it
+/// bypasses the queue: the writer takes these first and discards the ended
+/// stream's queued body frames, while every other stream's frames go on in
+/// order.
+#[derive(Debug)]
+struct StreamEnds {
+    lane: mpsc::Sender<Message>,
+    /// Streams whose queued `0x01`/`0x02` frames the writer drops.
+    ended: Mutex<HashSet<u32>>,
+    /// Set when even `lane` is full: the writer and reader stop, and the peer
+    /// learns from the closed socket that every stream on it is gone.
+    killed: watch::Sender<bool>,
+}
+
+impl StreamEnds {
+    fn new(lane: mpsc::Sender<Message>) -> Self {
+        Self {
+            lane,
+            ended: Mutex::new(HashSet::new()),
+            killed: watch::Sender::new(false),
+        }
+    }
+
+    fn discards(&self, message: &Message) -> bool {
+        let Message::Binary(bytes) = message else {
+            return false;
+        };
+        let Ok((_, stream_id)) = proto::parse_body_header(bytes) else {
+            return false;
+        };
+        self.ended.lock().expect("ended mutex").contains(&stream_id)
+    }
+
+    /// Safe once the queue is empty: nothing queued before an end is left, and
+    /// nothing is queued after one, since the stream has left the routing table.
+    fn forget_ended(&self) {
+        self.ended.lock().expect("ended mutex").clear();
+    }
 }
 
 impl Tx {
@@ -169,6 +217,40 @@ impl Tx {
         })
     }
 
+    /// Ends `stream_id` with `error_json`, a stream-scoped `ERROR`, even when
+    /// this peer's queue is full.
+    ///
+    /// The `ERROR` overtakes what is queued, and the stream's queued body
+    /// frames are discarded. Only ever an `ERROR`: a `CLOSE` overtaking the
+    /// body it ends would present a truncated body as complete.
+    pub fn end_stream(&self, stream_id: u32, error_json: String) {
+        self.ends
+            .ended
+            .lock()
+            .expect("ended mutex")
+            .insert(stream_id);
+        if self
+            .ends
+            .lane
+            .try_send(Message::Text(error_json.into()))
+            .is_err()
+        {
+            self.kill();
+        }
+    }
+
+    /// Drops the connection without queueing anything, for a peer too far
+    /// behind to be told even through [`Tx::end_stream`].
+    pub fn kill(&self) {
+        self.ends.killed.send_replace(true);
+    }
+
+    /// Resolves once [`Tx::kill`] has been called.
+    pub async fn killed(&self) {
+        let mut killed = self.ends.killed.subscribe();
+        let _ = killed.wait_for(|killed| *killed).await;
+    }
+
     /// Best-effort close. Used on teardown paths where there is nothing useful
     /// to do about a peer that is already gone.
     pub fn close(&self) {
@@ -189,7 +271,16 @@ impl Tx {
             queued: AtomicUsize::new(0),
             limit,
         });
-        (Self { inner: tx, budget }, rx)
+        let (lane, _) = mpsc::channel(STREAM_END_QUEUE);
+        let ends = Arc::new(StreamEnds::new(lane));
+        (
+            Self {
+                inner: tx,
+                budget,
+                ends,
+            },
+            rx,
+        )
     }
 }
 
@@ -205,15 +296,44 @@ impl Tx {
 pub fn split(socket: WebSocket, queue: usize, byte_limit: usize) -> (Rx, Tx) {
     let (mut sink, stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(queue);
+    let (lane, mut lane_rx) = mpsc::channel::<Message>(STREAM_END_QUEUE);
     let budget = Arc::new(Budget {
         queued: AtomicUsize::new(0),
         limit: byte_limit,
     });
+    let ends = Arc::new(StreamEnds::new(lane));
     let writer_budget = budget.clone();
+    let writer_ends = ends.clone();
+    let mut killed = ends.killed.subscribe();
     tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            let len = cost(&message);
-            let sent = sink.send(message).await;
+        loop {
+            // `Ok(_)`: a dropped sender is not a kill, and must not cut off the
+            // `ERROR` and `Close` an ordinary teardown queued last.
+            let (message, queued) = tokio::select! {
+                biased;
+                Ok(_) = killed.wait_for(|killed| *killed) => return,
+                Some(message) = lane_rx.recv() => (message, false),
+                message = rx.recv() => match message {
+                    Some(message) => (message, true),
+                    None => break,
+                },
+            };
+            let len = if queued { cost(&message) } else { 0 };
+            if queued {
+                let discard = writer_ends.discards(&message);
+                if rx.is_empty() {
+                    writer_ends.forget_ended();
+                }
+                if discard {
+                    writer_budget.refund(len);
+                    continue;
+                }
+            }
+            let sent = tokio::select! {
+                biased;
+                Ok(_) = killed.wait_for(|killed| *killed) => return,
+                sent = sink.send(message) => sent,
+            };
             // Refunded after the write, not on dequeue: until the socket has
             // taken the frame, the relay is still holding its bytes.
             writer_budget.refund(len);
@@ -223,7 +343,14 @@ pub fn split(socket: WebSocket, queue: usize, byte_limit: usize) -> (Rx, Tx) {
         }
         let _ = sink.close().await;
     });
-    (stream, Tx { inner: tx, budget })
+    (
+        stream,
+        Tx {
+            inner: tx,
+            budget,
+            ends,
+        },
+    )
 }
 
 /// One frame, classified.
@@ -318,6 +445,45 @@ mod tests {
         // Channel full: refused, and the 10 bytes must not be charged.
         assert!(tx.try_send_raw(vec![0; 10]).is_err());
         assert_eq!(tx.budget.queued.load(Ordering::Acquire), 10);
+    }
+
+    #[tokio::test]
+    async fn a_stream_end_that_finds_no_room_drops_the_trunk() {
+        // Overflowing the lane must not lose the end silently, which is the
+        // hang this lane exists to prevent.
+        let (inner, _rx) = mpsc::channel(1);
+        let (lane, _lane_rx) = mpsc::channel(1);
+        let tx = Tx {
+            inner,
+            budget: Arc::new(Budget {
+                queued: AtomicUsize::new(0),
+                limit: usize::MAX,
+            }),
+            ends: Arc::new(StreamEnds::new(lane)),
+        };
+        tx.end_stream(1, "{}".into());
+        assert!(!*tx.ends.killed.borrow());
+        tx.end_stream(2, "{}".into());
+        tokio::time::timeout(std::time::Duration::from_secs(1), tx.killed())
+            .await
+            .expect("an overflowing stream end did not drop the trunk");
+    }
+
+    #[test]
+    fn only_an_ended_streams_body_frames_are_discarded() {
+        let (lane, _lane_rx) = mpsc::channel(1);
+        let ends = StreamEnds::new(lane);
+        ends.ended.lock().unwrap().insert(7);
+        let body = |id: u32| {
+            let mut frame = vec![proto::BODY_RESPONSE];
+            frame.extend_from_slice(&id.to_be_bytes());
+            Message::Binary(frame.into())
+        };
+        assert!(ends.discards(&body(7)));
+        assert!(!ends.discards(&body(8)));
+        assert!(!ends.discards(&Message::Text(r#"{"stream_id":7}"#.into())));
+        ends.forget_ended();
+        assert!(!ends.discards(&body(7)));
     }
 
     #[test]
