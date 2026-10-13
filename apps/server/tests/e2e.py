@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = "http://127.0.0.1:8484"
+BASE = os.environ.get("STORM_BASE", "http://127.0.0.1:8484")
 # **No shared token.** The cutover removed it, so this suite now signs in the
 # way a real client does — pair a device from the boot nonce, create the first
 # account, log in — via the one helper every suite shares.

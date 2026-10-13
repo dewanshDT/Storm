@@ -6021,6 +6021,44 @@ relay TODO §4; stacked on 93, which put the relays in the QR)*
   the fake relay, `/v1/pair` completes and comes after the challenge; and
   `probeRelay` tells `server_unreachable` from no answer.
 
+**98. Body frames are bounded; the live suites take a port and drive a real
+relay further.** *(2026-10-12, relay completion loop.)*
+- **Defect: one large download cut every relayed client off the server.**
+  `serve_one` sent each handler chunk as one `0x02` frame, and an attachment
+  is one chunk. Measured through a real `storm-relay`: up to 15 MiB crossed
+  fine; at 17 MiB the relay refused the frame (the WebSocket 16 MiB default)
+  by closing the **server's trunk**, so every relayed client lost the server
+  until it re-registered (~5–6 s later). The server now splits a response
+  into frames of at most `proto::MAX_BODY_FRAME_PAYLOAD` (256 KiB).
+- **SRP §5.2 gains "Body frame size":** every sender MUST keep a frame under
+  16 MiB and SHOULD split at 256 KiB, so streams on one trunk interleave.
+- **Open — the Dart client's uploads.** `SrpHttpClient` sends a request body
+  as one `0x01` frame, so an upload over 16 MiB closes that client's trunk
+  (measured at 17 and 24 MiB). The fix is splitting in
+  `srp_http_client.dart` at 256 KiB; left to the Dart trunk work (decision
+  97) that owns the file. A skipped live test names it.
+- **Decision 95's 32-chunk request queue holds for a chunking sender.** A
+  15 MiB attachment sent as 60 back-to-back 256 KiB frames to the real
+  attachment route lands whole
+  (`a_chunked_upload_sent_back_to_back_lands_whole`), so splitting the Dart
+  client's uploads will not trip it on that route.
+- **Live suites take a port.** `e2e.py` reads `STORM_BASE`, and
+  `live_server_test.dart` / `two_client_sync_test.dart` read the
+  `STORM_BASE` dart-define; `make test-live PORT=… AUTH_PORT=… RELAY_PORT=…`
+  now runs every suite off the defaults, so two checkouts can run it at once.
+- **`relay_live_test.dart` against the real relay** now also covers the SSE
+  change feed (a LAN edit reaches a relayed client), a multi-MB note, a
+  12 MiB attachment round-trip, a 20 MiB download that leaves the server
+  registered, and MCP `initialize` + `create_note` with an `stk_` key.
+- §10's pubkey items were already covered in `apps/relay/tests/registration.rs`:
+  `a_signature_by_the_wrong_key_is_auth_failed`,
+  `tofu_binds_the_first_key_and_refuses_a_different_one_for_ever`,
+  `a_tofu_binding_survives_a_relay_restart`,
+  `an_allowlist_refuses_a_mismatched_key_and_an_unlisted_id_on_first_sight`.
+- Tests: `a_response_larger_than_a_websocket_frame_crosses_in_bounded_frames`
+  (fails on the old code: the fake relay's 16 MiB limit drops the trunk),
+  `a_chunked_upload_sent_back_to_back_lands_whole`.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

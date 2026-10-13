@@ -28,7 +28,11 @@ import 'live_auth.dart';
 /// The vault under test is whichever one the server reports first, so this
 /// runs against whatever the harness seeded.
 void main() {
-  const baseUrl = 'http://127.0.0.1:8484';
+  const baseUrl = String.fromEnvironment(
+    'STORM_BASE',
+    defaultValue: 'http://127.0.0.1:8484',
+  );
+  final port = Uri.parse(baseUrl).port;
   // Obtained by pairing and signing in — there is no shared token.
   late String token;
 
@@ -40,12 +44,12 @@ void main() {
     try {
       final socket = await Socket.connect(
         '127.0.0.1',
-        8484,
+        port,
         timeout: const Duration(seconds: 2),
       );
       socket.destroy();
     } catch (_) {
-      fail('No server on 127.0.0.1:8484 — start storm-server first.');
+      fail('No server on 127.0.0.1:$port — start storm-server first.');
     }
 
     // **The harness claims the server once and passes the session in.** The
