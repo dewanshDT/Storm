@@ -6307,6 +6307,11 @@ open item; S1 is 105a, S2 105b)*
 *Revisit if:* `/mcp` becomes stateful or starts streaming (the line-per-POST
 model breaks); rmcp accepts batches; or a client needs server-initiated
 requests (elicitation), which a stateless `/mcp` cannot carry back.
+*105c addendum (2026-10-14):* a pinned key is base64url, which starts with
+`-` one key in 64, and clap read `--pk -9…` as an unknown flag — CI's random
+server key hit it. `--pk` now takes hyphen-led values
+(`a_pinned_key_that_starts_with_a_hyphen_is_a_value_not_a_flag`, which fails
+without it).
 
 **105a. storm-runtime gains an SRP v1 client (mcp-connect S1).**
 *(2026-10-13, decision 105's first slice; vault *MCP over the Relay —
