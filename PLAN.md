@@ -6429,6 +6429,299 @@ suite is now 92 cases. 30 serial runs passed before and after the change.
 Under load (four suites in parallel per tree, 32 runs each), the old code
 failed 6/32 and 4/32 on the CI error and the new code 0/32.
 
+**105a. storm-runtime gains an SRP v1 client (mcp-connect S1).**
+*(2026-10-13, decision 105's first slice; vault *MCP over the Relay —
+mcp-connect*.)* `mcp-connect` must reach a server through a relay, and §11's
+Runtime Hosts behind a relay will need the same thing, so the client half of
+SRP now exists in Rust: `apps/runtime/src/srp/` (`codec.rs`, `trunk.rs`,
+`error.rs`). A port of the Dart `SrpTrunk`, with nothing new on the wire.
+- **The codec is a copy, not a dependency** (R6): it is the fourth
+  re-derivation, beside `apps/server/src/relay/proto.rs`, `apps/relay` and
+  `srp_codec.dart`. `tests/srp_vectors.rs` reads `docs/srp-vectors.json`.
+  A client never signs relay-auth, so the test covers the `server_id` rule it
+  dials with and the client challenge (message, signatures, key parsing) that
+  S2 will check the race winner with. `validate_server_id` is reused from
+  `identity.rs`, which `runtime-vectors.json` already pins.
+- **API.** `SrpTrunk::connect(relay_url, server_id)` / `connect_with(..,
+  TrunkConfig)` dials `<relay>/connect/<server_id>` with `TCP_NODELAY` (91)
+  and completes `HELLO`/`READY` inside 8 s, which outlasts the relay's 5 s
+  hold (97). `ws://` is refused unless the host is loopback.
+  `trunk.request(method, path_and_query, headers, body: Bytes)` does
+  `OPEN_STREAM` → `STREAM_READY`, the head (headers as an object, never a
+  `relay_peer_ip`), the body in frames of at most 256 KiB (100), then always
+  one empty end-of-body frame, a `GET` included (92). It returns an
+  `SrpResponse { status, headers, body: SrpBody }` once the head arrives.
+- **The body streams.** `SrpBody` is a `Stream` of chunks, with
+  `chunk()`/`collect()`. It ends cleanly only on the origin's plain `CLOSE`.
+  `ERROR{stream_aborted}`, the raw `CLOSE{aborted: true}`, any other
+  stream-scoped `ERROR` or a lost trunk is an `Err`, never a short body (101).
+  Streaming rather than a collected `Vec` because §11 needs SSE. Each
+  stream's channel is unbounded, so the trunk's one reader never waits on a
+  slow consumer and one stream cannot stall the others. Dropping a body early
+  sends `CLOSE{stream_id}`. Uploads are bounded by a 64-frame outbound queue.
+- **Liveness** follows 97: `PING` every 15 s; with nothing heard for 45 s
+  the trunk dies as `relay_silent`. Every stream still open, or still
+  waiting for `STREAM_READY`, ends with `trunk_lost`. There is no
+  open timeout: the relay answers `OPEN_STREAM` at once, so a relay that
+  does not answer is caught by the heartbeat.
+- **A `rate_limited` open no longer kills the trunk** (97's "Not changed").
+  The relay refuses an over-cap `OPEN_STREAM` with a *trunk-scoped* `ERROR`
+  that names no attempt (`connect.rs`), and keeps the trunk. It answers
+  opens in order, so the client keeps pending opens in wire order (a lock
+  spans the queue push and the send) and fails the oldest one.
+- **`SrpError::code()`** is stable, because it surfaces as
+  `error.data.storm_error`. The codes are `server_offline`
+  (`server_unreachable` at `HELLO`), `relay_down`, `relay_silent`,
+  `handshake_timeout`, `trunk_lost`, `trunk_superseded`, `stream_aborted`,
+  `server_timeout`, `rate_limited`, `stream_closed`, `protocol_error`,
+  `trunk_closed` (closed by this side), `invalid_relay_target`, and
+  `relay_error` for a code this build does not know.
+- Tests: `tests/srp_trunk.rs` runs 18 cases against a Rust fake relay that
+  answers a request only when its end-of-body frame arrives. The fake has
+  no timers; heartbeat timings are injected. The cases: end of body on every
+  request, `GET` included; 16 MiB + 12 345 bytes in ≤ 256 KiB frames,
+  byte-exact both ways; an aborted response, as `ERROR` and as the raw flag,
+  failing only its own stream; a silent relay, which is `relay_silent`, with
+  both a pre-head and a mid-body stream `trunk_lost`; `server_unreachable`
+  as `server_offline`; eight interleaved streams without cross-talk; a
+  `rate_limited` open that the trunk survives; the server's trunk lost;
+  an early drop sending `CLOSE`; `close()`. There are also 10 unit tests and
+  7 vector tests. Mutations were checked: dropping the end-of-body frame
+  hangs 11 tests, and treating an abort as a clean end fails 1–3.
+  `tests/srp_live.rs` (ignored) passed against a real `storm-relay` and
+  storm-server on 18860/18861: `/v1/server`, a `POST` identity challenge
+  verified, 16 concurrent `GET`s, and an unregistered id as `server_offline`.
+*Revisit if:* SRP gains per-stream flow control (67), which would bound the
+per-stream body buffer by window; or the relay starts naming the refused
+attempt in its `rate_limited` reply, which would replace the FIFO inference.
+
+**105b. mcp-connect races the address and the relays, and proves the winner
+(mcp-connect S2).** *(2026-10-13, decision 105's second slice; vault *MCP over
+the Relay — mcp-connect*.)* S3's `Connector` now has a real implementation
+behind it: `src/race.rs` (`RaceConnector`, returning a `RaceTransport` enum of
+`Direct | Srp`) and `transport::SrpTransport` over S1's `SrpTrunk`.
+`--relay` is used, and `--addr` is optional once a relay is given (neither is
+refused at startup).
+- **The race copies `storm_connection.dart`** (SRP §2):
+  1. The address and every self-hosted relay race together. A public relay
+     is tried only once **all** of those have failed, so a fast public relay
+     never beats a slow self-hosted one. The app also starts the public round
+     after a 2 s timer; this does not, because the adapter has no UI to keep
+     responsive and the timer is exactly how a public relay would beat a
+     slow self-hosted one. Each candidate gets 20 s to connect and prove
+     itself (`server_silent` after), which bounds the wait.
+  2. A candidate wins only once `verify_identity` passes **over its own
+     path**: the challenge is the first thing on a new trunk, so the trunk
+     that proved the key is the one that carries it (this closes 105c's open
+     item for relayed paths). An impostor on one path is one failed
+     candidate; another path can still win.
+  3. The losers are dropped as soon as one wins, which closes their trunks.
+  4. When nothing wins, the code is the most telling failure:
+     `identity_failed` (something answered and could not prove the key) >
+     `server_offline` (a relay is up without the server, or the address
+     refused) > the rest (`relay_down`, `unreachable`, `rate_limited`, …),
+     the earliest candidate breaking a tie. The detail lists every
+     candidate's failure.
+- **Public or self-hosted.** There is no marker on the wire: `/v1/server`'s
+  relay entries are `{url, public_address}` only. The app decides by host —
+  `publicRelayHosts`, the hosts of relays Storm runs, which is empty in
+  production because no Storm relay exists yet — and treats everything else
+  as the operator's, which is the safe direction to err. The adapter does
+  the same with `race::PUBLIC_RELAY_HOSTS`, also empty. When a Storm relay
+  ships, its host goes in both lists.
+- **The relay set refreshes (Q11).** After a win, `GET /v1/server` over the
+  winner (no key; it is the `none` tier) gives the **registered** relays,
+  which replace that `server_id`'s entry in a small JSON file, a mirror and
+  not a merge, since the server is its only writer. The next connect races
+  the flags ∪ the cache, flags first; the flags are only the seed. The file
+  is `mcp-connect-relays.json` in `platform::user_state_dir()`
+  (`$XDG_STATE_HOME/storm`, `~/Library/Application Support/Storm`,
+  `%LOCALAPPDATA%\Storm`), private, written beside and renamed. A failed
+  refresh changes nothing.
+- **`SrpTransport`** collects the body, maps `SrpError::code()` straight onto
+  `TransportError.code`, and sends `Host: localhost`. storm-server's dispatch
+  replaces a relayed `Host` with its bind address anyway (`relay/dispatch.rs`),
+  so what the client sends is never what rmcp checks. `localhost` is chosen
+  because it is on every `mcp::allowed_hosts` list, so a server that did not
+  rewrite would still accept it. Verified against a real server bound to
+  `127.0.0.1`, where `allowed_hosts` is enforced (105d).
+- **An idle limit on relayed requests.** No bytes for 120 s, the direct
+  path's `read_timeout`, is `server_silent`, never resent. A relay before
+  decision 106 drops a backlogged client's stream (`drop_backlogged_client`,
+  105a's finding) and tells the client nothing, so without this a call could
+  hang for ever; against a 106 relay it is a backstop.
+- **Decision 106's two client signals, in the Rust client.**
+  `ERROR{rate_limited, attempt_id}` with no `stream_id` fails the pending
+  open whose `attempt_id` matches (an id no longer pending is ignored) and
+  keeps the trunk; without `attempt_id` (an older relay) the oldest pending
+  open is failed, as 105a did. `ERROR{client_backlogged, stream_id}` is
+  `SrpError::ClientBacklogged`, code `client_backlogged`: a body error like
+  `stream_aborted`, never a clean end, and it reaches `storm_error` as
+  itself. Tests in `tests/srp_trunk.rs`: a relay that holds the first open,
+  refuses the second by id and then readies the first (the FIFO rule would
+  fail the wrong one), and a `client_backlogged` after a partial body that
+  fails only its own stream.
+- **A dead trunk is replaced before the next request.** `Transport` gained
+  `is_closed()` (default `false`; a trunk's `is_closed` for SRP). The adapter
+  reconnects on a closed transport, so a trunk that died while idle costs no
+  request. A trunk that dies mid-call is still that call's one error
+  (`trunk_lost`), never resent, and the next request re-races.
+- Tests: `src/race.rs` (11): the public round under a paused clock (a timer
+  would fire during the test's virtual 30 s), public only after every other
+  candidate failed, an impostor not stopping another path, the error ranking,
+  losers dropped, the candidate deadline, the tier rule, and the cache.
+  `tests/mcp_race.rs` (10, the adapter over real trunks to fake relays and
+  real HTTP to fake servers, all answering on events): an impostor at the
+  address and one behind a relay, each never seeing the key while the other
+  path wins; an impostor everywhere is `identity_failed`; a fast public relay
+  losing to a slow self-hosted one; the public relay used only after the
+  address and the self-hosted relay fail; `server_offline` vs `relay_down`
+  and the two together; a trunk lost mid-call; an idle relayed call; the
+  cache written and then used with no flags; one `Host`, `localhost`, on
+  every relayed head. `tests/mcp_connect.rs` gained the no-path refusal and
+  points the binary's state at a temporary directory.
+*Revisit if:* a Storm-run public relay ships (fill both host lists, or add a
+marker to `/v1/server`'s relay entries); every relay in use has decision 106
+(the FIFO fallback for an unnamed `rate_limited` can go); or SRP gains E2E,
+which would change what "public" costs.
+
+**105c. `storm-runtime mcp-connect`: external MCP clients over stdio
+(mcp-connect S3).** *(2026-10-13, operator design of 2026-10-13; answers 95's
+open item; S1 is 105a, S2 105b)*
+- **What.** Claude Code, Cursor and Claude Desktop start `storm-runtime
+  mcp-connect --server srv_… --pk <b64url> --addr http://… [--relay wss://…]…`
+  as a stdio MCP server, with the `stk_` key in `STORM_MCP_KEY` or
+  `--key-file`. Each line it reads is one `POST /mcp`, and the answer is
+  written back as a line. It is meant for the LAN too, so one config works at
+  home and away, and it adds the server-identity check the plain HTTP config
+  never had. `src/transport.rs` holds a `Transport` (one `HttpRequest` in, one
+  `HttpResponse` or a `TransportError { code, detail }` out), a `Connector`
+  that returns a transport **only after `verify_identity` has passed over that
+  same transport**, and the direct implementations. `src/mcp_connect.rs` is
+  the adapter. S2 adds an `SrpTransport` and a connector that races the direct
+  address and the relays, verifying the winner. Until then `--relay` is parsed,
+  logged once as unused, and `--addr` is required.
+- **Why stdio is this simple.** `/mcp` is stateless (`with_legacy_session_mode
+  (false)`) and answers plain JSON (`with_json_response(true)`), so there is no
+  session to keep and nothing to resume.
+- **Rules.**
+  1. Nothing is sent before the challenge passes, the key included. An
+     impostor is `identity_failed`, never "offline": once a path carried an
+     answer, any failure to prove the pinned key (a 404, a wrong body, another
+     `server_id`, a bad signature) is identity.
+  2. A failed request is one JSON-RPC error (`-32001`, `data.storm_error`
+     naming the hop) and is never resent. The direct path reports
+     `server_offline` (connection refused), `unreachable` (no route, DNS, a
+     connect timeout), `server_silent` (120 s with nothing read) and
+     `stream_aborted` (failed after sending). A non-JSON-RPC HTTP answer is
+     `unauthorized` / `forbidden` / `mcp_unavailable` / `rate_limited` /
+     `http_error`, with `data.status`.
+  3. A failed transport is forgotten, so the **next** request reconnects and
+     re-verifies, with a fresh HTTP client and no pooled connection. Nothing
+     migrates mid-call.
+  4. The key never goes on argv: clap has no key flag, and a test reads
+     `--help` for one. The key is never logged, and neither is a body. Logs go
+     to stderr only.
+  5. It holds no authority: it sends the client's key, and the server decides.
+- **What rmcp 3.1.2 actually does**, measured against a real server:
+  - **No batches.** A JSON array is a 415 (`did not match any variant of
+    untagged enum JsonRpcMessage`), so the adapter splits a batch into one
+    `POST` per message and writes the answers back as one array.
+  - **A notification** gets 202 with an empty body, and nothing is written.
+  - **A stdio client sends no HTTP headers, so the adapter supplies them.**
+    `MCP-Protocol-Version` is the version `initialize`'s result negotiated, or
+    the request's own `_meta` `io.modelcontextprotocol/protocolVersion` when
+    present. rmcp refuses a `_meta` version with no header. `initialize`
+    itself is sent without the header, since rmcp refuses a header that
+    disagrees with its body. From 2026-07-28 rmcp also requires SEP-2243's
+    `Mcp-Method` and `Mcp-Name` (`-32020 missing required Mcp-Method
+    header`). The adapter always sends both, base64-wrapped (`=?base64?…?=`)
+    when the value cannot travel bare. `Mcp-Param-*` is not sent: Storm's
+    tools declare no `x-mcp-header`.
+  - **`Accept` must name both** `application/json` and `text/event-stream`,
+    or the answer is 406. rmcp may still answer with SSE in JSON mode when a
+    handler emits anything before its result, so an SSE body is unpacked
+    message by message.
+- **Concurrency.** Requests run concurrently and are matched by their own id.
+  `initialize` and notifications finish before the next line is read, so they
+  reach the server in the client's order. On EOF it waits for in-flight
+  answers, then exits 0.
+- **Not covered.** Per-connection identity on plain HTTP: the challenge and
+  later requests may use different TCP connections. This is the same exposure
+  the host's `verify_server` has, and it closes with TLS or with S2's trunk,
+  where the verified path is the connection.
+- Tests: `src/mcp_connect.rs` (14, against a fake transport verified by the
+  real `verify_identity`): `the_challenge_runs_before_the_key_is_sent`,
+  `an_impostor_is_identity_failed_and_never_sees_the_key`,
+  `a_tool_error_passes_through_untouched`,
+  `a_transport_failure_is_one_error_never_resent_and_the_next_call_reconnects`,
+  `notifications_write_nothing`, `concurrent_requests_are_answered_by_id`,
+  `eof_exits_after_the_answers_in_flight`, the header, batch, SSE, refusal
+  and key-source tests. `src/transport.rs` (5): identity pass and fail cases,
+  and a refused connection being `server_offline`. `tests/mcp_connect.rs` (5,
+  the real binary over real HTTP to an in-process fake): no key argument, a
+  `--key-file` key sent only after the challenge, an impostor never seeing
+  the key, a server that is down, and a missing key sending nothing.
+  `tests/mcp_connect_live.py` (12 checks, a real storm-server on 18870–18879):
+  `initialize`, `tools/list`, `list_vaults`, a `get_vault` round trip, a tool
+  error, a 2026-07-28 call through the header checks, a batch, a wrong pinned
+  key, and a bad key. It is run by hand for now; S4 wires the live suite into
+  `make test-live`.
+*Revisit if:* `/mcp` becomes stateful or starts streaming (the line-per-POST
+model breaks); rmcp accepts batches; or a client needs server-initiated
+requests (elicitation), which a stateless `/mcp` cannot carry back.
+*105c addendum (2026-10-14):* a pinned key is base64url, which starts with
+`-` one key in 64, and clap read `--pk -9…` as an unknown flag — CI's random
+server key hit it. `--pk` now takes hyphen-led values
+(`a_pinned_key_that_starts_with_a_hyphen_is_a_value_not_a_flag`, which fails
+without it).
+
+**105d. mcp-connect's live acceptance runs in `make test-live`
+(mcp-connect S4).** *(2026-10-13, decision 105's fourth slice.)* The adapter
+is now proven against the real server and the real relay on every live run,
+by the same checks that prove `/mcp` itself.
+- **The MCP suite runs three times.** `apps/server/tests/mcp_e2e.py` gained an
+  adapter mode: with `MCP_CONNECT_BIN` set, every `/mcp` call goes over stdio
+  to one long-lived `storm-runtime mcp-connect` (`MCP_CONNECT_ADDR`,
+  `MCP_CONNECT_RELAY` pick the route) instead of HTTP, and an HTTP refusal
+  comes back as `data.status`, which the harness turns back into the status
+  each check already expects. A call with another key gets a one-shot
+  adapter; the one call with no key at all stays on HTTP, since the adapter
+  cannot send none. REST fixtures stay on `STORM_BASE`, which makes them the
+  concurrent LAN side. `make test-live` runs it over HTTP (86), through the
+  adapter direct (89: the 86 plus a clean exit, every call on the expected
+  route, and no key in the log), and through the real `storm-relay` with
+  `--addr` a closed port (89). Driving the existing suite rather than a copy
+  is the point: a check added to it later is an adapter check too.
+- **Re-runnable against one server.** A run through the adapter names its
+  fixtures for the run (`MCP/Tornado-direct.md`, `demo/run-relay.spec.ts`)
+  and starts by setting `/mcp` read-only, since an earlier run ends
+  read-write. The HTTP run is unchanged.
+- **`tests/mcp_connect_live.py` is in `make test-live`** (39 checks, its own
+  servers and relays on 18870–18879). Its server binds `127.0.0.1`, not a
+  wildcard, so rmcp's `allowed_hosts` is enforced and a relayed call proves
+  the `Host` is accepted. S3's suite runs direct and relayed. Then: a relay
+  alone; the registered relay set cached under `XDG_STATE_HOME`; a dead seed
+  relay still connecting through the cached ones; a `base_version` diff3
+  merge over the relay against a concurrent LAN edit (`merged: true`, both
+  edits kept, and the LAN reads the merge); an impostor storm-server at
+  `--addr` losing to the relay, which proves the real one; an impostor alone,
+  and an impostor beside a dead relay, both `identity_failed`; a relay
+  without the server `server_offline`; no relay `relay_down`.
+- **The relay's per-IP `HELLO` limit shapes the harness.** A relay allows one
+  address 10 `HELLO`s a minute (token bucket), and every mcp-connect process
+  that tries a relay spends one, losers included. A harness spawning a
+  process per check ran out (`rate_limited`) in its first draft. So
+  `mcp_connect_live.py` runs two relays and gives each connect a fresh state
+  directory unless the check is about the cache, since a cached set of two
+  relays dials both. A real MCP client runs one process for its session and
+  is far from the limit.
+- **No server or relay defect found.** `make test-live PORT=18880
+  AUTH_PORT=18881 RELAY_PORT=18887` and `make check` green.
+*Revisit if:* the relay's `HELLO` limit becomes configurable (one relay would
+do), or `/mcp` becomes stateful (one long-lived adapter per suite would then
+also be testing session reuse).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

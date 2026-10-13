@@ -90,6 +90,13 @@ pub fn default_path() -> Option<std::ffi::OsString> {
     os::default_path()
 }
 
+/// Where a tool a person runs (not the service) keeps its own state, such
+/// as `mcp-connect`'s relay cache. Linux: XDG state. macOS: Application
+/// Support. Windows: `%LOCALAPPDATA%`. `None` without a home.
+pub fn user_state_dir() -> Option<std::path::PathBuf> {
+    os::user_state_dir()
+}
+
 /// Locations no workspace root may be in or contain, whatever
 /// `runtime.toml` says (AM39). macOS: every person's home (and with it
 /// `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive), removable and

@@ -19,6 +19,15 @@ pub fn default_path() -> Option<std::ffi::OsString> {
     None
 }
 
+/// `$XDG_STATE_HOME/storm`, else `~/.local/state/storm`.
+pub fn user_state_dir() -> Option<std::path::PathBuf> {
+    let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
+    var("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| var("HOME").map(|h| std::path::Path::new(&h).join(".local/state")))
+        .map(|d| d.join("storm"))
+}
+
 const USE_THE_PACKAGE: &str = "on Linux the storm-runtime package installs and removes the \
 service: `sudo apt install storm-runtime` / `sudo apt remove storm-runtime` \
 (deploy/README.md, Runtime Hosts)";
