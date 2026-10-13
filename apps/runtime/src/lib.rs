@@ -46,6 +46,12 @@
 //!   daemon socket's line format. The host forwards; it never authorizes.
 //! - [`bridge`]: `storm-runtime mcp-bridge`, the agent's stdio MCP server.
 //!
+//! ## mcp-connect (decision 105)
+//!
+//! - [`transport`]: one HTTP exchange with the server over a verified path.
+//! - [`mcp_connect`]: `storm-runtime mcp-connect`, an external MCP client's
+//!   stdio server for the server's own `/mcp`.
+//!
 //! ## macOS (D14, decision 83)
 //!
 //! - [`platform`]: everything that differs between Linux and macOS — paths,
@@ -61,6 +67,7 @@ pub mod harness;
 pub mod host;
 pub mod identity;
 pub mod mcp;
+pub mod mcp_connect;
 pub mod platform;
 pub mod provider;
 mod pty;
@@ -68,3 +75,4 @@ pub mod scrollback;
 pub mod serve;
 pub mod status;
 pub mod terminal;
+pub mod transport;

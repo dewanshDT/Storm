@@ -47,6 +47,13 @@ struct Nonce {
     nonce: String,
 }
 
+/// A fresh nonce for the server's identity challenge.
+pub fn challenge_nonce() -> String {
+    let mut raw = [0u8; 24];
+    rand::rng().fill_bytes(&mut raw);
+    BASE64URL_NOPAD.encode(&raw)
+}
+
 /// A host token, minted by proving the key.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HostToken {
@@ -84,9 +91,7 @@ impl ServerClient {
 
     /// Proves the server holds the pinned key. Called before anything else.
     pub async fn verify_server(&self) -> Result<()> {
-        let mut raw = [0u8; 24];
-        rand::rng().fill_bytes(&mut raw);
-        let nonce = BASE64URL_NOPAD.encode(&raw);
+        let nonce = challenge_nonce();
         let answer: ChallengeAnswer = self
             .http
             .post(format!("{}/v1/server/challenge", self.base))
