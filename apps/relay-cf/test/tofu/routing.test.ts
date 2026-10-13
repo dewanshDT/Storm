@@ -348,6 +348,19 @@ describe("trunk loss", () => {
     await client(serverId);
   });
 
+  // The attachment's copy of last-seen is written at most once a second; the
+  // deadline must still count from the newest frame, or a trunk whose frames
+  // are under a second apart is dropped as silent.
+  it("counts the deadline from a server's newest frame, not its last written one", async () => {
+    const { serverId, server } = await pair();
+    for (let i = 0; i < 2; i++) {
+      await sleep(900);
+      server.send({ v: 1, type: "STREAM_ACK", stream_id: 999 });
+    }
+    expect(await server.silentFor(300)).toBe(true);
+    await client(serverId);
+  });
+
   it("drops a silent server at the deadline and tells its clients", async () => {
     const { client: c, server } = await pair();
     const streamId = await openStream(c);
