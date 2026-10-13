@@ -55,6 +55,33 @@ enum Command {
         /// The connection's slug.
         slug: String,
     },
+    /// An external MCP client's stdio server for a Storm Server's `/mcp`
+    /// (Claude Code, Cursor, Claude Desktop start it). Verifies the server's
+    /// identity before sending anything.
+    ///
+    /// The key is read from STORM_MCP_KEY or --key-file, **never an
+    /// argument**: arguments are visible to every user in `ps`.
+    McpConnect {
+        /// The server's id (`srv_…`), as the app shows it.
+        #[arg(long)]
+        server: String,
+        /// The server's public key, unpadded base64url, as the app shows it.
+        // base64url starts with `-` one key in 64; clap would read it as a flag.
+        #[arg(long, allow_hyphen_values = true)]
+        pk: String,
+        /// The server's own address, e.g. `http://192.168.1.10:8484`.
+        /// Optional when a --relay is given.
+        #[arg(long)]
+        addr: Option<String>,
+        /// A relay that reaches the server (`wss://…`). Repeatable. Only a
+        /// seed: the server's current relays are learned on each connect
+        /// and cached.
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// A file holding the `stk_` key, instead of STORM_MCP_KEY.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Tells the host which conversation the agent is on, so Storm can
     /// resume it. Run by the agent's own hook or plugin, never by hand; reads
     /// the id from stdin (a Claude Code hook's input) when none is given.
@@ -102,6 +129,30 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         // Logs nothing: stdout is the MCP stream, and stderr is the agent's.
         Command::McpBridge { slug } => storm_runtime::bridge::run(slug).await,
+        Command::McpConnect {
+            server,
+            pk,
+            addr,
+            relays,
+            key_file,
+        } => {
+            // stderr only: stdout is the MCP stream.
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "info".into()),
+                )
+                .init();
+            storm_runtime::mcp_connect::run(storm_runtime::mcp_connect::Options {
+                server,
+                pk,
+                addr,
+                relays,
+                key_file,
+            })
+            .await
+        }
         Command::HarnessSession { id } => {
             storm_runtime::harness::report(id);
             Ok(())

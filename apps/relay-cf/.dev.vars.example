@@ -1,0 +1,30 @@
+# Copy to .dev.vars for `wrangler dev`; it is gitignored. In production the
+# allowlist is a secret: `wrangler secret put STORM_RELAY_ALLOWLIST`.
+
+# allowlist (the default, and the only mode for a public relay) or tofu.
+STORM_RELAY_BINDING=allowlist
+
+# storm-relay's allowlist format: <server_id> <pubkey> per line, # comments.
+# The pubkey is the server's GET /v1/server public_key (base64url, unpadded).
+STORM_RELAY_ALLOWLIST="
+srv_01ARZ3NDEKTSV4RRFFQ69G5FAV A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg  # example: the vectors' test key
+"
+
+# What REGISTERED's public_address starts with. Unset: derived from the
+# request, ws:// for http and wss:// for https.
+# STORM_RELAY_PUBLIC_BASE=wss://relay.example
+
+# Timers (ms) and limits; production defaults shown.
+# STORM_RELAY_CHALLENGE_TTL_MS=30000
+# STORM_RELAY_HANDSHAKE_TIMEOUT_MS=30000
+# STORM_RELAY_HELLO_WAIT_MS=5000
+# STORM_RELAY_STREAM_ACK_TIMEOUT_MS=5000
+# STORM_RELAY_HEARTBEAT_DEADLINE_MS=45000
+# STORM_RELAY_SUPERSESSION_DRAIN_MS=30000
+# STORM_RELAY_HELLO_RATE_LIMIT=10
+# STORM_RELAY_HELLO_RATE_WINDOW_MS=60000
+# STORM_RELAY_MAX_IN_FLIGHT_STREAMS=20
+# STORM_RELAY_MAX_TOTAL_STREAMS=1000
+# STORM_RELAY_MAX_CLIENT_BUFFER_BYTES=33554432
+# STORM_RELAY_MAX_SERVER_BUFFER_BYTES=33554432
+# STORM_RELAY_MAX_ROOM_BUFFER_BYTES=67108864

@@ -74,6 +74,13 @@ pub fn default_path() -> Option<OsString> {
     Some(winsvc::path_for_home(&home, &machine).into())
 }
 
+/// `%LOCALAPPDATA%\Storm`.
+pub fn user_state_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|d| !d.is_empty())
+        .map(|d| std::path::Path::new(&d).join("Storm"))
+}
+
 /// `HKLM\…\Session Manager\Environment\Path`, expanded.
 fn machine_path() -> Option<String> {
     let key = wide(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");

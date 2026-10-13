@@ -11,6 +11,8 @@
 SERVER := apps/server
 RELAY  := apps/relay
 CONFORMANCE := tools/relay-conformance
+
+RELAY_CF := apps/relay-cf
 RUNTIME := apps/runtime
 CLIENT := apps/client
 WWW    := apps/www
@@ -69,7 +71,7 @@ lint:
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-runtime test-client
+test: test-server test-relay test-relay-cf test-runtime test-client
 
 ## test-server: Rust unit tests
 test-server:
@@ -101,6 +103,13 @@ relay-conformance-local:
 	@cd $(RELAY) && cargo build --release --quiet
 	@cd $(CONFORMANCE) && cargo build --release --quiet
 	bash $(CONFORMANCE)/local.sh "$$PWD/$(RELAY)/target/release/storm-relay"
+
+## test-relay-cf: the Cloudflare relay's typecheck + workerd tests (needs Node 22)
+#
+# Decision 108b. `npm ci` from the committed lockfile, then tsc and the vitest
+# suite, which runs inside workerd and reads docs/srp-vectors.json.
+test-relay-cf:
+	cd $(RELAY_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
 
 ## test-runtime: storm-runtime unit + provider-contract tests
 #
@@ -240,6 +249,23 @@ test-live:
 		-H 'Content-Type: application/json' \
 		-d '{"relays":["ws://127.0.0.1:$(RELAY_PORT)"]}' \
 		http://127.0.0.1:$(PORT)/v1/config/relays; \
+	echo "--- mcp e2e through mcp-connect, direct (decision 105d) ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) VAULT_ROOT="$$ROOT/.dev/live-vaults" \
+	MCP_CONNECT_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_CONNECT_ADDR=http://127.0.0.1:$(PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- mcp e2e through mcp-connect and the real relay, the address unreachable ---"; \
+	CLOSED=$$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'); \
+	STORM_BASE=http://127.0.0.1:$(PORT) VAULT_ROOT="$$ROOT/.dev/live-vaults" \
+	MCP_CONNECT_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_CONNECT_ADDR=http://127.0.0.1:$$CLOSED \
+	MCP_CONNECT_RELAY=ws://127.0.0.1:$(RELAY_PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- mcp-connect live: relay cache, LAN merge over the relay, impostors (own servers, 18870-18879) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 "$$ROOT/$(RUNTIME)/tests/mcp_connect_live.py"; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
 		--dart-define=STORM_SESSION="$$STORM_SESSION" \
@@ -447,7 +473,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-client test-live test-browser test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-relay-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check
