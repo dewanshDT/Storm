@@ -9,6 +9,9 @@ import sitemap from "@astrojs/sitemap";
 // og:image in BaseLayout are all derived from it.
 export default defineConfig({
   output: "static",
+  // Astro 7's compression drops the line break between a word and an inline
+  // element on the next line, so "Then\n<a>" rendered as "Then<a>" sitewide.
+  compressHTML: false,
   site: "https://storm.dewansh.space",
   integrations: [sitemap()],
 });

@@ -18,17 +18,28 @@ Bump `tag` when cutting a release. UI: `GetStorm.astro`.
 ## Meta
 
 - **Title:** Install · Storm
-- **Description:** Install storm-server from the apt repository on Debian or Ubuntu, then download clients from GitHub Releases.
+- **Description:** Install Storm on Linux, macOS or Windows with the interactive installer, then pair your devices and download the apps.
 
 ## Page hero
 
-**Eyebrow:** 07 · Installation
+**Eyebrow:** 08 · Installation
 
 **Heading:** Install Storm
 
-## Linux · apt · Update · Start · Custom paths
+## Linux and macOS · Windows · Update · Start by hand · Custom paths
 
-Unchanged operator steps (bootstrap → `storm-server up` → custom roots).
+- **Linux and macOS:** the interactive installer, `curl -fsSL
+  https://dewanshdt.github.io/Storm/install.sh | sh` (`release.installCommand`).
+- **Windows** (`/install#windows`, decision 99): `irm
+  https://dewanshdt.github.io/Storm/install.ps1 | iex`
+  (`release.windowsInstallCommand`) — server, Runtime Host, or both; server
+  at logon with notes in `%USERPROFILE%\Storm`, the host as the
+  `StormRuntime` service. Not code-signed: SmartScreen may warn.
+- **Update:** re-run the installer, `… | sh -s -- upgrade`
+  (`release.installerUpgradeCommand`); the apt commands below stay for a
+  server installed by hand.
+- **Start the server by hand:** `curl … | sudo sh` (apt repo + storm-server
+  only) → `storm-server up` → custom roots.
 Web client default: `http://<host>:8484` (from `deploy/storm.env.example`).
 
 **There is no token.** `storm.env` stopped carrying one at the A10 cutover
@@ -39,23 +50,27 @@ download rows.
 ## First login
 
 Site section: `/install#first-login`. Source of truth: `deploy/README.md`
-(User accounts) and `apps/server/README.md`.
+(The account) and `apps/server/README.md`.
 
-The first account on a server is always an **owner**. Three ways in, in the
-order the page presents them:
+Storm is single-user (decision 82): one account, with a password set when the
+first device pairs. More devices, MCP keys and Runtime Hosts are added from a
+signed-in client, under Settings. Three ways in, in the order the page presents
+them:
 
 1. **Browser** — open `http://<host>:8484` on the same network. The served page
-   bootstraps its own device against the server that served it, then asks for
-   the first account.
+   bootstraps its own device against the server that served it, then asks you
+   to set your Storm's password.
 2. **macOS / Android app** — `sudo -u storm storm-server pair --state
    /srv/storm/state --qr` on the host prints a single-use pairing URI and QR.
-   `pair` refuses once any account exists; after that a new device is added from
-   a client that is already signed in.
-3. **On the host** — `user add` / `user list` / `passwd`, the recovery path.
+   `pair` refuses once the account exists; after that a new device is added
+   with Settings › Devices & access › Add a device on a signed-in client.
+3. **On the host** — `storm-server passwd --state /srv/storm/state`, the
+   recovery path for a forgotten password (it creates the account on a server
+   that has none).
    **Run as `storm`, not root**: `auth.db` is created on first use, and a
    root-owned database is one the service cannot write.
 
-### Update (apt already registered)
+### Update by hand (apt already registered)
 
 No `storm-server upgrade` — refresh through apt, then restart:
 
@@ -93,10 +108,12 @@ other platforms.
 
 ## MCP
 
-Off by default; enable from Server → AI access, or `PUT /v1/config/mcp`. Write
-tools need writable mode. An MCP client authenticates with an **MCP key**
-(`stk_…`) minted in the app — shown once, revocable, accepted on `/mcp` and
-nowhere else (A14). Twelve tools; list in `apps/server/README.md`.
+Off by default; enable from Settings › AI access, or `PUT /v1/config/mcp`.
+Write tools need *Let them create, edit and delete*. An MCP client
+authenticates with an **MCP key** (`stk_…`) minted under Settings › Devices &
+access — shown once, revocable, accepted on `/mcp` and nowhere else (A14). The
+tool list is on `/#mcp`, checked against `apps/server/src/mcp.rs` by `make
+www-check`.
 
 ## Related
 

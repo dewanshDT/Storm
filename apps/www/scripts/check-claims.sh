@@ -5,6 +5,8 @@
 # 1. The download links point at the newest tag.
 # 2. No page still describes the shared token, which stopped existing at the
 #    A10 cutover (M19).
+# 3. No page describes more than one account (decision 82).
+# 4. The MCP tools on the home page are the ones the server has.
 #
 # The second one is why this file exists. `apps/www` kept telling people to
 # copy a token out of `storm.env` for thirteen days after the token was deleted,
@@ -52,5 +54,39 @@ if hits=$(grep -rniE "$stale" src ../../docs/www 2>/dev/null); then
 	status=1
 fi
 
-[ "$status" -eq 0 ] && echo "check-claims: ok ($site_tag, no stale credential copy)"
+# --- 3. accounts that stopped existing --------------------------------------
+# Storm became single-user in decision 82 and `storm-server user` went with it.
+# The site went on telling people to run `user add` for three releases. The
+# root README is in scope: it is the first page most people read.
+accounts='storm-server user |user add|user list|is (always )?an owner|add more (accounts|from the app)|more accounts|several devices is the default'
+if hits=$(grep -rniE "$accounts" src ../../docs/www ../../README.md 2>/dev/null); then
+	echo "check-claims: a page still describes more than one account" >&2
+	echo "$hits" | sed 's/^/  /' >&2
+	echo "  Storm is single-user (decision 82): one account, \`storm-server passwd\` to reset it." >&2
+	status=1
+fi
+
+# --- 4. the MCP tools the home page names ------------------------------------
+# A typed list went stale at twelve while the server grew to seventeen. Every
+# #[tool] in mcp.rs must be on the page, and nothing that is not.
+mcp_rs=../server/src/mcp.rs
+server_tools=$(awk '/#\[tool\(/ { want = 1 } want && match($0, /async fn [a-z_]+/) { print substr($0, RSTART + 9, RLENGTH - 9); want = 0 }' "$mcp_rs" | sort)
+page_tools=$(awk '/^const mcp(Read|Write|Agent)Tools = \[/, /\];/' src/pages/index.astro | grep -oE '"[a-z_]+"' | tr -d '"' | sort)
+if [ -z "$server_tools" ]; then
+	echo "check-claims: found no #[tool] functions in $mcp_rs; the parser needs updating" >&2
+	status=1
+elif [ -z "$page_tools" ]; then
+	echo "check-claims: found no mcp{Read,Write,Agent}Tools lists in src/pages/index.astro" >&2
+	status=1
+elif [ "$server_tools" != "$page_tools" ]; then
+	echo "check-claims: the MCP tools on / do not match $mcp_rs" >&2
+	printf '%s\n' "$server_tools" >"${TMPDIR:-/tmp}/check-claims.server.$$"
+	printf '%s\n' "$page_tools" >"${TMPDIR:-/tmp}/check-claims.page.$$"
+	diff "${TMPDIR:-/tmp}/check-claims.server.$$" "${TMPDIR:-/tmp}/check-claims.page.$$" | grep '^[<>]' |
+		sed 's/^</  missing from the page:/; s/^>/  not a tool:/' >&2
+	rm -f "${TMPDIR:-/tmp}/check-claims.server.$$" "${TMPDIR:-/tmp}/check-claims.page.$$"
+	status=1
+fi
+
+[ "$status" -eq 0 ] && echo "check-claims: ok ($site_tag, no stale credential, account or tool copy)"
 exit "$status"

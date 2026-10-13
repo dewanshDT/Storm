@@ -6,7 +6,9 @@ import { release } from "../data/release";
 
 const bootstrap = release.installCommand;
 
-const mcpTools = [
+// Every tool in apps/server/src/mcp.rs. `make www-check` compares this list
+// with that file, so a tool added there fails CI until it is named here.
+const mcpReadTools = [
   "list_vaults",
   "get_vault",
   "search",
@@ -16,13 +18,21 @@ const mcpTools = [
   "recent_notes",
   "get_note_history",
   "get_note_version",
+  "list_scripts",
+  "get_script",
+];
+const mcpWriteTools = [
   "create_note",
   "update_note",
   "delete_note",
+  "create_script",
+  "update_script",
 ];
+const mcpAgentTools = ["session_context"];
+const mcpTools = [...mcpReadTools, ...mcpWriteTools];
 
 const description =
-  "Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients and MCP access for AI agents.";
+  "Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients, MCP access for AI agents, and coding agents that run on your own machines.";
 ---
 
 <BaseLayout title="Storm — Self-hosted knowledge" description={description}>
@@ -38,7 +48,8 @@ const description =
       </h1>
       <p class="lede">
         Storm is a self-hosted, Markdown-native knowledge system with
-        cross-platform clients and first-class access for AI agents through MCP.
+        cross-platform clients, first-class access for AI agents through MCP,
+        and coding agents that run on your own machines.
       </p>
       <div class="cta">
         <a class="btn btn-primary" href="/install">Install Storm</a>
@@ -49,8 +60,9 @@ const description =
       <div class="hero-install">
         <CodeBlock code={bootstrap} label="install" />
         <p class="install-note">
-          Debian / Ubuntu apt bootstrap (from the apt repo). Then
-          <code>sudo storm-server up</code>.
+          An interactive installer for Linux (Debian/Ubuntu) and macOS: the
+          server, the app, a Runtime Host, or everything.
+          <a href="/install#windows">Windows</a> ·
           <a href="/install">Full installation →</a>
         </p>
       </div>
@@ -60,6 +72,7 @@ const description =
         <span role="listitem">Flutter client</span>
         <span role="listitem">Markdown</span>
         <span role="listitem">MCP</span>
+        <span role="listitem">Agents</span>
         <span role="listitem">Self-hosted</span>
       </p>
     </div>
@@ -96,8 +109,8 @@ state/          ← indexes · registry · auth.db (never inside vaults)</code><
       <p class="support">
         Storm exposes your vault through MCP, allowing compatible AI agents to
         search, read, create, and modify knowledge while the underlying source
-        remains your Markdown vault. MCP is off by default; write tools require
-        writable mode.
+        remains your Markdown vault. MCP is off by default, and the write tools
+        need a second switch.
       </p>
       <p class="support">
         An agent authenticates with a key you mint in the app — shown once,
@@ -108,7 +121,7 @@ state/          ← indexes · registry · auth.db (never inside vaults)</code><
       <div class="mcp-stats">
         <div class="kv-chip">
           <span class="k">Tools</span>
-          <span class="v">12 when writable</span>
+          <span class="v">{mcpReadTools.length} read · {mcpWriteTools.length} write</span>
         </div>
         <div class="kv-chip">
           <span class="k">Protocol</span>
@@ -123,6 +136,11 @@ state/          ← indexes · registry · auth.db (never inside vaults)</code><
       <ul class="tool-list" aria-label="MCP tools">
         {mcpTools.map((name) => <li><code>{name}</code></li>)}
       </ul>
+      <p class="support">
+        Agents in a Storm session also get <code>{mcpAgentTools[0]}</code>,
+        which reads the note the session was started from. They never get
+        <code>delete_note</code>.
+      </p>
 
       <div class="mcp-demo" aria-label="Conceptual MCP interaction (static)">
         <p class="demo-label">Conceptual · not executed on this page</p>
@@ -152,15 +170,67 @@ state/          ← indexes · registry · auth.db (never inside vaults)</code><
     </div>
   </section>
 
-  <!-- 03 ARCHITECTURE -->
+  <!-- 03 AGENTS -->
+  <section class="section" id="agents" aria-labelledby="agents-h">
+    <div class="wrap">
+      <p class="section-label">03 · Agents</p>
+      <h2 id="agents-h">Run coding agents on your own machines.</h2>
+      <p class="support">
+        A Runtime Host runs Claude Code, OpenCode or a shell in a workspace on
+        a machine you choose — the server’s own box or another one. Start a
+        session from a note, then drive its terminal from any device, your
+        phone included. The agent reads your notes through Storm and writes
+        only to the vault you chose when you started it.
+      </p>
+      <p class="support">
+        Connect integrations such as Notion or Linear once, in the app. Storm
+        keeps their credentials on your server, encrypted, and an agent gets
+        only the tools you allow.
+      </p>
+      <div class="mcp-stats">
+        <div class="kv-chip">
+          <span class="k">Agents</span>
+          <span class="v">Claude Code · OpenCode · shell</span>
+        </div>
+        <div class="kv-chip">
+          <span class="k">Hosts</span>
+          <span class="v">Linux · macOS · Windows</span>
+        </div>
+        <div class="kv-chip">
+          <span class="k">Inbound ports</span>
+          <span class="v">none — the host dials out</span>
+        </div>
+      </div>
+      <div class="platform-row">
+        <div class="platform">
+          <span class="chip">From a note</span>
+          <p>Start a session with the note as its context.</p>
+        </div>
+        <div class="platform">
+          <span class="chip">Anywhere</span>
+          <p>
+            One terminal on every device. Paste images; resume an ended Claude
+            Code or OpenCode session.
+          </p>
+        </div>
+        <div class="platform">
+          <span class="chip">Back to notes</span>
+          <p>What the agent learns lands in your vault as Markdown.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 04 ARCHITECTURE -->
   <section class="section" id="architecture" aria-labelledby="arch-h">
     <div class="wrap">
-      <p class="section-label">03 · Architecture</p>
+      <p class="section-label">04 · Architecture</p>
       <h2 id="arch-h">One knowledge layer. Many interfaces.</h2>
       <p class="support">
         Flutter clients on macOS, Android, and web talk to a Rust sync server.
         The server owns merge, search, and history. AI applications reach the
-        same vault through MCP.
+        same vault through MCP, and Runtime Hosts dial out to the server to run
+        agents.
       </p>
 
       <div class="arch" aria-label="Architecture diagram">
@@ -178,15 +248,17 @@ state/          ← indexes · registry · auth.db (never inside vaults)</code><
         <div class="arch-mcp">
           <span class="arch-node arch-mcp-node">AI applications</span>
           <span class="arch-mcp-label">MCP</span>
+          <span class="arch-node arch-mcp-node">Runtime Hosts</span>
+          <span class="arch-mcp-label">dial out</span>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- 04 STORAGE -->
+  <!-- 05 STORAGE -->
   <section class="section" id="storage" aria-labelledby="storage-h">
     <div class="wrap">
-      <p class="section-label">04 · Storage</p>
+      <p class="section-label">05 · Storage</p>
       <h2 id="storage-h">Your knowledge is just files.</h2>
       <p class="support">
         Storm stores knowledge as Markdown rather than locking it inside a
@@ -215,10 +287,10 @@ Archive/</code></pre>
     </div>
   </section>
 
-  <!-- 05 CLIENTS -->
+  <!-- 06 CLIENTS -->
   <section class="section" id="client" aria-labelledby="client-h">
     <div class="wrap">
-      <p class="section-label">05 · Clients</p>
+      <p class="section-label">06 · Clients</p>
       <h2 id="client-h">One client across your devices.</h2>
       <p class="support">
         A single Flutter client provides the same Storm experience across
@@ -245,10 +317,10 @@ Archive/</code></pre>
     </div>
   </section>
 
-  <!-- 06 SYNC -->
+  <!-- 07 SYNC -->
   <section class="section" id="sync" aria-labelledby="sync-h">
     <div class="wrap">
-      <p class="section-label">06 · Synchronization</p>
+      <p class="section-label">07 · Synchronization</p>
       <h2 id="sync-h">Work wherever you are.</h2>
       <p class="support">
         The server owns the canonical vault. Clients keep a local cache and an
@@ -287,10 +359,10 @@ Archive/</code></pre>
     </div>
   </section>
 
-  <!-- 07 INSTALLATION -->
+  <!-- 08 INSTALLATION -->
   <section class="section" id="installation" aria-labelledby="install-h">
     <div class="wrap">
-      <p class="section-label">07 · Installation</p>
+      <p class="section-label">08 · Installation</p>
       <h2 id="install-h">Run it on your own machine.</h2>
       <p class="support">
         Install the server, then get a client for your device.
@@ -300,7 +372,7 @@ Archive/</code></pre>
           <span class="step-num mono">01</span>
           <div>
             <strong>Install the server</strong>
-            <p>Install storm-server on Debian or Ubuntu.</p>
+            <p>Run the installer on Linux, macOS or Windows.</p>
             <a href="/install">Install command →</a>
           </div>
         </li>
@@ -317,8 +389,8 @@ Archive/</code></pre>
           <div>
             <strong>Sign in</strong>
             <p>
-              Pair the device with your server and create the first account —
-              it is the owner. No shared password, no cloud account.
+              Pair the device with your server and set your Storm’s password.
+              One account, yours — no cloud account.
             </p>
             <a href="/install#first-login">First login →</a>
           </div>
@@ -328,8 +400,8 @@ Archive/</code></pre>
           <div>
             <strong>Update later</strong>
             <p>
-              Refresh the server through apt when a new release lands. Restart
-              so the new binary is listening.
+              Run the installer again when a new release lands. It upgrades
+              what it installed and keeps your notes.
             </p>
             <a href="/install#update">Update command →</a>
           </div>
@@ -338,10 +410,10 @@ Archive/</code></pre>
     </div>
   </section>
 
-  <!-- 08 DOCUMENTATION -->
+  <!-- 09 DOCUMENTATION -->
   <section class="section" id="docs" aria-labelledby="docs-h">
     <div class="wrap">
-      <p class="section-label">08 · Documentation</p>
+      <p class="section-label">09 · Documentation</p>
       <h2 id="docs-h">Depth lives next to the code.</h2>
       <p class="support">
         Storm does not ship a separate docs portal. Operator and architecture

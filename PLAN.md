@@ -52,7 +52,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M13 | MCP — read-only tools | **done** | 144 Rust tests · 33 MCP e2e checks · 9 tools, off by default |
 | M14 | The design system, applied | **done** | 522 Dart tests · tokens, chrome, every screen |
 | M15 | Releases, versioning, apt repo | **done** | v0.2.2 · apt Pages · VM on packaged install |
-| M16 | Marketing / home site (Astro) | **in progress** | SlowFlow redesign shipped in `apps/www` · post-M19 truth pass + `www-check` (65) · CF hostname still TBD |
+| M16 | Marketing / home site (Astro) | **done, closing into M27** | SlowFlow redesign · post-M19 truth pass (65) · v0.8.0 truth pass + account and MCP-tool gates in `www-check` (105) · CF hostname still TBD |
 | M17 | Markdown Read Mode | **in progress** | `flutter_markdown_plus` · Read default · Edit keeps source editor |
 | M18 | Desktop keyboard shortcuts | **done** | Intents/Actions · platform Meta/Ctrl · find + sidebar collapse |
 | M19 | Auth phase 1 — server identity, users | **done** | slices 1–16 + A14 MCP keys + **the A10 cutover** · `STORM_TOKEN` removed entirely · pairing, sessions and MCP keys are the only credentials · authorization is its own release |
@@ -63,6 +63,7 @@ non-negotiable — it's what makes the vault greppable, backupable, and escapabl
 | M24 | Interactive installer — one script for server, runtime, app and pairing | **done, released in v0.6.0** | decision 84 · spec + plan in the vault (*Installer/*) · #120 server commands, #121 macOS server (LaunchAgent), #122 release assets, #128 the script (111 bats tests, bash 3.2) + end-to-end CI (clean Ubuntu and macOS runners), #129 docs — **merged into `staging` 2026-10-10** · left: the operator's runs (a Mac runtime-only to prod; a laptop Everything) |
 | M25 | Session experience — agent-named sessions, logo rows, native image paste, terminal settings | **done, released in v0.7.0** | decision 85 · spec amendment D15 (AM42–AM47) in the vault, *Agent Runtime/Session Experience — D15*, approved 2026-10-10 · seven stacked slices 85a–85g (#123–#127, #130, #131) + Android 16 back (86, #134), **merged into `staging` 2026-10-11** · live-test races (86a, #137) · xterm2 vendored for Gboard images (87, #138) · real Claude Code run passed (85) · Mac first-run fixes (88) · Resume reopens the agent's own conversation (89, on `staging`) |
 | M26 | Windows — the Runtime Host as a Windows Service, and the server per user | **done, released in v0.8.0** | decision 99 · spec amendment D16 (AM48–AM57) in the vault, *Agent Runtime/Windows Runtime Host*, and *Installer/Windows Server* · stacked slices on `staging`: 99a carrier, platform and service (ConPTY, Job Objects, named pipe, Windows CI) · 99b the enroll sheet's Windows steps · 99c the server (Scheduled Task, `storm-serverw`, backup, filename rules) · 99d release zips, `install.ps1`, docs, Windows acceptance · **acceptance on `windows-latest` green** (AC-W1–W9 68/0/3, server 28/0, `install.ps1` end to end) · **merged into `staging` 2026-10-12** (#154 `fdff6fa`, #155 `54f0021`, #158 `1ef580e`, #160 `13ceb3e`) · left: a real Windows 11 round (a logged-in CLI, the phone handoff, a reboot, logoff/logon, a Notepad edit reaching the watcher) |
+| M27 | Website & docs v2 — `/docs` (Starlight, `docs/site/`), generated facts, new home | **planned** | decision 105 · plan in the vault, *Storm/Website/Website v2 — Plan* · slice 1, the truth pass, is 105 itself · next: the Cloudflare hostname (operator), then the foundation slice |
 
 **Release state (2026-10-12).** **v0.8.0 is being cut** (decision 72's
 steps; this sentence is the prep PR's), at the operator's request after #165
@@ -5731,6 +5732,54 @@ operator: agent pages give too much of the screen to the top bar)*
   - The back bubble in a session, and the place picker elsewhere.
 - The acceptance shots `phone-06` to `phone-09` are retaken.
 
+**105. The site is a consumer of every release: a truth pass for v0.8.0,
+three new content gates, and Website v2 planned.** *(2026-10-13; the
+operator: the site is so stale nobody remembers it)*
+- **What was wrong.** Since decision 65, `apps/www` only had its release tag
+  bumped. `/install` told people to run `storm-server user add` / `user list`,
+  which went away with single user (82). The site also described an "owner"
+  account, listed 12 MCP tools when there are 17, said Debian/Ubuntu was the
+  only server platform, and mentioned no agents or integrations. The root
+  README still said v0.3.1 and "add more accounts". `deploy/README.md` and
+  `apps/server/README.md` still described a shared token. `make www-check`
+  stayed green through all of it, because it only knew about the token.
+  **This is the decision-65 failure a second time.**
+- **The fix (this change).**
+  - `/install` now covers Windows (`install.ps1`). Updating means re-running
+    the installer, and apt is the by-hand path. First login describes one
+    account, adding devices under Settings › Devices & access, and `passwd`.
+  - `/` has an Agents section (Runtime Hosts, integrations), the full tool
+    list and the new install note.
+  - `/how-it-works` adds Runtime Hosts, `agent.db` and `gateway.db`.
+  - `docs/www/` is mirrored, and the four READMEs are corrected.
+- **Every sentence ran together with the next link or code span.** Astro 7's
+  `compressHTML` drops the line break between a word and an inline element
+  on the next line, so the live site read "Then<a>get a client</a>". It is
+  off in `astro.config.mjs`. The pages are small enough that the size does
+  not matter.
+- **`check-claims.sh` gains two gates.**
+  - **Accounts:** the post-82 phrasings (`user add`, `storm-server user`,
+    "is an owner", "more accounts"…) are refused in `src/`, `docs/www/` and
+    the root README.
+  - **MCP tools:** every `#[tool]` in `apps/server/src/mcp.rs` must appear in
+    the home page's `mcpReadTools` / `mcpWriteTools` / `mcpAgentTools`, and
+    nothing else may. A new tool fails CI until the site names it.
+  - Both were proven to fail: on `staging`'s old pages (six account hits, a
+    missing tool list), and against a `mcp.rs` with a dummy tool added.
+- **Website v2 (planned, not built).** Vault: *Storm/Website/Website v2 —
+  Plan*. The operator accepted its recommendations:
+  - Docs at `/docs` on Starlight, written as markdown in `docs/site/`. This
+    **reverses M16's "not a docs portal" non-goal.** The user-facing parts of
+    `deploy/README.md` are *moved* there, not copied.
+  - The relay stays off the site until the completion loop (91–102) ships.
+  - M16 closes and **M27 — Website & docs v2** opens. Dark mode on every
+    page.
+  - Generated facts (MCP tools, CLI help, release assets) with a CI drift
+    check. Gates 3 and 4 above are the first hand-written version of that.
+- *Revisit if:* the docs move to a separate host or framework, or the copy
+  moves back to the vault notes as its source. Either would bring back the
+  three-copy mirroring that let this happen.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
@@ -6670,7 +6719,7 @@ updates are apt (`apt install --only-upgrade storm-server` +
 
 ---
 
-### M16 — Marketing / home site (Astro) · in progress
+### M16 — Marketing / home site (Astro) · closing into M27
 
 Started 2026-08-11. Thin public front door — product story + install path —
 in `apps/www`. **Not** a documentation portal; depth stays on GitHub /
@@ -6725,7 +6774,14 @@ pre-cutover world for thirteen days after `STORM_TOKEN` was deleted. Fixed on
   restored verbatim. `apps/www/README.md` carries the warning.
 - **`make www-check`** — the content gate, in the `www` CI job.
 
-**Still open:**
+**The v0.8.0 truth pass (2026-10-13, decision 105).** The site had drifted
+again: `user add`, an "owner" account, 12 tools, Debian only, no agents.
+Fixed, with two new `www-check` gates (accounts, MCP tools from `mcp.rs`) and
+`compressHTML` off, because it was gluing every word to the next link. The
+redesign and the docs section are **M27**, which reverses this milestone's
+"not a docs portal" non-goal.
+
+**Still open (moves to M27):**
 
 - Optional: real running-app screenshot for the Client section (prototype PNGs
   stay design reference only — not shipped as product photos).

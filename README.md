@@ -18,7 +18,7 @@ Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 ┌──── clients (one Dart codebase) ────┐      ┌── AI agents ──┐
 │  macOS · Android · Web              │      │  MCP clients  │
 │  editor · cache · outbox · sync     │      └───────┬───────┘
-│  Notes | Agents (owner only)        │              │
+│  Notes | Agents | Integrations      │              │
 └──────┬───────────────────┬──────────┘              │
   REST + WebSocket     via storm-relay          MCP (/mcp)
   (LAN)                (optional, SRP v1)            │
@@ -109,16 +109,19 @@ and enables the service; the web client is served from the same port.
 
 ### Pair the first device
 
-There is no shared token. Accounts, per-device sessions and MCP keys are the
-only credentials. While the server has no users, `pair` prints a single-use
-pairing URI — `--qr` also draws it as a code for a phone to scan:
+There is no shared token. Storm is single-user: one account, with per-device
+sessions and MCP keys as the only credentials. While the server has no account,
+`pair` prints a single-use pairing URI — `--qr` also draws it as a code for a
+phone to scan:
 
 ```sh
 sudo -u storm storm-server pair --state /srv/storm/state --qr
 ```
 
-The first account is an owner; add more from the app or with `storm-server
-user`. Details: [`deploy/README.md`](deploy/README.md#user-accounts).
+You set the account's password on that first device. Add more devices from
+the app (Settings › Devices & access › Add a device); reset a forgotten
+password with `storm-server passwd`. Details:
+[`deploy/README.md`](deploy/README.md#the-account).
 
 ### Update
 
@@ -129,8 +132,7 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
-Current release: **v0.3.1**. Clients (macOS zip, Android APK,
-web UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
+Clients (macOS zip, Android APK, web UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
 [Clients page](https://storm.dewansh.space/clients).
 
 ### Runtime Hosts (optional)
@@ -220,15 +222,16 @@ into the same three-way merge the clients use. See
 
 ## Status
 
-M0–M15, M18 (desktop shortcuts) and M19 (auth phase 1 — server identity,
-accounts, pairing, sessions, MCP keys) are done; the shared token is gone.
-M20 (Agent Runtime V1 — runtime hosts, enrollment, agent sessions in a
-terminal) shipped decisions 77–78 in **v0.3.0** and the operator's first
-on-device fixes in **v0.3.1**; AM22, a host-owned terminal protocol, is
-drafted and awaiting approval. The relay is built, packaged and TLS-capable
-but still runs on the LAN only — a public VPS is next. M16 (marketing site,
-live at [storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown
-read mode) are in progress. Per-vault authorization is its own later release.
+M0–M15 and M18–M26 are done; the newest release is on
+[GitHub Releases](https://github.com/dewanshDT/Storm/releases/latest). That
+covers auth (pairing, sessions, MCP keys — the shared token is gone) and a
+single account (decision 82); the Agent Runtime, with Runtime Hosts on Linux,
+macOS and Windows and agent sessions in a terminal you can resume; Storm v2's
+activity rail; and the interactive installer. M21, the MCP Gateway, is
+released and has its last acceptance items open. The relay is packaged but
+not yet run in public. M16 (marketing site, live at
+[storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown read
+mode) are in progress.
 
 See [`PLAN.md`](PLAN.md) for milestone status, the decision log, and open
 items. License: [MIT](LICENSE).

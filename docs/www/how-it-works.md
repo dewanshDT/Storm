@@ -13,11 +13,11 @@ or second `PLAN.md`.
 ## Meta
 
 - **Title:** How it works · Storm
-- **Description:** Storm architecture: Flutter clients, a Rust sync server, plain Markdown vaults, and MCP for AI agents.
+- **Description:** Storm architecture: Flutter clients, a Rust sync server, plain Markdown vaults, Runtime Hosts for agents, and MCP.
 
 ## Page hero
 
-**Eyebrow:** 03 · Architecture
+**Eyebrow:** 04 · Architecture
 
 **Heading:** One knowledge layer. Many interfaces.
 
@@ -34,19 +34,23 @@ search, tags, attachments, and version history. Notes remain plain Markdown
 under a storage root you control. Compatible AI agents reach the same vault
 through MCP.
 
+Agents run on **Runtime Hosts** — `storm-runtime` on Linux, macOS or Windows,
+on the server's machine or another. A host dials out to the server, so it needs
+no inbound port, and it holds no notes: the agent reads and writes through the
+server like any other client. Integrations connected in the app are reached
+through the server too, which keeps their credentials.
+
 ```
-macOS · Android · Web
-          │  REST + WebSocket
-          ▼
-   storm-server (Rust / axum)
-          │
-   ┌──────┴──────┐
-   ▼             ▼
-vaults/*.md   state/
-plain md      indexes · registry · auth.db
-                     ▲
-                     │ MCP
-              AI applications
+macOS · Android · Web  AI applications
+       │ REST + WS        │ MCP
+       ▼                  ▼
+  storm-server (Rust / axum)  ◄──────  storm-runtime
+       │                     dials out Claude Code ·
+  ┌────┴─────┐                         OpenCode · shell
+  ▼          ▼
+vaults/    state/
+*.md       indexes · auth.db ·
+           agent.db · gateway.db
 ```
 
 ## Invariants that matter
@@ -60,10 +64,13 @@ plain md      indexes · registry · auth.db
 - **Conflicts stay in the file.** Markers in the note — not a hidden sibling.
 - **Offline is normal.** Creates and edits queue and replay. Search is
   server-side.
-- **Accounts are local and yours.** An owner account, per-device pairing,
-  sessions, and revocable MCP keys — all in `state/auth.db` on your server. No
-  cloud account, no third-party identity provider. One person with several
-  devices is the default, not the limit.
+- **One account, and it is yours.** Storm is single-user (decision 82): one
+  password, per-device pairing and sessions, and revocable MCP keys — all in
+  `state/auth.db` on your server. No cloud account, no third-party identity
+  provider.
+- **A Runtime Host is never an authority.** It runs agents and nothing else;
+  the server decides who may start a session, which vault an agent may write
+  to, and which integration tools it may call.
 
 Full invariant list for agents: [[Storm Invariants]].
 

@@ -35,8 +35,9 @@ sudo storm-server status
 root by `apt-repo.yml`. Manual key + `sources.list` steps are in
 [release-secrets.md](release-secrets.md) if you prefer not to pipe to shell.
 
-`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600, with a
-generated token), and `systemctl enable --now storm-server`. The web client
+`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600; it
+holds paths and the port, never a credential), and `systemctl enable --now
+storm-server`. The web client
 lives at `/usr/share/storm/web` and upgrades with the package.
 
 ## Updating (packaged)
@@ -796,10 +797,11 @@ the vault root), which must be refused.
 
 ## Security
 
-v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a
-home network and nowhere else. Before this is reachable from the internet it
-needs TLS and per-device tokens — see decision 4 in `PLAN.md`. Do not
-port-forward it as it stands.
+The server's own port is **plain HTTP**. Credentials are per device — pairing,
+sessions and MCP keys, in `state/auth.db` — but nothing on that port is
+encrypted, so keep it on the LAN and do not port-forward it. To reach it from
+outside, use the relay (*Relay (optional)* above), which terminates TLS
+itself.
 
 The unit runs as a dedicated `storm` user with `ProtectSystem=strict` and
 write access to `/srv/storm` only. That bounds where the storage root can go:
@@ -812,5 +814,7 @@ can read a note, an index or `state/auth.db`. Check it with
 `sudo -u nobody ls /srv/storm`, which must be refused. A vault root on a NAS
 keeps the modes the NAS assigns.
 
-One token covers the whole server and every vault on it. There is no per-vault
-access control — a second vault is organisation, not isolation.
+Storm is single-user (decision 82): the one account reaches every vault on
+the server. A second vault is organisation, not isolation. Agents are the
+exception — an agent session writes only to the vault chosen when it was
+started.
