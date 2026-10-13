@@ -5890,6 +5890,42 @@ closes the stream.** *(2026-10-12, relay TODO §5, stacked on 92)*
   `a_relayed_write_whose_stream_closes_before_its_body_ends_writes_nothing`,
   `a_body_that_outruns_its_handler_is_closed_not_truncated` (fails on the
   old code), `a_response_leaves_the_server_chunk_by_chunk`.
+- *Amended by 102:* the queue's bound was 32 **chunks**, which shed an
+  ordinary 20 MiB upload sent at line rate. The shed rule stands; the bound
+  is now bytes.
+
+**102. The tunnel buffers request bodies by bytes, not chunks.**
+*(2026-10-12, amends 95)*
+- **Why.** Measured through a real `storm-relay` once the Dart client split
+  uploads into 256 KiB frames (100): a 20 MiB attachment arrived as 80 frames
+  back to back, the attachment handler fell more than 32 chunks behind, and
+  95's shed rule closed the stream — `no_response_head` for an ordinary
+  upload. 95's bound counted chunks, so it measured how a client happened to
+  frame a body, not memory.
+- **Per stream: `STREAM_BODY_BUDGET` = `MAX_ATTACHMENT_BYTES` + 16 MiB.** The
+  sender is never slowed (awaiting in the trunk's read loop would stall every
+  other stream), so the buffer must hold a whole attachment arriving before
+  its handler reads; the extra 16 MiB is one maximal WebSocket frame crossing
+  the line. A larger body is the route's 413, not the tunnel's business.
+- **Per trunk: `TRUNK_BODY_BUDGET` = 2 × `MAX_ATTACHMENT_BYTES`** (128 MiB) —
+  two maximal attachments in flight at once. Without it the per-stream bound
+  times the relay's 1000-stream cap is no bound. The stream whose frame would
+  cross it is the one shed; the others are untouched.
+- **Shed is still abort with `CLOSE`, never end of body** (95's invariant).
+- **Accounting:** an unbounded channel per stream plus two counters. Only the
+  trunk's read loop adds; the body's reader subtracts what it reads, and its
+  drop (handler done, stream aborted, trunk gone) gives back what it never
+  read. A send to a dropped reader takes its bytes back with the same `swap`,
+  so they leave the trunk's count exactly once.
+- *Revisit if:* SRP gains per-stream flow control (67), which would let a
+  sender be slowed instead of buffered; or attachments grow past 64 MiB.
+- Tests: `a_large_upload_at_line_rate_reaches_a_slow_handler_whole` (fails on
+  95's code), `a_body_over_its_buffer_budget_is_closed_not_truncated` (95's
+  test, now past the byte budget), and in `client.rs`
+  `a_stream_is_refused_past_its_own_budget_not_truncated`,
+  `the_trunk_budget_sheds_only_the_stream_that_would_exceed_it`,
+  `read_bytes_free_the_budget_for_more`,
+  `an_abandoned_body_gives_its_bytes_back_to_the_trunk`.
 
 **97. The Dart trunk tells server offline from relay down, and drops a
 silent relay.** *(2026-10-12, two gaps found by decision 94's §9 work)*
