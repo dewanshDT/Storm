@@ -6087,6 +6087,56 @@ failed about 1 run in 4 on PRs that never touched the web client)*
   case needs to see a reload that opens a new context (a `target=_blank`
   form, say).
 
+**110. A disposed sync engine touches nothing, its socket is live when
+`start` returns, and the browser test clears tokens before the app runs.**
+*(2026-10-14; CI run 38474971682 on #162, and 38473240712 attempt 1 on #163)*
+- **a. The engine after `dispose` (product bug).** `two_client_sync_test`
+  failed after completion with `Bad state: Can't re-open a database after
+  closing it` from `CacheDb.removeNote` in `_applyChanges`, reached from the
+  WebSocket's debounce timer. `dispose` already cancelled the timers and the
+  subscriptions; what it could not stop was a pull *already in flight*: the
+  response to `GET /v1/sync` arrived after the engine was disposed and its
+  cache closed, and `_applyChanges` wrote to it. In the app that is sign-out,
+  a server switch or a vault switch with a change message in flight.
+  `_drainOutbox`, `_pull` and `_applyChanges` now stop at their next await
+  once the engine is disposed; `_setOnline`, `start`, `_refreshPending` and
+  the `changes` stream do nothing after it; `sync` swallows an error only if
+  it is disposed, for a cache query already in flight when the cache closed;
+  and an SSE response that lands after `dispose` is cancelled, not
+  subscribed.
+- **b. The socket was not live when `start` returned (product gap).** Looping
+  the live test showed a second failure: *B should have been pushed A's
+  change* (21 of 30 runs on a loaded machine, 9 of 10 on a quieter one). The
+  engine opened the WebSocket without waiting for the handshake, so A's save
+  could land before B's server-side subscription and the frame was never
+  sent. `_openWebSocket` now awaits `channel.ready`. The server subscribes
+  before answering the upgrade, so after that no change is missed. SSE
+  already waited for its response head. The app never awaits `start`, so
+  nothing in the UI waits on the handshake.
+- **c. "A paired browser signs in again" (test bug).** The app went straight
+  to `/v/<id>/browse` because the tokens were still in `localStorage`. The
+  test removed them from the *running* app as soon as it reached `/notes`,
+  but the app was still settling: `VaultGate` then saved the vault it landed
+  on, and `Settings.save` writes every field, tokens included, from memory.
+  A probe showed both tokens back within 300 ms of the removal. A real
+  expired session does not race the app's own writes, and the relay changes
+  (#149, #153, #156) are not involved. The test now clears the two keys in a
+  preload script, which runs in the new page before the app does. (Clearing
+  them from the JSON page at `/v1/health` did not work: Firefox's JSON viewer
+  has its own storage.)
+- **Tests.** `sync_engine_test` *disposed mid-sync*: a `/v1/sync` answered
+  after dispose and a note fetch answered after dispose both fail on the old
+  engine with the CI's exact error and pass now. A change frame scheduled
+  just before dispose sends no request. `FakeServer.syncGate`/`noteGate` hold
+  those requests open. Live: `two_client_sync_test` against a local server,
+  30 runs, 0 failures (it was 21 of 30 before). Browser: `make test-browser`
+  on Firefox 158, 3 at a time. Before: 3 of 30 runs failed, each on this
+  case at `/v/<id>/browse`. After: 0 of 45.
+- *Revisit if:* the engine gains another async path that touches the cache
+  (it needs the same `_disposed` checks), `Settings.save` stops writing the
+  credentials on every save, or the browser test needs a sign-out that
+  happens inside the app.
+
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was
 established with a test first, then fixed where wrong.
