@@ -6206,6 +6206,56 @@ Two relay→client signals were missing, and each left a client guessing.
 slow reader before its queue fills, and `client_backlogged` would become rare
 rather than the only bound.
 
+**108a. A black-box conformance suite is what makes a relay an SRP v1 relay.**
+*(2026-10-13, hosted relay phase 5 step 1; vault *Hosted Relay — Cloudflare*.)*
+storm-relay's tests start it in process and read its tables, so they prove
+storm-relay and nothing else. A second relay (the Worker, 108b) needs a
+contract it can be held to without sharing a line of code.
+`tools/relay-conformance` is a standalone crate that knows a relay only by its
+URL: it plays the origin and the clients over WebSockets, and reports each of
+its 54 checks under the `docs/srp-v1.md` section it enforces, so a failure
+reads as a spec violation. It reads `docs/srp-vectors.json` for the invalid
+`server_id`s and key spellings.
+- **The fixture contract** (committed first, for 108b): 48 fixed identities
+  (`fixtures/servers.json`, seeds derived and checked against
+  `gen-fixtures`), the allowlist a relay loads, and `fixtures/relay.env` — the
+  shortened timers and limits, named as storm-relay's `STORM_RELAY_*`
+  environment. A relay under test runs in allowlist mode at `RELAY_URL`;
+  `RELAY_TOFU_URL`, optional, runs without one.
+- **storm-relay gains runtime knobs** for all ten (challenge TTL, `HELLO`
+  wait, ack timeout, heartbeat deadline, drain, `HELLO` limit and window,
+  in-flight and total caps, client buffer), defaulted to the `config`
+  constants. It had none: every one was a constant only an in-process test
+  could change.
+- **Black-box vs storm-relay-only.** The suite covers every MUST observable on
+  the wire. What needs internals or a restart stays in `apps/relay/tests`:
+  pinned nonce sources (a spent nonce never resurrected), TOFU persistence
+  across a restart, `registrations`/`tracked_count` assertions, the budget's
+  refund, TLS, the vectors as functions, and storm-relay's own choices the
+  spec does not make (path/`HELLO` mismatch, head shape, non-boolean
+  `aborted`). The README lists them, and the readings the suite takes where
+  the spec is implicit (per-client in-flight cap, `stream_closed` for a
+  foreign id with the trunk kept, a held `HELLO` and drain of at least 80 %).
+- **Two of its own first readings were wrong, and the spec was right:** a
+  stream-ending `ERROR` may overtake the frames queued for its stream (§5.4
+  rule 2), so `stream_aborted` can precede the partial body, and storm-relay
+  then still delivers a queued head after it (discarding is a SHOULD; it
+  drops only body frames). The checks accept both.
+- `make relay-conformance RELAY_URL=…` runs it against any relay;
+  `make relay-conformance-local` starts storm-relay twice (allowlist on 18900,
+  TOFU on 18901), runs it with the latency check (decision 91) and, on Linux,
+  the `127.0.0.2` per-address checks, and stops them. CI runs it in the
+  `relay` job. `make check` lints and unit-tests the crate.
+- Tests: 54/54 against storm-relay (release and debug builds, repeated). It
+  fails on the pre-106 relay (`client_backlogged`, both `attempt_id`
+  refusals) and on a relay mutated to forward a client's `relay_peer_ip`, to
+  route a foreign `stream_id`, or to supersede without a drain. No storm-relay
+  defect found.
+*Revisit if:* the spec's implicit readings above are written into
+`srp-v1.md` (then they become plain MUSTs here), or a relay needs a
+knob the contract does not name — add it to `relay.env` and storm-relay
+together.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
