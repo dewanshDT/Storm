@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use axum::body::Bytes;
 use data_encoding::BASE64URL_NOPAD;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
@@ -52,25 +53,36 @@ struct FakeRelay {
     to_server: mpsc::UnboundedSender<Message>,
     /// Registration attempts seen, so a reconnect test can count them.
     attempts: Arc<std::sync::atomic::AtomicUsize>,
+    /// Drops the live trunk's socket without a `CLOSE`: the relay vanishing.
+    vanish: Arc<tokio::sync::Notify>,
     _task: tokio::task::JoinHandle<()>,
 }
 
 impl FakeRelay {
     async fn start(behaviour: Behaviour) -> Self {
+        Self::start_with(behaviour, 15).await
+    }
+
+    async fn start_with(behaviour: Behaviour, heartbeat_secs: u64) -> Self {
         // Ephemeral port: never 8484/8485, and safe to run many at once.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let (events_tx, events) = mpsc::unbounded_channel();
         let (to_server, mut commands) = mpsc::unbounded_channel::<Message>();
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let vanish = Arc::new(tokio::sync::Notify::new());
 
         let task = tokio::spawn({
             let attempts = attempts.clone();
+            let vanish = vanish.clone();
             async move {
                 loop {
                     let Ok((socket, _)) = listener.accept().await else {
                         return;
                     };
+                    // As the real relay does, so a delay measured through the
+                    // tunnel can only be the server's own socket.
+                    socket.set_nodelay(true).unwrap();
                     attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
                         continue;
@@ -125,7 +137,7 @@ impl FakeRelay {
                         serde_json::json!({
                             "v":1,"type":"REGISTERED","trunk_id":"trk_test",
                             "public_address": format!("ws://relay.test/connect/{server_id}"),
-                            "heartbeat_interval_secs": 15
+                            "heartbeat_interval_secs": heartbeat_secs
                         })
                         .to_string(),
                     ))
@@ -136,13 +148,22 @@ impl FakeRelay {
                     if behaviour == Behaviour::HangAfterRegister {
                         // Registered, then dead to the world: never read,
                         // never write, never close. The socket stays open, so
-                        // the server has no error to react to.
-                        std::future::pending::<()>().await;
+                        // the server has no error to react to. Held on its own
+                        // task so a redial can still be accepted and counted.
+                        tokio::spawn(async move {
+                            let _held = ws;
+                            std::future::pending::<()>().await;
+                        });
+                        continue;
                     }
 
                     // ---- pump ---------------------------------------------
                     loop {
                         tokio::select! {
+                            _ = vanish.notified() => {
+                                let _ = events_tx.send(Event::Disconnected);
+                                break;
+                            }
                             command = commands.recv() => match command {
                                 Some(message) => {
                                     if ws.send(message).await.is_err() { break; }
@@ -178,8 +199,14 @@ impl FakeRelay {
             events,
             to_server,
             attempts,
+            vanish,
             _task: task,
         }
+    }
+
+    /// Drops the socket mid-whatever, with no `CLOSE` and no `ERROR`.
+    fn vanish(&self) {
+        self.vanish.notify_one();
     }
 
     fn send(&self, value: serde_json::Value) {
@@ -684,6 +711,38 @@ async fn a_tunnelled_get_reaches_the_router_and_comes_back_intact() {
         "ok",
         "and so does the body: {}",
         String::from_utf8_lossy(&response.body)
+    );
+
+    tunnels.shutdown().await;
+}
+
+/// A tunnelled response is a head, body chunks and a `CLOSE`, written one after
+/// another. With Nagle on the tunnel, each after the first waited out the
+/// relay's delayed ACK: about 40 ms a request on localhost (P1, decision 91).
+#[tokio::test]
+async fn a_tunnelled_request_does_not_wait_on_delayed_acks() {
+    let dir = tempdir::TempDir::new("storm-relay-latency").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+
+    let (_registered, tunnels) = start_tunnel(&relay.url, router.clone(), identity);
+    let _ = relay.await_registration().await;
+
+    let mut samples = Vec::new();
+    for stream_id in 1..=21 {
+        let started = std::time::Instant::now();
+        let response = relay
+            .request(stream_id, TunnelRequest::get("/v1/health"))
+            .await;
+        assert_eq!(response.status, 200);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    assert!(
+        median < Duration::from_millis(15),
+        "median tunnelled request took {median:?}; TCP_NODELAY missing?"
     );
 
     tunnels.shutdown().await;
@@ -1228,6 +1287,258 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
         .await;
     assert_eq!(whoami.status, 401);
 
+    tunnels.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// §9: failure handling (decision 94)
+// ---------------------------------------------------------------------------
+
+/// Signals when it is dropped, so a test can see a handler being cancelled.
+struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// `/slow` answers a head and one chunk, then never finishes: the shape of a
+/// long download or the change feed. `dropped` fires when the response body
+/// is dropped, which is what cancelling the dispatch task does.
+fn slow_router() -> (Router, tokio::sync::oneshot::Receiver<()>) {
+    let (tx, dropped) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let router = Router::new().route(
+        "/slow",
+        axum::routing::get(move || {
+            let signal = DropSignal(tx.lock().unwrap().take());
+            async move {
+                let body = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"first"))
+                })
+                .chain(futures_util::stream::pending())
+                .map(move |chunk| {
+                    let _keep = &signal;
+                    chunk
+                });
+                axum::body::Body::from_stream(body)
+            }
+        }),
+    );
+    (router, dropped)
+}
+
+/// Opens `/slow` on `stream_id` and waits for its first chunk.
+async fn start_slow_response(relay: &mut FakeRelay, stream_id: u32) {
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+        "method":"GET","path":"/slow","headers":{}
+    }));
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    loop {
+        match relay.next_event().await {
+            Event::Binary(frame) => {
+                let (_, id, payload) = proto::decode_body_frame(&frame).unwrap();
+                assert_eq!((id, payload), (stream_id, &b"first"[..]));
+                return;
+            }
+            Event::Text(value) if value["type"] == "PING" => continue,
+            other => panic!("expected the first chunk, got {other:?}"),
+        }
+    }
+}
+
+async fn serve_lan(router: Router) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
+async fn await_attempts(relay: &FakeRelay, count: usize, within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    while relay.attempts.load(std::sync::atomic::Ordering::SeqCst) < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {count} connection attempts within {within:?}, saw {}",
+            relay.attempts.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_relay_vanishing_mid_response_cancels_the_handler_and_the_trunk_comes_back() {
+    // The load-bearing R6 case the hung and silent relays did not cover: the
+    // relay goes away while a relayed response is half sent.
+    let dir = tempdir::TempDir::new("storm-relay-vanish").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let (slow, dropped) = slow_router();
+    let router = router.merge(slow);
+    let lan = serve_lan(router.clone()).await;
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    start_slow_response(&mut relay, 1).await;
+    relay.vanish();
+
+    tokio::time::timeout(Duration::from_secs(5), dropped)
+        .await
+        .expect("an in-flight relayed handler must be cancelled when its trunk dies")
+        .unwrap();
+    // Not advertised while there is no trunk, or clients race a dead path.
+    await_advertised(&registered, 0).await;
+
+    let elapsed = lan_health(lan).await;
+    assert!(elapsed < Duration::from_secs(2), "LAN took {elapsed:?}");
+
+    // Served-then-closed resets the backoff, so the redial comes after 1 s.
+    loop {
+        match relay.next_event().await {
+            Event::Registered { .. } => break,
+            Event::Disconnected | Event::Text(_) => continue,
+            other => panic!("expected a redial, got {other:?}"),
+        }
+    }
+    await_advertised(&registered, 1).await;
+    let response = relay.request(2, TunnelRequest::get("/v1/health")).await;
+    assert_eq!(response.status, 200);
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_closing_a_stream_mid_response_cancels_only_that_handler() {
+    // What the relay sends when the *client* hop dies mid-response (§5.4).
+    let dir = tempdir::TempDir::new("storm-relay-close-mid").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let (slow, dropped) = slow_router();
+    let router = router.merge(slow);
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    start_slow_response(&mut relay, 7).await;
+    relay.send(serde_json::json!({"v":1,"type":"CLOSE","stream_id":7}));
+
+    tokio::time::timeout(Duration::from_secs(5), dropped)
+        .await
+        .expect("CLOSE must cancel the handler, not leave it streaming into nothing")
+        .unwrap();
+
+    // The trunk and its other streams are untouched.
+    let response = relay.request(8, TunnelRequest::get("/v1/health")).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(registered.snapshot().len(), 1);
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_erroring_a_stream_mid_response_cancels_that_handler() {
+    // `ERROR{.., stream_id}` toward the server — a relay-side timeout or limit.
+    let dir = tempdir::TempDir::new("storm-relay-error-mid").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let (slow, dropped) = slow_router();
+    let router = router.merge(slow);
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    start_slow_response(&mut relay, 3).await;
+    relay.send(serde_json::json!({
+        "v":1,"type":"ERROR","code":"rate_limited","message":"limit","stream_id":3
+    }));
+
+    tokio::time::timeout(Duration::from_secs(5), dropped)
+        .await
+        .expect("a stream-scoped ERROR must cancel the handler")
+        .unwrap();
+    assert_eq!(registered.snapshot().len(), 1, "only the stream ends");
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_gone_silent_is_dropped_at_the_heartbeat_deadline_and_redialled() {
+    // A sleep, a network change or a NAT timeout leaves the socket open with
+    // nobody behind it. Before decision 94 the trunk stayed advertised until
+    // TCP gave up, which is many minutes.
+    let dir = tempdir::TempDir::new("storm-relay-silent-deadline").unwrap();
+    let identity = test_identity(dir.path());
+    // A 1 s heartbeat makes the deadline 3 s.
+    let relay = FakeRelay::start_with(Behaviour::HangAfterRegister, 1).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+
+    await_advertised(&registered, 1).await;
+    let registered_at = Instant::now();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while !registered.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a relay that stopped answering PING is still advertised after {:?}",
+            registered_at.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let dropped_after = registered_at.elapsed();
+    assert!(
+        dropped_after >= Duration::from_millis(2500),
+        "dropped after {dropped_after:?}, before three heartbeats had been missed"
+    );
+
+    await_attempts(&relay, 2, Duration::from_secs(5)).await;
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_that_answers_heartbeats_is_kept_past_the_deadline() {
+    let dir = tempdir::TempDir::new("storm-relay-alive").unwrap();
+    let identity = test_identity(dir.path());
+    let mut relay = FakeRelay::start_with(Behaviour::Normal, 1).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    // Answer every PING for twice the deadline.
+    let until = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < until {
+        if let Ok(Some(Event::Text(value))) =
+            tokio::time::timeout(Duration::from_millis(200), relay.events.recv()).await
+            && value["type"] == "PING"
+        {
+            relay.send(serde_json::json!({"v":1,"type":"PONG"}));
+        }
+    }
+
+    assert_eq!(registered.snapshot().len(), 1, "a live relay must be kept");
+    assert_eq!(
+        relay.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "and never redialled"
+    );
     tunnels.shutdown().await;
 }
 

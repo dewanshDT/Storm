@@ -91,4 +91,54 @@ void main() {
     expect(PairingUri.parse('storm://other?v=1'), isNull);
     expect(PairingUri.parse('not a uri at all'), isNull);
   });
+
+  group('relays', () {
+    test('a URI without relays still parses, with none', () {
+      // Every QR an older server ever printed.
+      expect(PairingUri.parse(good)!.relays, isEmpty);
+    });
+
+    test("the server's encoded relay keys parse, in order", () {
+      // Byte for byte what `encode_qr` emits (pairing.rs).
+      final p = PairingUri.parse(
+        '$good&relay=wss%3A%2F%2Frelay.example.com'
+        '&relay=ws%3A%2F%2F10.0.0.5%3A8787',
+      )!;
+      expect(p.relays, ['wss://relay.example.com', 'ws://10.0.0.5:8787']);
+      expect(
+        p.relayAdverts.map((r) => r.publicAddress),
+        [
+          'wss://relay.example.com/connect/srv_ABC',
+          'ws://10.0.0.5:8787/connect/srv_ABC',
+        ],
+        reason: 'derived as registry::public_address derives it',
+      );
+    });
+
+    test('a malformed relay is dropped and pairing still proceeds', () {
+      final p = PairingUri.parse(
+        '$good&relay=https%3A%2F%2Fnot-a-relay.example'
+        '&relay=wss%3A%2F%2Fhost%2Fpath&relay=&relay=wss%3A%2F%2Fok.example',
+      );
+      expect(p, isNotNull, reason: 'the LAN address is what pairing dials');
+      expect(p!.relays, ['wss://ok.example']);
+    });
+
+    test('the live set from GET /v1/server wins over the QR snapshot', () {
+      final p = PairingUri.parse('$good&relay=wss%3A%2F%2Fold.example')!;
+      const live = RelayAdvert(
+        url: 'wss://new.example',
+        publicAddress: 'wss://new.example/connect/srv_ABC',
+      );
+      ServerInfo info(List<RelayAdvert> relays) => ServerInfo(
+        serverId: 'srv_ABC',
+        keyId: 'k',
+        algorithm: 'ed25519',
+        publicKey: 'KEY',
+        relays: relays,
+      );
+      expect(pairedRelays(p, info(const [live])).single.url, live.url);
+      expect(pairedRelays(p, info(const [])).single.url, 'wss://old.example');
+    });
+  });
 }
