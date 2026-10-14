@@ -27,6 +27,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/api/ed25519_verify.dart';
 import 'package:storm/api/lan_discovery.dart' show keyFingerprint;
+import 'package:storm/api/relay/srp_codec.dart';
 import 'package:storm/api/relay/srp_trunk.dart';
 import 'package:storm/api/server_verifier.dart';
 
@@ -198,5 +199,73 @@ void main() {
         reason: c['name'] as String,
       );
     }
+  });
+
+  group('framing (§3, §5, §6; decision 116l)', () {
+    final framing = doc['framing'] as Map<String, dynamic>;
+    List<int> hex(String s) => [
+      for (var i = 0; i < s.length; i += 2)
+        int.parse(s.substring(i, i + 2), radix: 16),
+    ];
+    List<int> payload(Map<String, dynamic> c) => c['payload_utf8'] != null
+        ? utf8.encode(c['payload_utf8'] as String)
+        : hex(c['payload_hex'] as String);
+    Map<String, dynamic> control(String name) =>
+        (framing['control_messages'] as List)
+            .cast<Map<String, dynamic>>()
+            .firstWhere((c) => c['name'] == name);
+
+    test('body frames encode and decode as recorded', () {
+      for (final c
+          in (framing['body_frames'] as List).cast<Map<String, dynamic>>()) {
+        final bytes = hex(c['frame_hex'] as String);
+        if (c['sender_may_send'] != false) {
+          expect(
+            encodeBodyFrame(
+              c['type'] as int,
+              c['stream_id'] as int,
+              payload(c),
+            ),
+            bytes,
+            reason: c['name'] as String,
+          );
+        }
+        final f = decodeBodyFrame(bytes)!;
+        expect([f.kind, f.streamId], [c['type'], c['stream_id']]);
+        expect(f.payload, payload(c), reason: c['name'] as String);
+      }
+      for (final c
+          in (framing['too_short_frames'] as List)
+              .cast<Map<String, dynamic>>()) {
+        expect(decodeBodyFrame(hex(c['frame_hex'] as String)), isNull);
+      }
+    });
+
+    test('the control frames this client sends match the vectors', () {
+      // The Worker answers exactly this PING without waking (SG-38).
+      expect(
+        SrpControl.encode('PING'),
+        control('canonical_ping')['exact_text'],
+      );
+      expect(
+        SrpControl.encode('PONG'),
+        control('canonical_pong')['exact_text'],
+      );
+      final hello =
+          control('hello_with_pubkey')['json'] as Map<String, dynamic>;
+      expect(
+        jsonDecode(
+          SrpControl.encode('HELLO', {
+            'server_id': hello['server_id'],
+            'pubkey': hello['pubkey'],
+          }),
+        ),
+        hello,
+      );
+      expect(
+        jsonDecode(SrpControl.encode('CLOSE', {'stream_id': 7})),
+        control('close_stream')['json'],
+      );
+    });
   });
 }

@@ -622,4 +622,104 @@ mod tests {
         assert!(decode_body_frame(&[FRAME_REQUEST_BODY, 0, 0]).is_none());
         assert!(decode_body_frame(&[]).is_none());
     }
+
+    /// `docs/srp-vectors.json` → `framing` (SRP §3, §5, §6; decision 116l):
+    /// the bytes and shapes this origin produces and parses, held to the file
+    /// both relays and both clients read.
+    fn framing() -> serde_json::Value {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/srp-vectors.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        doc["framing"].clone()
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn payload(case: &serde_json::Value) -> Vec<u8> {
+        match case["payload_utf8"].as_str() {
+            Some(text) => text.as_bytes().to_vec(),
+            None => hex(case["payload_hex"].as_str().unwrap()),
+        }
+    }
+
+    #[test]
+    fn body_frames_match_the_framing_vectors() {
+        let f = framing();
+        for case in f["body_frames"].as_array().unwrap() {
+            let kind = case["type"].as_u64().unwrap() as u8;
+            let id = case["stream_id"].as_u64().unwrap() as u32;
+            let bytes = hex(case["frame_hex"].as_str().unwrap());
+            if case["sender_may_send"] != false {
+                assert_eq!(encode_body_frame(kind, id, &payload(case)), bytes, "{case}");
+            }
+            let (k, i, p) = decode_body_frame(&bytes).expect("a vector frame decodes");
+            assert_eq!((k, i, p.to_vec()), (kind, id, payload(case)), "{case}");
+        }
+        for case in f["too_short_frames"].as_array().unwrap() {
+            assert!(
+                decode_body_frame(&hex(case["frame_hex"].as_str().unwrap())).is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_frames_match_the_framing_vectors() {
+        let f = framing();
+        let named = |name: &str| {
+            f["control_messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("no vector {name}"))
+                .clone()
+        };
+        // The canonical spellings, byte for byte: the Worker answers exactly
+        // this PING without waking (SG-38).
+        assert_eq!(
+            ping(),
+            named("canonical_ping")["exact_text"].as_str().unwrap()
+        );
+        assert_eq!(
+            pong(),
+            named("canonical_pong")["exact_text"].as_str().unwrap()
+        );
+        let json = |s: String| serde_json::from_str::<serde_json::Value>(&s).unwrap();
+        assert_eq!(json(close_stream(7)), named("close_stream")["json"]);
+        assert_eq!(json(abort_stream(7)), named("close_stream_aborted")["json"]);
+        assert_eq!(json(close_trunk()), named("close_trunk")["json"]);
+        assert!(matches!(
+            parse_text(&named("request_head")["json"].to_string()),
+            Ok(Inbound::RequestHead(_))
+        ));
+    }
+
+    #[test]
+    fn a_malformed_head_vector_never_reaches_the_router() {
+        // Refused at parse, or when the request is built: either way the
+        // stream gets 400 and CLOSE and the trunk carries on (client.rs).
+        let host = axum::http::HeaderValue::from_static("storm.test");
+        for case in framing()["malformed_request_heads"]["cases"]
+            .as_array()
+            .unwrap()
+        {
+            match parse_text(&case["json"].to_string()) {
+                Ok(Inbound::BadHead { .. }) => {}
+                Ok(Inbound::RequestHead(head)) => assert!(
+                    super::super::dispatch::build_request(&head, &host, axum::body::Body::empty())
+                        .is_err(),
+                    "{} would be dispatched",
+                    case["name"]
+                ),
+                other => panic!("{}: {other:?}", case["name"]),
+            }
+        }
+    }
 }
