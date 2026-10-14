@@ -9,7 +9,7 @@ workspace_roots = ["/var/lib/storm-runtime/workspaces"]
 max_sessions = 8
 scrollback_bytes = 4194304
 
-# Where agent CLIs are looked for, and the PATH every session gets (PLAN.md
+# Where agent CLIs are looked for, and the PATH every session gets (decision
 # 83, AM38). Omitted, the unit's own PATH is kept. A CLI must be on a path
 # the storm-runtime account can reach (ProtectHome hides /home).
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]

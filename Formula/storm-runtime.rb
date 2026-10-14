@@ -1,4 +1,4 @@
-# The Storm Runtime Host for macOS (PLAN.md decision 83, AM41).
+# The Storm Runtime Host for macOS (decision 83, AM41).
 #
 # This repository is the tap:
 #   brew tap dewanshdt/storm https://github.com/dewanshDT/Storm

@@ -1,5 +1,5 @@
 //! Who this Runtime Host is, and the wire formats it signs (freeze §5.1–5.4;
-//! `PLAN.md` decision 77b).
+//! decision 77b).
 //!
 //! `docs/runtime-vectors.json` pins every format here. `apps/server` checks
 //! the same file and this crate cannot depend on it, so the vectors are the

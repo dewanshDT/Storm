@@ -1,4 +1,4 @@
-//! `storm-server backup` (PLAN 99, W-S3): `deploy/storm-backup.sh`'s steps,
+//! `storm-server backup` (decision 99, W-S3): `deploy/storm-backup.sh`'s steps,
 //! natively, for a machine with no bash, rsync or find — Windows' nightly
 //! task. Linux and macOS keep the script.
 //!

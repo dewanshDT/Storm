@@ -64,7 +64,7 @@ export default {
 
 // `/register` names no server_id, so the Worker reads REGISTER_SERVER before it
 // can pick the Durable Object, and then carries the trunk's frames both ways.
-// See PLAN.md decision 108b for why this is the one hop that is not spliced.
+// See decision 108b for why this is the one hop that is not spliced.
 async function register(env: Env, url: URL): Promise<Response> {
   const base = publicBase(env, url);
   const [client, server] = Object.values(new WebSocketPair());

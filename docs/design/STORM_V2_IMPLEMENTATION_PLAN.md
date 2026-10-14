@@ -5,7 +5,7 @@
 equals the handoff's baseline `d864f8d` plus docs.
 **Sources read in full:** `design_handoff_storm_v2/` (README, both `.dc.html`
 files, the screenshots), `docs/design/STORM_UI_UX_DISCOVERY.md`, `CLAUDE.md`,
-`AGENTS.md`, the relevant `PLAN.md` decisions (17, 34, 40–44, 64, 77–81n).
+`AGENTS.md`, the relevant decisions (17, 34, 40–44, 64, 77–81n).
 **Code audited:** `apps/client/lib` (router, shell, agent, settings, auth,
 design system), `apps/server/src` (api, ops, auth, agent, gateway, mcp,
 registry), `apps/runtime/src/provider.rs`.
@@ -35,7 +35,7 @@ product decision it says so (§5.3).
 | runtime `cargo test` | 53 passed |
 | `dart format --set-exit-if-changed` | clean |
 | `flutter analyze` | no issues |
-| `flutter test` | **773 passed** (incl. `editor_save_loop_test`, which PLAN.md notes codebox could not finish) |
+| `flutter test` | **773 passed** (incl. `editor_save_loop_test`, which codebox could not finish) |
 | `make test-live` | e2e 81 · mcp 80 · agent 61 · gateway 65 · auth 74 · client live 20 (+1 skipped: needs `STORM_AGENT_BASE`, not set by the Makefile) — 0 failed |
 
 **Acceptance harness:** `docs/design/acceptance/storm-v2/` — real server +
@@ -718,7 +718,7 @@ and an e2e through the real gateway path (`gateway_e2e.py`).
 ## 8. Implementation order (vertical slices)
 
 Each slice: branch from `staging`, PR into `staging` (CLAUDE.md), `make
-check` clean, relevant live suites, screenshots compared, `PLAN.md` updated
+check` clean, relevant live suites, screenshots compared, the vault's notes updated
 in the same change.
 
 | # | Slice | Depends on | Done when |
@@ -732,7 +732,7 @@ in the same change.
 | 6 | **Agents**: sidebar, overview, first/no-host, launcher (modal/sheet), session route + split + panel tabs, inline end, run again/dismiss, phone session + details sheet. | 3, 5 | desktop-05..11c, phone-04..09 match with real sessions (fake provider). |
 | 7 | **Settings**: shell + all ten pages on real endpoints (devices, keys, vaults+colour, AI access 2 groups, integrations restyle, hosts, storage, connection+relays, advanced, health). Old settings screens deleted. | 3, 5 | desktop-12..21, phone-10..11 match; OAuth orphan still lands on Integrations. |
 | 8 | **Loop**: provenance link, "edited/created by this session", unseen dots (tree + phone rows + collapsed folders), Wrote live update, Open in Notes / ‹ Wrote. | 4, 6 | loop-a/b match; end-to-end core loop on a real server (handoff §11 "Core loop"). |
-| 9 | **Regression + acceptance**: full suites, light/earth presets, resize sweeps, Android back on device/emulator if available, docs (`PLAN.md` 82, `CLAUDE.md`, `docs/storm-ui.md`), acceptance set committed. | all | Handoff §11 checklist fully ticked with evidence. |
+| 9 | **Regression + acceptance**: full suites, light/earth presets, resize sweeps, Android back on device/emulator if available, docs (decision 82, `CLAUDE.md`, `docs/storm-ui.md`), acceptance set committed. | all | Handoff §11 checklist fully ticked with evidence. |
 
 Slice 1 is early on purpose: every later slice would otherwise be built on
 owner gating it then has to remove. Slice 5 can run in parallel with 3–4.

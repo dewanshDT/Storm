@@ -1,6 +1,6 @@
 # Deploying the Cloudflare relay
 
-The operator's runbook for `apps/relay-cf` (PLAN decision 108c). It puts an
+The operator's runbook for `apps/relay-cf` (decision 108c). It puts an
 SRP v1 relay on your own Cloudflare account, in **allowlist mode**, for your
 own servers. Nothing here is automated: deployment is not part of
 `release.yml` or `apt-repo.yml`, and no Storm build deploys anything to

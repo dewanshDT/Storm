@@ -180,7 +180,6 @@ wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 | [`apps/www`](apps/www/README.md) | Marketing site (Astro) → [storm.dewansh.space](https://storm.dewansh.space) |
 | [`deploy/`](deploy/README.md) | systemd units, apt bootstrap, backup, relay setup |
 | [`docs/`](docs) | Design briefs, editor findings, the relay spec and its test vectors |
-| [`PLAN.md`](PLAN.md) | Living plan, status, and decision log |
 
 ## Development
 
@@ -258,5 +257,5 @@ but still runs on the LAN only — a public VPS is next. M16 (marketing site,
 live at [storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown
 read mode) are in progress. Per-vault authorization is its own later release.
 
-See [`PLAN.md`](PLAN.md) for milestone status, the decision log, and open
-items. License: [MIT](LICENSE).
+Milestone status and the decision log are kept in the maintainer's notes, not
+in this repo. License: [MIT](LICENSE).
