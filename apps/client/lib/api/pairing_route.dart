@@ -1,14 +1,15 @@
-/// How a pairing QR reaches its server: the QR's LAN address, or — when that
-/// does not answer — one of the relays the QR names (decision 96).
+/// How a device with no session reaches its server: the QR's or the saved
+/// address, or — when that does not answer — one of the server's relays
+/// (decisions 96 and 111).
 ///
-/// Pairing runs the same [StormConnection] race the app uses afterwards, so
-/// there is one ordering rule (direct and self-hosted first, a public relay
-/// only on failure) and one identity gate. **Nothing the pairing flow sends is
-/// sensitive until the challenge against the QR's key has passed:** the race
-/// sends `HELLO {server_id}` and `GET /v1/server`, the challenge sends a fresh
-/// random nonce, and only a [PairingRoute] — which exists only after
-/// [ServerProof.verified] — carries the pairing nonce, the device secret or a
-/// password.
+/// Pairing, sign-in and session refresh run the same [StormConnection] race
+/// the app uses afterwards, so there is one ordering rule (direct and
+/// self-hosted first, a public relay only on failure) and one identity gate.
+/// **Nothing sent before the challenge against the pinned key has passed is
+/// sensitive:** the race sends `HELLO {server_id}` and `GET /v1/server`, the
+/// challenge sends a fresh random nonce, and only a [ServerRoute] — which
+/// exists only after [ServerProof.verified] — carries the pairing nonce, the
+/// device secret, a refresh token or a password.
 library;
 
 import 'dart:async';
@@ -62,38 +63,46 @@ enum RelayReach {
   down,
 }
 
-/// A transport to the QR's server that has passed the identity challenge.
-class PairingRoute {
-  PairingRoute._(this._connection, this.serverInfo);
+/// A transport to the server that has passed the identity challenge.
+class ServerRoute {
+  ServerRoute._(this._connection);
 
   final StormConnection _connection;
 
-  /// `GET /v1/server`, fetched over the proven transport.
-  final ServerInfo serverInfo;
-
-  /// Device-tier and unauthenticated calls for the rest of pairing, over the
-  /// same transport the challenge was answered on.
+  /// Device-tier and unauthenticated calls, over the same transport the
+  /// challenge was answered on.
   AuthApi get authApi => _connection.authApi;
 
   bool get viaRelay => _connection.isRelayed;
 
-  /// The relay carrying pairing, or null when it is direct.
+  /// The relay carrying the route, or null when it is direct.
   String? get relayHost => _hostOf(_connection.active.relayUrl);
 
   /// Releases the relay trunk, if any. The app's own connection re-races.
   void close() => _connection.reset();
 }
 
-/// The QR's relays that pairing may send credentials through.
+/// A [ServerRoute] opened from a pairing QR.
+class PairingRoute extends ServerRoute {
+  PairingRoute._(super.connection, this.serverInfo) : super._();
+
+  /// `GET /v1/server`, fetched over the proven transport.
+  final ServerInfo serverInfo;
+}
+
+/// The relays a route may send credentials through.
 ///
 /// The challenge proves *who* answers; it does nothing for confidentiality. A
 /// password crossing the internet over a plain `ws://` relay would be readable
 /// by anyone on the path, so only `wss://` relays — and loopback ones, which
 /// never leave the machine — are used.
-List<RelayAdvert> pairingRelays(PairingUri uri) => [
-  for (final relay in uri.relayAdverts)
+List<RelayAdvert> confidentialRelays(List<RelayAdvert> relays) => [
+  for (final relay in relays)
     if (_isConfidential(relay.url)) relay,
 ];
+
+List<RelayAdvert> pairingRelays(PairingUri uri) =>
+    confidentialRelays(uri.relayAdverts);
 
 bool _isConfidential(String relayUrl) {
   final u = Uri.tryParse(relayUrl);
@@ -147,17 +156,86 @@ Future<PairingRoute> openPairingRoute(
   if (Uri.parse(uri.baseUrl).host.isEmpty) {
     throw ArgumentError('no host in "${uri.address}"');
   }
-  final relays = pairingRelays(uri);
-  final connection = StormConnection(
-    localAddress: uri.baseUrl,
-    token: '',
+  final connection = await _openProven(
+    baseUrl: uri.baseUrl,
     serverId: uri.serverId,
-    publicKeyB64: uri.publicKey,
+    publicKey: uri.publicKey,
+    relays: pairingRelays(uri),
+    publicRelayHosts: publicRelayHosts,
+    buildAuthApi: buildAuthApi,
+    probe: probe,
+    raceTimeout: raceTimeout,
+    deadline: deadline,
+  );
+  final ServerInfo info;
+  try {
+    info = await connection.authApi.serverInfo();
+  } catch (_) {
+    connection.reset();
+    rethrow;
+  }
+  if (info.serverId != uri.serverId || info.publicKey != uri.publicKey) {
+    final host = _hostOf(connection.active.relayUrl);
+    connection.reset();
+    throw PairingRouteException(
+      PairingFailure.identityMismatch,
+      relayHost: host,
+    );
+  }
+  return PairingRoute._(connection, info);
+}
+
+/// Races a paired device's saved address against its saved relays and proves
+/// the winner against the identity pinned at pairing. Sign-in and session
+/// refresh go through this, so a device away from the server's network can
+/// still reach it — and never hand a password to anything that cannot sign.
+///
+/// Throws [PairingRouteException] for anything a person has to act on.
+Future<ServerRoute> openSavedRoute({
+  required String baseUrl,
+  required String serverId,
+  required String publicKey,
+  required List<RelayAdvert> relays,
+  Set<String> publicRelayHosts = kPublicRelayHosts,
+  AuthApi Function(ConnectionCandidate)? buildAuthApi,
+  Future<RelayReach> Function(RelayAdvert relay)? probe,
+  Duration raceTimeout = const Duration(seconds: 10),
+  Duration deadline = const Duration(seconds: 30),
+}) async => ServerRoute._(
+  await _openProven(
+    baseUrl: baseUrl,
+    serverId: serverId,
+    publicKey: publicKey,
+    relays: confidentialRelays(relays),
+    publicRelayHosts: publicRelayHosts,
+    buildAuthApi: buildAuthApi,
+    probe: probe,
+    raceTimeout: raceTimeout,
+    deadline: deadline,
+  ),
+);
+
+Future<StormConnection> _openProven({
+  required String baseUrl,
+  required String serverId,
+  required String publicKey,
+  required List<RelayAdvert> relays,
+  required Set<String> publicRelayHosts,
+  required AuthApi Function(ConnectionCandidate)? buildAuthApi,
+  required Future<RelayReach> Function(RelayAdvert relay)? probe,
+  required Duration raceTimeout,
+  required Duration deadline,
+}) async {
+  final connection = StormConnection(
+    localAddress: baseUrl,
+    token: '',
+    serverId: serverId,
+    publicKeyB64: publicKey,
     relays: relays,
     publicRelayHosts: publicRelayHosts,
     buildAuthApi: buildAuthApi,
-    // Pairing is one deliberate attempt, often over a phone's mobile data: a
-    // relay's TLS, handshake and first exchange get longer than a reconnect.
+    // One deliberate attempt, often over a phone's mobile data: a relay's
+    // TLS, handshake and first exchange get longer than a reconnect.
     publicRelayDelay: raceTimeout,
   );
 
@@ -174,22 +252,7 @@ Future<PairingRoute> openPairingRoute(
 
   switch (proof) {
     case ServerProof.verified:
-      final ServerInfo info;
-      try {
-        info = await connection.authApi.serverInfo();
-      } catch (_) {
-        connection.reset();
-        rethrow;
-      }
-      if (info.serverId != uri.serverId || info.publicKey != uri.publicKey) {
-        final host = _hostOf(connection.active.relayUrl);
-        connection.reset();
-        throw PairingRouteException(
-          PairingFailure.identityMismatch,
-          relayHost: host,
-        );
-      }
-      return PairingRoute._(connection, info);
+      return connection;
     case ServerProof.impostor:
       final host = _hostOf(connection.active.relayUrl);
       connection.reset();
@@ -204,7 +267,7 @@ Future<PairingRoute> openPairingRoute(
       }
       final reach = await Future.wait([
         for (final relay in relays)
-          (probe ?? (r) => probeRelay(r, uri.serverId))(relay),
+          (probe ?? (r) => probeRelay(r, serverId))(relay),
       ]);
       final absent = reach.indexOf(RelayReach.serverAbsent);
       if (absent >= 0) {

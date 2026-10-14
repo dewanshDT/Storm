@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
 import '../api/models.dart';
+import '../api/pairing_route.dart';
 import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
@@ -627,16 +628,24 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   Future<bool> refreshSession() async {
     final s = state.value;
     if (s == null || s.refreshToken.isEmpty) return false;
-    final api = AuthApi(baseUrl: s.baseUrl);
+    ServerRoute? route;
     try {
+      // The refresh token and device secret go only to a proven server, over
+      // the relay when the saved address is not reachable (decision 111).
+      route = await openSavedRoute(
+        baseUrl: s.baseUrl,
+        serverId: s.serverId,
+        publicKey: s.serverPublicKey,
+        relays: s.relays,
+      );
       // Device tier: refresh is bound to the device holding the session.
-      final tokens = await api.refresh(
+      final tokens = await route.authApi.refresh(
         s.refreshToken,
         deviceId: s.deviceId,
         deviceSecret: s.deviceSecret,
       );
       await save(
-        s.copyWith(
+        (state.value ?? s).copyWith(
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
           accessTokenExpiresAt: tokens.expires,
@@ -646,7 +655,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     } catch (_) {
       return false;
     } finally {
-      api.dispose();
+      route?.close();
     }
   }
 
