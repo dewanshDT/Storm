@@ -706,7 +706,7 @@
     ]
   },
   "plaintext_relay_hosts": {
-    "about": "Revision 115, section 4.3, decision 114e: a ws:// relay is allowed only on loopback, private (RFC 1918, IPv6 ULA fc00::/7) or CGNAT/Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48) addresses, and refused everywhere else by the server and every client, pairing and sign-in included. A hostname qualifies only if every address it resolves to does; one that cannot be checked is public. wss:// is allowed on any host.",
+    "about": "Revision 115, section 4.3, decision 114e as amended 2026-10-14: a ws:// relay is allowed only on loopback (127.0.0.0/8, ::1), RFC 1918 (10/8, 172.16/12, 192.168/16), link-local (169.254/16, fe80::/10) or IPv6 ULA (fc00::/7) addresses, and refused everywhere else (100.64.0.0/10 included) by the server and every client, pairing and sign-in included. A hostname qualifies only if every address it resolves to does; one that cannot be checked is public. wss:// is allowed on any host.",
     "cases": [
       {
         "host": "127.0.0.1",
@@ -750,11 +750,16 @@
       },
       {
         "host": "100.64.0.1",
-        "ws_allowed": true
+        "ws_allowed": false,
+        "why": "100.64.0.0/10 is shared address space (RFC 6598): carriers use it for CGNAT, so it is not private to the user."
+      },
+      {
+        "host": "100.100.1.2",
+        "ws_allowed": false
       },
       {
         "host": "100.127.255.254",
-        "ws_allowed": true
+        "ws_allowed": false
       },
       {
         "host": "100.128.0.1",
@@ -770,12 +775,11 @@
       },
       {
         "host": "fe80::1",
-        "ws_allowed": false,
-        "why": "Link-local is not in the allowed set."
+        "ws_allowed": true
       },
       {
         "host": "169.254.1.1",
-        "ws_allowed": false
+        "ws_allowed": true
       },
       {
         "host": "8.8.8.8",
