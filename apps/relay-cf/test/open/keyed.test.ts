@@ -60,6 +60,8 @@ describe("an open relay", () => {
     const onOther = await keyedClient(serverId, 2);
     const otherStream = await openStream(onOther, "a2");
     await expectOpenAndAck(other);
+    // Silence below is the point; the trunks themselves must stay alive.
+    const beats = [first, other, onFirst, onOther].map((p) => p.keepAlive());
 
     await register(serverId, 1);
     const superseded = await onFirst.recv(3000);
@@ -69,6 +71,7 @@ describe("an open relay", () => {
     expect(await onOther.silentFor(300)).toBe(true);
     other.send({ v: 1, type: "CLOSE", stream_id: otherStream });
     expect(await onOther.recv()).toEqual({ v: 1, type: "CLOSE", stream_id: otherStream });
+    for (const stop of beats) stop();
   });
 
   it("refuses a keyless HELLO at once, with or without a query", async () => {
