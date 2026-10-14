@@ -26,6 +26,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/api/ed25519_verify.dart';
+import 'package:storm/api/lan_discovery.dart' show keyFingerprint;
 import 'package:storm/api/server_verifier.dart';
 
 /// The vectors live at the repo root, not in the client — three implementations
@@ -162,6 +163,20 @@ void main() {
         expect(rune, isNot(0x22), reason: 'the nonce travels inside JSON');
       }
       expect(invalid.map((c) => c['nonce']), isNot(contains(nonce)));
+    }
+  });
+
+  test('key fingerprints match the vectors (decision 118)', () {
+    final fp = doc['key_fingerprint'] as Map<String, dynamic>?;
+    if (fp == null) fail('section `key_fingerprint` missing');
+    final cases = (fp['cases'] as List).cast<Map<String, dynamic>>();
+    expect(cases, isNotEmpty);
+    for (final c in cases) {
+      expect(
+        keyFingerprint(c['public_key_b64'] as String),
+        c['fingerprint'],
+        reason: c['name'] as String,
+      );
     }
   });
 }

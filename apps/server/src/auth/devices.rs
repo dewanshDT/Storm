@@ -19,6 +19,8 @@ use super::token;
 pub const EVENT_DEVICE_CREATED: &str = "device_created";
 pub const EVENT_DEVICE_REVOKED: &str = "device_revoked";
 
+pub const PAIRED_BY_LAN_PASSWORD: &str = "lan_password";
+
 /// Recorded on devices this server minted for itself rather than paired.
 #[allow(dead_code)] // Used only by `create_synthetic`, which is wired by future CLI callers.
 pub const PLATFORM_SYNTHETIC: &str = "synthetic";
@@ -34,6 +36,9 @@ pub struct Device {
     pub paired: String,
     pub last_seen: Option<String>,
     pub revoked: Option<String>,
+    /// [`PAIRED_BY_LAN_PASSWORD`] for a device paired from a discovery list
+    /// (decision 118); `None` for a QR pairing or a synthetic device.
+    pub paired_by: Option<String>,
 }
 
 impl Device {
@@ -47,7 +52,7 @@ impl AuthDb {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, platform, client_version, paired, last_seen, revoked
+                "SELECT id, name, platform, client_version, paired, last_seen, revoked, paired_by
                  FROM client_devices WHERE id = ?1",
                 params![id],
                 row_to_device,
@@ -57,7 +62,7 @@ impl AuthDb {
 
     pub fn list_devices(&self) -> Result<Vec<Device>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, platform, client_version, paired, last_seen, revoked
+            "SELECT id, name, platform, client_version, paired, last_seen, revoked, paired_by
              FROM client_devices ORDER BY paired",
         )?;
         let rows = stmt.query_map([], row_to_device)?;
@@ -133,6 +138,24 @@ impl AuthDb {
         Ok(())
     }
 
+    fn insert_device_lan_paired(&mut self, device: &Device, secret_hash: &[u8]) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO client_devices
+                 (id, name, platform, client_version, secret_hash, paired, paired_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                device.id,
+                device.name,
+                device.platform,
+                device.client_version,
+                secret_hash,
+                device.paired,
+                device.paired_by,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn mark_device_revoked(&mut self, id: &str, reason: &str, now: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE client_devices SET revoked = ?2, revoked_reason = ?3 WHERE id = ?1",
@@ -151,6 +174,7 @@ fn row_to_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
         paired: row.get(4)?,
         last_seen: row.get(5)?,
         revoked: row.get(6)?,
+        paired_by: row.get(7)?,
     })
 }
 
@@ -176,6 +200,7 @@ pub fn create_synthetic(db: &mut AuthDb, name: &str, now: &str) -> Result<Device
         paired: now.to_string(),
         last_seen: None,
         revoked: None,
+        paired_by: None,
     };
     let secret = token::mint(token::DEVICE_SECRET_PREFIX);
     db.insert_device(&device, &token::hash(&secret))?;
@@ -216,6 +241,7 @@ pub fn create_paired(
         paired: now.to_string(),
         last_seen: None,
         revoked: None,
+        paired_by: None,
     };
     db.insert_device_paired(&device, &token::hash(secret), paired_via)?;
     db.record_event(
@@ -230,6 +256,45 @@ pub fn create_paired(
         ),
     )?;
     Ok((device, device_id))
+}
+
+/// Registers a device paired with the account password from a discovery list
+/// (decision 118). No pairing session stands behind it, so `paired_via` is
+/// NULL and `paired_by` says how it came in. The secret is returned once.
+pub fn create_lan_paired(
+    db: &mut AuthDb,
+    name: &str,
+    platform: Option<&str>,
+    client_version: Option<&str>,
+    secret: &str,
+    now: &str,
+) -> Result<Device> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("a device needs a name — it is how you recognise what to revoke");
+    }
+    let device = Device {
+        id: random_id("dev_"),
+        name: name.to_string(),
+        platform: platform.map(str::to_string),
+        client_version: client_version.map(str::to_string),
+        paired: now.to_string(),
+        last_seen: None,
+        revoked: None,
+        paired_by: Some(PAIRED_BY_LAN_PASSWORD.to_string()),
+    };
+    db.insert_device_lan_paired(&device, &token::hash(secret))?;
+    db.record_event(
+        EVENT_DEVICE_CREATED,
+        None,
+        Some(&device.id),
+        now,
+        &format!(
+            r#"{{"name":{:?},"paired_by":{:?}}}"#,
+            device.name, PAIRED_BY_LAN_PASSWORD
+        ),
+    )?;
+    Ok(device)
 }
 
 /// Revokes a device **and every session on it**.

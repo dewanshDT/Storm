@@ -179,18 +179,18 @@ with their slice, not before, because both relays fail most of them today.
 | §5.4 | `server_timeout`, `stream_aborted`, `trunk_lost`, `trunk_superseded` and `rate_limited` reach a client whose queue is full | `every_stream_ending_error_is_delivered_past_a_full_queue` | 116l |
 | §5.1 | An `attempt_id` over 64 characters may be refused; one up to 64 is echoed (`docs/srp-vectors.json` → `framing.attempt_id`) | `attempt_ids_up_to_64_characters_are_echoed` | 116l |
 | §6.1 | After a trunk-scoped `ERROR` the close code is 1008 or 1000 as listed; the suite records it and fails only on a missing close | `a_trunk_scoped_error_is_followed_by_a_close` | 116l |
-| §4.1, §5 | **Open mode.** Two registrations of one `server_id` under different keys coexist; each client reaches only the trunk its `HELLO.pubkey` names; a re-registration under the same key supersedes, under another key it does not | `open_registrations_are_keyed_by_server_id_and_pubkey`, `supersession_is_per_key`, `a_hello_reaches_only_the_trunk_its_key_names` | 116k |
-| §5 | **Open mode, old clients.** A keyless `HELLO` reaches the only live registration, and is `server_unreachable` when there are several | `a_keyless_hello_reaches_a_lone_registration_only` | 116k |
-| §5 | A `HELLO.pubkey` that is malformed (the vectors' spellings) or disagrees with `?pubkey=` is `protocol_error` | `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error` | 116k |
-| §5 | **Allowlist and TOFU modes.** A `HELLO.pubkey` that differs from the registered key is treated as no live trunk | `a_hello_for_another_key_is_server_unreachable` | 116k |
+| §4.1, §5 | **Open mode.** Two registrations of one `server_id` under different keys coexist; each client reaches only the trunk its `HELLO.pubkey` names; a re-registration under the same key supersedes, under another key it does not | `open_registrations_are_keyed_by_server_id_and_pubkey`, `supersession_is_per_key`, `a_hello_reaches_only_the_trunk_its_key_names` | 116n |
+| §5 | **Open mode, old clients.** A keyless `HELLO` reaches the only live registration, and is `server_unreachable` when there are several | `a_keyless_hello_reaches_a_lone_registration_only` | 116n |
+| §5 | A `HELLO.pubkey` that is malformed (the vectors' spellings) or disagrees with `?pubkey=` is `protocol_error` | `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error` | 116n |
+| §5 | **Allowlist and TOFU modes.** A `HELLO.pubkey` that differs from the registered key is treated as no live trunk | `a_hello_for_another_key_is_server_unreachable` | 116n |
 | §6.2 | `/register` attempts are rate-limited per source address, IPv6 per /64 | `register_attempts_are_rate_limited` | 116k |
 | §6.2 | In allowlist mode an unlisted `server_id` costs no per-server state (Worker) | `an_unlisted_server_id_creates_no_state` | 116k |
 | §6.2 | A server removed from the allowlist is evicted, not only refused next time | `a_revoked_server_is_evicted` | 116k |
 
-**Fixture contract changes (116k, 116l):**
+**Fixture contract changes (116k, 116l, 116n):**
 
-- `RELAY_OPEN_URL`: a third relay in **open** (key-addressed) mode, with the
-  same knobs. The open-mode checks are skipped without it, as the TOFU ones are
+- `RELAY_OPEN_URL` (116n): a third relay in **open** (key-addressed) mode,
+  with the same knobs. The open-mode checks are skipped without it, as the TOFU ones are
   without `RELAY_TOFU_URL`.
 - `STORM_RELAY_REGISTER_RATE_LIMIT` and `STORM_RELAY_REGISTER_RATE_WINDOW_MS`,
   paced like the `HELLO` pair.

@@ -10,17 +10,27 @@
 /// 4. Client creates the owner account (first user).
 /// 5. Client logs in → session tokens.
 /// 6. Done — saved to Settings, router redirects to the dashboard.
+///
+/// Or, on Android, macOS and Linux, pick the server from the "On this
+/// network" list and pair with the account password (decision 118,
+/// `lan_servers.dart`).
 library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
+import '../api/lan_discovery.dart';
+import '../api/lan_pairing.dart';
 import '../api/pairing_route.dart';
+import '../router.dart';
 import '../state/app_state.dart';
+import 'controls.dart';
+import 'lan_servers.dart';
 import 'scan_pairing_screen.dart';
 import 'tokens.dart';
 import 'widgets.dart';
@@ -58,6 +68,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
 
   // Device credentials from pairing.
   PairingResult? _pairResult;
+
+  // The pasted-URI form, folded away behind "Enter address manually" while
+  // the discovery list is showing.
+  bool _manual = false;
 
   @override
   void dispose() {
@@ -210,6 +224,59 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         _error = "Couldn't reach the server at ${uri.address}.\n\n$e";
         _verifying = false;
       });
+    }
+  }
+
+  // ---- LAN discovery (decision 118) ----
+
+  Future<void> _openLanSheet(DiscoveredServer server) async {
+    final paired = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.tokens.bg,
+      builder: (_) => LanPairSheet(
+        server: server,
+        onPaired: _saveLanPairing,
+        onScanQr: canScanPairingQr ? _scan : null,
+      ),
+    );
+    if (paired == true && widget.rePair && mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  /// Pins what the verified route proved, then the session when the sign-in
+  /// that followed pairing worked. Without one, `/login` takes it from here.
+  Future<void> _saveLanPairing(LanRoute route, LanPairing paired) async {
+    final info = route.serverInfo;
+    final session = paired.session;
+    final current = ref.read(settingsProvider).value ?? const Settings();
+    await ref
+        .read(settingsProvider.notifier)
+        .save(
+          current.copyWith(
+            baseUrl: route.server.baseUrl,
+            deviceId: paired.device.deviceId,
+            deviceSecret: paired.device.deviceSecret,
+            serverId: info.serverId,
+            serverKeyId: info.keyId,
+            serverPublicKey: info.publicKey,
+            relays: info.relays,
+            // Never keep a session from a server this device paired with
+            // before.
+            accessToken: session?.accessToken ?? '',
+            refreshToken: session?.refreshToken ?? '',
+            userId: session?.userId ?? '',
+            accessTokenExpiresAt: session?.expires ?? '',
+          ),
+        );
+  }
+
+  void _openPaired() {
+    if (widget.rePair) {
+      Navigator.of(context).pop(false);
+    } else {
+      context.go(Routes.root);
     }
   }
 
@@ -378,118 +445,157 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   }
 
   Widget _buildUriInput(StormTokens t) {
+    final lan = ref.watch(lanDiscoverySupportedProvider);
+    final showForm = !lan || _manual;
     return Scaffold(
       body: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: t.sp * 52),
-          child: Padding(
-            padding: EdgeInsets.all(t.cardPad),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Center(child: BrandMark(size: 44, withWordmark: true)),
-                SizedBox(height: t.sp * 2),
-                Text(
-                  'Pair with your Storm server',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
-                    color: t.text3,
-                  ),
-                ),
-                SizedBox(height: t.sp * 1),
-                Text(
-                  // Not "scan": there is no scanner in this app, and offering
-                  // one that does not exist sends people hunting for a camera
-                  // button on their first run. `storm-server pair` prints the
-                  // URI as text — say the thing that is actually possible.
-                  'Run `storm-server pair` and paste the URI it prints.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
-                    color: t.text3,
-                  ),
-                ),
-                SizedBox(height: t.sp * 3.5),
-                StormInput(
-                  controller: _uriController,
-                  autofocus: true,
-                  labelText: 'Pairing URI',
-                  hintText: 'storm://pair?v=1&sid=...',
-                  autocorrect: false,
-                  keyboardType: TextInputType.url,
-                  onChanged: _onUriChanged,
-                ),
-                // Only where a camera exists. On desktop and web the paste
-                // field is the whole story, and a button that opens nothing is
-                // the same broken promise the old "Scan or paste" copy made.
-                if (canScanPairingQr) ...[
-                  SizedBox(height: t.sp * 1.5),
-                  OutlinedButton.icon(
-                    key: const Key('scan-pairing-qr'),
-                    onPressed: _scan,
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Scan a code instead'),
-                  ),
-                ],
-                if (widget.rePair) ...[
-                  SizedBox(height: t.sp),
-                  TextButton(
-                    key: const Key('re-pair-cancel'),
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                ],
-                if (_error != null) ...[
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: t.sp * 52),
+            child: Padding(
+              padding: EdgeInsets.all(t.cardPad),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Center(child: BrandMark(size: 44, withWordmark: true)),
                   SizedBox(height: t.sp * 2),
-                  Container(
-                    padding: EdgeInsets.all(t.sp * 1.5),
-                    decoration: BoxDecoration(
-                      color: t.surface,
-                      borderRadius: BorderRadius.circular(t.rControl),
-                      border: Border.all(color: t.danger, width: t.bw),
-                    ),
-                    child: Text(
-                      _error!,
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.codeSize,
-                        color: t.danger,
-                      ),
-                    ),
-                  ),
-                ],
-                SizedBox(height: t.sp * 2.5),
-                FilledButton(
-                  onPressed: (_parsedUri != null && !_verifying)
-                      ? _verifyAndPair
-                      : null,
-                  child: _verifying
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Verify & Pair'),
-                ),
-                if (_verifying && pairingRelays(_parsedUri!).isNotEmpty) ...[
-                  SizedBox(height: t.sp * 1.5),
                   Text(
-                    key: const Key('pairing-via-relay'),
-                    'Connecting to ${_parsedUri!.address}, or through '
-                    '${_relayHosts(_parsedUri!)} if it is not on this network.',
+                    'Connect to your Storm',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      color: t.text3,
+                      fontSize: t.uiSize,
+                      color: t.text2,
                     ),
                   ),
+                  if (lan) ...[
+                    SizedBox(height: t.sp * 3),
+                    LanServersSection(
+                      onPair: _openLanSheet,
+                      onScanQr: canScanPairingQr ? _scan : null,
+                      onOpenPaired: _openPaired,
+                    ),
+                    SizedBox(height: t.sp * 2.5),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        if (canScanPairingQr)
+                          Flexible(
+                            child: StormButton.outline(
+                              key: const Key('scan-pairing-qr'),
+                              label: 'Scan QR code',
+                              onPressed: _scan,
+                            ),
+                          ),
+                        SizedBox(width: t.sp),
+                        Flexible(
+                          child: StormButton.text(
+                            key: const Key('enter-address-manually'),
+                            label: 'Enter address manually',
+                            onPressed: () => setState(() => _manual = !_manual),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (showForm) ...[
+                    SizedBox(height: t.sp * 1),
+                    Text(
+                      // Not "scan": there is no scanner in this app, and offering
+                      // one that does not exist sends people hunting for a camera
+                      // button on their first run. `storm-server pair` prints the
+                      // URI as text — say the thing that is actually possible.
+                      'Run `storm-server pair` and paste the URI it prints.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        color: t.text3,
+                      ),
+                    ),
+                    SizedBox(height: t.sp * 3.5),
+                    StormInput(
+                      controller: _uriController,
+                      autofocus: true,
+                      labelText: 'Pairing URI',
+                      hintText: 'storm://pair?v=1&sid=...',
+                      autocorrect: false,
+                      keyboardType: TextInputType.url,
+                      onChanged: _onUriChanged,
+                    ),
+                    // Only where a camera exists. On desktop and web the paste
+                    // field is the whole story, and a button that opens nothing is
+                    // the same broken promise the old "Scan or paste" copy made.
+                    if (canScanPairingQr && !lan) ...[
+                      SizedBox(height: t.sp * 1.5),
+                      OutlinedButton.icon(
+                        key: const Key('scan-pairing-qr'),
+                        onPressed: _scan,
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text('Scan a code instead'),
+                      ),
+                    ],
+                  ],
+                  if (widget.rePair) ...[
+                    SizedBox(height: t.sp),
+                    TextButton(
+                      key: const Key('re-pair-cancel'),
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: const Text('Cancel'),
+                    ),
+                  ],
+                  if (_error != null) ...[
+                    SizedBox(height: t.sp * 2),
+                    Container(
+                      padding: EdgeInsets.all(t.sp * 1.5),
+                      decoration: BoxDecoration(
+                        color: t.surface,
+                        borderRadius: BorderRadius.circular(t.rControl),
+                        border: Border.all(color: t.danger, width: t.bw),
+                      ),
+                      child: Text(
+                        _error!,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.codeSize,
+                          color: t.danger,
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (showForm) ...[
+                    SizedBox(height: t.sp * 2.5),
+                    FilledButton(
+                      onPressed: (_parsedUri != null && !_verifying)
+                          ? _verifyAndPair
+                          : null,
+                      child: _verifying
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Verify & Pair'),
+                    ),
+                    if (_verifying &&
+                        pairingRelays(_parsedUri!).isNotEmpty) ...[
+                      SizedBox(height: t.sp * 1.5),
+                      Text(
+                        key: const Key('pairing-via-relay'),
+                        'Connecting to ${_parsedUri!.address}, or through '
+                        '${_relayHosts(_parsedUri!)} if it is not on this network.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.codeSize,
+                          color: t.text3,
+                        ),
+                      ),
+                    ],
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),

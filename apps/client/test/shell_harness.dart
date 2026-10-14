@@ -22,10 +22,12 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/state/client_version.dart';
 import 'package:storm/state/nav_memory.dart';
 import 'package:storm/sync/sync_engine.dart';
+import 'package:storm/ui/lan_servers.dart';
 import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
 
 import 'fake_server.dart';
+import 'lan_fakes.dart';
 
 /// Mounting the real shell — router, theme and providers — for widget tests.
 ///
@@ -133,6 +135,8 @@ ProviderContainer shellContainer({
       ),
       // Detached, so no suite reaches the native link channel.
       oauthLinksProvider.overrideWithValue(oauthLinks ?? OAuthLinks.detached()),
+      // No suite browses the real network; LAN discovery has its own tests.
+      lanBrowserFactoryProvider.overrideWithValue(FakeLanBrowser.new),
       oauthSupportedProvider.overrideWithValue(true),
     ],
   );

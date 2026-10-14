@@ -28,6 +28,10 @@ ed25519-dalek = "3.0.0"
 # response body out as it is produced. Already in the tree under
 # tokio-tungstenite; named directly because `relay/client.rs` uses it directly.
 futures-util = { version = "0.3", default-features = false }
+# LAN discovery (decision 118): advertises `_storm._tcp`. Pure Rust, no
+# runtime of its own and no Avahi/Bonjour daemon, so it builds for the static
+# musl release and for Windows.
+mdns-sd = { version = "0.21.5", default-features = false, features = ["logging"] }
 notify = "8.2.0"
 rand = "0.10.2"
 # Server features for `/mcp` (decision 39); client features for the MCP
@@ -65,6 +69,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 # under tokio with the same feature.
 socket2 = { version = "0.6", features = ["all"] }
 serde_json = "1.0.151"
+# The key fingerprint people compare (decision 118). Already in the tree via
+# ed25519-dalek.
+sha2 = "0.10.9"
 thiserror = "2.0.19"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
 tokio = { version = "1.53.1", features = ["full"] }

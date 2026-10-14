@@ -80,6 +80,30 @@ class AuthApi {
     return PairingResult.fromJson(json as Map<String, dynamic>);
   }
 
+  /// `POST /v1/pairings/password` — pair a device found on the LAN with the
+  /// account password (decision 118). Only ever called on a direct route
+  /// whose identity has verified: the server refuses it through a relay.
+  Future<PairingResult> pairWithPassword({
+    required String password,
+    required String deviceName,
+    String? platform,
+    String? version,
+  }) async {
+    final json = _decode(
+      await _client.post(
+        _uri('/v1/pairings/password'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'password': password,
+          'device_name': deviceName,
+          'platform': ?platform,
+          'version': ?version,
+        }),
+      ),
+    );
+    return PairingResult.fromJson(json as Map<String, dynamic>);
+  }
+
   /// `GET /v1/account` (device tier): whether this Storm is set up.
   Future<bool> accountExists({
     required String deviceId,

@@ -148,13 +148,14 @@ pub fn status() -> Result<()> {
     println!("unit     : {active}");
     println!("enabled  : {enabled}");
 
-    if let Some(env) = read_env_listen() {
+    let port = if let Some(env) = read_env_listen() {
         println!("listen   : {}:{}", env.0, env.1);
         let url = format!("http://127.0.0.1:{}/v1/health", env.1);
         match ureq_get_health(&url) {
             Ok(()) => println!("health   : ok ({url})"),
             Err(e) => println!("health   : unreachable ({e})"),
         }
+        env.1
     } else {
         // Fall back to the packaged default port.
         let url = format!("http://127.0.0.1:{DEFAULT_PORT}/v1/health");
@@ -162,6 +163,11 @@ pub fn status() -> Result<()> {
             Ok(()) => println!("health   : ok ({url})"),
             Err(e) => println!("health   : unreachable ({e})"),
         }
+        DEFAULT_PORT
+    };
+    // The fingerprint a device pairing from the LAN list shows (decision 118).
+    for line in crate::discovery::status_identity(port, 9) {
+        println!("{line}");
     }
     Ok(())
 }

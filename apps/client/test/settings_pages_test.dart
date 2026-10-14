@@ -179,6 +179,7 @@ void main() {
               .subtract(const Duration(hours: 2))
               .toUtc()
               .toIso8601String(),
+          'paired_by': 'lan_password',
         },
         {
           'id': 'dev_old',
@@ -204,7 +205,10 @@ void main() {
       final c = await withDevices(tester, desk);
       expect(find.text('MacBook (this device)'), findsOneWidget);
       expect(find.text('Pixel 8'), findsOneWidget);
-      expect(find.text('active 2h ago'), findsOneWidget);
+      expect(
+        find.text('active 2h ago · paired on local network'),
+        findsOneWidget,
+      );
       expect(find.text('Old laptop'), findsNothing, reason: 'revoked');
       expect(find.byKey(const Key('sign-out')), findsOneWidget);
       expect(
@@ -576,7 +580,7 @@ void main() {
         settings: const Settings(
           baseUrl: 'http://storm.home:7420',
           accessToken: 'sta_test',
-          // base64url of 0x4F 0x2A 0x91 …
+          // SHA-256 of 0x4F 0x2A 0x91 0 … 0 starts C670 7650 3088 8312.
           serverPublicKey: 'TyqRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
           activeVault: FakeServer.primaryVault,
         ),
@@ -585,7 +589,7 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'connection');
       expect(find.text('storm.home:7420'), findsOneWidget);
-      expect(find.text('verified · 4F:2A:91…'), findsOneWidget);
+      expect(find.text('verified · C670 7650 3088 8312'), findsOneWidget);
       expect(find.text('relay.example.net'), findsOneWidget);
 
       await tapKey(tester, 'add-relay');
@@ -602,6 +606,49 @@ void main() {
 
       await tapKey(tester, 'remove-relay-wss://relay.example.net');
       expect(serverOf(c).relays, ['wss://relay.two.net']);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the server can stop being discoverable (decision 118)', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      serverOf(c).discoverable = true;
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      expect(find.text('Discoverable on this network'), findsOneWidget);
+      expect(
+        find.text(
+          'Lets devices on your Wi-Fi find this server and pair with your '
+          'password. Turn off to pair by QR only.',
+        ),
+        findsOneWidget,
+      );
+      await tapKey(tester, 'discoverable-toggle');
+      expect(serverOf(c).discoverable, isFalse);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a server started with --no-discovery cannot be switched on', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      serverOf(c)
+        ..discoverable = true
+        ..discoveryForcedOff = true;
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      expect(find.textContaining('--no-discovery'), findsOneWidget);
+      await tapKey(tester, 'discoverable-toggle');
+      expect(serverOf(c).discoverable, isTrue, reason: 'nothing was sent');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an older server shows no discovery switch', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      expect(find.byKey(const Key('discoverable')), findsNothing);
       await disposeShell(tester, c);
     });
 

@@ -41,6 +41,17 @@ void main() {
     );
   });
 
+  test('the main manifest grants the multicast lock LAN discovery needs', () {
+    // Decision 118: without it Wi-Fi drops the mDNS answers and the "On this
+    // network" list is empty, which reads as "no server here".
+    expect(
+      RegExp(
+        r'<uses-permission\s+android:name="android\.permission\.CHANGE_WIFI_MULTICAST_STATE"\s*/>',
+      ).hasMatch(text),
+      isTrue,
+    );
+  });
+
   test('it is a uses-permission, not a mention in a comment', () {
     // The comment above the line names the permission too, so a `contains`
     // check alone would pass with the declaration deleted.

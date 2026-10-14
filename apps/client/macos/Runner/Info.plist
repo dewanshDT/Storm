@@ -29,7 +29,13 @@
 	     if it is refused, syncing fails silently and the only cure is System
 	     Settings > Privacy & Security > Local Network. -->
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Storm syncs your notes with the server on your local network.</string>
+	<string>Storm finds your server on your local network and syncs your notes with it.</string>
+	<!-- LAN discovery (decision 118). Bonjour refuses to browse a type the
+	     app has not declared, and the list stays empty with no error. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_storm._tcp</string>
+	</array>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

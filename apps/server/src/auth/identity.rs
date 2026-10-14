@@ -80,6 +80,10 @@ impl ServerIdentity {
         BASE64URL_NOPAD.encode(self.verifying_key().as_bytes())
     }
 
+    pub fn fingerprint(&self) -> String {
+        fingerprint(self.verifying_key().as_bytes())
+    }
+
     /// Signs a client's nonce, proving this host holds the private half of the
     /// key the client pinned from a QR.
     ///
@@ -144,6 +148,19 @@ impl ServerIdentity {
             signing: SigningKey::from_bytes(&seed),
         }
     }
+}
+
+/// What a person compares to tell two servers apart (decision 118):
+/// SHA-256 of the raw key, first 8 bytes, as `6FEC DC12 9A0B 44E1`. The client
+/// derives the same string; `docs/srp-vectors.json` keeps them in agreement.
+pub fn fingerprint(public_key: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(public_key);
+    digest[..8]
+        .chunks(2)
+        .map(|pair| format!("{:02X}{:02X}", pair[0], pair[1]))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The exact bytes a challenge signature covers.

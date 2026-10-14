@@ -405,6 +405,13 @@ cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
   `tools/relay-conformance` (`make relay-conformance-local`,
   `make relay-conformance-cf`). A behaviour the spec leaves open is amended
   into the vault spec in the same change, never settled in one relay's code.
+- **Password pairing is LAN-only** (decision 118). `POST
+  /v1/pairings/password` refuses a request the relay dispatched (the
+  `relay::Relayed` extension, set in `dispatch.rs`; `relay_peer_ip` alone looks
+  like any socket peer), a peer outside loopback, RFC 1918, link-local and
+  IPv6 ULA, and everything while discovery is off. The client sends the
+  password only on a direct route whose challenge verified against the
+  advertised key, with no relay candidate at all.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.
