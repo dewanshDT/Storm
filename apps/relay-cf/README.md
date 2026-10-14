@@ -72,8 +72,9 @@ RELAY=ws://127.0.0.1:18910 ORIGIN=http://127.0.0.1:8484 STORM_SESSION="Bearer st
 ```
 
 Under `wrangler dev`, `CF-Connecting-IP` is the socket's address, but a value a
-client sends in that header is passed through. Cloudflare's edge overwrites it;
-only a deployed relay can rely on it.
+client sends in that header is passed through. Cloudflare's edge refuses a
+request that carries one (403, error 1000); only a deployed relay can rely on
+it.
 
 ## Configuration
 

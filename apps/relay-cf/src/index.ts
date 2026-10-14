@@ -166,8 +166,8 @@ async function register(env: Env, url: URL): Promise<Response> {
 
 async function connect(request: Request, env: Env, url: URL): Promise<Response> {
   const config = configFor(env);
-  // Set by Cloudflare's edge, which overwrites any value a client sends: the
-  // relay's only source for relay_peer_ip (§5.2, rule 5 of the plan note).
+  // Set by Cloudflare's edge, which refuses a request carrying a client's own
+  // (403, error 1000): the relay's only source for relay_peer_ip (§5.2).
   const peerIp = request.headers.get("cf-connecting-ip");
   if (!peerIp) {
     log("relay_fault", { reason: "connect: no CF-Connecting-IP" });
