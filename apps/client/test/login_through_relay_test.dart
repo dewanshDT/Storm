@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
@@ -36,6 +37,9 @@ void main() {
   late String pubkey;
 
   setUpAll(() async {
+    // Real sockets, so the saved address is refused rather than answered 400
+    // by the widget binding's stand-in HttpClient.
+    HttpOverrides.global = null;
     keyPair = await Ed25519().newKeyPair();
     final pk = await keyPair.extractPublicKey();
     pubkey = base64Url.encode(pk.bytes).replaceAll('=', '');

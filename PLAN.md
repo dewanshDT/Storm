@@ -6223,7 +6223,7 @@ data)*
   relay after the challenge; a plain `ws://` relay off loopback is never
   raced; a relay without the server is named. The two sign-in widget tests
   fail on the old code (no token; no identity message). `FakeRelay` now
-  serves a second trunk. Live (`test_live/relay_live_test.dart`): an extra
+  serves a second trunk. Live (`test_live/relay_sign_in_live_test.dart`, its own file because a `testWidgets` would put `relay_live_test.dart` under the widget binding, whose `HttpClient` answers 400): an extra
   device is paired from an invite whose address is a closed port, then signs
   in through the real `LoginScreen` and the real `storm-relay`, and its
   token reads the vaults.
