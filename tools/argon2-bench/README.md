@@ -22,7 +22,7 @@ Not part of the server build. It is a separate crate with one dependency, and
 ```
 
 `vm-q18.sh` must run from the homelab LAN — the server is LAN-only
-(`PLAN.md` decision 4) — and it fails with that explanation rather than a
+(decision 4) — and it fails with that explanation rather than a
 timeout when it is not.
 
 **It never touches prod.** No `storm-server up`/`down`, no systemctl, port 8585

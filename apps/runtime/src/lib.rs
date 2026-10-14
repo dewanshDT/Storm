@@ -1,5 +1,5 @@
 //! `storm-runtime` — a Storm Runtime Host, the execution plane of the Agent
-//! Runtime (`PLAN.md` decision 77; the vault's *Agent Runtime/V1
+//! Runtime (decision 77; the vault's *Agent Runtime/V1
 //! Specification Freeze* is the spec).
 //!
 //! The Storm Server is the control plane. It owns identity, ownership,

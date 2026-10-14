@@ -370,7 +370,7 @@ pub fn hash(content: &str) -> String {
 }
 
 /// Why Windows cannot store a file or folder called `name`, or `None`
-/// (PLAN 99, W-S4). Checked only on a Windows server: elsewhere these are
+/// (decision 99, W-S4). Checked only on a Windows server: elsewhere these are
 /// ordinary names. Without it `con.md` opens the console device and
 /// `a:b.md` writes an NTFS alternate data stream of `a`.
 pub fn windows_name_problem(name: &str) -> Option<&'static str> {

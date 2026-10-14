@@ -6,7 +6,7 @@ WebSockets, and every check is tagged with the spec section it enforces, so a
 failure reads as a spec violation rather than as a test name.
 
 Any relay must pass it. Today that is `storm-relay` (`apps/relay`); the
-Cloudflare Worker relay (`apps/relay-cf`, PLAN decision 108b) is the second.
+Cloudflare Worker relay (`apps/relay-cf`, decision 108b) is the second.
 
 Standalone crate, like every other: no workspace, and no dependency on
 `apps/relay`. Linking the implementation it judges would let the two agree by
@@ -157,7 +157,7 @@ are now plain rules:
 
 ## Revision 115: what the suite must gain in Phase 2
 
-`PLAN.md` decision 115 moved the normative spec to the vault note *Storm Relay
+decision 115 moved the normative spec to the vault note *Storm Relay
 Protocol* (SRP v1, revision 115). Where it and `docs/srp-v1.md` (a 108c
 snapshot) differ, the note wins. Revision 115 adds MUSTs that no check holds
 yet. Each is listed below with the slice that implements it (decision 116) and

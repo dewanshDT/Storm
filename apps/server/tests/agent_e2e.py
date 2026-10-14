@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Agent Runtime V1, end to end: a real storm-server and a real storm-runtime.
 
-PLAN.md decisions 77 and 77c. The fake provider drives the whole path through
+decisions 77 and 77c. The fake provider drives the whole path through
 the Agent Manager and the host link (AC-A1). A real shell then proves the PTY,
 and the recovery criteria (AC-R1/R2/R3) restart and revoke for real. Nothing
 here reaches into either process: everything goes through the public REST and

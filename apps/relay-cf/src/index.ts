@@ -87,7 +87,7 @@ async function limited(env: Env, scope: string, ip: string, limit: number, windo
 
 // `/register` names no server_id, so the Worker reads REGISTER_SERVER before it
 // can pick the Durable Object, and then carries the trunk's frames both ways.
-// See PLAN.md decision 108b for why this is the one hop that is not spliced.
+// See decision 108b for why this is the one hop that is not spliced.
 async function register(request: Request, env: Env, url: URL): Promise<Response> {
   const config = configFor(env);
   // §6.2: counted before a socket, a challenge or a room is spent on it. The

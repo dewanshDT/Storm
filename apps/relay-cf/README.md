@@ -1,7 +1,7 @@
 # storm-relay-cf
 
 The Storm Relay Protocol v1 relay on **Cloudflare Workers + Durable Objects**:
-the hosted half of the relay (`PLAN.md` decision 108, slice B = 108b). It is
+the hosted half of the relay (decision 108, slice B = 108b). It is
 wire-identical to `storm-relay` (`apps/relay`): the same paths, handshake,
 frames and error codes. `docs/srp-v1.md` is the contract both implement, and
 `tools/relay-conformance` (108a) is the black-box suite both pass.
@@ -35,7 +35,7 @@ HELLO limit per source address ─▶ HelloLimiter idFromName("ip:" + CF-Connect
 - `public_address` is `<STORM_RELAY_PUBLIC_BASE>/connect/<server_id>`.
 
 What survives hibernation, how the timers are alarms, and what "a client that
-fell behind" means without a send buffer: `PLAN.md` decision 108b.
+fell behind" means without a send buffer: decision 108b.
 
 ## Local development
 

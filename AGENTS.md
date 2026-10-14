@@ -3,30 +3,27 @@
 Self-hosted markdown notes: Flutter clients + a Rust sync server in the homelab,
 replacing Obsidian + Syncthing.
 
-## Read PLAN.md first
+## The vault is the source of truth
 
-**`PLAN.md` is the living plan and status.** Read it before starting work in
-this repo, and **update it as part of the change** — not afterwards:
+**Storm's plan, status and decisions live in the personal vault (Storm MCP),
+never in this repo.** There is no `PLAN.md`; it grew to 600 KB and was removed
+on 2026-10-15 (its text is in git history). Read the vault before starting
+work, and **update it as part of the change** — not afterwards:
 
-- A milestone changing state, a new blocker, or a finding that would have
-  changed an earlier decision all belong in `PLAN.md` in the same change that
-  produced them.
-- Its **Decision log** records settled choices and what would justify revisiting
-  each. Don't relitigate them without a reason; if one does change, amend the
-  entry with why.
-- Leaving `PLAN.md` stale is a defect. A finding that exists only in a chat
-  transcript is lost.
-
-**Also keep `Storm/Active Work.md` current** (personal vault, via Storm MCP) —
-the short in-flight checklist. Read it when starting multi-step work; update it
-when an item moves. `.cursor/rules/storm-active-work.mdc` requires this.
-`PLAN.md` still wins for decisions; Active Work is the queue.
-
-**`Storm/Global Todo.md` is the one aggregate tracking surface** — every
-milestone, the Agent Runtime phases, in-flight items, backlog and parking lot
-in a single checklist. `PLAN.md` and Active Work stay authoritative for
-decisions and the queue; Global Todo mirrors their status. When a milestone,
-phase, or queue item changes state, update Global Todo in the same change.
+- **`Storm/Active Work.md`** is the short in-flight queue. Read it when
+  starting multi-step work; update it when an item moves.
+  `.cursor/rules/storm-active-work.mdc` requires this.
+- **`Storm/Global Todo.md`** is the one aggregate checklist — every milestone,
+  the Agent Runtime phases, in-flight items, backlog and parking lot. When a
+  milestone, phase or queue item changes state, update it in the same change.
+- **Decisions are numbered** and recorded in the vault note for their area
+  (the feature's design note, `Storm/Remote/…`, the area's *Decisions* note),
+  with what would justify revisiting each. Don't relitigate a settled one
+  without a reason; if one changes, amend it there with why. Code and docs
+  cite them as "decision 77b". Active Work names the next free number.
+- **Specs are normative in the vault**, never written into the repo.
+- A finding that exists only in a chat transcript is lost. A slice that
+  lands without its vault note updated is not done.
 
 **Every vault note an agent edits carries a `summary:` in its frontmatter.**
 Add it when creating a note; refresh it whenever you update one — one
@@ -34,8 +31,8 @@ plain-text line capturing what the note is (for a change, what it now is).
 It is what search indexes and what a later agent skims first; a note whose
 summary still says "proposed" long after it shipped is a note that lied.
 
-`docs/prd.md` is the original brief and is **not** maintained.
-Where it and `PLAN.md` disagree, `PLAN.md` is current.
+`docs/prd.md` is the original brief and is **not** maintained. Where it and
+the vault disagree, the vault is current.
 
 ## Layout
 
@@ -44,7 +41,7 @@ Where it and `PLAN.md` disagree, `PLAN.md` is current.
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
-| `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
+| `docs/prd.md` | Original brief. Superseded by the vault; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |

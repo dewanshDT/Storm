@@ -27,7 +27,7 @@ Companion: [[Storm Codebase Map]] · [[Storm Active Work]] · [[Storm Releases]]
 | `/install` | [[Storm Website Install]] | Apt + `storm-server up` + clients |
 | `/how-it-works` | [[Storm Website How it works]] | Architecture sketch |
 
-Non-goal: a docs portal. Depth stays on GitHub / `PLAN.md` / `deploy/`.
+Non-goal: a docs portal. Depth stays on GitHub / `docs/` / `deploy/`.
 
 ## Hosting rules
 
@@ -36,7 +36,7 @@ Non-goal: a docs portal. Depth stays on GitHub / `PLAN.md` / `deploy/`.
   `storm.dewansh-dt.workers.dev`.
 - **Never** publish into `https://dewanshdt.github.io/Storm/` — that URL is the
   **apt repository root**. Overwriting it breaks every `sources.list` line
-  (decision 49 in `PLAN.md`).
+  (decision 49).
 
 ## Repo pointers
 
@@ -51,4 +51,4 @@ make www / make www-dev   build / local preview
 
 1. Edit the page note (or the matching file under `docs/www/`).
 2. Mirror the prose into the matching `apps/www/src/pages/*.astro`.
-3. Tick [[Storm Active Work]] / `PLAN.md` if the milestone status moved.
+3. Tick [[Storm Active Work]] / [[Global Todo]] if the milestone status moved.

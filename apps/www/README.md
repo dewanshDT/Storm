@@ -1,7 +1,6 @@
 # storm (www)
 
-Marketing / home site for Storm. Astro, static. Milestone **M16** in
-`PLAN.md`.
+Marketing / home site for Storm. Astro, static. Milestone **M16**.
 
 ## Routes
 

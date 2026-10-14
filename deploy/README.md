@@ -4,7 +4,7 @@ A single static binary, a systemd unit, and a nightly backup. No container, no
 runtime dependencies — the server is a ~5 MB musl binary that runs on a bare
 Ubuntu or Debian box with nothing installed.
 
-See decision 8 in `PLAN.md` for why this isn't a Docker image. Prefer the
+See decision 8 for why this isn't a Docker image. Prefer the
 packaged install (`apt install storm-server` then `sudo storm-server up`) once
 a release exists; the steps below are the manual equivalent. Secrets and the
 **clean-install** runbook are in [release-secrets.md](release-secrets.md).
@@ -487,7 +487,7 @@ before any connection is attempted. Clients learn the relay from the server when
 ### On Cloudflare instead (optional)
 
 `apps/relay-cf` is the same relay as a Cloudflare Worker with Durable
-Objects, for an operator who would rather not run a public box (PLAN decision
+Objects, for an operator who would rather not run a public box (decision
 108). It deploys to **your own** Cloudflare account, on the Free plan, with
 `wrangler`; nothing in Storm's release or apt pipeline touches it. The runbook
 is `apps/relay-cf/DEPLOY.md`. In short:
@@ -910,7 +910,7 @@ the vault root), which must be refused.
 
 v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a
 home network and nowhere else. Before this is reachable from the internet it
-needs TLS and per-device tokens — see decision 4 in `PLAN.md`. Do not
+needs TLS and per-device tokens — see decision 4. Do not
 port-forward it as it stands.
 
 The unit runs as a dedicated `storm` user with `ProtectSystem=strict` and

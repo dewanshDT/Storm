@@ -2,7 +2,7 @@
 
 Scope: make the client use a wide window. A folder-tree sidebar beside the note, a flowing card grid on the dashboard, and recents in a rail — without changing anything at phone width.
 
-Status: **built.** M12 in `PLAN.md`, decisions 31–34.
+Status: **built.** M12, decisions 31–34.
 
 ---
 

@@ -1,5 +1,5 @@
 # Storm Runtime Host: runs agent sessions for one Storm Server (Agent Runtime
-# V1; PLAN.md decisions 77 and 77e).
+# V1; decisions 77 and 77e).
 #
 # Enroll it before starting it. The app's Hosts screen shows a one-time string:
 #   sudo -u storm-runtime storm-runtime enroll
@@ -12,7 +12,7 @@
 
 [Unit]
 Description=Storm Runtime Host
-Documentation=https://github.com/dewanshDT/Storm/blob/main/PLAN.md
+Documentation=https://github.com/dewanshDT/Storm/blob/main/deploy/README.md
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60

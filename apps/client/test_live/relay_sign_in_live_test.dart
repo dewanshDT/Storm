@@ -12,7 +12,7 @@ import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/login_screen.dart';
 import 'package:storm/ui/theme.dart';
 
-/// A device added away from home signs in (PLAN decision 111), against the
+/// A device added away from home signs in (decision 111), against the
 /// real `storm-relay` and storm-server `make test-live` starts.
 ///
 /// Its own file, not `relay_live_test.dart`: a `testWidgets` there would make

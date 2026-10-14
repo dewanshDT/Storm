@@ -1,5 +1,5 @@
 //! The Agent Manager: the control plane of the Agent Runtime (freeze §3;
-//! `PLAN.md` decisions 77 and 77c).
+//! decisions 77 and 77c).
 //!
 //! **This is the only session authority.** It holds identity, ownership and
 //! the lifecycle record; Runtime Hosts run agents and are told nothing about
