@@ -910,3 +910,104 @@ async fn closing_the_trunk_says_close_and_fails_what_is_left() {
         SrpError::TrunkLost
     );
 }
+
+/// A relay that answers `HELLO` and `OPEN_STREAM`, then stops reading the
+/// socket until `resume` fires, and afterwards reports every frame it reads.
+async fn stalling_relay(
+    resume: Arc<Notify>,
+) -> (String, tokio::sync::mpsc::UnboundedReceiver<Message>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (seen, frames) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let (mut tx, mut rx) = ws.split();
+        while let Some(Ok(message)) = rx.next().await {
+            let Message::Text(text) = &message else {
+                continue;
+            };
+            let v: Value = serde_json::from_str(text.as_str()).unwrap();
+            match v["type"].as_str().unwrap() {
+                "HELLO" => {
+                    let _ = tx
+                        .send(control("READY", json!({"client_trunk_id": "ctk_fake"})))
+                        .await;
+                }
+                "OPEN_STREAM" => {
+                    let _ = tx
+                        .send(control(
+                            "STREAM_READY",
+                            json!({"attempt_id": v["attempt_id"], "stream_id": 7}),
+                        ))
+                        .await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        resume.notified().await;
+        while let Some(Ok(message)) = rx.next().await {
+            if let Message::Text(text) = &message
+                && text.contains("\"PING\"")
+            {
+                let _ = tx.send(control("PONG", json!({}))).await;
+            }
+            if seen.send(message).is_err() {
+                return;
+            }
+        }
+    });
+    (url, frames)
+}
+
+/// SRP §5.2 (decision 116b): a `PING` overtakes an upload already queued, and
+/// the trunk is not judged silent while its own `PING` cannot be written. On
+/// a slow uplink a 20 MiB upload used to end as `relay_silent`.
+#[tokio::test]
+async fn a_ping_overtakes_a_queued_upload_and_a_stalled_trunk_is_not_silent() {
+    let resume = Arc::new(Notify::new());
+    let (url, mut frames) = stalling_relay(resume.clone()).await;
+    let config = TrunkConfig {
+        handshake_timeout: Duration::from_secs(5),
+        heartbeat: Duration::from_millis(200),
+        silence_limit: Duration::from_millis(600),
+    };
+    let trunk = within(SrpTrunk::connect_with(&url, SERVER_ID, config))
+        .await
+        .unwrap();
+
+    let upload = tokio::spawn({
+        let trunk = trunk.clone();
+        async move {
+            let _ = trunk
+                .request(
+                    "PUT",
+                    "/v1/attachments/x",
+                    &[],
+                    Bytes::from(vec![7u8; 20 << 20]),
+                )
+                .await;
+        }
+    });
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !trunk.is_closed(),
+        "judged silent while its own PING could not be written: {:?}",
+        trunk.loss_reason()
+    );
+
+    resume.notify_one();
+    let mut bodies = 0;
+    loop {
+        match within(frames.recv()).await.expect("relay gone") {
+            Message::Text(text) if text.contains("\"PING\"") => break,
+            Message::Binary(_) => bodies += 1,
+            _ => {}
+        }
+    }
+    assert!(bodies < 40, "the PING waited behind {bodies} body frames");
+    assert!(!trunk.is_closed());
+    upload.abort();
+}

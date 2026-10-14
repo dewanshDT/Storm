@@ -836,6 +836,55 @@ async fn a_dying_client_trunk_frees_its_streams_on_the_server_side() {
     assert_eq!(closed["stream_id"], stream_id, "{closed}");
 }
 
+/// §5.4 (decision 116b): a relay that ends a stream sends the origin `CLOSE`
+/// even while the server-ward queue is full. It used to be dropped, and the
+/// origin kept serving a stream nobody would read.
+#[tokio::test]
+async fn a_dying_clients_close_reaches_the_origin_past_a_full_server_ward_queue() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut gone = harness.client().await;
+    let mut uploader = harness.client().await;
+
+    let gone_stream = gone.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+    let upload_stream = uploader.open_stream("b1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // The origin stops reading while another client uploads far more than
+    // the 64-frame queue and the loopback buffers hold.
+    let upload = tokio::spawn(async move {
+        uploader
+            .send(json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": upload_stream,
+                "method": "PUT", "path": "/up", "headers": {},
+            }))
+            .await;
+        let chunk = vec![0u8; 256 * 1024];
+        for _ in 0..256 {
+            uploader.send_body(0x01, upload_stream, &chunk).await;
+        }
+        uploader
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(gone);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let closed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Frame::Text(value) = server.next_frame().await
+                && value["type"] == "CLOSE"
+                && value["stream_id"] == gone_stream
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the origin was never told the stream ended");
+    upload.abort();
+}
+
 // ------------------------------------------------------------------ streaming
 
 #[tokio::test]
