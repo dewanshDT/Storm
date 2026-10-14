@@ -7522,6 +7522,14 @@ reads as a spec violation. It reads `docs/srp-vectors.json` for the invalid
 knob the contract does not name — add it to `relay.env` and storm-relay
 together.
 
+*108a addendum (2026-10-14):* `a_body_over_16_mib_crosses_both_ways_in_256_kib_frames`
+failed on the Worker about one run in four, then every run once the client read
+concurrently: the origin sent 17 MiB before the client read, and the Worker's
+read-marks (a `PING` per 128 KiB under the fixture's 1 MiB client budget)
+declared the client backlogged — the case the check says it is not testing. The
+check's origin now stays within half the client budget of what the client has
+read, so only framing is under test (3/3 Worker runs, 58/58 storm-relay).
+
 **105e. mcp-connect in Settings and the installer (S5).** *(2026-10-13,
 "MCP over the Relay — mcp-connect", the product surface; stacked on 101)*
 - **Why.** External MCP clients reach Storm through `storm-runtime
@@ -7889,6 +7897,96 @@ comment and §5.4's `CLOSE` toward the origin.)*
 - *Revisit if:* a platform's `TCP_NOTSENT_LOWAT` turns out to cost
   throughput, or 116d's per-stream queues make the origin's FIFO lane
   replaceable by the Dart client's round robin.
+
+**116n. Key-addressed registration: an `open` mode in both relays, and the
+pinned key in every client's `HELLO`.** *(2026-10-14; decision 114f, spec
+revision 115 §4.1, §4.2, §5 and the 114f addendum; gaps SG-62, SG-70. The
+addressing half of what 115 listed under 116k; 116k keeps the abuse controls
+and logs, and the hosted relay switches to `open` only after 116k and 116f's
+hot-loop rule. Nothing is deployed and no deployment's mode changes.)*
+- **Mode is configuration, as before.** storm-relay gains `--mode`
+  (`STORM_RELAY_MODE`) `allowlist | tofu | open`; without it the mode is what
+  it was (allowlist with `--allowlist`, TOFU otherwise), and `open` refuses to
+  start beside an allowlist or a bindings file. The Worker's
+  `STORM_RELAY_BINDING` takes `open`; its default stays `allowlist`.
+- **storm-relay: one table keyed by `(server_id, pubkey)`.** `Registrations`
+  is `server_id → key bytes → Registration`; install, release and touch take
+  the key, so supersession and the release guard are per key and two keys of
+  one `server_id` never meet. Open mode skips the binding check entirely (no
+  challenge is withheld, nothing is recorded). A `HELLO` is routed by
+  `HELLO.pubkey`: in any mode, a key routes to that key's registration (held
+  for the wait, then `server_unreachable`); without a key, allowlist and TOFU
+  route to the one registration as before, and open refuses at once.
+- **The Worker: one Durable Object per `(server_id, pubkey)` in open mode,**
+  named `<server_id>:<pubkey>` (canonical unpadded base64url; `server_id` has
+  no `:`, so it never meets a per-`server_id` room). `/register` reads the
+  key from `REGISTER_SERVER`, `/connect` from `?pubkey=`, so nothing done
+  under one key reaches another key's room, which is §4.1 rule 2 by
+  construction. Allowlist and TOFU rooms keep their `server_id` names, so
+  this deploys over existing rooms and TOFU bindings unchanged. A connect URL
+  without `?pubkey=` on an open relay lands in the bare `server_id` room,
+  which holds no server and answers the `HELLO` `server_unreachable` at once.
+  The room keeps the registered key in the server's attachment (`pk`, kept
+  after registration now) and the client's query key and named key (`qk`,
+  `hk`), so routing survives hibernation; a trunk from before 116n has no
+  `pk` and its key is read from the allowlist or the binding.
+- **`HELLO.pubkey` checks, both relays.** It must be a string decoding to 32
+  bytes of strict base64url, and must equal `?pubkey=` when both are present;
+  otherwise `protocol_error`. A malformed `?pubkey=` is `protocol_error` too.
+  A query alone names no key: §5's table reads the `HELLO`.
+- **Clients.** Dart `SrpTrunk` takes `serverKey` and sends it as
+  `HELLO.pubkey` and `?pubkey=` (`keyedConnectUrl`); `StormConnection` passes
+  its pinned `publicKeyB64`, and the pairing and sign-in route
+  (`openPairingRoute`, `openSavedRoute`, `probeRelay`) the QR's or the saved
+  key. Rust `SrpTrunk::connect(_with)` now requires the key, refuses one that
+  is not 32 bytes of unpadded base64url before dialling, and `mcp-connect`'s
+  race passes its pinned key. storm-server needs nothing: it already sends
+  `pubkey` in `REGISTER_SERVER`.
+- **Compatibility** (servers are unaffected in every cell):
+
+  | | relay before 116n (allowlist or TOFU) | 116n relay, allowlist or TOFU | 116n relay, open |
+  |---|---|---|---|
+  | **client before 116n** (keyless `HELLO`, no query) | routed by `server_id` | routed to the one registration, as before | `server_unreachable` at once (no grace, 114f addendum) |
+  | **116n client** (`HELLO.pubkey` and `?pubkey=`) | key and query ignored (unknown field, §3.1); routed by `server_id`; the identity challenge decides | routed only if the registered key is the pinned one; otherwise held, then `server_unreachable` | routed to `(server_id, pubkey)`; none live: held, then `server_unreachable` |
+
+  One verdict moves: a 116n client whose pinned key no longer matches the
+  key registered on an allowlist or TOFU relay now sees `server_offline`
+  from that relay, where it used to reach the server and fail the challenge
+  (`identity_failed`). That is §5's table; a rotated key needs a re-pair
+  either way.
+- **Vectors.** `docs/srp-vectors.json` → `hello_pubkey` is now read by
+  storm-relay (`tests/vectors.rs`, and the routing tests' refused
+  spellings), the Worker (`test/unit/vectors.test.ts`, `test/open`), the Dart
+  client (`srp_vectors_test.dart`, including the connect URL) and the Rust
+  client (`tests/srp_vectors.rs`). The generator still does not emit it;
+  that stays with 116l, as 115 says.
+- **Conformance.** `RELAY_OPEN_URL` and seven checks
+  (`checks/keyed.rs`): on the allowlist relay
+  `a_hello_for_another_key_is_server_unreachable` and
+  `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error`; on the open relay
+  `open_registrations_are_keyed_by_server_id_and_pubkey`,
+  `a_squatter_cannot_take_over`, `supersession_is_per_key`,
+  `a_keyless_hello_is_refused_on_an_open_relay` and the bad-key check again.
+  `local.sh` starts a third, open-mode instance (+2 on its ports). `cf.sh`
+  starts its open Worker only for a second pass (`--open-only`): with three
+  workerds up, the 16 MiB check's known `client_backlogged` flake failed
+  CI twice in a row. `make test-live RELAY_MODE=open` runs every relayed live suite
+  through an open relay. `mcp_connect_live.py`'s wrong-pin check over the
+  relay now expects `server_offline` (the verdict change above).
+- **Results.** `make check` green (server 609, relay 51 + 21 + 48 + 8 + 10,
+  Worker 110, runtime 133 + 78, client 1091 + 1 skipped).
+  `make relay-conformance-local` 65/65 (three relays);
+  `make relay-conformance-cf` 64 + the latency skip (the known 16 MiB
+  `client_backlogged` flake under the 1 MiB fixture budget, recorded since
+  108b, failed in two of five runs; the open-mode checks passed in all). `make test-live` on 19720–19722
+  (storm-relay, TOFU), with `RELAY_MODE=open` on 19730–19732 and with
+  `RELAY_IMPL=cf RELAY_MODE=open` on 19740–19742 all exit 0: server 81,
+  mcp 86, agent 93, gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect
+  live 39, client integration 34 + 1 skipped. *Revisit if:* the spec settles what an open relay
+  that routes on the URL does with a keyed `HELLO` whose URL named no key
+  (here `server_unreachable` at once), or keeps a grace period for keyless
+  `HELLO`s on some open relay (then the "exactly one live registration" row
+  of §5 needs a cross-room lookup in the Worker).
 
 **116i. `mcp-connect` follows the Connection state machine.** *(2026-10-14;
 a Phase 2 slice of the relay spec gap audit, vault *Remote/Relay Spec Gap

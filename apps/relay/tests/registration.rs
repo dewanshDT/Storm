@@ -184,7 +184,8 @@ async fn a_correct_handshake_registers_and_returns_a_derived_public_address() {
         format!("wss://relay.example/connect/{SERVER_ID}")
     );
 
-    let registration = harness.relay.registrations.get(SERVER_ID).unwrap();
+    let key = PublicKey::from_b64(&pubkey_b64(1)).unwrap().bytes();
+    let registration = harness.relay.registrations.get(SERVER_ID, &key).unwrap();
     assert_eq!(registration.trunk_id, reply["trunk_id"].as_str().unwrap());
 }
 

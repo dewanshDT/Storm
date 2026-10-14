@@ -101,9 +101,15 @@ describe("config", () => {
   });
 
   it("refuses an unknown mode, a bad number and a public base that is not ws(s)", () => {
-    expect(() => loadConfig({ STORM_RELAY_BINDING: "open" } as never)).toThrow(ConfigError);
+    expect(() => loadConfig({ STORM_RELAY_BINDING: "account" } as never)).toThrow(ConfigError);
     expect(() => loadConfig({ STORM_RELAY_HELLO_WAIT_MS: "soon" } as never)).toThrow(ConfigError);
     expect(() => loadConfig({ STORM_RELAY_PUBLIC_BASE: "https://relay.example" } as never)).toThrow(ConfigError);
     expect(loadConfig({ STORM_RELAY_PUBLIC_BASE: "wss://relay.example/" } as never).publicBase).toBe("wss://relay.example");
+  });
+
+  it("takes open mode, which reads no allowlist", () => {
+    const config = loadConfig({ STORM_RELAY_BINDING: "open", STORM_RELAY_ALLOWLIST: "not parsed" } as never);
+    expect(config.binding).toBe("open");
+    expect(config.allowlist.size).toBe(0);
   });
 });

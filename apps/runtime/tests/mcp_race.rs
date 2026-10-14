@@ -271,6 +271,8 @@ struct FakeRelay {
     url: String,
     hellos: AtomicUsize,
     heads: Mutex<Vec<Value>>,
+    /// The `HELLO.pubkey` of every trunk.
+    hello_keys: Mutex<Vec<Value>>,
 }
 
 impl FakeRelay {
@@ -283,6 +285,7 @@ impl FakeRelay {
             url: format!("ws://{host}:{port}"),
             hellos: AtomicUsize::new(0),
             heads: Mutex::default(),
+            hello_keys: Mutex::default(),
         });
         let r = relay.clone();
         tokio::spawn(async move {
@@ -348,6 +351,7 @@ async fn relay_connection(
                 match v["type"].as_str().unwrap_or_default() {
                     "HELLO" => {
                         relay.hellos.fetch_add(1, Ordering::SeqCst);
+                        relay.hello_keys.lock().unwrap().push(v["pubkey"].clone());
                         match hello {
                             Hello::Ready => {
                                 let _ = out.send(Out::Send(control(
@@ -514,6 +518,11 @@ async fn impostor_on_one_path(impostor_direct: bool) {
     assert_eq!(answer["result"]["via"], "real", "{answer}");
     assert!(fake.never_saw_the_key());
     assert_eq!(real.calls("echo"), 1);
+    // §5: the relay was told the pinned key, never the impostor's.
+    let pinned_key = data_encoding::BASE64URL_NOPAD.encode(pinned().verifying_key().as_bytes());
+    let keys = relay.hello_keys.lock().unwrap().clone();
+    assert!(!keys.is_empty());
+    assert!(keys.iter().all(|k| *k == pinned_key), "{keys:?}");
 }
 
 #[tokio::test]

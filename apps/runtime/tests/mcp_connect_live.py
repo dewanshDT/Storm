@@ -191,7 +191,10 @@ def the_suite(mode, path, sid, pk, key):
     print(f"\n=== {mode}: a wrong pinned key, a bad key ===")
     other = "Kay64UG8yvCyLhqU000LxzYeUm0L_hLIl5S8kyKWbdc"
     code, out, err = connect(["--server", sid, "--pk", other] + path, key, [INIT])
-    check(f"{mode}: identity_failed", len(out) == 1 and storm_error(out[0]) == "identity_failed", out)
+    # A relay routes a HELLO only to the key it names (SRP §5, decision 116n),
+    # so over the relay a wrong pin finds no server rather than a wrong one.
+    wrong_pin = "identity_failed" if mode == "direct" else "server_offline"
+    check(f"{mode}: {wrong_pin}", len(out) == 1 and storm_error(out[0]) == wrong_pin, out)
     code, out, err = connect(pin + path, "stk_notakey", [INIT])
     check(f"{mode}: unauthorized, from the server",
           len(out) == 1 and storm_error(out[0]) == "unauthorized", out)

@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::harness::Ctx;
 
 mod framing;
+mod keyed;
 mod lifecycle;
 mod limits;
 mod registration;
@@ -20,6 +21,8 @@ pub enum Needs {
     Nothing,
     /// `RELAY_TOFU_URL`.
     Tofu,
+    /// `RELAY_OPEN_URL`.
+    Open,
     /// `RELAY_MULTI_IP=1`.
     MultiIp,
     /// `RELAY_LATENCY=1`.
@@ -55,5 +58,6 @@ pub fn all() -> Vec<Check> {
     checks.extend(lifecycle::checks());
     checks.extend(streams::checks());
     checks.extend(limits::checks());
+    checks.extend(keyed::checks());
     checks
 }

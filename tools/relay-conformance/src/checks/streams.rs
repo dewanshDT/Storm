@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -448,23 +447,46 @@ async fn a_body_over_16_mib_crosses_both_ways_in_256_kib_frames(ctx: &Ctx) -> Re
         body.len()
     );
 
-    pair.server.send_json(response_head(id)).await?;
-    for chunk in body.chunks(FRAME) {
-        pair.server.send_body(BODY_RESPONSE, id, chunk).await?;
-        // SRP has no flow control: an origin outrunning a reading client by
-        // the relay's whole buffer is the backlogged case, not this one.
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    pair.server.send_json(close(id)).await?;
-    pair.client.recv_type("HTTP_RESPONSE_HEAD", STEP).await?;
-    let mut received = Vec::with_capacity(body.len());
-    loop {
-        match pair.client.next(STEP).await? {
-            Frame::Body { payload, .. } => received.extend_from_slice(&payload),
-            Frame::Text(v) if v["type"] == "CLOSE" => break,
-            other => bail!("downloading: {}", other.describe()),
+    // The client reads while the origin sends, as a real client does. An
+    // origin outrunning a client that is not reading by the relay's whole
+    // buffer is the backlogged case (SRP has no flow control), not this one.
+    // The origin stays within half the client buffer of what the client has
+    // read, so only framing is under test, never a relay's backlog bound.
+    let (server, client) = (&mut pair.server, &mut pair.client);
+    let window = ctx.knobs.max_client_buffer_bytes / 2;
+    let (progress_tx, mut progress) = tokio::sync::watch::channel(0usize);
+    let send = async {
+        server.send_json(response_head(id)).await?;
+        let mut sent = 0usize;
+        for chunk in body.chunks(FRAME) {
+            while sent.saturating_sub(*progress.borrow()) + chunk.len() > window {
+                tokio::time::timeout(STEP, progress.changed())
+                    .await
+                    .context("the client stopped reading the download")??;
+            }
+            server.send_body(BODY_RESPONSE, id, chunk).await?;
+            sent += chunk.len();
         }
-    }
+        server.send_json(close(id)).await
+    };
+    let receive = async {
+        client.recv_type("HTTP_RESPONSE_HEAD", STEP).await?;
+        let mut received = Vec::with_capacity(body.len());
+        loop {
+            match client.next(STEP).await? {
+                Frame::Body { payload, .. } => {
+                    received.extend_from_slice(&payload);
+                    progress_tx.send_replace(received.len());
+                }
+                Frame::Text(v) if v["type"] == "CLOSE" => break,
+                other => bail!("downloading: {}", other.describe()),
+            }
+        }
+        Ok(received)
+    };
+    let (sent, received) = tokio::join!(send, receive);
+    sent?;
+    let received = received?;
     ensure!(
         received == body,
         "the client got {} bytes of a {}-byte download, or different bytes",

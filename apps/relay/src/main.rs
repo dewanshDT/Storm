@@ -19,6 +19,13 @@ use storm_relay::state::Bindings;
 use storm_relay::tls::CertStore;
 use storm_relay::{Allowlist, CONNECT_PATH, Config, REGISTER_PATH, Relay};
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum ModeArg {
+    Allowlist,
+    Tofu,
+    Open,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "storm-relay", version, about = "Storm Relay Protocol v1 relay")]
 struct Args {
@@ -53,6 +60,13 @@ struct Args {
     /// relay. Meaningless with --allowlist, which switches TOFU off.
     #[arg(long, env = "STORM_RELAY_BINDINGS", conflicts_with = "allowlist")]
     bindings: Option<PathBuf>,
+
+    /// The §4.1 registration mode. Without it: `allowlist` when --allowlist is
+    /// given, `tofu` otherwise. `open` lets anyone register and addresses each
+    /// registration by `(server_id, pubkey)`; it takes neither file, and §6's
+    /// abuse controls are then mandatory.
+    #[arg(long, env = "STORM_RELAY_MODE", value_enum)]
+    mode: Option<ModeArg>,
 
     /// PEM certificate chain (e.g. certbot's fullchain.pem). With --tls-key,
     /// the relay terminates TLS itself and serves wss:// directly. It must, on
@@ -201,7 +215,27 @@ async fn main() -> Result<()> {
 
     let mut config = Config::new(args.bind, &public_base);
     args.limits.apply(&mut config);
+    match (args.mode, &allowlist, &bindings) {
+        (Some(ModeArg::Allowlist), None, _) => {
+            anyhow::bail!("--mode allowlist needs --allowlist")
+        }
+        (Some(ModeArg::Tofu), Some(_), _) => {
+            anyhow::bail!("--mode tofu cannot take --allowlist")
+        }
+        (Some(ModeArg::Open), Some(_), _) | (Some(ModeArg::Open), _, Some(_)) => {
+            anyhow::bail!("--mode open binds nothing; drop --allowlist and --bindings")
+        }
+        (Some(ModeArg::Open), None, None) => {
+            config.open = true;
+            tracing::warn!(
+                "open mode: anyone may register, and registrations are addressed by \
+                 (server_id, pubkey). Strangers' traffic will cross this relay."
+            );
+        }
+        _ => {}
+    }
     match (&allowlist, &bindings) {
+        _ if config.open => {}
         (Some(list), _) => tracing::info!(
             entries = list.len(),
             "allowlist loaded; trust-on-first-use is off"

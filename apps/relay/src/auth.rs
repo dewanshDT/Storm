@@ -97,17 +97,27 @@ pub struct PublicKey {
     bytes: [u8; 32],
 }
 
+/// The 32 bytes a registration is addressed by on an open relay (§4.1).
+pub type KeyBytes = [u8; 32];
+
+/// A key a client names (`HELLO.pubkey`, `?pubkey=`): strict base64url,
+/// unpadded, 32 bytes (§5). Not checked as a curve point: it is only ever
+/// compared with registered keys, which were.
+pub fn decode_key(encoded: &str) -> Result<KeyBytes, &'static str> {
+    let decoded = BASE64URL_NOPAD
+        .decode(encoded.as_bytes())
+        .map_err(|_| "public key must be base64url, unpadded")?;
+    decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| "public key must be 32 bytes")
+}
+
 impl PublicKey {
     /// Decodes the wire form: base64url, no padding, matching
     /// `ServerIdentity::public_key_b64`.
     pub fn from_b64(encoded: &str) -> Result<Self, &'static str> {
-        let decoded = BASE64URL_NOPAD
-            .decode(encoded.as_bytes())
-            .map_err(|_| "public key must be base64url, unpadded")?;
-        let bytes: [u8; 32] = decoded
-            .as_slice()
-            .try_into()
-            .map_err(|_| "public key must be 32 bytes")?;
+        let bytes = decode_key(encoded)?;
         // Parsed once here so a key that is not a valid curve point is refused
         // at the door rather than at every verify.
         VerifyingKey::from_bytes(&bytes).map_err(|_| "public key is not a valid Ed25519 key")?;
@@ -116,6 +126,10 @@ impl PublicKey {
 
     pub fn to_b64(self) -> String {
         BASE64URL_NOPAD.encode(&self.bytes)
+    }
+
+    pub fn bytes(self) -> KeyBytes {
+        self.bytes
     }
 
     /// Verifies `sig` over the relay-auth message for `(server_id, nonce)`.

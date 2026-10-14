@@ -29,6 +29,7 @@ void main() {
   late String vaultId;
   late String token;
   late String serverId;
+  late String serverKey;
   late Uri relayAddress;
   late SrpTrunk trunk;
   late StormApi relayed;
@@ -37,7 +38,11 @@ void main() {
   /// A client on a trunk of its own, for a test that must not share one: a
   /// trunk the relay closes takes every stream on it down.
   (SrpTrunk, StormApi) freshRelayed() {
-    final t = SrpTrunk(url: relayAddress, serverId: serverId);
+    final t = SrpTrunk(
+      url: relayAddress,
+      serverId: serverId,
+      serverKey: serverKey,
+    );
     return (
       t,
       StormApi(baseUrl: origin, token: token, client: SrpHttpClient(t)),
@@ -66,12 +71,14 @@ void main() {
     // so wait for the server to report the relay rather than racing it.
     Map<String, dynamic>? relay;
     String? id;
+    String? key;
     final until = DateTime.now().add(deadline);
     while (relay == null && DateTime.now().isBefore(until)) {
       final info =
           jsonDecode((await http.get(Uri.parse('$origin/v1/server'))).body)
               as Map<String, dynamic>;
       id = info['server_id'] as String;
+      key = info['public_key'] as String;
       final relays = (info['relays'] as List? ?? const [])
           .cast<Map<String, dynamic>>();
       if (relays.isNotEmpty) {
@@ -83,8 +90,13 @@ void main() {
     if (relay == null) fail('The server never registered with the relay.');
 
     serverId = id!;
+    serverKey = key!;
     relayAddress = Uri.parse(relay['public_address'] as String);
-    trunk = SrpTrunk(url: relayAddress, serverId: serverId);
+    trunk = SrpTrunk(
+      url: relayAddress,
+      serverId: serverId,
+      serverKey: serverKey,
+    );
     relayed = StormApi(
       baseUrl: origin,
       token: token,
@@ -239,14 +251,23 @@ void main() {
     // reached storm-server, which sent ERROR and dropped its trunk, and every
     // relayed client of the server was cut off.
     Future<(WebSocket, StreamIterator<Map<String, dynamic>>)> raw() async {
-      final ws = await WebSocket.connect(relayAddress.toString());
+      final ws = await WebSocket.connect(
+        keyedConnectUrl(relayAddress, serverKey).toString(),
+      );
       final frames = StreamIterator(
         ws
             .where((m) => m is String)
             .map((m) => jsonDecode(m as String) as Map<String, dynamic>)
             .where((m) => m['type'] != 'PING'),
       );
-      ws.add(jsonEncode({'v': 1, 'type': 'HELLO', 'server_id': serverId}));
+      ws.add(
+        jsonEncode({
+          'v': 1,
+          'type': 'HELLO',
+          'server_id': serverId,
+          'pubkey': serverKey,
+        }),
+      );
       expect(await frames.moveNext().timeout(deadline), isTrue);
       expect(frames.current['type'], 'READY');
       return (ws, frames);

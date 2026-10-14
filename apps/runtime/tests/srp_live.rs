@@ -20,8 +20,9 @@ fn env(name: &str) -> String {
 #[ignore = "needs a live storm-relay and storm-server"]
 async fn a_real_relay_carries_the_identity_challenge() {
     let server_id = env("STORM_SRP_SERVER_ID");
-    let key = decode_public_key(&env("STORM_SRP_SERVER_KEY")).unwrap();
-    let trunk = SrpTrunk::connect(&env("STORM_SRP_RELAY"), &server_id)
+    let key_b64 = env("STORM_SRP_SERVER_KEY");
+    let key = decode_public_key(&key_b64).unwrap();
+    let trunk = SrpTrunk::connect(&env("STORM_SRP_RELAY"), &server_id, &key_b64)
         .await
         .unwrap();
 
@@ -65,7 +66,7 @@ async fn a_real_relay_carries_the_identity_challenge() {
     .await;
     assert!(concurrent.iter().all(|(status, _)| *status == 200));
 
-    let unknown = SrpTrunk::connect(&env("STORM_SRP_RELAY"), "srv_not_registered_here")
+    let unknown = SrpTrunk::connect(&env("STORM_SRP_RELAY"), "srv_not_registered_here", &key_b64)
         .await
         .unwrap_err();
     assert_eq!(unknown.code(), "server_offline");

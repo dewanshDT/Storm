@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import vectors from "../../../../docs/srp-vectors.json";
 import {
   b64urlEncode,
+  decodeKey,
   parsePublicKey,
   RELAY_AUTH_DOMAIN,
   relayAuthMessage,
@@ -83,5 +84,16 @@ describe("docs/srp-vectors.json", () => {
     const key = parsePublicKey(vectors.keys.test_public_key_b64);
     expect(key).not.toBeNull();
     expect(b64urlEncode(key!)).toBe(vectors.keys.test_public_key_b64);
+  });
+
+  it("decodes every HELLO.pubkey spelling exactly as recorded", () => {
+    const section = vectors.hello_pubkey;
+    expect(section.cases.some((v) => v.accepted)).toBe(true);
+    for (const v of section.cases) expect(decodeKey(v.pubkey) !== null, v.name).toBe(v.accepted);
+    const agree = section.query_and_hello_must_agree;
+    expect(b64urlEncode(decodeKey(agree.query_pubkey)!)).not.toBe(b64urlEncode(decodeKey(agree.hello_pubkey)!));
+    const url = section.connect_url;
+    expect(b64urlEncode(decodeKey(url.pubkey_b64)!)).toBe(url.pubkey_b64);
+    expect(`${url.relay_base}/connect/${url.server_id}?pubkey=${url.pubkey_b64}`).toBe(url.url);
   });
 });

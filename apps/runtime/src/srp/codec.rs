@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::identity::validate_server_id;
 
+/// `HELLO.pubkey` and `?pubkey=` (§5): unpadded base64url of 32 bytes.
+pub fn validate_key(key: &str) -> Result<(), &'static str> {
+    match data_encoding::BASE64URL_NOPAD.decode(key.as_bytes()) {
+        Ok(bytes) if bytes.len() == 32 => Ok(()),
+        _ => Err("the server key must be 32 bytes of unpadded base64url"),
+    }
+}
+
 /// Hard-pinned (§3).
 pub const PROTOCOL_VERSION: u64 = 1;
 
@@ -206,12 +214,13 @@ fn control<T: Serialize>(ty: &'static str, body: T) -> String {
     .unwrap_or_else(|_| String::from("{}"))
 }
 
-pub fn hello(server_id: &str) -> String {
+pub fn hello(server_id: &str, pubkey: &str) -> String {
     #[derive(Serialize)]
     struct B<'a> {
         server_id: &'a str,
+        pubkey: &'a str,
     }
-    control("HELLO", B { server_id })
+    control("HELLO", B { server_id, pubkey })
 }
 
 pub fn open_stream(attempt_id: &str) -> String {
@@ -291,7 +300,7 @@ mod tests {
     #[test]
     fn every_outbound_control_frame_carries_the_version_envelope() {
         for text in [
-            hello("srv_A"),
+            hello("srv_A", "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"),
             open_stream("a1"),
             request_head(7, "GET", "/v1/health", &WireHeaders::default()),
             close_stream(7),

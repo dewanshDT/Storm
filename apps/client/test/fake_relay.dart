@@ -102,6 +102,10 @@ class FakeRelay {
   /// Trunks the client has opened (`HELLO`s seen).
   int hellos = 0;
 
+  /// Every `HELLO` body, and every URL a trunk was dialled at.
+  final helloBodies = <Map<String, dynamic>>[];
+  final connectUris = <Uri>[];
+
   int get port => _server!.port;
 
   /// The `ws://` connect URL the client dials.
@@ -115,6 +119,7 @@ class FakeRelay {
         await req.response.close();
         return;
       }
+      connectUris.add(req.uri);
       final socket = await WebSocketTransformer.upgrade(req);
       _socket = socket;
       socket.listen(
@@ -158,6 +163,7 @@ class FakeRelay {
     switch (frame.type) {
       case 'HELLO':
         hellos++;
+        helloBodies.add(Map<String, dynamic>.from(frame.body));
         onHandshake?.call(Map<String, dynamic>.from(frame.body));
         final refusal = helloError;
         if (refusal != null) {
