@@ -61,6 +61,9 @@ rpassword = "7.5.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
+# `TCP_NOTSENT_LOWAT` on relay trunks (decision 116b). Already in the tree
+# under tokio with the same feature.
+socket2 = { version = "0.6", features = ["all"] }
 serde_json = "1.0.151"
 thiserror = "2.0.19"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }

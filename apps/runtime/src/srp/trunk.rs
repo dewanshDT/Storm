@@ -33,6 +33,28 @@ const OUTBOUND_CAPACITY: usize = 64;
 
 const WRITER_DRAIN: Duration = Duration::from_secs(1);
 
+/// Unsent bytes the kernel may hold for a trunk socket (§5.2 "Control
+/// before bulk", decision 116b). The priority lane only reorders what has not
+/// reached the socket; on a slow uplink an autotuned send buffer holds
+/// seconds of body, and a `STREAM_ACK` or `PING` written after it waits that
+/// long. This bounds only what is unsent, not what is in flight, so it costs
+/// no throughput. Linux and Android only; elsewhere the kernel default stands.
+const UNSENT_LOWAT: u32 = 128 * 1024;
+
+fn bound_unsent(socket: &MaybeTlsStream<TcpStream>) {
+    let tcp = match socket {
+        MaybeTlsStream::Plain(tcp) => tcp,
+        MaybeTlsStream::Rustls(tls) => tls.get_ref().0,
+        _ => return,
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_notsent_lowat(UNSENT_LOWAT) {
+        tracing::debug!(error = %e, "setting TCP_NOTSENT_LOWAT");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = tcp;
+}
+
 /// Timings, injectable so tests need not wait out real heartbeats.
 #[derive(Debug, Clone)]
 pub struct TrunkConfig {
@@ -164,6 +186,7 @@ impl SrpTrunk {
             Ok(Err(e)) => return Err(SrpError::RelayDown(e.to_string())),
             Ok(Ok((ws, _))) => ws,
         };
+        bound_unsent(ws.get_ref());
         let (mut sink, mut stream) = ws.split();
         let client_trunk_id = handshake(&mut sink, &mut stream, server_id, deadline).await?;
 

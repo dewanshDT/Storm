@@ -2254,6 +2254,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "socket2",
  "tempdir",
  "thiserror 2.0.19",
  "time",

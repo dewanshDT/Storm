@@ -390,7 +390,16 @@ lives in this repo**; the design rationale stays in the personal vault under
 - **Every `PING` is answered, at any point on a trunk, and a `PONG` is never
   dropped** (SRP §4.2, decision 108c). The Worker relay `PING`s to measure
   what a peer has read, so a `PONG` lost on a full queue reads as a stalled
-  reader. storm-server owes them through `Pongs`, outside the bounded queue.
+  reader. storm-server queues them on its `Control` lane, outside the
+  bounded queue.
+- **Control before bulk** (SRP §5.2, decision 116b). Every sender — storm-server,
+  storm-runtime's client, the Dart trunk, storm-relay — writes `PING`, `PONG`,
+  `STREAM_ACK`, `CLOSE` and stream `ERROR` ahead of queued body frames and
+  never drops one for want of room. Silence is not judged while a side's
+  own `PING` is unwritten.
+  Trunk sockets set `TCP_NOTSENT_LOWAT` (Linux, Android, Apple for Dart), or
+  the kernel's send buffer undoes the lane on a slow uplink. A response's
+  own `CLOSE` stays behind its body.
 - **Two relays, one spec.** `apps/relay` and `apps/relay-cf` both pass
   `tools/relay-conformance` (`make relay-conformance-local`,
   `make relay-conformance-cf`). A behaviour the spec leaves open is amended

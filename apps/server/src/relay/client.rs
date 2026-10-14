@@ -76,6 +76,28 @@ const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(20);
 /// wedged peer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Unsent bytes the kernel may hold for a trunk socket (§5.2 "Control
+/// before bulk", decision 116b). The priority lane only reorders what has not
+/// reached the socket; on a slow uplink an autotuned send buffer holds
+/// seconds of body, and a `STREAM_ACK` or `PING` written after it waits that
+/// long. This bounds only what is unsent, not what is in flight, so it costs
+/// no throughput. Linux and Android only; elsewhere the kernel default stands.
+pub(super) const UNSENT_LOWAT: u32 = 128 * 1024;
+
+fn bound_unsent(socket: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>) {
+    let tcp = match socket {
+        tokio_tungstenite::MaybeTlsStream::Plain(tcp) => tcp,
+        tokio_tungstenite::MaybeTlsStream::Rustls(tls) => tls.get_ref().0,
+        _ => return,
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_notsent_lowat(UNSENT_LOWAT) {
+        tracing::debug!(error = %e, "setting TCP_NOTSENT_LOWAT");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = tcp;
+}
+
 /// How long a closing trunk waits for queued frames to reach the socket.
 const WRITER_DRAIN: Duration = Duration::from_secs(1);
 
@@ -203,7 +225,10 @@ async fn run_once(
     };
 
     let socket = match connected {
-        Ok((socket, _)) => socket,
+        Ok((socket, _)) => {
+            bound_unsent(socket.get_ref());
+            socket
+        }
         Err(e) => {
             // `wss://` without a TLS feature fails here with a message that
             // does not obviously name the cause, so it is called out.

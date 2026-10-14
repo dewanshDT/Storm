@@ -34,6 +34,9 @@ RELAY_PORT ?= 8487
 # Which relay `test-live` runs the relayed suites through: rust (storm-relay)
 # or cf (apps/relay-cf under wrangler dev).
 RELAY_IMPL ?= rust
+# Four ports from here for the throttled-link relay test, which starts its own
+# server and storm-relay behind a slow link (decision 116b).
+THROTTLE_PORT ?= 18890
 
 .DEFAULT_GOAL := help
 
@@ -319,7 +322,11 @@ test-live:
 		--dart-define=STORM_RELAY_ORIGIN=http://127.0.0.1:$(PORT) \
 		--dart-define=STORM_AGENT_HOST=live-host \
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
-		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
+		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log" \
+		--dart-define=STORM_SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+		--dart-define=STORM_RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
+		--dart-define=STORM_BOOTSTRAP="$$ROOT/$(SERVER)/tests/bootstrap.py" \
+		--dart-define=STORM_THROTTLE_PORT=$(THROTTLE_PORT)
 
 ## fmt: format every codebase
 fmt:
