@@ -44,6 +44,12 @@ pub fn checks() -> Vec<Check> {
         check!("§5.2", a_response_streams_unbuffered),
         check!("§5.2", relay_peer_ip_is_the_socket_address_never_a_header),
         check!("§5.2", a_client_sent_relay_peer_ip_is_refused_even_null),
+        check!("§5.2", a_malformed_head_is_refused_to_that_client_only),
+        check!("§5.2", a_second_head_is_refused_and_not_forwarded),
+        check!(
+            "§5.4",
+            an_origin_error_naming_a_stream_ends_that_stream_only
+        ),
         check!("§5.4", close_ends_one_stream_and_the_trunk_carries_on),
         check!("§5.4", an_origin_close_follows_its_body_to_its_client_only),
         check!("§5.4", close_without_a_stream_id_ends_the_whole_trunk),
@@ -592,6 +598,127 @@ async fn a_client_sent_relay_peer_ip_is_refused_even_null(ctx: &Ctx) -> Result<(
             );
         }
     }
+    Ok(())
+}
+
+/// Another client's request still crosses the shared server trunk, and no
+/// head reached the origin before its own.
+async fn trunk_still_serves(server: &mut Conn, bob: &mut Conn) -> Result<()> {
+    let stream_id = open_stream(bob, json!("bob")).await?;
+    let open = server
+        .wait_for(
+            "bob's STREAM_OPEN",
+            STEP,
+            |f| matches!(f, Frame::Text(v) if v["type"] != "CLOSE"),
+        )
+        .await?;
+    let Frame::Text(open) = open else {
+        bail!("expected STREAM_OPEN, got {}", open.describe());
+    };
+    ensure!(
+        open["type"] == "STREAM_OPEN" && open["stream_id"] == stream_id,
+        "expected bob's STREAM_OPEN, got {open}"
+    );
+    server
+        .send_json(json!({ "v": 1, "type": "STREAM_ACK", "stream_id": stream_id }))
+        .await?;
+    bob.send_json(request_head(stream_id, "GET", "/v1/notes"))
+        .await?;
+    let head = server.recv_type("HTTP_REQUEST_HEAD", STEP).await?;
+    ensure!(head["stream_id"] == stream_id, "{head}");
+    server.send_json(response_head(stream_id)).await?;
+    let reply = bob.recv_type("HTTP_RESPONSE_HEAD", STEP).await?;
+    ensure!(reply["stream_id"] == stream_id, "{reply}");
+    Ok(())
+}
+
+/// Frames the origin receives meanwhile may free a stream; none may be a head.
+async fn no_head_reached(server: &mut Conn, what: &str) -> Result<()> {
+    while let Ok(frame) = server.next(QUIET).await {
+        ensure!(!frame.is_type("HTTP_REQUEST_HEAD"), "{what} was forwarded");
+        ensure!(
+            !matches!(frame, Frame::Closed),
+            "{what} ended the server trunk"
+        );
+    }
+    Ok(())
+}
+
+async fn a_malformed_head_is_refused_to_that_client_only(ctx: &Ctx) -> Result<()> {
+    let identity = ctx.identity();
+    let mut server = ctx.register(&ctx.relay, &identity).await?;
+    let mut bob = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let ok = request_head(0, "GET", "/v1/notes");
+    for (field, bad) in [
+        ("headers", json!({ "x": 1 })),
+        ("headers", json!({ "x": null })),
+        ("headers", json!({ "x": ["a", "b"] })),
+        ("headers", json!([["x", "1"]])),
+        ("method", json!("")),
+        ("method", json!("GE T")),
+        ("path", json!("v1/notes")),
+        ("path", json!("/a b")),
+    ] {
+        let mut mallory = ctx.client(&ctx.relay, &identity.server_id).await?;
+        let stream_id = open_stream(&mut mallory, json!("m")).await?;
+        accept_stream(&mut server).await?;
+        let mut head = ok.clone();
+        head["stream_id"] = json!(stream_id);
+        head[field] = bad.clone();
+        mallory.send_json(head).await?;
+        crate::checks::framing::refused(&mut mallory)
+            .await
+            .with_context(|| format!("a head with {field} = {bad}"))?;
+        no_head_reached(&mut server, &format!("a head with {field} = {bad}")).await?;
+    }
+    trunk_still_serves(&mut server, &mut bob).await
+}
+
+async fn a_second_head_is_refused_and_not_forwarded(ctx: &Ctx) -> Result<()> {
+    let identity = ctx.identity();
+    let mut server = ctx.register(&ctx.relay, &identity).await?;
+    let mut mallory = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let mut bob = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let stream_id = open_stream(&mut mallory, json!("m")).await?;
+    accept_stream(&mut server).await?;
+    mallory
+        .send_json(request_head(stream_id, "GET", "/v1/notes"))
+        .await?;
+    server.recv_type("HTTP_REQUEST_HEAD", STEP).await?;
+
+    mallory
+        .send_json(request_head(stream_id, "POST", "/v1/notes"))
+        .await?;
+    let error = mallory.expect_error("stream_closed", STEP).await?;
+    wire::check_on_stream(&error, stream_id)?;
+    no_head_reached(&mut server, "a second head").await?;
+
+    // The refusal is the stream's: the sender's trunk carries on.
+    let next = open_stream(&mut mallory, json!("m2")).await?;
+    ensure!(accept_stream(&mut server).await? == next);
+    trunk_still_serves(&mut server, &mut bob).await
+}
+
+/// An origin from before this rule refuses a stream with `ERROR{stream_id}`.
+async fn an_origin_error_naming_a_stream_ends_that_stream_only(ctx: &Ctx) -> Result<()> {
+    let identity = ctx.identity();
+    let mut server = ctx.register(&ctx.relay, &identity).await?;
+    let mut alice = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let mut bob = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let refused = open_stream(&mut alice, json!("refused")).await?;
+    accept_stream(&mut server).await?;
+
+    server
+        .send_json(json!({
+            "v": 1, "type": "ERROR", "code": "stream_closed",
+            "message": "stream closed", "stream_id": refused,
+        }))
+        .await?;
+    let error = alice.expect_error("stream_aborted", STEP).await?;
+    wire::check_on_stream(&error, refused)?;
+    trunk_still_serves(&mut server, &mut bob).await?;
+    let sibling = open_stream(&mut alice, json!("sibling")).await?;
+    ensure!(accept_stream(&mut server).await? == sibling);
     Ok(())
 }
 

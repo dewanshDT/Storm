@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::Relay;
 use crate::auth::validate_server_id;
 use crate::proto::{self, ErrorCode, Frame, Hello};
-use crate::state::ServerTrunk;
+use crate::state::{HeadClaim, ServerTrunk};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// The largest `attempt_id` the relay will echo.
@@ -338,20 +338,41 @@ async fn forward_request_head(
     }
 
     let stream_id = proto::stream_id_of(&body)?;
-    // Enough shape to route and to be a plausible HTTP head. Not inspection:
-    // the relay never looks at a header's value or at a byte of the body (§1).
-    if !body.get("method").is_some_and(serde_json::Value::is_string)
-        || !body.get("path").is_some_and(serde_json::Value::is_string)
-        || !body
-            .get("headers")
-            .is_some_and(serde_json::Value::is_object)
-    {
+    // The trunk toward the origin is shared by every client of the server, so
+    // a head the origin could not interpret is refused here, to its sender
+    // only, and never forwarded (§5.2).
+    if !proto::is_request_head(&body) {
         return Err(ErrorCode::ProtocolError.into());
     }
 
-    let Some(server_tx) = route_client_ward(tx, session, stream_id).await? else {
-        return Ok(());
-    };
+    match session
+        .trunk
+        .claim_head(stream_id, &session.client_trunk_id)
+    {
+        HeadClaim::First => {}
+        HeadClaim::NotOwned => {
+            route_client_ward(tx, session, stream_id).await?;
+            return Ok(());
+        }
+        HeadClaim::Repeat => {
+            tracing::debug!(
+                client_trunk_id = %session.client_trunk_id,
+                stream_id,
+                "refusing a second HTTP_REQUEST_HEAD"
+            );
+            session.trunk.close_stream(stream_id);
+            tx.end_stream(
+                stream_id,
+                proto::error_on_stream(ErrorCode::StreamClosed, stream_id),
+            );
+            return session
+                .trunk
+                .tx()
+                .send_json(proto::close_stream(stream_id))
+                .await;
+        }
+    }
+    let server_tx = session.trunk.tx();
 
     // `.ip()`, not the full socket address: the field is what the origin buckets
     // rate limits by, and an ephemeral source port would split one client into a

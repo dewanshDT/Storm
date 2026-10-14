@@ -612,10 +612,14 @@ async fn handle_control(
     tunnel: &Tunnel,
     budget: &BodyBudget,
 ) -> bool {
+    // An origin never sends `ERROR` (§6): a relay before 116a drops the whole
+    // trunk on one. A stream is refused with `CLOSE{aborted}`, and only a
+    // frame the relay itself got wrong ends the trunk.
     let message = match proto::parse_text(text) {
         Ok(message) => message,
         Err(_) => {
-            control.push(Message::text(proto::error_protocol()));
+            tracing::warn!("relay sent a frame this server cannot parse; closing the trunk");
+            control.push(Message::text(proto::close_trunk()));
             return false;
         }
     };
@@ -623,8 +627,8 @@ async fn handle_control(
     match message {
         Inbound::StreamOpen { stream_id } => {
             if streams.contains_key(&stream_id) {
-                // §5.1: an id already open is refused, not acknowledged twice.
-                control.push(Message::text(proto::error_stream_closed(stream_id)));
+                // §5.1: an id already open is never acknowledged twice.
+                refuse_stream(streams, control, stream_id);
                 return true;
             }
             streams.insert(
@@ -641,17 +645,29 @@ async fn handle_control(
         }
         Inbound::RequestHead(head) => {
             let stream_id = head.stream_id;
-            let Some(entry) = streams.get_mut(&stream_id) else {
-                control.push(Message::text(proto::error_stream_closed(stream_id)));
-                return true;
-            };
-            if entry.head_seen {
-                control.push(Message::text(proto::error_stream_closed(stream_id)));
-                return true;
+            match streams.get_mut(&stream_id) {
+                Some(entry) if !entry.head_seen => {
+                    entry.head_seen = true;
+                    start_dispatch(entry, head, outbound.clone(), control, tunnel, budget);
+                }
+                // A second head, or one for a stream not open here.
+                _ => refuse_stream(streams, control, stream_id),
             }
-            entry.head_seen = true;
-            start_dispatch(entry, head, outbound.clone(), control, tunnel, budget);
         }
+        Inbound::BadHead { stream_id } => match streams.get(&stream_id) {
+            Some(entry) if !entry.head_seen => {
+                // Nothing has been answered yet, so the honest answer is a
+                // complete one: 400, and the stream ends.
+                streams.remove(&stream_id);
+                control.push(Message::text(proto::response_head(
+                    stream_id,
+                    400,
+                    proto::WireHeaders::default(),
+                )));
+                control.push(Message::text(proto::close_stream(stream_id)));
+            }
+            _ => refuse_stream(streams, control, stream_id),
+        },
         Inbound::Close {
             stream_id: Some(id),
         } => {
@@ -674,6 +690,14 @@ async fn handle_control(
         Inbound::Challenge { .. } | Inbound::Registered(_) => {}
     }
     true
+}
+
+/// Ends one stream as aborted (§5.1, §5.2): whatever it had started is
+/// abandoned, and the trunk's other streams carry on.
+fn refuse_stream(streams: &mut HashMap<u32, StreamEntry>, control: &Control, stream_id: u32) {
+    tracing::debug!(stream_id, "refusing a stream");
+    close_stream(streams, stream_id);
+    control.push(Message::text(proto::abort_stream(stream_id)));
 }
 
 fn close_stream(streams: &mut HashMap<u32, StreamEntry>, stream_id: u32) {

@@ -389,7 +389,8 @@ class SrpTrunk {
       return;
     }
     final stream = _streams[frame.streamId];
-    if (stream == null) return;
+    // An empty 0x02 has no meaning, so it is ignored (§5.2).
+    if (stream == null || frame.payload.isEmpty) return;
     stream.push(SrpBodyChunk(frame.payload));
   }
 

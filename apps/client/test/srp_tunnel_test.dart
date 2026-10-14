@@ -174,6 +174,36 @@ void main() {
     }
   });
 
+  test('an empty 0x02 frame is ignored, not delivered as a chunk', () async {
+    final body = StreamController<List<int>>();
+    final relay = FakeRelay(
+      handler: (m, p, h, b) async =>
+          FakeResponse.streamed(200, const {}, body.stream),
+    );
+    await relay.start();
+    final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+    final client = SrpHttpClient(trunk);
+    await trunk.connect();
+    try {
+      final response = await client.send(
+        http.Request('GET', Uri.parse('http://x/stream')),
+      );
+      final chunks = response.stream.toList();
+      body
+        ..add(utf8.encode('a'))
+        ..add(const [])
+        ..add(utf8.encode('b'));
+      await body.close();
+      expect(await chunks.timeout(const Duration(seconds: 5)), [
+        utf8.encode('a'),
+        utf8.encode('b'),
+      ]);
+    } finally {
+      trunk.dispose();
+      await relay.close();
+    }
+  });
+
   test('a request body travels as 0x01 chunks and is reassembled', () async {
     final relay = FakeRelay(
       handler: (m, p, h, body) async {

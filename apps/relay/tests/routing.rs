@@ -1037,6 +1037,144 @@ async fn a_request_head_missing_its_routing_or_shape_fields_is_refused() {
     }
 }
 
+// -------------------------------------------- one client cannot end the trunk
+//
+// Every client of a server shares its one trunk, so nothing a client puts in a
+// head may reach the origin in a form that ends it (116a).
+
+const WITHIN: Duration = Duration::from_secs(5);
+
+async fn recv_within(conn: &mut Conn) -> Value {
+    tokio::time::timeout(WITHIN, conn.recv())
+        .await
+        .expect("no frame arrived")
+}
+
+/// Acks the next `STREAM_OPEN`, past the `CLOSE`s of streams a refused client
+/// left behind. No head may reach the origin meanwhile.
+async fn ack_next_open(server: &mut Conn) -> u32 {
+    loop {
+        let frame = recv_within(server).await;
+        assert_ne!(frame["type"], "HTTP_REQUEST_HEAD", "{frame}");
+        if frame["type"] == "STREAM_OPEN" {
+            let stream_id = frame["stream_id"].as_u64().unwrap() as u32;
+            server
+                .send(json!({ "v": 1, "type": "STREAM_ACK", "stream_id": stream_id }))
+                .await;
+            return stream_id;
+        }
+    }
+}
+
+/// Bob's request crosses the shared trunk and his response comes back.
+async fn assert_trunk_still_serves(server: &mut Conn, bob: &mut Conn) {
+    let stream_id = bob.open_stream("bob").await;
+    assert_eq!(ack_next_open(server).await, stream_id);
+    bob.send(request_head(stream_id, "/v1/notes")).await;
+    let head = recv_within(server).await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+    assert_eq!(head["stream_id"], stream_id, "{head}");
+    server.send(response_head(stream_id)).await;
+    let reply = recv_within(bob).await;
+    assert_eq!(reply["type"], "HTTP_RESPONSE_HEAD", "{reply}");
+    assert_eq!(reply["stream_id"], stream_id, "{reply}");
+}
+
+#[tokio::test]
+async fn a_head_with_a_non_string_header_value_is_refused_and_never_forwarded() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut bob = harness.client().await;
+
+    for headers in [json!({ "x": 1 }), json!({ "x": null }), json!([["x", "1"]])] {
+        let mut mallory = harness.client().await;
+        let stream_id = mallory.open_stream("m").await;
+        assert_eq!(ack_next_open(&mut server).await, stream_id);
+        mallory
+            .send(json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": stream_id,
+                "method": "GET", "path": "/v1/notes", "headers": headers,
+            }))
+            .await;
+        assert_error(&recv_within(&mut mallory).await, "protocol_error");
+    }
+
+    assert_trunk_still_serves(&mut server, &mut bob).await;
+    assert_eq!(harness.relay.registrations.len(), 1);
+}
+
+#[tokio::test]
+async fn a_second_head_is_refused_and_never_forwarded() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut mallory = harness.client().await;
+    let mut bob = harness.client().await;
+
+    let stream_id = mallory.open_stream("m").await;
+    server.expect_stream_open_and_ack().await;
+    mallory.send(request_head(stream_id, "/v1/notes")).await;
+    let head = recv_within(&mut server).await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+
+    mallory.send(request_head(stream_id, "/v1/notes")).await;
+    let refused = recv_within(&mut mallory).await;
+    assert_error(&refused, "stream_closed");
+    assert_eq!(refused["stream_id"], stream_id, "{refused}");
+
+    // The origin hears the stream end, never the second head.
+    let closed = recv_within(&mut server).await;
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], stream_id, "{closed}");
+
+    // Mallory's own trunk carries on: the refusal was the stream's.
+    let next = mallory.open_stream("m2").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, next);
+    assert_trunk_still_serves(&mut server, &mut bob).await;
+}
+
+#[tokio::test]
+async fn an_origin_error_naming_a_stream_ends_that_stream_only() {
+    // What a server from before 116a sends for a second head.
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut alice = harness.client().await;
+    let mut bob = harness.client().await;
+    let alice_stream = alice.open_stream("a").await;
+    server.expect_stream_open_and_ack().await;
+
+    server
+        .send(json!({
+            "v": 1, "type": "ERROR", "code": "stream_closed",
+            "message": "stream closed", "stream_id": alice_stream,
+        }))
+        .await;
+    let ended = recv_within(&mut alice).await;
+    assert_error(&ended, "stream_aborted");
+    assert_eq!(ended["stream_id"], alice_stream, "{ended}");
+    let closed = recv_within(&mut server).await;
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], alice_stream, "{closed}");
+
+    assert_trunk_still_serves(&mut server, &mut bob).await;
+    assert_eq!(harness.relay.registrations.len(), 1);
+}
+
+#[tokio::test]
+async fn a_trunk_scoped_origin_error_is_still_a_protocol_error() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut alice = harness.client().await;
+    let alice_stream = alice.open_stream("a").await;
+    server.expect_stream_open_and_ack().await;
+
+    server
+        .send(json!({ "v": 1, "type": "ERROR", "code": "protocol_error", "message": "x" }))
+        .await;
+    let lost = recv_within(&mut alice).await;
+    assert_error(&lost, "trunk_lost");
+    assert_eq!(lost["stream_id"], alice_stream, "{lost}");
+}
+
 // ------------------------------------------------------------------- closing
 
 #[tokio::test]
