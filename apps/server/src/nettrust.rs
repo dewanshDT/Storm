@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 pub const UNTRUSTED_ZONES: [&str; 4] = ["public", "external", "drop", "block"];
 
 /// How long one OS query may take before its answer is treated as missing.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// A cold PowerShell loading the NetTCPIP module can take well over 5 s, and a
+/// missed answer means "no OS signal": a Public network then reads as trusted.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Runs the OS's own tools. Faked in tests, so every signal source is tested
 /// on any host.
