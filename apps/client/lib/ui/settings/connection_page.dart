@@ -101,8 +101,7 @@ class ConnectionPage extends ConsumerWidget {
                 trailing: TextAction(
                   key: Key('remove-relay-$relay'),
                   label: 'Remove',
-                  onTap: () =>
-                      _setRelays(context, ref, [...c!.relays]..remove(relay)),
+                  onTap: () => _remove(context, ref, c!.relays, relay),
                 ),
               ),
             if (c != null)
@@ -204,19 +203,81 @@ class ConnectionPage extends ConsumerWidget {
     await _setRelays(context, ref, [...current, url]);
   }
 
-  Future<void> _setRelays(
+  Future<bool> _setRelays(
     BuildContext context,
     WidgetRef ref,
     List<String> relays,
   ) async {
     final api = ref.read(apiProvider);
-    if (api == null) return;
+    if (api == null) return false;
+    var ok = true;
     try {
       await api.setRelays(relays);
     } catch (e) {
+      ok = false;
       if (context.mounted) settingsToast(context, describeFailure(e));
     }
     ref.invalidate(serverConfigProvider);
+    return ok;
+  }
+
+  /// Removes a relay, then offers to undo what it could have seen (SRP §7,
+  /// decision 116j): a relay reads every token and password that crossed it,
+  /// so leaving one behind is a reason to change the password and sign every
+  /// other device out.
+  Future<void> _remove(
+    BuildContext context,
+    WidgetRef ref,
+    List<String> current,
+    String relay,
+  ) async {
+    if (!await _setRelays(context, ref, [...current]..remove(relay))) return;
+    if (!context.mounted) return;
+    final go = await confirmSetting(
+      context,
+      title: 'Sign out everywhere and change your password?',
+      body:
+          '${_relayHost(relay)} could read the sign-ins and notes it carried. '
+          'If you no longer trust it, change your password and sign out every '
+          'other device; this one stays signed in.',
+      action: 'Change password',
+      confirmKey: const Key('confirm-after-relay'),
+    );
+    if (!go || !context.mounted) return;
+    final now = await promptForText(
+      context,
+      title: 'Current password',
+      hint: 'Current password',
+      obscure: true,
+    );
+    if (now == null || now.isEmpty || !context.mounted) return;
+    final next = await promptForText(
+      context,
+      title: 'New password',
+      hint: 'New password',
+      obscure: true,
+    );
+    if (next == null || next.isEmpty || !context.mounted) return;
+    final api = ref.read(apiProvider);
+    if (api == null) return;
+    try {
+      await api.changePassword(now, next);
+      final me = ref.read(settingsProvider).value?.deviceId ?? '';
+      var out = 0;
+      for (final d in await api.devices()) {
+        if (d.isRevoked || d.id == me) continue;
+        await api.revokeDevice(d.id);
+        out++;
+      }
+      if (context.mounted) {
+        settingsToast(
+          context,
+          'Password changed; $out other device${out == 1 ? '' : 's'} signed out',
+        );
+      }
+    } catch (e) {
+      if (context.mounted) settingsToast(context, describeFailure(e));
+    }
   }
 
   Future<void> _disconnect(BuildContext context, WidgetRef ref) async {

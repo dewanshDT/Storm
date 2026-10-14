@@ -305,3 +305,49 @@ fn key_fingerprints_match_the_vectors() {
     let identity = ServerIdentity::from_seed("srv_valid", SEED);
     assert_eq!(identity.fingerprint(), s(&cases[0], "fingerprint"));
 }
+
+#[test]
+fn every_relay_set_message_vector_matches_and_signs_byte_for_byte() {
+    // §4.3 (116j): the bytes `relays_sig` covers, and the signature a client
+    // verifies against the pinned key.
+    let doc = vectors();
+    for case in doc["relay_set_message"]["cases"].as_array().unwrap() {
+        let urls: Vec<String> = case["relays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u.as_str().unwrap().to_string())
+            .collect();
+        let message = super::identity::relay_set_message(s(case, "server_id"), &urls);
+        if let Some(expected) = case["message_b64"].as_str() {
+            assert_eq!(
+                data_encoding::BASE64URL_NOPAD.encode(&message),
+                expected,
+                "{}",
+                s(case, "name")
+            );
+        }
+        if case["verifies"] == true {
+            let identity = ServerIdentity::from_seed(s(case, "server_id"), SEED);
+            assert_eq!(
+                identity.sign_relay_set(&urls),
+                s(case, "signature_b64"),
+                "{}",
+                s(case, "name")
+            );
+        }
+    }
+}
+
+#[test]
+fn every_plaintext_relay_host_gets_the_verdict_the_file_records() {
+    let doc = vectors();
+    for case in doc["plaintext_relay_hosts"]["cases"].as_array().unwrap() {
+        let host = s(case, "host");
+        assert_eq!(
+            crate::registry::plaintext_relay_allowed(host),
+            case["ws_allowed"] == true,
+            "{host}"
+        );
+    }
+}

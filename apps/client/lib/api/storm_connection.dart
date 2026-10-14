@@ -746,7 +746,7 @@ class StormConnection {
         'race #$no won by ${winner.candidate.tier.name} in ${r.millis} ms',
       );
       final info = winner.info;
-      if (info != null) _adoptRelaySet(info);
+      if (info != null) unawaited(_adoptRelaySet(info));
       _lastProof = ServerProof.verified;
       _cancelReconnect();
       _stableTimer?.cancel();
@@ -788,7 +788,11 @@ class StormConnection {
   /// Adopts a relay set only from the proven winner, and only when it
   /// describes the pinned server (§4.3, §8.3 rule 8). It takes effect at the
   /// next race.
-  void _adoptRelaySet(ServerInfo info) {
+  ///
+  /// A signed set is adopted only if `relays_sig` verifies against the pinned
+  /// key (116j): the set may have crossed a relay, which could rewrite it.
+  /// An older server sends none, and the proof and `server_id` rules stand.
+  Future<void> _adoptRelaySet(ServerInfo info) async {
     if (serverId.isNotEmpty && info.serverId != serverId) {
       _log.add('relay set ignored: another server id');
       return;
@@ -798,6 +802,20 @@ class StormConnection {
       return;
     }
     if (_sameRelays(_relays, info.relays)) return;
+    final sig = info.relaysSig;
+    if (sig != null) {
+      final ok = await verifyRelaySet(
+        publicKeyB64: publicKeyB64.isNotEmpty ? publicKeyB64 : info.publicKey,
+        signatureB64: sig,
+        serverId: info.serverId,
+        urls: info.relays.map((r) => r.url),
+      );
+      if (!ok) {
+        _log.add('relay set ignored: relays_sig does not verify');
+        return;
+      }
+      if (_phase == ConnectionPhase.closed) return;
+    }
     _relays = List.of(info.relays);
     _log.add(
       'relay set adopted: ${_relays.map((r) => logHost(r.url)).join(', ')}',
