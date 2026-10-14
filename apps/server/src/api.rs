@@ -3112,6 +3112,10 @@ const WS_RESYNC: &str = r#"{"kind":"resync"}"#;
 /// The SSE form of the same thing (`docs/srp-v1.md` §5.3). Empty `data:`.
 const SSE_RESYNC: &str = "event: resync\ndata:\n\n";
 
+/// An SSE comment, which every reader ignores (SRP §5.3, decision 116b).
+const SSE_KEEPALIVE: &str = ":\n\n";
+const SSE_KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// The peer is gone; stop the feed.
 struct Gone;
 
@@ -3273,19 +3277,48 @@ fn sse_response(headers: &HeaderMap, rx: broadcast::Receiver<Change>) -> Respons
     // `Lagged`, and the client is told to resync — the same recovery a slow
     // WebSocket gets.
     let (tx, body_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(push_changes(SseSink(tx), rx));
+    tokio::spawn(feed_with_keepalive(tx, rx, SSE_KEEPALIVE_EVERY));
 
     (
         [
             (header::CONTENT_TYPE, "text/event-stream"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        // No keep-alive comments and no inactivity timeout: a quiet vault is a
-        // normal vault, and a feed that hung up on silence would be
-        // indistinguishable from a broken one.
+        // No inactivity timeout: a quiet vault is a normal vault. The comment
+        // every 15 s is what lets a reader tell a quiet feed from a dead one.
         axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx)),
     )
         .into_response()
+}
+
+/// The feed, with a comment every `period` (SRP §5.3). Over a
+/// relay this is the one long-lived stream every client holds, so it is also
+/// traffic both trunks can see. Ends with the feed.
+async fn feed_with_keepalive(
+    tx: tokio::sync::mpsc::Sender<Result<String, std::convert::Infallible>>,
+    rx: broadcast::Receiver<Change>,
+    period: std::time::Duration,
+) {
+    let keepalive = {
+        let tx = tx.clone();
+        async move {
+            let mut every = tokio::time::interval(period);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                // A full queue is already traffic; this one can be skipped.
+                if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
+                    tx.try_send(Ok(SSE_KEEPALIVE.into()))
+                {
+                    return;
+                }
+            }
+        }
+    };
+    tokio::select! {
+        () = push_changes(SseSink(tx), rx) => {}
+        () = keepalive => {}
+    }
 }
 
 /// Pushes change events so other devices update without polling.
@@ -5611,6 +5644,26 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(ids, vec!["id: vault-a:1", "id: vault-b:1"]);
         assert_ne!(ids[0], ids[1], "a bare seq would have collided here");
+    }
+
+    /// SRP §5.3 (decision 116b): a quiet feed still says something every
+    /// period, and the comment ends with the feed rather than holding it open.
+    #[tokio::test]
+    async fn a_quiet_sse_feed_sends_a_comment_every_period() {
+        assert_eq!(SSE_KEEPALIVE_EVERY, std::time::Duration::from_secs(15));
+        let period = std::time::Duration::from_millis(200);
+        let (events, rx) = broadcast::channel::<Change>(4);
+        let (tx, mut frames) = tokio::sync::mpsc::channel(8);
+        let feed = tokio::spawn(feed_with_keepalive(tx, rx, period));
+
+        tokio::time::sleep(period / 2).await;
+        assert!(frames.try_recv().is_err(), "a comment before the period");
+        let comment = tokio::time::timeout(period * 5, frames.recv()).await;
+        assert_eq!(comment.unwrap().unwrap().unwrap(), ":\n\n");
+
+        drop(events);
+        feed.await.unwrap();
+        assert!(frames.recv().await.is_none(), "the feed ended");
     }
 
     #[tokio::test]
