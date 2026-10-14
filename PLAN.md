@@ -7768,6 +7768,128 @@ and 115, the operator's choices and the spec text, land in their own PR.)*
   (both relays and the conformance check change together), or a header that
   cannot be folded (`Set-Cookie`) ever has to cross.
 
+**116b. Control before bulk.** *(2026-10-14; the second Phase 2 slice of the
+relay spec gap audit, vault *Remote/Relay Spec Gap Audit*; gaps SG-06, SG-07,
+SG-26 = audit A's G30, G26, G33 and B's G14. The rules are revision 115's
+§5.2 "Control before bulk", §5.1 "`STREAM_ACK` is priority", §5.3's feed
+comment and §5.4's `CLOSE` toward the origin.)*
+- **The bugs (confirmed on a throttled link).** Measured with
+  `test_live/relay_throttled_live_test.dart` on `origin/staging`'s sources:
+  real storm-relay and storm-server, each side's uplink 2 Mbit/s and its
+  downlink 20 Mbit/s, 150 ms each way, 20 MiB each way, a relayed
+  `GET /v1/vaults` every 5 s alongside.
+  - **G30, client.** The Dart sink was unbounded (`maxQueuedFrames` was
+    never used) and the relay sends nothing during an upload, so the trunk's
+    `PING` sat behind the whole upload: **`relay_silent` at 59 s**, both
+    transfers failed, and the outbox would resend the same upload for ever.
+    The Rust client dropped its `PING` with `try_send` on a full queue: the
+    same verdict.
+  - **G26, origin.** `STREAM_ACK` went through `try_send` on the 256-frame
+    queue that carries response bodies. With only the download running,
+    **8 of 9 small requests got `server_timeout`**: the ACK waited behind
+    the download for longer than the relay's 5 s. The origin's own `PING`
+    was `try_send`-dropped the same way.
+  - **G33, relay.** storm-relay `try_send`-dropped the `CLOSE` it owes the
+    origin when a client dies, an ack times out, a client is backlogged or
+    the origin refuses a stream, whenever the shared 64-frame server-ward
+    queue was full; the origin kept serving a stream nobody would read.
+- **The fix.** In every sender, one lane for control and one bounded queue
+  for bodies; control is written first and never dropped.
+  - **storm-server** (`relay/client.rs`): 108c's `Pongs` becomes `Control`,
+    a queue outside the bounded one that the writer drains before each body
+    frame. `PING` (at most one waiting), `PONG`, `STREAM_ACK`, every
+    refusal and abort, `DEREGISTER` and the trunk's `CLOSE` go there. A
+    response's head, body and closing `CLOSE` stay in order on the bounded
+    queue (§5.4 rule 4).
+  - **storm-runtime's client** (`srp/trunk.rs`): the same `Control` lane;
+    every JSON message goes on it (`OPEN_STREAM` and the head too, so they
+    are not behind a queued upload), bodies on the 64-frame queue.
+  - **Dart** (`srp_trunk.dart`, new `srp_socket*.dart`): the trunk owns its
+    queues and writes one frame at a time through an `SrpSocket` whose
+    `write` completes when the socket can take more (dart:io: one
+    `addStream` per frame; browser: `bufferedAmount`). JSON messages first;
+    body frames take turns per stream, bounded by `maxQueuedFrames`, and
+    `sendBody` now awaits room. An aborting `CLOSE` drops the stream's
+    queued body. Fixes audit D14's two false comments.
+  - **storm-relay**: `CLOSE` toward the origin, for every end the origin did
+    not ask for, goes on the stream-end lane (`Tx::close_toward_origin`,
+    which also drops that stream's queued request body); `PONG` goes on the
+    lane too (`Tx::send_control`), so a relay answers a `PING` ahead of its
+    backlog. A client's own `CLOSE` still uses the blocking send: never
+    dropped, and a client cannot fill the server trunk's lane with them.
+    The Worker needed nothing: it has no queue of its own, sends `CLOSE`
+    unconditionally, and workerd answers `PING`.
+  - **Liveness from write time.** No side judges its peer silent while its
+    own `PING` is unwritten, and silence counts from when it was written
+    (Rust: no verdict until `limit − heartbeat` after the first `PING`
+    written since the peer last spoke; Dart: the silence clock stops while
+    a `PING` waits). Any frame received still counts as proof of life.
+  - **`TCP_NOTSENT_LOWAT` = 128 KiB on every trunk socket** (origin, both
+    clients, storm-relay). The lane only reorders what has not reached the
+    socket, and an autotuned send buffer on a slow uplink holds seconds of
+    body: with the lane alone the live test still saw opens wait 5 s+ and
+    one `server_timeout`. It bounds only unsent bytes, not bytes in flight,
+    so throughput is unchanged. Rust sets it on Linux and Android (socket2);
+    Dart on Linux, Android, macOS and iOS, which is why the Dart client now
+    does its own WebSocket upgrade (`HttpClient` + `detachSocket`, the
+    accept key checked) instead of `WebSocket.connect`.
+  - **The change feed says something every 15 s** (§5.3): `/v1/stream`'s
+    SSE body gets a `:` comment, as the terminal stream already had. Both
+    clients ignore comment lines.
+- **Tests, each failing on the old sources.** storm-server:
+  `a_stream_ack_overtakes_a_full_download_queue` (old: the ACK never came),
+  `a_heartbeat_overtakes_a_full_download_queue_and_a_stalled_trunk_is_not_silent`
+  (old: dropped at the 3 s deadline), both measuring 10 body frames ahead of
+  the control frame where the bound is 128, and
+  `a_quiet_sse_feed_sends_a_comment_every_period`. storm-runtime:
+  `a_ping_overtakes_a_queued_upload_and_a_stalled_trunk_is_not_silent`
+  (old: `relay_silent`). storm-relay:
+  `a_dying_clients_close_reaches_the_origin_past_a_full_server_ward_queue`
+  (old: never). Dart `test/srp_control_first_test.dart`, against a relay
+  that really stops reading its TCP socket (a dart:io `WebSocket` keeps
+  reading into memory while paused, so it speaks WebSocket over a raw
+  socket): a `PING` and a second request's `OPEN_STREAM` overtake a 20 MiB
+  upload, the trunk is not silent while stalled (old: `relay_silent`), and
+  a 64 MiB body waits for room (old: queued whole at once). Live:
+  `test_live/relay_throttled_live_test.dart`, self-contained (its own
+  server and storm-relay on `THROTTLE_PORT`, default 18890–18893, an
+  in-process link in front of the relay on both sides with 64 KiB receive
+  buffers, so the link's queue is not hidden in the kernel), in
+  `make test-live`.
+- **Measured, before → after** (the live test, numbers above):
+
+  | | `origin/staging` | 116b |
+  |---|---|---|
+  | 20 MiB upload | `relay_silent` at 59 s | 98 s, complete |
+  | 20 MiB download | failed with the trunk (59 s); alone: 87 s | 98 s, complete |
+  | client trunk | lost (`relay_silent`) | kept |
+  | small requests alongside | download alone: 8 of 9 `server_timeout`; both: all failed `trunk_lost` | 2 of 2 succeeded, none failed |
+  | server trunk drops | 0 | 0 |
+
+  Upload-only on 116b, before `TCP_NOTSENT_LOWAT`: opens 5 s+ (the
+  client's 5 s open timer, 116c's to change); after: 3.4 s worst.
+- **Not fixed here.** A small request's *response* during a long download
+  still waits behind the download frames the origin has queued (88 s in the
+  run above): its `STREAM_ACK` is prompt, its head and body are FIFO with
+  the download. Per-stream fairness in the origin's queue, and in
+  storm-relay's shared server-ward queue (G34), is 116d. The Dart open
+  timer (5 s from `openStream`, not from write) is 116c. A peer that stops
+  reading while this side's `PING` is stuck is now found by TCP, not by the
+  45 s deadline: the spec's rule, and a trunk with nothing queued still
+  times out at 45 s as before.
+- **Results.** `make check` green (server 612 + 2 ignored, relay 50 + 43
+  routing, runtime 23 SRP trunk, Worker 100, conformance 132, client 1091 +
+  1 skipped). `make relay-conformance-local` 58/58 and
+  `make relay-conformance-cf` 57 + the latency check skipped, as before.
+  `make test-live PORT=19500 AUTH_PORT=19501 RELAY_PORT=19502
+  THROTTLE_PORT=19510` and the same with `RELAY_IMPL=cf` on 19520–19530
+  exit 0: server 81, mcp 86, agent 93, gateway 95, auth 72, mcp-connect
+  89 + 89, mcp-connect live 39, client integration 35 + 1 skipped, the
+  throttled test included (upload 98 s, download 97 s, no failures).
+- *Revisit if:* a platform's `TCP_NOTSENT_LOWAT` turns out to cost
+  throughput, or 116d's per-stream queues make the origin's FIFO lane
+  replaceable by the Dart client's round robin.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

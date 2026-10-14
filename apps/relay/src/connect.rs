@@ -94,7 +94,7 @@ pub async fn serve(
     let orphaned = session.trunk.close_streams_of(&session.client_trunk_id);
     let server_tx = session.trunk.tx();
     for stream_id in orphaned {
-        let _ = server_tx.try_send_json(proto::close_stream(stream_id));
+        server_tx.close_toward_origin(stream_id);
     }
 
     tracing::info!(
@@ -212,7 +212,10 @@ async fn trunk_loop(
                     Ok(false) => Ok(()),
                     Err(fault) => Err(fault),
                 },
-                "PING" => tx.send_json(proto::pong()).await,
+                "PING" => {
+                    tx.send_control(proto::pong());
+                    Ok(())
+                }
                 "PONG" => Ok(()),
                 // Including `STREAM_ACK`, `HTTP_RESPONSE_HEAD` and everything
                 // else that is server→relay: a client sending one is not a
@@ -301,7 +304,7 @@ fn arm_ack_timeout(trunk: Arc<ServerTrunk>, client: Tx, stream_id: u32, relay: &
             stream_id,
             proto::error_on_stream(ErrorCode::ServerTimeout, stream_id),
         );
-        let _ = trunk.tx().try_send_json(proto::close_stream(stream_id));
+        trunk.tx().close_toward_origin(stream_id);
     });
 }
 

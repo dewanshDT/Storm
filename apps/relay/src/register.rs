@@ -291,7 +291,10 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
 
         let outcome = match incoming {
             Incoming::Control(frame) => match frame.ty() {
-                "PING" => tx.send_json(proto::pong()).await,
+                "PING" => {
+                    tx.send_control(proto::pong());
+                    Ok(())
+                }
                 // A server SHOULD send this before closing, so the relay frees
                 // the `server_id` immediately rather than making clients wait
                 // out a timeout for a deliberate restart (§4.2).
@@ -398,10 +401,7 @@ fn drop_backlogged_client(session: &Session, stream_id: u32, client: &Tx) {
         stream_id,
         proto::error_on_stream(ErrorCode::ClientBacklogged, stream_id),
     );
-    let _ = session
-        .trunk
-        .tx()
-        .try_send_json(proto::close_stream(stream_id));
+    session.trunk.tx().close_toward_origin(stream_id);
 }
 
 /// An `ERROR` from the origin, which §6 does not allow it to send.
@@ -423,10 +423,7 @@ fn server_error(session: &Session, frame: Frame) -> Result<(), Fault> {
             proto::error_on_stream(ErrorCode::StreamAborted, stream_id),
         );
     }
-    let _ = session
-        .trunk
-        .tx()
-        .try_send_json(proto::close_stream(stream_id));
+    session.trunk.tx().close_toward_origin(stream_id);
     Ok(())
 }
 
