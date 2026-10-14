@@ -6591,6 +6591,9 @@ vault's *Storm Remote Open Questions*; R-numbers its *Storm Remote Decisions*.
 - **h. Flow control.** The 32 MiB per-client-trunk budget is normative, with
   `Range`-based resume for downloads. **Credit-based flow control is a v1.1
   capability negotiated in `HELLO`/`READY`** (`flow`), relays first (SG-08).
+  *114h amended (2026-10-14):* the budget is **per stream**, as the operator
+  chose and the spec (§5.5) and R21 state; an optional per-trunk bound is
+  separate. Both relays still count per trunk until 116d.
 - **i. A challenge answered with anything but a valid signature is
   `identity_failed`, never `unreachable`** (SG-51). `unreachable` means only
   that no HTTP answer arrived.
