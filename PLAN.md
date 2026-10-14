@@ -6612,6 +6612,8 @@ relay spec gap audit; decisions 114a–i.)*
   carries a status and version header ("SRP v1, revision 115"; the wire's
   `v: 1` is unchanged), marks each change *(115)*, keeps short compatibility
   notes where shipped code relied on the old text, and ends with a history.
+  *Amended by PR #182:* `docs/srp-v1.md` is now only a pointer to the note,
+  not a snapshot; the 108c text is in git history.
 - **What changed, by section** (each closes the gap ids shown, in text):
   - **Front matter and §1:** status, precedence and three conformance roles
     (SG-01, SG-03 text); the honest trust statement (114a; SG-58).
