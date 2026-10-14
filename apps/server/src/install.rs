@@ -84,6 +84,7 @@ pub fn up(opts: UpOptions) -> Result<()> {
         }
     }
 
+    let old_port = read_env_listen().map(|(_, port)| port);
     fs::create_dir_all("/etc/storm").context("creating /etc/storm")?;
     write_env_file(
         Path::new(ENV_PATH),
@@ -121,6 +122,27 @@ pub fn up(opts: UpOptions) -> Result<()> {
     println!("  env       : {ENV_PATH}");
     println!();
     println!("Pair a device to get in: `storm-server pair` (no users yet).");
+
+    // Decision 119: the ufw profile and firewalld service follow the port, but
+    // a rule already made from them is the operator's to refresh.
+    if let Err(e) = crate::firewall::sync_definitions(Path::new("/"), opts.port) {
+        eprintln!("warning: could not update Storm's firewall definitions: {e}");
+    }
+    if let Some(old) = old_port {
+        let reminder = crate::firewall::port_change_reminder(
+            crate::nettrust::Platform::Linux,
+            &crate::nettrust::RealOs,
+            old,
+            opts.port,
+            "/usr/bin/storm-server",
+        );
+        if !reminder.is_empty() {
+            println!();
+            for line in reminder {
+                println!("{line}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -167,6 +189,10 @@ pub fn status() -> Result<()> {
     };
     // The fingerprint a device pairing from the LAN list shows (decision 118).
     for line in crate::discovery::status_identity(port, 9) {
+        println!("{line}");
+    }
+    // Decision 119: the host firewall and the network's trust, for this port.
+    for line in crate::firewall::status_here(port, "/usr/bin/storm-server", 9) {
         println!("{line}");
     }
     Ok(())

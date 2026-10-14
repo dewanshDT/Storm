@@ -483,6 +483,10 @@ pub fn status() -> Result<()> {
             println!("{line}");
         }
     }
+    // Decision 119: whether a device on this network can reach it directly.
+    for line in crate::firewall::status_here(r.port, &layout.bin.display().to_string(), 8) {
+        println!("{line}");
+    }
     if !healthy {
         std::process::exit(1);
     }

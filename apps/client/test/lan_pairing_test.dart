@@ -418,6 +418,36 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('a different version is a warning on the row, and pairable', (
+      tester,
+    ) async {
+      await pump(tester);
+      final newer = DiscoveredServer.fromAdvert(
+        name: "Dewansh's Storm",
+        addresses: ['192.168.1.13'],
+        port: 8484,
+        txt: {
+          'v': '1',
+          'sid': sid,
+          'pk': pubkey,
+          'ver': '9.9.0',
+          'claimed': '1',
+          'lan': '1',
+        },
+      )!;
+      browser.emit([newer]);
+      await tester.pump();
+      expect(
+        find.text('${newer.fingerprint} · different version (server v9.9.0)'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text("Dewansh's Storm"));
+      await settle(tester);
+      expect(find.byKey(const Key('lan-verified')), findsOneWidget);
+      expect(find.byKey(const Key('lan-password')), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('setup_required switches to the setup QR', (tester) async {
       await pump(tester, pairStatus: 409, pairError: 'setup_required');
       browser.emit([advertised()]);
@@ -435,6 +465,139 @@ void main() {
       await settle(tester);
       expect(find.byKey(const Key('lan-setup-required')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('found but unreachable (decision 119)', () {
+    testWidgets(
+      'firewall guidance and the QR fallback, and the password is never sent',
+      (tester) async {
+        final seen = <String>[];
+        // Every dial is refused, as a host firewall refuses it.
+        final refused = MockClient((request) async {
+          seen.add('${request.method} ${request.url.path}');
+          throw http.ClientException('Connection refused', request.url);
+        });
+        var scans = 0;
+        final server = DiscoveredServer.fromAdvert(
+          name: 'dew-omarchy',
+          addresses: ['192.168.1.13'],
+          port: 19484,
+          txt: {
+            'v': '1',
+            'sid': sid,
+            'pk': pubkey,
+            'ver': '0.0.0',
+            'claimed': '1',
+            'lan': '1',
+          },
+        )!;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              clientVersionProvider.overrideWith((ref) async => '0.0.0'),
+              defaultDeviceNameProvider.overrideWith((ref) async => 'Pixel 10'),
+              lanRouteOpenerProvider.overrideWithValue(
+                (s) => openLanRoute(
+                  s,
+                  buildAuthApi: (cand) =>
+                      AuthApi(baseUrl: cand.baseUrl, client: refused),
+                  deadline: const Duration(seconds: 2),
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              theme: StormTheme.dark(),
+              home: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () => showModalBottomSheet<bool>(
+                    context: context,
+                    isScrollControlled: true,
+                    builder: (_) => LanPairSheet(
+                      server: server,
+                      onPaired: (_, _) async {},
+                      onScanQr: () => scans++,
+                    ),
+                  ),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('open'));
+        for (var i = 0; i < 60; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        expect(find.byKey(const Key('lan-unreachable')), findsOneWidget);
+        final text = tester
+            .widget<RichText>(
+              find.descendant(
+                of: find.byKey(const Key('lan-unreachable-text')),
+                matching: find.byType(RichText),
+              ),
+            )
+            .text
+            .toPlainText();
+        expect(
+          text,
+          "Found dew-omarchy but couldn't connect to it. A firewall on that "
+          'computer may be blocking Storm (port 19484).',
+        );
+        expect(find.text('Your password was not sent.'), findsOneWidget);
+        expect(find.byKey(const Key('lan-password')), findsNothing);
+
+        await tester.tap(find.byKey(const Key('lan-how-to-allow')));
+        await tester.pump();
+        expect(
+          find.text(
+            'sudo ufw allow from 192.168.1.0/24 to any app storm-server',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining('-LocalPort 19484 -Profile Private'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('storm-server status'), findsOneWidget);
+
+        await tester.ensureVisible(find.byKey(const Key('lan-qr-instead')));
+        await tester.tap(find.byKey(const Key('lan-qr-instead')));
+        await tester.pumpAndSettle();
+        expect(scans, 1, reason: 'the QR works through a relay');
+        expect(find.byKey(const Key('lan-unreachable')), findsNothing);
+        expect(seen, isNotEmpty, reason: 'it did try the direct address');
+        expect(seen.where((s) => s.contains('/v1/pairings/password')), isEmpty);
+        expect(seen.where((s) => s.contains('/v1/auth/login')), isEmpty);
+      },
+    );
+
+    test('how to allow Storm is LAN-only for every OS', () {
+      final server = DiscoveredServer.fromAdvert(
+        name: 'x',
+        addresses: ['10.20.30.40'],
+        port: 8484,
+        txt: {
+          'v': '1',
+          'sid': sid,
+          'pk': pubkey,
+          'ver': '0.0.0',
+          'claimed': '1',
+          'lan': '1',
+        },
+      )!;
+      final steps = howToAllowStorm(server).map((s) => s.$2).join('\n');
+      expect(steps, contains('from 10.20.30.0/24 to any app storm-server'));
+      expect(steps, contains('--zone=home'));
+      expect(steps, isNot(contains('--zone=public')));
+      expect(steps, contains('-Profile Private'));
+      expect(steps, isNot(contains('Public')));
+      expect(steps, isNot(contains('Anywhere')));
+      expect(
+        lanSubnetGuess('fd12:3456:789a:1:0:0:0:5'),
+        'fd12:3456:789a:1::/64',
+      );
     });
   });
 }

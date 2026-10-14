@@ -13,6 +13,29 @@ Android signing is optional for the first server release.
 | Public keyring in repo | `deploy/storm-archive-keyring.gpg` (+ `.asc`) |
 | Android upload keystore | **not set** — first APK will be debug-signed |
 
+## macOS signing identity (decision 119)
+
+The macOS firewall remembers "allow incoming connections" per signing
+identity. An ad-hoc signature is new on every build, so without these every
+update of storm-server asks again. With all three set, the release signs the
+server with the Developer ID and **fails** unless `codesign -dvv` shows an
+`Authority=`, a Team ID and no `Signature=adhoc`. Without them it signs
+ad-hoc and the run carries a warning.
+
+| Secret | What |
+|---|---|
+| `STORM_MACOS_CERT_P12_BASE64` | the Developer ID Application certificate and key, `.p12`, base64 |
+| `STORM_MACOS_CERT_PASSWORD` | the `.p12`'s password |
+| `STORM_MACOS_SIGN_IDENTITY` | e.g. `Developer ID Application: Dewansh Singh Thakur (TEAMID1234)` |
+
+```sh
+base64 -i storm-developer-id.p12 | gh secret set STORM_MACOS_CERT_P12_BASE64 -R dewanshDT/Storm
+gh secret set STORM_MACOS_CERT_PASSWORD -R dewanshDT/Storm
+gh secret set STORM_MACOS_SIGN_IDENTITY -R dewanshDT/Storm
+```
+
+State: **not set** (2026-10-14): releases are ad-hoc signed until they are.
+
 ## Android upload keystore (optional until you ship APKs)
 
 ```sh

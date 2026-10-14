@@ -103,8 +103,11 @@ void main() {
     test('pairing off when lan=0', () {
       expect(stateOf(txt(lan: '0')), LanServerState.pairingOff);
     });
-    test('update needed on a version mismatch', () {
-      expect(stateOf(txt(), compatible: false), LanServerState.updateNeeded);
+    test('a version mismatch is a warning, not a block', () {
+      expect(
+        stateOf(txt(), compatible: false),
+        LanServerState.differentVersion,
+      );
     });
     test('already paired wins over everything', () {
       expect(

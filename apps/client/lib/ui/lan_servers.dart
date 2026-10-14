@@ -234,12 +234,14 @@ class _LanServerRow extends StatelessWidget {
         'Pairing from this network is turned off',
         null,
       ),
-      LanServerState.updateNeeded => (
-        'Update needed — server v${server.version}',
-        null,
+      LanServerState.differentVersion => (
+        '${server.fingerprint} · different version (server v${server.version})',
+        onPair,
       ),
     };
-    final live = state == LanServerState.available;
+    final live =
+        state == LanServerState.available ||
+        state == LanServerState.differentVersion;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -339,6 +341,37 @@ class _LanServerRow extends StatelessWidget {
   }
 }
 
+/// "How to allow Storm", per OS, for the server [s] found at its address
+/// (decision 119). Every way is LAN-only; none opens Storm to the internet.
+List<(String, String)> howToAllowStorm(DiscoveredServer s) {
+  final subnet = lanSubnetGuess(s.host);
+  return [
+    (
+      'On that computer',
+      'storm-server status\n'
+          '# says what blocks Storm and prints the command that allows it',
+    ),
+    ('Linux with ufw', 'sudo ufw allow from $subnet to any app storm-server'),
+    (
+      'Linux with firewalld',
+      'sudo firewall-cmd --permanent --zone=home --add-service=storm-server\n'
+          'sudo firewall-cmd --reload',
+    ),
+    (
+      'Windows (PowerShell as administrator)',
+      "New-NetFirewallRule -DisplayName 'Storm Server' -Direction Inbound "
+          r"-Program $env:LOCALAPPDATA\Storm\bin\storm-serverw.exe "
+          '-Protocol TCP -LocalPort ${s.port} -Profile Private -Action Allow\n'
+          '# and set this network to Private in Settings › Network',
+    ),
+    (
+      'macOS',
+      'System Settings › Network › Firewall › Options:\n'
+          'allow incoming connections for storm-server',
+    ),
+  ];
+}
+
 enum _SheetPhase {
   verifying,
   identityFailed,
@@ -372,6 +405,7 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
   _SheetPhase _phase = _SheetPhase.verifying;
   LanRoute? _route;
   bool _pairing = false;
+  bool _howTo = false;
   String? _error;
 
   @override
@@ -472,14 +506,7 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
             'password.',
         danger: true,
       ),
-      _SheetPhase.unreachable => _status(
-        t,
-        key: const Key('lan-unreachable'),
-        text:
-            "Couldn't reach ${widget.server.name} at "
-            '${widget.server.address}. Your password was not sent.',
-        danger: true,
-      ),
+      _SheetPhase.unreachable => _unreachable(t),
       _SheetPhase.setupRequired => _setupRequired(t),
       _SheetPhase.verified => _verified(t),
     };
@@ -534,6 +561,95 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
       ),
     ],
   );
+
+  /// Found on the LAN but the direct connect failed: most often the host
+  /// firewall (decision 119, Layer 3). The relay needs nothing opened, so the
+  /// QR is the way in; the password was never sent.
+  Widget _unreachable(StormTokens t) {
+    final s = widget.server;
+    final body = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.uiSize,
+      height: 1.45,
+      color: t.text2,
+    );
+    return Column(
+      key: const Key('lan-unreachable'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _title(t, s.name),
+        SizedBox(height: t.sp * 2),
+        Text.rich(
+          key: const Key('lan-unreachable-text'),
+          TextSpan(
+            children: [
+              const TextSpan(text: 'Found '),
+              TextSpan(
+                text: s.name,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              TextSpan(
+                text:
+                    " but couldn't connect to it. A firewall on that computer "
+                    'may be blocking Storm (port ${s.port}).',
+              ),
+            ],
+          ),
+          style: body,
+        ),
+        SizedBox(height: t.sp),
+        Text(
+          'Your password was not sent.',
+          style: body.copyWith(fontSize: t.codeSize, color: t.text3),
+        ),
+        SizedBox(height: t.sp * 2.5),
+        if (widget.onScanQr != null) ...[
+          StormButton.primary(
+            key: const Key('lan-qr-instead'),
+            label: 'Pair with a QR code instead',
+            expand: true,
+            onPressed: () {
+              Navigator.of(context).pop(false);
+              widget.onScanQr!();
+            },
+          ),
+          SizedBox(height: t.sp * 1.25),
+        ],
+        StormButton.outline(
+          key: const Key('lan-how-to-allow'),
+          label: 'How to allow Storm',
+          expand: true,
+          onPressed: () => setState(() => _howTo = !_howTo),
+        ),
+        if (_howTo) ...[
+          SizedBox(height: t.sp * 2),
+          for (final (os, steps) in howToAllowStorm(s)) ...[
+            Text(
+              os,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.codeSize,
+                fontWeight: FontWeight.w600,
+                color: t.text,
+              ),
+            ),
+            SizedBox(height: t.sp * 0.5),
+            SelectableText(
+              steps,
+              style: TextStyle(
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.labelSize,
+                height: 1.5,
+                color: t.text2,
+              ),
+            ),
+            SizedBox(height: t.sp * 1.5),
+          ],
+        ],
+      ],
+    );
+  }
 
   Widget _title(StormTokens t, String text) => Text(
     text,
