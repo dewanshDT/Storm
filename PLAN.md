@@ -6550,6 +6550,12 @@ vault's *Storm Remote Open Questions*; R-numbers its *Storm Remote Decisions*.
   and every session request alike. One predicate, with vectors (SG-47). It
   relaxes the Dart pairing/sign-in route (loopback only today) and tightens
   session requests (any advertised `ws://` today).
+  *114e amended (2026-10-14), operator:* the allowed set is defined by
+  address class only: loopback, RFC 1918 (`10/8`, `172.16/12`,
+  `192.168/16`), link-local and IPv6 ULA (`fc00::/7`). **`100.64.0.0/10` is
+  not allowed**: carriers share it for CGNAT, so it is not private to the
+  user. `docs/srp-vectors.json` → `plaintext_relay_hosts` now refuses
+  `100.64.x.x` and allows link-local.
 - **f. The hosted relay becomes an open relay: no accounts, key-addressed.**
   Anyone may register; the relay keys registrations by **`(server_id,
   pubkey)`**. A client's `HELLO` names the pinned key (`HELLO.pubkey`, and
@@ -6585,6 +6591,9 @@ vault's *Storm Remote Open Questions*; R-numbers its *Storm Remote Decisions*.
 - **h. Flow control.** The 32 MiB per-client-trunk budget is normative, with
   `Range`-based resume for downloads. **Credit-based flow control is a v1.1
   capability negotiated in `HELLO`/`READY`** (`flow`), relays first (SG-08).
+  *114h amended (2026-10-14):* the budget is **per stream**, as the operator
+  chose and the spec (§5.5) and R21 state; an optional per-trunk bound is
+  separate. Both relays still count per trunk until 116d.
 - **i. A challenge answered with anything but a valid signature is
   `identity_failed`, never `unreachable`** (SG-51). `unreachable` means only
   that no HTTP answer arrived.
@@ -6606,6 +6615,8 @@ relay spec gap audit; decisions 114a–i.)*
   carries a status and version header ("SRP v1, revision 115"; the wire's
   `v: 1` is unchanged), marks each change *(115)*, keeps short compatibility
   notes where shipped code relied on the old text, and ends with a history.
+  *Amended by PR #182:* `docs/srp-v1.md` is now only a pointer to the note,
+  not a snapshot; the 108c text is in git history.
 - **What changed, by section** (each closes the gap ids shown, in text):
   - **Front matter and §1:** status, precedence and three conformance roles
     (SG-01, SG-03 text); the honest trust statement (114a; SG-58).
@@ -6718,6 +6729,9 @@ relay spec gap audit; decisions 114a–i.)*
   - **116e — Liveness and heartbeat** (latent): SG-16, SG-17, SG-20, SG-21.
     Relays reap silent client trunks and derive the advertised interval.
   - **116f — Supersession and origin reconnect** (latent): SG-18, SG-19.
+    Includes the origin's **no hot reconnect loop** rule (±20 % jitter, no
+    backoff reset for a trunk that lived under 60 s), which gates the hosted
+    relay's switch to `open`.
   - **116g — Client race** (latent; after 113): SG-10 (114d follow-through),
     SG-11, SG-12, SG-22, SG-23, SG-50, SG-51, SG-64. Per-candidate deadline,
     the no-timer public round (replacing 113's 2 s join, including the
@@ -6740,20 +6754,27 @@ relay spec gap audit; decisions 114a–i.)*
   - **116j — Credential and relay-set hygiene** (latent, security): SG-47,
     SG-59 (app action), SG-61, SG-63. The shared plaintext predicate, relay
     set adopted only after proof, `relays_sig`, TOFU refused on a public bind.
-  - **116k — The open hosted relay: key-addressed registration, abuse
-    controls and logs** (latent; 114b, c, f): SG-29, SG-62, SG-65, SG-66,
-    SG-68, SG-69, SG-70. Registrations keyed by `(server_id, pubkey)` in both
-    relays, `HELLO.pubkey` and `?pubkey=` in both clients, the keyless-`HELLO`
-    rule; `/register` limits and /64 keys; allowlist checked before any state;
-    revocation evicts; R14 logging; then, after a week's numbers, the
-    per-registration budget. May land as two PRs (addressing, then controls);
-    the hosted relay switches to `open` only once both are in.
+  - **116k — Relay abuse controls and logs** (latent; 114b, c): SG-29,
+    SG-65, SG-66, SG-68, SG-69. The relay side only: `/register` limits and
+    /64 keys; allowlist checked before any state; revocation evicts; R14
+    logging; then, after a week's numbers, the per-registration budget.
   - **116l — Conformance role suites and framing vectors**: SG-03, SG-33,
     SG-34, SG-36, SG-38, SG-73. The origin and client suites, the README's new
     checks, the generator emitting revision 115's vectors, and every suite
     reading them.
   - **116m — Ops visibility** (small, optional): SG-75; `storm-server status`
     printing the identity, `GET /health` on the Worker.
+  - **116n — Key-addressed registration** (latent; 114f): SG-62, SG-70.
+    `HELLO.pubkey` and `?pubkey=` (clients send the pinned key; relays check
+    they agree); registrations keyed by `(server_id, pubkey)` in both relays,
+    the Worker naming its Durable Object from the pair; supersession within
+    the same key only; the `open`/`allowlist`/`tofu` and old-client
+    compatibility tables of spec §5; a keyless `HELLO` refused on the hosted
+    relay in `open` mode; conformance checks; the suites reading the
+    `hello_pubkey` vectors.
+  - **The hosted relay switches to `open` only when 116k, 116n and 116f's
+    hot-loop rule are all live**, and the week of measurement has started
+    (114f addendum).
 - **Closed by this decision.** In text, with no code owed: SG-01 (precedence,
   now the vault note), SG-02, SG-15, SG-30, SG-32, SG-35, SG-37, SG-58, SG-67,
   SG-80, SG-85, SG-86, SG-88 (the stale vault note is now the spec). With 113
