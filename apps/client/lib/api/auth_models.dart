@@ -39,6 +39,7 @@ class ServerInfo {
     required this.algorithm,
     required this.publicKey,
     this.relays = const [],
+    this.relaysSig,
   });
 
   final String serverId;
@@ -52,6 +53,10 @@ class ServerInfo {
   /// stranded client can still reach.
   final List<RelayAdvert> relays;
 
+  /// The server's signature over [relays]' URLs (§4.3); absent from a server
+  /// that predates it.
+  final String? relaysSig;
+
   factory ServerInfo.fromJson(Map<String, dynamic> j) => ServerInfo(
     serverId: j['server_id'] as String,
     keyId: j['key_id'] as String,
@@ -62,6 +67,7 @@ class ServerInfo {
             ?.map((r) => RelayAdvert.fromJson(r as Map<String, dynamic>))
             .toList() ??
         const [],
+    relaysSig: j['relays_sig'] as String?,
   );
 }
 

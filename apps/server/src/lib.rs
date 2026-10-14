@@ -72,7 +72,7 @@ struct Cli {
     command: Commands,
 
     /// Append the log to this file instead of the terminal. Windows'
-    /// windowless `storm-serverw` has no terminal (PLAN 99, W-S1).
+    /// windowless `storm-serverw` has no terminal (decision 99, W-S1).
     #[arg(long, global = true, value_name = "FILE")]
     log_file: Option<PathBuf>,
 }
@@ -151,7 +151,7 @@ enum Commands {
     /// Back up the vaults, the indexes and the account into
     /// `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones:
     /// `deploy/storm-backup.sh` without bash, for Windows' nightly task
-    /// (PLAN 99, W-S3).
+    /// (decision 99, W-S3).
     Backup {
         /// The storage root to fall back on when the registry names none.
         #[arg(long)]
@@ -1444,7 +1444,7 @@ fn advertised_host(bind_host: &str) -> String {
 }
 
 /// The `storm-server` command line: `storm-server` and Windows' windowless
-/// `storm-serverw` are both this (PLAN 99, W-S1).
+/// `storm-serverw` are both this (decision 99, W-S1).
 #[tokio::main]
 pub async fn main() -> Result<()> {
     // Before anything can open a TLS connection. The relay tunnel dials

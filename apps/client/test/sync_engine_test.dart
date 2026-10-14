@@ -12,7 +12,7 @@ import 'package:storm/sync/sync_engine.dart';
 import 'fake_server.dart';
 
 /// Offline, outbox and reconnect behaviour — scenarios 3-6 and 9 of the sync
-/// matrix in PLAN.md, exercised in-process.
+/// matrix (the vault's sync design notes), exercised in-process.
 ///
 /// A fake server stands in for storm-server so connectivity can be cut
 /// deterministically. `unreachable` throws a socket-style error (what a dead

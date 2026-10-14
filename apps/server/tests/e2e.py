@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end exercise of the Storm server API — M1's exit criterion.
 
-Drives scenarios 3-7 of the sync matrix in PLAN.md against a live server,
+Drives scenarios 3-7 of the sync matrix (the vault's sync design notes) against a live server,
 checking behaviour the Rust unit tests can't: real HTTP, real files on disk,
 and the file watcher reacting to an external edit.
 

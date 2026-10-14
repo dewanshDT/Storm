@@ -15,7 +15,7 @@ import 'package:storm/api/storm_api.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/storm_image_provider.dart';
 
-/// Signed in away from home (PLAN decision 112): the saved address is a closed
+/// Signed in away from home (decision 112): the saved address is a closed
 /// port, and Agents (list, launch, the live terminal) and an attachment image
 /// reach the real storm-server through the real `storm-relay`, over the app's
 /// own providers. `make test-live` registers the relay, enrolls a runtime host

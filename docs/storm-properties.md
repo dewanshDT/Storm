@@ -2,7 +2,7 @@
 
 Scope: turn a note's YAML frontmatter from a read-only strip into an editable, typed key/value list — a key on the left, an input suited to its type on the right, and `+` to add one. Values live in the note's frontmatter; a property's *type* lives in a hidden per-vault note.
 
-Status: **built.** M11 in `PLAN.md`, which records the decisions and what would justify revisiting them.
+Status: **built.** M11; its decisions, and what would justify revisiting them, are in the vault.
 
 ---
 

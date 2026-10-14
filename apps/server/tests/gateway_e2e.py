@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCP Gateway V1, end to end (PLAN.md decisions 81, 81f; spec §17).
+"""MCP Gateway V1, end to end (decisions 81, 81f; spec §17).
 
 A real storm-server, a real storm-runtime, a mock upstream MCP server and a
 scripted agent that the runtime launches exactly as it would Claude Code or

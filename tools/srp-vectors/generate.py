@@ -2,7 +2,8 @@
 """Generate docs/srp-vectors.json.
 
 Run from the repo root. Regenerating is not routine: the file is a wire
-commitment, so a change to it is a protocol change and belongs in PLAN.md.
+commitment, so a change to it is a protocol change and belongs in a numbered
+decision in the vault.
 """
 
 import base64
@@ -112,7 +113,7 @@ doc["delimiter_confusion"] = {
         "re-splits it. Both pairs below produce identical signed bytes: one "
         "signature would cover two different (server_id, nonce) readings. "
         "Validating only the nonce leaves the server_id half open — that was "
-        "PLAN.md decision 60. An implementation is correct here only if it "
+        "decision 60. An implementation is correct here only if it "
         "rejects both pairs before signing or verifying."
     ),
     "colliding_pairs": [

@@ -3,30 +3,27 @@
 Self-hosted markdown notes: Flutter clients + a Rust sync server in the homelab,
 replacing Obsidian + Syncthing.
 
-## Read PLAN.md first
+## The vault is the source of truth
 
-**`PLAN.md` is the living plan and status.** Read it before starting work in
-this repo, and **update it as part of the change** — not afterwards:
+**Storm's plan, status and decisions live in the personal vault (Storm MCP),
+never in this repo.** There is no `PLAN.md`; it grew to 600 KB and was removed
+on 2026-10-15 (its text is in git history). Read the vault before starting
+work, and **update it as part of the change** — not afterwards:
 
-- A milestone changing state, a new blocker, or a finding that would have
-  changed an earlier decision all belong in `PLAN.md` in the same change that
-  produced them.
-- Its **Decision log** records settled choices and what would justify revisiting
-  each. Don't relitigate them without a reason; if one does change, amend the
-  entry with why.
-- Leaving `PLAN.md` stale is a defect. A finding that exists only in a chat
-  transcript is lost.
-
-**Also keep `Storm/Active Work.md` current** (personal vault, via Storm MCP) —
-the short in-flight checklist. Read it when starting multi-step work; update it
-when an item moves. `.cursor/rules/storm-active-work.mdc` requires this.
-`PLAN.md` still wins for decisions; Active Work is the queue.
-
-**`Storm/Global Todo.md` is the one aggregate tracking surface** — every
-milestone, the Agent Runtime phases, in-flight items, backlog and parking lot
-in a single checklist. `PLAN.md` and Active Work stay authoritative for
-decisions and the queue; Global Todo mirrors their status. When a milestone,
-phase, or queue item changes state, update Global Todo in the same change.
+- **`Storm/Active Work.md`** is the short in-flight queue. Read it when
+  starting multi-step work; update it when an item moves.
+  `.cursor/rules/storm-active-work.mdc` requires this.
+- **`Storm/Global Todo.md`** is the one aggregate checklist — every milestone,
+  the Agent Runtime phases, in-flight items, backlog and parking lot. When a
+  milestone, phase or queue item changes state, update it in the same change.
+- **Decisions are numbered** and recorded in the vault note for their area
+  (the feature's design note, `Storm/Remote/…`, the area's *Decisions* note),
+  with what would justify revisiting each. Don't relitigate a settled one
+  without a reason; if one changes, amend it there with why. Code and docs
+  cite them as "decision 77b". Active Work names the next free number.
+- **Specs are normative in the vault**, never written into the repo.
+- A finding that exists only in a chat transcript is lost. A slice that
+  lands without its vault note updated is not done.
 
 **Every vault note an agent edits carries a `summary:` in its frontmatter.**
 Add it when creating a note; refresh it whenever you update one — one
@@ -34,8 +31,8 @@ plain-text line capturing what the note is (for a change, what it now is).
 It is what search indexes and what a later agent skims first; a note whose
 summary still says "proposed" long after it shipped is a note that lied.
 
-`docs/prd.md` is the original brief and is **not** maintained.
-Where it and `PLAN.md` disagree, `PLAN.md` is current.
+`docs/prd.md` is the original brief and is **not** maintained. Where it and
+the vault disagree, the vault is current.
 
 ## Branches: `staging` is where development lands
 
@@ -60,11 +57,11 @@ Practical consequences worth knowing before you start:
 
 - **Branch from `staging`, not `main`**, or your PR will carry every commit
   that is on `staging` and not yet released, and its diff will be unreviewable.
-- **`PLAN.md`'s decision log is numbered, and `staging` may already carry
-  entries `main` has never seen.** Read `PLAN.md` **on `staging`** before
-  choosing a number. A gap is harmless; a duplicate is not.
+- **Decision numbers are global, and work on `staging` may already have used
+  some `main` has never seen.** Take the next free number from
+  `Storm/Active Work.md`. A gap is harmless; a duplicate is not.
 - When a release does happen, `main` gets the merge and the tag together — see
-  `PLAN.md`'s release entries for how versioning works.
+  the vault's *Storm Releases* for how versioning works.
 
 ## Layout
 
@@ -80,8 +77,8 @@ Practical consequences worth knowing before you start:
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `docs/srp-v1.md` | A pointer: the normative relay spec is the vault note *Storm Relay Protocol*. `docs/srp-vectors.json` is its shared test vectors. |
 | *Storm Relay Dart Client* (vault) | The client half's accepted architecture. Read before writing any Dart SRP code. |
-| *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then `PLAN.md` decision 77, before touching `apps/runtime` or `/v1/agent/*`. |
-| `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
+| *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then decision 77, before touching `apps/runtime` or `/v1/agent/*`. |
+| `docs/prd.md` | Original brief. Superseded by the vault; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
@@ -428,7 +425,7 @@ cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
   halves of one signed string, so a colon in *either* re-splits it.
 
 From M20 (Agent Runtime V1 — the spec is the vault's *Agent Runtime/V1
-Specification Freeze*; the slices and slice 1's decisions are `PLAN.md`
+Specification Freeze*; the slices and slice 1's decisions are
 decision 77):
 
 - **A Runtime Host is never an authority.** `storm-runtime` runs agents and
@@ -487,7 +484,7 @@ decision 77):
   (SRP §5.3).
 
 From M21 (the MCP Gateway — the spec is the vault's *MCP Gateway/V1
-Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
+Specification*; the slices are decisions 81 and 81a onward):
 
 - **`state/gateway/gateway.db` and `state/gateway/keys/` cannot be rebuilt,
   and travel together** (81b). `backup_all()` carries both, before the "no
@@ -617,7 +614,7 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   the client shows them through `displayToolName`.
 
 From M26 (Windows — the vault's *Agent Runtime/Windows Runtime Host*, D16,
-and *Installer/Windows Server*; `PLAN.md` decision 99):
+and *Installer/Windows Server*; decision 99):
 
 - **The carrier is per platform, the ending policy is not.** `pty/` holds
   the PTY (Unix) and ConPTY (Windows) behind one interface; `cli.rs` decides

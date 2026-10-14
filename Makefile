@@ -28,7 +28,7 @@ PORT  ?= 8484
 # pairing nonce and creates the first user, both of which are once-per-server
 # and both of which `auth_e2e.py` has already used up on $(PORT).
 AUTH_PORT ?= 8485
-# A real storm-relay for the client's relayed suite (PLAN decision 92). Not
+# A real storm-relay for the client's relayed suite (decision 92). Not
 # 8486, the relay's own default, so a dev relay left running is not borrowed.
 RELAY_PORT ?= 8487
 # Which relay `test-live` runs the relayed suites through: rust (storm-relay)

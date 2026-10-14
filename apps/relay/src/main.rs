@@ -68,6 +68,13 @@ struct Args {
     #[arg(long, env = "STORM_RELAY_MODE", value_enum)]
     mode: Option<ModeArg>,
 
+    /// Run trust-on-first-use on a public or wildcard --bind anyway. TOFU is
+    /// safe only where the operator controls who can reach the relay (§4.1):
+    /// on the internet, whoever registers a `server_id` first owns it for good.
+    /// Use --allowlist or --mode open there instead.
+    #[arg(long, env = "STORM_RELAY_ALLOW_PUBLIC_TOFU")]
+    allow_public_tofu: bool,
+
     /// PEM certificate chain (e.g. certbot's fullchain.pem). With --tls-key,
     /// the relay terminates TLS itself and serves wss:// directly. It must, on
     /// a public address: behind a TLS proxy every client would arrive from the
@@ -233,6 +240,9 @@ async fn main() -> Result<()> {
             );
         }
         _ => {}
+    }
+    if !config.open && allowlist.is_none() {
+        config::check_tofu_bind(config.bind, args.allow_public_tofu)?;
     }
     match (&allowlist, &bindings) {
         _ if config.open => {}

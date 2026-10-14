@@ -166,7 +166,7 @@ excluded, so it cannot forge the message's field boundaries).
 how to check a restore actually brought the identity back.
 
 Sessions and pairing are not built yet; the shared bearer token is unchanged.
-See `PLAN.md` decisions 52 / 52a / 52c.
+See decisions 52 / 52a / 52c.
 
 ### The account
 

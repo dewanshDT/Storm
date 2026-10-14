@@ -131,6 +131,9 @@ class FakeServer {
   /// Paired devices, as `GET /v1/auth/devices` returns them.
   final List<Map<String, dynamic>> devices = [];
 
+  /// The account password, for `POST /v1/auth/password`.
+  String password = 'correct horse';
+
   /// Access keys, as `GET /v1/keys` returns them.
   final List<Map<String, dynamic>> keys = [];
 
@@ -297,6 +300,14 @@ class FakeServer {
       return http.Response(jsonEncode({'relays': relays}), 200, headers: j(''));
     }
 
+    if (path == '/v1/auth/password' && request.method == 'POST') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      if (body['current_password'] != password) {
+        return http.Response('wrong password', 401);
+      }
+      password = body['new_password'] as String;
+      return http.Response('', 204);
+    }
     if (path == '/v1/auth/devices' && request.method == 'GET') {
       return http.Response(jsonEncode(devices), 200, headers: j(''));
     }

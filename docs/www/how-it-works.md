@@ -8,7 +8,7 @@ route: /how-it-works
 Content for route **`/how-it-works`**. Parent: [[Storm Website]].
 
 Thin sketch only — link out for depth. Do not turn this into an API reference
-or second `PLAN.md`.
+or a design document.
 
 ## Meta
 
@@ -71,7 +71,7 @@ Full invariant list for agents: [[Storm Invariants]].
 
 | Topic | Where |
 |---|---|
-| Living plan + decisions | [`PLAN.md`](https://github.com/dewanshDT/Storm/blob/main/PLAN.md) |
+| Design briefs | [`docs/`](https://github.com/dewanshDT/Storm/tree/main/docs) |
 | Deploy + apt | [`deploy/`](https://github.com/dewanshDT/Storm/tree/main/deploy) |
 | Server + MCP | [`apps/server/README.md`](https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md) |
 

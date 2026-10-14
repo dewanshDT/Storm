@@ -2,7 +2,7 @@
 
 Scope: several vaults instead of one, a dashboard rebuilt around them, folder creation as a real operation, and a server-side vault storage root that can be changed from the app. This cuts through every layer — server routing and state, the wire format, the client cache schema, and the shell — which is what makes it different from the UI-layer pass in `docs/storm-ui-refactor.md`.
 
-Status: **built.** M9/M10 in `PLAN.md`, which records the two bugs the new tests caught. Decisions 20–25 there hold the rationale and what would justify revisiting each; this doc is the shape.
+Status: **built.** M9/M10. Decisions 20–25 (in the vault) record the two bugs the new tests caught and hold the rationale and what would justify revisiting each; this doc is the shape.
 
 ---
 
@@ -38,8 +38,8 @@ A vault is identified by a **UUID**, not its directory name, for the same reason
 
 `state/` remains a sibling of the vault data, never inside it.
 
-**Both trees are private to the service user and its group** (`PLAN.md`
-decision 76): `/srv/storm` and `state/` are 0750 and the units set
+**Both trees are private to the service user and its group** (decision
+76): `/srv/storm` and `state/` are 0750 and the units set
 `UMask=0027`, so other local accounts cannot read a note or `state/auth.db`.
 A storage root outside the data root, such as an NFS share, is left to whoever
 owns it. Storm never changes its modes, because other machines write it.
