@@ -7890,6 +7890,100 @@ comment and §5.4's `CLOSE` toward the origin.)*
   throughput, or 116d's per-stream queues make the origin's FIFO lane
   replaceable by the Dart client's round robin.
 
+**116i. `mcp-connect` follows the Connection state machine.** *(2026-10-14;
+a Phase 2 slice of the relay spec gap audit, vault *Remote/Relay Spec Gap
+Audit*; gap SG-52 = audit B's G19, and the Rust column of audit B §3. The
+rules are revision 115's §8, §8.10 in particular, plus §2.1–2.2 (114d), §4.3
+(114e as amended), §5.1 and 114i.)*
+- **The bug (latent).** `Adapter::forget` dropped the transport on *any*
+  `TransportError`, stream-scoped ones included (`rate_limited`,
+  `server_timeout`, `stream_aborted`, `client_backlogged`, `server_silent`),
+  and with the server down every message raced again with no backoff. Each
+  race spends one `HELLO` per relay, and a relay allows ten a minute per
+  address, so an agent retrying tool calls could lock its own address (and,
+  behind CGNAT, everyone's) out of the relay. The connect also ran inside
+  the caller under a mutex, so a caller that gave up cancelled the race.
+- **The fix: a `Connection`** (`apps/runtime/src/connection.rs`), the §8
+  machine with demand = one JSON-RPC message:
+  1. **Single flight, never cancelled.** The race is its own task; callers
+     join it. Only `close()` (the end of `mcp-connect`) voids it, and then
+     it adopts nothing.
+  2. **Only positive failures reset.** `Transport::is_lost` decides: the
+     trunk closed, or `trunk_lost`/`trunk_superseded` naming a stream (the
+     server left the relay; `trunk_superseded` re-races with no backoff);
+     direct, any connection-level failure but a read timeout. A
+     stream-scoped error is one JSON-RPC error and the transport stays
+     (§8.10 rule 2), as does `server_silent`.
+  3. **Backoff per Connection.** A race with no proven candidate enters
+     `Unreachable`/`Unproven` for 1 s → 60 s, ×2, ±20 % jitter. A message
+     in backoff fails at once with the last race's code and a "not retrying
+     for another N s" detail; it never races (rule 3). The backoff clears
+     only when a transport that stayed connected 60 s is lost.
+  4. **Reconnects only ensure a connection.** With no feed or outbox there
+     is no reconnect timer: the backoff is a deadline, the first demand after
+     it races once, and every other caller joins that race, so at most one
+     reconnect is ever pending and none can reset anything.
+  5. **Status** is derived from the state alone (§8.6): `online`/`relayed`,
+     `connecting` after 2 s of racing (the previous status before),
+     `serverOffline`, `offline`, `unproven`. It is logged on every race.
+- **Timers.** `T_candidate` is **15 s**, the spec's value (20 s conformed;
+  15 s is what the table names, and it is per candidate with no round
+  timer). `T_handshake` (8 s) now runs from the open WebSocket, the dial
+  bounded separately. `T_connect` 10 s and heartbeat/silence 15/45 s were
+  already right.
+- **Public tier (114d).** `PUBLIC_RELAY_HOSTS` holds
+  `storm-relay.dewansh.space`; the public round starts only once every
+  round-1 candidate failed or reached its own deadline, as it already did.
+- **The relay set (§4.3).** Adopted only from the proven winner whose
+  `server_id` is the pinned one, as before, and now only if a `relays_sig`
+  it carries verifies against the pinned key (`storm-relays:v1:`,
+  `identity::relay_set_message`); no signature falls back to proof alone.
+  The plaintext rule is one predicate, `srp::plaintext_allowed`: `ws://`
+  only on loopback, RFC 1918, link-local and ULA, **never `100.64.0.0/10`**,
+  and a hostname other than `localhost` counts as public. A relay outside it
+  is not a candidate, is never dialled and is never cached; before this,
+  every `ws://` off loopback was refused, LAN relays included. These are the
+  Rust client's halves of 116j's predicate and relay-set items; 116j keeps
+  the server's (`normalize_relay_url`, signing) and the app's.
+- **Checked, already conforming.** A refused challenge (any status, a
+  malformed body, another key or `server_id`) is `identity_failed` (114i;
+  Rust was the reference). A late `STREAM_READY` is answered with
+  `CLOSE{stream_id}` and the trunk carries on (§5.1), now with a test. No
+  open is timed out while unsent: the only timer is the 120 s idle limit.
+- **Not changed.** `T_ttfb` (30 s from end of body) is not applied to
+  `mcp-connect`: rmcp answers a tool call's head only when the tool
+  finishes, so 30 s would fail long tools. The 120 s idle limit stays, and
+  it still includes the upload, which an MCP message never makes long. A
+  `READY` trunk from a race that found no proven candidate is not kept for
+  the next race (§8.3 rule 7 says MAY).
+- **Tests, each failing on the old behaviour** (checked by mutating the new
+  code back: forget on any error and no backoff fails 8, an empty public
+  list 1, the loopback-only predicate 4, an unchecked relay set 1).
+  `connection.rs`: `concurrent_callers_join_one_race`,
+  `a_caller_giving_up_never_cancels_the_race`,
+  `in_backoff_a_message_fails_at_once_and_one_reconnect_follows`,
+  `a_stream_scoped_error_keeps_the_transport_and_a_loss_re_races`,
+  `the_backoff_clears_only_after_a_minute_connected`, the backoff sequence,
+  status without flicker. `mcp_race.rs` (real trunks, fake relays):
+  `a_stream_scoped_error_leaves_the_trunk_for_the_next_call` (one `HELLO`),
+  `with_the_server_down_messages_fail_from_the_backoff_and_spend_one_hello_per_relay`
+  (ten messages, two relays, one `HELLO` each),
+  `a_refused_challenge_is_identity_failed_unproven_and_not_re_raced` (bad
+  base64, a zero signature, 404, 500),
+  `a_relay_set_is_adopted_only_when_its_signature_verifies`,
+  `trunk_superseded_naming_a_stream_re_races_at_once`; the silent-request
+  test now expects one `HELLO`. `race.rs`: the hosted host is tier 2,
+  `a_plaintext_relay_off_a_private_network_is_not_a_candidate`,
+  `the_public_round_waits_out_a_silent_candidates_deadline`. `srp_vectors.rs`
+  reads `relay_set_message` and `plaintext_relay_hosts`. `srp_trunk.rs`:
+  `a_late_stream_ready_is_answered_with_close`. `mcp_connect_live.py`: three
+  messages to a relay without the server get one race and two backoff
+  answers; its ports come from `MCP_LIVE_PORT` (default 18870).
+- **Results.** RESULTS_PLACEHOLDER
+- *Revisit if:* the spec gives `mcp-connect` a `T_ttfb` that fits long tool
+  calls, or a hostname-resolving plaintext check is wanted (it would have to
+  pin the resolved address for the dial).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

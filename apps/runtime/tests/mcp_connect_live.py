@@ -2,8 +2,8 @@
 """`storm-runtime mcp-connect` against a real storm-server and a real
 storm-relay (decisions 105c, 105b, 105d).
 
-Starts its own server, relay and impostor server on ports in 18870–18879
-(never 8484–8487). The server binds `127.0.0.1`, not a wildcard, so rmcp's
+Starts its own server, relay and impostor server on ten ports from
+`MCP_LIVE_PORT` (default 18870; never 8484–8487). The server binds `127.0.0.1`, not a wildcard, so rmcp's
 `allowed_hosts` is enforced and a relayed call proves its `Host` is accepted.
 It claims the server, mints an `stk_` key, registers the relay, and drives the
 real binary over stdio twice: direct, and through the relay with the address
@@ -41,6 +41,7 @@ SERVER_BIN = os.environ["SERVER_BIN"]
 RELAY_BIN = os.environ["RELAY_BIN"]
 RUNTIME_BIN = os.environ["RUNTIME_BIN"]
 RELAY_IMPL = os.environ.get("RELAY_IMPL", "rust")
+PORT_BASE = int(os.environ.get("MCP_LIVE_PORT", "18870"))
 
 ok = 0
 fail = 0
@@ -60,7 +61,7 @@ _taken = set()
 
 
 def free_port():
-    for port in range(18870, 18880):
+    for port in range(PORT_BASE, PORT_BASE + 10):
         if port in _taken:
             continue
         with socket.socket() as s:
@@ -70,7 +71,7 @@ def free_port():
                 continue
         _taken.add(port)
         return port
-    raise RuntimeError("no free port in 18870–18879")
+    raise RuntimeError(f"no free port in {PORT_BASE}–{PORT_BASE + 9}")
 
 
 def wait_for(url, what, log_path):
@@ -343,6 +344,14 @@ def main():
                                  key, [INIT])
         check("a relay without the server is server_offline",
               len(out) == 1 and storm_error(out[0]) == "server_offline", out)
+        # SRP §8.10 rule 3 (116i): initialize (handled in order) races once;
+        # the calls after it are answered from the backoff.
+        code, out, err = connect(["--server", unregistered, "--pk", pk, "--relay", other],
+                                 key, [INIT] + [{**list_vaults, "id": n} for n in (1, 2, 3)])
+        check("messages after a failed race fail from the backoff, not a new race",
+              len(out) == 4 and all(storm_error(m) == "server_offline" for m in out)
+              and [("not retrying" in m["error"]["message"]) for m in out]
+              == [False, True, True, True], out)
         code, out, err = connect(pin + ["--relay", dead], key, [INIT])
         check("no relay is relay_down", len(out) == 1 and storm_error(out[0]) == "relay_down", out)
     finally:
