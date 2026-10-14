@@ -701,7 +701,22 @@ mod tests {
             }
             s = evaluate(Platform::Windows, &RealOs, &ifaces);
         }
-        assert_eq!(s.signal, Signal::WindowsCategory, "{s:?}");
+        if s.signal != Signal::WindowsCategory {
+            // Say why the query gave nothing: an exit status, stderr, or a hang.
+            let started = Instant::now();
+            let out = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_PROFILES,
+                ])
+                .output();
+            panic!(
+                "no Windows category after 3 tries ({s:?}); a direct run took {:?}: {out:?}",
+                started.elapsed()
+            );
+        }
         assert!(
             s.verdicts
                 .iter()
