@@ -58,6 +58,9 @@ pub struct ServerTrunk {
     /// tell every one of them, including clients that hold no open stream and
     /// would otherwise wait for a timeout on a destination that is gone.
     clients: Mutex<HashMap<String, Tx>>,
+    /// Body bytes carried both ways for this registration (§6.2): what the
+    /// week of measurement reads before a budget is set (decision 116k).
+    bytes: std::sync::atomic::AtomicU64,
     /// Set by [`ServerTrunk::start_drain`]; no stream opens after it.
     draining: std::sync::atomic::AtomicBool,
 }
@@ -121,8 +124,18 @@ impl ServerTrunk {
                 next_id: 1,
             }),
             clients: Mutex::new(HashMap::new()),
+            bytes: std::sync::atomic::AtomicU64::new(0),
             draining: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn count_bytes(&self, n: usize) {
+        self.bytes
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The socket toward the origin server.
@@ -343,6 +356,14 @@ impl ServerTrunk {
             }
             tx.close();
         }
+    }
+
+    /// Ends this trunk for a server the operator revoked: its socket closes,
+    /// and the trunk's own teardown tells every client `trunk_lost`.
+    pub fn evict(&self) {
+        let _ = self.tx.try_send_json(proto::error(ErrorCode::AuthFailed));
+        self.tx.close();
+        self.tx.kill();
     }
 
     #[cfg(test)]
@@ -706,6 +727,23 @@ impl Registrations {
             .values()
             .map(HashMap::len)
             .sum()
+    }
+
+    /// Keeps the registrations `keep` accepts and returns the rest, removed.
+    pub fn retain(&self, keep: impl Fn(&str, &KeyBytes) -> bool) -> Vec<Registration> {
+        let mut live = self.live.lock().expect("registrations mutex");
+        let mut gone = vec![];
+        for (server_id, keys) in live.iter_mut() {
+            keys.retain(|key, registration| {
+                let kept = keep(server_id, key);
+                if !kept {
+                    gone.push(registration.clone());
+                }
+                kept
+            });
+        }
+        live.retain(|_, keys| !keys.is_empty());
+        gone
     }
 
     pub fn is_empty(&self) -> bool {
