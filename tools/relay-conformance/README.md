@@ -145,6 +145,94 @@ are now plain rules:
   is only a SHOULD; the checks accept both and require everything else in
   order.
 
+## Revision 115: what the suite must gain in Phase 2
+
+`PLAN.md` decision 115 moved the normative spec to the vault note *Storm Relay
+Protocol* (SRP v1, revision 115). Where it and `docs/srp-v1.md` (a 108c
+snapshot) differ, the note wins. Revision 115 adds MUSTs that no check holds
+yet. Each is listed below with the slice that implements it (decision 116) and
+the check it needs. Until a check exists, the rule is enforced only by that
+implementation's own tests, and a relay may still fail it. These checks land
+with their slice, not before, because both relays fail most of them today.
+
+**New relay MUSTs, black-box:**
+
+| § | Rule | Proposed check | Slice |
+|---|---|---|---|
+| §5.2 | A head of the wrong shape (a non-string header value, headers as pairs, a bad method or path) is `protocol_error` to that client only, and the server's trunk and other clients carry on | `a_malformed_head_is_refused_to_that_client_only` | 116a |
+| §5.2 | A second `HTTP_REQUEST_HEAD` on a stream is `ERROR{stream_closed, stream_id}` and is never forwarded | `a_second_head_is_refused_and_not_forwarded` | 116a |
+| §6 | An `ERROR` from the origin is still `protocol_error`, and a client cannot provoke one (follows from the two above) | covered by the two above, asserting the server trunk survives | 116a |
+| §5.4 | A relay that ends a stream for any reason but the origin's `CLOSE` sends `CLOSE{stream_id}` toward the origin, even with a full server-ward queue: client trunk death, client `CLOSE`, ack timeout, backlog | `every_stream_the_relay_ends_is_closed_at_the_origin` | 116b |
+| §5.2 | A relay answers a client `PING` within 1 s while that client's queue is full | `a_client_ping_is_answered_behind_a_full_queue` | 116b |
+| §5.2 | One client's upload delays another client's `OPEN_STREAM` toward the origin by at most one body frame | `one_clients_upload_does_not_hold_another_clients_open` | 116d |
+| §5.4 | A shared bound never ends a stream whose client is keeping up | `a_slow_client_never_backlogs_a_keeping_up_peer` | 116d |
+| §5.1 | A late-ready `CLOSE` releases the stream: the relay's count returns to zero | `a_stream_closed_after_a_late_ready_is_released` | 116c |
+| §5 | A client trunk silent for 45 s is ended, and `CLOSE` goes to the origin for each of its streams | `a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin` | 116e |
+| §4.2 | A server that only answers `PING`s, never sends one, is dropped at the deadline | `a_non_pinging_origin_is_dropped` | 116e |
+| §4.2 | Server trunk death ends every client trunk: per-stream `trunk_lost`, trunk-scoped `trunk_lost` to a client holding none, then close (moves from storm-relay-only) | `server_trunk_death_ends_every_client_trunk` | 116e |
+| §4.2 | The advertised `heartbeat_interval_secs` is at most a third of the deadline | `the_advertised_heartbeat_fits_the_deadline` | 116e |
+| §4.2 | An `OPEN_STREAM` on a draining trunk is a trunk-scoped `trunk_superseded`, and the client trunk closes | `opens_on_a_draining_trunk_are_refused_trunk_superseded` | 116f |
+| §4.2 | A draining trunk whose socket closes ends its streams at once with `trunk_lost` | `drain_ends_when_the_old_socket_closes` | 116f |
+| §5 | `HELLO.server_id` must equal the path (moves from storm-relay-only) | `a_hello_for_another_server_id_is_a_protocol_error` | 116l |
+| §5 | Nothing sent before `READY` is ever routed to the origin | `frames_before_ready_never_reach_the_origin` | 116l |
+| §5.4 | A non-boolean `aborted` is `protocol_error` (moves from storm-relay-only) | `a_non_boolean_aborted_is_a_protocol_error` | 116l |
+| §5.4 | `server_timeout`, `stream_aborted`, `trunk_lost`, `trunk_superseded` and `rate_limited` reach a client whose queue is full | `every_stream_ending_error_is_delivered_past_a_full_queue` | 116l |
+| §5.1 | An `attempt_id` over 64 characters may be refused; one up to 64 is echoed (`docs/srp-vectors.json` → `framing.attempt_id`) | `attempt_ids_up_to_64_characters_are_echoed` | 116l |
+| §6.1 | After a trunk-scoped `ERROR` the close code is 1008 or 1000 as listed; the suite records it and fails only on a missing close | `a_trunk_scoped_error_is_followed_by_a_close` | 116l |
+| §4.1, §5 | **Open mode.** Two registrations of one `server_id` under different keys coexist; each client reaches only the trunk its `HELLO.pubkey` names; a re-registration under the same key supersedes, under another key it does not | `open_registrations_are_keyed_by_server_id_and_pubkey`, `supersession_is_per_key`, `a_hello_reaches_only_the_trunk_its_key_names` | 116k |
+| §5 | **Open mode, old clients.** A keyless `HELLO` reaches the only live registration, and is `server_unreachable` when there are several | `a_keyless_hello_reaches_a_lone_registration_only` | 116k |
+| §5 | A `HELLO.pubkey` that is malformed (the vectors' spellings) or disagrees with `?pubkey=` is `protocol_error` | `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error` | 116k |
+| §5 | **Allowlist and TOFU modes.** A `HELLO.pubkey` that differs from the registered key is treated as no live trunk | `a_hello_for_another_key_is_server_unreachable` | 116k |
+| §6.2 | `/register` attempts are rate-limited per source address, IPv6 per /64 | `register_attempts_are_rate_limited` | 116k |
+| §6.2 | In allowlist mode an unlisted `server_id` costs no per-server state (Worker) | `an_unlisted_server_id_creates_no_state` | 116k |
+| §6.2 | A server removed from the allowlist is evicted, not only refused next time | `a_revoked_server_is_evicted` | 116k |
+
+**Fixture contract changes (116k, 116l):**
+
+- `RELAY_OPEN_URL`: a third relay in **open** (key-addressed) mode, with the
+  same knobs. The open-mode checks are skipped without it, as the TOFU ones are
+  without `RELAY_TOFU_URL`.
+- `STORM_RELAY_REGISTER_RATE_LIMIT` and `STORM_RELAY_REGISTER_RATE_WINDOW_MS`,
+  paced like the `HELLO` pair.
+- `STORM_RELAY_CLIENT_SILENCE_MS` (production 45000) for the client-trunk
+  reaper.
+- Edge runs use `STORM_RELAY_CHALLENGE_TTL_MS=10000` and
+  `STORM_RELAY_MAX_CLIENT_BUFFER_BYTES=4194304` (SG-73), with the same values
+  in the suite's `RELAY_ENV_OVERRIDES`.
+
+**Planned role suites (slice 116l).** The suite judges relays only. Revision
+115 adds two more roles, each held to a suite that plays the relay, by
+address, with no dependency on the code it judges:
+
+- **Origin suite.** It runs a fake relay, points a real `storm-server` at it,
+  and checks: the server `PING`s every advertised interval (§4.2); it
+  reconnects with jitter and does not reset its backoff for a trunk under 60 s;
+  it answers every `PING` and sends `STREAM_ACK` ahead of 256 queued body
+  frames (§5.1, §5.2); it never sends `ERROR` (§5.1); a malformed or second
+  head ends that stream only, with 400 or `CLOSE{aborted}` (§5.2); it forgets
+  closed streams and aborts one whose head never comes within 30 s (§5.4); it
+  ends a failed body with `CLOSE{aborted: true}`; it treats an end-of-body
+  frame as end of input; it advertises only registered relays and signs them
+  (`relays_sig`, §4.3); it refuses a public-host `ws://` relay; it honours
+  `Range` on attachments (§5.5); and `/v1/stream` sends a comment at least
+  every 15 s (§5.3).
+- **Client suite.** It runs a fake relay and a fake origin behind it, drives
+  the Dart client and the Rust client / `mcp-connect` through their public
+  APIs, and checks §8: one `HELLO` per relay per race, trunk reuse, single
+  flight; the public round starting only after round 1 resolves; proof per
+  candidate and `identity_failed` for any non-signature answer; what may and
+  may not reset a connection; requests waiting for proof and never resent
+  after a sent head; status derived per race; heartbeats measured from write
+  time; a late `STREAM_READY` answered with `CLOSE`; at most 19 pending opens;
+  backoff with jitter and no reset for a transport lost within 60 s; a race
+  never cancelled by a reconnect timer, and at most one timer pending;
+  `HELLO.pubkey` and `?pubkey=` on every relay dial; and no public-host `ws://`
+  relay ever dialled. It runs once on a clean link and once on the emulated
+  link of 500 ms ± 300 ms per frame.
+
+Both role suites also read `docs/srp-vectors.json`'s revision 115 keys
+(`framing`, `hello_pubkey`, `relay_set_message`, `plaintext_relay_hosts`).
+
 ## Not black-box: storm-relay only
 
 These stay in `apps/relay/tests` and the crate's unit tests, because they need
