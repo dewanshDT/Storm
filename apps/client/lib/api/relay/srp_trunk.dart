@@ -189,12 +189,15 @@ class SrpTrunk {
   SrpSocket? _ws;
   StreamSubscription<dynamic>? _sub;
 
-  /// `PING`, `PONG` and `CLOSE`: written before anything in [_bulk] (§5.2
-  /// "Control before bulk", decision 116b).
+  /// Every JSON control message, in order, written before any queued body
+  /// frame (§5.2 "Control before bulk", decision 116b). A stream's head
+  /// still precedes its body: the body is queued after it.
   final Queue<_Outbound> _control = Queue();
 
-  /// Everything else, in order. Request bodies wait while it is full.
-  final Queue<_Outbound> _bulk = Queue();
+  /// Request-body frames per stream, taken in turn so a small request's
+  /// end of body is not queued behind a whole upload.
+  final LinkedHashMap<int, Queue<Object>> _bodies = LinkedHashMap();
+  int _bodyFrames = 0;
   Completer<void>? _room;
   bool _writing = false;
   bool _pingUnwritten = false;
@@ -318,7 +321,7 @@ class SrpTrunk {
       case 'HTTP_RESPONSE_HEAD':
         _onResponseHead(frame);
       case 'PING':
-        _sendControl(SrpControl.encode('PONG'));
+        _send(SrpControl.encode('PONG'));
       case 'PONG':
         break; // Liveness is implied by hearing anything.
       case 'CLOSE':
@@ -487,12 +490,13 @@ class SrpTrunk {
   Future<void> sendBody(SrpStream stream, List<int> bytes) async {
     assert(bytes.isNotEmpty, 'an empty 0x01 frame ends the body (§5.2)');
     for (var i = 0; i < bytes.length; i += maxBodyFramePayload) {
-      while (_bulk.length >= maxQueuedFrames && !_closed) {
+      while (_bodyFrames >= maxQueuedFrames && !_closed) {
         await (_room ??= Completer<void>()).future;
       }
       if (stream.isFinal) return;
       final end = min(i + maxBodyFramePayload, bytes.length);
-      _send(
+      _sendBody(
+        stream.streamId,
         encodeBodyFrame(
           bodyRequest,
           stream.streamId,
@@ -500,7 +504,6 @@ class SrpTrunk {
               ? Uint8List.sublistView(bytes, i, end)
               : bytes.sublist(i, end),
         ),
-        streamId: stream.streamId,
       );
     }
   }
@@ -509,9 +512,9 @@ class SrpTrunk {
   /// Every request sends it once, a body-less `GET` included.
   void endBody(SrpStream stream) {
     if (stream.isFinal) return;
-    _send(
+    _sendBody(
+      stream.streamId,
       encodeBodyFrame(bodyRequest, stream.streamId, const []),
-      streamId: stream.streamId,
     );
   }
 
@@ -520,27 +523,41 @@ class SrpTrunk {
     if (stream.isReady && !_closed) {
       // A CLOSE is an abort and goes ahead of the queue, so the stream's own
       // queued body would follow it to a relay that no longer knows the id.
-      _bulk.removeWhere((frame) => frame.streamId == stream.streamId);
+      _bodyFrames -= _bodies.remove(stream.streamId)?.length ?? 0;
       _wakeSenders();
-      _sendControl(SrpControl.encode('CLOSE', {'stream_id': stream.streamId}));
+      _send(SrpControl.encode('CLOSE', {'stream_id': stream.streamId}));
     }
     _streams.remove(stream.streamId);
     _pendingOpens.remove(stream.attemptId);
     stream.finish();
   }
 
-  void _send(Object frame, {int? streamId}) {
+  void _send(String frame, {bool ping = false}) {
     if (_ws == null || _closed) {
       throw const SrpTrunkClosed();
     }
-    _bulk.add(_Outbound(frame, streamId: streamId));
+    _control.add(_Outbound(frame, ping: ping));
     _write();
   }
 
-  void _sendControl(Object frame, {bool ping = false}) {
-    if (_ws == null || _closed) return;
-    _control.add(_Outbound(frame, ping: ping));
+  void _sendBody(int streamId, Object frame) {
+    if (_ws == null || _closed) {
+      throw const SrpTrunkClosed();
+    }
+    _bodies.putIfAbsent(streamId, Queue.new).add(frame);
+    _bodyFrames++;
     _write();
+  }
+
+  Object? _nextBody() {
+    if (_bodies.isEmpty) return null;
+    final streamId = _bodies.keys.first;
+    final queue = _bodies.remove(streamId)!;
+    final frame = queue.removeFirst();
+    if (queue.isNotEmpty) _bodies[streamId] = queue;
+    _bodyFrames--;
+    _wakeSenders();
+    return frame;
   }
 
   /// The socket's one writer: a frame at a time, each when the socket can
@@ -555,9 +572,8 @@ class SrpTrunk {
         final _Outbound next;
         if (_control.isNotEmpty) {
           next = _control.removeFirst();
-        } else if (_bulk.isNotEmpty) {
-          next = _bulk.removeFirst();
-          _wakeSenders();
+        } else if (_nextBody() case final body?) {
+          next = _Outbound(body);
         } else {
           return;
         }
@@ -594,7 +610,7 @@ class SrpTrunk {
       if (_pingUnwritten) return;
       _pingUnwritten = true;
       _sinceHeard.stop();
-      _sendControl(SrpControl.encode('PING'), ping: true);
+      _send(SrpControl.encode('PING'), ping: true);
     });
   }
 
@@ -613,7 +629,8 @@ class SrpTrunk {
     _sub?.cancel();
     _ws?.close();
     _control.clear();
-    _bulk.clear();
+    _bodies.clear();
+    _bodyFrames = 0;
     _wakeSenders();
     for (final s in _streams.values) {
       s.push(SrpStreamError('trunk_lost', reason));
@@ -657,11 +674,8 @@ class SrpTrunk {
 }
 
 class _Outbound {
-  _Outbound(this.frame, {this.streamId, this.ping = false});
+  _Outbound(this.frame, {this.ping = false});
   final Object frame;
-
-  /// The request a body frame belongs to, so an abort can drop it unsent.
-  final int? streamId;
   final bool ping;
 }
 

@@ -229,8 +229,8 @@ impl SrpTrunk {
                 core: core.clone(),
                 attempt_id: attempt_id.clone(),
             };
-            core.send(Message::text(codec::open_stream(&attempt_id)))
-                .await?;
+            core.control
+                .push(Message::text(codec::open_stream(&attempt_id)));
             guard
         };
 
@@ -243,13 +243,14 @@ impl SrpTrunk {
                 .cloned()
                 .collect(),
         );
-        core.send(Message::text(codec::request_head(
+        // Ahead of any queued body, as every JSON message is; its own body
+        // is queued after it.
+        core.control.push(Message::text(codec::request_head(
             stream_id,
             method,
             path_and_query,
             &headers,
-        )))
-        .await?;
+        )));
 
         let mut offset = 0;
         while offset < body.len() && core.stream_live(stream_id) {
@@ -387,9 +388,9 @@ struct Core {
     control: Control,
 }
 
-/// Frames that go ahead of every queued request frame and are never dropped
-/// for want of room (SRP §5.2 "Control before bulk", decision 116b): `PING`,
-/// `PONG` and the `CLOSE`s this side sends. Outside the bounded queue because
+/// Frames that go ahead of every queued request-body frame and are never
+/// dropped for want of room (SRP §5.2 "Control before bulk", decision 116b):
+/// every JSON message, `PING`, `PONG` and `CLOSE` among them. Outside the bounded queue because
 /// that queue is the upload: a `PING` behind 16 MiB of it never reaches a
 /// relay that has nothing else to answer.
 #[derive(Default)]

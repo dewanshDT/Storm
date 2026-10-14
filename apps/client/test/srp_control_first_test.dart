@@ -145,13 +145,13 @@ class _StallingRelay {
     unawaited(_drain());
   }
 
-  /// Body frames read before the first `PING` after the stall.
-  Future<int> bodiesBeforePing() async {
+  /// Body frames read before the first [type] after the stall.
+  Future<int> bodiesBefore(String type) async {
     while (true) {
       var bodies = 0;
       for (final frame in after) {
         if (frame is String) {
-          if (SrpControl.decode(frame).type == 'PING') return bodies;
+          if (SrpControl.decode(frame).type == type) return bodies;
         } else {
           bodies++;
         }
@@ -193,18 +193,22 @@ void main() {
       unawaited(upload.catchError((Object _) {}));
 
       await relay.stalled.future.timeout(const Duration(seconds: 10));
+      // A second request opened behind the upload.
+      unawaited(trunk.openStream().then<void>((_) {}, onError: (_) {}));
       await Future<void>.delayed(const Duration(seconds: 2));
       expect(lost, isEmpty, reason: 'judged silent behind its own upload');
 
       relay.resume();
-      final bodies = await relay.bodiesBeforePing().timeout(
-        const Duration(seconds: 20),
-      );
-      expect(
-        bodies,
-        lessThan(40),
-        reason: 'the PING waited behind $bodies of the 80 body frames',
-      );
+      for (final type in ['PING', 'OPEN_STREAM']) {
+        final bodies = await relay
+            .bodiesBefore(type)
+            .timeout(const Duration(seconds: 20));
+        expect(
+          bodies,
+          lessThan(40),
+          reason: 'the $type waited behind $bodies of the 80 body frames',
+        );
+      }
       expect(lost, isEmpty);
     } finally {
       trunk.dispose();
