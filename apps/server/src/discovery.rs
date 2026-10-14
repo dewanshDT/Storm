@@ -375,10 +375,29 @@ fn identity_lines(info: &serde_json::Value, width: usize) -> Vec<String> {
         .decode(field("public_key").as_bytes())
         .map(|k| crate::auth::identity::fingerprint(&k))
         .unwrap_or_else(|_| "unknown".into());
+    // The relays it holds a trunk with right now, not the configured ones
+    // (§4.3): a configured relay missing here is one it cannot reach.
+    let relays: Vec<String> = info["relays"]
+        .as_array()
+        .map(|r| {
+            r.iter()
+                .filter_map(|r| r["url"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     vec![
         format!("{:width$}: {}", "name", field("name")),
         format!("{:width$}: {}", "server", field("server_id")),
         format!("{:width$}: {key}", "key"),
+        format!(
+            "{:width$}: {}",
+            "relays",
+            if relays.is_empty() {
+                "none registered".to_string()
+            } else {
+                relays.join(", ")
+            }
+        ),
     ]
 }
 
@@ -402,6 +421,27 @@ fn fetch_server_info(port: u16) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn status_names_the_relays_the_server_is_registered_with() {
+        // 116m: configured is not reachable; status shows the registered set.
+        let mut info = serde_json::json!({
+            "name": "home", "server_id": "srv_A", "public_key": "AAAA", "relays": [],
+        });
+        assert!(
+            identity_lines(&info, 6)
+                .last()
+                .unwrap()
+                .ends_with("none registered")
+        );
+        info["relays"] = serde_json::json!([{"url": "wss://r.example"}, {"url": "ws://10.0.0.2"}]);
+        assert!(
+            identity_lines(&info, 6)
+                .last()
+                .unwrap()
+                .ends_with("wss://r.example, ws://10.0.0.2")
+        );
+    }
     use super::*;
 
     #[test]
@@ -436,6 +476,8 @@ mod tests {
                 "server   : srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 // docs/srp-vectors.json, `key_fingerprint.test_key`.
                 "key      : 5647 5AA7 5463 474C",
+                // No `relays` field (an older server): nothing registered.
+                "relays   : none registered",
             ]
         );
     }

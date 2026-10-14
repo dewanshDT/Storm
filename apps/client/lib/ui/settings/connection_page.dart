@@ -98,6 +98,12 @@ class ConnectionPage extends ConsumerWidget {
               SettingsRow(
                 key: Key('relay-$relay'),
                 label: _relayHost(relay),
+                // Configured is not reachable (SG-75): the server advertises
+                // only relays it holds a trunk with, and that set is what the
+                // app last adopted.
+                sub: settings.relays.any((r) => r.url == relay)
+                    ? null
+                    : 'Not connected',
                 trailing: TextAction(
                   key: Key('remove-relay-$relay'),
                   label: 'Remove',
