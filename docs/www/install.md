@@ -69,6 +69,31 @@ sudo storm-server status
 Refreshes the binary and `/usr/share/storm/web`. Leaves `/etc/storm/storm.env`
 alone. Site section: `/install#update` (`release.upgradeCommand`).
 
+## Firewalls
+
+Site section: `/install#firewalls`. Source of truth: `deploy/README.md`
+(Firewalls; decision 119). Short version for the page:
+
+- Storm needs **no inbound port**: away from home it goes through a relay.
+- On your home network it is faster and more private to allow Storm
+  directly. The installer **asks** first, and only ever allows Storm's port
+  from your local network: ufw rules from your local subnets, firewalld's
+  home zone (never public), Windows' **Private** networks only, macOS's own
+  "Allow incoming connections?" prompt.
+- Say no and it prints the command instead. Uninstall removes only what it
+  added.
+- On a public network (café, hotel) Storm doesn't announce itself and won't
+  pair by password; scan a QR code instead.
+- `storm-server status` says whether the firewall lets Storm in, and the
+  command to fix it if not.
+
+| OS | Mechanism | Scope |
+|---|---|---|
+| Windows | rule `Storm Server` for `storm-serverw.exe` | Private only |
+| macOS | the firewall's per-app prompt | per app |
+| Linux, ufw | `ufw allow from <subnet> to any app storm-server` | local subnets |
+| Linux, firewalld | service `storm-server` | home/trusted zones |
+
 ## Clients — Get Storm
 
 Section label: `07 · Clients`

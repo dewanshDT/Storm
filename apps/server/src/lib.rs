@@ -33,6 +33,7 @@ mod auth;
 mod backup;
 mod db;
 mod discovery;
+mod firewall;
 mod frontmatter;
 mod gateway;
 mod index;
@@ -43,6 +44,7 @@ mod install_windows;
 mod kit;
 mod mcp;
 mod merge;
+mod nettrust;
 mod ops;
 mod parse;
 mod registry;
@@ -300,6 +302,11 @@ struct ServeArgs {
     /// `STORM_DISCOVERY=0`.
     #[arg(long)]
     no_discovery: bool,
+
+    /// Test suites only: treat this interface's network as untrusted
+    /// (decision 119, Layer 2) whatever the OS says. Repeatable.
+    #[arg(long = "test-untrusted-interface", hide = true)]
+    test_untrusted_interfaces: Vec<String>,
     // Deliberately no `--relay` here, however much it looks like `--mcp`'s
     // sibling. `Registry::relays` is a setting the app can also change at
     // runtime, and a flag would seed it before `state/vaults.json` exists —
@@ -1168,7 +1175,11 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         host_limiter: auth::ratelimit::LoginLimiter::new(),
         agent,
         gateway,
-        discovery: discovery::Discovery::new(discovery_forced_off, discoverable),
+        discovery: discovery::Discovery::with_trust(
+            discovery_forced_off,
+            discoverable,
+            nettrust::NetTrust::new(args.test_untrusted_interfaces.clone()),
+        ),
     });
 
     ops::reconcile_single_user(&state)

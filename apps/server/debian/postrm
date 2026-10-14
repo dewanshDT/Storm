@@ -4,6 +4,9 @@ set -e
 if [ "$1" = "purge" ]; then
     rm -f /etc/storm/storm.env
     rm -rf /etc/systemd/system/storm-server.service.d
+    # The port override `storm-server up` wrote (decision 119). A firewall rule
+    # the installer added is removed by the installer's uninstall, never here.
+    rm -f /etc/firewalld/services/storm-server.xml
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
     fi
