@@ -82,7 +82,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// seconds of body, and a `STREAM_ACK` or `PING` written after it waits that
 /// long. This bounds only what is unsent, not what is in flight, so it costs
 /// no throughput. Linux and Android only; elsewhere the kernel default stands.
-pub(super) const UNSENT_LOWAT: u32 = 128 * 1024;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const UNSENT_LOWAT: u32 = 128 * 1024;
 
 fn bound_unsent(socket: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>) {
     let tcp = match socket {
