@@ -764,6 +764,110 @@ async fn a_relay_ping_is_answered_even_behind_a_full_outbound_queue() {
     tunnels.shutdown().await;
 }
 
+fn big_download_router() -> Router {
+    static BIG: std::sync::OnceLock<Bytes> = std::sync::OnceLock::new();
+    Router::new().route(
+        "/big",
+        axum::routing::get(|| async {
+            BIG.get_or_init(|| Bytes::from(vec![0u8; 4 << 20])).clone()
+        }),
+    )
+}
+
+/// Fills the outbound queue: 24 downloads of 4 MiB toward a relay that has
+/// stopped reading.
+fn stall_behind_downloads(relay: &FakeRelay) {
+    relay.reading.send_replace(false);
+    for stream_id in 1..=24u32 {
+        relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+            "method":"GET","path":"/big","headers":{}
+        }));
+    }
+}
+
+/// Body frames the relay reads before the first control frame `wanted` picks.
+/// What the sockets themselves buffer arrives first, so a frame that went
+/// ahead of the queue still comes after a few dozen.
+async fn body_frames_before(
+    relay: &mut FakeRelay,
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> usize {
+    let mut bodies = 0;
+    loop {
+        match relay.next_event().await {
+            Event::Text(value) if wanted(&value) => return bodies,
+            Event::Binary(_) => bodies += 1,
+            Event::Disconnected => panic!("the trunk dropped"),
+            _ => {}
+        }
+    }
+}
+
+/// SRP §5.1/§5.2 (decision 116b): `STREAM_ACK` goes ahead of the response
+/// bodies already queued, and is never dropped for want of room. Behind a
+/// full queue it used to be dropped, so every request made during a large
+/// download got `server_timeout`.
+#[tokio::test]
+async fn a_stream_ack_overtakes_a_full_download_queue() {
+    let dir = tempdir::TempDir::new("storm-relay-ack").unwrap();
+    let identity = test_identity(dir.path());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, big_download_router(), identity);
+    let _ = relay.await_registration().await;
+
+    stall_behind_downloads(&relay);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":100}));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    relay.reading.send_replace(true);
+
+    let bodies = body_frames_before(&mut relay, |v| {
+        v["type"] == "STREAM_ACK" && v["stream_id"] == 100
+    })
+    .await;
+    assert!(
+        bodies < super::client::OUTBOUND_CAPACITY / 2,
+        "the ACK waited behind {bodies} body frames"
+    );
+
+    tunnels.shutdown().await;
+}
+
+/// SRP §5.2 (decision 116b): the heartbeat overtakes queued response bodies,
+/// and the trunk is not judged silent while its own `PING` is still waiting
+/// to be written. A long download over a slow uplink used to drop the trunk
+/// at the deadline although the relay was fine.
+#[tokio::test]
+async fn a_heartbeat_overtakes_a_full_download_queue_and_a_stalled_trunk_is_not_silent() {
+    let dir = tempdir::TempDir::new("storm-relay-hb-bulk").unwrap();
+    let identity = test_identity(dir.path());
+    // A 1 s heartbeat makes the silence deadline 3 s.
+    let mut relay = FakeRelay::start_with(Behaviour::Normal, 1).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, big_download_router(), identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    stall_behind_downloads(&relay);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        registered.snapshot().len(),
+        1,
+        "the trunk was judged silent while its own PING could not be written"
+    );
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    relay.reading.send_replace(true);
+    let bodies = body_frames_before(&mut relay, |v| v["type"] == "PING").await;
+    assert!(
+        bodies < super::client::OUTBOUND_CAPACITY / 2,
+        "the PING waited behind {bodies} body frames"
+    );
+
+    tunnels.shutdown().await;
+}
+
 /// A tunnelled response is a head, body chunks and a `CLOSE`, written one after
 /// another. With Nagle on the tunnel, each after the first waited out the
 /// relay's delayed ACK: about 40 ms a request on localhost (P1, decision 91).

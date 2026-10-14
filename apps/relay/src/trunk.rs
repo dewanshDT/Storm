@@ -221,8 +221,8 @@ impl Tx {
     /// this peer's queue is full.
     ///
     /// The `ERROR` overtakes what is queued, and the stream's queued body
-    /// frames are discarded. Only ever an `ERROR`: a `CLOSE` overtaking the
-    /// body it ends would present a truncated body as complete.
+    /// frames are discarded. Toward a client, only ever an `ERROR`: a `CLOSE`
+    /// overtaking the body it ends would present a truncated body as complete.
     pub fn end_stream(&self, stream_id: u32, error_json: String) {
         self.ends
             .ended
@@ -233,6 +233,27 @@ impl Tx {
             .ends
             .lane
             .try_send(Message::Text(error_json.into()))
+            .is_err()
+        {
+            self.kill();
+        }
+    }
+
+    /// Ends `stream_id` at the origin with `CLOSE{stream_id}`, for every end
+    /// the origin did not ask for: client gone, ack timeout, client backlogged
+    /// (§5.4, decision 116b). Toward the origin a `CLOSE` is a teardown, so it
+    /// may overtake the stream's own queued request body, which is discarded.
+    pub fn close_toward_origin(&self, stream_id: u32) {
+        self.end_stream(stream_id, proto::close_stream(stream_id));
+    }
+
+    /// Queues a control frame ahead of everything this peer has queued, for
+    /// the `PONG` that must not wait behind a backlog (§5.2).
+    pub fn send_control(&self, json: String) {
+        if self
+            .ends
+            .lane
+            .try_send(Message::Text(json.into()))
             .is_err()
         {
             self.kill();
