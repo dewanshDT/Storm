@@ -341,22 +341,27 @@ cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
   forwards it verbatim — so a client could otherwise set headers that other
   code treats as *proxy-set* facts. `web_bootstrap_nonce` refuses to mint a
   nonce when one is present, which a client that could set them would turn
-  into a remote off-switch. The peer address comes from the accepted socket,
-  never from a header.
+  into a remote off-switch. The peer address comes from the accepted socket —
+  or, on the Worker, whose provider edge *is* the front end, from the
+  `CF-Connecting-IP` that edge attests and refuses to accept from a client
+  (403, error 1000) — never from a header a client can set.
 - **A shutdown may cancel the phases before registration, never the serving
   phase.** Connect and registration have announced nothing, so dropping them
   costs nothing. `serve_trunk` owes the relay a `DEREGISTER` — cancelling it
   leaves the relay holding the `server_id` until a heartbeat timeout, which is
   the outage `DEREGISTER` exists to prevent.
-- **The wire format is re-derived in three places and `docs/srp-vectors.json`
-  is what makes them agree.** `relay_auth_message`, `validate_nonce`,
-  `validate_server_id` and the base64url rules exist in `apps/server`,
-  `apps/relay` and `apps/client`, which cannot depend on one another. Nothing
-  in any build makes them agree, and drift surfaces at runtime as
-  `auth_failed` — identical to a genuine attack, an expired nonce and a
-  refused binding. All three test suites read the one vector file; regenerate
-  it with `tools/srp-vectors/generate.py`, and treat a changed vector as a
-  protocol change.
+- **The wire format is re-derived in five places and `docs/srp-vectors.json`
+  is what makes them agree.** The signed messages (`storm-relay-auth:v1:`,
+  `storm-challenge:v1:`, `storm-relays:v1:`), `validate_nonce`,
+  `validate_server_id`, the base64url rules, body-frame bytes and control
+  shapes exist in `apps/server`, `apps/relay`, `apps/relay-cf`, `apps/client`
+  and `apps/runtime`, which cannot depend on one another. Nothing in any build
+  makes them agree, and drift surfaces at runtime as `auth_failed` — identical
+  to a genuine attack, an expired nonce and a refused binding. All five test
+  suites read the one vector file; regenerate it with
+  `tools/srp-vectors/generate.py`, and treat a changed vector as a protocol
+  change: the vault spec first, then a conformance or role-suite check
+  (`tools/relay-conformance`, `--role=origin`).
 - **base64url, unpadded, and decoders must *reject* the alternatives.** One key
   has one spelling. `dart:convert`'s `base64Url` decoder accepts the standard
   `+/` alphabet and accepts padding; `data_encoding`'s `BASE64URL_NOPAD` does

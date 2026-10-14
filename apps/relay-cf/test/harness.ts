@@ -47,6 +47,7 @@ export class Peer {
   // Real clients and storm-server answer every PING; the relay's watermark
   // PINGs depend on it. A test of a client that stops reading turns this off.
   answerPings = true;
+  private swallowPongs = false;
   pingsSeen = 0;
   closed = false;
   private unanswered = 0;
@@ -72,6 +73,7 @@ export class Peer {
     ws.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
         const value = JSON.parse(event.data);
+        if (value.type === "PONG" && this.swallowPongs) return;
         if (value.type === "PING") {
           this.pingsSeen++;
           if (this.answerPings) this.pong();
@@ -167,14 +169,19 @@ export class Peer {
     }
   }
 
-  // A server's heartbeat that asks for no answer: the relay ignores an ack for
-  // a stream it never issued. Without it a slow runner can pass the test
-  // deadline between a test's own frames, and the trunk is dropped as silent.
+  // A heartbeat, as real servers and clients send: a PING every `everyMs`,
+  // its PONG kept out of the queue a test reads. Without it a slow runner can
+  // pass the test deadline between a test's own frames, and the relay drops
+  // the trunk as silent (servers §4.2, clients §5).
   keepAlive(everyMs = 300): () => void {
+    this.swallowPongs = true;
     const timer = setInterval(() => {
-      if (this.ws.readyState === WebSocket.READY_STATE_OPEN) this.send({ v: 1, type: "STREAM_ACK", stream_id: 999 });
+      if (this.ws.readyState === WebSocket.READY_STATE_OPEN) this.send({ v: 1, type: "PING" });
     }, everyMs);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      this.swallowPongs = false;
+    };
   }
 
   close() {

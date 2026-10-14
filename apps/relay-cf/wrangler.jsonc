@@ -1,6 +1,7 @@
 // storm-relay-cf: SRP v1 on Workers + Durable Objects (decision 108b).
 // No account_id and no routes on purpose: deploying is the operator's step,
-// with their account (DEPLOY.md). Every STORM_RELAY_* var is documented in
+// with their account, and the custom domain is added in the dashboard
+// (DEPLOY.md step 3). Every STORM_RELAY_* var is documented in
 // README.md; secrets and local overrides go in .dev.vars.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -30,6 +31,10 @@
   "env": {
     "conformance": {
       "name": "storm-relay-conformance",
+      // Never inherit a production route: deleting this Worker would take the
+      // custom domain with it (DEPLOY.md step 3).
+      "routes": [],
+      "workers_dev": true,
       "durable_objects": {
         "bindings": [
           { "name": "ROOMS", "class_name": "RelayRoom" },
@@ -54,6 +59,10 @@
     },
     "conformance-tofu": {
       "name": "storm-relay-conformance-tofu",
+      // Never inherit a production route: deleting this Worker would take the
+      // custom domain with it (DEPLOY.md step 3).
+      "routes": [],
+      "workers_dev": true,
       "durable_objects": {
         "bindings": [
           { "name": "ROOMS", "class_name": "RelayRoom" },

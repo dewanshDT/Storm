@@ -156,16 +156,20 @@ limits live in `/etc/storm-runtime/runtime.toml`, and a root outside
 `/var/lib/storm-runtime` needs a `ReadWritePaths` drop-in on the unit. Log the
 agent CLIs in once as `storm-runtime` (`claude`, `opencode auth login`) — the
 unit's `HOME` is its own, not yours. Setup and the package's guarantees:
-[`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). V1 is
-direct-network only; the relay does not carry agent sessions yet.
+[`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). A Runtime
+Host connects to its server directly; the app reaches agent sessions through
+the relay like everything else.
 
 ### Relay (optional)
 
 `storm-relay` lets clients reach a server from outside its network: the server
-dials out to the relay, so nothing is port-forwarded. It is a separate package
-in the same apt repository and nothing depends on it. The relay holds no vault
-data and authenticates no one — a client's credential rides inside the tunnel
-to the origin server, which checks it exactly as it would on the LAN. Setup,
+dials out to the relay, so nothing is port-forwarded. The app races the
+server's address and its relays, and uses whichever answers first. It is a
+separate package in the same apt repository and nothing depends on it. The
+relay holds no vault data and authenticates no one — a client's credential rides
+inside the tunnel to the origin server, which checks it exactly as it would on
+the LAN. It stores nothing, but until end-to-end encryption it can read the
+traffic it carries, so run your own or use one you trust. Setup,
 TLS and key bindings: [`deploy/README.md`](deploy/README.md#relay-optional);
 wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 
@@ -252,8 +256,8 @@ accounts, pairing, sessions, MCP keys) are done; the shared token is gone.
 M20 (Agent Runtime V1 — runtime hosts, enrollment, agent sessions in a
 terminal) shipped decisions 77–78 in **v0.3.0** and the operator's first
 on-device fixes in **v0.3.1**; AM22, a host-owned terminal protocol, is
-drafted and awaiting approval. The relay is built, packaged and TLS-capable
-but still runs on the LAN only — a public VPS is next. M16 (marketing site,
+drafted and awaiting approval. The relay is built, packaged and TLS-capable,
+and a Cloudflare Worker relay is deployed for testing. M16 (marketing site,
 live at [storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown
 read mode) are in progress. Per-vault authorization is its own later release.
 

@@ -424,10 +424,33 @@ both stops the relay.
 
 - `STORM_RELAY_BINDINGS` (the default): trust-on-first-use, persisted to
   `/var/lib/storm-relay/bindings`. The first key to register a `server_id` owns
-  it. Safe only where you control who can reach the relay.
+  it. Safe only where you control who can reach the relay, so the relay
+  refuses to start in this mode on a public or wildcard bind unless you pass
+  `--allow-public-tofu` (decision 116j).
 - `STORM_RELAY_ALLOWLIST`: only listed keys register. **Use this on a public
   address.** Same format as the bindings file, so a bindings file you trust can
   be copied over as the allowlist.
+
+**Revoking a server** on an allowlist relay: remove its line and run `sudo
+systemctl reload storm-relay`. The relay re-reads the file and ends that
+server's live trunk at once, not only its next registration (decision 116k).
+
+**Limits** (all on by default; `storm-relay --help` names the flags): `/register`
+attempts and `HELLO`s per source address, an IPv6 /64 counting as one;
+streams per server and opens in flight per client; 32 MiB unread per stream.
+A client past one gets `rate_limited` or `client_backlogged`; the server's
+trunk and every other client carry on.
+
+**Logs** go to the relay's own journal namespace, kept at most 7 days
+(`/etc/systemd/journald@storm-relay.conf`, decision 114b):
+`journalctl --namespace=storm-relay -u storm-relay`. They hold lifecycle
+events and error codes, server ids and trunk ids; never a client's address, a
+payload or a credential.
+
+**If a server's identity changes** (a restore without `state/identity/`, see
+*Backups*), its key changes with it. Every paired device must pair again, and
+every allowlist line naming the old key must be replaced; until then the relay
+refuses the server with `auth_failed`.
 
 `/var/lib/storm-relay` is the relay's only state, and it **cannot be rebuilt**.
 Lose the bindings file and every `server_id` is open to whoever registers
@@ -908,15 +931,28 @@ the vault root), which must be refused.
 
 ## Security
 
-v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a
-home network and nowhere else. Before this is reachable from the internet it
-needs TLS and per-device tokens — see decision 4. Do not
-port-forward it as it stands.
+**Who can get in.** Storm has one account (decision 82), protected by a
+password hashed with Argon2id. Each device pairs — by QR, or on the LAN with
+the password (decision 118) — and gets its own device credential and session
+tokens, revocable in Settings › Access. MCP clients use separate keys. Logins
+are rate-limited per address.
 
-The unit runs as a dedicated `storm` user with `ProtectSystem=strict` and
-write access to `/srv/storm` only. That bounds where the storage root can go:
-a root outside `/srv/storm` fails validation as unwritable, so moving it
-elsewhere means widening `ReadWritePaths` in the unit first.
+**How a client knows it reached your server.** Pairing pins the server's
+public key, and every connection proves it with a signed challenge before a
+credential is sent, on the LAN and through a relay alike.
+
+**On the network.** On the LAN the app talks to the server over plain HTTP.
+Away from home it goes through a relay over `wss://`, and the relay can read
+what it carries, notes and sign-ins included, until end-to-end encryption
+(Q19): run your own relay or use one you trust. Do not port-forward
+storm-server itself; reach it through a relay instead. The installer adds a
+LAN-only firewall rule only after asking (decision 119).
+
+**On disk.** The unit runs as a dedicated `storm` user with
+`ProtectSystem=strict` and write access to `/srv/storm` only. That bounds where
+the storage root can go: a root outside `/srv/storm` fails validation as
+unwritable, so moving it elsewhere means widening `ReadWritePaths` in the unit
+first.
 
 The data tree is the service user's and its group's alone (decision 76):
 `/srv/storm` is 0750 and both units set `UMask=0027`, so no other local account
@@ -924,5 +960,9 @@ can read a note, an index or `state/auth.db`. Check it with
 `sudo -u nobody ls /srv/storm`, which must be refused. A vault root on a NAS
 keeps the modes the NAS assigns.
 
-One token covers the whole server and every vault on it. There is no per-vault
-access control — a second vault is organisation, not isolation.
+**One account sees every vault.** A second vault is organisation, not
+isolation.
+
+`storm-server status` prints the server's name, id, key fingerprint and the
+relays it is registered with: what a device pairing from the LAN list shows,
+and what a relay allowlist line must contain.

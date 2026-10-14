@@ -1,6 +1,6 @@
 // The signed bytes of SRP v1 registration and the rules on each field.
 // Re-derived from apps/server and apps/relay; docs/srp-vectors.json is what
-// keeps the four implementations in agreement (test/vectors.test.ts).
+// keeps the five implementations in agreement (test/vectors.test.ts).
 
 export const RELAY_AUTH_DOMAIN = "storm-relay-auth:v1:";
 
