@@ -14,6 +14,22 @@ use std::time::{Duration, Instant};
 /// process, which on a public address is a memory leak an anonymous caller
 /// drives. `prune_stale` existed from the start with no caller outside its own
 /// test. Now `try_take` runs it at most once per window.
+/// The address a limit counts against (§6.2): an IPv6 source is its /64,
+/// since one subscriber holds the whole prefix and a per-address limit would
+/// give them 2^64 buckets; an IPv4-mapped one is its IPv4 address.
+pub fn source_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let s = v6.segments();
+                IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+        v4 => v4,
+    }
+}
+
 #[derive(Debug)]
 pub struct RateLimiter {
     limit: usize,
@@ -53,6 +69,7 @@ impl RateLimiter {
     /// [`try_take`](Self::try_take) at a given instant, so a test can move time
     /// forward instead of sleeping through two windows.
     fn try_take_at(&self, ip: IpAddr, now: Instant) -> bool {
+        let ip = source_key(ip);
         let mut inner = self.inner.lock().expect("rate limiter mutex");
 
         // Amortised: one O(n) sweep per window, never one per call.
@@ -114,6 +131,21 @@ impl Default for RateLimiter {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_ipv6_slash_64_shares_one_bucket() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        assert!(limiter.try_take("2001:db8:1:2::1".parse().unwrap()));
+        assert!(
+            !limiter.try_take("2001:db8:1:2:ffff::9".parse().unwrap()),
+            "the same /64 is one subscriber"
+        );
+        assert!(limiter.try_take("2001:db8:1:3::1".parse().unwrap()));
+        assert_eq!(
+            source_key("::ffff:10.0.0.1".parse().unwrap()),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;

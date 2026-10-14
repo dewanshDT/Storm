@@ -134,7 +134,8 @@ async fn hello(
 ) -> Result<Session, Fault> {
     // Rate limit HELLO attempts per source IP.
     if !relay.check_hello_rate_limit(peer_ip) {
-        tracing::info!(peer_ip = %peer_ip, "rate limiting HELLO");
+        // That it happened, never from where (§6.3, decision 114b).
+        tracing::info!("rate limiting HELLO");
         return Err(ErrorCode::RateLimited.into());
     }
 
@@ -503,6 +504,7 @@ async fn forward_request_body(
     };
     // Forwarded as the bytes arrived, unbuffered and unrewritten (§5.2). The
     // relay does not reassemble, re-chunk or look inside a body.
+    session.trunk.count_bytes(raw.len());
     server_tx.send_raw(raw).await
 }
 

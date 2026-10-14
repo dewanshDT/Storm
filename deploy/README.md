@@ -411,7 +411,7 @@ a client's credential rides inside the tunnel to the origin.
 sudo apt install storm-relay
 sudoedit /etc/storm-relay/storm-relay.env   # set STORM_RELAY_PUBLIC_BASE
 sudo systemctl enable --now storm-relay
-journalctl -u storm-relay -f
+journalctl --namespace=storm-relay -u storm-relay -f   # its own journal, kept 7 days
 ```
 
 The package does not start the relay, because a relay with the wrong public
