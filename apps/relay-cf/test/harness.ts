@@ -202,6 +202,21 @@ export async function register(serverId: string, seed = 1): Promise<{ peer: Peer
   return { peer, registered };
 }
 
+// A HELLO naming the key of `seed`, in the query and in the HELLO (§5).
+export async function keyedHello(serverId: string, seed: number): Promise<Peer> {
+  const { pubkey } = await signingKey(seed);
+  const peer = await Peer.dial(`/connect/${serverId}?pubkey=${pubkey}`);
+  peer.send({ v: 1, type: "HELLO", server_id: serverId, pubkey });
+  return peer;
+}
+
+export async function keyedClient(serverId: string, seed: number): Promise<Peer> {
+  const peer = await keyedHello(serverId, seed);
+  const ready = await peer.recv();
+  expect(ready.type, JSON.stringify(ready)).toBe("READY");
+  return peer;
+}
+
 export async function client(serverId: string, ip?: string): Promise<Peer> {
   const peer = await Peer.dial(`/connect/${serverId}`, ip);
   peer.send({ v: 1, type: "HELLO", server_id: serverId });

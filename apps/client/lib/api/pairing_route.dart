@@ -118,11 +118,16 @@ String? _hostOf(String? url) {
 }
 
 /// Dials [relay] alone and reports whether it, and the server behind it, are
-/// there. Sends only `HELLO {server_id}`.
-Future<RelayReach> probeRelay(RelayAdvert relay, String serverId) async {
+/// there. Sends only `HELLO {server_id, pubkey}`.
+Future<RelayReach> probeRelay(
+  RelayAdvert relay,
+  String serverId, {
+  String publicKey = '',
+}) async {
   final trunk = SrpTrunk(
     url: Uri.parse(relay.publicAddress),
     serverId: serverId,
+    serverKey: publicKey,
     // Longer than the relay's own hold for a server mid-restart (§5), so its
     // `server_unreachable` arrives before this gives up.
     handshakeTimeout: const Duration(seconds: 8),
@@ -268,7 +273,9 @@ Future<StormConnection> _openProven({
       }
       final reach = await Future.wait([
         for (final relay in relays)
-          (probe ?? (r) => probeRelay(r, serverId))(relay),
+          (probe ?? (r) => probeRelay(r, serverId, publicKey: publicKey))(
+            relay,
+          ),
       ]);
       final absent = reach.indexOf(RelayReach.serverAbsent);
       if (absent >= 0) {

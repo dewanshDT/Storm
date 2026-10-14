@@ -35,6 +35,7 @@ A `FILTER` keeps the checks whose section or name contains it (`§4.1`,
 |---|---|
 | `RELAY_URL` | **Required.** `ws://` or `wss://` base of a relay in **allowlist mode**, started with the fixture contract below. |
 | `RELAY_TOFU_URL` | A second relay with the same knobs and **no allowlist** (trust-on-first-use). The §4.1 TOFU checks are skipped without it. |
+| `RELAY_OPEN_URL` | A third relay with the same knobs in **open** (key-addressed) mode. The open-mode checks are skipped without it. |
 | `RELAY_REGISTER_PATH` | Where a server opens its trunk. Default `/register` (§4.0). |
 | `RELAY_CONNECT_PATH` | Prefix of the client path, `<prefix>/<server_id>`. Default `/connect` (§4.3). |
 | `RELAY_FIXTURES` | The fixture directory. Default this crate's `fixtures/`. |
@@ -63,6 +64,10 @@ a relay that serves real servers.
 given, is in **trust-on-first-use mode**: no allowlist (storm-relay: neither
 `STORM_RELAY_ALLOWLIST` nor `STORM_RELAY_BINDINGS`). The TOFU checks register
 random `server_id`s, so a TOFU relay can be reused across runs.
+`RELAY_OPEN_URL`, if given, is in **open mode** (storm-relay:
+`STORM_RELAY_MODE=open`; the Worker: `STORM_RELAY_BINDING=open`). Its checks
+register fixture identities under their own keys and the `intruder` key, and
+leave nothing behind, so it too can be reused.
 
 **Timers and limits** (`fixtures/relay.env`; the suite reads the same file to
 know what to expect):
@@ -100,13 +105,17 @@ clients pace their `HELLO`s to a third of the per-IP limit, except in the
 checks that exceed it, which then wait two windows.
 
 `make relay-conformance-cf` (`cf.sh`) does the same for the Worker relay:
-two `wrangler dev` instances on 18910/18911, the `127.0.0.2` checks on, the
-latency check off.
+allowlist and TOFU `wrangler dev` instances on 18910/18911, then an open one
+on 18912 for a second pass with `--open-only` (the checks that need
+`RELAY_OPEN_URL`), so the load-sensitive 16 MiB checks never share the
+machine with a third workerd; the `127.0.0.2` checks on, the latency check
+off.
 
-`make relay-conformance-local` runs two storm-relays (`tools/relay-conformance/local.sh`):
-allowlist mode on 18900 and TOFU on 18901, with `RELAY_PEER_IP=127.0.0.1`,
-the latency check on, and on Linux the `127.0.0.2` checks. A run takes about
-40 s.
+`make relay-conformance-local` runs three storm-relays (`tools/relay-conformance/local.sh`):
+allowlist mode on 18900, TOFU on 18901 and open on 18902, with
+`RELAY_PEER_IP=127.0.0.1`, the latency check on, and on Linux the `127.0.0.2`
+checks. A run takes about 50 s. `CONFORMANCE_PORT` / `CONFORMANCE_CF_PORT`
+move each trio.
 
 ## Section map
 
@@ -117,7 +126,8 @@ the latency check on, and on Linux the `127.0.0.2` checks. A run takes about
 | §4.0 base64url | `a_key_or_signature_in_another_spelling_is_refused` (padded, standard alphabet) |
 | §4.1 bindings | `the_allowlist_refuses_before_spending_a_nonce`; TOFU: `tofu_binds_the_first_key_for_good`, `tofu_records_only_after_a_good_signature`, `tofu_compares_keys_as_decoded_bytes_of_one_spelling` (the vectors' key spellings) |
 | §4.2 lifecycle | `a_server_ping_is_answered`; `a_ping_is_answered_at_any_point_on_a_trunk` (108c: before `REGISTER_SERVER`, mid-handshake, before `HELLO`, several in order); `a_heartbeating_server_outlives_the_deadline`; `a_silent_server_is_dead_at_the_deadline`; `deregister_frees_the_server_id_at_once`; `a_superseded_trunk_drains_then_ends_trunk_superseded`; `an_unfinished_registration_supersedes_nothing`; `a_server_lost_mid_body_is_trunk_lost_never_a_clean_end` |
-| §5 `HELLO` | `hello_gets_ready_and_no_challenge`; `hello_with_no_live_trunk_is_server_unreachable`; `hello_waits_for_a_server_mid_restart` |
+| §4.1, §4.2 open mode (`RELAY_OPEN_URL`) | `open_registrations_are_keyed_by_server_id_and_pubkey` (two keys of one `server_id` coexist, each client reaches only its key); `a_squatter_cannot_take_over`; `supersession_is_per_key` |
+| §5 `HELLO` | `hello_gets_ready_and_no_challenge`; `hello_with_no_live_trunk_is_server_unreachable`; `hello_waits_for_a_server_mid_restart`; `a_hello_for_another_key_is_server_unreachable` (allowlist); `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error` (the vectors' `hello_pubkey` spellings and `?pubkey=` disagreement), and on the open relay `…_is_refused_on_an_open_relay`; `a_keyless_hello_is_refused_on_an_open_relay` |
 | §5.1 opening | `open_stream_echoes_any_attempt_id_and_reaches_the_origin`; `an_unacked_stream_is_server_timeout_and_never_retried`; `past_the_in_flight_cap_an_open_is_refused_by_attempt` (decision 106) |
 | §5.2 the exchange | `a_request_and_response_cross_unchanged`; `the_empty_end_of_body_frame_is_forwarded`; `body_frames_are_forwarded_unmerged_and_unsplit`; `a_body_over_16_mib_crosses_both_ways_in_256_kib_frames`; `a_16_mib_frame_crosses_both_ways`; `a_response_streams_unbuffered`; `an_acked_stream_that_stays_silent_is_never_timed_out`; `relay_peer_ip_is_the_socket_address_never_a_header`; `a_client_sent_relay_peer_ip_is_refused_even_null`; optional `a_relayed_exchange_does_not_wait_on_delayed_acks` (decision 91) |
 | §5.4 closing | `close_ends_one_stream_and_the_trunk_carries_on`; `an_origin_close_follows_its_body_to_its_client_only`; `close_without_a_stream_id_ends_the_whole_trunk`; `an_aborted_response_is_stream_aborted_for_that_stream_only` (101); `a_backlogged_client_is_told_and_its_other_streams_go_on` (106) |
@@ -179,19 +189,17 @@ with their slice, not before, because both relays fail most of them today.
 | §5.4 | `server_timeout`, `stream_aborted`, `trunk_lost`, `trunk_superseded` and `rate_limited` reach a client whose queue is full | `every_stream_ending_error_is_delivered_past_a_full_queue` | 116l |
 | §5.1 | An `attempt_id` over 64 characters may be refused; one up to 64 is echoed (`docs/srp-vectors.json` → `framing.attempt_id`) | `attempt_ids_up_to_64_characters_are_echoed` | 116l |
 | §6.1 | After a trunk-scoped `ERROR` the close code is 1008 or 1000 as listed; the suite records it and fails only on a missing close | `a_trunk_scoped_error_is_followed_by_a_close` | 116l |
-| §4.1, §5 | **Open mode.** Two registrations of one `server_id` under different keys coexist; each client reaches only the trunk its `HELLO.pubkey` names; a re-registration under the same key supersedes, under another key it does not | `open_registrations_are_keyed_by_server_id_and_pubkey`, `supersession_is_per_key`, `a_hello_reaches_only_the_trunk_its_key_names` | 116n |
-| §5 | **Open mode, old clients.** A keyless `HELLO` reaches the only live registration, and is `server_unreachable` when there are several | `a_keyless_hello_reaches_a_lone_registration_only` | 116n |
-| §5 | A `HELLO.pubkey` that is malformed (the vectors' spellings) or disagrees with `?pubkey=` is `protocol_error` | `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error` | 116n |
-| §5 | **Allowlist and TOFU modes.** A `HELLO.pubkey` that differs from the registered key is treated as no live trunk | `a_hello_for_another_key_is_server_unreachable` | 116n |
 | §6.2 | `/register` attempts are rate-limited per source address, IPv6 per /64 | `register_attempts_are_rate_limited` | 116k |
 | §6.2 | In allowlist mode an unlisted `server_id` costs no per-server state (Worker) | `an_unlisted_server_id_creates_no_state` | 116k |
 | §6.2 | A server removed from the allowlist is evicted, not only refused next time | `a_revoked_server_is_evicted` | 116k |
 
-**Fixture contract changes (116k, 116l, 116n):**
+The open-mode and `HELLO.pubkey` checks landed with slice 116n and are in the
+section map above, with `RELAY_OPEN_URL`. A keyless `HELLO` on an open relay
+is refused `server_unreachable` (the 114f addendum), not routed to a lone
+registration.
 
-- `RELAY_OPEN_URL` (116n): a third relay in **open** (key-addressed) mode,
-  with the same knobs. The open-mode checks are skipped without it, as the TOFU ones are
-  without `RELAY_TOFU_URL`.
+**Fixture contract changes (116k, 116l):**
+
 - `STORM_RELAY_REGISTER_RATE_LIMIT` and `STORM_RELAY_REGISTER_RATE_WINDOW_MS`,
   paced like the `HELLO` pair.
 - `STORM_RELAY_CLIENT_SILENCE_MS` (production 45000) for the client-trunk

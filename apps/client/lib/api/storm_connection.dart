@@ -371,10 +371,16 @@ class StormConnection {
     if (trunk == null || trunk.isClosed) {
       final connector = relayConnector;
       trunk = connector == null
-          ? SrpTrunk(url: Uri.parse(url), serverId: serverId, log: _log)
+          ? SrpTrunk(
+              url: Uri.parse(url),
+              serverId: serverId,
+              serverKey: publicKeyB64,
+              log: _log,
+            )
           : SrpTrunk(
               url: Uri.parse(url),
               serverId: serverId,
+              serverKey: publicKeyB64,
               log: _log,
               connector: connector,
             );

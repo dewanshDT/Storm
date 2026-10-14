@@ -23,7 +23,9 @@ export interface Env {
   STORM_RELAY_HEARTBEAT_DEADLINE_MS?: string;
 }
 
-export type BindingMode = "allowlist" | "tofu";
+// §4.1. `open` binds nothing and addresses each registration by
+// (server_id, pubkey), one Durable Object per pair.
+export type BindingMode = "allowlist" | "tofu" | "open";
 
 export interface Config {
   publicBase: string | null;
@@ -76,8 +78,8 @@ export function parseAllowlist(text: string): Map<string, Uint8Array> {
 
 export function loadConfig(env: Env): Config {
   const binding = (env.STORM_RELAY_BINDING ?? "allowlist").trim() || "allowlist";
-  if (binding !== "allowlist" && binding !== "tofu") {
-    throw new ConfigError("STORM_RELAY_BINDING must be allowlist or tofu");
+  if (binding !== "allowlist" && binding !== "tofu" && binding !== "open") {
+    throw new ConfigError("STORM_RELAY_BINDING must be allowlist, tofu or open");
   }
   let publicBase: string | null = null;
   if (env.STORM_RELAY_PUBLIC_BASE && env.STORM_RELAY_PUBLIC_BASE.trim() !== "") {

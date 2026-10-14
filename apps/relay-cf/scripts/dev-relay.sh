@@ -4,7 +4,7 @@
 #
 #   dev-relay.sh PORT MODE ALLOWLIST_FILE STATE_DIR [NAME=VALUE ...]
 #
-# MODE is allowlist or tofu. ALLOWLIST_FILE is storm-relay's allowlist format
+# MODE is allowlist, tofu or open. ALLOWLIST_FILE is storm-relay's allowlist format
 # and is passed as STORM_RELAY_ALLOWLIST's content ("-" for none). Each
 # NAME=VALUE becomes a Worker var. STATE_DIR is wiped first: every run starts
 # with no nonces, bindings or rooms. SIGTERM stops wrangler and workerd with it.
