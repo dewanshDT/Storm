@@ -117,6 +117,11 @@ impl ServerIdentity {
         Ok(self.sign_domain(&relay_auth_message(&self.server_id, nonce)))
     }
 
+    /// Signs the relay set this server advertises (SRP §4.3).
+    pub fn sign_relay_set(&self, urls: &[String]) -> String {
+        self.sign_domain(&relay_set_message(&self.server_id, urls))
+    }
+
     /// Signs `message` and encodes the result the way the wire carries every
     /// signature: base64url, no padding.
     ///
@@ -183,6 +188,18 @@ pub fn challenge_message(server_id: &str, nonce: &str) -> Vec<u8> {
 #[allow(dead_code)] // Called by `sign_relay_auth` and relay registration; tested directly here.
 pub fn relay_auth_message(server_id: &str, nonce: &str) -> Vec<u8> {
     format!("storm-relay-auth:v1:{server_id}:{nonce}").into_bytes()
+}
+
+/// The exact bytes `relays_sig` covers (SRP §4.3, decision 116j): the relay
+/// set reaches a client through whatever path won, a relay included, so the
+/// transport does not authenticate it and the server's key must. A fourth
+/// domain, never coinciding with the other three. The URLs are sorted
+/// bytewise and joined by `\n`, so the order a set was built in never
+/// changes what is signed.
+pub fn relay_set_message(server_id: &str, urls: &[String]) -> Vec<u8> {
+    let mut sorted: Vec<&str> = urls.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    format!("storm-relays:v1:{server_id}:{}", sorted.join("\n")).into_bytes()
 }
 
 /// Loads this server's identity, creating it on first boot.

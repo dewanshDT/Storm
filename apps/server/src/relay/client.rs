@@ -202,6 +202,13 @@ async fn run_once(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Outcome {
     let url = register_url(relay_url);
+    if !crate::registry::dialable_relay_url(relay_url) {
+        tracing::error!(
+            relay = %relay_url,
+            "refusing to dial a ws:// relay off this network; use wss:// (§4.3)"
+        );
+        return Outcome::Failed;
+    }
 
     // Bounded, because `connect_async` is not. A host that completes the TCP
     // handshake and then says nothing leaves it pending for ever — the

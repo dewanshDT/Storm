@@ -888,6 +888,9 @@ pub struct ServerInfo {
     /// is the honest answer, not a placeholder: an empty list means "no relay
     /// path to me", which is true.
     pub relays: Vec<RelayAdvert>,
+    /// The server's signature over `relays`' URLs (SRP §4.3, decision 116j),
+    /// so a set that arrived through a relay cannot have been rewritten by it.
+    pub relays_sig: String,
 }
 
 /// One reachable relay path, as a client should read it.
@@ -923,6 +926,7 @@ pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
         let vaults = state.vaults.read().await;
         vaults.registry.registered_relays.snapshot()
     };
+    let relays_sig = identity.sign_relay_set(&registered);
     let relays = registered
         .into_iter()
         .map(|url| RelayAdvert {
@@ -938,6 +942,7 @@ pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
         algorithm: crate::auth::identity::ALGORITHM.to_string(),
         public_key: identity.public_key_b64(),
         relays,
+        relays_sig,
     })
 }
 
@@ -3554,15 +3559,53 @@ mod tests {
                 "name".to_string(),
                 "public_key".to_string(),
                 "relays".to_string(),
+                "relays_sig".to_string(),
                 "server_id".to_string(),
             ],
-            "the addition is additive — nothing was added but `relays`, nothing removed"
+            "additions are additive — `relays` and `relays_sig` only, nothing removed"
         );
         assert_eq!(json["server_id"], state.identity.server_id.as_str());
         assert_eq!(json["name"], state.identity.name.as_str());
         assert_eq!(json["key_id"], state.identity.key_id.as_str());
         assert_eq!(json["algorithm"], crate::auth::identity::ALGORITHM);
         assert_eq!(json["public_key"], state.identity.public_key_b64().as_str());
+    }
+
+    #[tokio::test]
+    async fn the_relay_set_is_signed_over_its_sorted_urls() {
+        // §4.3 (116j): the set reaches a client through whatever path won, a
+        // relay included, so only the server's key can vouch for it.
+        use ed25519_dalek::Verifier;
+        let dir = tempdir::TempDir::new("storm-ops-relays-sig").unwrap();
+        let state = server_state(dir.path());
+        {
+            let vaults = state.vaults.read().await;
+            for url in ["wss://b.example", "wss://a.example"] {
+                vaults
+                    .registry
+                    .registered_relays
+                    .mark_registered(url)
+                    .unwrap();
+            }
+        }
+        let info = must(server_info(&state).await);
+        let sig = data_encoding::BASE64URL_NOPAD
+            .decode(info.relays_sig.as_bytes())
+            .unwrap();
+        let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
+        let message = b"storm-relays:v1:"
+            .iter()
+            .chain(state.identity.server_id.as_bytes())
+            .chain(b":wss://a.example\nwss://b.example")
+            .copied()
+            .collect::<Vec<u8>>();
+        assert!(
+            state
+                .identity
+                .verifying_key()
+                .verify(&message, &sig)
+                .is_ok()
+        );
     }
 
     #[tokio::test]

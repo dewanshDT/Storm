@@ -220,6 +220,21 @@ class StormApi {
   }
 
   /// Revokes a device and every session it holds.
+  /// Changes the account password; the server checks [current] first.
+  Future<void> changePassword(String current, String next) async {
+    final r = await _client.post(
+      _uri('/v1/auth/password'),
+      headers: {..._headers, 'content-type': 'application/json'},
+      body: jsonEncode({'current_password': current, 'new_password': next}),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(
+        r.statusCode,
+        r.statusCode == 401 ? 'wrong password' : 'HTTP ${r.statusCode}',
+      );
+    }
+  }
+
   Future<void> revokeDevice(String id) async {
     final r = await _client.delete(
       _uri('/v1/auth/devices/${Uri.encodeComponent(id)}'),

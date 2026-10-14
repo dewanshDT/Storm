@@ -126,16 +126,19 @@ impl RegisteredRelays {
 #[allow(dead_code)]
 pub fn normalize_relay_url(url: &str) -> Result<String> {
     let trimmed = url.trim().trim_end_matches('/');
-    let rest = match trimmed.split_once("://") {
-        Some(("wss", rest)) => rest,
-        // `ws://` is allowed so a relay can run on a trusted LAN, or in a test,
-        // without a certificate. It is not the shape anything facing the public
-        // internet should use.
-        Some(("ws", rest)) => rest,
+    let (plain, rest) = match trimmed.split_once("://") {
+        Some(("wss", rest)) => (false, rest),
+        Some(("ws", rest)) => (true, rest),
         _ => bail!("a relay URL must start with wss:// or ws://"),
     };
     if rest.is_empty() {
         bail!("a relay URL needs a host");
+    }
+    // §4.3 (decision 114e): without TLS, every bearer token on the trunk is
+    // readable on the path, so `ws://` is only for a host on this machine or
+    // this network.
+    if plain && !plaintext_relay_allowed(relay_host(rest)) {
+        bail!("ws:// is only for a relay on this machine or this network; use wss://");
     }
     if rest.contains('/') {
         bail!("a relay URL is a scheme and host only — no path");
@@ -144,6 +147,34 @@ pub fn normalize_relay_url(url: &str) -> Result<String> {
         bail!("a relay URL cannot contain whitespace");
     }
     Ok(trimmed.to_string())
+}
+
+/// The host of a relay URL's `host[:port]`, without brackets.
+fn relay_host(authority: &str) -> &str {
+    match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(v6),
+        None => authority.split(':').next().unwrap_or(authority),
+    }
+}
+
+/// §4.3's one predicate for a `ws://` relay host (`plaintext_relay_hosts` in
+/// `docs/srp-vectors.json`): loopback, RFC 1918, link-local or IPv6 ULA, and
+/// never `100.64.0.0/10`. A name other than `localhost` is not resolved, so
+/// it counts as public.
+pub fn plaintext_relay_allowed(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(crate::discovery::is_lan_scoped)
+}
+
+/// Whether a stored relay URL may be dialled: a `ws://` one saved before
+/// §4.3 was enforced must not be, though the registry still loads it.
+pub fn dialable_relay_url(url: &str) -> bool {
+    match url.split_once("://") {
+        Some(("ws", rest)) => plaintext_relay_allowed(relay_host(rest.trim_end_matches('/'))),
+        _ => true,
+    }
 }
 
 /// `wss://<relay-host>/connect/<server_id>` — **derived, never allocated**
@@ -971,6 +1002,10 @@ mod tests {
             "wss://",
             "wss://relay.example.com/connect",
             "wss://relay example.com",
+            "ws://relay.example.com",
+            "ws://8.8.8.8:8080",
+            "ws://100.64.1.2",
+            "ws://[2001:db8::1]:9",
         ] {
             assert!(normalize_relay_url(bad).is_err(), "should reject {bad:?}");
         }
@@ -978,6 +1013,18 @@ mod tests {
             normalize_relay_url("  wss://relay.example.com:8443/  ").unwrap(),
             "wss://relay.example.com:8443"
         );
+        for lan in [
+            "ws://127.0.0.1:18860",
+            "ws://localhost:9",
+            "ws://192.168.1.10",
+            "ws://10.0.0.2:80",
+            "ws://169.254.3.4",
+            "ws://[::1]:9",
+            "ws://[fd00::1]",
+            "ws://[fe80::1]",
+        ] {
+            assert!(normalize_relay_url(lan).is_ok(), "should accept {lan:?}");
+        }
 
         let f = fixture();
         let mut reg = Registry::load(&f.state, &f.root).unwrap();

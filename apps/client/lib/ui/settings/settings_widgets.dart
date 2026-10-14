@@ -362,6 +362,7 @@ Future<String?> promptForText(
   String initial = '',
   String? label,
   String? help,
+  bool obscure = false,
 }) => showDialog<String>(
   context: context,
   builder: (_) => _TextDialog(
@@ -370,6 +371,7 @@ Future<String?> promptForText(
     initial: initial,
     label: label,
     help: help,
+    obscure: obscure,
   ),
 );
 
@@ -380,6 +382,7 @@ class _TextDialog extends StatefulWidget {
     required this.initial,
     this.label,
     this.help,
+    this.obscure = false,
   });
 
   final String title;
@@ -387,6 +390,7 @@ class _TextDialog extends StatefulWidget {
   final String initial;
   final String? label;
   final String? help;
+  final bool obscure;
 
   @override
   State<_TextDialog> createState() => _TextDialogState();
@@ -418,6 +422,9 @@ class _TextDialogState extends State<_TextDialog> {
           key: const Key('prompt-field'),
           controller: _controller,
           autofocus: true,
+          obscureText: widget.obscure,
+          autocorrect: !widget.obscure,
+          enableSuggestions: !widget.obscure,
           decoration: InputDecoration(
             labelText: widget.label,
             hintText: widget.hint,
