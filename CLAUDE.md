@@ -78,7 +78,7 @@ Practical consequences worth knowing before you start:
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
-| `docs/srp-v1.md` | The relay wire spec, normative. `docs/srp-vectors.json` is its shared test vectors. |
+| `docs/srp-v1.md` | A pointer: the normative relay spec is the vault note *Storm Relay Protocol*. `docs/srp-vectors.json` is its shared test vectors. |
 | *Storm Relay Dart Client* (vault) | The client half's accepted architecture. Read before writing any Dart SRP code. |
 | *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then `PLAN.md` decision 77, before touching `apps/runtime` or `/v1/agent/*`. |
 | `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
@@ -319,9 +319,10 @@ From M19 slice 2 (users and passwords):
 - **`security_events` never contains a secret** — not a password, not a hash,
   not a token. A test asserts it for every administrative act.
 
-From the relay (SRP v1 — **`docs/srp-v1.md` is the normative wire spec and
-lives in this repo**; the design rationale stays in the personal vault under
-`Storm/Remote/`, and ADRs R1–R13 in *Storm Remote Decisions*):
+From the relay (SRP v1 — **the normative wire spec is the vault note
+*Storm Relay Protocol*** (Storm MCP, personal vault); specs live in the vault,
+never in this repo. `docs/srp-v1.md` only points there, and section numbers
+cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
 
 - **The relay is never an authority (R5) and authenticates no clients (R12).**
   It has no user database, no vault data and no authorization. A client
@@ -394,7 +395,7 @@ lives in this repo**; the design rationale stays in the personal vault under
 - **Two relays, one spec.** `apps/relay` and `apps/relay-cf` both pass
   `tools/relay-conformance` (`make relay-conformance-local`,
   `make relay-conformance-cf`). A behaviour the spec leaves open is amended
-  into `docs/srp-v1.md` in the same change, never settled in one relay's code.
+  into the vault spec in the same change, never settled in one relay's code.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.

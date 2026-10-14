@@ -6499,109 +6499,277 @@ Pixel on mobile data through the hosted relay, with the APK from `6f5e6d5`)*
   connection log needs to survive a restart (it would then need a retention
   rule and the same no-credential test).
 
-**116a. A client can't end a shared trunk.** *(2026-10-14; the first slice
-of the relay spec gap audit's Phase 2, vault *Remote/Relay Spec Gap Audit*;
-gaps SG-04, SG-05, SG-13, SG-31 = audit A's G6, G7, G5, G10. Decisions 114
-and 115, the operator's choices and the spec text, land in their own PR.)*
-- **The bug (confirmed, cross-tenant).** Every client of a server shares the
-  server's one trunk at the relay, and any anonymous client could end it:
-  - **A malformed head (G6).** Both relays checked only that `headers` was
-    an object. `{"headers":{"x":1}}` failed storm-server's typed parse of the
-    whole frame; `handle_control` then sent `ERROR{protocol_error}` and
-    returned `false`, ending `serve_trunk` (`client.rs:521-526`). Every
-    relayed client of the server got `trunk_lost`; the server re-registered
-    after 1 s and the attacker could repeat.
-  - **A second head (G7).** Neither relay tracked heads, so two
-    `HTTP_REQUEST_HEAD`s on a client's *own* stream were both forwarded.
-    storm-server answered the second with `ERROR{stream_closed}`
-    (`client.rs:554-556`), as `srp-v1.md` §5.1 told it to, while §6 says
-    `ERROR` from anyone but the relay is `protocol_error`. Both relays
-    applied §6 (`register.rs:308`, `room.ts:359`) and dropped the server
-    trunk.
-  - Reproduced by the new tests below on `origin/staging`'s sources: each
-    one fails there (R 3/3, W 5/5, O 4/4).
-- **The fix, as rules** (for the spec PR to lift into §5.1, §5.2 and §6):
-  1. **Head shape (G5).** `headers` is a JSON object whose values are
-     strings; `method` is an HTTP token; `path` is origin-form (starts with
-     `/`, no space or control byte). storm-server drops the pair form it
-     accepted (`[["k","v"]]`): neither relay could deliver one.
-  2. **A relay refuses a malformed head** with `protocol_error` to that
-     client and never forwards it. **Chosen:** trunk-scoped on the sender's
-     own trunk (§6 says `protocol_error` is always trunk-scoped, and audit
-     item 11's text says so), not a new stream-scoped use of the code. The
-     server trunk, the one other clients share, is never touched.
-  3. **A relay refuses a second head** on a stream with
-     `ERROR{stream_closed, stream_id}`, never forwards it, ends the stream
-     and sends `CLOSE{stream_id}` to the origin (a party that sends a
-     stream-scoped `ERROR` forgets the stream). The sender's trunk carries
-     on. The Worker keeps the flag in its `streams` table (`head` column,
-     added by `ALTER TABLE` on wake for rooms from before this), so it holds
-     across hibernation.
-  4. **An origin never sends `ERROR`.** storm-server refuses one stream with
-     `CLOSE{stream_id, aborted:true}` (101's mechanism): a duplicate
-     `STREAM_OPEN`, a second head, a head for a stream it does not have. A
-     first head it cannot interpret (now `Inbound::BadHead`, parsed per
-     stream) is answered completely: `HTTP_RESPONSE_HEAD{400}` and `CLOSE`,
-     the path `build_request` failures already took. Only a frame from the
-     relay that does not parse at all ends the trunk, with `CLOSE {}`.
-  5. **A relay never drops a server trunk over a stream-scoped origin
-     `ERROR`.** One naming a `stream_id` ends that stream: `stream_aborted`
-     to its client, `CLOSE` to the origin. A trunk-scoped one is still
-     `protocol_error`.
-  6. **An empty `0x02` frame is ignored** (G10). The Dart client pushed an
-     empty chunk; the Rust client already ignored it.
-- **Compatibility.** Relays deploy first, as the audit orders, but either
-  side upgraded closes the hole:
+**114. The relay's trust model, logs, abuse controls, tiers and the open
+hosted relay: the operator's decisions on the spec gap audit.**
+*(2026-10-14; the operator, on the vault's* Relay Spec Gap Audit*, which
+consolidates three read-only audits of `staging` @ `6f5e6d5`.)* Each part
+unblocks text in the spec (115) and code in Phase 2 (116). Q-numbers are the
+vault's *Storm Remote Open Questions*; R-numbers its *Storm Remote Decisions*.
+- **a. A relay is fully trusted in v1, said plainly.** A relay, whoever runs
+  it and the platform under it can read and alter everything it carries,
+  including the sign-in password, session and refresh tokens, MCP keys and
+  note content, and can replay credentials. The identity challenge proves only
+  who answered at connect time. The old "a malicious relay cannot forge the
+  server's side" text was false and is gone (SG-58, SG-59). **Channel binding
+  is the next design**, as a v1.1 capability (`sealed`): an X25519 key agreed
+  inside the challenge, then AEAD over heads and bodies per stream. Recorded
+  as **Q19** (SG-71). Response signing alone was rejected: it needs a protocol
+  change and still leaves the password and tokens readable.
+- **b. Logs (Q15 → R14).** Relays log lifecycle events and error codes only:
+  no payloads, no headers or paths, no credentials and **no client
+  addresses**. Any stored relay log is deleted after at most **7 days**.
+  Cloudflare Workers Logs stays off. Cloudflare's own analytics, which see
+  client IPs, are disclosed to every operator whose server registers there
+  (SG-68). Code: `storm-relay` stops logging `peer_ip`, the Worker logs
+  `e.name` for faults, the `.deb` sets a 7-day journald namespace (116k).
+- **c. Abuse controls (Q14): number-free now, budgets after measuring.**
+  Ship what needs no number: a `/register` rate limit per source address,
+  IPv6 limits per **/64**, and no hot reconnect loops (backoff with jitter
+  that does not reset for a trunk or transport that lived under 60 s, on the
+  origin and on clients). Then measure a week of real use of the hosted relay
+  (requests and Durable Object requests per day, `/register` CPU per trunk,
+  `HELLO` refusals per address, `client_backlogged`/`rate_limited` counts,
+  bytes per registration per day) and set per-registration budgets from it
+  (SG-69, SG-29, SG-66, SG-18).
+- **d. The hosted Cloudflare relay is a public relay, in the last race
+  tier.** The spec separates **who runs it** (race tier: self-hosted or
+  public) from **who may register** (registration mode: allowlist, TOFU or
+  open). A client's built-in public list decides the tier. **The public round
+  starts only after every first-round candidate has failed or hit its
+  deadline, with no timer** (audit B's rule, not A's 2 s start gate). This
+  changes decision 113's rule 1, where a public relay may *join* after 2 s;
+  with the public lists empty that has no effect today, and slice 116g adds
+  the hosted host to `kPublicRelayHosts` and `PUBLIC_RELAY_HOSTS` and applies
+  the no-timer rule in the same release (SG-11, SG-62, SG-64). Cost, accepted:
+  off the LAN with a blackholed private address and no self-hosted relay, a
+  cold connect waits the direct candidate's 10 s connect timeout first; trunk
+  reuse hides it afterwards.
+- **e. Plaintext `ws://` relays only on loopback, private (RFC 1918, ULA)
+  and CGNAT/Tailscale addresses**, refused on any other host by the server
+  (`normalize_relay_url`) and by every client, for pairing, sign-in, refresh
+  and every session request alike. One predicate, with vectors (SG-47). It
+  relaxes the Dart pairing/sign-in route (loopback only today) and tightens
+  session requests (any advertised `ws://` today).
+- **f. The hosted relay becomes an open relay: no accounts, key-addressed.**
+  Anyone may register; the relay keys registrations by **`(server_id,
+  pubkey)`**. A client's `HELLO` names the pinned key (`HELLO.pubkey`, and
+  `?pubkey=` on the connect URL so an edge can route before reading `HELLO`).
+  Two registrations of one `server_id` under different keys coexist and
+  nothing under one key can refuse, evict or slow the other; a client reaches
+  only the trunk whose key it names; supersession applies only within the same
+  key. So there is nothing to squat and no claim to own, and the
+  account-owned binding of earlier revisions is withdrawn (SG-70, SG-62).
+  **Allowlist and TOFU stay valid operator modes for self-hosted relays**;
+  TOFU only where the operator controls who can reach the relay (SG-63).
+  Compatibility: a keyless `HELLO` (a client older than 115) on an open relay
+  reaches the only live registration of its `server_id`, and is
+  `server_unreachable` when there are several; on an allowlist or TOFU relay
+  it behaves as before; a relay older than 115 ignores the key. The client's
+  identity challenge still decides in every case. **Said honestly: open
+  registration means anyone's server traffic may cross the hosted relay**, and
+  its operator and Cloudflare can read it (a); so (b) and (c) are mandatory
+  for an open relay, not tuning.
+  - **The full key, not a fingerprint.** `HELLO.pubkey` is the same 32-byte
+    base64url key `REGISTER_SERVER` carries, compared as decoded bytes. A
+    fingerprint would save about 20 bytes and add a hash and a truncation rule
+    that five implementations would have to get byte-identical; the key is
+    public already (`GET /v1/server`, the pairing QR).
+- **g. The client state machine is normative, as the spec's §8**, binding the
+  Dart app and the Rust client / `mcp-connect`: who may start a race and
+  single flight; what may and must not reset a connection; in-flight requests
+  across a reset; how status is derived and cleared; liveness, the outbox and
+  every request using the proven transport; and a timer table that names the
+  network each value must survive (100–800 ms RTT, jitter, silent sockets,
+  carrier NAT, CGNAT, IPv6-only cellular). Decision 113 implements most of it;
+  where §8 differs, it says so (SG-02).
+- **h. Flow control.** The 32 MiB per-client-trunk budget is normative, with
+  `Range`-based resume for downloads. **Credit-based flow control is a v1.1
+  capability negotiated in `HELLO`/`READY`** (`flow`), relays first (SG-08).
+- **i. A challenge answered with anything but a valid signature is
+  `identity_failed`, never `unreachable`** (SG-51). `unreachable` means only
+  that no HTTP answer arrived.
+- *Revisit if:* `sealed` streams ship (a: relays become trusted with
+  availability only, and the app's copy and §7 change); a week's numbers show
+  CGNAT sharing the `HELLO` bucket (c); a self-hosted relay must beat a slow
+  LAN address (d); a relay operator needs per-account quota or billing (f:
+  accounts then govern quota only, never a binding); or a platform cannot
+  route on the URL's key (f).
 
-  | | old server | new server |
-  |---|---|---|
-  | **old relay** | open (both bugs) | closed: a bad head is 400 + `CLOSE`, a second one `CLOSE{aborted}` (`stream_aborted` at relays since 101, a plain `CLOSE` before), never `ERROR` |
-  | **new relay** | closed: nothing malformed or repeated reaches the server; an `ERROR` it still sends ends one stream | closed twice |
-
-  No correct client changes: Dart sends `Map<String,String>` headers, the
-  Rust client an object of strings, both an origin-form path. A client
-  that sends a bad path now gets `protocol_error` from the relay instead of
-  a 400 from the origin. The Worker's head flags for streams opened before
-  the deploy start unset, so such a stream could pass one second head, which
-  a new server aborts.
-- **Tests.** storm-relay `tests/routing.rs`:
-  `a_head_with_a_non_string_header_value_is_refused_and_never_forwarded`,
-  `a_second_head_is_refused_and_never_forwarded`,
-  `an_origin_error_naming_a_stream_ends_that_stream_only`,
-  `a_trunk_scoped_origin_error_is_still_a_protocol_error`, and a unit test
-  of the head shape; each multi-client test checks another client's request
-  still crosses the same server trunk. The Worker (vitest/workerd):
-  the same four in `routing.test.ts`, plus `hibernation.test.ts` "still
-  refuses a second head" across an eviction and the column migration on a
-  pre-116a table. storm-server `relay/tests.rs`:
-  `a_head_with_a_non_string_header_value_fails_its_stream_only`,
-  `a_second_head_aborts_its_stream_only`,
-  `a_stream_id_already_open_is_aborted_rather_than_acked_twice`,
-  `a_request_head_for_an_unopened_stream_is_aborted`, each then serving
-  another stream on the same trunk with no `ERROR` written and no
-  re-registration. Conformance, both relays: §5.2
-  `a_malformed_head_is_refused_to_that_client_only`,
-  `a_second_head_is_refused_and_not_forwarded`, §5.4
-  `an_origin_error_naming_a_stream_ends_that_stream_only`. Live
-  (`relay_live_test.dart`, R+O and W+O): raw sockets send a bad head and a
-  second head; the app's long-lived relayed client is still served and the
-  server still reports the relay. Dart: an empty `0x02` is not delivered.
-- **Against revision 115** (vault *Remote/Relay Protocol*, §5.1, §5.2, §3,
-  §6): rules 1–4 and 6 are its text. Rule 5 is not yet: 115 keeps "a relay
-  MUST treat an origin `ERROR` as `protocol_error`" *until 116a*, and says
-  nothing after it. The next spec edit should state rule 5, which the §5.4
-  conformance check already holds both relays to.
-- **Results.** `make check` green (server 609, relay 50 + 42 routing,
-  Worker 100, conformance 132, client 1089 + 1 skipped).
-  `make relay-conformance-local` and `make relay-conformance-cf` pass every
-  check (cf skips only the latency check, as before). `make test-live
-  PORT=19400 AUTH_PORT=19401 RELAY_PORT=19402` and the same with
-  `RELAY_IMPL=cf` on 19410–19412 exit 0: server 81, mcp 86, agent 93,
-  gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect live 39, client
-  integration 34, 1 skipped.
-- *Revisit if:* the spec words the malformed-head refusal as stream-scoped
-  (both relays and the conformance check change together), or a header that
-  cannot be folded (`Set-Cookie`) ever has to cross.
+**115. SRP v1 revision 115: the spec is the vault note *Storm Relay
+Protocol*, and it is brought up to date.** *(2026-10-14; Phase 1 of the
+relay spec gap audit; decisions 114a–i.)*
+- **Where the spec lives.** The normative spec is the vault note *Storm Relay
+  Protocol* (`Storm/Remote/Relay Protocol.md`, vault `6d4f507d…`), read and
+  written through the Storm MCP; it is the single source of truth, and where
+  any other text disagrees, the note wins. `docs/srp-v1.md` is left exactly as
+  it was, a snapshot of revision 108c, and is no longer maintained. The note
+  carries a status and version header ("SRP v1, revision 115"; the wire's
+  `v: 1` is unchanged), marks each change *(115)*, keeps short compatibility
+  notes where shipped code relied on the old text, and ends with a history.
+- **What changed, by section** (each closes the gap ids shown, in text):
+  - **Front matter and §1:** status, precedence and three conformance roles
+    (SG-01, SG-03 text); the honest trust statement (114a; SG-58).
+  - **§2:** race tier separated from registration mode (114d; SG-62); the
+    no-timer public round and the reset wording (SG-10 text, SG-11).
+  - **§3:** one SRP frame is one WebSocket message, 16 MiB in bytes (SG-14);
+    an empty `0x02` is ignored (SG-31); unknown fields are ignored; canonical
+    `PING`/`PONG` (SG-38); `caps` reserved for v1.1 `flow` and `sealed`.
+  - **§4:** registration modes `allowlist`, `tofu` (private reach only) and
+    `open`, key-addressed (114f; SG-62, SG-63, SG-70); heartbeat direction and
+    the advertised-interval rule (SG-16, SG-17); server trunk death ends every
+    client trunk (SG-20); reconnect with jitter and no reset under 60 s
+    (SG-18); supersession per key, drain ending on socket close, and opens on a
+    draining trunk refused `trunk_superseded` (SG-19); adopting a relay set only
+    after proof, `relays_sig` under `storm-relays:v1:` (SG-61); the plaintext
+    relay predicate, pairing and sign-in included (114e; SG-47); `?pubkey=`.
+  - **§5:** `HELLO.pubkey` and its behaviour in each relay mode and with old
+    clients and relays; client heartbeat and relay reaping (SG-21); handshake
+    budget from WebSocket open (SG-22); one dial per trunk (SG-43); path match
+    (SG-34); trunk reuse and CGNAT (SG-23).
+  - **§5.1:** the `ERROR` direction contradiction resolved: an origin never
+    sends `ERROR` and ends a duplicate stream with `CLOSE{aborted}` (SG-05);
+    `attempt_id` is a 1–64 character string (SG-15); `STREAM_READY` before
+    `STREAM_ACK` and the resend hazard (SG-24); `STREAM_ACK` priority (SG-07);
+    no open timeout while unsent, ≥ 15 s after write, a late `STREAM_READY`
+    answered with `CLOSE` (SG-09); clients keep `cap − 1` opens pending (SG-49).
+  - **§5.2:** head shape (SG-13); a bad head is stream-fatal only (SG-04); one
+    head per stream (SG-05); control before bulk with bounded queues, which
+    gives `STREAM_ACK`, `PONG`, `PING`, `CLOSE` and `ERROR` priority (SG-06,
+    SG-26); fairness (SG-27); `relay_peer_ip` refused-or-overwritten and its
+    trust (SG-67, SG-78 text); the relay's 5 s bounds `STREAM_ACK` only
+    (SG-35).
+  - **§5.3:** a `/v1/stream` keep-alive comment every 15 s (SG-54 text).
+  - **§5.4–§5.5:** forget closed streams and the 30 s head-wait (SG-25);
+    `CLOSE` toward the origin always (SG-26); shared bounds (SG-28); the
+    32 MiB budget and `Range` resume (114h; SG-08 text).
+  - **§6:** the catalogue with `HELLO.pubkey` and `ERROR` relay-only; unknown
+    types (SG-30); `trunk_lost` vs `trunk_superseded` (SG-32); close codes
+    (SG-37); the full error catalogue with scopes; client verdicts kept off the
+    wire; abuse controls on by default (SG-80), `/register` limit and /64
+    (SG-66), bandwidth per registration and which controls an open relay must
+    have (114c; SG-29, SG-69); relay logs (114b; SG-68).
+  - **§7:** what the challenge does not cover and what to do after
+    distrusting a relay (SG-59 text); metadata (SG-85); a lying relay
+    (SG-86); open relays carry strangers' traffic (114f); Q19 (SG-71); key
+    rotation on an open relay.
+  - **§8 (new), client behaviour, normative** (114g; SG-02): one connection,
+    one owner; states; the race (single flight, per-candidate proof,
+    `identity_failed` (114i; SG-50, SG-51), the no-timer rounds, per-candidate
+    deadlines (SG-12), trunk reuse, refresh after proof); what may reset a
+    connection; requests across a reset; status; liveness (SG-53, SG-48 text);
+    the timer table with its reference network; the outbox; `mcp-connect`
+    (SG-52 text); diagnostics. It lifts 113's rules and says where it
+    deliberately differs: the public round (114d), a token change must not
+    re-race (113 rebuilds the connection), `T_candidate` per candidate (113 has
+    one 15 s race deadline, the same value), the open timer, the handshake
+    timer, and backoff jitter with no reset for a transport lost within 60 s.
+    After the operator ran the 113 build on mobile data, §8.3 also gained
+    **reconnect scheduling**: a scheduled reconnect only ensures a connection
+    and never resets one, timers coalesce, only a positive failure signal may
+    reset, and backoff is one per connection; and §8.8 records the measured
+    LTE reference (trunk ready 0.7–3.9 s, `GET /v1/server` 1.3–4.7 s, identity
+    check 0.5–0.8 s more).
+    Changed from audit B's draft: `T_ttfb` starts when the request's
+    end-of-body frame is written, or a 64 MiB upload on a 2 Mbps uplink always
+    fails.
+- **Audit proposals not taken as written.** The audit recommended keeping the
+  hosted relay invite-only by allowlist (its 114f) and a "provider-hosted,
+  operator-run" binding row; the operator chose an open, key-addressed relay
+  instead (114f), so §4.1 has three modes and no hosted-only row. The audit's
+  "a relay that does not bound bandwidth per `server_id` MUST NOT be offered to
+  servers its operator did not add" became: an open relay MUST enforce the
+  number-free controls now and the per-registration budget once one is set,
+  per 114c. Its `T_candidate` of 20 s became 15 s with 20 s allowed, to match
+  113's measured link. Its pairing/sign-in loopback-only `ws://` rule became
+  114e's private-address rule. A bounded queue that "fails the stream" when
+  full (B-G14) was dropped for the priority lane, which never drops control.
+- **Vectors.** `docs/srp-vectors.json` gains `framing` (body-frame bytes, end
+  of body, empty `0x02`, canonical heartbeats, `ERROR`/`CLOSE`/`HELLO` shapes,
+  malformed heads, `attempt_id`), `hello_pubkey` (accepted and refused
+  spellings, the connect URL, query/`HELLO` disagreement),
+  `relay_set_message` (`storm-relays:v1:` bytes and a signature, verified with
+  OpenSSL) and `plaintext_relay_hosts` (the 114e predicate). Every existing
+  vector is byte-identical. They were added by hand: no suite reads them yet,
+  and the generator (`tools/srp-vectors/generate.py`) must learn to emit them
+  in slice 116l, before anyone regenerates the file. The suites that read the
+  file (`apps/server`, `apps/relay`, `apps/client`, `apps/relay-cf`,
+  `apps/runtime`) gain the new keys in Phase 2.
+- **`tools/relay-conformance/README.md`** lists every new relay MUST with its
+  proposed check and slice, the fixture changes (`RELAY_OPEN_URL`, register
+  limits, client silence, edge timings) and the planned origin and client role
+  suites. The suite's code is unchanged.
+- **Phase 2: decision 116, the implementation that follows.** Each slice
+  lands only after this text; relays deploy before origins where both change.
+  Gap ids are the audit's index.
+  - **116a — A client cannot end a shared trunk** (bug-now): SG-04, SG-05,
+    SG-13, SG-31. Relays validate head shape and one head per stream; the
+    origin parses heads per stream and never sends `ERROR`; Dart ignores an
+    empty `0x02`.
+  - **116b — Control before bulk** (bug-now): SG-06, SG-07, SG-26. Priority
+    lanes in the origin, Dart (bounded queue) and Rust clients; `CLOSE` toward
+    the origin on the stream-end lane in `storm-relay`.
+  - **116c — Stream open lifecycle** (bug-now): SG-09, SG-25, SG-49. `CLOSE`
+    on a late `STREAM_READY`, open timer from write, `cap − 1` pending opens;
+    the origin forgets streams and waits 30 s for a head.
+  - **116d — Flow-control stopgap** (bug-now): SG-08, SG-14, SG-27, SG-28.
+    `Range` on attachments and the Dart retry; per-client fairness in
+    `storm-relay`; the Worker's room bound and byte lengths; a 16 MiB message
+    through the edge.
+  - **116e — Liveness and heartbeat** (latent): SG-16, SG-17, SG-20, SG-21.
+    Relays reap silent client trunks and derive the advertised interval.
+  - **116f — Supersession and origin reconnect** (latent): SG-18, SG-19.
+  - **116g — Client race** (latent; after 113): SG-10 (114d follow-through),
+    SG-11, SG-12, SG-22, SG-23, SG-50, SG-51, SG-64. Per-candidate deadline,
+    the no-timer public round (replacing 113's 2 s join, including the
+    pairing/sign-in route's 10 s window), proof per candidate,
+    `identity_failed`, trunk reuse across races, handshake timer from
+    WebSocket open, the hosted host on both public lists. **A race in flight
+    is never cancelled** by a timer or another caller, and reconnect timers
+    coalesce (at most one pending, earliest wins): on a real phone the 113
+    build's feed timer reset the connection 999 ms into a race's handshake,
+    then a second timer reset the next race at 2 s, and recovery took about
+    10 s where one race takes 2–4 s.
+  - **116h — Client liveness, status and outbox** (latent): SG-24, SG-48,
+    SG-53, SG-54, SG-55, SG-56, SG-57; and 113's residuals: no re-race on a
+    token change; the engine's reconnect becomes *ensure connected*, never a
+    reset, and only a positive failure (the trunk lost, an identity failure,
+    a race ending with no candidate) may reset; one backoff per connection,
+    with jitter, cleared only after 60 s connected; the origin's
+    `/v1/stream` keep-alive.
+  - **116i — `mcp-connect` state machine** (latent): SG-52.
+  - **116j — Credential and relay-set hygiene** (latent, security): SG-47,
+    SG-59 (app action), SG-61, SG-63. The shared plaintext predicate, relay
+    set adopted only after proof, `relays_sig`, TOFU refused on a public bind.
+  - **116k — The open hosted relay: key-addressed registration, abuse
+    controls and logs** (latent; 114b, c, f): SG-29, SG-62, SG-65, SG-66,
+    SG-68, SG-69, SG-70. Registrations keyed by `(server_id, pubkey)` in both
+    relays, `HELLO.pubkey` and `?pubkey=` in both clients, the keyless-`HELLO`
+    rule; `/register` limits and /64 keys; allowlist checked before any state;
+    revocation evicts; R14 logging; then, after a week's numbers, the
+    per-registration budget. May land as two PRs (addressing, then controls);
+    the hosted relay switches to `open` only once both are in.
+  - **116l — Conformance role suites and framing vectors**: SG-03, SG-33,
+    SG-34, SG-36, SG-38, SG-73. The origin and client suites, the README's new
+    checks, the generator emitting revision 115's vectors, and every suite
+    reading them.
+  - **116m — Ops visibility** (small, optional): SG-75; `storm-server status`
+    printing the identity, `GET /health` on the Worker.
+- **Closed by this decision.** In text, with no code owed: SG-01 (precedence,
+  now the vault note), SG-02, SG-15, SG-30, SG-32, SG-35, SG-37, SG-58, SG-67,
+  SG-80, SG-85, SG-86, SG-88 (the stale vault note is now the spec). With 113
+  merged, SG-10 and SG-39 to SG-46 are closed in code and now in text; 113's
+  remaining differences are tracked under 116g and 116h. SG-62, SG-69, SG-70
+  and SG-71 are decided (114). Every other Phase 1 item has its text and stays
+  open until its slice lands. Phase 3 (docs and runbooks, SG-60, SG-72,
+  SG-74–SG-79, SG-81–SG-84, SG-87, SG-89–SG-97) is decision 117, not yet
+  written.
+- **Not changed, and why.** `docs/srp-v1.md` and `CLAUDE.md` still call the
+  repo file the normative spec; both are outside this change by the
+  operator's direction and are corrected by a later docs PR. No code changes.
+- *Revisit if:* a slice finds a rule here untestable or wrong (amend the note
+  first, then the slice), the `flow` or `sealed` capability is designed (a new
+  revision, negotiated in the handshake), or the operator moves the spec back
+  into the repo.
 
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was
@@ -7379,6 +7547,110 @@ decision 108; vault: *Hosted Relay — Cloudflare*.)*
 *Revisit if:* a deploy shows the `/register` hop's CPU (then an optional
 `server_id` on the upgrade); or step 2 (relay accounts, Q14, Q15) changes
 who may register.
+
+**116a. A client can't end a shared trunk.** *(2026-10-14; the first slice
+of the relay spec gap audit's Phase 2, vault *Remote/Relay Spec Gap Audit*;
+gaps SG-04, SG-05, SG-13, SG-31 = audit A's G6, G7, G5, G10. Decisions 114
+and 115, the operator's choices and the spec text, land in their own PR.)*
+- **The bug (confirmed, cross-tenant).** Every client of a server shares the
+  server's one trunk at the relay, and any anonymous client could end it:
+  - **A malformed head (G6).** Both relays checked only that `headers` was
+    an object. `{"headers":{"x":1}}` failed storm-server's typed parse of the
+    whole frame; `handle_control` then sent `ERROR{protocol_error}` and
+    returned `false`, ending `serve_trunk` (`client.rs:521-526`). Every
+    relayed client of the server got `trunk_lost`; the server re-registered
+    after 1 s and the attacker could repeat.
+  - **A second head (G7).** Neither relay tracked heads, so two
+    `HTTP_REQUEST_HEAD`s on a client's *own* stream were both forwarded.
+    storm-server answered the second with `ERROR{stream_closed}`
+    (`client.rs:554-556`), as `srp-v1.md` §5.1 told it to, while §6 says
+    `ERROR` from anyone but the relay is `protocol_error`. Both relays
+    applied §6 (`register.rs:308`, `room.ts:359`) and dropped the server
+    trunk.
+  - Reproduced by the new tests below on `origin/staging`'s sources: each
+    one fails there (R 3/3, W 5/5, O 4/4).
+- **The fix, as rules** (for the spec PR to lift into §5.1, §5.2 and §6):
+  1. **Head shape (G5).** `headers` is a JSON object whose values are
+     strings; `method` is an HTTP token; `path` is origin-form (starts with
+     `/`, no space or control byte). storm-server drops the pair form it
+     accepted (`[["k","v"]]`): neither relay could deliver one.
+  2. **A relay refuses a malformed head** with `protocol_error` to that
+     client and never forwards it. **Chosen:** trunk-scoped on the sender's
+     own trunk (§6 says `protocol_error` is always trunk-scoped, and audit
+     item 11's text says so), not a new stream-scoped use of the code. The
+     server trunk, the one other clients share, is never touched.
+  3. **A relay refuses a second head** on a stream with
+     `ERROR{stream_closed, stream_id}`, never forwards it, ends the stream
+     and sends `CLOSE{stream_id}` to the origin (a party that sends a
+     stream-scoped `ERROR` forgets the stream). The sender's trunk carries
+     on. The Worker keeps the flag in its `streams` table (`head` column,
+     added by `ALTER TABLE` on wake for rooms from before this), so it holds
+     across hibernation.
+  4. **An origin never sends `ERROR`.** storm-server refuses one stream with
+     `CLOSE{stream_id, aborted:true}` (101's mechanism): a duplicate
+     `STREAM_OPEN`, a second head, a head for a stream it does not have. A
+     first head it cannot interpret (now `Inbound::BadHead`, parsed per
+     stream) is answered completely: `HTTP_RESPONSE_HEAD{400}` and `CLOSE`,
+     the path `build_request` failures already took. Only a frame from the
+     relay that does not parse at all ends the trunk, with `CLOSE {}`.
+  5. **A relay never drops a server trunk over a stream-scoped origin
+     `ERROR`.** One naming a `stream_id` ends that stream: `stream_aborted`
+     to its client, `CLOSE` to the origin. A trunk-scoped one is still
+     `protocol_error`.
+  6. **An empty `0x02` frame is ignored** (G10). The Dart client pushed an
+     empty chunk; the Rust client already ignored it.
+- **Compatibility.** Relays deploy first, as the audit orders, but either
+  side upgraded closes the hole:
+
+  | | old server | new server |
+  |---|---|---|
+  | **old relay** | open (both bugs) | closed: a bad head is 400 + `CLOSE`, a second one `CLOSE{aborted}` (`stream_aborted` at relays since 101, a plain `CLOSE` before), never `ERROR` |
+  | **new relay** | closed: nothing malformed or repeated reaches the server; an `ERROR` it still sends ends one stream | closed twice |
+
+  No correct client changes: Dart sends `Map<String,String>` headers, the
+  Rust client an object of strings, both an origin-form path. A client
+  that sends a bad path now gets `protocol_error` from the relay instead of
+  a 400 from the origin. The Worker's head flags for streams opened before
+  the deploy start unset, so such a stream could pass one second head, which
+  a new server aborts.
+- **Tests.** storm-relay `tests/routing.rs`:
+  `a_head_with_a_non_string_header_value_is_refused_and_never_forwarded`,
+  `a_second_head_is_refused_and_never_forwarded`,
+  `an_origin_error_naming_a_stream_ends_that_stream_only`,
+  `a_trunk_scoped_origin_error_is_still_a_protocol_error`, and a unit test
+  of the head shape; each multi-client test checks another client's request
+  still crosses the same server trunk. The Worker (vitest/workerd):
+  the same four in `routing.test.ts`, plus `hibernation.test.ts` "still
+  refuses a second head" across an eviction and the column migration on a
+  pre-116a table. storm-server `relay/tests.rs`:
+  `a_head_with_a_non_string_header_value_fails_its_stream_only`,
+  `a_second_head_aborts_its_stream_only`,
+  `a_stream_id_already_open_is_aborted_rather_than_acked_twice`,
+  `a_request_head_for_an_unopened_stream_is_aborted`, each then serving
+  another stream on the same trunk with no `ERROR` written and no
+  re-registration. Conformance, both relays: §5.2
+  `a_malformed_head_is_refused_to_that_client_only`,
+  `a_second_head_is_refused_and_not_forwarded`, §5.4
+  `an_origin_error_naming_a_stream_ends_that_stream_only`. Live
+  (`relay_live_test.dart`, R+O and W+O): raw sockets send a bad head and a
+  second head; the app's long-lived relayed client is still served and the
+  server still reports the relay. Dart: an empty `0x02` is not delivered.
+- **Against revision 115** (vault *Remote/Relay Protocol*, §5.1, §5.2, §3,
+  §6): rules 1–4 and 6 are its text. Rule 5 is not yet: 115 keeps "a relay
+  MUST treat an origin `ERROR` as `protocol_error`" *until 116a*, and says
+  nothing after it. The next spec edit should state rule 5, which the §5.4
+  conformance check already holds both relays to.
+- **Results.** `make check` green (server 609, relay 50 + 42 routing,
+  Worker 100, conformance 132, client 1089 + 1 skipped).
+  `make relay-conformance-local` and `make relay-conformance-cf` pass every
+  check (cf skips only the latency check, as before). `make test-live
+  PORT=19400 AUTH_PORT=19401 RELAY_PORT=19402` and the same with
+  `RELAY_IMPL=cf` on 19410–19412 exit 0: server 81, mcp 86, agent 93,
+  gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect live 39, client
+  integration 34, 1 skipped.
+- *Revisit if:* the spec words the malformed-head refusal as stream-scoped
+  (both relays and the conformance check change together), or a header that
+  cannot be folded (`Set-Cookie`) ever has to cross.
 
 ## Data model
 

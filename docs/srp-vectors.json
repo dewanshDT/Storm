@@ -366,5 +366,430 @@
         "accepted": false
       }
     ]
+  },
+  "framing": {
+    "about": "SRP v1 revision 115 (vault note Storm Relay Protocol, sections 3, 5 and 6). Byte layouts of binary body frames and the shapes of control messages, so the origin, both relays and both clients test framing against one artefact. frame_hex is the whole WebSocket binary message. Control messages are JSON: only entries with exact_text are byte-exact; for the rest compare as parsed JSON.",
+    "body_frames": [
+      {
+        "name": "request_body_chunk",
+        "type": 1,
+        "stream_id": 7,
+        "payload_utf8": "hello",
+        "frame_hex": "010000000768656c6c6f"
+      },
+      {
+        "name": "end_of_request_body",
+        "type": 1,
+        "stream_id": 7,
+        "payload_utf8": "",
+        "frame_hex": "0100000007",
+        "meaning": "Ends the request body for stream 7. Exactly one per request, a GET included."
+      },
+      {
+        "name": "response_body_chunk_stream_id_is_big_endian",
+        "type": 2,
+        "stream_id": 16909060,
+        "payload_hex": "00ff",
+        "frame_hex": "020102030400ff"
+      },
+      {
+        "name": "max_stream_id",
+        "type": 2,
+        "stream_id": 4294967295,
+        "payload_hex": "2a",
+        "frame_hex": "02ffffffff2a"
+      },
+      {
+        "name": "empty_response_body_frame",
+        "type": 2,
+        "stream_id": 7,
+        "payload_utf8": "",
+        "frame_hex": "0200000007",
+        "sender_may_send": false,
+        "receiver": "ignore",
+        "why": "Revision 115: an empty 0x02 means nothing. Only an empty 0x01 has a meaning (end of body)."
+      }
+    ],
+    "too_short_frames": [
+      {
+        "name": "header_only_four_bytes",
+        "frame_hex": "01000000",
+        "valid": false
+      },
+      {
+        "name": "empty_message",
+        "frame_hex": "",
+        "valid": false
+      }
+    ],
+    "control_messages": [
+      {
+        "name": "canonical_ping",
+        "exact_text": "{\"v\":1,\"type\":\"PING\"}",
+        "why": "The Cloudflare relay answers exactly this text without waking its Durable Object. SHOULD, not MUST: another spelling still works."
+      },
+      {
+        "name": "canonical_pong",
+        "exact_text": "{\"v\":1,\"type\":\"PONG\"}"
+      },
+      {
+        "name": "hello_with_pubkey",
+        "json": {
+          "v": 1,
+          "type": "HELLO",
+          "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "pubkey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
+        }
+      },
+      {
+        "name": "hello_without_pubkey_from_a_client_older_than_115",
+        "json": {
+          "v": 1,
+          "type": "HELLO",
+          "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        }
+      },
+      {
+        "name": "error_trunk_scoped",
+        "scope": "trunk",
+        "json": {
+          "v": 1,
+          "type": "ERROR",
+          "code": "rate_limited",
+          "message": "rate limited"
+        }
+      },
+      {
+        "name": "error_attempt_scoped",
+        "scope": "attempt",
+        "json": {
+          "v": 1,
+          "type": "ERROR",
+          "code": "rate_limited",
+          "message": "rate limited",
+          "attempt_id": "a1"
+        }
+      },
+      {
+        "name": "error_stream_scoped",
+        "scope": "stream",
+        "json": {
+          "v": 1,
+          "type": "ERROR",
+          "code": "client_backlogged",
+          "message": "client backlogged",
+          "stream_id": 7
+        }
+      },
+      {
+        "name": "close_stream",
+        "json": {
+          "v": 1,
+          "type": "CLOSE",
+          "stream_id": 7
+        }
+      },
+      {
+        "name": "close_stream_aborted",
+        "json": {
+          "v": 1,
+          "type": "CLOSE",
+          "stream_id": 7,
+          "aborted": true
+        },
+        "meaning": "Origin only: the response failed after its head. The relay turns it into ERROR stream_aborted."
+      },
+      {
+        "name": "close_trunk",
+        "json": {
+          "v": 1,
+          "type": "CLOSE"
+        }
+      },
+      {
+        "name": "request_head",
+        "json": {
+          "v": 1,
+          "type": "HTTP_REQUEST_HEAD",
+          "stream_id": 7,
+          "method": "GET",
+          "path": "/v1/vaults?x=a%20b",
+          "headers": {
+            "authorization": "Bearer t",
+            "accept": "a/b, c/d"
+          }
+        },
+        "why": "headers is an object of string values; a repeated field is folded into one comma-separated value."
+      }
+    ],
+    "malformed_request_heads": {
+      "about": "A relay refuses each with protocol_error to that client only; an origin that sees one answers 400 and CLOSE for that stream and never ends the trunk (revision 115).",
+      "cases": [
+        {
+          "name": "header_value_not_a_string",
+          "json": {
+            "v": 1,
+            "type": "HTTP_REQUEST_HEAD",
+            "stream_id": 7,
+            "method": "GET",
+            "path": "/",
+            "headers": {
+              "x": 1
+            }
+          }
+        },
+        {
+          "name": "headers_as_pairs",
+          "json": {
+            "v": 1,
+            "type": "HTTP_REQUEST_HEAD",
+            "stream_id": 7,
+            "method": "GET",
+            "path": "/",
+            "headers": [
+              [
+                "x",
+                "y"
+              ]
+            ]
+          }
+        },
+        {
+          "name": "method_not_a_token",
+          "json": {
+            "v": 1,
+            "type": "HTTP_REQUEST_HEAD",
+            "stream_id": 7,
+            "method": "GE T",
+            "path": "/",
+            "headers": {}
+          }
+        },
+        {
+          "name": "path_not_origin_form",
+          "json": {
+            "v": 1,
+            "type": "HTTP_REQUEST_HEAD",
+            "stream_id": 7,
+            "method": "GET",
+            "path": "http://x/",
+            "headers": {}
+          }
+        }
+      ]
+    },
+    "attempt_id": [
+      {
+        "name": "typical",
+        "attempt_id": "a1",
+        "valid": true
+      },
+      {
+        "name": "max_length",
+        "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "valid": true
+      },
+      {
+        "name": "one_above_max",
+        "attempt_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "valid": false
+      },
+      {
+        "name": "empty",
+        "attempt_id": "",
+        "valid": false
+      },
+      {
+        "name": "not_a_string",
+        "attempt_id": 7,
+        "valid": false
+      },
+      {
+        "name": "non_ascii",
+        "attempt_id": "aé",
+        "valid": false
+      }
+    ]
+  },
+  "hello_pubkey": {
+    "about": "Revision 115, decision 114f: a client names the key it pinned, in HELLO.pubkey and in the connect URL's pubkey query. Same encoding as REGISTER_SERVER.pubkey: base64url, unpadded, 32 bytes, compared as decoded bytes. An open (key-addressed) relay routes the HELLO to the registration (server_id, pubkey).",
+    "connect_url": {
+      "relay_base": "wss://relay.example",
+      "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "pubkey_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "url": "wss://relay.example/connect/srv_01ARZ3NDEKTSV4RRFFQ69G5FAV?pubkey=A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "why": "base64url's alphabet is URL-safe, so the key needs no percent-encoding."
+    },
+    "cases": [
+      {
+        "name": "unpadded",
+        "pubkey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "accepted": true
+      },
+      {
+        "name": "padded",
+        "pubkey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+        "accepted": false
+      },
+      {
+        "name": "standard_alphabet",
+        "pubkey": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "accepted": false
+      },
+      {
+        "name": "too_short",
+        "pubkey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMQ",
+        "accepted": false
+      },
+      {
+        "name": "empty",
+        "pubkey": "",
+        "accepted": false
+      }
+    ],
+    "query_and_hello_must_agree": {
+      "query_pubkey": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "hello_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "result": "protocol_error"
+    }
+  },
+  "relay_set_message": {
+    "about": "Revision 115, section 4.3: the server MAY sign its advertised relay set as relays_sig. A new domain, distinct from storm-relay-auth:v1: and storm-challenge:v1:. The URLs are the set as advertised in GET /v1/server relays, sorted bytewise (UTF-8) and joined by a single newline; the order they arrive in does not matter.",
+    "domain": "storm-relays:v1:",
+    "cases": [
+      {
+        "name": "three_relays_given_unsorted",
+        "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "relays": [
+          "wss://relay.example",
+          "ws://192.168.1.5:8443",
+          "wss://a.example"
+        ],
+        "message_utf8": "storm-relays:v1:srv_01ARZ3NDEKTSV4RRFFQ69G5FAV:ws://192.168.1.5:8443\nwss://a.example\nwss://relay.example",
+        "message_b64": "c3Rvcm0tcmVsYXlzOnYxOnNydl8wMUFSWjNOREVLVFNWNFJSRkZRNjlHNUZBVjp3czovLzE5Mi4xNjguMS41Ojg0NDMKd3NzOi8vYS5leGFtcGxlCndzczovL3JlbGF5LmV4YW1wbGU",
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "signature_b64": "IUhWcyg8KKMGSbgBqfNEZh4pnXr7pkdLuqpBbM7HVD7iPlvapoRzJmuRsk-RL3_JfGhxBHlPmm1cJSLFY581CA",
+        "verifies": true
+      },
+      {
+        "name": "empty_set",
+        "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "relays": [],
+        "message_utf8": "storm-relays:v1:srv_01ARZ3NDEKTSV4RRFFQ69G5FAV:",
+        "message_b64": "c3Rvcm0tcmVsYXlzOnYxOnNydl8wMUFSWjNOREVLVFNWNFJSRkZRNjlHNUZBVjo"
+      },
+      {
+        "name": "signature_over_a_different_set",
+        "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "relays": [
+          "wss://relay.example",
+          "ws://192.168.1.5:8443"
+        ],
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "signature_b64": "IUhWcyg8KKMGSbgBqfNEZh4pnXr7pkdLuqpBbM7HVD7iPlvapoRzJmuRsk-RL3_JfGhxBHlPmm1cJSLFY581CA",
+        "verifies": false,
+        "why": "Dropping a relay changes the signed bytes."
+      },
+      {
+        "name": "signature_under_another_domain",
+        "server_id": "srv_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "relays": [
+          "wss://relay.example",
+          "ws://192.168.1.5:8443",
+          "wss://a.example"
+        ],
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "signature_b64": "SX_-Fa7f__Ys_Lq2NOztaHKRB24IQvRYbD0udevciDfyROsV58GUf9PbSznksVUfpB5WIhWp6DXhu5AdK1U8Bg",
+        "verifies": false,
+        "why": "Same bytes after the prefix, signed as storm-relay-auth:v1:. Domain separation, asserted."
+      }
+    ]
+  },
+  "plaintext_relay_hosts": {
+    "about": "Revision 115, section 4.3, decision 114e: a ws:// relay is allowed only on loopback, private (RFC 1918, IPv6 ULA fc00::/7) or CGNAT/Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48) addresses, and refused everywhere else by the server and every client, pairing and sign-in included. A hostname qualifies only if every address it resolves to does; one that cannot be checked is public. wss:// is allowed on any host.",
+    "cases": [
+      {
+        "host": "127.0.0.1",
+        "ws_allowed": true
+      },
+      {
+        "host": "127.8.9.10",
+        "ws_allowed": true
+      },
+      {
+        "host": "::1",
+        "ws_allowed": true
+      },
+      {
+        "host": "localhost",
+        "ws_allowed": true
+      },
+      {
+        "host": "10.0.0.5",
+        "ws_allowed": true
+      },
+      {
+        "host": "172.16.0.1",
+        "ws_allowed": true
+      },
+      {
+        "host": "172.31.255.254",
+        "ws_allowed": true
+      },
+      {
+        "host": "172.32.0.1",
+        "ws_allowed": false
+      },
+      {
+        "host": "192.168.1.10",
+        "ws_allowed": true
+      },
+      {
+        "host": "192.169.0.1",
+        "ws_allowed": false
+      },
+      {
+        "host": "100.64.0.1",
+        "ws_allowed": true
+      },
+      {
+        "host": "100.127.255.254",
+        "ws_allowed": true
+      },
+      {
+        "host": "100.128.0.1",
+        "ws_allowed": false
+      },
+      {
+        "host": "fd00::1",
+        "ws_allowed": true
+      },
+      {
+        "host": "fd7a:115c:a1e0::1",
+        "ws_allowed": true
+      },
+      {
+        "host": "fe80::1",
+        "ws_allowed": false,
+        "why": "Link-local is not in the allowed set."
+      },
+      {
+        "host": "169.254.1.1",
+        "ws_allowed": false
+      },
+      {
+        "host": "8.8.8.8",
+        "ws_allowed": false
+      },
+      {
+        "host": "2001:db8::1",
+        "ws_allowed": false
+      },
+      {
+        "host": "relay.example.com",
+        "ws_allowed": false,
+        "why": "A hostname that resolves to a public address, or cannot be checked."
+      }
+    ]
   }
 }
