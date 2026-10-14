@@ -161,7 +161,7 @@ void main() {
       ],
     );
     addTearDown(() {
-      c.read(connectionProvider)?.reset();
+      c.read(connectionProvider)?.close();
       c.dispose();
     });
     await c.read(settingsProvider.future);
@@ -234,9 +234,12 @@ void main() {
       final connection = c.read(connectionProvider)!;
       expect(connection.isRelayed, isTrue);
 
-      // What the sync engine does when its feed drops: the trunk dies and
-      // the next connect re-races.
-      connection.reset();
+      // The carrier drops the trunk: the connection re-races, and the next
+      // request waits for it.
+      await relay.dropTrunk();
+      while (connection.isConnected && connection.hasLiveTrunk) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
       seen.clear();
       final hosts = await api.hosts();
       expect(hosts.single.id, 'hst_1');
@@ -345,7 +348,7 @@ void main() {
 
     Future<void> unmount(WidgetTester tester, ProviderContainer c) async {
       await tester.pumpWidget(const SizedBox());
-      c.read(connectionProvider)?.reset();
+      c.read(connectionProvider)?.close();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 50)),
       );

@@ -19,7 +19,7 @@ import 'package:storm/api/storm_connection.dart';
 /// rule rather than a latency one.
 void main() {
   const serverId = 'srv_TESTSERVER';
-  final pubkey = 'x' * 43;
+  final pubkey = 'A' * 43;
 
   /// `GET /v1/server` for a server advertising [relays].
   http.Client serverAnswering({
@@ -55,7 +55,6 @@ void main() {
     List<RelayAdvert> relays = const [],
     Set<String> publicRelayHosts = const {},
     ServerVerifier? verifier,
-    Duration publicRelayDelay = const Duration(milliseconds: 200),
   }) => StormConnection(
     localAddress: 'http://direct.test',
     token: 't',
@@ -63,7 +62,6 @@ void main() {
     publicKeyB64: pubkey,
     relays: relays,
     publicRelayHosts: publicRelayHosts,
-    publicRelayDelay: publicRelayDelay,
     buildAuthApi: (c) {
       final host = Uri.parse(c.baseUrl).host;
       final client = byHost[host];
@@ -221,7 +219,7 @@ void main() {
         serverId: serverId,
         publicKeyB64: pubkey,
         relays: const [selfHosted],
-        raceTimeout: const Duration(milliseconds: 300),
+        candidateDeadline: const Duration(milliseconds: 300),
         buildAuthApi: (cand) => AuthApi(
           baseUrl: cand.baseUrl,
           client: MockClient((_) => Completer<http.Response>().future),
@@ -247,31 +245,29 @@ void main() {
       expect(c.status, ConnectionStatus.offline);
     });
 
-    test(
-      'with one candidate the challenge is the reachability signal',
-      () async {
-        // There is nothing to race, so the probe is best-effort on purpose — a
-        // server predating `GET /v1/server` must still connect. That makes the
-        // identity challenge the thing that decides reachability, which is also
-        // what the pre-seam client did.
-        final c = connectionWith(
-          byHost: {'direct.test': serverAnswering(dead: true)},
-          verifier: ServerVerifier(
-            authApi: AuthApi(
-              baseUrl: 'http://direct.test',
-              client: MockClient(
-                (_) async => throw http.ClientException('Connection refused'),
-              ),
+    test('a candidate that answers the probe with an error still faces the '
+        'challenge, which decides', () async {
+      // A server predating `GET /v1/server` answers it 404 and must still
+      // connect; an HTTP answer is not unreachable.
+      final c = connectionWith(
+        byHost: {
+          'direct.test': MockClient((_) async => http.Response('{}', 404)),
+        },
+        verifier: ServerVerifier(
+          authApi: AuthApi(
+            baseUrl: 'http://direct.test',
+            client: MockClient(
+              (_) async => throw http.ClientException('Connection refused'),
             ),
-            serverId: serverId,
-            publicKeyB64: pubkey,
           ),
-        );
+          serverId: serverId,
+          publicKeyB64: pubkey,
+        ),
+      );
 
-        expect(await c.connect(), ServerProof.unreachable);
-        expect(c.status, ConnectionStatus.offline);
-      },
-    );
+      expect(await c.connect(), ServerProof.unreachable);
+      expect(c.status, ConnectionStatus.offline);
+    });
   });
 
   group('the identity gate', () {
@@ -427,14 +423,13 @@ void main() {
 
   group('reconnect', () {
     test(
-      'reset re-races rather than resuming on the previous winner',
+      'a lost transport re-races rather than resuming on the previous winner',
       () async {
         var directAlive = false;
         final c = StormConnection(
           localAddress: 'http://direct.test',
           token: 't',
           relays: const [selfHosted],
-          publicRelayDelay: const Duration(milliseconds: 200),
           buildAuthApi: (candidate) => AuthApi(
             baseUrl: candidate.baseUrl,
             client: MockClient((_) async {
@@ -464,9 +459,12 @@ void main() {
           reason: 'direct is down',
         );
 
-        // The LAN comes back. Only a re-race can notice.
+        // The LAN comes back. Only a re-race can notice: the network change
+        // probes the relayed transport, which has no trunk here, so it is
+        // lost and the connection re-races.
         directAlive = true;
-        c.reset();
+        await c.onNetworkChanged();
+        expect(c.phase, ConnectionPhase.racing);
         await c.connect();
 
         expect(

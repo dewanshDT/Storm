@@ -458,4 +458,82 @@ void main() {
       throwsA(isA<SrpProtocolError>()),
     );
   });
+
+  test(
+    'a response waiting behind another stream\'s body is not silent (§8.7 rule 4)',
+    () async {
+      final relay = FakeRelay(
+        handler: (m, p, h, b) async {
+          if (p == '/download') {
+            final chunks = Stream<List<int>>.periodic(
+              const Duration(milliseconds: 40),
+              (_) => List<int>.filled(1024, 7),
+            ).take(25);
+            return FakeResponse.streamed(200, {
+              'content-type': 'application/octet-stream',
+            }, chunks);
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+          return FakeResponse(200, {}, utf8.encode('late'));
+        },
+      );
+      await relay.start();
+      try {
+        final trunk = _trunk(relay);
+        final client = SrpHttpClient(
+          trunk,
+          ttfb: const Duration(milliseconds: 250),
+          idle: const Duration(milliseconds: 250),
+        );
+        await trunk.connect();
+        final download = client.get(Uri.parse('http://x/download'));
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        final small = await client.get(Uri.parse('http://x/v1/server'));
+        expect(utf8.decode(small.bodyBytes), 'late');
+        expect((await download).bodyBytes.length, 25 * 1024);
+        trunk.dispose();
+      } finally {
+        await relay.close();
+      }
+    },
+  );
+
+  test(
+    'a server that never answers on a quiet trunk is server_silent',
+    () async {
+      final relay = FakeRelay(
+        handler: (m, p, h, b) async {
+          await Future<void>.delayed(const Duration(seconds: 3));
+          return FakeResponse(200, {}, const []);
+        },
+      );
+      await relay.start();
+      try {
+        final trunk = _trunk(relay);
+        final client = SrpHttpClient(
+          trunk,
+          ttfb: const Duration(milliseconds: 250),
+        );
+        await trunk.connect();
+        final started = DateTime.now();
+        await expectLater(
+          client.get(Uri.parse('http://x/v1/server')),
+          throwsA(
+            isA<SrpTransportException>().having(
+              (e) => e.code,
+              'code',
+              'server_silent',
+            ),
+          ),
+        );
+        expect(
+          DateTime.now().difference(started),
+          lessThan(const Duration(seconds: 2)),
+        );
+        trunk.dispose();
+      } finally {
+        await relay.close();
+      }
+    },
+  );
 }

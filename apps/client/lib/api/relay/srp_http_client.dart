@@ -34,9 +34,22 @@ class SrpTransportException implements Exception {
 
 /// Routes every request over one [SrpTrunk].
 class SrpHttpClient extends http.BaseClient {
-  SrpHttpClient(this.trunk);
+  SrpHttpClient(
+    this.trunk, {
+    this.ttfb = const Duration(seconds: 30),
+    this.idle = const Duration(seconds: 120),
+  });
 
   final SrpTrunk trunk;
+
+  /// `T_ttfb` (§8.7 rule 4): from the end of body being written to the
+  /// response head. Measured from the write, so a long upload is not a
+  /// silent server.
+  final Duration ttfb;
+
+  /// `T_idle`: silence inside a response body. The change feed and the
+  /// terminal (`text/event-stream`) are exempt.
+  final Duration idle;
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
@@ -51,7 +64,7 @@ class SrpHttpClient extends http.BaseClient {
     // delivers events synchronously, so a response that starts the instant the
     // head does would be missed by a listener attached later — the race the
     // broadcast/sync design exists to prevent.
-    final pipe = _ResponsePipe(trunk, stream);
+    final pipe = _ResponsePipe(trunk, stream, idle);
     stream.events.listen(pipe.onEvent, onDone: pipe.onDone);
     try {
       final uri = request.url;
@@ -74,12 +87,20 @@ class SrpHttpClient extends http.BaseClient {
         if (chunk.isEmpty) continue;
         await trunk.sendBody(stream, chunk);
       }
-      trunk.endBody(stream);
+      await trunk.endBody(stream);
 
       // The response is the head, which may have already arrived. If the trunk
       // finished this stream first (a refused open, trunk loss), surface that
       // as a transport error, not as an HTTP response.
-      final response = await pipe.response;
+      final ttfbWatch = QuietWatch(trunk, ttfb, () {
+        pipe.failSilent();
+      });
+      final http.StreamedResponse? response;
+      try {
+        response = await pipe.response;
+      } finally {
+        ttfbWatch.cancel();
+      }
       if (response == null) {
         throw const SrpTransportException('no_response_head');
       }
@@ -99,7 +120,7 @@ class SrpHttpClient extends http.BaseClient {
 /// controller: the trunk's broadcast `events` is shared, but the response body
 /// belongs to exactly one consumer.
 class _ResponsePipe {
-  _ResponsePipe(this.trunk, this.stream) {
+  _ResponsePipe(this.trunk, this.stream, this.idle) {
     // A reader that stops listening (a closed terminal, a disposed feed) ends
     // the stream on the trunk too, or the origin keeps streaming to nobody.
     _body = StreamController<Uint8List>(
@@ -113,6 +134,9 @@ class _ResponsePipe {
 
   final SrpTrunk trunk;
   final SrpStream stream;
+  final Duration idle;
+  QuietWatch? _idleTimer;
+  bool _exempt = false;
   late final StreamController<Uint8List> _body;
   final _head = Completer<http.StreamedResponse?>();
   bool _headSeen = false;
@@ -125,6 +149,10 @@ class _ResponsePipe {
     switch (event) {
       case SrpResponseHead():
         _headSeen = true;
+        _exempt = (event.headers['content-type'] ?? '').startsWith(
+          'text/event-stream',
+        );
+        _armIdle();
         if (!_head.isCompleted) {
           _head.complete(
             http.StreamedResponse(
@@ -137,6 +165,7 @@ class _ResponsePipe {
           );
         }
       case SrpBodyChunk():
+        _armIdle();
         _body.add(event.bytes);
       case SrpStreamError():
         // An error *before* the head is a failed open; one *after* would be a
@@ -149,7 +178,20 @@ class _ResponsePipe {
   /// The trunk finished this stream — a `CLOSE`, trunk loss, or the response
   /// body completing. A normal end closes the body; a head never seen means
   /// the open was refused or the trunk died before the response started.
+  void _armIdle() {
+    _idleTimer?.cancel();
+    if (_exempt) return;
+    _idleTimer = QuietWatch(trunk, idle, failSilent);
+  }
+
+  void failSilent() {
+    if (_done) return;
+    _fail(const SrpTransportException('server_silent'));
+    trunk.closeStream(stream);
+  }
+
   void onDone() {
+    _idleTimer?.cancel();
     if (_done) return;
     _done = true;
     if (!_headSeen && !_head.isCompleted) {
@@ -161,6 +203,7 @@ class _ResponsePipe {
   }
 
   void _fail(Object error) {
+    _idleTimer?.cancel();
     _done = true;
     if (_headSeen) {
       _body.addError(error);
@@ -169,4 +212,43 @@ class _ResponsePipe {
       _head.completeError(error);
     }
   }
+}
+
+/// Calls [onSilent] once [limit] passes with no stream frame on [trunk]
+/// (§8.7 rule 4). A response queued at the relay behind another stream's body
+/// is waiting, not silent: the trunk is busy delivering, and on a 2 Mbps link
+/// a small response can wait minutes behind a download.
+class QuietWatch {
+  QuietWatch(this.trunk, this.limit, this.onSilent) {
+    _seen = trunk.streamFramesReceived;
+    _quiet.start();
+    var tick = limit ~/ 4;
+    if (tick > const Duration(seconds: 1)) tick = const Duration(seconds: 1);
+    if (tick < const Duration(milliseconds: 1)) {
+      tick = const Duration(milliseconds: 1);
+    }
+    _timer = Timer.periodic(tick, (_) => _check());
+  }
+
+  final SrpTrunk trunk;
+  final Duration limit;
+  final void Function() onSilent;
+  final Stopwatch _quiet = Stopwatch();
+  late int _seen;
+  late final Timer _timer;
+
+  void _check() {
+    final n = trunk.streamFramesReceived;
+    if (n != _seen) {
+      _seen = n;
+      _quiet.reset();
+      return;
+    }
+    if (_quiet.elapsed >= limit) {
+      cancel();
+      onSilent();
+    }
+  }
+
+  void cancel() => _timer.cancel();
 }

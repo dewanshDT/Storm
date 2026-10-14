@@ -81,7 +81,7 @@ void main() {
   });
 
   tearDownAll(() {
-    c.read(connectionProvider)?.reset();
+    c.read(connectionProvider)?.close();
     c.dispose();
     direct.dispose();
   });

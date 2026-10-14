@@ -16,6 +16,7 @@ import 'dart:async';
 
 import 'auth_api.dart';
 import 'auth_models.dart';
+import 'net.dart';
 import 'relay/srp_trunk.dart';
 import 'server_verifier.dart';
 import 'storm_connection.dart';
@@ -78,8 +79,8 @@ class ServerRoute {
   /// The relay carrying the route, or null when it is direct.
   String? get relayHost => _hostOf(_connection.active.relayUrl);
 
-  /// Releases the relay trunk, if any. The app's own connection re-races.
-  void close() => _connection.reset();
+  /// Ends the route's connection and closes its trunks (§8.1 rule 1).
+  void close() => _connection.close('route done');
 }
 
 /// A [ServerRoute] opened from a pairing QR.
@@ -94,22 +95,16 @@ class PairingRoute extends ServerRoute {
 ///
 /// The challenge proves *who* answers; it does nothing for confidentiality. A
 /// password crossing the internet over a plain `ws://` relay would be readable
-/// by anyone on the path, so only `wss://` relays — and loopback ones, which
-/// never leave the machine — are used.
+/// by anyone on the path, so `ws://` is used only on the addresses §4.3
+/// allows — loopback, RFC 1918, link-local and ULA — as for the session.
 List<RelayAdvert> confidentialRelays(List<RelayAdvert> relays) => [
   for (final relay in relays)
-    if (_isConfidential(relay.url)) relay,
+    if (relayUrlAllowed(relay.url) && relayUrlAllowed(relay.publicAddress))
+      relay,
 ];
 
 List<RelayAdvert> pairingRelays(PairingUri uri) =>
     confidentialRelays(uri.relayAdverts);
-
-bool _isConfidential(String relayUrl) {
-  final u = Uri.tryParse(relayUrl);
-  if (u == null) return false;
-  if (u.scheme == 'wss') return true;
-  return u.host == 'localhost' || u.host == '127.0.0.1' || u.host == '::1';
-}
 
 String? _hostOf(String? url) {
   if (url == null) return null;
@@ -155,7 +150,7 @@ Future<PairingRoute> openPairingRoute(
   Set<String> publicRelayHosts = kPublicRelayHosts,
   AuthApi Function(ConnectionCandidate)? buildAuthApi,
   Future<RelayReach> Function(RelayAdvert relay)? probe,
-  Duration raceTimeout = const Duration(seconds: 10),
+  Duration candidateDeadline = const Duration(seconds: 15),
   Duration deadline = const Duration(seconds: 30),
 }) async {
   if (Uri.parse(uri.baseUrl).host.isEmpty) {
@@ -169,19 +164,19 @@ Future<PairingRoute> openPairingRoute(
     publicRelayHosts: publicRelayHosts,
     buildAuthApi: buildAuthApi,
     probe: probe,
-    raceTimeout: raceTimeout,
+    candidateDeadline: candidateDeadline,
     deadline: deadline,
   );
   final ServerInfo info;
   try {
     info = await connection.authApi.serverInfo();
   } catch (_) {
-    connection.reset();
+    connection.close('route failed');
     rethrow;
   }
   if (info.serverId != uri.serverId || info.publicKey != uri.publicKey) {
     final host = _hostOf(connection.active.relayUrl);
-    connection.reset();
+    connection.close('route failed');
     throw PairingRouteException(
       PairingFailure.identityMismatch,
       relayHost: host,
@@ -204,7 +199,7 @@ Future<ServerRoute> openSavedRoute({
   Set<String> publicRelayHosts = kPublicRelayHosts,
   AuthApi Function(ConnectionCandidate)? buildAuthApi,
   Future<RelayReach> Function(RelayAdvert relay)? probe,
-  Duration raceTimeout = const Duration(seconds: 10),
+  Duration candidateDeadline = const Duration(seconds: 15),
   Duration deadline = const Duration(seconds: 30),
 }) async => ServerRoute._(
   await _openProven(
@@ -215,7 +210,7 @@ Future<ServerRoute> openSavedRoute({
     publicRelayHosts: publicRelayHosts,
     buildAuthApi: buildAuthApi,
     probe: probe,
-    raceTimeout: raceTimeout,
+    candidateDeadline: candidateDeadline,
     deadline: deadline,
   ),
 );
@@ -228,7 +223,7 @@ Future<StormConnection> _openProven({
   required Set<String> publicRelayHosts,
   required AuthApi Function(ConnectionCandidate)? buildAuthApi,
   required Future<RelayReach> Function(RelayAdvert relay)? probe,
-  required Duration raceTimeout,
+  required Duration candidateDeadline,
   required Duration deadline,
 }) async {
   final connection = StormConnection(
@@ -239,10 +234,7 @@ Future<StormConnection> _openProven({
     relays: relays,
     publicRelayHosts: publicRelayHosts,
     buildAuthApi: buildAuthApi,
-    // One deliberate attempt, often over a phone's mobile data: a relay's
-    // TLS, handshake and first exchange get longer than a reconnect.
-    publicRelayDelay: raceTimeout,
-    raceTimeout: deadline,
+    candidateDeadline: candidateDeadline,
   );
 
   final ServerProof proof;
@@ -252,7 +244,7 @@ Future<StormConnection> _openProven({
       onTimeout: () => ServerProof.unreachable,
     );
   } catch (_) {
-    connection.reset();
+    connection.close('route failed');
     rethrow;
   }
 
@@ -260,14 +252,14 @@ Future<StormConnection> _openProven({
     case ServerProof.verified:
       return connection;
     case ServerProof.impostor:
-      final host = _hostOf(connection.active.relayUrl);
-      connection.reset();
+      final host = _hostOf(connection.failedIdentity?.relayUrl);
+      connection.close('route failed');
       throw PairingRouteException(
         PairingFailure.identityFailed,
         relayHost: host,
       );
     case ServerProof.unreachable:
-      connection.reset();
+      connection.close('route failed');
       if (relays.isEmpty) {
         throw const PairingRouteException(PairingFailure.serverUnreachable);
       }

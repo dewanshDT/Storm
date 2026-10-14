@@ -6,6 +6,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:storm/api/auth_models.dart';
 import 'package:storm/api/relay/srp_codec.dart';
 import 'package:storm/api/relay/srp_http_client.dart';
@@ -143,13 +144,13 @@ void main() {
     });
 
     StormConnection connectionVia(_Relay relay) => StormConnection(
-      // Nothing listens on port 9: the direct candidate is refused at once.
-      localAddress: 'http://127.0.0.1:9',
+      // The direct candidate gets no answer (not a refusal, which would say
+      // the server's host is up and the server down).
+      localAddress: 'http://direct.invalid',
+      client: MockClient((_) async => throw http.ClientException('no route')),
       token: 't',
       serverId: 'srv_test',
       relays: [RelayAdvert(url: relay.origin, publicAddress: relay.connectUrl)],
-      publicRelayDelay: const Duration(milliseconds: 200),
-      raceTimeout: const Duration(milliseconds: 200),
     );
 
     test('the connection reports serverOffline, not offline', () async {
@@ -158,66 +159,51 @@ void main() {
       final c = connectionVia(relay);
       try {
         expect(await c.connect(), ServerProof.unreachable);
-        if (c.status != ConnectionStatus.serverOffline) {
-          await c.statusChanges
-              .firstWhere((s) => s == ConnectionStatus.serverOffline)
-              .timeout(const Duration(seconds: 2));
-        }
         expect(c.status, ConnectionStatus.serverOffline);
       } finally {
-        c.reset();
+        c.dispose();
         await relay.close();
       }
     });
 
-    test(
-      'a verdict landing after the race gave up still reaches the status',
-      () async {
-        // The relay holds HELLO longer than the race waits, as a real one does
-        // for 5 s, so the race has already said offline when the answer comes.
-        final relay = _Relay(
-          refuseHello: 'server_unreachable',
-          helloDelay: const Duration(milliseconds: 600),
-        );
-        await relay.start();
-        final c = connectionVia(relay);
-        try {
-          final changes = <ConnectionStatus>[];
-          c.statusChanges.listen(changes.add);
-          expect(await c.connect(), ServerProof.unreachable);
-          expect(c.status, ConnectionStatus.offline);
-          await c.statusChanges
-              .firstWhere((s) => s == ConnectionStatus.serverOffline)
-              .timeout(const Duration(seconds: 3));
-          expect(changes, [
-            ConnectionStatus.connecting,
-            ConnectionStatus.offline,
-            ConnectionStatus.serverOffline,
-          ]);
-        } finally {
-          c.reset();
-          await relay.close();
-        }
-      },
-    );
+    test('the race waits out the relay\'s HELLO hold, so its verdict is the '
+        'race\'s', () async {
+      // A real relay holds HELLO for 5 s. The race gives each candidate
+      // 15 s, so the answer arrives inside it rather than after it.
+      final relay = _Relay(
+        refuseHello: 'server_unreachable',
+        helloDelay: const Duration(milliseconds: 600),
+      );
+      await relay.start();
+      final c = connectionVia(relay);
+      try {
+        final changes = <ConnectionStatus>[];
+        c.statusChanges.listen(changes.add);
+        expect(await c.connect(), ServerProof.unreachable);
+        expect(c.status, ConnectionStatus.serverOffline);
+        await Future<void>.delayed(Duration.zero);
+        expect(changes, [ConnectionStatus.serverOffline]);
+      } finally {
+        c.dispose();
+        await relay.close();
+      }
+    });
 
-    test('reset forgets the verdict', () async {
+    test('the next race recomputes the verdict', () async {
       final relay = _Relay(refuseHello: 'server_unreachable');
       await relay.start();
       final c = connectionVia(relay);
       try {
         await c.connect();
-        await pumpEventQueue();
-        c.reset();
-        expect(c.status, ConnectionStatus.idle);
+        expect(c.status, ConnectionStatus.serverOffline);
       } finally {
         await relay.close();
       }
       // The relay is gone now; nothing answers, so this is plain offline.
+      await c.onNetworkChanged();
       expect(await c.connect(), ServerProof.unreachable);
-      await Future<void>.delayed(const Duration(milliseconds: 300));
       expect(c.status, ConnectionStatus.offline);
-      c.reset();
+      c.dispose();
     });
 
     test('the dot and its line say which one it is', () {

@@ -128,16 +128,18 @@ the server by any path; new pairings carry it in the QR.
 
 ## 7. Make clients treat it as public
 
-A hosted relay must lose the race to direct and to self-hosted relays (rule 7,
-`docs/srp-v1.md` §2). Clients rank a relay as *public* only if its host is on
+A hosted relay must lose the race to direct and to self-hosted relays (SRP
+§2.2 in the vault's *Storm Relay Protocol*). Clients rank a relay as *public* only if its host is on
 their list, so add the host, without scheme or port, to **both**:
 
 - the app: `kPublicRelayHosts` in `apps/client/lib/api/storm_connection.dart`;
-- mcp-connect: `PUBLIC_RELAY_HOSTS` in `apps/runtime/src/race.rs` (and drop the
-  `assert!(PUBLIC_RELAY_HOSTS.is_empty())` in its test).
+- mcp-connect: `PUBLIC_RELAY_HOSTS` in `apps/runtime/src/race.rs`.
 
 Both lists ship in a release; a relay not on them is raced as self-hosted,
-which is the safe direction to be wrong in but not the intended order.
+which is the safe direction to be wrong in but not the intended order. Storm's
+own hosted relay, `storm-relay.dewansh.space`, is on both (decision 116g).
+A public relay is raced only once every direct and self-hosted candidate has
+failed or hit its 15 s deadline; there is no round timer.
 
 ## 8. Verify
 

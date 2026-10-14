@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -62,7 +64,12 @@ class _StormAppState extends ConsumerState<StormApp>
     // **Coming back is when sessions are found dead.** Storm is offline-first
     // and a phone can be away for weeks; the access token is the thing most
     // likely to have lapsed while nothing was watching.
-    if (state == AppLifecycleState.resumed) _checkSession();
+    if (state == AppLifecycleState.resumed) {
+      _checkSession();
+      // A suspended phone's sockets may be dead without a FIN, and the
+      // trunk's silence clock stopped while it slept (§8.7 rule 3).
+      unawaited(ref.read(connectionProvider)?.onAppResumed());
+    }
   }
 
   /// Renews a stale session, retires a dead one.

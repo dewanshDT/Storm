@@ -45,7 +45,7 @@ Future<LanRoute> openLanRoute(
     relays: const [],
     publicRelayHosts: const {},
     buildAuthApi: buildAuthApi,
-    raceTimeout: deadline,
+    candidateDeadline: deadline,
     deadline: deadline,
   );
   final ServerInfo info;

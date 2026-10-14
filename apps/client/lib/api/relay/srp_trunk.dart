@@ -155,7 +155,9 @@ class SrpTrunk {
     this.heartbeat = const Duration(seconds: 15),
     Duration? silenceLimit,
     this.handshakeTimeout = const Duration(seconds: 8),
-    this.openTimeout = const Duration(seconds: 5),
+    this.dialTimeout = const Duration(seconds: 15),
+    this.openTimeout = const Duration(seconds: 15),
+    this.maxPendingOpens = 19,
     this.maxQueuedFrames = 256,
     ConnectionLog? log,
   }) : url = keyedConnectUrl(url, serverKey),
@@ -189,10 +191,20 @@ class SrpTrunk {
   /// until its own timeout (decision 97).
   final Duration silenceLimit;
 
-  /// Longer than the relay's 5 s `HELLO` hold (§5), so a relay with no live
-  /// server trunk gets to say `server_unreachable` before this gives up.
+  /// From the WebSocket opening to `READY` (`T_handshake`, §8.8): longer
+  /// than the relay's 5 s `HELLO` hold, so a relay with no live server trunk
+  /// gets to say `server_unreachable` first. The dial before it is bounded
+  /// by [dialTimeout]; a slow TLS dial on LTE must not eat the hold.
   final Duration handshakeTimeout;
+  final Duration dialTimeout;
+
+  /// From `OPEN_STREAM` being *written* to `STREAM_READY` (§5.1): never while
+  /// the frame is still queued behind an upload.
   final Duration openTimeout;
+
+  /// `cap − 1` (§5.1): the relay refuses past 20 in flight, so a burst of
+  /// image loads waits here instead of drawing `rate_limited`.
+  final int maxPendingOpens;
 
   /// How many frames may wait for the socket before a request body waits for
   /// room (§5.2). Control frames never wait and are never refused.
@@ -211,7 +223,7 @@ class SrpTrunk {
 
   /// Request-body frames per stream, taken in turn so a small request's
   /// end of body is not queued behind a whole upload.
-  final LinkedHashMap<int, Queue<Object>> _bodies = LinkedHashMap();
+  final LinkedHashMap<int, Queue<_Outbound>> _bodies = LinkedHashMap();
   int _bodyFrames = 0;
   Completer<void>? _room;
   bool _writing = false;
@@ -244,9 +256,23 @@ class SrpTrunk {
   /// answer what it has not been sent (§5.2).
   final Stopwatch _sinceHeard = Stopwatch();
 
+  /// Frames received for any stream: heads, bodies, `STREAM_READY`, `CLOSE`,
+  /// `ERROR`. Not `PING`/`PONG`, which prove only the relay is there.
+  int get streamFramesReceived => _streamFrames;
+  int _streamFrames = 0;
+
   /// Why the trunk is dead: the relay's own `ERROR` code when it sent one,
   /// otherwise the [onTrunkLost] reason.
   String? get lossReason => _relayErrorCode ?? _lossReason;
+
+  /// The relay's `ERROR` code when it refused the `HELLO` itself — what tells
+  /// "server offline" from "relay unavailable" in a race (§8.6).
+  String? get helloRefusal => _helloRefusal;
+  String? _helloRefusal;
+
+  final List<Completer<void>> _probes = [];
+  int _openSlots = 0;
+  final Queue<Completer<void>> _openWaiters = Queue();
 
   bool get isClosed => _closed;
 
@@ -269,7 +295,17 @@ class SrpTrunk {
   Future<void>? _handshake;
 
   Future<void> _handshakeOnce() async {
-    await _dial();
+    _dial();
+    final ws = _ws;
+    if (ws != null && !_closed) {
+      try {
+        await ws.ready.timeout(dialTimeout);
+      } on TimeoutException {
+        _fail('dial_timeout');
+      } catch (_) {
+        _fail('socket_error');
+      }
+    }
     return _connected.future.timeout(
       handshakeTimeout,
       onTimeout: () {
@@ -281,7 +317,7 @@ class SrpTrunk {
     );
   }
 
-  Future<void> _dial() async {
+  void _dial() {
     _age.start();
     _log.add('trunk dial ${logHost(url.toString())}');
     try {
@@ -314,6 +350,9 @@ class SrpTrunk {
 
   void _onFrame(dynamic raw) {
     _sinceHeard.reset();
+    for (final p in _probes) {
+      if (!p.isCompleted) p.complete();
+    }
     if (raw is String) {
       _onControl(raw);
     } else if (raw is List<int>) {
@@ -331,6 +370,7 @@ class SrpTrunk {
       _fail('protocol_error');
       return;
     }
+    if (frame.type != 'PING' && frame.type != 'PONG') _streamFrames++;
     switch (frame.type) {
       case 'READY':
         _log.add('trunk ready after ${_age.elapsedMilliseconds} ms');
@@ -365,7 +405,12 @@ class SrpTrunk {
       return;
     }
     final stream = _pendingOpens.remove(attemptId);
-    if (stream == null) return; // We never asked, or already aborted.
+    if (stream == null) {
+      // An open we stopped waiting for: release it at the relay and origin.
+      _log.add('late STREAM_READY: CLOSE sent');
+      _send(SrpControl.encode('CLOSE', {'stream_id': streamId}));
+      return;
+    }
     stream.signalReady(streamId);
     _streams[streamId] = stream;
   }
@@ -403,6 +448,7 @@ class SrpTrunk {
   }
 
   void _onBody(List<int> raw) {
+    _streamFrames++;
     final frame = decodeBodyFrame(raw);
     if (frame == null || frame.kind != bodyResponse) {
       _fail('protocol_error');
@@ -445,6 +491,7 @@ class SrpTrunk {
       // A trunk-scoped error is fatal. A relay that predates decision 106
       // refuses an open this way too, and the trunk cannot tell which.
       _relayErrorCode = code;
+      if (!_connected.isCompleted) _helloRefusal = code;
       _fail('relay_error');
       return;
     }
@@ -459,10 +506,10 @@ class SrpTrunk {
   /// Opens one stream (sends `OPEN_STREAM`, waits for `STREAM_READY`).
   ///
   /// A refusal (`ERROR{rate_limited, attempt_id}`) throws [SrpOpenRefused] and
-  /// leaves the trunk up — §5.1 refuses immediately rather than queueing, so a
-  /// caller that discovers the in-flight cap this way has already turned a
-  /// queueing problem into an error. A relay that answers nothing within
-  /// [openTimeout] fails the open with [SrpStreamAborted].
+  /// leaves the trunk up. At most [maxPendingOpens] are outstanding; the rest
+  /// wait here. An open the relay has not answered [openTimeout] after its
+  /// frame was written fails with `open_timeout`, and a `STREAM_READY` that
+  /// arrives after that is answered with `CLOSE` (§5.1).
   Future<SrpStream> openStream() async {
     // The trunk only comes alive on first use: `StormConnection` hands a
     // wrapped client to the app before any request is queued, so dialling here
@@ -470,17 +517,64 @@ class SrpTrunk {
     if (!isConnected) {
       await connect();
     }
+    await _takeOpenSlot();
     final attemptId = _newAttemptId();
     final stream = SrpStream._(attemptId);
-    _pendingOpens[attemptId] = stream;
-    Timer(openTimeout, () {
-      if (_pendingOpens.remove(attemptId) == stream) {
-        stream.finish();
-      }
-    });
-    _send(SrpControl.encode('OPEN_STREAM', {'attempt_id': attemptId}));
-    await stream.ready;
-    return stream;
+    try {
+      if (_closed) throw const SrpTrunkClosed();
+      _pendingOpens[attemptId] = stream;
+      final written = Completer<void>();
+      _send(
+        SrpControl.encode('OPEN_STREAM', {'attempt_id': attemptId}),
+        written: written,
+      );
+      unawaited(
+        written.future.then((_) {
+          if (_closed || !identical(_pendingOpens[attemptId], stream)) return;
+          Timer(openTimeout, () {
+            if (_pendingOpens.remove(attemptId) == stream) {
+              _log.add('open timed out ${openTimeout.inSeconds} s after write');
+              stream.refuse('open_timeout', null);
+            }
+          });
+        }),
+      );
+      await stream.ready;
+      return stream;
+    } finally {
+      _releaseOpenSlot();
+    }
+  }
+
+  Future<void> _takeOpenSlot() async {
+    while (_openSlots >= maxPendingOpens && !_closed) {
+      final waiter = Completer<void>();
+      _openWaiters.add(waiter);
+      await waiter.future;
+    }
+    _openSlots++;
+  }
+
+  void _releaseOpenSlot() {
+    _openSlots--;
+    if (_openWaiters.isNotEmpty) _openWaiters.removeFirst().complete();
+  }
+
+  /// One liveness probe (§8.7 rule 3): a `PING`, and anything heard back
+  /// within [timeout].
+  Future<bool> probe(Duration timeout) async {
+    if (!isConnected) return false;
+    final heard = Completer<void>();
+    _probes.add(heard);
+    try {
+      _send(SrpControl.encode('PING'));
+      await heard.future.timeout(timeout);
+      return !_closed;
+    } catch (_) {
+      return false;
+    } finally {
+      _probes.remove(heard);
+    }
   }
 
   /// Sends `HTTP_REQUEST_HEAD` for [stream].
@@ -530,13 +624,17 @@ class SrpTrunk {
   }
 
   /// Ends [stream]'s request body with a zero-length `0x01` frame (§5.2).
-  /// Every request sends it once, a body-less `GET` included.
-  void endBody(SrpStream stream) {
-    if (stream.isFinal) return;
+  /// Every request sends it once, a body-less `GET` included. Completes when
+  /// the frame has been written, which is when `T_ttfb` starts (§8.7).
+  Future<void> endBody(SrpStream stream) {
+    if (stream.isFinal) return Future.value();
+    final written = Completer<void>();
     _sendBody(
       stream.streamId,
       encodeBodyFrame(bodyRequest, stream.streamId, const []),
+      written: written,
     );
+    return written.future;
   }
 
   /// Sends `CLOSE { stream_id }` and forgets the stream (§5.4).
@@ -544,7 +642,11 @@ class SrpTrunk {
     if (stream.isReady && !_closed) {
       // A CLOSE is an abort and goes ahead of the queue, so the stream's own
       // queued body would follow it to a relay that no longer knows the id.
-      _bodyFrames -= _bodies.remove(stream.streamId)?.length ?? 0;
+      final dropped = _bodies.remove(stream.streamId);
+      _bodyFrames -= dropped?.length ?? 0;
+      for (final o in dropped ?? const <_Outbound>[]) {
+        o.markWritten();
+      }
       _wakeSenders();
       _send(SrpControl.encode('CLOSE', {'stream_id': stream.streamId}));
     }
@@ -553,24 +655,26 @@ class SrpTrunk {
     stream.finish();
   }
 
-  void _send(String frame, {bool ping = false}) {
+  void _send(String frame, {bool ping = false, Completer<void>? written}) {
     if (_ws == null || _closed) {
       throw const SrpTrunkClosed();
     }
-    _control.add(_Outbound(frame, ping: ping));
+    _control.add(_Outbound(frame, ping: ping, written: written));
     _write();
   }
 
-  void _sendBody(int streamId, Object frame) {
+  void _sendBody(int streamId, Object frame, {Completer<void>? written}) {
     if (_ws == null || _closed) {
       throw const SrpTrunkClosed();
     }
-    _bodies.putIfAbsent(streamId, Queue.new).add(frame);
+    _bodies
+        .putIfAbsent(streamId, Queue.new)
+        .add(_Outbound(frame, written: written));
     _bodyFrames++;
     _write();
   }
 
-  Object? _nextBody() {
+  _Outbound? _nextBody() {
     if (_bodies.isEmpty) return null;
     final streamId = _bodies.keys.first;
     final queue = _bodies.remove(streamId)!;
@@ -586,25 +690,27 @@ class SrpTrunk {
   Future<void> _write() async {
     if (_writing) return;
     _writing = true;
+    _Outbound? next;
     try {
       while (!_closed) {
         final ws = _ws;
         if (ws == null) return;
-        final _Outbound next;
         if (_control.isNotEmpty) {
           next = _control.removeFirst();
         } else if (_nextBody() case final body?) {
-          next = _Outbound(body);
+          next = body;
         } else {
           return;
         }
         await ws.write(next.frame);
+        next.markWritten();
         if (next.ping) {
           _pingUnwritten = false;
           _sinceHeard.start();
         }
       }
     } catch (_) {
+      next?.markWritten();
       _fail('socket_error');
     } finally {
       _writing = false;
@@ -649,10 +755,19 @@ class SrpTrunk {
     _sinceHeard.stop();
     _sub?.cancel();
     _ws?.close();
+    for (final o in [..._control, for (final q in _bodies.values) ...q]) {
+      o.markWritten();
+    }
     _control.clear();
     _bodies.clear();
     _bodyFrames = 0;
     _wakeSenders();
+    for (final p in _probes) {
+      if (!p.isCompleted) p.completeError(const SrpTrunkClosed());
+    }
+    while (_openWaiters.isNotEmpty) {
+      _openWaiters.removeFirst().complete();
+    }
     for (final s in _streams.values) {
       s.push(SrpStreamError('trunk_lost', reason));
     }
@@ -695,9 +810,15 @@ class SrpTrunk {
 }
 
 class _Outbound {
-  _Outbound(this.frame, {this.ping = false});
+  _Outbound(this.frame, {this.ping = false, this.written});
   final Object frame;
   final bool ping;
+  final Completer<void>? written;
+
+  void markWritten() {
+    final w = written;
+    if (w != null && !w.isCompleted) w.complete();
+  }
 }
 
 /// The trunk or its streams are gone.
