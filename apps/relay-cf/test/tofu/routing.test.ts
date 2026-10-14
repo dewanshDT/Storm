@@ -76,7 +76,7 @@ describe("a stream", () => {
       const pings = c.pingsSeen;
       server.sendBody(0x02, streamId, chunk);
       const f = await c.next();
-      expect(f.kind).toBe("body");
+      expect(f.kind, `chunk ${i}: ${f.kind === "text" ? f.raw : f.kind}`).toBe("body");
       if (f.kind === "body") expect(f.payload).toEqual(chunk);
       // Each chunk is four times this project's 64 KiB budget, so the next is
       // admitted only once the client's PONG has proved this one read. The
