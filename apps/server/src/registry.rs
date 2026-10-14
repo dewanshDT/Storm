@@ -190,6 +190,11 @@ pub struct Registry {
     #[serde(default)]
     agent_writes: Option<bool>,
 
+    /// Settings › Server › "Discoverable on this network" (decision 118).
+    /// Absent means on: a registry written before it existed advertises.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    discoverable: Option<bool>,
+
     /// Relay URLs this server should try to register with (SRP v1 §4.4).
     ///
     /// Here for the same reasons the MCP switches are: it has to survive a
@@ -230,6 +235,7 @@ impl Default for Registry {
             mcp_enabled: false,
             mcp_writable: false,
             agent_writes: Some(false),
+            discoverable: None,
             // Off. `#[derive(Default)]` would give the same answer, but this
             // Default is hand-written precisely so nobody has to check.
             relays: Vec::new(),
@@ -326,6 +332,14 @@ impl Registry {
 
     pub fn set_agent_writes(&mut self, on: bool) {
         self.agent_writes = Some(on);
+    }
+
+    pub fn discoverable(&self) -> bool {
+        self.discoverable.unwrap_or(true)
+    }
+
+    pub fn set_discoverable(&mut self, on: bool) {
+        self.discoverable = Some(on);
     }
 
     pub fn get(&self, id: &str) -> Option<&VaultEntry> {
@@ -803,6 +817,22 @@ mod tests {
         assert!(reg.relays.is_empty(), "defaults to none, does not fail");
         assert!(reg.registered_relays.is_empty());
         assert!(reg.mcp_enabled, "the fields we kept must survive");
+    }
+
+    #[test]
+    fn discovery_is_on_unless_the_registry_says_off() {
+        let dir = tempdir::TempDir::new("storm-reg-discovery").unwrap();
+        std::fs::write(
+            dir.path().join(REGISTRY_FILE),
+            r#"{"root":"/tmp/vaults","vaults":[]}"#,
+        )
+        .unwrap();
+        let mut reg = Registry::load(dir.path(), Path::new("/tmp/vaults")).unwrap();
+        assert!(reg.discoverable(), "an older registry advertises");
+        reg.set_discoverable(false);
+        reg.save(dir.path()).unwrap();
+        let reg = Registry::load(dir.path(), Path::new("/tmp/vaults")).unwrap();
+        assert!(!reg.discoverable(), "off survives a restart");
     }
 
     #[test]

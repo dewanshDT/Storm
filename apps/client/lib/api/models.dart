@@ -296,6 +296,7 @@ class ServerConfig {
     this.relays = const [],
     this.agentWrites,
     this.version,
+    this.discovery,
   });
 
   final String vaultRoot;
@@ -325,6 +326,9 @@ class ServerConfig {
   /// The server's release version, when it reports one.
   final String? version;
 
+  /// LAN discovery (decision 118); null from a server that predates it.
+  final DiscoveryConfig? discovery;
+
   factory ServerConfig.fromJson(Map<String, dynamic> j) => ServerConfig(
     vaultRoot: j['vault_root'] as String? ?? '',
     stateDir: j['state_dir'] as String? ?? '',
@@ -334,6 +338,32 @@ class ServerConfig {
     relays: [for (final r in (j['relays'] as List? ?? const [])) r as String],
     agentWrites: j['agent_writes'] as bool?,
     version: j['version'] as String?,
+    discovery: j['discovery'] is Map<String, dynamic>
+        ? DiscoveryConfig.fromJson(j['discovery'] as Map<String, dynamic>)
+        : null,
+  );
+}
+
+class DiscoveryConfig {
+  const DiscoveryConfig({
+    required this.discoverable,
+    required this.forcedOff,
+    required this.active,
+  });
+
+  /// The setting the toggle shows.
+  final bool discoverable;
+
+  /// `--no-discovery` / `STORM_DISCOVERY=0`: off whatever the setting says.
+  final bool forcedOff;
+
+  /// Advertising and accepting password pairing now.
+  final bool active;
+
+  factory DiscoveryConfig.fromJson(Map<String, dynamic> j) => DiscoveryConfig(
+    discoverable: j['discoverable'] as bool? ?? true,
+    forcedOff: j['forced_off'] as bool? ?? false,
+    active: j['active'] as bool? ?? false,
   );
 }
 
@@ -346,6 +376,7 @@ class PairedDevice {
     this.platform,
     this.lastSeen,
     this.revoked,
+    this.pairedBy,
   });
 
   final String id;
@@ -355,7 +386,12 @@ class PairedDevice {
   final String? lastSeen;
   final String? revoked;
 
+  /// `lan_password` for a device paired from the discovery list (decision
+  /// 118); null for a QR pairing.
+  final String? pairedBy;
+
   bool get isRevoked => revoked != null;
+  bool get pairedOnLocalNetwork => pairedBy == 'lan_password';
 
   factory PairedDevice.fromJson(Map<String, dynamic> j) => PairedDevice(
     id: j['id'] as String,
@@ -364,6 +400,7 @@ class PairedDevice {
     paired: j['paired'] as String? ?? '',
     lastSeen: j['last_seen'] as String?,
     revoked: j['revoked'] as String?,
+    pairedBy: j['paired_by'] as String?,
   );
 }
 

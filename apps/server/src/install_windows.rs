@@ -568,6 +568,11 @@ mod imp {
         println!("vaults  : {}", r.vaults);
         println!("state   : {}", r.state);
         println!("log     : {}", layout.log_file);
+        if healthy {
+            for line in crate::discovery::status_identity(r.port, 8) {
+                println!("{line}");
+            }
+        }
         if !healthy {
             std::process::exit(1);
         }

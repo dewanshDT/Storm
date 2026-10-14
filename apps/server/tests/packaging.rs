@@ -98,3 +98,10 @@ fn the_package_closes_the_default_root_to_other_accounts() {
         "never chmod through a symlink, which could point at a shared mount"
     );
 }
+
+#[test]
+fn the_server_unit_can_list_interfaces_for_lan_discovery() {
+    let unit = repo_file("deploy/storm-server.service");
+    let families = unit_value(&unit, "RestrictAddressFamilies").unwrap();
+    assert!(families.contains("AF_NETLINK"), "{families}");
+}

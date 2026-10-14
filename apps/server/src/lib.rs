@@ -32,6 +32,7 @@ mod api;
 mod auth;
 mod backup;
 mod db;
+mod discovery;
 mod frontmatter;
 mod gateway;
 mod index;
@@ -293,6 +294,12 @@ struct ServeArgs {
     /// the clear.
     #[arg(long, hide = true)]
     gateway_allow_http_upstreams: bool,
+
+    /// Do not advertise on the local network, and refuse pairing with the
+    /// password, whatever the app's setting says (decision 118). Also
+    /// `STORM_DISCOVERY=0`.
+    #[arg(long)]
+    no_discovery: bool,
     // Deliberately no `--relay` here, however much it looks like `--mcp`'s
     // sibling. `Registry::relays` is a setting the app can also change at
     // runtime, and a flag would seed it before `state/vaults.json` exists —
@@ -1012,6 +1019,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         server_id = %identity.server_id,
         name = %identity.name,
         key_id = %identity.key_id,
+        fingerprint = %identity.fingerprint(),
         "server identity"
     );
 
@@ -1029,6 +1037,12 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     }
     let mcp_writable = mcp_enabled && vault_set.registry.mcp_writable;
     let agent_writes = vault_set.registry.agent_writes();
+    let discoverable = vault_set.registry.discoverable();
+    let discovery_forced_off = args.no_discovery
+        || discovery::env_forces_off(std::env::var("STORM_DISCOVERY").ok().as_deref());
+    if discovery_forced_off {
+        tracing::info!("LAN discovery is off (--no-discovery / STORM_DISCOVERY)");
+    }
     tracing::info!(
         enabled = mcp_enabled,
         writable = mcp_writable,
@@ -1154,6 +1168,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         host_limiter: auth::ratelimit::LoginLimiter::new(),
         agent,
         gateway,
+        discovery: discovery::Discovery::new(discovery_forced_off, discoverable),
     });
 
     ops::reconcile_single_user(&state)
@@ -1169,6 +1184,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // Kept for the web fallback below, which mints bootstrap nonces and so
     // needs the same state the API has.
     let web_state = state.clone();
+    let discovery_state = state.clone();
 
     let mut app = api::router(
         state,
@@ -1290,6 +1306,15 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     let (stop_tunnels, tunnels_stop) = tokio::sync::oneshot::channel();
     let tunnels = tokio::spawn(relay::manage(tunnels, relays_rx, tunnels_stop));
 
+    let (stop_discovery, discovery_stop) = tokio::sync::oneshot::channel();
+    let bound = listener.local_addr().context("reading the bound address")?;
+    let discovery = tokio::spawn(discovery::run(
+        discovery_state,
+        bound.ip(),
+        bound.port(),
+        discovery_stop,
+    ));
+
     tracing::info!("storm-server listening on http://{addr}");
     // `into_make_service_with_connect_info` is what makes the peer address
     // available to handlers. `/v1/pair/local` refuses anything that is not
@@ -1311,7 +1336,9 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // this server waits that out — a restart would look like an outage for as
     // long as the timeout lasts.
     let _ = stop_tunnels.send(());
+    let _ = stop_discovery.send(());
     let _ = tunnels.await;
+    let _ = discovery.await;
     Ok(())
 }
 

@@ -206,6 +206,9 @@ test-live:
 	echo "--- mcp e2e ---"; \
 	STORM_BASE=http://127.0.0.1:$(PORT) \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- LAN discovery pairing: mDNS on loopback, password pairing (decision 118) ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/lan_discovery_e2e.py"; \
 	echo "--- agent runtime e2e (its own server and host; decision 77c) ---"; \
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \

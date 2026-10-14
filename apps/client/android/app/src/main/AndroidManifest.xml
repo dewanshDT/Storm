@@ -9,6 +9,10 @@
          Storm is a sync client; there is no version of it that works offline
          forever. `test/android_manifest_test.dart` is the guard. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- LAN discovery (decision 118): Wi-Fi drops multicast unless an app
+         holds a multicast lock, so without this the "On this network" list
+         stays empty. The lock is held only while the pairing screen is open. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <application
         android:label="Storm"
         android:name="${applicationName}"
