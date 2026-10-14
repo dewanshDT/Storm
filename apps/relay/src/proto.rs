@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 /// support: an incompatible change is a new relay deployment.
 pub const PROTOCOL_VERSION: u64 = 1;
 
-/// What the relay tells a server to send it: §4.2's `PING`/`PONG` cadence.
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 15;
+/// What the relay tells a server to send it: §4.2's `PING`/`PONG` cadence,
+/// three to the deadline it is held to, so the two can never disagree
+/// (decision 116e). 15 s at the default 45 s.
+pub fn heartbeat_interval_secs(deadline: std::time::Duration) -> u64 {
+    (deadline.as_secs() / 3).max(1)
+}
 
 /// A control frame, parsed **envelope first**.
 ///
@@ -246,13 +250,17 @@ pub fn challenge(nonce: String) -> String {
     Control::new("CHALLENGE", Challenge { nonce }).to_json()
 }
 
-pub fn registered(trunk_id: String, public_address: String) -> String {
+pub fn registered(
+    trunk_id: String,
+    public_address: String,
+    deadline: std::time::Duration,
+) -> String {
     Control::new(
         "REGISTERED",
         Registered {
             trunk_id,
             public_address,
-            heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+            heartbeat_interval_secs: heartbeat_interval_secs(deadline),
         },
     )
     .to_json()
@@ -459,7 +467,11 @@ mod tests {
     fn every_outbound_message_carries_the_version_envelope() {
         for json in [
             challenge("nonce-0123456789".into()),
-            registered("trk_1".into(), "wss://relay/connect/srv_A".into()),
+            registered(
+                "trk_1".into(),
+                "wss://relay/connect/srv_A".into(),
+                crate::config::DEFAULT_HEARTBEAT_DEADLINE,
+            ),
             error(ErrorCode::AuthFailed),
             pong(),
         ] {

@@ -885,6 +885,98 @@ async fn a_dying_clients_close_reaches_the_origin_past_a_full_server_ward_queue(
     upload.abort();
 }
 
+/// §5 client heartbeat: a client heard nothing from for the deadline is gone,
+/// and each of its streams ends at the origin as if it had closed.
+#[tokio::test]
+async fn a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin() {
+    let mut config = config();
+    config.heartbeat_deadline = Duration::from_millis(600);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // The server heartbeats; the client says nothing at all.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            server.send(json!({ "v": 1, "type": "PING" })).await;
+            if let Ok(Frame::Text(value)) =
+                tokio::time::timeout(Duration::from_millis(150), server.next_frame()).await
+                && value["type"] == "CLOSE"
+            {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("the origin was never told the silent client's stream ended");
+    assert_eq!(closed["stream_id"], stream_id);
+}
+
+#[test]
+fn the_advertised_interval_is_a_third_of_the_deadline() {
+    use storm_relay::proto::heartbeat_interval_secs;
+    assert_eq!(heartbeat_interval_secs(Duration::from_secs(45)), 15);
+    assert_eq!(heartbeat_interval_secs(Duration::from_millis(600)), 1);
+}
+
+/// One client's upload to an origin that stopped reading must not hold another
+/// client's `STREAM_OPEN` behind its backlog (§5.5, decision 116d). With one
+/// shared server-ward queue it waited behind up to 64 queued body frames;
+/// with a lane per client, behind at most the frame being written.
+#[tokio::test]
+async fn an_upload_to_a_slow_origin_does_not_hold_another_clients_open() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut uploader = harness.client().await;
+    let mut other = harness.client().await;
+
+    let upload_stream = uploader.open_stream("u1").await;
+    server.expect_stream_open_and_ack().await;
+    let upload = tokio::spawn(async move {
+        uploader
+            .send(json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": upload_stream,
+                "method": "PUT", "path": "/up", "headers": {},
+            }))
+            .await;
+        let chunk = vec![0u8; 256 * 1024];
+        for _ in 0..512 {
+            uploader.send_body(0x01, upload_stream, &chunk).await;
+        }
+        uploader
+    });
+    // Long enough for the backlog to fill every buffer it can.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    other
+        .send(json!({ "v": 1, "type": "OPEN_STREAM", "attempt_id": "o1" }))
+        .await;
+    let mut bodies_first = 0;
+    let opened = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match server.next_frame().await {
+                Frame::Body { .. } => bodies_first += 1,
+                Frame::Text(value) if value["type"] == "STREAM_OPEN" => return,
+                Frame::Text(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        opened.is_ok(),
+        "the other client's open never reached the origin"
+    );
+    // What the sockets themselves buffer arrives first either way; the
+    // relay's own queue must add at most a frame to it.
+    assert!(
+        bodies_first < storm_relay::trunk::SERVER_WARD_QUEUE,
+        "{bodies_first} upload frames reached the origin before another client's open"
+    );
+    upload.abort();
+}
+
 // ------------------------------------------------------------------ streaming
 
 #[tokio::test]
@@ -1272,10 +1364,20 @@ async fn a_silent_server_is_dropped_at_the_deadline_and_its_clients_told() {
     let stream_id = client.open_stream("a1").await;
     server.expect_stream_open_and_ack().await;
 
-    // `server` stays open and says nothing from here on.
-    let reply = tokio::time::timeout(Duration::from_secs(3), client.recv())
-        .await
-        .expect("the deadline never fired for a silent server");
+    // `server` stays open and says nothing from here on. The client keeps
+    // heartbeating, as a real one does, or it would be reaped first (§5).
+    let reply = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            client.send(json!({ "v": 1, "type": "PING" })).await;
+            if let Ok(value) = tokio::time::timeout(Duration::from_millis(100), client.recv()).await
+                && value["type"] != "PONG"
+            {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("the deadline never fired for a silent server");
     assert_error(&reply, "trunk_lost");
     assert_eq!(reply["stream_id"], stream_id, "{reply}");
     assert!(harness.relay.registrations.is_empty());

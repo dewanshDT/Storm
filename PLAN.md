@@ -8294,6 +8294,67 @@ landed with 116g + 116h in #190)*
   `a_stream_with_no_head_is_aborted_after_the_head_wait`; both fail on the
   old code.
 
+**116d. Flow-control stopgap.** *(2026-10-15; SG-08, SG-14, SG-27, SG-28;
+spec §5.4 shared bounds and §5.5)*
+- **Origin: `Range` on attachment downloads.** `GET …/attachments/*` answers
+  `Accept-Ranges: bytes` and a strong `ETag` (blake3 of the content), and a
+  single `bytes=` range with `206` and `Content-Range` (`416` past the end).
+  A `Range` whose `If-Range` no longer matches gets the whole new file: an
+  attachment replaced between attempts must never be spliced onto the old
+  prefix. The spec's rule 3 now names `ETag`/`If-Range` (vault note,
+  2026-10-15).
+- **Client: resume on `client_backlogged`.** `resumableGet` (attachments and
+  images) keeps what arrived and retries with `Range: bytes=<n>-` and
+  `If-Range`, checks the `206`'s `Content-Range` before appending, starts over
+  on `200`, and gives up after 8 resumes or one with no progress. Any other
+  transport error is not retried.
+- **Worker: shared bounds shed laggards only.** The room's total was checked
+  inside `admits`, so a full room ended whichever stream's frame came next,
+  often one whose client was keeping up — exactly what §5.4 forbids. Now a
+  full room ends the streams of the socket with the most unread (its trunk if
+  it has none left), the current frame still goes to a reader that keeps up,
+  a request body toward an origin that is itself the laggard is refused
+  `rate_limited`, and `OPEN_STREAM` is refused `rate_limited` while the room
+  is over its bound. Text frames are counted in UTF-8 bytes, not UTF-16
+  units (budgets, the attempt-id limit and the 16 MiB frame check).
+- **storm-relay: a lane per client toward the origin.** Every client's
+  request frames shared one blocking 64-frame queue on the server trunk, so
+  one upload to a slow origin held every other client's `STREAM_OPEN` and
+  heads behind up to 64 frames. Each client trunk now queues into its own
+  8-frame lane and the writer takes the lanes round-robin (`SelectAll`).
+  Measured: 70 upload frames reached a non-reading origin ahead of another
+  client's open before, a handful (socket buffers) after.
+- **Not done here:** the edge check of a 16 MiB message through Cloudflare
+  (108c's unverified item) needs the redeployed Worker, so it runs with the
+  pre-release device test. The per-trunk 32 MiB bound already meets §5.5
+  rule 1, so no separate per-stream budget was added.
+
+**116e. Liveness: relays reap silent client trunks.** *(2026-10-15; SG-16,
+SG-17, SG-20, SG-21; spec §4.2, §5 client heartbeat)*
+- **storm-relay.** A client trunk's read had no deadline, so a client that
+  vanished without a FIN held its streams, and the origin's work for them,
+  for as long as the socket lasted. The read now times out at the heartbeat
+  deadline (45 s), and the existing teardown ends each stream at the origin
+  with `CLOSE`.
+- **Worker.** Clients had no last-seen time at all. A ready client now keeps
+  one (written at most once a second, as servers do, and counting `PING`s
+  the runtime answered without waking the object); the alarm reaps one past
+  the deadline through `dropClient`, which closes its streams at the origin.
+- **The advertised interval is derived.** `REGISTERED.heartbeat_interval_secs`
+  was a constant 15 whatever the configured deadline; both relays now send a
+  third of the deadline in whole seconds, at least 1, so they cannot
+  disagree (the spec's §4.2 says so). That made the audit's "refuse
+  inconsistent config" moot.
+- **Tests.** Worker: `reaps a silent client trunk and closes its streams at
+  the origin`; storm-relay: `a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin`,
+  `the_advertised_interval_is_a_third_of_the_deadline`; conformance gains the
+  same reaping check, and its client harness now heartbeats after `READY` as
+  a real client does (three checks had held a client silent past the
+  fixture's 2 s deadline). The interval check follows the derived rule.
+  Conformance: storm-relay 66/0, Worker 60/0/6 + 5/0.
+- **Left to 116l:** `server_trunk_death_ends_every_client_trunk` as a
+  conformance case (`every_open_stream_is_told_trunk_lost` covers streams).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

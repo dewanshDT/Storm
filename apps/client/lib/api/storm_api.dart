@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import 'auth_models.dart';
 import 'models.dart';
+import 'resumable_get.dart';
 
 /// REST client for `storm-server`.
 ///
@@ -448,14 +449,17 @@ class StormApi {
   }
 
   Future<List<int>> attachment(String vaultId, String path) async {
-    final r = await _client.get(
-      _uri(_v(vaultId, '/attachments/${_path(path)}')),
-      headers: {'Authorization': 'Bearer $token'},
-    );
-    if (r.statusCode < 200 || r.statusCode >= 300) {
-      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    try {
+      return await resumableGet(
+        _client,
+        _uri(_v(vaultId, '/attachments/${_path(path)}')),
+        {'Authorization': 'Bearer $token'},
+      );
+    } on http.ClientException catch (e) {
+      final status = RegExp(r'^HTTP (\d+)$').firstMatch(e.message);
+      if (status == null) rethrow;
+      throw StormApiException(int.parse(status.group(1)!), e.message);
     }
-    return r.bodyBytes;
   }
 
   /// Where an attachment lives, for [StormImageProvider], which sends the
