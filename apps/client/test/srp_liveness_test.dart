@@ -149,6 +149,7 @@ void main() {
       serverId: 'srv_test',
       relays: [RelayAdvert(url: relay.origin, publicAddress: relay.connectUrl)],
       publicRelayDelay: const Duration(milliseconds: 200),
+      raceTimeout: const Duration(milliseconds: 200),
     );
 
     test('the connection reports serverOffline, not offline', () async {

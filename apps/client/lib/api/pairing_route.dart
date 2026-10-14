@@ -237,6 +237,7 @@ Future<StormConnection> _openProven({
     // One deliberate attempt, often over a phone's mobile data: a relay's
     // TLS, handshake and first exchange get longer than a reconnect.
     publicRelayDelay: raceTimeout,
+    raceTimeout: deadline,
   );
 
   final ServerProof proof;

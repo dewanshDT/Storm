@@ -90,6 +90,18 @@ class FakeRelay {
   final _streaming = <int, StreamSubscription<List<int>>>{};
   int _nextStream = 1;
 
+  /// How long every frame the relay sends takes to arrive, in order: a phone
+  /// on mobile data, where a probe is several round trips.
+  Duration latency = Duration.zero;
+  Future<void> _wire = Future.value();
+
+  /// Request paths the relay answers with a stream-scoped `ERROR` of the
+  /// given code instead of forwarding, as it does for a `server_timeout`.
+  final streamErrors = <String, String>{};
+
+  /// Trunks the client has opened (`HELLO`s seen).
+  int hellos = 0;
+
   int get port => _server!.port;
 
   /// The `ws://` connect URL the client dials.
@@ -145,6 +157,7 @@ class FakeRelay {
 
     switch (frame.type) {
       case 'HELLO':
+        hellos++;
         onHandshake?.call(Map<String, dynamic>.from(frame.body));
         final refusal = helloError;
         if (refusal != null) {
@@ -210,6 +223,13 @@ class FakeRelay {
   Future<void> _serve(int streamId) async {
     final state = _streams.remove(streamId);
     if (state == null) return;
+    final scripted = streamErrors[(state.path ?? '/').split('?').first];
+    if (scripted != null) {
+      _send(
+        SrpControl.encode('ERROR', {'code': scripted, 'stream_id': streamId}),
+      );
+      return;
+    }
     final handler = this.handler;
     if (handler == null) {
       // Nothing scripted: refuse the open like a closed channel.
@@ -260,8 +280,34 @@ class FakeRelay {
   }
 
   void _send(Object text) {
-    _socket?.add(text);
+    final socket = _socket;
+    if (latency == Duration.zero) {
+      _add(socket, text);
+      return;
+    }
+    final due = DateTime.now().add(latency);
+    _wire = _wire.then((_) async {
+      final wait = due.difference(DateTime.now());
+      if (wait > Duration.zero) await Future<void>.delayed(wait);
+      _add(socket, text);
+    });
   }
+
+  /// A frame for a socket the client already closed goes nowhere, as on a
+  /// real relay.
+  void _add(WebSocket? socket, Object frame) {
+    try {
+      socket?.add(frame);
+    } on StateError {
+      // Closed.
+    }
+  }
+
+  /// Whether the last trunk's socket has closed.
+  bool get socketClosed => _socket?.closeCode != null;
+
+  /// Drops the client's trunk without a `CLOSE`, as a carrier does.
+  Future<void> dropTrunk() async => _socket?.close();
 
   void sendRaw(List<int> bytes) {
     _socket?.add(bytes);

@@ -6355,6 +6355,150 @@ direct or relayed.** *(2026-10-14; the follow-up from 111's audit)*
   connection on each request, which is what lets a feature recover with no
   vault open), or web gains relays it would use instead of its origin.
 
+**113. The session connection survives mobile data: the race waits for a
+slow relay, and nothing resets a working trunk.** *(2026-10-14; found on a
+Pixel on mobile data through the hosted relay, with the APK from `6f5e6d5`)*
+- **The bug.** Paired and signed in through `wss://storm-relay.dewansh.space`
+  (111's route), Settings showed the relay and a verified identity, yet notes
+  would not create, sync did nothing and the app said the server was offline.
+  The Worker logged a new client trunk every few seconds, each closing the
+  last, and no error. On Wi-Fi the same relay path worked.
+- **Reproduced from here** with the app's own `StormConnection`, `SyncEngine`
+  and `ConnectionClient` against the deployed Worker and the test server, the
+  saved address a closed port, and each trunk frame delayed by a 500 ms ±
+  300 ms link (three round trips to open). The connection log (below) showed:
+  ```
+   0.04s probe direct failed in 10 ms: _ClientSocketException
+   2.04s race window closed after 2000 ms
+   2.04s status connecting -> offline
+   2.04s reconnect in 1s: server unreachable
+   2.24s trunk ready after 2203 ms
+   3.05s reset: server unreachable
+   3.05s trunk lost: closed after 3012 ms, 1 streams open
+   3.07s create: Cannot reach the server — new notes need a connection.
+   ...
+  11.21s probe selfHosted ok in 4150 ms      (after the race had given up)
+  13.06s reset: server unreachable           (and the trunk is closed)
+  ```
+  The same run on a desk link (no injected delay) connects in about 1.1 s,
+  which is why `make test-live` and `wrangler dev` passed.
+- **Root cause: the race gave the relay 2 s.** `_race` timed out every round
+  at `publicRelayDelay`, including the first round when there is no public
+  relay. A relayed probe is a TLS dial, `HELLO`/`READY`, a stream open and
+  `GET /v1/server`: about seven phone round trips, 4.2 s on the emulated link.
+  So every race reported `offline` while the relay was about to answer. The
+  engine then reset (closing that trunk, the Worker's `canceled`), backed off
+  1, 2, 4, 8, 16 s and raced a cold trunk again, which matches the Worker's
+  cadence. Sign-in worked because 111's route uses a 10 s race; the session
+  connection kept 2 s.
+- **What else the reproduction and the client audit confirmed**, each fixed
+  here:
+  - **The engine sent to the saved address mid-race** (audit G5).
+    `SyncEngine.api` was `connection.api`, which after a reset or a failed
+    race is the direct candidate: a create during the re-race was refused and
+    marked the engine offline. With a bearer token, on a foreign network.
+  - **A feed ending reset the connection** (G2), closing a live trunk and
+    every save in flight on it.
+  - **A dead trunk stayed `connected`** (G4): nothing listened to
+    `onTrunkLost`, so every request went to the closed trunk until the engine
+    happened to reset, and with no vault open, never.
+  - **Offline was a latch** (G3): one failed request set it, saves then
+    queued without trying, and only a feed event or a reconnect cleared it.
+  - **One trunk could dial twice** (G6): `SrpTrunk.connect()` was not single
+    flight, so a second caller mid-handshake sent a second `HELLO` and
+    orphaned the first socket.
+  - **Every settings save rebuilt the connection** (G7), and the engine with
+    it, and raced a new trunk; the old trunks were never closed
+    (`connection.api.dispose` closed nothing on a relayed client).
+  - **"Server offline" was sticky** (G8): a stream-scoped `server_timeout` on
+    a working connection set the flag, and every later failure, the 2 s cap
+    included, read "Server offline, relay reachable".
+  - Not confirmed: several components each resetting (only the engine and the
+    pairing route call `reset()`), and the `relay_silent` liveness. A link that
+    goes silent without closing is detected at 45–60 s and costs one re-race,
+    then the connection is stable (the live run below).
+- **The fix, as rules** (for the spec PR to lift into `srp-v1.md` §8):
+  1. **A race has one deadline, `raceTimeout` (15 s), not a round timer.** The
+     first round (direct and self-hosted relays) runs until one answers, all
+     fail, or the deadline. `publicRelayDelay` (2 s) only says when a public
+     relay may *join*; the first round keeps running after it, so a slow
+     self-hosted relay can still win. A refused candidate fails at once, so
+     the deadline only matters for a LAN address that never answers. The
+     route keeps its 10 s window and passes its 30 s deadline as `raceTimeout`.
+  2. **Only the connection decides a transport is lost.** The active trunk
+     closing resets the connection (`active trunk lost: <reason>`), so status
+     leaves `connected` and the next request re-races. A feed ending is the
+     feed's business: if the trunk is still up, the engine re-proves on it
+     (no reset, no new trunk) and reopens the feed.
+  3. **Session requests wait for proof.** `StormConnection.sessionApi` is the
+     `ConnectionClient`-backed API on the saved address (112), and the engine
+     uses it, so a request during a race joins it and goes out on the winner.
+     `apiProvider` is the same object. `move` now refuses an unproven server
+     as `save` does.
+  4. **Offline is re-checked, not latched.** A request failure that marks the
+     engine offline schedules the engine's reconnect (re-prove, then sync),
+     and the connection becoming `connected` from any caller syncs if
+     anything is queued or the engine is offline. The backoff resets when a
+     request succeeds.
+  5. **One dial per trunk.** A caller arriving mid-handshake joins it.
+  6. **The connection lives as long as what it is built from.**
+     `connectionProvider` watches only the address, token and pinned
+     identity; the relay set is read at build (the connection keeps it
+     current itself). A replaced connection is disposed, which closes its
+     trunks.
+  7. **"Server offline" is per race.** Each race clears the verdict, and a
+     relay's server-side code counts only while the connection is not
+     `connected`.
+- **Connection log** (`lib/api/connection_log.dart`): the release APK logs
+  nothing about connections, so there was no on-device evidence. A bounded
+  in-memory log (400 lines, lost on exit) records races and candidates, each
+  probe's outcome and time, trunk dial/ready/loss with the reason, resets with
+  their cause, identity checks and status changes, with timestamps. It holds
+  scheme, host and port only: never a token, key, ticket, path or note
+  content (a test asserts it). Settings › Connection › Diagnostics ›
+  "Connection log" copies it.
+- **Settings copy (audit G9).** The Relays note said "A relay can't read your
+  notes", and the add-relay help "It carries traffic and cannot read it".
+  Both false: SRP traffic is not end-to-end encrypted, so a relay's operator
+  can read notes and credentials (Relay Security §7.4). Now: "Another way to
+  reach your server, tried alongside its address. Until Storm has end-to-end
+  encryption, whoever runs a relay can read what passes through it, notes and
+  sign-in included. Run your own relay or use one you trust." The help says
+  whoever runs it can read the traffic it carries.
+- **Tests.** `test/relayed_reconnect_test.dart`, over the fake relay (which
+  gains `latency`, `hellos`, `streamErrors` and `dropTrunk`) with the saved
+  address refused, through the app's providers:
+  a relay 2.4 s away connects on the first race and the vaults load (one
+  `HELLO`); the engine connects through it and creates a note on one trunk; a
+  create during a re-race waits for it; the feed ending re-opens on the same
+  trunk without failing a save in flight; a dropped trunk ends the connection
+  and the next request re-races; one `server_timeout` does not latch the
+  engine offline; that timeout is not remembered as "server offline"; an
+  unrelated settings save keeps the connection and trunk; a replaced
+  connection closes its trunk; two callers mid-handshake send one `HELLO`; and
+  the log names hops and reasons and no credential. `storm_connection_test`
+  adds a self-hosted relay slower than the public delay winning alone, and
+  after the public relay joined, and a race nobody answers ending at
+  `raceTimeout`. **All 13 fail on the old code** (run against
+  `origin/staging` with the new test files and a test-only shim for the new
+  getters). `settings_pages_test` pins the relays wording and the copied log.
+  `srp_liveness_test`'s "verdict landing after the race gave up" sets a
+  200 ms `raceTimeout`, since the race no longer gives up at 2 s.
+- **Live, against the deployed Worker and the test server** (a temporary
+  test, not committed, with the emulated link and the first trunk going silent
+  at 40 s): connected at 6.7 s (probe 4.2 s, challenge 2.4 s), vaults, create
+  and sync succeeded; at 92 s `trunk lost: relay_silent`, one reset and one
+  re-race, connected again at 99.8 s; a create at 167 s succeeded; two trunks
+  in 167 s.
+- **Results.** `make check` green: client 1088 tests, 1 skipped
+  (was 1072). `make test-live PORT=19310 AUTH_PORT=19311 RELAY_PORT=19312`
+  exits 0: server 81, mcp 86, agent 93, gateway 95, auth 72, mcp-connect
+  89 + 89, mcp-connect live 39, client integration 33, 1 skipped.
+- *Revisit if:* the spec PR's client state machine (§8) lands (these rules
+  move there), relay liveness needs to be faster than 45 s on mobile, or a
+  connection log needs to survive a restart (it would then need a retention
+  rule and the same no-credential test).
+
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was
 established with a test first, then fixed where wrong.

@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../api/connection_log.dart';
 import '../../api/storm_connection.dart' show CandidateTier;
 import '../../state/app_state.dart';
+import '../clipboard_copy.dart';
 import '../controls.dart';
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
@@ -82,8 +84,11 @@ class ConnectionPage extends ConsumerWidget {
         ),
         GroupLabel('Relays', top: t.sp * 3),
         const SettingsNote(
-          "Used when this device can't reach the server directly. A relay "
-          "can't read your notes.",
+          'Another way to reach your server, tried alongside its address. '
+          'Until Storm has end-to-end encryption, whoever runs a relay can '
+          'read what passes through it, notes and sign-in included. Run your '
+          'own relay or use one you trust.',
+          key: Key('relays-note'),
         ),
         ...config.when(
           loading: () => [const SettingsMuted('Loading…')],
@@ -110,6 +115,19 @@ class ConnectionPage extends ConsumerWidget {
               ),
           ],
         ),
+        GroupLabel('Diagnostics', top: t.sp * 3),
+        SettingsRow(
+          key: const Key('connection-log'),
+          label: 'Connection log',
+          sub:
+              'Races, relays, resets and status changes since the app '
+              'started. No notes, keys or tokens.',
+          trailing: TextAction(
+            key: const Key('copy-connection-log'),
+            label: 'Copy',
+            onTap: () => _copyLog(context),
+          ),
+        ),
         Padding(
           padding: EdgeInsets.only(top: t.sp * 1.5),
           child: Container(height: t.bw, color: t.border),
@@ -129,6 +147,18 @@ class ConnectionPage extends ConsumerWidget {
     );
   }
 
+  Future<void> _copyLog(BuildContext context) async {
+    final log = ConnectionLog.instance;
+    final copied = await copyToClipboard(log.toString());
+    if (!context.mounted) return;
+    settingsToast(
+      context,
+      copied
+          ? 'Copied ${log.entries.length} lines'
+          : "Couldn't copy the connection log",
+    );
+  }
+
   Future<void> _add(
     BuildContext context,
     WidgetRef ref,
@@ -138,7 +168,9 @@ class ConnectionPage extends ConsumerWidget {
       context,
       title: 'Add relay',
       hint: 'wss://relay.example.net',
-      help: 'The relay’s address. It carries traffic and cannot read it.',
+      help:
+          'The relay’s address (wss://). Whoever runs it can read the '
+          'traffic it carries.',
     );
     if (raw == null || raw.trim().isEmpty || !context.mounted) return;
     final url = raw.trim().contains('://') ? raw.trim() : 'wss://${raw.trim()}';

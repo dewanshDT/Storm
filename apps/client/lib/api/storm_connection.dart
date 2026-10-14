@@ -13,9 +13,12 @@ library;
 import 'dart:async';
 
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'auth_api.dart';
 import 'auth_models.dart';
+import 'connection_client.dart';
+import 'connection_log.dart';
 import 'relay/srp_http_client.dart';
 import 'relay/srp_trunk.dart';
 import 'server_verifier.dart';
@@ -103,9 +106,13 @@ class StormConnection {
     this.buildApi,
     this.buildAuthApi,
     this.buildVerifier,
+    this.relayConnector,
     this.onRelaysChanged,
     this.publicRelayDelay = const Duration(seconds: 2),
-  }) : _relays = List.of(relays) {
+    this.raceTimeout = const Duration(seconds: 15),
+    ConnectionLog? log,
+  }) : _relays = List.of(relays),
+       _log = log ?? ConnectionLog.instance {
     _active = _candidates().first;
   }
 
@@ -128,8 +135,11 @@ class StormConnection {
        buildApi = null,
        buildAuthApi = null,
        buildVerifier = null,
+       relayConnector = null,
        publicRelayDelay = Duration.zero,
+       raceTimeout = Duration.zero,
        onRelaysChanged = null,
+       _log = ConnectionLog.instance,
        _pinnedApi = api,
        _pinnedAuthApi = authApi,
        _pinnedVerifier = verifier {
@@ -141,14 +151,28 @@ class StormConnection {
 
   final String token;
 
+  final ConnectionLog _log;
+
   /// Pinned at pairing, and what the identity challenge verifies against.
   /// Empty on an unpaired install, which is the one case with nothing to prove.
   final String serverId;
   final String publicKeyB64;
 
-  /// How long the direct + self-hosted round gets before the public relay is
-  /// allowed to run at all.
+  /// How long the direct + self-hosted round runs alone before the public
+  /// relay may join it. It only gates the public relay: the first round keeps
+  /// running past it (decision 113).
   final Duration publicRelayDelay;
+
+  /// How long a race waits for any candidate to answer before it reports the
+  /// server unreachable.
+  ///
+  /// A relayed probe is a TLS dial, the `HELLO`, a stream open and a request,
+  /// about seven round trips: 1 s from a desk, 3–5 s over mobile data. Until
+  /// decision 113 the race gave up at [publicRelayDelay] (2 s), so a phone
+  /// off Wi-Fi never connected and re-raced on every backoff tick. It is a
+  /// ceiling, not a wait: a refused candidate fails at once, and the first to
+  /// answer wins. It bounds a direct dial to a LAN address that never answers.
+  final Duration raceTimeout;
 
   /// The stored server address. Plain configuration, never discovery.
   final String localAddress;
@@ -169,6 +193,9 @@ class StormConnection {
   /// survives a restart — the server is the only writer, so this is a
   /// one-way mirror, not a merge.
   final void Function(List<RelayAdvert> relays)? onRelaysChanged;
+
+  /// Test seam: how a relay's socket is opened. Null is the real one.
+  final WebSocketChannel Function(Uri)? relayConnector;
 
   /// Mutable, unlike everything above: this is state the server tells us, not
   /// configuration we were given.
@@ -208,11 +235,19 @@ class StormConnection {
 
   void _setStatus(ConnectionStatus value) {
     if (_status == value) return;
+    _log.add('status ${_status.name} -> ${value.name}');
     _status = value;
     if (!_statusChanges.isClosed) _statusChanges.add(value);
   }
 
-  void _onServerUnreachable(String _) {
+  void _onServerUnreachable(String code) {
+    // A verdict about one request on a working connection is that request's
+    // failure, not the server's status (decision 113).
+    if (_status == ConnectionStatus.connected ||
+        _status == ConnectionStatus.unproven) {
+      return;
+    }
+    _log.add('relay says server not there: $code');
     _serverBehindRelay = true;
     if (_status == ConnectionStatus.offline) {
       _setStatus(ConnectionStatus.serverOffline);
@@ -239,8 +274,8 @@ class StormConnection {
   /// The API client for whichever candidate is active.
   ///
   /// A getter rather than a field so callers follow the winning transport
-  /// without being rebuilt. `SyncEngine` reads `api.x()` in a dozen places and
-  /// none of them had to change.
+  /// without being rebuilt. Session calls use [sessionApi], which waits for a
+  /// proven transport; this one is the transport itself.
   StormApi get api {
     final pinned = _pinnedApi;
     if (pinned != null) return pinned;
@@ -250,6 +285,29 @@ class StormConnection {
   }
 
   AuthApi get authApi => _pinnedAuthApi ?? _authApiFor(_active);
+
+  /// The API for session calls: addressed to the saved address, and each
+  /// request sent on whatever transport is proven when it goes out, joining
+  /// the race in flight if there is one ([ConnectionClient], decision 112).
+  ///
+  /// [api] follows the active candidate, which between a reset and the end
+  /// of the re-race is the saved address. A request sent then from off the
+  /// LAN was refused, and the engine took that as offline (decision 113).
+  StormApi get sessionApi =>
+      _pinnedApi ??
+      (_sessionApi ??= StormApi(
+        baseUrl: localAddress,
+        token: token,
+        client: ConnectionClient(() => this),
+      ));
+  StormApi? _sessionApi;
+
+  /// Whether the active candidate is relayed and its trunk is still up.
+  bool get hasLiveTrunk {
+    final url = _activeRelayUrl;
+    final trunk = url == null ? null : _trunks[url];
+    return trunk != null && !trunk.isClosed;
+  }
 
   /// Where the change feed lives on the active candidate.
   ///
@@ -311,8 +369,25 @@ class StormConnection {
     var trunk = _trunks[url];
     // A dead trunk is replaced, never reused: it refuses every request.
     if (trunk == null || trunk.isClosed) {
-      trunk = SrpTrunk(url: Uri.parse(url), serverId: serverId);
+      final connector = relayConnector;
+      trunk = connector == null
+          ? SrpTrunk(url: Uri.parse(url), serverId: serverId, log: _log)
+          : SrpTrunk(
+              url: Uri.parse(url),
+              serverId: serverId,
+              log: _log,
+              connector: connector,
+            );
       trunk.onServerUnreachable.listen(_onServerUnreachable);
+      final born = trunk;
+      // The winner's trunk dying ends the connection: without this the
+      // status stayed `connected` and every request went to a dead trunk
+      // until something reset.
+      born.onTrunkLost.listen((reason) {
+        if (identical(_trunks[url], born) && url == _activeRelayUrl) {
+          reset('active trunk lost: $reason');
+        }
+      });
       _trunks[url] = trunk;
     }
     return SrpHttpClient(trunk);
@@ -397,6 +472,8 @@ class StormConnection {
   int _epoch = 0;
 
   Future<ServerProof> _connect(int epoch) async {
+    // Each race reports what *it* found; an earlier verdict is stale.
+    _serverBehindRelay = false;
     _setStatus(ConnectionStatus.connecting);
 
     // A pinned transport has nothing to race and nothing to refresh — probing
@@ -414,6 +491,9 @@ class StormConnection {
     }
 
     final candidates = _candidates();
+    _log.add(
+      'race start: ${candidates.map((c) => '${c.tier.name} ${logHost(c.relayUrl ?? c.baseUrl)}').join(', ')}',
+    );
 
     // Round one: direct and every self-hosted relay together. The public relay
     // is excluded here even when it would answer first — see below.
@@ -424,25 +504,22 @@ class StormConnection {
         .where((c) => c.tier == CandidateTier.public)
         .toList();
 
-    var winner = await _race(firstRound);
+    // **The public relay runs only if nothing the operator controls answered
+    // in time.** Not a latency rule: without end-to-end encryption, whichever
+    // path carries traffic reads note content. Self-hosted means the operator
+    // sees it, public means Storm does. Racing all three from the start would
+    // silently prefer Storm's infrastructure over the operator's own — a
+    // privacy regression wearing a latency optimisation.
+    final winner = await _race(firstRound, publicRound);
     if (epoch != _epoch) return ServerProof.unreachable;
 
-    // **The public relay runs only if nothing the operator controls answered.**
-    // Not a latency rule: without end-to-end encryption, whichever path carries
-    // traffic reads note content. Self-hosted means the operator sees it,
-    // public means Storm does. Racing all three and taking the first answer
-    // would silently prefer Storm's infrastructure over the operator's own —
-    // a privacy regression wearing a latency optimisation.
-    if (winner == null && publicRound.isNotEmpty) {
-      winner = await _race(publicRound);
-      if (epoch != _epoch) return ServerProof.unreachable;
-    }
-
     if (winner == null) {
+      _log.add('race: no candidate answered');
       _setStatus(_unreachable);
       return ServerProof.unreachable;
     }
 
+    _log.add('race won by ${winner.candidate.tier.name}');
     _adopt(winner.candidate);
 
     // The race dialled a trunk for every relayed candidate; only the winner's
@@ -460,6 +537,7 @@ class StormConnection {
     // **Reachability is not trust.** The race chose a transport; only the
     // challenge decides whether we are connected to the server.
     final proof = await _verifierFor(authApi).check();
+    _log.add('identity check: ${proof.name}');
     if (epoch != _epoch) return ServerProof.unreachable;
     _setStatus(switch (proof) {
       ServerProof.verified => ConnectionStatus.connected,
@@ -474,7 +552,8 @@ class StormConnection {
   /// A dropped connection re-races rather than resuming on whatever won last
   /// time — there is no mid-session transport migration, and reusing a stale
   /// winner is how you get one by accident.
-  void reset() {
+  void reset([String reason = '']) {
+    _log.add('reset${reason.isEmpty ? '' : ': $reason'}');
     _epoch++;
     _connecting = null;
     _setStatus(ConnectionStatus.idle);
@@ -487,6 +566,12 @@ class StormConnection {
     _trunks.clear();
     _activeRelayUrl = null;
     _active = _candidates().first;
+  }
+
+  /// Closes every trunk for good. The owner is done with this connection.
+  void dispose() {
+    reset('disposed');
+    _statusChanges.close();
   }
 
   void _adopt(ConnectionCandidate c) {
@@ -502,35 +587,85 @@ class StormConnection {
   /// That endpoint is the right probe for three reasons: it needs no
   /// credential, it is the one a stranded client can always reach, and its
   /// answer *is* the relay-set refresh.
-  Future<_Probe?> _race(List<ConnectionCandidate> candidates) async {
-    if (candidates.isEmpty) return null;
-    if (candidates.length == 1) {
+  ///
+  /// [public] joins after [publicRelayDelay], or as soon as every one of
+  /// [first] has failed. [first] keeps running either way, so a slow
+  /// self-hosted relay can still win; nothing is abandoned until
+  /// [raceTimeout].
+  Future<_Probe?> _race(
+    List<ConnectionCandidate> first,
+    List<ConnectionCandidate> public,
+  ) async {
+    if (first.length == 1 && public.isEmpty) {
       // Nothing to race. The probe is best-effort: a server predating the
       // endpoint must still connect, and the challenge remains the real
       // reachability signal.
-      final c = candidates.single;
+      final c = first.single;
+      final watch = Stopwatch()..start();
       try {
         final info = await _authApiFor(c).serverInfo();
+        _log.add('probe ${c.tier.name} ok in ${watch.elapsedMilliseconds} ms');
         return _Probe(c, info);
-      } catch (_) {
+      } catch (e) {
+        _log.add(
+          'probe ${c.tier.name} failed in ${watch.elapsedMilliseconds} ms: ${logError(e)}',
+        );
         return _Probe(c, null);
       }
     }
 
     final completer = Completer<_Probe?>();
-    var pending = candidates.length;
-    for (final c in candidates) {
+    final watch = Stopwatch()..start();
+    var pending = 0;
+    var publicJoined = public.isEmpty;
+    Timer? gate;
+    late final void Function() joinPublic;
+
+    void probe(ConnectionCandidate c) {
+      pending++;
       unawaited(() async {
         try {
           final info = await _authApiFor(c).serverInfo();
+          _log.add(
+            'probe ${c.tier.name} ok in ${watch.elapsedMilliseconds} ms',
+          );
           if (!completer.isCompleted) completer.complete(_Probe(c, info));
-        } catch (_) {
+        } catch (e) {
+          _log.add(
+            'probe ${c.tier.name} failed in ${watch.elapsedMilliseconds} ms: ${logError(e)}',
+          );
           pending--;
-          if (pending == 0 && !completer.isCompleted) completer.complete(null);
+          if (pending > 0 || completer.isCompleted) return;
+          if (publicJoined) {
+            completer.complete(null);
+          } else {
+            joinPublic();
+          }
         }
       }());
     }
-    return completer.future.timeout(publicRelayDelay, onTimeout: () => null);
+
+    joinPublic = () {
+      if (publicJoined || completer.isCompleted) return;
+      publicJoined = true;
+      gate?.cancel();
+      _log.add('public relay joins after ${watch.elapsedMilliseconds} ms');
+      public.forEach(probe);
+    };
+
+    first.forEach(probe);
+    if (!publicJoined) gate = Timer(publicRelayDelay, joinPublic);
+    try {
+      return await completer.future.timeout(
+        raceTimeout,
+        onTimeout: () {
+          _log.add('race gave up after ${raceTimeout.inMilliseconds} ms');
+          return null;
+        },
+      );
+    } finally {
+      gate?.cancel();
+    }
   }
 }
 
