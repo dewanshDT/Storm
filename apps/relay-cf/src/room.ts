@@ -742,6 +742,12 @@ export class RelayRoom extends DurableObject<Env> {
     const server = this.entries.get(entry.att.tid ?? "") as Entry<ServerAtt> | undefined;
     if (!server) throw new Error("client bound to a missing trunk");
     if (!this.alive(server)) return;
+    // §4.2: no new streams on a draining trunk. The client is told the trunk
+    // was superseded and closed, and re-dials onto the replacement at once.
+    if (server.att.sup !== undefined) {
+      log("stream_refused", { client_trunk_id: entry.att.ctk, reason: "draining trunk" });
+      return this.dropClient(entry, "trunk_superseded");
+    }
     const config = this.config;
     const table = this.table(server.att.tid);
 

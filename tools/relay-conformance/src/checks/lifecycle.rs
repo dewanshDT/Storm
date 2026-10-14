@@ -25,6 +25,11 @@ pub fn checks() -> Vec<Check> {
         check!("§4.2", a_silent_server_is_dead_at_the_deadline),
         check!("§4.2", deregister_frees_the_server_id_at_once),
         check!("§4.2", a_superseded_trunk_drains_then_ends_trunk_superseded),
+        check!(
+            "§4.2",
+            opens_on_a_draining_trunk_are_refused_trunk_superseded
+        ),
+        check!("§4.2", a_drain_ends_at_once_when_the_old_socket_closes),
         check!("§4.2", an_unfinished_registration_supersedes_nothing),
         check!(
             "§4.2",
@@ -203,6 +208,52 @@ async fn deregister_frees_the_server_id_at_once(ctx: &Ctx) -> Result<()> {
     let mut client = ctx.client(&ctx.relay, &pair.identity.server_id).await?;
     let stream_id = open_stream(&mut client, json!("restarted")).await?;
     ensure!(accept_stream(&mut server).await? == stream_id);
+    Ok(())
+}
+
+/// §4.2 (116f): a draining trunk takes no new streams. The open is refused
+/// with a trunk-scoped `trunk_superseded` and that client trunk closes, so the
+/// client re-dials onto the replacement; the old origin never hears of it.
+async fn opens_on_a_draining_trunk_are_refused_trunk_superseded(ctx: &Ctx) -> Result<()> {
+    let identity = ctx.identity();
+    let mut old = ctx.register(&ctx.relay, &identity).await?;
+    let mut alice = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let _new = ctx.register(&ctx.relay, &identity).await?;
+
+    alice
+        .send_json(json!({ "v": 1, "type": "OPEN_STREAM", "attempt_id": "late" }))
+        .await?;
+    let error = alice.expect_error("trunk_superseded", STEP).await?;
+    ensure!(
+        error.get("stream_id").is_none() && error.get("attempt_id").is_none(),
+        "the refusal is trunk-scoped: {error}"
+    );
+    alice.expect_closed(STEP).await?;
+    // The draining origin never hears of the refused open.
+    old.expect_silence(QUIET).await?;
+    Ok(())
+}
+
+/// §4.2 (116f): a drain lasts only while the old trunk does. If its socket
+/// closes, its streams end at once with `trunk_lost`, not at the window's end.
+async fn a_drain_ends_at_once_when_the_old_socket_closes(ctx: &Ctx) -> Result<()> {
+    let identity = ctx.identity();
+    let mut old = ctx.register(&ctx.relay, &identity).await?;
+    let mut alice = ctx.client(&ctx.relay, &identity.server_id).await?;
+    let stream_id = open_stream(&mut alice, json!("open")).await?;
+    ensure!(accept_stream(&mut old).await? == stream_id);
+    let _new = ctx.register(&ctx.relay, &identity).await?;
+
+    let closed_at = Instant::now();
+    drop(old);
+    let error = alice.expect_error("trunk_lost", STEP).await?;
+    wire::check_on_stream(&error, stream_id)?;
+    ensure!(
+        closed_at.elapsed() < ctx.knobs.supersession_drain,
+        "trunk_lost after {:?}, not at once; the drain is {:?}",
+        closed_at.elapsed(),
+        ctx.knobs.supersession_drain
+    );
     Ok(())
 }
 
