@@ -21,7 +21,7 @@ import {
   error,
   errorOnAttempt,
   errorOnStream,
-  HEARTBEAT_INTERVAL_SECS,
+  heartbeatIntervalSecs,
   isRequestHead,
   parseBodyHeader,
   parseFrame,
@@ -97,6 +97,8 @@ interface ClientAtt {
   // ?pubkey= on the URL, and the key the HELLO named (§5)
   qk?: string;
   hk?: string;
+  // newest frame once ready, written at most once a second (§5 client heartbeat)
+  seen?: number;
   f: Flow;
 }
 
@@ -105,7 +107,7 @@ type Att = ServerAtt | ClientAtt;
 interface Entry<A extends Att = Att> {
   ws: WebSocket;
   att: A;
-  // A server's newest frame; att.seen is its copy written at most once a second.
+  // A trunk's newest frame; att.seen is its copy written at most once a second.
   seen?: number;
 }
 
@@ -521,7 +523,7 @@ export class RelayRoom extends DurableObject<Env> {
     const registered = control("REGISTERED", {
       trunk_id: att.tid,
       public_address: `${att.base}/connect/${att.sid}`,
-      heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+      heartbeat_interval_secs: heartbeatIntervalSecs(this.config.heartbeatDeadlineMs),
     });
     // A server gone before REGISTERED reached it supersedes nothing.
     if (!this.send(entry, registered)) return;
@@ -693,6 +695,14 @@ export class RelayRoom extends DurableObject<Env> {
 
   private onClient(entry: Entry<ClientAtt>, message: string | ArrayBuffer): void {
     const att = entry.att;
+    if (att.ph === 2) {
+      const now = Date.now();
+      entry.seen = now;
+      if (now - (att.seen ?? 0) >= SEEN_WRITE_MS) {
+        att.seen = now;
+        this.persist(entry);
+      }
+    }
     const frame = typeof message === "string" ? parseFrame(message) : null;
     if (frame?.type === "PING") {
       if (att.ph === 2) this.sendCounted(entry, PONG, bytesOf(PONG), this.config.maxClientBufferBytes);
@@ -763,6 +773,7 @@ export class RelayRoom extends DurableObject<Env> {
   private ready(entry: Entry<ClientAtt>, tid: string): void {
     entry.att.ph = 2;
     entry.att.tid = tid;
+    entry.att.seen = Date.now();
     delete entry.att.hw;
     this.persist(entry);
     const json = control("READY", { client_trunk_id: entry.att.ctk });
@@ -777,6 +788,12 @@ export class RelayRoom extends DurableObject<Env> {
     const server = this.entries.get(entry.att.tid ?? "") as Entry<ServerAtt> | undefined;
     if (!server) throw new Error("client bound to a missing trunk");
     if (!this.alive(server)) return;
+    // §4.2: no new streams on a draining trunk. The client is told the trunk
+    // was superseded and closed, and re-dials onto the replacement at once.
+    if (server.att.sup !== undefined) {
+      log("stream_refused", { client_trunk_id: entry.att.ctk, reason: "draining trunk" });
+      return this.dropClient(entry, "trunk_superseded");
+    }
     const config = this.config;
     const table = this.table(server.att.tid);
 
@@ -1002,6 +1019,12 @@ export class RelayRoom extends DurableObject<Env> {
       } else {
         const client = entry as Entry<ClientAtt>;
         if (client.att.ph === 0 && client.att.hs <= now) this.dropClient(client, null);
+        // §5: a client heard from for none of the deadline is gone, and its
+        // streams end at the origin as if it had closed.
+        else if (client.att.ph === 2 && this.lastSeen(client) + config.heartbeatDeadlineMs <= now) {
+          log("client_heartbeat_expired", { client_trunk_id: client.att.ctk });
+          this.dropClient(client, null);
+        }
         else if (client.att.ph === 1 && (client.att.hw ?? 0) <= now) this.dropClient(client, "server_unreachable");
       }
     }
@@ -1027,10 +1050,10 @@ export class RelayRoom extends DurableObject<Env> {
 
   // Any frame keeps a trunk alive, including the PINGs the runtime answered
   // without waking this object.
-  private lastSeen(server: Entry<ServerAtt>): number {
-    let seen = Math.max(server.att.seen, server.seen ?? 0);
+  private lastSeen(entry: Entry): number {
+    let seen = Math.max(entry.att.seen ?? 0, entry.seen ?? 0);
     try {
-      const auto = this.ctx.getWebSocketAutoResponseTimestamp(server.ws);
+      const auto = this.ctx.getWebSocketAutoResponseTimestamp(entry.ws);
       if (auto) seen = Math.max(seen, auto.getTime());
     } catch {}
     return seen;
@@ -1051,6 +1074,7 @@ export class RelayRoom extends DurableObject<Env> {
         const att = entry.att;
         if (att.ph === 0) next = Math.min(next, att.hs);
         else if (att.ph === 1 && att.hw !== undefined) next = Math.min(next, att.hw);
+        else if (att.ph === 2) next = Math.min(next, this.lastSeen(entry) + config.heartbeatDeadlineMs);
       }
     }
     for (const table of this.streams.values()) {

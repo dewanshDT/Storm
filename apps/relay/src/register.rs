@@ -249,6 +249,7 @@ async fn handshake(
     tx.send_json(proto::registered(
         trunk_id.clone(),
         relay.config.public_address(&register.server_id),
+        relay.config.heartbeat_deadline,
     ))
     .await?;
 

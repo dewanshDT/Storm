@@ -33,10 +33,25 @@ use super::proto::{self, Inbound, RequestHead};
 use crate::auth::ServerIdentity;
 use crate::registry::RegisteredRelays;
 
-/// Reconnect backoff bounds. Doubling, no jitter: a server has a handful of
-/// relays, not a herd, and a deterministic schedule is one a test can assert.
+/// Reconnect backoff bounds (§4.2). Doubling, with ±20 % jitter applied to
+/// each wait: a public relay that restarts has every server it carried
+/// redialling at once (decision 116f).
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+/// A trunk that lived less than this does not reset the backoff (§4.2, "no
+/// hot loops"). One that dies just after `REGISTERED` — a platform's CPU
+/// limit, a refusal after registering — would otherwise redial every second
+/// all day against a shared relay's quota.
+const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(60);
+
+/// 0.8..=1.2.
+fn jitter() -> f64 {
+    use rand::Rng;
+    let mut b = [0u8; 4];
+    rand::rng().fill_bytes(&mut b);
+    0.8 + 0.4 * (u32::from_le_bytes(b) as f64 / u32::MAX as f64)
+}
 
 /// Outbound control and body frames waiting for the socket.
 ///
@@ -124,9 +139,9 @@ pub struct Tunnel {
 
 /// How far an attempt got, which is what decides whether backoff resets.
 enum Outcome {
-    /// Registered, then the trunk ended. The relay is healthy and reachable,
-    /// so the next attempt starts from the minimum delay.
-    ServedThenClosed,
+    /// Registered, then the trunk ended after `lived`. Only a trunk that
+    /// lived [`BACKOFF_RESET_AFTER`] starts the next attempt from the minimum.
+    ServedThenClosed { lived: Duration },
     /// Never registered.
     Failed,
 }
@@ -164,9 +179,17 @@ pub async fn supervise(relay_url: String, tunnel: Tunnel, mut shutdown: watch::R
         tunnel.registered.mark_unregistered(&relay_url);
 
         match outcome {
-            Outcome::ServedThenClosed => {
+            Outcome::ServedThenClosed { lived } if resets_backoff(lived) => {
                 tracing::info!(relay = %relay_url, "relay trunk closed, reconnecting");
                 backoff = BACKOFF_MIN;
+            }
+            Outcome::ServedThenClosed { lived } => {
+                tracing::warn!(
+                    relay = %relay_url,
+                    lived_secs = lived.as_secs(),
+                    retry_in_secs = backoff.as_secs(),
+                    "relay trunk closed soon after registering; backing off"
+                );
             }
             Outcome::Failed => {
                 tracing::warn!(
@@ -182,13 +205,21 @@ pub async fn supervise(relay_url: String, tunnel: Tunnel, mut shutdown: watch::R
         }
         tokio::select! {
             _ = shutdown.changed() => break,
-            _ = tokio::time::sleep(backoff) => {}
+            _ = tokio::time::sleep(backoff.mul_f64(jitter())) => {}
         }
-        backoff = (backoff * 2).min(BACKOFF_MAX);
+        backoff = next_backoff(backoff);
     }
 
     tunnel.registered.mark_unregistered(&relay_url);
     tracing::info!(relay = %relay_url, "relay supervisor stopped");
+}
+
+fn resets_backoff(lived: Duration) -> bool {
+    lived >= BACKOFF_RESET_AFTER
+}
+
+fn next_backoff(backoff: Duration) -> Duration {
+    (backoff * 2).min(BACKOFF_MAX)
 }
 
 /// The `ws(s)://<relay-host>/register` endpoint (§4.0).
@@ -304,6 +335,7 @@ async fn run_once(
         "registered with relay"
     );
 
+    let served = tokio::time::Instant::now();
     serve_trunk(
         sink,
         stream,
@@ -315,7 +347,9 @@ async fn run_once(
     )
     .await;
 
-    Outcome::ServedThenClosed
+    Outcome::ServedThenClosed {
+        lived: served.elapsed(),
+    }
 }
 
 type Sink = futures_util::stream::SplitSink<
@@ -1155,7 +1189,7 @@ mod tests {
         let mut backoff = BACKOFF_MIN;
         let mut seen = vec![backoff];
         for _ in 0..10 {
-            backoff = (backoff * 2).min(BACKOFF_MAX);
+            backoff = next_backoff(backoff);
             seen.push(backoff);
         }
         assert_eq!(seen[0], Duration::from_secs(1));
@@ -1166,6 +1200,29 @@ mod tests {
             BACKOFF_MAX,
             "it caps rather than growing without bound"
         );
+    }
+
+    #[test]
+    fn a_trunk_that_dies_young_keeps_the_backoff_doubling() {
+        // §4.2 "no hot loops": registered, then gone after 5 s, every time.
+        let mut backoff = BACKOFF_MIN;
+        let mut waits = vec![];
+        for _ in 0..7 {
+            if resets_backoff(Duration::from_secs(5)) {
+                backoff = BACKOFF_MIN;
+            }
+            waits.push(backoff.as_secs());
+            backoff = next_backoff(backoff);
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60]);
+        assert!(resets_backoff(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn every_wait_is_jittered_within_a_fifth() {
+        let waits: Vec<f64> = (0..200).map(|_| jitter()).collect();
+        assert!(waits.iter().all(|j| (0.8..=1.2).contains(j)));
+        assert!(waits.iter().any(|j| *j < 0.95) && waits.iter().any(|j| *j > 1.05));
     }
 
     #[test]

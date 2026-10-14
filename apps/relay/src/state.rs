@@ -58,6 +58,8 @@ pub struct ServerTrunk {
     /// tell every one of them, including clients that hold no open stream and
     /// would otherwise wait for a timeout on a destination that is gone.
     clients: Mutex<HashMap<String, Tx>>,
+    /// Set by [`ServerTrunk::start_drain`]; no stream opens after it.
+    draining: std::sync::atomic::AtomicBool,
 }
 
 /// One multiplexed stream.
@@ -92,6 +94,9 @@ struct StreamTable {
 pub enum OpenRefused {
     TooManyInFlight,
     IdsExhausted,
+    /// The trunk is draining after a supersession (§4.2): a new stream
+    /// belongs on the replacement, which the client reaches by re-dialling.
+    Draining,
 }
 
 /// What a client's `HTTP_REQUEST_HEAD` may do on a stream.
@@ -116,6 +121,7 @@ impl ServerTrunk {
                 next_id: 1,
             }),
             clients: Mutex::new(HashMap::new()),
+            draining: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -149,6 +155,9 @@ impl ServerTrunk {
         max_in_flight: usize,
         max_total: usize,
     ) -> Result<u32, OpenRefused> {
+        if self.draining.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(OpenRefused::Draining);
+        }
         let mut table = self.streams.lock().expect("streams mutex");
 
         // Global cap: total concurrent streams across all clients on this trunk.
@@ -301,6 +310,8 @@ impl ServerTrunk {
     /// old trunk outlives its window. Usually the server has already dropped
     /// it, but a half-open socket would then sit until the heartbeat deadline.
     pub fn start_drain(self: Arc<Self>, drain: std::time::Duration) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
         let trunk = self;
         tokio::spawn(async move {
             tokio::time::sleep(drain).await;

@@ -29,7 +29,7 @@ use crate::Relay;
 use crate::auth::{KeyBytes, decode_key, validate_server_id};
 use crate::config::Mode;
 use crate::proto::{self, ErrorCode, Frame, Hello};
-use crate::state::{HeadClaim, Only, Registration, ServerTrunk};
+use crate::state::{HeadClaim, Only, OpenRefused, Registration, ServerTrunk};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// The largest `attempt_id` the relay will echo.
@@ -253,12 +253,24 @@ async fn trunk_loop(
     peer: SocketAddr,
 ) -> Fault {
     loop {
+        // §5 client heartbeat: a client sends `PING` at least every 15 s, so a
+        // trunk silent for the deadline is gone, and the caller's teardown
+        // ends its streams at the origin as if it had closed. A timeout on the
+        // read itself, as on the server side, or a silent client is never
+        // noticed at all.
         let incoming = tokio::select! {
             biased;
             () = tx.killed() => return Fault::Disconnected,
-            incoming = trunk::recv(rx) => match incoming {
-                Ok(incoming) => incoming,
-                Err(fault) => return fault,
+            incoming = tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)) => match incoming {
+                Ok(Ok(incoming)) => incoming,
+                Ok(Err(fault)) => return fault,
+                Err(_) => {
+                    tracing::info!(
+                        client_trunk_id = %session.client_trunk_id,
+                        "client silent past the heartbeat deadline; closing its trunk"
+                    );
+                    return Fault::Disconnected;
+                }
             },
         };
 
@@ -309,6 +321,16 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
         relay.config.max_total_streams,
     ) {
         Ok(stream_id) => stream_id,
+        // §4.2: no new streams on a draining trunk. A trunk-scoped
+        // `trunk_superseded` and a closed socket send the client to the
+        // replacement at once, with no backoff (§8.4).
+        Err(OpenRefused::Draining) => {
+            tracing::debug!(
+                client_trunk_id = %session.client_trunk_id,
+                "refusing OPEN_STREAM on a draining trunk"
+            );
+            return Err(ErrorCode::TrunkSuperseded.into());
+        }
         Err(refused) => {
             // Refused **immediately**, never queued (§5.1). Queueing would make
             // an overloaded relay look exactly like a slow server, and the two

@@ -885,6 +885,42 @@ async fn a_dying_clients_close_reaches_the_origin_past_a_full_server_ward_queue(
     upload.abort();
 }
 
+/// §5 client heartbeat: a client heard nothing from for the deadline is gone,
+/// and each of its streams ends at the origin as if it had closed.
+#[tokio::test]
+async fn a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin() {
+    let mut config = config();
+    config.heartbeat_deadline = Duration::from_millis(600);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // The server heartbeats; the client says nothing at all.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            server.send(json!({ "v": 1, "type": "PING" })).await;
+            if let Ok(Frame::Text(value)) =
+                tokio::time::timeout(Duration::from_millis(150), server.next_frame()).await
+                && value["type"] == "CLOSE"
+            {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("the origin was never told the silent client's stream ended");
+    assert_eq!(closed["stream_id"], stream_id);
+}
+
+#[test]
+fn the_advertised_interval_is_a_third_of_the_deadline() {
+    use storm_relay::proto::heartbeat_interval_secs;
+    assert_eq!(heartbeat_interval_secs(Duration::from_secs(45)), 15);
+    assert_eq!(heartbeat_interval_secs(Duration::from_millis(600)), 1);
+}
+
 /// One client's upload to an origin that stopped reading must not hold another
 /// client's `STREAM_OPEN` behind its backlog (§5.5, decision 116d). With one
 /// shared server-ward queue it waited behind up to 64 queued body frames;
@@ -1328,10 +1364,20 @@ async fn a_silent_server_is_dropped_at_the_deadline_and_its_clients_told() {
     let stream_id = client.open_stream("a1").await;
     server.expect_stream_open_and_ack().await;
 
-    // `server` stays open and says nothing from here on.
-    let reply = tokio::time::timeout(Duration::from_secs(3), client.recv())
-        .await
-        .expect("the deadline never fired for a silent server");
+    // `server` stays open and says nothing from here on. The client keeps
+    // heartbeating, as a real one does, or it would be reaped first (§5).
+    let reply = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            client.send(json!({ "v": 1, "type": "PING" })).await;
+            if let Ok(value) = tokio::time::timeout(Duration::from_millis(100), client.recv()).await
+                && value["type"] != "PONG"
+            {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("the deadline never fired for a silent server");
     assert_error(&reply, "trunk_lost");
     assert_eq!(reply["stream_id"], stream_id, "{reply}");
     assert!(harness.relay.registrations.is_empty());
