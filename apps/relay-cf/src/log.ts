@@ -16,6 +16,7 @@ export type LogEvent =
   | "server_backlogged"
   | "stream_refused"
   | "hello_rate_limited"
+  | "register_rate_limited"
   | "protocol_error"
   | "relay_fault";
 
@@ -26,6 +27,8 @@ export interface LogFields {
   stream_id?: number;
   code?: string;
   reason?: string;
+  // bytes this room moved today (§6.2), on server_closed
+  bytes_today?: number;
 }
 
 export function log(event: LogEvent, fields: LogFields = {}): void {

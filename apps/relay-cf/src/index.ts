@@ -68,14 +68,49 @@ export default {
       return refuse("protocol_error");
     }
 
-    return isRegister ? register(env, url) : connect(request, env, url);
+    return isRegister ? register(request, env, url) : connect(request, env, url);
   },
 };
+
+// §6.2: a limit counts against an IPv6 source's /64, since one subscriber
+// holds the whole prefix, and against an IPv4-mapped source's IPv4 address.
+export function sourceKey(ip: string): string {
+  if (!ip.includes(":")) return ip;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (mapped) return mapped[1];
+  const [head, tail = ""] = ip.split("::");
+  const left = head ? head.split(":") : [];
+  const right = ip.includes("::") && tail ? tail.split(":") : [];
+  const groups = ip.includes("::")
+    ? [...left, ...Array(8 - left.length - right.length).fill("0"), ...right]
+    : left;
+  return `${groups
+    .slice(0, 4)
+    .map((g) => parseInt(g || "0", 16).toString(16))
+    .join(":")}::/64`;
+}
+
+async function limited(env: Env, scope: string, ip: string, limit: number, windowMs: number): Promise<boolean> {
+  const limiter = env.HELLO_LIMITER.get(env.HELLO_LIMITER.idFromName(`${scope}:${sourceKey(ip)}`));
+  return !(await limiter.take(limit, windowMs));
+}
 
 // `/register` names no server_id, so the Worker reads REGISTER_SERVER before it
 // can pick the Durable Object, and then carries the trunk's frames both ways.
 // See decision 108b for why this is the one hop that is not spliced.
-async function register(env: Env, url: URL): Promise<Response> {
+async function register(request: Request, env: Env, url: URL): Promise<Response> {
+  const config = configFor(env);
+  // §6.2: counted before a socket, a challenge or a room is spent on it. The
+  // log says it happened, never from where (§6.3).
+  const peerIp = request.headers.get("cf-connecting-ip");
+  if (!peerIp) {
+    log("relay_fault", { reason: "register: no CF-Connecting-IP" });
+    return refuse("protocol_error");
+  }
+  if (await limited(env, "reg", peerIp, config.registerRateLimit, config.registerRateWindowMs)) {
+    log("register_rate_limited");
+    return refuse("rate_limited");
+  }
   const base = publicBase(env, url);
   const [client, server] = Object.values(new WebSocketPair());
   // The standard default is "blob"; body frames are forwarded as bytes.
@@ -119,7 +154,8 @@ async function register(env: Env, url: URL): Promise<Response> {
       room = ws;
       if (serverGone) close(ws);
     } catch (e) {
-      log("relay_fault", { server_id: serverId, reason: `register: ${String(e)}` });
+      // The error's class only: a message can carry anything (§6.3).
+      log("relay_fault", { server_id: serverId, reason: `register: ${e instanceof Error ? e.name : "unknown"}` });
       close(server, "protocol_error");
     }
   };
@@ -150,7 +186,15 @@ async function register(env: Env, url: URL): Promise<Response> {
       serverId = stringField(frame.body, "server_id");
       const pubkey = stringField(frame.body, "pubkey");
       if (!validateServerId(serverId)) throw new ProtocolError();
-      if (configFor(env).binding === "open") {
+      // §6.2: on an allowlist relay an unlisted id gets no room at all. It is
+      // the same answer the room would give, without the Durable Object.
+      if (config.binding === "allowlist" && !config.allowlist.has(serverId)) {
+        pending = [];
+        log("registration_refused", { server_id: serverId, reason: "not on the allowlist" });
+        close(server, "auth_failed");
+        return;
+      }
+      if (config.binding === "open") {
         const bytes = parsePublicKey(pubkey);
         if (!bytes) throw new ProtocolError();
         key = b64urlEncode(bytes);
@@ -184,8 +228,7 @@ async function connect(request: Request, env: Env, url: URL): Promise<Response> 
     return refuse("protocol_error");
   }
 
-  const limiter = env.HELLO_LIMITER.get(env.HELLO_LIMITER.idFromName(`ip:${peerIp}`));
-  if (!(await limiter.take(config.helloRateLimit, config.helloRateWindowMs))) {
+  if (await limited(env, "ip", peerIp, config.helloRateLimit, config.helloRateWindowMs)) {
     log("hello_rate_limited");
     return refuse("rate_limited");
   }

@@ -50,6 +50,7 @@ export default defineConfig({
         STORM_RELAY_PUBLIC_BASE: "wss://relay.example/",
         STORM_RELAY_ALLOWLIST: `# test allowlist\nsrv_ALLOWED ${KEY_1}  # seed 1\n\nsrv_OTHER ${KEY_2}\nsrv_LIMITS ${KEY_3}\n`,
         STORM_RELAY_HELLO_RATE_LIMIT: "3",
+        STORM_RELAY_REGISTER_RATE_LIMIT: "3",
         STORM_RELAY_MAX_ROOM_BUFFER_BYTES: String(96 * 1024),
       }),
     ],

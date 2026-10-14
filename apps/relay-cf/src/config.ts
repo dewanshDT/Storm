@@ -16,6 +16,8 @@ export interface Env {
   STORM_RELAY_MAX_TOTAL_STREAMS?: string;
   STORM_RELAY_HELLO_RATE_LIMIT?: string;
   STORM_RELAY_HELLO_RATE_WINDOW_MS?: string;
+  STORM_RELAY_REGISTER_RATE_LIMIT?: string;
+  STORM_RELAY_REGISTER_RATE_WINDOW_MS?: string;
   STORM_RELAY_MAX_CLIENT_BUFFER_BYTES?: string;
   STORM_RELAY_MAX_SERVER_BUFFER_BYTES?: string;
   STORM_RELAY_MAX_ROOM_BUFFER_BYTES?: string;
@@ -39,6 +41,8 @@ export interface Config {
   maxTotalStreams: number;
   helloRateLimit: number;
   helloRateWindowMs: number;
+  registerRateLimit: number;
+  registerRateWindowMs: number;
   maxClientBufferBytes: number;
   maxServerBufferBytes: number;
   maxRoomBufferBytes: number;
@@ -100,6 +104,10 @@ export function loadConfig(env: Env): Config {
     maxTotalStreams: int(env.STORM_RELAY_MAX_TOTAL_STREAMS, "STORM_RELAY_MAX_TOTAL_STREAMS", 1000),
     helloRateLimit: int(env.STORM_RELAY_HELLO_RATE_LIMIT, "STORM_RELAY_HELLO_RATE_LIMIT", 10),
     helloRateWindowMs: int(env.STORM_RELAY_HELLO_RATE_WINDOW_MS, "STORM_RELAY_HELLO_RATE_WINDOW_MS", 60_000),
+    // §6.2: /register attempts per source address (IPv6 per /64), as
+    // storm-relay's --register-rate-limit.
+    registerRateLimit: int(env.STORM_RELAY_REGISTER_RATE_LIMIT, "STORM_RELAY_REGISTER_RATE_LIMIT", 30),
+    registerRateWindowMs: int(env.STORM_RELAY_REGISTER_RATE_WINDOW_MS, "STORM_RELAY_REGISTER_RATE_WINDOW_MS", 60_000),
     // storm-relay's 32 MiB per peer. The room bound below is what keeps a
     // Durable Object's 128 MB isolate safe when several peers fall behind;
     // server-ward needs room for one 16 MiB frame and its end of body.

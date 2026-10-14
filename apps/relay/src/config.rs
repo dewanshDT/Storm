@@ -89,6 +89,12 @@ pub const DEFAULT_SUPERSESSION_DRAIN: Duration = Duration::from_secs(30);
 /// Any frame, not only `PONG`. The server heartbeats by *sending* `PING` every
 /// 15 s, which the relay answers, and the relay never pings, so a server has no
 /// reason ever to send `PONG`. 45 s is three missed heartbeats.
+/// `/register` attempts per source address per window (§6.2). A server
+/// registers once per relay and reconnects with backoff, so this only binds
+/// someone minting registrations; a whole NAT of homes stays well under it.
+pub const DEFAULT_REGISTER_RATE_LIMIT: usize = 30;
+pub const DEFAULT_REGISTER_RATE_WINDOW: Duration = Duration::from_secs(60);
+
 pub const DEFAULT_HEARTBEAT_DEADLINE: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone)]
@@ -117,6 +123,10 @@ pub struct Config {
     pub hello_rate_limit: usize,
     /// Time window for the HELLO rate limit.
     pub hello_rate_window: Duration,
+    /// `/register` attempts per source address (IPv6 per /64) per window
+    /// (§6.2, decision 116k).
+    pub register_rate_limit: usize,
+    pub register_rate_window: Duration,
     /// Bytes queued and unwritten toward one client trunk before its streams
     /// start being dropped. See [`DEFAULT_MAX_CLIENT_BUFFER_BYTES`].
     pub max_client_buffer_bytes: usize,
@@ -141,6 +151,8 @@ impl Config {
             max_total_streams: DEFAULT_MAX_TOTAL_STREAMS,
             hello_rate_limit: DEFAULT_HELLO_RATE_LIMIT,
             hello_rate_window: DEFAULT_HELLO_RATE_WINDOW,
+            register_rate_limit: DEFAULT_REGISTER_RATE_LIMIT,
+            register_rate_window: DEFAULT_REGISTER_RATE_WINDOW,
             max_client_buffer_bytes: DEFAULT_MAX_CLIENT_BUFFER_BYTES,
             supersession_drain: DEFAULT_SUPERSESSION_DRAIN,
             heartbeat_deadline: DEFAULT_HEARTBEAT_DEADLINE,

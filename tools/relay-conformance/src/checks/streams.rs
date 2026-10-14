@@ -450,10 +450,13 @@ async fn a_body_over_16_mib_crosses_both_ways_in_256_kib_frames(ctx: &Ctx) -> Re
     // The client reads while the origin sends, as a real client does. An
     // origin outrunning a client that is not reading by the relay's whole
     // buffer is the backlogged case (SRP has no flow control), not this one.
-    // The origin stays within half the client buffer of what the client has
-    // read, so only framing is under test, never a relay's backlog bound.
+    // The origin stays within a quarter of the client buffer of what the
+    // client has read, so only framing is under test, never a relay's backlog
+    // bound. Not half: the Worker learns what was read only when the client's
+    // PONGs for its read-marks arrive, and on a loaded runner those trail the
+    // reads by more than the margin half left (CI, decision 116k).
     let (server, client) = (&mut pair.server, &mut pair.client);
-    let window = ctx.knobs.max_client_buffer_bytes / 2;
+    let window = (ctx.knobs.max_client_buffer_bytes / 4).max(FRAME);
     let (progress_tx, mut progress) = tokio::sync::watch::channel(0usize);
     let send = async {
         server.send_json(response_head(id)).await?;

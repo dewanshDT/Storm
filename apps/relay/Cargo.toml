@@ -26,10 +26,11 @@ section = "net"
 priority = "optional"
 depends = "$auto"
 maintainer-scripts = "debian/"
-conf-files = ["/etc/storm-relay/storm-relay.env"]
+conf-files = ["/etc/storm-relay/storm-relay.env", "/etc/systemd/journald@storm-relay.conf"]
 assets = [
     ["target/release/storm-relay", "usr/bin/", "755"],
     ["../../deploy/storm-relay.service", "lib/systemd/system/", "644"],
+    ["../../deploy/journald@storm-relay.conf", "etc/systemd/", "644"],
     ["../../deploy/storm-relay.env.example", "etc/storm-relay/storm-relay.env", "644"],
     ["../../LICENSE", "usr/share/doc/storm-relay/", "644"],
 ]
