@@ -7645,6 +7645,19 @@ declared the client backlogged — the case the check says it is not testing. Th
 check's origin now stays within half the client budget of what the client has
 read, so only framing is under test (3/3 Worker runs, 58/58 storm-relay).
 
+*108a addendum 2 (2026-10-15):* CI then failed the paced check once with "the
+client stopped reading the download", which was only the origin's echo:
+`tokio::join!` reported the stalled sender before the receiver's error. The
+receiver's error now comes first. The Worker's own unit tests flaked the same
+week for a different reason: `vitest.config.ts` sets a 1.5 s heartbeat deadline
+and most test servers never heartbeat, so on a slow runner a gap between a
+test's frames dropped the trunk as silent (the client saw an `ERROR`, the
+server a closed socket). Such tests now opt into `Peer.keepAlive()`, an
+answerless `STREAM_ACK` for an unissued stream; the deadline tests stay
+silent on purpose. The Windows `nettrust` real-query test retries twice, as the
+server's own refresh does, because a cold PowerShell can miss 20 s on a loaded
+runner.
+
 **105e. mcp-connect in Settings and the installer (S5).** *(2026-10-13,
 "MCP over the Relay — mcp-connect", the product surface; stacked on 101)*
 - **Why.** External MCP clients reach Storm through `storm-runtime

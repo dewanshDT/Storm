@@ -167,6 +167,16 @@ export class Peer {
     }
   }
 
+  // A server's heartbeat that asks for no answer: the relay ignores an ack for
+  // a stream it never issued. Without it a slow runner can pass the test
+  // deadline between a test's own frames, and the trunk is dropped as silent.
+  keepAlive(everyMs = 300): () => void {
+    const timer = setInterval(() => {
+      if (this.ws.readyState === WebSocket.READY_STATE_OPEN) this.send({ v: 1, type: "STREAM_ACK", stream_id: 999 });
+    }, everyMs);
+    return () => clearInterval(timer);
+  }
+
   close() {
     try {
       this.ws.close(1000);
