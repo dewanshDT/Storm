@@ -24,7 +24,8 @@ use std::time::{Instant, SystemTime};
 use axum::extract::ws::WebSocket;
 
 use crate::Relay;
-use crate::auth::{PublicKey, validate_nonce, validate_server_id};
+use crate::auth::{KeyBytes, PublicKey, validate_nonce, validate_server_id};
+use crate::config::Mode;
 use crate::proto::{self, ChallengeResponse, ErrorCode, Frame, RegisterServer};
 use crate::state::{Binding, RecordError, Registration, ServerTrunk, new_trunk_id};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
@@ -74,7 +75,7 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
     // trunk reaching here must not evict the trunk that replaced it.
     relay
         .registrations
-        .release(&session.server_id, &session.trunk_id);
+        .release(&session.server_id, session.key, &session.trunk_id);
     // Streams do not survive trunk loss (§5.4): every client holding one is
     // told `trunk_lost` rather than left waiting for a response that can no
     // longer arrive.
@@ -90,6 +91,7 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
 
 struct Session {
     server_id: String,
+    key: KeyBytes,
     trunk_id: String,
     trunk: Arc<ServerTrunk>,
 }
@@ -122,18 +124,23 @@ async fn handshake(
 
     // **Binding first, challenge second** (§4.1). There is no reason to spend a
     // nonce on a registration that cannot succeed, and issuing one anyway would
-    // let an unbound caller farm nonces from the relay for free.
-    let binding = relay
-        .bindings
-        .check(relay.config.allowlist.as_ref(), &register.server_id, pubkey)
-        .map_err(|_| {
-            tracing::info!(
-                server_id = %register.server_id,
-                pubkey = %pubkey.to_b64(),
-                "refusing registration: pubkey does not match the binding"
-            );
-            ErrorCode::AuthFailed
-        })?;
+    // let an unbound caller farm nonces from the relay for free. An open relay
+    // binds nothing: the key is the address.
+    let binding = if relay.config.mode() == Mode::Open {
+        Binding::Established
+    } else {
+        relay
+            .bindings
+            .check(relay.config.allowlist.as_ref(), &register.server_id, pubkey)
+            .map_err(|_| {
+                tracing::info!(
+                    server_id = %register.server_id,
+                    pubkey = %pubkey.to_b64(),
+                    "refusing registration: pubkey does not match the binding"
+                );
+                ErrorCode::AuthFailed
+            })?
+    };
 
     let nonce = relay.mint_nonce();
     // The nonce generator satisfies `validate_nonce` by construction, so this
@@ -218,6 +225,7 @@ async fn handshake(
     let now = Instant::now();
     if let Some(displaced) = relay.registrations.install(
         &register.server_id,
+        pubkey.bytes(),
         Registration {
             trunk_id: trunk_id.clone(),
             connected_at: SystemTime::now(),
@@ -246,6 +254,7 @@ async fn handshake(
 
     Ok(Session {
         server_id: register.server_id,
+        key: pubkey.bytes(),
         trunk_id,
         trunk: server_trunk.clone(),
     })
@@ -285,9 +294,12 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
                     return Fault::Disconnected;
                 }
             };
-        relay
-            .registrations
-            .touch(&session.server_id, &session.trunk_id, Instant::now());
+        relay.registrations.touch(
+            &session.server_id,
+            session.key,
+            &session.trunk_id,
+            Instant::now(),
+        );
 
         let outcome = match incoming {
             Incoming::Control(frame) => match frame.ty() {

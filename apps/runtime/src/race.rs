@@ -177,7 +177,8 @@ impl RaceConnector {
         let config = self.options.trunk.clone();
         let idle = self.options.idle;
         Box::pin(async move {
-            let trunk = SrpTrunk::connect_with(&relay, &pin.server_id, config)
+            let key = data_encoding::BASE64URL_NOPAD.encode(pin.key.as_bytes());
+            let trunk = SrpTrunk::connect_with(&relay, &pin.server_id, &key, config)
                 .await
                 .map_err(|e| TransportError::new(e.code(), e.to_string()))?;
             let t = SrpTransport::new(trunk, idle);

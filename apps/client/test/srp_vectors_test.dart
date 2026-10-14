@@ -26,6 +26,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/api/ed25519_verify.dart';
+import 'package:storm/api/relay/srp_trunk.dart';
 import 'package:storm/api/server_verifier.dart';
 
 /// The vectors live at the repo root, not in the client — three implementations
@@ -135,6 +136,25 @@ void main() {
             'expected accepted=${c['accepted']}',
       );
     }
+  });
+
+  test('every HELLO.pubkey spelling decodes as recorded, and the connect URL '
+      'carries the key', () {
+    final hello = doc['hello_pubkey'] as Map<String, dynamic>;
+    for (final c in section(hello, 'cases').cast<Map<String, dynamic>>()) {
+      final decoded = decodeBase64UrlNoPad(c['pubkey'] as String);
+      expect(
+        decoded != null && decoded.length == 32,
+        c['accepted'],
+        reason: 'hello_pubkey vector `${c['name']}`',
+      );
+    }
+    final url = hello['connect_url'] as Map<String, dynamic>;
+    final base = Uri.parse('${url['relay_base']}/connect/${url['server_id']}');
+    expect(
+      keyedConnectUrl(base, url['pubkey_b64'] as String).toString(),
+      url['url'],
+    );
   });
 
   test('the generated nonce satisfies the rule the server enforces', () {

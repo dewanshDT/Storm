@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   b64urlEncode,
+  decodeKey,
   newClientTrunkId,
   newNonce,
   newTrunkId,
@@ -37,6 +38,7 @@ import { trySend } from "./send";
 const H_SERVER_ID = "x-storm-server-id";
 const H_PEER_IP = "x-storm-peer-ip";
 const H_PUBLIC_BASE = "x-storm-public-base";
+const H_PUBKEY = "x-storm-pubkey";
 
 // §5.2: no sender may exceed 16 MiB a frame; storm-relay's WebSocket reader
 // drops the connection past it, and so does this one.
@@ -65,7 +67,10 @@ interface ServerAtt {
   // 0 awaiting REGISTER_SERVER, 1 challenged, 2 registered
   ph: 0 | 1 | 2;
   hs: number;
+  // the key it registered under, kept for routing a keyed HELLO (§5)
   pk?: string;
+  // open mode: the key this room is addressed by
+  rk?: string;
   nonce?: string;
   rec?: boolean;
   next: number;
@@ -84,6 +89,9 @@ interface ClientAtt {
   hs: number;
   hw?: number;
   tid?: string;
+  // ?pubkey= on the URL, and the key the HELLO named (§5)
+  qk?: string;
+  hk?: string;
   f: Flow;
 }
 
@@ -202,6 +210,8 @@ export class RelayRoom extends DurableObject<Env> {
         seen: now,
         f: flow,
       };
+      const key = request.headers.get(H_PUBKEY);
+      if (key !== null) att.rk = key;
       this.ctx.acceptWebSocket(server, ["s", `s:${att.tid}`]);
     } else if (url.pathname === "/connect") {
       att = {
@@ -213,6 +223,8 @@ export class RelayRoom extends DurableObject<Env> {
         hs: now + config.handshakeTimeoutMs,
         f: flow,
       };
+      const key = request.headers.get(H_PUBKEY);
+      if (key !== null) att.qk = key;
       this.ctx.acceptWebSocket(server, ["c", `c:${att.ctk}`]);
     } else {
       return new Response("not found", { status: 404 });
@@ -412,7 +424,12 @@ export class RelayRoom extends DurableObject<Env> {
     // registration that cannot succeed.
     const config = this.config;
     let record = false;
-    if (config.binding === "allowlist") {
+    if (config.binding === "open") {
+      // Nothing to bind: the room is the key (§4.1). The Worker routed on it,
+      // so a disagreement here is the relay's own fault.
+      const room = parsePublicKey(att.rk ?? "");
+      if (!room || !sameKey(room, pubkey)) throw new Error("open room addressed by another key");
+    } else if (config.binding === "allowlist") {
       const expected = config.allowlist.get(serverId);
       if (!expected || !sameKey(expected, pubkey)) {
         log("registration_refused", { server_id: serverId, reason: "binding" });
@@ -486,7 +503,6 @@ export class RelayRoom extends DurableObject<Env> {
     const now = Date.now();
     att.ph = 2;
     att.seen = now;
-    delete att.pk;
     delete att.nonce;
     delete att.rec;
     this.persist(entry);
@@ -508,9 +524,25 @@ export class RelayRoom extends DurableObject<Env> {
     }
 
     for (const client of this.clients()) {
-      if (client.att.ph === 1) this.ready(client, att.tid);
+      if (client.att.ph === 1 && this.reaches(client.att, entry)) this.ready(client, att.tid);
     }
     this.arm();
+  }
+
+  // §5: a keyed HELLO reaches only a registration under that key; a keyless
+  // one (allowlist and tofu only) the one registration.
+  private reaches(client: ClientAtt, server: Entry<ServerAtt>): boolean {
+    if (client.hk === undefined) return true;
+    const named = decodeKey(client.hk);
+    const key = this.serverKey(server.att);
+    return !!named && !!key && sameKey(named, key);
+  }
+
+  // Trunks registered before 116n kept no key; theirs is the binding's.
+  private serverKey(att: ServerAtt): Uint8Array | null {
+    if (att.pk) return parsePublicKey(att.pk);
+    if (this.config.binding === "allowlist") return this.config.allowlist.get(att.sid) ?? null;
+    return this.boundKey(att.sid);
   }
 
   private boundKey(serverId: string): Uint8Array | null {
@@ -666,12 +698,31 @@ export class RelayRoom extends DurableObject<Env> {
     // Named twice, in the path and in HELLO; a disagreement is refused, never
     // resolved (as storm-relay's connect.rs).
     if (serverId !== entry.att.sid) throw new ProtocolError();
-    const live = this.liveServer();
+    const named = this.helloKey(entry.att, body);
+    if (this.config.binding === "open") {
+      // No grace for a keyless HELLO on an open relay (§5, the 114f addendum),
+      // and a key the URL did not carry was routed to a room with no server.
+      if (named === null || entry.att.qk === undefined) throw new Refusal("server_unreachable");
+    }
+    if (named !== null) entry.att.hk = named;
+    const live = this.liveServer(entry.att);
     if (live) return this.ready(entry, live.att.tid);
     entry.att.ph = 1;
     entry.att.hw = Date.now() + this.config.helloWaitMs;
     this.persist(entry);
     this.arm();
+  }
+
+  // HELLO.pubkey: 32 bytes of strict base64url, and the URL's key when both
+  // are given (§5). A query alone names nothing; §5's table reads the HELLO.
+  private helloKey(att: ClientAtt, body: Body): string | null {
+    if (!("pubkey" in body)) return null;
+    if (typeof body.pubkey !== "string") throw new ProtocolError();
+    const bytes = decodeKey(body.pubkey);
+    if (!bytes) throw new ProtocolError();
+    const key = b64urlEncode(bytes);
+    if (att.qk !== undefined && att.qk !== key) throw new ProtocolError();
+    return key;
   }
 
   private ready(entry: Entry<ClientAtt>, tid: string): void {
@@ -973,9 +1024,11 @@ export class RelayRoom extends DurableObject<Env> {
     for (const entry of [...this.entries.values()]) if (entry.att.k === "c") yield entry as Entry<ClientAtt>;
   }
 
-  private liveServer(): Entry<ServerAtt> | undefined {
+  private liveServer(client: ClientAtt): Entry<ServerAtt> | undefined {
     for (const server of this.servers()) {
-      if (server.att.ph === 2 && server.att.sup === undefined && this.alive(server)) return server;
+      if (server.att.ph === 2 && server.att.sup === undefined && this.reaches(client, server) && this.alive(server)) {
+        return server;
+      }
     }
     return undefined;
   }

@@ -2,7 +2,7 @@
 //! a tunnelled HTTP exchange.
 //!
 //! ```text
-//! Client → Relay:  HELLO { server_id }
+//! Client → Relay:  HELLO { server_id, pubkey }
 //! Relay → Client:  READY { client_trunk_id }
 //! Client → Relay:  OPEN_STREAM { attempt_id }
 //! Relay → Client:  STREAM_READY { attempt_id, stream_id }
@@ -26,9 +26,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::Relay;
-use crate::auth::validate_server_id;
+use crate::auth::{KeyBytes, decode_key, validate_server_id};
+use crate::config::Mode;
 use crate::proto::{self, ErrorCode, Frame, Hello};
-use crate::state::{HeadClaim, ServerTrunk};
+use crate::state::{HeadClaim, Only, Registration, ServerTrunk};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// The largest `attempt_id` the relay will echo.
@@ -47,6 +48,7 @@ pub async fn serve(
     socket: axum::extract::ws::WebSocket,
     relay: Arc<Relay>,
     path_server_id: String,
+    query_key: Option<String>,
     peer: SocketAddr,
 ) {
     // The byte budget applies here and only here: this is the queue the
@@ -62,7 +64,14 @@ pub async fn serve(
     // the door, so anyone who can connect can start one and leave it hanging.
     let opened = match tokio::time::timeout(
         relay.config.handshake_timeout,
-        hello(&mut rx, &tx, &relay, &path_server_id, peer.ip()),
+        hello(
+            &mut rx,
+            &tx,
+            &relay,
+            &path_server_id,
+            query_key.as_deref(),
+            peer.ip(),
+        ),
     )
     .await
     {
@@ -117,6 +126,7 @@ async fn hello(
     tx: &Tx,
     relay: &Relay,
     path_server_id: &str,
+    query_key: Option<&str>,
     peer_ip: std::net::IpAddr,
 ) -> Result<Session, Fault> {
     // Rate limit HELLO attempts per source IP.
@@ -137,19 +147,34 @@ async fn hello(
     if frame.ty() != "HELLO" {
         return Err(ErrorCode::ProtocolError.into());
     }
+    let key = hello_key(&frame, query_key)?;
     let hello: Hello = frame.body()?;
 
-    // The `server_id` arrives twice — in the URL and in `HELLO` — and §5 does
-    // not say what a disagreement means. Refused rather than resolved: picking
-    // one silently would let a client dial one server's address and be routed
-    // to another, and there is no reading under which a mismatch is meaningful.
+    // §5: `HELLO.server_id` must equal the path. Refused rather than resolved:
+    // picking one silently would let a client dial one server's address and be
+    // routed to another.
     if hello.server_id != path_server_id {
         tracing::debug!("rejecting HELLO: server_id disagrees with the path");
         return Err(ErrorCode::ProtocolError.into());
     }
 
-    let Some(registration) = await_trunk(relay, &hello.server_id).await else {
-        tracing::debug!(server_id = %hello.server_id, "no live server trunk for HELLO");
+    let server_id = hello.server_id.as_str();
+    let found = match (relay.config.mode(), key) {
+        (_, Some(key)) => await_trunk(relay, || relay.registrations.get(server_id, &key)).await,
+        // Storm's open relays refuse every keyless HELLO at once (§5, the 114f
+        // addendum): without a key there is nothing to address.
+        (Mode::Open, None) => None,
+        // Before 115: the one registration, whatever its key.
+        (_, None) => {
+            await_trunk(relay, || match relay.registrations.only(server_id) {
+                Only::One(registration) => Some(registration),
+                Only::None | Only::Several => None,
+            })
+            .await
+        }
+    };
+    let Some(registration) = found else {
+        tracing::debug!(server_id, "no live server trunk for HELLO");
         return Err(ErrorCode::ServerUnreachable.into());
     };
 
@@ -165,17 +190,46 @@ async fn hello(
     })
 }
 
+/// The key a `HELLO` names (§5), if any: `HELLO.pubkey`, which must decode to
+/// 32 bytes and agree with `?pubkey=` when both are present. A query without
+/// a `HELLO.pubkey` names nothing; the table in §5 is keyed on the `HELLO`.
+fn hello_key(frame: &Frame, query_key: Option<&str>) -> Result<Option<KeyBytes>, Fault> {
+    let refuse = |why: &str| {
+        tracing::debug!(reason = why, "rejecting HELLO: bad pubkey");
+        Fault::from(ErrorCode::ProtocolError)
+    };
+    let query = query_key
+        .map(|q| decode_key(q).map_err(|_| refuse("query")))
+        .transpose()?;
+    let named = match frame.body.get("pubkey") {
+        None => None,
+        Some(serde_json::Value::String(text)) => {
+            Some(decode_key(text).map_err(|_| refuse("HELLO"))?)
+        }
+        Some(_) => return Err(refuse("HELLO.pubkey is not a string")),
+    };
+    if let (Some(named), Some(query)) = (named, query)
+        && named != query
+    {
+        return Err(refuse("HELLO and query disagree"));
+    }
+    Ok(named)
+}
+
 /// Waits up to `hello_wait` for a live trunk, covering a server mid-restart.
 ///
 /// Polled rather than notified. A notification bus would have to be woken by
 /// registration, which means registration would have to know that client trunks
 /// exist — and the wait is bounded and rare enough that the coupling costs more
 /// than the polling does.
-async fn await_trunk(relay: &Relay, server_id: &str) -> Option<crate::state::Registration> {
+async fn await_trunk(
+    relay: &Relay,
+    find: impl Fn() -> Option<Registration>,
+) -> Option<Registration> {
     const POLL: std::time::Duration = std::time::Duration::from_millis(20);
     let deadline = tokio::time::Instant::now() + relay.config.hello_wait;
     loop {
-        if let Some(registration) = relay.registrations.get(server_id) {
+        if let Some(registration) = find() {
             return Some(registration);
         }
         let now = tokio::time::Instant::now();

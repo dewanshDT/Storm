@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value;
-use storm_relay::auth::{PublicKey, relay_auth_message, validate_nonce, validate_server_id};
+use storm_relay::auth::{
+    PublicKey, decode_key, relay_auth_message, validate_nonce, validate_server_id,
+};
 
 /// The vectors live at the repo root, not in the crate — three implementations
 /// read the one file, and a copy per crate is exactly the drift being guarded
@@ -202,4 +204,40 @@ fn a_parsed_key_round_trips_to_the_unpadded_spelling() {
     let canonical = s(&doc["keys"], "test_public_key_b64");
     let key = PublicKey::from_b64(canonical).expect("the file's own test key must parse");
     assert_eq!(key.to_b64(), canonical);
+}
+
+#[test]
+fn every_hello_pubkey_spelling_decodes_exactly_as_recorded() {
+    let doc = vectors();
+    let section = &doc["hello_pubkey"];
+    let list = section["cases"]
+        .as_array()
+        .expect("hello_pubkey.cases missing");
+    assert!(list.iter().any(|c| c["accepted"] == true));
+    for case in list {
+        let expected = case["accepted"].as_bool().expect("`accepted` is a bool");
+        assert_eq!(
+            decode_key(s(case, "pubkey")).is_ok(),
+            expected,
+            "hello_pubkey vector `{}`",
+            s(case, "name")
+        );
+    }
+    let agree = &section["query_and_hello_must_agree"];
+    assert_ne!(
+        decode_key(s(agree, "query_pubkey")).unwrap(),
+        decode_key(s(agree, "hello_pubkey")).unwrap()
+    );
+    let url = &section["connect_url"];
+    let key = decode_key(s(url, "pubkey_b64")).unwrap();
+    assert_eq!(BASE64URL_NOPAD.encode(&key), s(url, "pubkey_b64"));
+    assert_eq!(
+        format!(
+            "{}/connect/{}?pubkey={}",
+            s(url, "relay_base"),
+            s(url, "server_id"),
+            s(url, "pubkey_b64")
+        ),
+        s(url, "url")
+    );
 }

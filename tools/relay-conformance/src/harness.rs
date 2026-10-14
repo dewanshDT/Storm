@@ -40,6 +40,7 @@ pub struct Options {
 pub struct Ctx {
     pub relay: Relay,
     pub tofu: Option<Relay>,
+    pub open: Option<Relay>,
     pub fixtures: Fixtures,
     pub knobs: Knobs,
     pub options: Options,
@@ -50,6 +51,7 @@ impl Ctx {
     pub fn new(
         relay: String,
         tofu: Option<String>,
+        open: Option<String>,
         fixtures: Fixtures,
         knobs: Knobs,
         options: Options,
@@ -64,6 +66,11 @@ impl Ctx {
             tofu: tofu.map(|base| Relay {
                 base: base.trim_end_matches('/').to_string(),
                 name: "tofu relay",
+                pacer: pacer(),
+            }),
+            open: open.map(|base| Relay {
+                base: base.trim_end_matches('/').to_string(),
+                name: "open relay",
                 pacer: pacer(),
             }),
             fixtures,
@@ -92,6 +99,51 @@ impl Ctx {
         self.tofu
             .as_ref()
             .ok_or_else(|| anyhow!("RELAY_TOFU_URL is not set"))
+    }
+
+    pub fn open(&self) -> Result<&Relay> {
+        self.open
+            .as_ref()
+            .ok_or_else(|| anyhow!("RELAY_OPEN_URL is not set"))
+    }
+
+    /// A client socket dialled with `?pubkey=` (§4.3), before `HELLO`.
+    pub async fn dial_connect_keyed(
+        &self,
+        relay: &Relay,
+        server_id: &str,
+        pubkey: &str,
+    ) -> Result<Conn> {
+        relay.pacer.take().await;
+        let url = format!("{}?pubkey={pubkey}", self.connect_url(relay, server_id));
+        wire::connect(&url, &format!("client@{}", relay.name), None).await
+    }
+
+    /// A client naming `identity`'s key in the URL and in `HELLO` (§5), past
+    /// `READY`.
+    pub async fn keyed_client(&self, relay: &Relay, identity: &Identity) -> Result<Conn> {
+        let mut conn = self.keyed_hello(relay, identity).await?;
+        let ready = conn
+            .recv_type("READY", self.knobs.hello_wait + STEP)
+            .await?;
+        ensure!(
+            ready["client_trunk_id"].is_string(),
+            "READY without a string client_trunk_id: {ready}"
+        );
+        Ok(conn)
+    }
+
+    /// The same, before the relay answers.
+    pub async fn keyed_hello(&self, relay: &Relay, identity: &Identity) -> Result<Conn> {
+        let pubkey = identity.pubkey_b64();
+        let conn = self
+            .dial_connect_keyed(relay, &identity.server_id, &pubkey)
+            .await?;
+        conn.send_json(json!({
+            "v": 1, "type": "HELLO", "server_id": identity.server_id, "pubkey": pubkey,
+        }))
+        .await?;
+        Ok(conn)
     }
 
     pub fn heartbeat_interval(&self) -> Duration {

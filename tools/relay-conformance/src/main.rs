@@ -76,7 +76,8 @@ fn run() -> Result<bool> {
     }
 
     let relay = env("RELAY_URL").context("RELAY_URL is required (ws:// or wss://)")?;
-    for url in std::iter::once(&relay).chain(env("RELAY_TOFU_URL").as_ref()) {
+    let extra = [env("RELAY_TOFU_URL"), env("RELAY_OPEN_URL")];
+    for url in std::iter::once(&relay).chain(extra.iter().flatten()) {
         if !url.starts_with("ws://") && !url.starts_with("wss://") {
             bail!("{url} is not a ws:// or wss:// URL");
         }
@@ -98,6 +99,7 @@ fn run() -> Result<bool> {
     let ctx = Ctx::new(
         relay,
         env("RELAY_TOFU_URL"),
+        env("RELAY_OPEN_URL"),
         fixtures::Fixtures::load(&dir)?,
         fixtures::Knobs::load(&dir.join("relay.env"))?,
         options,
@@ -120,9 +122,10 @@ struct Tally {
 
 async fn run_checks(ctx: &Ctx, selected: &[Check]) -> bool {
     println!(
-        "SRP v1 relay conformance: {} (tofu: {})",
+        "SRP v1 relay conformance: {} (tofu: {}, open: {})",
         ctx.relay.base,
-        ctx.tofu.as_ref().map_or("not given", |r| r.base.as_str())
+        ctx.tofu.as_ref().map_or("not given", |r| r.base.as_str()),
+        ctx.open.as_ref().map_or("not given", |r| r.base.as_str())
     );
     let mut sections: BTreeMap<&str, Tally> = BTreeMap::new();
     let mut failures = Vec::new();
@@ -131,6 +134,7 @@ async fn run_checks(ctx: &Ctx, selected: &[Check]) -> bool {
         let skip = match check.needs {
             Needs::Nothing => None,
             Needs::Tofu if ctx.tofu.is_none() => Some("needs RELAY_TOFU_URL"),
+            Needs::Open if ctx.open.is_none() => Some("needs RELAY_OPEN_URL"),
             Needs::MultiIp if !ctx.options.multi_ip => Some("needs RELAY_MULTI_IP=1"),
             Needs::Latency if !ctx.options.latency => Some("needs RELAY_LATENCY=1"),
             _ => None,

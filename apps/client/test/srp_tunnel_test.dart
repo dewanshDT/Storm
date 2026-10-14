@@ -57,6 +57,22 @@ void main() {
     });
   });
 
+  test('a trunk names its pinned key in HELLO and on the URL (§5)', () async {
+    await _withRelay((relay) async {
+      const key = 'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg';
+      final trunk = SrpTrunk(
+        url: relay.url,
+        serverId: 'srv_test',
+        serverKey: key,
+      );
+      await trunk.connect();
+      expect(relay.helloBodies.single['pubkey'], key);
+      expect(relay.connectUris.single.queryParameters['pubkey'], key);
+      expect(relay.connectUris.single.path, '/connect/srv_test');
+      trunk.dispose();
+    });
+  });
+
   test('every relay PING is answered, before READY and after', () async {
     await _withRelay((relay) async {
       relay.pings = 3;

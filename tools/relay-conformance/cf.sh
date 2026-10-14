@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Starts the Worker relay (apps/relay-cf) twice under `wrangler dev` with the
-# fixture contract — allowlist mode and TOFU mode — runs the conformance suite
-# against both, and stops them (decision 108c).
+# Starts the Worker relay (apps/relay-cf) three times under `wrangler dev` with
+# the fixture contract — allowlist, TOFU and open (key-addressed) mode — runs
+# the conformance suite against them, and stops them (decision 108c).
 #
 #   tools/relay-conformance/cf.sh [FILTER ...]
 #
-# Ports 18910/18911 (CONFORMANCE_CF_PORT, +1). No latency check: wrangler dev
-# is not the edge, and decision 91's median is storm-relay's promise.
+# Ports 18910-18912 (CONFORMANCE_CF_PORT, +1, +2). No latency check: wrangler
+# dev is not the edge, and decision 91's median is storm-relay's promise.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 port="${CONFORMANCE_CF_PORT:-18910}"
 tofu_port=$((port + 1))
+open_port=$((port + 2))
 log_dir="${CONFORMANCE_LOG_DIR:-$root/.dev}"
 mkdir -p "$log_dir"
 
-for p in "$port" "$tofu_port"; do
+for p in "$port" "$tofu_port" "$open_port"; do
 	if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
 		echo "Something is already listening on 127.0.0.1:$p; set CONFORMANCE_CF_PORT." >&2
 		exit 1
@@ -36,8 +37,11 @@ trap 'kill -TERM "${pids[@]}" 2>/dev/null; wait 2>/dev/null || true' EXIT
 "$dev" "$tofu_port" tofu - "$log_dir/conformance-cf-tofu" "${knobs[@]}" \
 	>"$log_dir/conformance-cf-tofu.log" 2>&1 &
 pids+=($!)
+"$dev" "$open_port" open - "$log_dir/conformance-cf-open" "${knobs[@]}" \
+	>"$log_dir/conformance-cf-open.log" 2>&1 &
+pids+=($!)
 
-for p in "$port" "$tofu_port"; do
+for p in "$port" "$tofu_port" "$open_port"; do
 	for i in $(seq 1 240); do
 		curl -s -o /dev/null "http://127.0.0.1:$p/" && break
 		if [ "$i" -eq 240 ]; then
@@ -54,11 +58,12 @@ multi_ip=0
 status=0
 RELAY_URL="ws://127.0.0.1:$port" \
 	RELAY_TOFU_URL="ws://127.0.0.1:$tofu_port" \
+	RELAY_OPEN_URL="ws://127.0.0.1:$open_port" \
 	RELAY_PEER_IP=127.0.0.1 \
 	RELAY_MULTI_IP="${RELAY_MULTI_IP:-$multi_ip}" \
 	RELAY_LATENCY=0 \
 	"$here/target/release/relay-conformance" "$@" || status=$?
 if [ "$status" -ne 0 ]; then
-	echo "relay logs: $log_dir/conformance-cf.log, $log_dir/conformance-cf-tofu.log" >&2
+	echo "relay logs: $log_dir/conformance-cf{,-tofu,-open}.log" >&2
 fi
 exit "$status"

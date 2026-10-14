@@ -7652,6 +7652,84 @@ and 115, the operator's choices and the spec text, land in their own PR.)*
   (both relays and the conformance check change together), or a header that
   cannot be folded (`Set-Cookie`) ever has to cross.
 
+**116n. Key-addressed registration: an `open` mode in both relays, and the
+pinned key in every client's `HELLO`.** *(2026-10-14; decision 114f, spec
+revision 115 §4.1, §4.2, §5 and the 114f addendum; gaps SG-62, SG-70. The
+addressing half of what 115 listed under 116k; 116k keeps the abuse controls
+and logs, and the hosted relay switches to `open` only after 116k and 116f's
+hot-loop rule. Nothing is deployed and no deployment's mode changes.)*
+- **Mode is configuration, as before.** storm-relay gains `--mode`
+  (`STORM_RELAY_MODE`) `allowlist | tofu | open`; without it the mode is what
+  it was (allowlist with `--allowlist`, TOFU otherwise), and `open` refuses to
+  start beside an allowlist or a bindings file. The Worker's
+  `STORM_RELAY_BINDING` takes `open`; its default stays `allowlist`.
+- **storm-relay: one table keyed by `(server_id, pubkey)`.** `Registrations`
+  is `server_id → key bytes → Registration`; install, release and touch take
+  the key, so supersession and the release guard are per key and two keys of
+  one `server_id` never meet. Open mode skips the binding check entirely (no
+  challenge is withheld, nothing is recorded). A `HELLO` is routed by
+  `HELLO.pubkey`: in any mode, a key routes to that key's registration (held
+  for the wait, then `server_unreachable`); without a key, allowlist and TOFU
+  route to the one registration as before, and open refuses at once.
+- **The Worker: one Durable Object per `(server_id, pubkey)` in open mode,**
+  named `<server_id>:<pubkey>` (canonical unpadded base64url; `server_id` has
+  no `:`, so it never meets a per-`server_id` room). `/register` reads the
+  key from `REGISTER_SERVER`, `/connect` from `?pubkey=`, so nothing done
+  under one key reaches another key's room, which is §4.1 rule 2 by
+  construction. Allowlist and TOFU rooms keep their `server_id` names, so
+  this deploys over existing rooms and TOFU bindings unchanged. A connect URL
+  without `?pubkey=` on an open relay lands in the bare `server_id` room,
+  which holds no server and answers the `HELLO` `server_unreachable` at once.
+  The room keeps the registered key in the server's attachment (`pk`, kept
+  after registration now) and the client's query key and named key (`qk`,
+  `hk`), so routing survives hibernation; a trunk from before 116n has no
+  `pk` and its key is read from the allowlist or the binding.
+- **`HELLO.pubkey` checks, both relays.** It must be a string decoding to 32
+  bytes of strict base64url, and must equal `?pubkey=` when both are present;
+  otherwise `protocol_error`. A malformed `?pubkey=` is `protocol_error` too.
+  A query alone names no key: §5's table reads the `HELLO`.
+- **Clients.** Dart `SrpTrunk` takes `serverKey` and sends it as
+  `HELLO.pubkey` and `?pubkey=` (`keyedConnectUrl`); `StormConnection` passes
+  its pinned `publicKeyB64`, and the pairing and sign-in route
+  (`openPairingRoute`, `openSavedRoute`, `probeRelay`) the QR's or the saved
+  key. Rust `SrpTrunk::connect(_with)` now requires the key, refuses one that
+  is not 32 bytes of unpadded base64url before dialling, and `mcp-connect`'s
+  race passes its pinned key. storm-server needs nothing: it already sends
+  `pubkey` in `REGISTER_SERVER`.
+- **Compatibility** (servers are unaffected in every cell):
+
+  | | relay before 116n (allowlist or TOFU) | 116n relay, allowlist or TOFU | 116n relay, open |
+  |---|---|---|---|
+  | **client before 116n** (keyless `HELLO`, no query) | routed by `server_id` | routed to the one registration, as before | `server_unreachable` at once (no grace, 114f addendum) |
+  | **116n client** (`HELLO.pubkey` and `?pubkey=`) | key and query ignored (unknown field, §3.1); routed by `server_id`; the identity challenge decides | routed only if the registered key is the pinned one; otherwise held, then `server_unreachable` | routed to `(server_id, pubkey)`; none live: held, then `server_unreachable` |
+
+  One verdict moves: a 116n client whose pinned key no longer matches the
+  key registered on an allowlist or TOFU relay now sees `server_offline`
+  from that relay, where it used to reach the server and fail the challenge
+  (`identity_failed`). That is §5's table; a rotated key needs a re-pair
+  either way.
+- **Vectors.** `docs/srp-vectors.json` → `hello_pubkey` is now read by
+  storm-relay (`tests/vectors.rs`, and the routing tests' refused
+  spellings), the Worker (`test/unit/vectors.test.ts`, `test/open`), the Dart
+  client (`srp_vectors_test.dart`, including the connect URL) and the Rust
+  client (`tests/srp_vectors.rs`). The generator still does not emit it;
+  that stays with 116l, as 115 says.
+- **Conformance.** `RELAY_OPEN_URL` and seven checks
+  (`checks/keyed.rs`): on the allowlist relay
+  `a_hello_for_another_key_is_server_unreachable` and
+  `a_bad_or_disagreeing_hello_pubkey_is_a_protocol_error`; on the open relay
+  `open_registrations_are_keyed_by_server_id_and_pubkey`,
+  `a_squatter_cannot_take_over`, `supersession_is_per_key`,
+  `a_keyless_hello_is_refused_on_an_open_relay` and the bad-key check again.
+  `local.sh` and `cf.sh` start a third, open-mode instance (+2 on their
+  ports). `make test-live RELAY_MODE=open` runs every relayed live suite
+  through an open relay.
+- **Results.** See the PR. *Revisit if:* the spec settles what an open relay
+  that routes on the URL does with a keyed `HELLO` whose URL named no key
+  (here `server_unreachable` at once), or keeps a grace period for keyless
+  `HELLO`s on some open relay (then the "exactly one live registration" row
+  of §5 needs a cross-room lookup in the Worker).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
