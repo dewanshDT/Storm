@@ -692,7 +692,15 @@ mod tests {
     #[test]
     fn the_real_windows_query_parses() {
         let ifaces = local_ifaces();
-        let s = evaluate(Platform::Windows, &RealOs, &ifaces);
+        // A cold PowerShell on a loaded runner can miss even QUERY_TIMEOUT;
+        // the server re-reads on its refresh interval, so this retries too.
+        let mut s = evaluate(Platform::Windows, &RealOs, &ifaces);
+        for _ in 0..2 {
+            if s.signal == Signal::WindowsCategory {
+                break;
+            }
+            s = evaluate(Platform::Windows, &RealOs, &ifaces);
+        }
         assert_eq!(s.signal, Signal::WindowsCategory, "{s:?}");
         assert!(
             s.verdicts
