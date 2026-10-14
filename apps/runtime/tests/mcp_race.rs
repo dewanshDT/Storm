@@ -12,6 +12,8 @@ use data_encoding::BASE64URL_NOPAD;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use storm_runtime::connection::Status;
+use storm_runtime::identity::relay_set_message;
 use storm_runtime::mcp_connect::Adapter;
 use storm_runtime::race::{RaceConnector, RaceOptions, read_cache};
 use storm_runtime::srp::TrunkConfig;
@@ -56,6 +58,8 @@ impl Seen {
 
 enum Action {
     Respond(u16, Option<Value>),
+    /// The relay ends the stream with `ERROR{code, stream_id}`.
+    StreamError(&'static str),
     /// Never answer.
     Hang,
     /// The relay hangs up the whole trunk.
@@ -69,6 +73,9 @@ struct FakeServer {
     signing: SigningKey,
     /// What `/v1/server` advertises.
     relays: Mutex<Vec<String>>,
+    relays_sig: Mutex<Option<String>>,
+    /// Answers the challenge with this instead of a signature.
+    refuse_challenge: Mutex<Option<(u16, Value)>>,
     /// While set, the challenge waits for it: a slow path.
     gate: Mutex<Option<Arc<Notify>>>,
     seen: Mutex<Vec<Seen>>,
@@ -81,6 +88,8 @@ impl FakeServer {
             name,
             signing,
             relays: Mutex::default(),
+            relays_sig: Mutex::default(),
+            refuse_challenge: Mutex::default(),
             gate: Mutex::default(),
             seen: Mutex::default(),
             changed: Notify::new(),
@@ -128,6 +137,9 @@ impl FakeServer {
                 if let Some(gate) = gate {
                     gate.notified().await;
                 }
+                if let Some((status, body)) = self.refuse_challenge.lock().unwrap().clone() {
+                    return Action::Respond(status, Some(body));
+                }
                 let nonce = seen.body["nonce"].as_str().unwrap_or_default();
                 let sig = self
                     .signing
@@ -146,11 +158,12 @@ impl FakeServer {
                     .iter()
                     .map(|u| json!({"url": u, "public_address": format!("{u}/connect/{SERVER}")}))
                     .collect();
-                Action::Respond(
-                    200,
-                    Some(json!({"server_id": SERVER, "name": "fake", "key_id": "k",
-                                "algorithm": "ed25519", "public_key": "x", "relays": relays})),
-                )
+                let mut info = json!({"server_id": SERVER, "name": "fake", "key_id": "k",
+                                      "algorithm": "ed25519", "public_key": "x", "relays": relays});
+                if let Some(sig) = self.relays_sig.lock().unwrap().clone() {
+                    info["relays_sig"] = json!(sig);
+                }
+                Action::Respond(200, Some(info))
             }
             "/mcp" => {
                 let id = seen.body["id"].clone();
@@ -159,6 +172,11 @@ impl FakeServer {
                     seen.body.pointer("/params/name").and_then(|n| n.as_str()),
                 ) {
                     (Some("tools/call"), Some("dies")) => Action::DropTrunk,
+                    (Some("tools/call"), Some("refused")) => Action::StreamError("rate_limited"),
+                    (Some("tools/call"), Some("aborted")) => Action::StreamError("stream_aborted"),
+                    (Some("tools/call"), Some("superseded")) => {
+                        Action::StreamError("trunk_superseded")
+                    }
                     (Some("tools/call"), Some("hangs")) => Action::Hang,
                     (Some(m), _) if m.starts_with("notifications/") => Action::Respond(202, None),
                     _ => Action::Respond(
@@ -224,6 +242,7 @@ async fn http_connection(stream: TcpStream, server: Arc<FakeServer>) {
             .await
         {
             Action::Respond(s, a) => (s, a),
+            Action::StreamError(_) => return,
             Action::Hang => return std::future::pending().await,
             Action::DropTrunk => return,
         };
@@ -406,6 +425,12 @@ async fn relay_connection(
                             }
                             let _ = out
                                 .send(Out::Send(control("CLOSE", json!({"stream_id": stream_id}))));
+                        }
+                        Action::StreamError(code) => {
+                            let _ = out.send(Out::Send(control(
+                                "ERROR",
+                                json!({"code": code, "message": code, "stream_id": stream_id}),
+                            )));
                         }
                         Action::Hang => {}
                         Action::DropTrunk => {
@@ -617,7 +642,99 @@ async fn a_relayed_call_with_nothing_back_is_server_silent_and_not_resent() {
     let answer = ask(&a, 2, "echo").await;
     assert_eq!(answer["result"]["via"], "relayed", "{answer}");
     assert_eq!(server.calls("hangs"), 1, "the call was resent");
+    assert_eq!(
+        relay.hellos(),
+        1,
+        "a silent request is not a lost transport (§8.7)"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_scoped_error_leaves_the_trunk_for_the_next_call() {
+    let server = FakeServer::new("relayed", pinned());
+    let relay = FakeRelay::start("127.0.0.1", Hello::Ready, server.clone()).await;
+    let a = adapter(options(None, vec![relay.url.clone()]));
+
+    for (id, tool, code) in [
+        (1, "refused", "rate_limited"),
+        (2, "aborted", "stream_aborted"),
+    ] {
+        let answer = ask(&a, id, tool).await;
+        assert_eq!(storm_error(&answer), code, "{answer}");
+        assert_eq!(server.calls(tool), 1, "the call was resent");
+    }
+    let answer = ask(&a, 3, "echo").await;
+    assert_eq!(answer["result"]["via"], "relayed", "{answer}");
+    assert_eq!(relay.hellos(), 1, "a stream-scoped error dropped the trunk");
+    assert_eq!(a.connection().status(), Status::Relayed);
+}
+
+#[tokio::test]
+async fn trunk_superseded_naming_a_stream_re_races_at_once() {
+    let server = FakeServer::new("relayed", pinned());
+    let relay = FakeRelay::start("127.0.0.1", Hello::Ready, server.clone()).await;
+    let a = adapter(options(None, vec![relay.url.clone()]));
+    let answer = ask(&a, 1, "superseded").await;
+    assert_eq!(storm_error(&answer), "trunk_superseded", "{answer}");
+    let answer = ask(&a, 2, "echo").await;
+    assert_eq!(answer["result"]["via"], "relayed", "{answer}");
     assert_eq!(relay.hellos(), 2);
+}
+
+#[tokio::test]
+async fn with_the_server_down_messages_fail_from_the_backoff_and_spend_one_hello_per_relay() {
+    let absent = FakeServer::new("never", pinned());
+    let one = FakeRelay::start(
+        "127.0.0.1",
+        Hello::Refuse("server_unreachable"),
+        absent.clone(),
+    )
+    .await;
+    let two = FakeRelay::start(
+        "127.0.0.1",
+        Hello::Refuse("server_unreachable"),
+        absent.clone(),
+    )
+    .await;
+    let a = adapter(options(
+        Some(format!("http://127.0.0.1:{}", closed_port())),
+        vec![one.url.clone(), two.url.clone()],
+    ));
+    for id in 0..10 {
+        let answer = ask(&a, id, "echo").await;
+        assert_eq!(storm_error(&answer), "server_offline", "{answer}");
+    }
+    assert_eq!((one.hellos(), two.hellos()), (1, 1), "a message re-raced");
+    assert_eq!(a.connection().status(), Status::ServerOffline);
+}
+
+#[tokio::test]
+async fn a_refused_challenge_is_identity_failed_unproven_and_not_re_raced() {
+    for (status, body) in [
+        (
+            200,
+            json!({"server_id": SERVER, "signature": "bm90IGEgc2lnbmF0dXJl"}),
+        ),
+        (
+            200,
+            json!({"server_id": SERVER, "signature": BASE64URL_NOPAD.encode(&[0u8; 64])}),
+        ),
+        (404, json!({"error": "not found"})),
+        (500, json!({})),
+    ] {
+        let fake = FakeServer::new("fake", pinned());
+        *fake.refuse_challenge.lock().unwrap() = Some((status, body.clone()));
+        let relay = FakeRelay::start("127.0.0.1", Hello::Ready, fake.clone()).await;
+        let down = format!("ws://127.0.0.1:{}", closed_port());
+        let a = adapter(options(None, vec![relay.url.clone(), down]));
+        for id in 0..3 {
+            let answer = ask(&a, id, "echo").await;
+            assert_eq!(storm_error(&answer), "identity_failed", "{body}: {answer}");
+        }
+        assert_eq!(a.connection().status(), Status::Unproven);
+        assert_eq!(relay.hellos(), 1, "{body}: re-raced per message");
+        assert!(fake.never_saw_the_key());
+    }
 }
 
 #[tokio::test]
@@ -648,6 +765,53 @@ async fn the_relay_set_is_cached_after_a_connect_and_used_by_the_next() {
     assert_eq!(ask(&a, 2, "echo").await["result"]["via"], "relayed");
     assert_eq!(learned.hellos(), 1);
     assert_eq!(seed.hellos(), 1);
+}
+
+/// §4.3: adopted only from the proven winner, only when a `relays_sig` it
+/// carries verifies against the pinned key, and never with a plaintext relay
+/// off a private network.
+#[tokio::test]
+async fn a_relay_set_is_adopted_only_when_its_signature_verifies() {
+    let server = FakeServer::new("relayed", pinned());
+    let seed = FakeRelay::start("127.0.0.1", Hello::Ready, server.clone()).await;
+    let advertised = vec![
+        "wss://relay.example".to_string(),
+        "ws://100.64.0.1:8080".to_string(),
+        "ws://192.168.1.5:8080".to_string(),
+    ];
+    *server.relays.lock().unwrap() = advertised.clone();
+    let urls: Vec<&str> = advertised.iter().map(String::as_str).collect();
+    let signed_by = |key: &SigningKey| {
+        BASE64URL_NOPAD.encode(&key.sign(&relay_set_message(SERVER, &urls)).to_bytes())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("relays.json");
+    let run = |cache: std::path::PathBuf, id: i64| {
+        let mut o = options(None, vec![seed.url.clone()]);
+        o.cache = Some(cache);
+        let a = adapter(o);
+        async move { ask(&a, id, "echo").await }
+    };
+
+    *server.relays_sig.lock().unwrap() = Some(signed_by(&impostor()));
+    assert_eq!(run(cache.clone(), 1).await["result"]["via"], "relayed");
+    assert!(
+        read_cache(&cache, SERVER).is_empty(),
+        "a set signed by another key was adopted"
+    );
+
+    *server.relays_sig.lock().unwrap() = Some(signed_by(&pinned()));
+    assert_eq!(run(cache.clone(), 2).await["result"]["via"], "relayed");
+    assert_eq!(
+        read_cache(&cache, SERVER),
+        vec!["wss://relay.example", "ws://192.168.1.5:8080"],
+        "a public ws:// relay was cached"
+    );
+
+    *server.relays.lock().unwrap() = vec!["wss://other.example".into()];
+    *server.relays_sig.lock().unwrap() = None;
+    assert_eq!(run(cache.clone(), 3).await["result"]["via"], "relayed");
+    assert_eq!(read_cache(&cache, SERVER), vec!["wss://other.example"]);
 }
 
 #[tokio::test]

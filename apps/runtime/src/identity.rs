@@ -108,6 +108,17 @@ pub fn challenge_message(server_id: &str, nonce: &str) -> Vec<u8> {
     format!("{CHALLENGE_PREFIX}{server_id}:{nonce}").into_bytes()
 }
 
+pub const RELAY_SET_PREFIX: &str = "storm-relays:v1:";
+
+/// What a server signs as `relays_sig` over the relay set it advertises
+/// (SRP §4.3): the URLs sorted bytewise and joined by `\n`, so the order
+/// they arrive in does not matter.
+pub fn relay_set_message(server_id: &str, urls: &[&str]) -> Vec<u8> {
+    let mut urls = urls.to_vec();
+    urls.sort_unstable();
+    format!("{RELAY_SET_PREFIX}{server_id}:{}", urls.join("\n")).into_bytes()
+}
+
 /// The server's id rules, which make the colon in a signed message
 /// unambiguous.
 pub fn validate_server_id(id: &str) -> std::result::Result<(), &'static str> {

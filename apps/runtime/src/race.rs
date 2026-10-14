@@ -1,13 +1,14 @@
-//! The connection race behind `mcp-connect` (decision 105b, SRP §2): which
-//! path reaches the pinned server, the server's own address or one of its
-//! relays, and proof on that path that it is the server.
+//! The connection race behind `mcp-connect` (decision 105b, SRP §2.2 and
+//! §8.3): which path reaches the pinned server, the server's own address or
+//! one of its relays, and proof on that path that it is the server.
 //!
-//! **The rules, the app's (`storm_connection.dart`):**
+//! **The rules:**
 //! 1. The direct address and every self-hosted relay race together. A public
-//!    relay is tried only once all of those have failed, so a fast public
-//!    relay never beats a slow self-hosted one. Without E2E, whichever path
-//!    carries traffic reads it: preferring Storm's relay over the operator's
-//!    own would be a privacy regression, not a latency win.
+//!    relay is tried only once every one of those has failed or reached its
+//!    own deadline (`T_candidate`), so a fast public relay never beats a slow
+//!    self-hosted one. Without E2E, whichever path carries traffic reads it:
+//!    preferring Storm's relay over the operator's own would be a privacy
+//!    regression, not a latency win.
 //! 2. A candidate wins only after [`verify_identity`] passes **over its own
 //!    path**, so nothing carrying the key goes anywhere unproven. An impostor
 //!    on one path does not stop another path from winning.
@@ -17,7 +18,11 @@
 //!    then `server_offline` (a relay is up and the server is not on it, or
 //!    the address refused), then the rest (`relay_down`, `unreachable`, …).
 //! 5. After a win, `GET /v1/server` over the winner refreshes the relay set,
-//!    cached per `server_id`: the flags only seed it (Q11).
+//!    cached per `server_id`: the flags only seed it (Q11). Only the proven
+//!    winner's set for the pinned `server_id` is adopted, and when it carries
+//!    `relays_sig` only if that verifies against the pinned key (§4.3).
+//! 6. A `ws://` relay off loopback, RFC 1918, link-local and ULA hosts is not
+//!    a candidate and is never dialled or cached ([`plaintext_allowed`]).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -29,18 +34,22 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use serde::Deserialize;
 
-use crate::srp::{SrpTrunk, TrunkConfig};
+use crate::identity::{relay_set_message, verify};
+use crate::srp::{SrpTrunk, TrunkConfig, plaintext_allowed};
 use crate::transport::{
     Connector, DirectTransport, HttpRequest, HttpResponse, IDLE_LIMIT, ServerPin, SrpTransport,
     Transport, TransportError, verify_identity,
 };
 
-/// Hosts of relays Storm itself runs: the only relays raced last. Empty, as
-/// the app's `kPublicRelayHosts` is, until a hosted relay ships; then its host
-/// goes in both (`apps/relay-cf/DEPLOY.md`). A relay not on this list is the
-/// operator's, which is the safe direction to err (it races something they
-/// already trust, never ours).
-pub const PUBLIC_RELAY_HOSTS: &[&str] = &[];
+/// Relays someone other than the server's operator runs: tier 2, raced last
+/// (§2.1, decision 114d). Storm's hosted Cloudflare relay is one whatever its
+/// registration mode, since Cloudflare terminates its TLS. The app's
+/// `kPublicRelayHosts` holds the same list. A relay not on it is the
+/// operator's, which is the safe direction to err.
+pub const PUBLIC_RELAY_HOSTS: &[&str] = &["storm-relay.dewansh.space"];
+
+/// `T_candidate` (§8.8): one candidate, first byte to proof.
+pub const CANDIDATE_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The cache file under [`crate::platform::user_state_dir`].
 pub const CACHE_FILE: &str = "mcp-connect-relays.json";
@@ -73,6 +82,17 @@ impl Transport for RaceTransport {
             Self::Srp(t) => t.is_closed(),
         }
     }
+
+    fn is_lost(&self, error: &TransportError) -> bool {
+        match self {
+            Self::Direct(t) => t.is_lost(error),
+            Self::Srp(t) => t.is_lost(error),
+        }
+    }
+
+    fn is_relayed(&self) -> bool {
+        matches!(self, Self::Srp(_))
+    }
 }
 
 pub struct RaceOptions {
@@ -99,7 +119,7 @@ impl RaceOptions {
             public_hosts: PUBLIC_RELAY_HOSTS.iter().map(|h| h.to_string()).collect(),
             trunk: TrunkConfig::default(),
             idle: IDLE_LIMIT,
-            candidate_deadline: Duration::from_secs(20),
+            candidate_deadline: CANDIDATE_DEADLINE,
         }
     }
 }
@@ -118,6 +138,11 @@ pub fn relay_base(url: &str, server_id: &str) -> String {
         .to_string()
 }
 
+/// §4.3: `wss://` anywhere, `ws://` only on a private network.
+fn relay_allowed(url: &str) -> bool {
+    !url.starts_with("ws://") || plaintext_allowed(&host_of(url))
+}
+
 fn host_of(url: &str) -> String {
     url.parse::<tokio_tungstenite::tungstenite::http::Uri>()
         .ok()
@@ -133,7 +158,8 @@ impl RaceConnector {
         Ok(Self { pin, options })
     }
 
-    /// Every relay to try: the flags, then the cache, each once.
+    /// Every relay to try: the flags, then the cache, each once, without the
+    /// plaintext relays that may not carry a credential.
     pub fn relays(&self) -> Vec<String> {
         let sid = &self.pin.server_id;
         let cached = self
@@ -145,9 +171,14 @@ impl RaceConnector {
         let mut out: Vec<String> = Vec::new();
         for url in self.options.relays.iter().chain(cached.iter()) {
             let base = relay_base(url, sid);
-            if !base.is_empty() && !out.contains(&base) {
-                out.push(base);
+            if base.is_empty() || out.contains(&base) {
+                continue;
             }
+            if !relay_allowed(&base) {
+                tracing::warn!("{base} is plaintext off a private network; not dialling it");
+                continue;
+            }
+            out.push(base);
         }
         out
     }
@@ -209,6 +240,7 @@ impl RaceConnector {
             server_id: String,
             #[serde(default)]
             relays: Vec<Advert>,
+            relays_sig: Option<String>,
         }
         let info = match response {
             Ok(r) if r.status == 200 => serde_json::from_slice::<Info>(&r.body).ok(),
@@ -218,10 +250,21 @@ impl RaceConnector {
             tracing::debug!("the relay set was not refreshed");
             return;
         };
-        let relays: Vec<String> = info
-            .relays
+        let advertised: Vec<&str> = info.relays.iter().map(|r| r.url.as_str()).collect();
+        if let Some(sig) = &info.relays_sig
+            && !verify(
+                &self.pin.key,
+                &relay_set_message(&self.pin.server_id, &advertised),
+                sig,
+            )
+        {
+            tracing::warn!("the relay set's signature does not verify; not adopting it");
+            return;
+        }
+        let relays: Vec<String> = advertised
             .iter()
-            .map(|r| relay_base(&r.url, &self.pin.server_id))
+            .map(|url| relay_base(url, &self.pin.server_id))
+            .filter(|url| relay_allowed(url))
             .collect();
         if let Err(e) = write_cache(path, &self.pin.server_id, &relays) {
             tracing::warn!("could not cache the relay set at {}: {e:#}", path.display());
@@ -429,6 +472,66 @@ mod tests {
         assert!(!public_tried.load(Ordering::SeqCst));
     }
 
+    /// §2.2: no round timer. A round-1 candidate that never answers holds
+    /// the public round off until its own `T_candidate` runs out.
+    #[tokio::test(start_paused = true)]
+    async fn the_public_round_waits_out_a_silent_candidates_deadline() {
+        let public_tried = Arc::new(AtomicBool::new(false));
+        let race = tokio::spawn(race(
+            vec![
+                vec![candidate(
+                    "self-hosted",
+                    Box::pin(std::future::pending::<Result<&'static str, TransportError>>()),
+                )],
+                vec![candidate("public", watched(public_tried.clone(), "public"))],
+            ],
+            CANDIDATE_DEADLINE,
+        ));
+        tokio::time::sleep(CANDIDATE_DEADLINE - Duration::from_millis(100)).await;
+        assert!(
+            !public_tried.load(Ordering::SeqCst),
+            "the public round ran early"
+        );
+        let (label, _) = race.await.unwrap().unwrap();
+        assert_eq!(label, "public");
+        assert_eq!(CANDIDATE_DEADLINE, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_plaintext_relay_off_a_private_network_is_not_a_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relays.json");
+        write_cache(
+            &path,
+            "srv_A",
+            &["ws://100.64.0.1:8080".into(), "ws://10.0.0.2:8080".into()],
+        )
+        .unwrap();
+        let pin = ServerPin {
+            server_id: "srv_A".into(),
+            key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key(),
+        };
+        let mut options = RaceOptions::new(
+            None,
+            vec![
+                "ws://relay.example.com".into(),
+                "ws://192.168.1.5:8080".into(),
+                "wss://relay.example.com".into(),
+                "ws://100.100.1.2".into(),
+            ],
+        );
+        options.cache = Some(path);
+        let c = RaceConnector::new(pin, options).unwrap();
+        assert_eq!(
+            c.relays(),
+            vec![
+                "ws://192.168.1.5:8080",
+                "wss://relay.example.com",
+                "ws://10.0.0.2:8080"
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn the_public_relay_runs_only_when_everything_else_failed() {
         let (_, won) = race(
@@ -575,7 +678,20 @@ mod tests {
         assert_eq!(c.tier("wss://relay.storm.example:443"), Tier::Public);
         assert_eq!(c.tier("wss://RELAY.storm.example"), Tier::Public);
         assert_eq!(c.tier("wss://relay.home.example"), Tier::SelfHosted);
-        assert!(PUBLIC_RELAY_HOSTS.is_empty());
+        let hosted = RaceConnector::new(
+            c.pin.clone(),
+            RaceOptions {
+                cache: None,
+                ..RaceOptions::new(None, vec![])
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            hosted.tier("wss://storm-relay.dewansh.space"),
+            Tier::Public,
+            "Storm's hosted relay is raced in tier 2 (114d)"
+        );
+        assert_eq!(hosted.tier("wss://relay.home.example"), Tier::SelfHosted);
     }
 
     #[test]

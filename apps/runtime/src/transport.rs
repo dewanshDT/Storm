@@ -77,6 +77,18 @@ pub trait Transport: Send + Sync {
     fn is_closed(&self) -> bool {
         false
     }
+
+    /// Whether `error`, from a request on this path, means the path itself
+    /// is gone (SRP §8.4). A stream-scoped error never does: it fails that
+    /// request and leaves the path for the next one.
+    fn is_lost(&self, _error: &TransportError) -> bool {
+        self.is_closed()
+    }
+
+    /// Whether a relay carries this path (`relayed`, not `online`, §8.6).
+    fn is_relayed(&self) -> bool {
+        false
+    }
 }
 
 pub trait Connector: Send + Sync {
@@ -238,6 +250,12 @@ impl Transport for DirectTransport {
             body,
         })
     }
+
+    /// Direct, the connection is the stream: refused, reset or cut short is
+    /// the path failing. Only a read timeout (`T_idle`) is the request's own.
+    fn is_lost(&self, error: &TransportError) -> bool {
+        !matches!(error.code, "server_silent" | "bad_request")
+    }
 }
 
 /// The `Host` a relayed request carries. storm-server rewrites it to its
@@ -320,6 +338,17 @@ impl Transport for SrpTransport {
 
     fn is_closed(&self) -> bool {
         self.trunk.is_closed()
+    }
+
+    /// The trunk died, or the relay said the server left it
+    /// (`trunk_lost`/`trunk_superseded` naming a stream): every stream on it
+    /// will fail. Anything else stream-scoped is one request's.
+    fn is_lost(&self, error: &TransportError) -> bool {
+        self.is_closed() || matches!(error.code, "trunk_lost" | "trunk_superseded")
+    }
+
+    fn is_relayed(&self) -> bool {
+        true
     }
 }
 
