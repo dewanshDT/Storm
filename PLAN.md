@@ -8273,6 +8273,32 @@ rules are revision 115's §8, §8.10 in particular, plus §2.1–2.2 (114d), §4
   calls, or a hostname-resolving plaintext check is wanted (it would have to
   pin the resolved address for the dial).
 
+**116e. Liveness: relays reap silent client trunks.** *(2026-10-15; SG-16,
+SG-17, SG-20, SG-21; spec §4.2, §5 client heartbeat)*
+- **storm-relay.** A client trunk's read had no deadline, so a client that
+  vanished without a FIN held its streams, and the origin's work for them,
+  for as long as the socket lasted. The read now times out at the heartbeat
+  deadline (45 s), and the existing teardown ends each stream at the origin
+  with `CLOSE`.
+- **Worker.** Clients had no last-seen time at all. A ready client now keeps
+  one (written at most once a second, as servers do, and counting `PING`s
+  the runtime answered without waking the object); the alarm reaps one past
+  the deadline through `dropClient`, which closes its streams at the origin.
+- **The advertised interval is derived.** `REGISTERED.heartbeat_interval_secs`
+  was a constant 15 whatever the configured deadline; both relays now send a
+  third of the deadline in whole seconds, at least 1, so they cannot
+  disagree (the spec's §4.2 says so). That made the audit's "refuse
+  inconsistent config" moot.
+- **Tests.** Worker: `reaps a silent client trunk and closes its streams at
+  the origin`; storm-relay: `a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin`,
+  `the_advertised_interval_is_a_third_of_the_deadline`; conformance gains the
+  same reaping check, and its client harness now heartbeats after `READY` as
+  a real client does (three checks had held a client silent past the
+  fixture's 2 s deadline). The interval check follows the derived rule.
+  Conformance: storm-relay 66/0, Worker 60/0/6 + 5/0.
+- **Left to 116l:** `server_trunk_death_ends_every_client_trunk` as a
+  conformance case (`every_open_stream_is_told_trunk_lost` covers streams).
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:

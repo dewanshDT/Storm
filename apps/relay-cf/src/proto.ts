@@ -1,7 +1,9 @@
 // SRP v1 control messages and the binary body-frame header (docs/srp-v1.md §3, §6).
 
 export const PROTOCOL_VERSION = 1;
-export const HEARTBEAT_INTERVAL_SECS = 15;
+// The interval a trunk is told to heartbeat at, derived from the deadline it
+// is held to (§4.2: three missed heartbeats), so the two cannot disagree.
+export const heartbeatIntervalSecs = (deadlineMs: number): number => Math.max(1, Math.floor(deadlineMs / 3000));
 
 export type ErrorCode =
   | "protocol_error"

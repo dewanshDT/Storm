@@ -248,12 +248,24 @@ async fn trunk_loop(
     peer: SocketAddr,
 ) -> Fault {
     loop {
+        // §5 client heartbeat: a client sends `PING` at least every 15 s, so a
+        // trunk silent for the deadline is gone, and the caller's teardown
+        // ends its streams at the origin as if it had closed. A timeout on the
+        // read itself, as on the server side, or a silent client is never
+        // noticed at all.
         let incoming = tokio::select! {
             biased;
             () = tx.killed() => return Fault::Disconnected,
-            incoming = trunk::recv(rx) => match incoming {
-                Ok(incoming) => incoming,
-                Err(fault) => return fault,
+            incoming = tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)) => match incoming {
+                Ok(Ok(incoming)) => incoming,
+                Ok(Err(fault)) => return fault,
+                Err(_) => {
+                    tracing::info!(
+                        client_trunk_id = %session.client_trunk_id,
+                        "client silent past the heartbeat deadline; closing its trunk"
+                    );
+                    return Fault::Disconnected;
+                }
             },
         };
 
