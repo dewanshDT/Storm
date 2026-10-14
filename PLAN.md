@@ -6886,6 +6886,121 @@ Discovery Pairing*; this entry records what was built and where it differs)*
 - *Revisit if:* graceful shutdown learns SIGTERM (then the goodbye goes out
   on every stop), iOS joins (its Info.plist keys and the support rule), or a
   network the operator trusts uses addresses outside the LAN-scoped set.
+- *Amended by 119:* a `ver` mismatch is a warning on the row ("different
+  version (server vX)"), not "update needed", and the row stays pairable.
+
+**119. Reachability on laptops and desktops: nothing opened silently, a
+LAN-only opening with consent, nothing on untrusted networks.** *(2026-10-14;
+agreed by the operator after an Omarchy laptop with `ufw` deny-incoming
+advertised over mDNS but refused the phone's connection. The normative spec is
+the vault note *Storm/Remote/Reachability on Laptops and Desktops*; this entry
+records what was built and where it differs)*
+- **Layer 0 is unchanged.** Remote access already dials out to a relay, so a
+  machine behind any firewall works with nothing opened. Because ordinary
+  laptops lean on the relay far more than a homelab VM, **Q19 (channel
+  binding) is the first slice after this release.**
+- **Layer 1, the opening.** The `.deb` ships `/etc/ufw/applications.d/storm-
+  server` (a conffile) and `/usr/lib/firewalld/services/storm-server.xml`,
+  both on 8484 (`deploy/firewall/`; `firewall.rs` generates the same text and a
+  test holds them equal). `install.sh` asks the agreed question when ufw is
+  active (`ENABLED=yes` in `ufw.conf`) or firewalld runs: yes (the default,
+  and `--yes`) adds `ufw allow from <subnet> to any app storm-server` for each
+  local RFC 1918/ULA route that is up (never a public, link-local, CGNAT or
+  docker `linkdown` one), or the service to every active zone that is not
+  `public`/`external`/`drop`/`block`/`trusted` (`home` when there is none,
+  with a note that this network stays closed). No, or `--no-firewall`, prints
+  the exact command. Each rule it adds, and only one it added, goes into
+  `/etc/storm/lan-firewall`; uninstall removes exactly those, before the
+  package. Without sudo, or if the firewall refuses, it prints the command
+  and the install carries on. `install.ps1` asks too (`-NoFirewall`), keeps
+  its program-scoped Private-only rule, and narrows an existing `Storm Server`
+  rule that is open beyond Private. `storm-server up` keeps the profile and
+  service on the port it writes (an `/etc/firewalld/services` override; purge
+  removes it) and, when `storm.env`'s port changed, prints `sudo ufw app update
+  storm-server` / `sudo firewall-cmd --reload`; Windows `up` prints
+  `Set-NetFirewallRule … -LocalPort N`. Nothing in the package or the server
+  ever adds or removes a rule.
+- **Layer 2, untrusted networks.** `nettrust.rs` classifies every interface:
+  Windows by network category (`Get-NetConnectionProfile` joined to
+  `Get-NetIPAddress` by address, run with `CREATE_NO_WINDOW`; Public, or a
+  connected address with no profile, is untrusted), Linux by firewalld zone
+  (`--get-active-zones`, else the default zone), else by NetworkManager's
+  `connection.zone`; macOS and a host with neither have no signal, so every
+  network counts as trusted and the switch governs. Queries time out at 5 s
+  and a failed one falls through to the next source. Discovery re-reads the
+  verdicts when the interface list changes (polled every 5 s) and at least
+  every 60 s, advertises only on addresses it has classified as trusted (a
+  network just joined waits for its verdict), and restarts the responder when
+  that set changes, because mdns-sd keeps an interface it already serves.
+  `ops::pair_with_password` refuses a peer inside an untrusted interface's
+  subnet with `403 lan_only`. `GET /v1/config`'s `discovery` gains
+  `untrusted`.
+- **Layer 3, guidance.** The pair sheet's unreachable state is now "Found
+  **name** but couldn't connect to it. A firewall on that computer may be
+  blocking Storm (port N)." with **Pair with a QR code instead** and **How to
+  allow Storm** (`storm-server status`, ufw with the server's /24, firewalld
+  home, the Windows Private rule, macOS); the password field never appears.
+  Settings › Connection browses, only while the route is relayed, for the
+  paired server's own advert and then shows the "Connected through a relay
+  although you're on the same network…" note and logs one line next to the
+  race's direct-probe failure. `storm-server status` on all three OSes adds
+  `lan` (ufw, firewalld, Windows Firewall or the macOS Application Firewall:
+  open with the rule, blocked with the command, no host firewall, or unknown)
+  and `network` (each LAN interface, trusted or not, and why).
+- **118 amended: a LAN version mismatch is a warning.** The row reads
+  "<fingerprint> · different version (server vX)" and pairs, as the health
+  check only warns.
+- **macOS signing.** The release signs `storm-server` with the Developer ID
+  when `STORM_MACOS_CERT_P12_BASE64`, `STORM_MACOS_CERT_PASSWORD` and
+  `STORM_MACOS_SIGN_IDENTITY` are set, and fails unless `codesign -dvv` shows
+  an `Authority=`, a Team ID and no `adhoc`; without them it signs ad-hoc with
+  a warning. The secrets are not set yet (`deploy/release-secrets.md`).
+- **Where it differs from the note.**
+  - A request cannot say which interface it arrived on (`ConnectInfo` is the
+    peer only), so "from an untrusted network" is a peer inside an untrusted
+    interface's subnet; a peer on a subnet shared by a trusted and an
+    untrusted interface is refused.
+  - The status lines are the existing padded `lan      : …` / `network  : …`
+    rather than "LAN: …", and there is a fourth outcome, `unknown`, for ufw's
+    rules without root (they are root's) and a firewalld that will not answer.
+  - firewalld targets every active non-public zone (Fedora's
+    `FedoraWorkstation` included), not only `home`; `trusted` is skipped, as it
+    allows everything already.
+  - `install.sh` asks on a fresh install or an upgrade without a recorded
+    rule, not on a keep or repair, so re-running changes nothing.
+  - The "How to allow Storm" steps are shown for every OS: the advert does
+    not say which OS the server runs, and adding that is a TXT change.
+- **Not tested here.** The real Windows category query and the real macOS
+  firewall run only on CI's runners (`nettrust`'s Windows-only test in
+  `server (rust, Windows)`; Windows acceptance checks `status` and the
+  Private narrowing); the signed-release assertion runs only on a tagged
+  release with the secrets. No real ufw or firewalld was touched on this
+  machine; installer e2e turns ufw on on its disposable Ubuntu runner and
+  checks the rules, `status`, the port-change reminder and the uninstall.
+- **Tests.** Server: each trust source and its failure fall-through, the
+  default zone, subnet membership, advertising only on trusted addresses (and
+  again once a network becomes trusted), the untrusted peer refused with
+  `lan_only` while a trusted one pairs, the test flag, the query timeout;
+  every `status` line (ufw open/blocked/stale port/no root/allow-all,
+  firewalld open/blocked/public-only/stale service, Windows four ways, macOS
+  three, none), the network line per signal, the port-change reminder, `up`
+  keeping the definitions in step; packaging ships both files, valid, and the
+  maintainer scripts never run `ufw` or `firewall-cmd`. Installer (bats,
+  `firewall.bats`, `ps1.bats`): detection, the plan's exact commands, consent
+  yes/no and the prompt text, home/trusted zones only, a pre-existing rule
+  not recorded, uninstall removing only Storm's rules, no-admin and refusing
+  firewalls printing the command, subnet filtering, `install.ps1`'s
+  Private-only rule, narrowing, prompt, and no `exit`. Client: found but
+  unreachable shows the guidance and the QR fallback with no password or
+  login request sent, the how-to is LAN-only, a version mismatch row pairs,
+  the relayed-on-LAN hint and its log line. Live: `lan_untrusted_e2e.py`
+  starts a server with loopback marked untrusted
+  (`--test-untrusted-interface`, hidden) and checks over real mDNS and HTTP
+  that it is not advertised and refuses password pairing.
+- *Revisit if:* a request can carry its local address (then refuse by
+  interface, not subnet), the advert learns the server's OS, macOS gains a
+  network-trust signal, or Q19 lands (then the relay no longer reads what
+  passes, and the LAN opening is speed alone).
 
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was

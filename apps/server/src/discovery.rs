@@ -13,15 +13,21 @@ use std::time::Duration;
 use mdns_sd::{IfKind, IfPredicate, ServiceDaemon, ServiceInfo};
 
 use crate::api::Shared;
+use crate::nettrust::{Iface, NetTrust, Platform, RealOs};
 
 pub const SERVICE_TYPE: &str = "_storm._tcp.local.";
 
 /// The TXT `v`: a client ignores an entry whose version it does not know.
 pub const TXT_VERSION: &str = "1";
 
-/// Re-checks what is advertised this often, so an account created by
-/// `storm-server passwd` in another process still flips `claimed`.
-const RECHECK: Duration = Duration::from_secs(30);
+/// Re-checks what is advertised this often: an account created by
+/// `storm-server passwd` in another process flips `claimed`, and a network
+/// joined or left changes which interfaces may be advertised (decision 119).
+const RECHECK: Duration = Duration::from_secs(5);
+
+/// The OS's trust verdicts are re-read at least this often, and whenever the
+/// interfaces change (decision 119: "at least every 60 s").
+const TRUST_RECHECK: Duration = Duration::from_secs(60);
 
 /// The switch: Settings › Server › "Discoverable on this network", and
 /// `--no-discovery` / `STORM_DISCOVERY=0`, which wins over the setting.
@@ -29,14 +35,22 @@ pub struct Discovery {
     forced_off: bool,
     enabled: AtomicBool,
     changed: tokio::sync::Notify,
+    /// Which networks the OS calls trusted (decision 119, Layer 2).
+    pub trust: NetTrust,
 }
 
 impl Discovery {
+    #[cfg(test)]
     pub fn new(forced_off: bool, enabled: bool) -> Self {
+        Self::with_trust(forced_off, enabled, NetTrust::default())
+    }
+
+    pub fn with_trust(forced_off: bool, enabled: bool, trust: NetTrust) -> Self {
         Self {
             forced_off,
             enabled: AtomicBool::new(enabled),
             changed: tokio::sync::Notify::new(),
+            trust,
         }
     }
 
@@ -155,19 +169,22 @@ struct Running {
     daemon: ServiceDaemon,
     fullname: String,
     advert: Advert,
+    allowed: Vec<IpAddr>,
 }
 
 impl Running {
-    fn start(bind: IpAddr, port: u16, host: &str, advert: Advert) -> mdns_sd::Result<Self> {
+    fn start(port: u16, host: &str, advert: Advert, allowed: Vec<IpAddr>) -> mdns_sd::Result<Self> {
         let daemon = ServiceDaemon::new()?;
         daemon.disable_interface(IfKind::All)?;
+        let only = allowed.clone();
         daemon.enable_interface(IfKind::Predicate(IfPredicate::new(move |i| {
-            advertises_on(bind, i.ip())
+            only.contains(&i.ip())
         })))?;
         let mut this = Self {
             daemon,
             fullname: String::new(),
             advert: advert.clone(),
+            allowed,
         };
         this.register(port, host, advert)?;
         Ok(this)
@@ -203,8 +220,54 @@ impl Running {
     }
 }
 
-/// Advertises while discovery is on, following the switch and `claimed`.
-/// Never fatal: a host without multicast still serves everything else.
+/// The addresses to advertise on: LAN-scoped for this bind, and on a network
+/// the OS calls trusted.
+pub fn allowed_addresses(bind: IpAddr, ifaces: &[Iface], trust: &NetTrust) -> Vec<IpAddr> {
+    let mut out: Vec<IpAddr> = ifaces
+        .iter()
+        .map(|i| i.ip)
+        .filter(|ip| advertises_on(bind, *ip) && trust.advertisable(*ip))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Re-reads the OS's verdicts when the interfaces changed or a minute passed,
+/// and logs each network that became untrusted.
+async fn refresh_trust(state: &Shared, last: &mut Option<(std::time::Instant, Vec<Iface>)>) {
+    let ifaces = crate::nettrust::local_ifaces();
+    let due = match last {
+        Some((at, seen)) => *seen != ifaces || at.elapsed() >= TRUST_RECHECK,
+        None => true,
+    };
+    if !due {
+        return;
+    }
+    let st = state.clone();
+    let probe = ifaces.clone();
+    let changed = tokio::task::spawn_blocking(move || {
+        st.discovery
+            .trust
+            .refresh(Platform::current(), &RealOs, &probe)
+    })
+    .await
+    .unwrap_or(false);
+    if changed && let Some(s) = state.discovery.trust.snapshot() {
+        for v in s.untrusted().filter(|v| is_lan_scoped(v.iface.ip)) {
+            tracing::info!(
+                interface = %v.iface.name,
+                why = %v.reason,
+                "untrusted network: not advertised, password pairing refused"
+            );
+        }
+    }
+    *last = Some((std::time::Instant::now(), ifaces));
+}
+
+/// Advertises while discovery is on, following the switch, `claimed` and the
+/// OS's trust verdicts. Never fatal: a host without multicast still serves
+/// everything else.
 pub async fn run(
     state: Shared,
     bind: IpAddr,
@@ -214,23 +277,40 @@ pub async fn run(
     let host = host_name(&state.identity.server_id);
     let mut running: Option<Running> = None;
     let mut failed_with: Option<String> = None;
+    let mut trust_seen = None;
     loop {
         let wanted = if state.discovery.is_on() {
+            refresh_trust(&state, &mut trust_seen).await;
+            let allowed = allowed_addresses(
+                bind,
+                trust_seen.as_ref().map(|(_, i)| &i[..]).unwrap_or(&[]),
+                &state.discovery.trust,
+            );
             let claimed = state.auth_db.lock().await.has_account().unwrap_or(false);
-            Some(advert(
+            let a = advert(
                 &state.identity.name,
                 &state.identity.server_id,
                 &state.identity.public_key_b64(),
                 claimed,
                 true,
-            ))
+            );
+            (!allowed.is_empty()).then_some((a, allowed))
         } else {
             None
         };
 
+        // A network that became untrusted (or trusted) restarts the
+        // responder: mdns-sd does not drop an interface it already serves.
+        if let (Some(r), Some((_, allowed))) = (running.as_ref(), wanted.as_ref())
+            && r.allowed != *allowed
+            && let Some(r) = running.take()
+        {
+            r.stop().await;
+        }
+
         match (running.as_mut(), wanted) {
-            (Some(r), Some(w)) if r.advert == w => {}
-            (Some(r), Some(w)) => {
+            (Some(r), Some((w, _))) if r.advert == w => {}
+            (Some(r), Some((w, _))) => {
                 if let Err(e) = r.register(port, &host, w) {
                     tracing::warn!(error = %e, "could not update the LAN advertisement");
                 }
@@ -241,11 +321,12 @@ pub async fn run(
                     tracing::info!("stopped advertising on the local network");
                 }
             }
-            (None, Some(w)) => match Running::start(bind, port, &host, w) {
+            (None, Some((w, allowed))) => match Running::start(port, &host, w, allowed.clone()) {
                 Ok(r) => {
                     tracing::info!(
                         service = %r.fullname,
                         port,
+                        addresses = ?allowed,
                         "advertising on the local network (_storm._tcp)"
                     );
                     failed_with = None;
@@ -489,6 +570,57 @@ mod tests {
         assert!(advertises_on(ip("192.168.1.13"), ip("192.168.1.13")));
         assert!(!advertises_on(ip("192.168.1.13"), ip("10.0.0.2")));
         assert!(advertises_on(ip("127.0.0.1"), ip("127.0.0.1")));
+    }
+
+    #[test]
+    fn an_untrusted_interface_is_not_advertised() {
+        let ifaces = [
+            Iface {
+                name: "lo".into(),
+                ip: ip("127.0.0.1"),
+                prefix: 8,
+            },
+            Iface {
+                name: "wlan0".into(),
+                ip: ip("192.168.1.13"),
+                prefix: 24,
+            },
+            Iface {
+                name: "enp3s0".into(),
+                ip: ip("10.0.0.5"),
+                prefix: 24,
+            },
+        ];
+        let trust = NetTrust::default();
+        assert!(
+            allowed_addresses(ip("0.0.0.0"), &ifaces, &trust).is_empty(),
+            "nothing before the first verdict"
+        );
+        let os = crate::nettrust::fake::FakeOs::default()
+            .with("firewall-cmd --state", "running\n")
+            .with(
+                "firewall-cmd --get-active-zones",
+                "public\n  interfaces: wlan0\nhome\n  interfaces: enp3s0\n",
+            );
+        trust.refresh(Platform::Linux, &os, &ifaces);
+        assert_eq!(
+            allowed_addresses(ip("0.0.0.0"), &ifaces, &trust),
+            [ip("10.0.0.5"), ip("127.0.0.1")]
+        );
+        assert!(allowed_addresses(ip("192.168.1.13"), &ifaces, &trust).is_empty());
+
+        // The network becomes trusted: it is advertised on the next pass.
+        let os = crate::nettrust::fake::FakeOs::default()
+            .with("firewall-cmd --state", "running\n")
+            .with(
+                "firewall-cmd --get-active-zones",
+                "home\n  interfaces: wlan0 enp3s0\n",
+            );
+        assert!(trust.refresh(Platform::Linux, &os, &ifaces));
+        assert_eq!(
+            allowed_addresses(ip("0.0.0.0"), &ifaces, &trust),
+            [ip("10.0.0.5"), ip("127.0.0.1"), ip("192.168.1.13")]
+        );
     }
 
     #[test]

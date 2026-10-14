@@ -1077,6 +1077,16 @@ pub async fn pair_with_password(
     let Some(peer) = lan_peer.filter(|_| !origin.relayed && state.discovery.is_on()) else {
         return Err(PasswordPairError::LanOnly);
     };
+    // Decision 119, Layer 2: not from a network the OS calls untrusted.
+    if let Some(v) = state.discovery.trust.peer_untrusted(peer) {
+        tracing::info!(
+            peer = %peer,
+            interface = %v.iface.name,
+            why = %v.reason,
+            "password pairing refused: untrusted network"
+        );
+        return Err(PasswordPairError::LanOnly);
+    }
     let device_name = req.device_name.trim().to_string();
     if device_name.is_empty() {
         return Err(PasswordPairError::BadRequest(
@@ -1166,6 +1176,9 @@ pub struct DiscoveryView {
     pub forced_off: bool,
     /// Advertising and accepting password pairing right now.
     pub active: bool,
+    /// Interfaces on a network the OS calls untrusted (decision 119): not
+    /// advertised there, and password pairing from them is refused.
+    pub untrusted: Vec<String>,
 }
 
 pub fn discovery_view(state: &Shared) -> DiscoveryView {
@@ -1173,6 +1186,20 @@ pub fn discovery_view(state: &Shared) -> DiscoveryView {
         discoverable: state.discovery.setting(),
         forced_off: state.discovery.forced_off(),
         active: state.discovery.is_on(),
+        untrusted: state
+            .discovery
+            .trust
+            .snapshot()
+            .map(|s| {
+                let mut names: Vec<String> = s
+                    .untrusted()
+                    .filter(|v| crate::discovery::is_lan_scoped(v.iface.ip))
+                    .map(|v| v.iface.name.clone())
+                    .collect();
+                names.dedup();
+                names
+            })
+            .unwrap_or_default(),
     }
 }
 

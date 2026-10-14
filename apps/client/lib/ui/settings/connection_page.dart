@@ -10,6 +10,7 @@ import '../clipboard_copy.dart';
 import '../controls.dart';
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
+import 'relayed_on_lan.dart';
 import 'settings_widgets.dart';
 
 /// `http://storm.home:7420` → `storm.home:7420`.
@@ -61,6 +62,10 @@ class ConnectionPage extends ConsumerWidget {
         SettingsRow(
           label: 'Route',
           trailing: MonoValue(route, key: const Key('route')),
+        ),
+        RelayedOnLanHint(
+          relayed: route == 'relayed',
+          serverId: settings.serverId,
         ),
         SettingsRow(
           label: 'Server identity',

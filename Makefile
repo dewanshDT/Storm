@@ -216,6 +216,9 @@ test-live:
 	echo "--- LAN discovery pairing: mDNS on loopback, password pairing (decision 118) ---"; \
 	STORM_BASE=http://127.0.0.1:$(PORT) \
 		python3 "$$ROOT/$(SERVER)/tests/lan_discovery_e2e.py"; \
+	echo "--- an untrusted network: no advert, no password pairing (its own server; decision 119) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+		python3 "$$ROOT/$(SERVER)/tests/lan_untrusted_e2e.py"; \
 	echo "--- agent runtime e2e (its own server and host; decision 77c) ---"; \
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \

@@ -135,8 +135,15 @@ jobs:
           Check 'the host is enrolled with the server beside it' ($LASTEXITCODE -eq 0)
           Check 'the first workspace exists' (Test-Path "$env:ProgramData\StormRuntime\workspaces\scratch")
           Check 'the firewall rule is private-only' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
+          # Decision 119: status reads the rule and the network category.
+          $status = & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" status | Out-String
+          $status
+          Check 'status reads the rule (or the Private profile is off)' ($status -match "lan     : (open \(rule 'Storm Server', private networks, TCP 8484\)|no host firewall)")
+          Check 'status says what the network is' ($status -match 'network : (trusted|untrusted)')
+          Set-NetFirewallRule -DisplayName 'Storm Server' -Profile Any
           ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes
           Check 're-running upgrades in place' ($? -and (Get-Service StormRuntime).Status -eq 'Running')
+          Check 'a rule opened wider is narrowed back to private' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
           & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall --purge
           & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" uninstall
           if (-not $ok) { exit 1 }
