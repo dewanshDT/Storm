@@ -130,6 +130,9 @@ impl Ctx {
             ready["client_trunk_id"].is_string(),
             "READY without a string client_trunk_id: {ready}"
         );
+        // §5: a client heartbeats once ready, and a relay reaps one that does
+        // not, so a check that waits on something else must not lose it.
+        conn.start_heartbeat(self.heartbeat_interval());
         Ok(conn)
     }
 
@@ -246,6 +249,9 @@ impl Ctx {
             ready["client_trunk_id"].is_string(),
             "READY without a string client_trunk_id: {ready}"
         );
+        // §5: a client heartbeats once ready, and a relay reaps one that does
+        // not, so a check that waits on something else must not lose it.
+        conn.start_heartbeat(self.heartbeat_interval());
         Ok(conn)
     }
 

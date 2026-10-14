@@ -35,6 +35,13 @@ pub type Rx = SplitStream<WebSocket>;
 /// also carries a byte budget (`max_client_buffer_bytes`); these counts stay
 /// only as the channel's capacity.
 pub const SERVER_WARD_QUEUE: usize = 64;
+
+/// Frames one client trunk may have queued toward its server (§5.5, decision
+/// 116d). Each client queues into its own lane and the writer takes the lanes
+/// in turn, so one client's upload to a slow origin delays another client's
+/// `STREAM_OPEN` by at most one frame, where one shared queue made it wait
+/// behind up to [`SERVER_WARD_QUEUE`] of them.
+pub const CLIENT_LANE_QUEUE: usize = 8;
 pub const CLIENT_WARD_QUEUE: usize = 256;
 
 /// Room for stream-ending `ERROR`s that overtake the ordinary queue (see
@@ -119,6 +126,8 @@ pub struct Tx {
     inner: mpsc::Sender<Message>,
     budget: Arc<Budget>,
     ends: Arc<StreamEnds>,
+    /// Hands the writer a new client's lane (see [`Tx::lane`]).
+    join: mpsc::UnboundedSender<mpsc::Receiver<Message>>,
 }
 
 /// The lane that ends one stream on a peer whose ordinary queue may be full.
@@ -165,6 +174,21 @@ impl StreamEnds {
 }
 
 impl Tx {
+    /// A handle whose blocking sends queue in a lane of their own, taken by
+    /// this socket's writer in turn with every other lane. For a client
+    /// trunk's frames toward its server: in order among themselves, and never
+    /// behind another client's backlog.
+    pub fn lane(&self) -> Self {
+        let (inner, rx) = mpsc::channel(CLIENT_LANE_QUEUE);
+        let _ = self.join.send(rx);
+        Self {
+            inner,
+            budget: self.budget.clone(),
+            ends: self.ends.clone(),
+            join: self.join.clone(),
+        }
+    }
+
     /// Blocks the caller while the peer is behind.
     ///
     /// Correct **only** where the calling task serves that one peer — a client
@@ -289,11 +313,13 @@ impl Tx {
         });
         let (lane, _) = mpsc::channel(STREAM_END_QUEUE);
         let ends = Arc::new(StreamEnds::new(lane));
+        let (join, _) = mpsc::unbounded_channel();
         (
             Self {
                 inner: tx,
                 budget,
                 ends,
+                join,
             },
             rx,
         )
@@ -318,10 +344,14 @@ pub fn split(socket: WebSocket, queue: usize, byte_limit: usize) -> (Rx, Tx) {
         limit: byte_limit,
     });
     let ends = Arc::new(StreamEnds::new(lane));
+    let (join, mut join_rx) = mpsc::unbounded_channel::<mpsc::Receiver<Message>>();
     let writer_budget = budget.clone();
     let writer_ends = ends.clone();
     let mut killed = ends.killed.subscribe();
     tokio::spawn(async move {
+        // `SelectAll` puts a lane back at the end of its turn after each frame
+        // it yields: round-robin across clients.
+        let mut lanes = futures_util::stream::SelectAll::new();
         loop {
             // `Ok(_)`: a dropped sender is not a kill, and must not cut off the
             // `ERROR` and `Close` an ordinary teardown queued last.
@@ -329,15 +359,22 @@ pub fn split(socket: WebSocket, queue: usize, byte_limit: usize) -> (Rx, Tx) {
                 biased;
                 Ok(_) = killed.wait_for(|killed| *killed) => return,
                 Some(message) = lane_rx.recv() => (message, false),
+                Some(mut lane) = join_rx.recv() => {
+                    lanes.push(futures_util::stream::poll_fn(move |cx| lane.poll_recv(cx)));
+                    continue;
+                }
                 message = rx.recv() => match message {
                     Some(message) => (message, true),
                     None => break,
                 },
+                Some(message) = lanes.next(), if !lanes.is_empty() => (message, true),
             };
             let len = if queued { cost(&message) } else { 0 };
             if queued {
                 let discard = writer_ends.discards(&message);
-                if rx.is_empty() {
+                // Nothing else charged is queued in any lane, so no frame of
+                // an ended stream is left to discard.
+                if writer_budget.queued.load(Ordering::Acquire) <= len {
                     writer_ends.forget_ended();
                 }
                 if discard {
@@ -365,6 +402,7 @@ pub fn split(socket: WebSocket, queue: usize, byte_limit: usize) -> (Rx, Tx) {
             inner: tx,
             budget,
             ends,
+            join,
         },
     )
 }
@@ -490,6 +528,7 @@ mod tests {
                 limit: usize::MAX,
             }),
             ends: Arc::new(StreamEnds::new(lane)),
+            join: mpsc::unbounded_channel().0,
         };
         tx.end_stream(1, "{}".into());
         assert!(!*tx.ends.killed.borrow());

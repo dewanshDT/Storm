@@ -82,8 +82,9 @@ pub const DEFAULT_MAX_CLIENT_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 /// remaining streams on the old trunk get `ERROR{trunk_superseded}`.
 pub const DEFAULT_SUPERSESSION_DRAIN: Duration = Duration::from_secs(30);
 
-/// Heartbeat deadline: how long a server trunk may go without sending **any**
-/// frame before the relay treats it as dead (§4.2).
+/// Heartbeat deadline: how long a server trunk, or a client trunk once ready,
+/// may go without sending **any** frame before the relay treats it as dead
+/// (§4.2, §5).
 ///
 /// Any frame, not only `PONG`. The server heartbeats by *sending* `PING` every
 /// 15 s, which the relay answers, and the relay never pings, so a server has no

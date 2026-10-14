@@ -3105,12 +3105,89 @@ async fn get_attachment(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     let bytes = ix.attachment(&path).map_err(|e| not_found(e.to_string()))?;
+    drop(ix);
+    Ok(ranged(bytes, content_type_for(&path), &headers))
+}
 
-    Ok(([(header::CONTENT_TYPE, content_type_for(&path))], bytes).into_response())
+/// A whole attachment, or the single range a resuming client asked for
+/// (SRP §5.5 rule 3). A relay ends a download that outruns its reader with
+/// `client_backlogged`; the client resumes from what it has rather than
+/// starting a 64 MiB file again.
+///
+/// The `ETag` is the content's hash, and a `Range` whose `If-Range` no longer
+/// matches gets the whole new file: an attachment replaced between two
+/// attempts must never be spliced onto the old one's prefix.
+fn ranged(bytes: Vec<u8>, content_type: &'static str, headers: &HeaderMap) -> Response {
+    let etag = format!("\"{}\"", &blake3::hash(&bytes).to_hex()[..32]);
+    let len = bytes.len();
+    let fresh = headers
+        .get(header::IF_RANGE)
+        .is_none_or(|v| v.to_str().is_ok_and(|v| v == etag));
+    let range = headers
+        .get(header::RANGE)
+        .filter(|_| fresh)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_byte_range(v, len));
+    let common = [
+        (header::CONTENT_TYPE, content_type.to_string()),
+        (header::ACCEPT_RANGES, "bytes".to_string()),
+        (header::ETAG, etag),
+    ];
+    match range {
+        None => (common, bytes).into_response(),
+        Some(Err(())) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            common,
+            [(header::CONTENT_RANGE, format!("bytes */{len}"))],
+        )
+            .into_response(),
+        Some(Ok((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            common,
+            [(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))],
+            bytes[start..=end].to_vec(),
+        )
+            .into_response(),
+    }
+}
+
+/// One `bytes=` range over `len` bytes, inclusive. `None` for anything this
+/// does not serve as a range (several ranges, another unit, a malformed
+/// header), which gets the whole body as RFC 9110 allows; `Err` for a range
+/// that starts past the end.
+fn parse_byte_range(value: &str, len: usize) -> Option<Result<(usize, usize), ()>> {
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (first, last) = spec.split_once('-')?;
+    let (first, last) = (first.trim(), last.trim());
+    if first.is_empty() {
+        let suffix: usize = last.parse().ok()?;
+        if suffix == 0 || len == 0 {
+            return Some(Err(()));
+        }
+        return Some(Ok((len.saturating_sub(suffix), len - 1)));
+    }
+    let start: usize = first.parse().ok()?;
+    let end = if last.is_empty() {
+        len.checked_sub(1)?
+    } else {
+        let end: usize = last.parse().ok()?;
+        if end < start {
+            return None;
+        }
+        end.min(len.checked_sub(1)?)
+    };
+    if start >= len {
+        return Some(Err(()));
+    }
+    Some(Ok((start, end)))
 }
 
 async fn put_attachment(
@@ -3562,6 +3639,58 @@ pub(crate) mod tests {
             .unwrap();
         let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, body)
+    }
+
+    #[test]
+    fn a_byte_range_is_parsed_as_rfc_9110_says() {
+        assert_eq!(parse_byte_range("bytes=4-", 10), Some(Ok((4, 9))));
+        assert_eq!(parse_byte_range("bytes=2-5", 10), Some(Ok((2, 5))));
+        assert_eq!(parse_byte_range("bytes=2-50", 10), Some(Ok((2, 9))));
+        assert_eq!(parse_byte_range("bytes=-3", 10), Some(Ok((7, 9))));
+        assert_eq!(parse_byte_range("bytes=-30", 10), Some(Ok((0, 9))));
+        assert_eq!(parse_byte_range("bytes=10-", 10), Some(Err(())));
+        assert_eq!(parse_byte_range("bytes=-0", 10), Some(Err(())));
+        for whole in ["bytes=0-1,4-5", "items=0-1", "bytes=5-2", "bytes=x-", "0-1"] {
+            assert_eq!(parse_byte_range(whole, 10), None, "{whole}");
+        }
+    }
+
+    async fn ranged_parts(
+        headers: &[(header::HeaderName, &str)],
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(k.clone(), v.parse().unwrap());
+        }
+        let response = ranged(b"0123456789".to_vec(), "application/pdf", &map);
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap().to_vec();
+        (parts.status, parts.headers, body)
+    }
+
+    #[tokio::test]
+    async fn an_attachment_resumes_from_a_range_and_only_while_it_is_unchanged() {
+        let (status, headers, body) = ranged_parts(&[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"0123456789");
+        assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+        let etag = headers[header::ETAG].to_str().unwrap().to_string();
+
+        let (status, headers, body) =
+            ranged_parts(&[(header::RANGE, "bytes=4-"), (header::IF_RANGE, &etag)]).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes 4-9/10");
+        assert_eq!(body, b"456789");
+
+        // Replaced since the first attempt: the whole new file, never a splice.
+        let (status, _, body) =
+            ranged_parts(&[(header::RANGE, "bytes=4-"), (header::IF_RANGE, "\"stale\"")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"0123456789");
+
+        let (status, headers, _) = ranged_parts(&[(header::RANGE, "bytes=10-")]).await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes */10");
     }
 
     fn get(path: &str) -> axum::http::Request<axum::body::Body> {

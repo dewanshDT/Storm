@@ -11,6 +11,7 @@ export type LogEvent =
   | "tofu_recorded"
   | "client_opened"
   | "client_closed"
+  | "client_heartbeat_expired"
   | "client_backlogged"
   | "server_backlogged"
   | "stream_refused"

@@ -113,9 +113,12 @@ async fn a_correct_handshake_registers(ctx: &Ctx) -> Result<()> {
             .is_some_and(|s| !s.is_empty()),
         "REGISTERED needs a trunk_id: {registered}"
     );
+    // §4.2 (116e): a third of the relay's deadline, whole seconds, at least 1;
+    // 15 s at the default 45 s.
+    let deadline = ctx.knobs.heartbeat_deadline.as_secs();
     ensure!(
-        registered["heartbeat_interval_secs"] == 15,
-        "§4.2 fixes the heartbeat at 15 s: {registered}"
+        registered["heartbeat_interval_secs"] == (deadline / 3).max(1),
+        "§4.2 derives the heartbeat from the {deadline} s deadline: {registered}"
     );
     // §4.3: derived, `<scheme>://<relay-host>/connect/<server_id>`.
     let address = registered["public_address"].as_str().unwrap_or_default();
