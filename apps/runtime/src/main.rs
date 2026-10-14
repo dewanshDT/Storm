@@ -66,7 +66,8 @@ enum Command {
         #[arg(long)]
         server: String,
         /// The server's public key, unpadded base64url, as the app shows it.
-        #[arg(long)]
+        // base64url starts with `-` one key in 64; clap would read it as a flag.
+        #[arg(long, allow_hyphen_values = true)]
         pk: String,
         /// The server's own address, e.g. `http://192.168.1.10:8484`.
         /// Optional when a --relay is given.

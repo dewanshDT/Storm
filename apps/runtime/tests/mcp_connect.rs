@@ -214,6 +214,29 @@ fn there_is_no_key_argument() {
 }
 
 #[tokio::test]
+async fn a_pinned_key_that_starts_with_a_hyphen_is_a_value_not_a_flag() {
+    let signing = (0u8..=255)
+        .map(|n| SigningKey::from_bytes(&[n; 32]))
+        .find(|k| {
+            BASE64URL_NOPAD
+                .encode(k.verifying_key().as_bytes())
+                .starts_with('-')
+        })
+        .expect("a seed whose key starts with a hyphen");
+    let pk = BASE64URL_NOPAD.encode(signing.verifying_key().as_bytes());
+    let (addr, _log) = fake_server(signing).await;
+    let (status, out, stderr) = run(
+        &["--server", SERVER, "--pk", &pk, "--addr", &addr],
+        Some("stk_x"),
+        &conversation(),
+    )
+    .await;
+    assert!(status.success(), "{stderr}");
+    assert_eq!(out.len(), 2, "{out:?} {stderr}");
+    assert_eq!(out[1]["id"], 1);
+}
+
+#[tokio::test]
 async fn the_key_file_works_and_is_sent_only_after_the_challenge() {
     let (addr, log) = fake_server(pinned()).await;
     let dir = tempfile::tempdir().unwrap();
