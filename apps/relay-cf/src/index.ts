@@ -43,6 +43,16 @@ function publicBase(env: Env, url: URL): string {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // For an operator's uptime check (116m): whether this deployment's
+    // configuration loads, and which registration mode it runs. Nothing else.
+    if (url.pathname === "/health" && request.method === "GET") {
+      try {
+        const config = configFor(env);
+        return Response.json({ ok: true, mode: config.binding });
+      } catch {
+        return Response.json({ ok: false }, { status: 503 });
+      }
+    }
     const isRegister = url.pathname === REGISTER_PATH;
     const isConnect = url.pathname.startsWith(CONNECT_PREFIX) && !url.pathname.slice(CONNECT_PREFIX.length).includes("/");
     if (!isRegister && !isConnect) return new Response("not found", { status: 404 });

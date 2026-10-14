@@ -591,6 +591,9 @@ void main() {
       expect(find.text('storm.home:7420'), findsOneWidget);
       expect(find.text('verified · C670 7650 3088 8312'), findsOneWidget);
       expect(find.text('relay.example.net'), findsOneWidget);
+      // Configured, but not in the set the server says it is registered
+      // with (116m).
+      expect(find.text('Not connected'), findsOneWidget);
 
       await tapKey(tester, 'add-relay');
       await tester.enterText(
