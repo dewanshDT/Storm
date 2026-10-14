@@ -32,6 +32,9 @@ futures-util = { version = "0.3", default-features = false }
 # runtime of its own and no Avahi/Bonjour daemon, so it builds for the static
 # musl release and for Windows.
 mdns-sd = { version = "0.21.5", default-features = false, features = ["logging"] }
+# The interfaces Layer 2 classifies (decision 119); the version and features
+# mdns-sd already pulls in, so nothing new is built.
+if-addrs = { version = "0.15", features = ["link-local"] }
 notify = "8.2.0"
 rand = "0.10.2"
 # Server features for `/mcp` (decision 39); client features for the MCP
@@ -120,7 +123,7 @@ section = "utils"
 priority = "optional"
 depends = "$auto"
 maintainer-scripts = "debian/"
-conf-files = ["/etc/storm/storm.env"]
+conf-files = ["/etc/storm/storm.env", "/etc/ufw/applications.d/storm-server"]
 assets = [
     ["target/release/storm-server", "usr/bin/", "755"],
     # Recursive files only. `packaging/web/` and `packaging/web/**` match
@@ -132,5 +135,9 @@ assets = [
     ["../../deploy/storm-backup.timer", "lib/systemd/system/", "644"],
     ["../../deploy/storm-backup.sh", "usr/bin/", "755"],
     ["../../deploy/storm.env.example", "etc/storm/storm.env", "600"],
+    # Decision 119: what a LAN-only rule names. The installer adds the rule,
+    # after asking; the package only ships the definitions.
+    ["../../deploy/firewall/storm-server.ufw", "etc/ufw/applications.d/storm-server", "644"],
+    ["../../deploy/firewall/storm-server.xml", "usr/lib/firewalld/services/storm-server.xml", "644"],
     ["../../LICENSE", "usr/share/doc/storm-server/", "644"],
 ]

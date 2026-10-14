@@ -105,3 +105,92 @@ fn the_server_unit_can_list_interfaces_for_lan_discovery() {
     let families = unit_value(&unit, "RestrictAddressFamilies").unwrap();
     assert!(families.contains("AF_NETLINK"), "{families}");
 }
+
+/// One `[package.metadata.deb]` asset line: source and mode, by destination.
+fn deb_asset(dest: &str) -> Option<(String, String)> {
+    let manifest = repo_file("apps/server/Cargo.toml");
+    manifest.lines().map(str::trim).find_map(|l| {
+        let parts: Vec<&str> = l
+            .trim_end_matches(',')
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|p| p.trim().trim_matches('"'))
+            .collect();
+        (parts.len() == 3 && parts[1] == dest).then(|| (parts[0].to_string(), parts[2].to_string()))
+    })
+}
+
+#[test]
+fn the_package_ships_a_valid_ufw_profile() {
+    let (src, mode) = deb_asset("etc/ufw/applications.d/storm-server").expect("shipped");
+    assert_eq!(src, "../../deploy/firewall/storm-server.ufw");
+    assert_eq!(mode, "644");
+    assert!(
+        repo_file("apps/server/Cargo.toml").contains("\"/etc/ufw/applications.d/storm-server\""),
+        "a conffile, so an operator's edit survives an upgrade"
+    );
+
+    // ufw's rules for a profile: one section named like the app, then title,
+    // description and ports, each `port/proto`.
+    let profile = repo_file("deploy/firewall/storm-server.ufw");
+    let lines: Vec<&str> = code_lines(&profile).filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines[0], "[storm-server]");
+    let value = |k: &str| {
+        lines
+            .iter()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .unwrap_or_else(|| panic!("{k}= missing"))
+    };
+    assert!(!value("title").is_empty());
+    assert!(!value("description").is_empty());
+    let (port, proto) = value("ports").split_once('/').expect("port/proto");
+    assert_eq!(proto, "tcp");
+    assert_eq!(port.parse::<u16>().unwrap(), 8484, "the packaged default");
+    assert_eq!(lines.len(), 4, "{lines:?}");
+}
+
+#[test]
+fn the_package_ships_a_valid_firewalld_service() {
+    let (src, mode) = deb_asset("usr/lib/firewalld/services/storm-server.xml").expect("shipped");
+    assert_eq!(src, "../../deploy/firewall/storm-server.xml");
+    assert_eq!(mode, "644");
+
+    let xml = repo_file("deploy/firewall/storm-server.xml");
+    assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"));
+    // Well formed: every element opened is closed, in order.
+    let mut open: Vec<String> = Vec::new();
+    for tag in xml.split('<').skip(1).map(|t| t.split('>').next().unwrap()) {
+        if tag.starts_with('?') {
+            continue;
+        }
+        if let Some(name) = tag.strip_prefix('/') {
+            assert_eq!(open.pop().as_deref(), Some(name), "{xml}");
+        } else if !tag.ends_with('/') {
+            open.push(tag.split_whitespace().next().unwrap().to_string());
+        }
+    }
+    assert!(open.is_empty(), "unclosed: {open:?}");
+    assert!(xml.contains("<service>") && xml.contains("<short>Storm server</short>"));
+    assert_eq!(xml.matches("<port ").count(), 1);
+    assert!(xml.contains("<port protocol=\"tcp\" port=\"8484\"/>"));
+}
+
+#[test]
+fn the_package_never_touches_a_firewall_rule() {
+    let postrm = repo_file("apps/server/debian/postrm");
+    assert!(
+        code_lines(&postrm).any(|l| l == "rm -f /etc/firewalld/services/storm-server.xml"),
+        "purge removes the port override `up` wrote"
+    );
+    // Adding or removing a rule is the installer's, with consent (decision 119).
+    for script in ["postinst", "postrm", "prerm"] {
+        let text = repo_file(&format!("apps/server/debian/{script}"));
+        for tool in ["ufw ", "firewall-cmd"] {
+            assert!(
+                !code_lines(&text).any(|l| l.contains(tool)),
+                "{script} runs {tool}"
+            );
+        }
+    }
+}

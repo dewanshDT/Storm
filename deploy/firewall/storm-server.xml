@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>Storm server</short>
+  <description>Storm notes sync server. Add it to a home or trusted zone only, never public.</description>
+  <port protocol="tcp" port="8484"/>
+</service>
