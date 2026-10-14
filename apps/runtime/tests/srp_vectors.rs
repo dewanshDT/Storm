@@ -10,8 +10,10 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-use storm_runtime::identity::{challenge_message, decode_public_key, verify};
-use storm_runtime::srp::{SrpTrunk, codec};
+use storm_runtime::identity::{
+    RELAY_SET_PREFIX, challenge_message, decode_public_key, relay_set_message, verify,
+};
+use storm_runtime::srp::{SrpTrunk, codec, plaintext_allowed};
 
 fn vectors() -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/srp-vectors.json");
@@ -140,6 +142,56 @@ fn every_client_challenge_signature_verifies_as_recorded() {
             case["verifies"].as_bool().unwrap(),
             "verify_client_challenge vector `{}`",
             s(case, "name")
+        );
+    }
+}
+
+#[test]
+fn every_relay_set_message_and_signature_is_judged_as_recorded() {
+    let doc = vectors();
+    let section = &doc["relay_set_message"];
+    assert_eq!(s(section, "domain"), RELAY_SET_PREFIX);
+    let list = cases(section, "cases");
+    assert!(
+        list.iter().any(|c| c["verifies"] == true),
+        "no positive vector"
+    );
+    for case in list {
+        let name = s(case, "name");
+        let relays: Vec<&str> = case["relays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_str().unwrap())
+            .collect();
+        let message = relay_set_message(s(case, "server_id"), &relays);
+        if let Some(want) = case["message_utf8"].as_str() {
+            assert_eq!(
+                message,
+                want.as_bytes(),
+                "relay_set_message vector `{name}`"
+            );
+        }
+        if let Some(sig) = case["signature_b64"].as_str() {
+            let key = decode_public_key(s(case, "public_key_b64")).unwrap();
+            assert_eq!(
+                verify(&key, &message, sig),
+                case["verifies"].as_bool().unwrap(),
+                "relay_set_message vector `{name}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_plaintext_relay_host_is_judged_as_recorded() {
+    let doc = vectors();
+    for case in cases(&doc["plaintext_relay_hosts"], "cases") {
+        let host = s(case, "host");
+        assert_eq!(
+            plaintext_allowed(host),
+            case["ws_allowed"].as_bool().unwrap(),
+            "plaintext_relay_hosts vector `{host}`"
         );
     }
 }

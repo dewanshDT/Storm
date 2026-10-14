@@ -94,6 +94,8 @@ struct Script {
     /// `PING`s the relay sends before `READY` and again after it (§4.2: a
     /// relay may `PING` any trunk, and every `PING` is answered).
     pings: usize,
+    /// Holds the first `STREAM_READY` until notified.
+    late_ready: Option<Arc<Notify>>,
     handler: Handler,
 }
 
@@ -105,6 +107,7 @@ impl Script {
             refuse_second_by_id: false,
             batch: 1,
             pings: 0,
+            late_ready: None,
             handler: Arc::new(handler),
         }
     }
@@ -247,6 +250,16 @@ async fn serve(
                             .send(control(
                                 "STREAM_READY",
                                 json!({"attempt_id": held.take(), "stream_id": next_stream}),
+                            ))
+                            .await;
+                    }
+                    "OPEN_STREAM" if script.late_ready.is_some() && next_stream == 100 => {
+                        script.late_ready.as_ref().unwrap().notified().await;
+                        next_stream += 1;
+                        let _ = tx
+                            .send(control(
+                                "STREAM_READY",
+                                json!({"attempt_id": v["attempt_id"], "stream_id": next_stream}),
                             ))
                             .await;
                     }
@@ -882,6 +895,31 @@ async fn the_server_trunk_dying_ends_the_request_with_trunk_lost() {
         .unwrap_err();
     assert_eq!(err.code(), "trunk_lost");
     assert_eq!(within(trunk.closed()).await, SrpError::TrunkLost);
+}
+
+/// §5.1: a `STREAM_READY` for an attempt nobody waits on any more is
+/// answered with `CLOSE{stream_id}` at once, and the trunk carries on.
+#[tokio::test]
+async fn a_late_stream_ready_is_answered_with_close() {
+    let release = Arc::new(Notify::new());
+    let mut script = Script::new(echo);
+    script.late_ready = Some(release.clone());
+    let fake = FakeRelay::start(script).await;
+    let trunk = connect(&fake).await;
+    let t = trunk.clone();
+    let abandoned =
+        tokio::spawn(async move { t.request("GET", "/v1/server", &[], Bytes::new()).await });
+    fake.saw(|v| v["type"] == "OPEN_STREAM").await;
+    abandoned.abort();
+    let _ = abandoned.await;
+    release.notify_one();
+    let close = fake.saw(|v| v["type"] == "CLOSE").await;
+    assert_eq!(close["stream_id"], 101);
+    let next = within(trunk.request("GET", "/v1/health", &[], Bytes::new()))
+        .await
+        .unwrap();
+    assert_eq!(next.status, 200);
+    assert!(!trunk.is_closed());
 }
 
 #[tokio::test]

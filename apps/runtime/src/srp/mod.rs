@@ -10,4 +10,4 @@ mod error;
 mod trunk;
 
 pub use error::SrpError;
-pub use trunk::{SrpBody, SrpResponse, SrpTrunk, TrunkConfig};
+pub use trunk::{SrpBody, SrpResponse, SrpTrunk, TrunkConfig, plaintext_allowed};

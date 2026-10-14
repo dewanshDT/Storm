@@ -182,9 +182,8 @@ impl SrpTrunk {
         // panics if none is installed. Idempotent; `ring` as everywhere else.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let deadline = Instant::now() + config.handshake_timeout;
-        let ws = match tokio::time::timeout_at(
-            deadline,
+        let ws = match tokio::time::timeout(
+            config.handshake_timeout,
             tokio_tungstenite::connect_async_with_config(url.as_str(), None, true),
         )
         .await
@@ -193,6 +192,9 @@ impl SrpTrunk {
             Ok(Err(e)) => return Err(SrpError::RelayDown(e.to_string())),
             Ok(Ok((ws, _))) => ws,
         };
+        // `T_handshake` runs from the open socket (§5), so a slow dial on a
+        // waking radio does not eat the relay's 5 s `HELLO` hold.
+        let deadline = Instant::now() + config.handshake_timeout;
         bound_unsent(ws.get_ref());
         let (mut sink, mut stream) = ws.split();
         let client_trunk_id =
@@ -337,9 +339,8 @@ fn body_frame(stream_id: u32, payload: &[u8]) -> Message {
     Message::Binary(codec::encode_body_frame(codec::FRAME_REQUEST_BODY, stream_id, payload).into())
 }
 
-/// `<relay>/connect/<server_id>?pubkey=<key>` (§4.3). Plaintext only to this
-/// machine: without E2E the path must be private, and a `ws://` relay
-/// elsewhere is not.
+/// `<relay>/connect/<server_id>?pubkey=<key>` (§4.3). Plaintext only on a
+/// private network ([`plaintext_allowed`]): without E2E the path must be private.
 fn connect_url(relay_url: &str, server_id: &str, server_key: &str) -> Result<String, SrpError> {
     let invalid = |why: &str| SrpError::InvalidTarget(why.to_string());
     codec::validate_server_id(server_id).map_err(invalid)?;
@@ -350,9 +351,9 @@ fn connect_url(relay_url: &str, server_id: &str, server_key: &str) -> Result<Str
         return Err(invalid("a relay URL is ws:// or wss://"));
     }
     let authority = uri.authority().ok_or_else(|| invalid("no host"))?;
-    if scheme == "ws" && !is_loopback(authority.host()) {
+    if scheme == "ws" && !plaintext_allowed(authority.host()) {
         return Err(invalid(
-            "plaintext ws:// is only for a relay on this machine",
+            "plaintext ws:// is only for a relay on a private network",
         ));
     }
     let own = format!("/connect/{server_id}");
@@ -368,13 +369,31 @@ fn connect_url(relay_url: &str, server_id: &str, server_key: &str) -> Result<Str
     Ok(format!("{scheme}://{authority}{own}?pubkey={server_key}"))
 }
 
-fn is_loopback(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+/// §4.3's one predicate for a `ws://` relay host (`plaintext_relay_hosts` in
+/// `docs/srp-vectors.json`): loopback, RFC 1918, link-local or IPv6 ULA.
+/// Never `100.64.0.0/10`, which carriers share for CGNAT. A name other than
+/// `localhost` is not resolved here, so it cannot be checked and counts as
+/// public.
+pub fn plaintext_allowed(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let ip = match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    {
+        Ok(IpAddr::V6(v6)) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+    }
 }
 
 async fn handshake(
@@ -919,19 +938,29 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_is_only_for_a_relay_on_this_machine() {
+    fn plaintext_is_only_for_a_relay_on_a_private_network() {
         for ok in [
             "ws://127.0.0.1:18860",
             "ws://localhost:18860",
             "ws://[::1]:18860",
             "ws://127.9.9.9",
+            "ws://192.168.1.10:8080",
+            "ws://10.1.2.3",
+            "ws://172.20.0.1",
+            "ws://169.254.3.4",
+            "ws://[fd7a:115c:a1e0::1]:8080",
+            "ws://[fe80::1]",
         ] {
             assert!(connect_url(ok, "srv_A").is_ok(), "{ok}");
         }
         for refused in [
             "ws://relay.example.com",
-            "ws://192.168.1.10:8080",
             "ws://localhost.example.com",
+            "ws://100.64.0.1",
+            "ws://100.101.102.103:8080",
+            "ws://[::ffff:100.64.0.1]",
+            "ws://172.32.0.1",
+            "ws://[2001:db8::1]",
         ] {
             assert_eq!(
                 connect_url(refused, "srv_A").unwrap_err().code(),

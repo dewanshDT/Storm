@@ -40,6 +40,8 @@ RELAY_MODE ?=
 # Four ports from here for the throttled-link relay test, which starts its own
 # server and storm-relay behind a slow link (decision 116b).
 THROTTLE_PORT ?= 18890
+# mcp_connect_live.py's own servers and relays take ten ports from here.
+MCP_LIVE_PORT ?= 18870
 
 .DEFAULT_GOAL := help
 
@@ -301,11 +303,12 @@ test-live:
 	MCP_CONNECT_ADDR=http://127.0.0.1:$$CLOSED \
 	MCP_CONNECT_RELAY=ws://127.0.0.1:$(RELAY_PORT) \
 		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
-	echo "--- mcp-connect live: relay cache, LAN merge over the relay, impostors (own servers, 18870-18879) ---"; \
+	echo "--- mcp-connect live: relay cache, LAN merge over the relay, impostors (own servers, ten ports from $(MCP_LIVE_PORT)) ---"; \
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
 	RELAY_IMPL=$(RELAY_IMPL) RELAY_CF_DEV="$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_LIVE_PORT=$(MCP_LIVE_PORT) \
 		python3 "$$ROOT/$(RUNTIME)/tests/mcp_connect_live.py"; \
 	echo "--- a runtime host on the first server, for the relayed Agents suite ---"; \
 	HOST_DIR=$$(mktemp -d /tmp/storm-live-host.XXXXXX); \

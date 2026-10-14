@@ -11,7 +11,10 @@
 //!    key included. An impostor is `identity_failed`, never "offline".
 //! 2. A request that fails is one JSON-RPC error whose `data.storm_error`
 //!    names the hop, and is **never retried**.
-//! 3. After a failure the next request reconnects; nothing migrates mid-call.
+//! 3. One [`Connection`] carries every message (SRP §8.10): it stays
+//!    connected across messages, a stream-scoped failure leaves it, and after
+//!    a failed race a message fails at once with that race's code until the
+//!    backoff runs out. Nothing migrates mid-call.
 //! 4. The key is never on argv and never logged, nor is any body. stdout is
 //!    the protocol; logs go to stderr.
 //! 5. It holds no authority: it sends the client's key, the server decides.
@@ -26,6 +29,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::connection::Connection;
 use crate::race::{RaceConnector, RaceOptions};
 use crate::transport::{
     Connector, HttpRequest, HttpResponse, ServerPin, Transport, TransportError,
@@ -38,9 +42,8 @@ pub const KEY_ENV: &str = "STORM_MCP_KEY";
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 
 pub struct Adapter<C: Connector> {
-    connector: C,
+    connection: Connection<C>,
     bearer: String,
-    current: tokio::sync::Mutex<Option<Arc<C::Transport>>>,
     /// The version `initialize` negotiated: the header every later request
     /// carries, as an HTTP client's would.
     protocol: Mutex<Option<String>>,
@@ -137,37 +140,18 @@ fn refusal(id: &Value, response: &HttpResponse) -> Value {
     )
 }
 
-impl<C: Connector> Adapter<C> {
+impl<C: Connector + 'static> Adapter<C> {
     /// `key` is the client's `stk_` key, sent as its bearer.
     pub fn new(connector: C, key: &str) -> Self {
         Self {
-            connector,
+            connection: Connection::new(connector),
             bearer: format!("Bearer {key}"),
-            current: tokio::sync::Mutex::new(None),
             protocol: Mutex::new(None),
         }
     }
 
-    /// The verified transport, connecting (and verifying) if there is none.
-    /// Held across the connect so concurrent requests share one.
-    async fn transport(&self) -> Result<Arc<C::Transport>, TransportError> {
-        let mut current = self.current.lock().await;
-        if let Some(t) = current.as_ref().filter(|t| !t.is_closed()) {
-            return Ok(t.clone());
-        }
-        let t = Arc::new(self.connector.connect().await?);
-        tracing::info!("connected to the server; its identity is verified");
-        *current = Some(t.clone());
-        Ok(t)
-    }
-
-    /// Rule 3: a failed transport is forgotten, so the next request
-    /// reconnects; one that already replaced it is kept.
-    async fn forget(&self, failed: &Arc<C::Transport>) {
-        let mut current = self.current.lock().await;
-        if current.as_ref().is_some_and(|t| Arc::ptr_eq(t, failed)) {
-            *current = None;
-        }
+    pub fn connection(&self) -> &Connection<C> {
+        &self.connection
     }
 
     fn headers(&self, message: &Value) -> Vec<(String, String)> {
@@ -208,7 +192,7 @@ impl<C: Connector> Adapter<C> {
     }
 
     async fn post(&self, message: &Value) -> Result<HttpResponse, TransportError> {
-        let transport = self.transport().await?;
+        let transport = self.connection.transport().await?;
         let result = transport
             .send(HttpRequest {
                 method: "POST".to_string(),
@@ -217,8 +201,8 @@ impl<C: Connector> Adapter<C> {
                 body: serde_json::to_vec(message).expect("a JSON value serializes"),
             })
             .await;
-        if result.is_err() {
-            self.forget(&transport).await;
+        if let Err(e) = &result {
+            self.connection.failed(&transport, e);
         }
         result
     }
@@ -416,12 +400,10 @@ pub async fn run(options: Options) -> anyhow::Result<()> {
         bail!("give the server's --addr, a --relay, or both");
     }
     let connector = RaceConnector::new(pin, RaceOptions::new(options.addr, options.relays))?;
-    serve(
-        Arc::new(Adapter::new(connector, &key)),
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-    )
-    .await?;
+    let adapter = Arc::new(Adapter::new(connector, &key));
+    let served = serve(adapter.clone(), tokio::io::stdin(), tokio::io::stdout()).await;
+    adapter.connection().close();
+    served?;
     Ok(())
 }
 
@@ -527,8 +509,11 @@ mod tests {
                 }))),
                 ("tools/call", Some("dies")) => Err(TransportError::new(
                     "stream_aborted",
-                    "the connection ended mid-answer",
+                    "the server abandoned the answer",
                 )),
+                ("tools/call", Some("loses_the_trunk")) => {
+                    Err(TransportError::new("trunk_lost", "the trunk died"))
+                }
                 ("tools/call", Some("slow")) => {
                     tokio::time::sleep(Duration::from_millis(150)).await;
                     Ok(ok(json!({"content": [], "who": "slow"})))
@@ -549,6 +534,10 @@ mod tests {
                 )),
                 _ => Ok(ok(json!({"content": [], "who": "echo"}))),
             }
+        }
+
+        fn is_lost(&self, e: &TransportError) -> bool {
+            e.code == "trunk_lost"
         }
     }
 
@@ -654,8 +643,11 @@ mod tests {
         }
         assert_eq!(seen.bearers(), 0, "the impostor saw the key");
         assert!(seen.mcp().is_empty(), "an MCP message reached the impostor");
-        // Every request tries again, and is refused again.
-        assert_eq!(a.connector.connects.load(Ordering::SeqCst), 2);
+        // §8.10 rule 3: the second is refused from the backoff, not re-raced.
+        assert_eq!(
+            a.connection().connector().connects.load(Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
@@ -669,7 +661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transport_failure_is_one_error_never_resent_and_the_next_call_reconnects() {
+    async fn a_stream_scoped_failure_is_one_error_never_resent_and_the_transport_stays() {
         let (a, seen) = adapter(pinned());
         let out = session(a.clone(), &[call(4, "dies")]).await;
         assert_eq!(out.len(), 1, "{out:?}");
@@ -679,7 +671,30 @@ mod tests {
 
         let out = a.handle(call(5, "echo")).await;
         assert_eq!(out[0]["result"]["who"], "echo");
-        assert_eq!(a.connector.connects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            a.connection().connector().connects.load(Ordering::SeqCst),
+            1,
+            "a stream-scoped error dropped the transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_transport_is_one_error_never_resent_and_the_next_call_reconnects() {
+        let (a, seen) = adapter(pinned());
+        let out = a.handle(call(4, "loses_the_trunk")).await;
+        assert_eq!(out[0]["error"]["data"]["storm_error"], "trunk_lost");
+        assert_eq!(
+            seen.calls("loses_the_trunk"),
+            1,
+            "the failed call was resent"
+        );
+
+        let out = a.handle(call(5, "echo")).await;
+        assert_eq!(out[0]["result"]["who"], "echo");
+        assert_eq!(
+            a.connection().connector().connects.load(Ordering::SeqCst),
+            2
+        );
     }
 
     #[tokio::test]

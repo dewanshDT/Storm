@@ -50,6 +50,8 @@
 //!
 //! - [`transport`]: one HTTP exchange with the server over a verified path.
 //! - [`race`]: which path (the address or a relay) reaches the server.
+//! - [`connection`]: SRP §8's Connection — single-flight races, what may
+//!   reset a transport, backoff and status (decision 116i).
 //! - [`mcp_connect`]: `storm-runtime mcp-connect`, an external MCP client's
 //!   stdio server for the server's own `/mcp`.
 //!
@@ -63,6 +65,7 @@ pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod connection;
 pub mod fake;
 pub mod harness;
 pub mod host;
