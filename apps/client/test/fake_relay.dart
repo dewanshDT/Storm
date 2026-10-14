@@ -102,6 +102,28 @@ class FakeRelay {
   /// Trunks the client has opened (`HELLO`s seen).
   int hellos = 0;
 
+  /// When set, the relay answers nothing at all, as a socket that went
+  /// silent without a FIN does.
+  bool mute = false;
+
+  /// How long the relay holds each `STREAM_READY`, as one waiting on a slow
+  /// origin's acknowledgement does.
+  Duration openDelay = Duration.zero;
+
+  /// The relay's in-flight open cap (§5.1): past it an `OPEN_STREAM` is
+  /// refused with `rate_limited` at once. Null is no cap.
+  int? openCap;
+  int _inFlightOpens = 0;
+
+  /// The most opens the client had outstanding at once.
+  int maxInFlightOpens = 0;
+
+  /// Opens refused for the cap.
+  int capRefusals = 0;
+
+  /// Sees every request head's path and headers.
+  void Function(String path, Map<String, String> headers)? onHeaders;
+
   int get port => _server!.port;
 
   /// The `ws://` connect URL the client dials.
@@ -149,6 +171,7 @@ class FakeRelay {
   }
 
   void _onControl(String text) {
+    if (mute) return;
     final frame = SrpControl.decode(text);
     // [sent] ends with the first trunk; a later trunk is still served.
     if (!_ws.isClosed) {
@@ -171,8 +194,21 @@ class FakeRelay {
         for (var i = 0; i < pings; i++) {
           _send(SrpControl.encode('PING'));
         }
+      case 'PING':
+        _send(SrpControl.encode('PONG'));
       case 'OPEN_STREAM':
         final attemptId = frame.body['attempt_id'];
+        final cap = openCap;
+        if (cap != null && _inFlightOpens >= cap) {
+          capRefusals++;
+          _send(
+            SrpControl.encode('ERROR', {
+              'code': 'rate_limited',
+              'attempt_id': attemptId,
+            }),
+          );
+          return;
+        }
         if (refuseOpens > 0) {
           refuseOpens--;
           _send(
@@ -185,18 +221,34 @@ class FakeRelay {
           return;
         }
         final streamId = _nextStream++;
-        _send(
+        void ready() => _send(
           SrpControl.encode('STREAM_READY', {
             'attempt_id': attemptId,
             'stream_id': streamId,
           }),
         );
+        if (openDelay == Duration.zero) {
+          ready();
+          return;
+        }
+        _inFlightOpens++;
+        if (_inFlightOpens > maxInFlightOpens) {
+          maxInFlightOpens = _inFlightOpens;
+        }
+        Timer(openDelay, () {
+          _inFlightOpens--;
+          ready();
+        });
       case 'HTTP_REQUEST_HEAD':
         final streamId = streamIdOf(frame.body);
         final state = _streams.putIfAbsent(streamId, _RequestState.new);
         state.method = frame.body['method'] as String?;
         state.path = frame.body['path'] as String?;
         state.headers = _headersOf(frame.body['headers']);
+        onHeaders?.call(
+          (state.path ?? '/').split('?').first,
+          state.headers ?? const {},
+        );
       case 'CLOSE':
         final streamId = streamIdOf(frame.body);
         closedByClient.add(streamId);

@@ -258,7 +258,7 @@ void main() {
             relays: [
               RelayAdvert.derive('ws://127.0.0.1:${relay.port}', 'srv_test'),
             ],
-            raceTimeout: const Duration(seconds: 2),
+            candidateDeadline: const Duration(seconds: 2),
           ),
           throwsA(
             isA<PairingRouteException>()

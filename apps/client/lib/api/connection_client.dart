@@ -11,9 +11,10 @@ import 'storm_connection.dart';
 /// Requests are addressed to the saved server address, as every caller always
 /// has. Each one goes out on whatever transport the connection has proven *at
 /// that moment*, direct or relayed, so a reconnect that re-races moves the
-/// next request with it rather than leaving it on a dead trunk. A connection
-/// that has not raced yet joins the race already in flight, or starts the one
-/// race; it never opens a second one beside the sync engine's.
+/// next request with it rather than leaving it on a dead trunk. A request made
+/// while the connection is not connected waits for it (§8.5), joining the
+/// race in flight; it never starts a second one. A failure is reported to the
+/// connection, which alone decides whether the transport is lost (§8.4).
 ///
 /// Nothing is sent to an unproven server, and nothing to a host other than the
 /// server: a request for any other URL is refused, never sent with the
@@ -36,11 +37,9 @@ class ConnectionClient extends http.BaseClient {
     if (path == null) {
       throw http.ClientException('Not this server.', request.url);
     }
-    final proof = switch (c.status) {
-      ConnectionStatus.connected => ServerProof.verified,
-      ConnectionStatus.unproven => ServerProof.impostor,
-      _ => await c.connect(),
-    };
+    final proof = c.isConnected
+        ? ServerProof.verified
+        : await c.awaitConnected();
     switch (proof) {
       case ServerProof.verified:
         break;
@@ -53,9 +52,15 @@ class ConnectionClient extends http.BaseClient {
         throw http.ClientException('Server unreachable.', request.url);
     }
     final active = _onActive(c, path, request.url);
-    return c.transportClient.send(
-      active == request.url ? request : _copy(request, active),
-    );
+    final generation = c.generation;
+    try {
+      return await c.transportClient.send(
+        active == request.url ? request : _copy(request, active),
+      );
+    } catch (e) {
+      c.requestFailed(e, generation: generation);
+      rethrow;
+    }
   }
 
   /// [url]'s path below the saved address, or null when it is not on it.

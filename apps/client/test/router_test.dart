@@ -93,6 +93,19 @@ void main() {
         // button spun forever. Settings now heal that on the web; whatever
         // else leaves a sign-in unconfigured must still not hang.
         final server = MockClient((req) async {
+          // Every server answers this; the race needs it (§8.3).
+          if (req.url.path == '/v1/server') {
+            return http.Response(
+              jsonEncode({
+                'server_id': 'srv_router',
+                'key_id': 'key_1',
+                'algorithm': 'ed25519',
+                'public_key': 'A' * 43,
+                'relays': <Object>[],
+              }),
+              200,
+            );
+          }
           if (req.url.path == '/v1/account') {
             return http.Response(jsonEncode({'exists': true}), 200);
           }
