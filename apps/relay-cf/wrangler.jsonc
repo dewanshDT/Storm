@@ -8,6 +8,10 @@
   "name": "storm-relay",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
+  // Off here, not only in the dashboard: wrangler re-enables both on every
+  // deploy whose config leaves them out, giving the relay a second address.
+  "workers_dev": false,
+  "preview_urls": false,
   "durable_objects": {
     "bindings": [
       { "name": "ROOMS", "class_name": "RelayRoom" },

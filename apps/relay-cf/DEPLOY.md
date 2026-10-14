@@ -46,8 +46,9 @@ npx wrangler deploy --env=""  # the production Worker, "storm-relay"
 `--env=""` picks the top-level (production) configuration; `wrangler.jsonc`
 also defines the `conformance` Workers of step 8, and wrangler warns when a
 deploy names none. The first deploy creates the Worker, both Durable Object
-classes and their migration. It prints a `*.workers.dev` URL; you will replace
-it with your own hostname next.
+classes and their migration. `wrangler.jsonc` sets `"workers_dev": false` and
+`"preview_urls": false`, so the Worker has no address until step 3 gives it
+yours.
 
 Until the allowlist is set (step 4) the relay refuses every registration,
 which is the safe state to be in.
@@ -69,8 +70,10 @@ is deployed again). Both conformance envs set `"routes": []` and
 the top; before a conformance deploy, `npx wrangler deployments list --env
 conformance` must not mention your hostname.
 
-Turn off the `workers.dev` route (Settings › Domains & Routes) on the
-production Worker, so the relay has one address and scanners find one door.
+The production Worker has no `workers.dev` route, so the relay has one
+address and scanners find one door. Keep `"workers_dev": false` in the file:
+a config that leaves it out turns the route back on with every deploy,
+whatever the dashboard says.
 
 Decision 71 (no proxy in front of a relay) does not apply as written here:
 Cloudflare's edge *is* the relay, and it sets `CF-Connecting-IP` on every
