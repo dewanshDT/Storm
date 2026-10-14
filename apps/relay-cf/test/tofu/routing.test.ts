@@ -73,13 +73,18 @@ describe("a stream", () => {
     await c.recv();
     const chunk = new Uint8Array(256 * 1024).map((_, i) => i & 0xff);
     for (let i = 0; i < 3; i++) {
+      const pings = c.pingsSeen;
       server.sendBody(0x02, streamId, chunk);
       const f = await c.next();
       expect(f.kind).toBe("body");
       if (f.kind === "body") expect(f.payload).toEqual(chunk);
       // Each chunk is four times this project's 64 KiB budget, so the next is
-      // admitted only once the client's PONG has proved this one read.
-      await sleep(30);
+      // admitted only once the client's PONG has proved this one read. The
+      // room handles a socket's frames in order, so the answer to a PING sent
+      // after that PONG is the proof it landed; a fixed sleep was not.
+      while (c.pingsSeen === pings) await sleep(5);
+      c.send({ v: 1, type: "PING" });
+      expect((await c.recv()).type).toBe("PONG");
     }
   });
 
