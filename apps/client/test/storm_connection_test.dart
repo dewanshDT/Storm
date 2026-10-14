@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -174,6 +175,63 @@ void main() {
         expect(c.active.tier, CandidateTier.public);
       },
     );
+
+    test('a self-hosted relay slower than the public-relay delay still wins '
+        'when it is the only relay', () async {
+      // A phone on mobile data: the relay answers after the 2 s that used to
+      // end the whole race (decision 113).
+      final c = connectionWith(
+        byHost: {
+          'direct.test': serverAnswering(dead: true),
+          'mine.example': serverAnswering(
+            delay: const Duration(milliseconds: 600),
+          ),
+        },
+        relays: const [selfHosted],
+      );
+
+      expect(await c.connect(), ServerProof.verified);
+      expect(c.active.tier, CandidateTier.selfHosted);
+    });
+
+    test('a slow self-hosted relay still wins after the public relay joins, '
+        'if it answers first', () async {
+      final c = connectionWith(
+        byHost: {
+          'direct.test': serverAnswering(dead: true),
+          'mine.example': serverAnswering(
+            delay: const Duration(milliseconds: 400),
+          ),
+          'relay.storm.dev': serverAnswering(
+            delay: const Duration(milliseconds: 600),
+          ),
+        },
+        relays: const [selfHosted, public],
+        publicRelayHosts: const {'relay.storm.dev'},
+      );
+
+      expect(await c.connect(), ServerProof.verified);
+      expect(c.active.tier, CandidateTier.selfHosted);
+    });
+
+    test('a race nothing answers gives up at its timeout', () async {
+      final c = StormConnection(
+        localAddress: 'http://direct.test',
+        token: 't',
+        serverId: serverId,
+        publicKeyB64: pubkey,
+        relays: const [selfHosted],
+        raceTimeout: const Duration(milliseconds: 300),
+        buildAuthApi: (cand) => AuthApi(
+          baseUrl: cand.baseUrl,
+          client: MockClient((_) => Completer<http.Response>().future),
+        ),
+        buildVerifier: (_) => alwaysVerifies(),
+      );
+
+      expect(await c.connect(), ServerProof.unreachable);
+      expect(c.status, ConnectionStatus.offline);
+    });
 
     test('nothing answering at all is offline', () async {
       // Two candidates, both dead, so the race genuinely resolves to nothing.

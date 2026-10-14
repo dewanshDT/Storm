@@ -762,8 +762,22 @@ final settingsProvider = AsyncNotifierProvider<SettingsNotifier, Settings>(
 /// would loop, since watching it means `connect()` → notify → rebuild → a new
 /// engine → `start()` → `connect()`.
 final connectionProvider = Provider<StormConnection?>((ref) {
-  final settings = ref.watch(settingsProvider).value;
-  if (settings == null || !settings.isConfigured) return null;
+  // Only what the connection is built from. Watching the whole value rebuilt
+  // it, and the engine, on every save (a theme, the relay mirror below), and
+  // each rebuild raced a new trunk (decision 113).
+  final key = ref.watch(
+    settingsProvider.select(
+      (s) => (
+        configured: s.value?.isConfigured ?? false,
+        baseUrl: s.value?.baseUrl,
+        token: s.value?.bearerToken,
+        serverId: s.value?.serverId,
+        serverPublicKey: s.value?.serverPublicKey,
+      ),
+    ),
+  );
+  if (!key.configured) return null;
+  final settings = ref.read(settingsProvider).value!;
 
   final settingsNotifier = ref.read(settingsProvider.notifier);
   final connection = StormConnection(
@@ -785,7 +799,7 @@ final connectionProvider = Provider<StormConnection?>((ref) {
       settingsNotifier.save(current.copyWith(relays: relays));
     },
   );
-  ref.onDispose(connection.api.dispose);
+  ref.onDispose(connection.dispose);
   return connection;
 });
 
@@ -815,11 +829,7 @@ bool _relaysEqual(List<RelayAdvert> a, List<RelayAdvert> b) {
 final apiProvider = Provider<StormApi?>((ref) {
   final connection = ref.watch(connectionProvider);
   if (connection == null) return null;
-  return StormApi(
-    baseUrl: connection.localAddress,
-    token: connection.token,
-    client: ConnectionClient(() => connection),
-  );
+  return connection.sessionApi;
 });
 
 /// An `http.Client` for session calls built outside [StormApi] (Agents,

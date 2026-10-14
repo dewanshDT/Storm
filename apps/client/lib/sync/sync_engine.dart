@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../api/connection_log.dart';
 import '../api/models.dart';
 import '../api/server_verifier.dart';
 import '../api/storm_connection.dart';
@@ -61,7 +62,14 @@ class SyncEngine extends ChangeNotifier {
   }) {
     // A relay's verdict on the server can land after `connect` returned, so
     // the status is followed rather than read once.
-    _statusSub = connection.statusChanges.listen((_) => notifyListeners());
+    _statusSub = connection.statusChanges.listen((status) {
+      notifyListeners();
+      // Whoever re-raced, a proven connection is the moment to retry what a
+      // failed request left queued or marked offline (decision 113).
+      if (status == ConnectionStatus.connected && (!_online || _pending > 0)) {
+        unawaited(sync());
+      }
+    });
   }
 
   StreamSubscription<ConnectionStatus>? _statusSub;
@@ -80,7 +88,7 @@ class SyncEngine extends ChangeNotifier {
   /// A getter, so every `api.x()` below follows a re-race without knowing one
   /// happened. That is the seam doing its job: nothing here distinguishes a
   /// direct dial from a relayed one.
-  StormApi get api => connection.api;
+  StormApi get api => connection.sessionApi;
 
   final CacheDb cache;
 
@@ -182,11 +190,11 @@ class SyncEngine extends ChangeNotifier {
         return true;
       case ServerProof.impostor:
         _setImpostor(true);
-        _scheduleReconnect();
+        _scheduleReconnect('server failed the challenge');
         return false;
       case ServerProof.unreachable:
         _setOnline(false);
-        _scheduleReconnect();
+        _scheduleReconnect('server unreachable');
         return false;
     }
   }
@@ -221,7 +229,15 @@ class SyncEngine extends ChangeNotifier {
     _online = value;
     notifyListeners();
     // Coming back online is the moment queued edits must go out.
-    if (value) unawaited(sync());
+    if (value) {
+      _backoffSeconds = 1;
+      unawaited(sync());
+    } else if (_reconnect?.isActive != true) {
+      // Offline is not a latch: one failed request (a stream timeout, a
+      // refused open) on a working connection would otherwise queue every
+      // later edit until a feed event happened to arrive (decision 113).
+      _scheduleReconnect('a request failed');
+    }
   }
 
   // ---- reads ---------------------------------------------------------
@@ -447,7 +463,7 @@ class SyncEngine extends ChangeNotifier {
     required String id,
     required String newPath,
   }) async {
-    if (_online) {
+    if (_mayReachServer) {
       try {
         final result = await api.moveNote(
           vaultId: vaultId,
@@ -777,7 +793,7 @@ class SyncEngine extends ChangeNotifier {
       // No ticket, no socket. Treated as a feed failure rather than an
       // error, because it is one from the feed's point of view — and the
       // reconnect timer is already the thing that retries it.
-      _scheduleReconnect();
+      _scheduleReconnect('no feed ticket');
       return;
     }
     if (_disposed) return;
@@ -806,8 +822,8 @@ class SyncEngine extends ChangeNotifier {
           _pullDebounce?.cancel();
           _pullDebounce = Timer(const Duration(milliseconds: 300), sync);
         },
-        onError: (_) => _scheduleReconnect(),
-        onDone: _scheduleReconnect,
+        onError: (Object e) => _scheduleReconnect('feed error: ${logError(e)}'),
+        onDone: () => _scheduleReconnect('feed closed'),
         cancelOnError: true,
       );
 
@@ -815,7 +831,7 @@ class SyncEngine extends ChangeNotifier {
       // change is missed. A failed handshake also errors the stream.
       await channel.ready;
     } catch (_) {
-      _scheduleReconnect();
+      _scheduleReconnect('feed socket failed');
     }
   }
 
@@ -837,7 +853,7 @@ class SyncEngine extends ChangeNotifier {
       }
 
       if (streamed.statusCode != 200) {
-        _scheduleReconnect();
+        _scheduleReconnect('feed answered ${streamed.statusCode}');
         return;
       }
 
@@ -846,12 +862,13 @@ class SyncEngine extends ChangeNotifier {
           .transform(const LineSplitter())
           .listen(
             _handleSseLine,
-            onError: (_) => _scheduleReconnect(),
-            onDone: _scheduleReconnect,
+            onError: (Object e) =>
+                _scheduleReconnect('feed error: ${logError(e)}'),
+            onDone: () => _scheduleReconnect('feed closed'),
             cancelOnError: true,
           );
     } catch (_) {
-      _scheduleReconnect();
+      _scheduleReconnect('feed request failed');
     }
   }
 
@@ -879,10 +896,11 @@ class SyncEngine extends ChangeNotifier {
 
   /// Simulates the change feed closing, for tests.
   @visibleForTesting
-  void debugSimulateSocketDrop() => _scheduleReconnect();
+  void debugSimulateSocketDrop() => _scheduleReconnect('simulated drop');
 
-  void _scheduleReconnect() {
+  void _scheduleReconnect(String why) {
     if (_disposed) return;
+    ConnectionLog.instance.add('reconnect in ${_backoffSeconds}s: $why');
     // Deliberately does NOT mark the client offline. The socket only delivers
     // *push*; HTTP is what "online" means. Treating a closed socket as offline
     // disabled note creation and made freshly created notes unopenable, even
@@ -899,7 +917,11 @@ class SyncEngine extends ChangeNotifier {
       // now be in it. A check that only ran at startup would never see any of
       // them. `_proveServer` reschedules on failure, so a refusal here is not
       // the end of retrying.
-      connection.reset();
+      // A relayed connection whose trunk is still up is re-proved on that
+      // trunk, not torn down: the feed ending says nothing about the trunk,
+      // and a reset fails every request in flight on it (decision 113). A
+      // dead trunk has already reset the connection.
+      if (!connection.hasLiveTrunk) connection.reset(why);
       if (!await _proveServer()) return;
       await _openSocket();
       unawaited(sync());

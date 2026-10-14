@@ -19,6 +19,7 @@ import 'dart:typed_data';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../connection_log.dart';
 import 'srp_codec.dart';
 
 /// One logical HTTP exchange over a trunk, tied to a relay-assigned
@@ -146,7 +147,12 @@ class SrpTrunk {
     this.handshakeTimeout = const Duration(seconds: 8),
     this.openTimeout = const Duration(seconds: 5),
     this.maxQueuedFrames = 256,
-  }) : silenceLimit = silenceLimit ?? heartbeat * 3;
+    ConnectionLog? log,
+  }) : silenceLimit = silenceLimit ?? heartbeat * 3,
+       _log = log ?? ConnectionLog.instance;
+
+  final ConnectionLog _log;
+  final Stopwatch _age = Stopwatch();
 
   /// The full `wss://<relay>/connect/<server_id>` URL to dial.
   final Uri url;
@@ -218,9 +224,19 @@ class SrpTrunk {
   ///
   /// The trunk is not usable until this future resolves. A relay that answers
   /// nothing is `SrpHandshakeFailed` — the caller decides what offline means.
-  Future<void> connect() async {
+  ///
+  /// One dial per trunk: a caller arriving mid-handshake joins it. Dialling
+  /// again would send a second `HELLO` and orphan the first socket, whose
+  /// close then failed the trunk (decision 113).
+  Future<void> connect() {
     if (_closed) return Future.error(const SrpTrunkClosed());
     if (isConnected) return _connected.future;
+    return _handshake ??= _handshakeOnce();
+  }
+
+  Future<void>? _handshake;
+
+  Future<void> _handshakeOnce() async {
     await _dial();
     return _connected.future.timeout(
       handshakeTimeout,
@@ -234,6 +250,8 @@ class SrpTrunk {
   }
 
   Future<void> _dial() async {
+    _age.start();
+    _log.add('trunk dial ${logHost(url.toString())}');
     try {
       final ws = connector(url);
       _ws = ws;
@@ -275,6 +293,7 @@ class SrpTrunk {
     }
     switch (frame.type) {
       case 'READY':
+        _log.add('trunk ready after ${_age.elapsedMilliseconds} ms');
         if (!_connected.isCompleted) _connected.complete();
         _startHeartbeat();
       case 'STREAM_READY':
@@ -512,6 +531,10 @@ class SrpTrunk {
     if (_closed) return;
     _closed = true;
     _lossReason = reason;
+    _log.add(
+      'trunk lost: $reason${_relayErrorCode == null ? '' : ' ($_relayErrorCode)'}'
+      ' after ${_age.elapsedMilliseconds} ms, ${_streams.length} streams open',
+    );
     _noteServerSide(_relayErrorCode);
     _heartbeatTimer?.cancel();
     _sinceHeard.stop();

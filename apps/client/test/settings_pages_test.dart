@@ -1,16 +1,19 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:storm/agent/oauth_links.dart';
+import 'package:storm/api/connection_log.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/pairing_screen.dart';
 import 'package:storm/ui/settings/settings_shell.dart';
+import 'package:storm/ui/settings/settings_widgets.dart';
 import 'package:storm/ui/tokens.dart';
 
 import 'fake_server.dart';
@@ -616,6 +619,59 @@ void main() {
       await tapKey(tester, 'prompt-ok');
       expect(serverOf(c).relays, isEmpty);
       expect(find.textContaining('wss://'), findsWidgets);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the relays note says a relay can read the traffic', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      final note = tester
+          .widget<SettingsNote>(find.byKey(const Key('relays-note')))
+          .text;
+      expect(note, contains('whoever runs a relay can read what passes'));
+      expect(note, isNot(contains("can't read")));
+      await tapKey(tester, 'add-relay');
+      expect(find.textContaining('can read the traffic'), findsOneWidget);
+      expect(find.textContaining('cannot read'), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the connection log copies without a credential', (
+      tester,
+    ) async {
+      final calls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          calls.add(call);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      ConnectionLog.instance
+        ..clear()
+        ..add('race start: selfHosted wss://relay.example.net');
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      await tapKey(tester, 'copy-connection-log');
+      final copied =
+          (calls.lastWhere((c) => c.method == 'Clipboard.setData').arguments
+                  as Map)['text']
+              as String;
+      expect(
+        copied,
+        contains('race start: selfHosted wss://relay.example.net'),
+      );
+      expect(copied, isNot(contains('sta_')));
       await disposeShell(tester, c);
     });
 
