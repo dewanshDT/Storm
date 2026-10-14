@@ -412,6 +412,15 @@ cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
   IPv6 ULA, and everything while discovery is off. The client sends the
   password only on a direct route whose challenge verified against the
   advertised key, with no relay candidate at all.
+- **Storm never opens a port silently, and never needs one** (decision 119).
+  Only the installers add a firewall rule, after asking, LAN-only (ufw from
+  local subnets, firewalld home/trusted zones, Windows Private), recorded in
+  `/etc/storm/lan-firewall` so uninstall removes exactly that; the package and
+  the server never run `ufw` or `firewall-cmd` against a rule. On a network the
+  OS calls untrusted (`nettrust.rs`: Windows Public, firewalld or
+  NetworkManager `public`/`external`/`drop`/`block`) the server neither
+  advertises nor accepts password pairing. Installer tests use the fakes;
+  never touch a real firewall from a test.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.
