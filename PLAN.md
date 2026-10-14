@@ -7723,8 +7723,18 @@ hot-loop rule. Nothing is deployed and no deployment's mode changes.)*
   `a_keyless_hello_is_refused_on_an_open_relay` and the bad-key check again.
   `local.sh` and `cf.sh` start a third, open-mode instance (+2 on their
   ports). `make test-live RELAY_MODE=open` runs every relayed live suite
-  through an open relay.
-- **Results.** See the PR. *Revisit if:* the spec settles what an open relay
+  through an open relay. `mcp_connect_live.py`'s wrong-pin check over the
+  relay now expects `server_offline` (the verdict change above).
+- **Results.** `make check` green (server 609, relay 51 + 21 + 48 + 8 + 10,
+  Worker 110, runtime 133 + 78, client 1091 + 1 skipped).
+  `make relay-conformance-local` 65/65 (three relays);
+  `make relay-conformance-cf` 64 + the latency skip (the known 16 MiB
+  `client_backlogged` flake under the 1 MiB fixture budget failed twice in
+  five runs, as it does on `staging`). `make test-live` on 19720–19722
+  (storm-relay, TOFU), with `RELAY_MODE=open` on 19730–19732 and with
+  `RELAY_IMPL=cf RELAY_MODE=open` on 19740–19742 all exit 0: server 81,
+  mcp 86, agent 93, gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect
+  live 39, client integration 34 + 1 skipped. *Revisit if:* the spec settles what an open relay
   that routes on the URL does with a keyed `HELLO` whose URL named no key
   (here `server_unreachable` at once), or keeps a grace period for keyless
   `HELLO`s on some open relay (then the "exactly one live registration" row
