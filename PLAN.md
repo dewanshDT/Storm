@@ -7522,6 +7522,14 @@ reads as a spec violation. It reads `docs/srp-vectors.json` for the invalid
 knob the contract does not name — add it to `relay.env` and storm-relay
 together.
 
+*108a addendum (2026-10-14):* `a_body_over_16_mib_crosses_both_ways_in_256_kib_frames`
+failed on the Worker about one run in four, then every run once the client read
+concurrently: the origin sent 17 MiB before the client read, and the Worker's
+read-marks (a `PING` per 128 KiB under the fixture's 1 MiB client budget)
+declared the client backlogged — the case the check says it is not testing. The
+check's origin now stays within half the client budget of what the client has
+read, so only framing is under test (3/3 Worker runs, 58/58 storm-relay).
+
 **105e. mcp-connect in Settings and the installer (S5).** *(2026-10-13,
 "MCP over the Relay — mcp-connect", the product surface; stacked on 101)*
 - **Why.** External MCP clients reach Storm through `storm-runtime
