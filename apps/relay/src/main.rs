@@ -131,6 +131,17 @@ struct Limits {
           default_value_t = millis(config::DEFAULT_HELLO_RATE_WINDOW))]
     hello_rate_window_ms: u64,
 
+    /// `/register` attempts one source IP (IPv6 per /64) may make per window
+    /// (§6.2).
+    #[arg(long, env = "STORM_RELAY_REGISTER_RATE_LIMIT", value_name = "N",
+          default_value_t = config::DEFAULT_REGISTER_RATE_LIMIT)]
+    register_rate_limit: usize,
+
+    /// The window for --register-rate-limit.
+    #[arg(long, env = "STORM_RELAY_REGISTER_RATE_WINDOW_MS", value_name = "MS",
+          default_value_t = millis(config::DEFAULT_REGISTER_RATE_WINDOW))]
+    register_rate_window_ms: u64,
+
     /// Un-acked STREAM_OPENs one client trunk may hold (§5.1).
     #[arg(long, env = "STORM_RELAY_MAX_IN_FLIGHT_STREAMS", value_name = "N",
           default_value_t = config::DEFAULT_MAX_IN_FLIGHT_STREAMS)]
@@ -160,6 +171,8 @@ impl Limits {
         config.supersession_drain = Duration::from_millis(self.supersession_drain_ms);
         config.hello_rate_limit = self.hello_rate_limit;
         config.hello_rate_window = Duration::from_millis(self.hello_rate_window_ms);
+        config.register_rate_limit = self.register_rate_limit;
+        config.register_rate_window = Duration::from_millis(self.register_rate_window_ms);
         config.max_in_flight_streams = self.max_in_flight_streams;
         config.max_total_streams = self.max_total_streams;
         config.max_client_buffer_bytes = self.max_client_buffer_bytes;
@@ -281,12 +294,10 @@ async fn main() -> Result<()> {
         relay = relay.with_bindings(bindings);
     }
     let relay = Arc::new(relay);
+    spawn_reload_on_sighup(certs.clone(), relay.clone(), args.allowlist.clone());
 
     match certs {
-        Some(certs) => {
-            spawn_reload_on_sighup(certs.clone());
-            storm_relay::serve_tls(listener, relay, certs).await
-        }
+        Some(certs) => storm_relay::serve_tls(listener, relay, certs).await,
         None => storm_relay::serve(listener, relay).await,
     }
 }
@@ -294,22 +305,46 @@ async fn main() -> Result<()> {
 /// `systemctl reload` sends SIGHUP; a renewed certificate is picked up without
 /// dropping a single trunk. A reload that fails keeps serving the old pair and
 /// says why, loudly, because an expiring certificate is a deadline.
-fn spawn_reload_on_sighup(certs: Arc<CertStore>) {
+fn spawn_reload_on_sighup(
+    certs: Option<Arc<CertStore>>,
+    relay: Arc<Relay>,
+    allowlist: Option<PathBuf>,
+) {
+    if certs.is_none() && allowlist.is_none() {
+        return;
+    }
     tokio::spawn(async move {
         let mut hup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
             Ok(hup) => hup,
             Err(e) => {
-                tracing::error!(error = %e, "cannot listen for SIGHUP; certificate reload is off");
+                tracing::error!(error = %e, "cannot listen for SIGHUP; reloads are off");
                 return;
             }
         };
         while hup.recv().await.is_some() {
-            match certs.reload() {
-                Ok(()) => tracing::info!("TLS certificate reloaded"),
-                Err(e) => tracing::error!(
-                    error = %format!("{e:#}"),
-                    "TLS certificate reload failed; still serving the previous one"
-                ),
+            if let Some(certs) = &certs {
+                match certs.reload() {
+                    Ok(()) => tracing::info!("TLS certificate reloaded"),
+                    Err(e) => tracing::error!(
+                        error = %format!("{e:#}"),
+                        "TLS certificate reload failed; still serving the previous one"
+                    ),
+                }
+            }
+            // Revocation (decision 116k): an entry removed from the file ends
+            // that server's live trunk now, not when it next reconnects.
+            if let Some(path) = &allowlist {
+                match Allowlist::load(path) {
+                    Ok(next) => {
+                        let entries = next.len();
+                        let evicted = relay.reload_allowlist(next);
+                        tracing::info!(entries, evicted, "allowlist reloaded");
+                    }
+                    Err(e) => tracing::error!(
+                        error = %format!("{e:#}"),
+                        "allowlist reload failed; still enforcing the previous one"
+                    ),
+                }
             }
         }
     });

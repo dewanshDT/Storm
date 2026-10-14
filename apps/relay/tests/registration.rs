@@ -684,3 +684,99 @@ async fn a_second_register_server_before_the_response_is_a_protocol_error() {
     .await;
     assert_error(&conn.recv().await, "protocol_error");
 }
+
+// -------------------------------------------- abuse controls (decision 116k)
+
+#[tokio::test]
+async fn register_attempts_are_rate_limited_per_source() {
+    let mut config = config();
+    config.register_rate_limit = 2;
+    let harness = Harness::start(config, None).await;
+    let _a = harness.connect().await;
+    let _b = harness.connect().await;
+    // §6.2: refused before anything is allocated, as a plain HTTP answer.
+    let refused = tokio_tungstenite::connect_async(harness.url.as_str()).await;
+    match refused {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 429);
+        }
+        other => panic!("a third /register within the window got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_server_removed_from_the_allowlist_is_evicted_on_reload() {
+    let harness = Harness::start(allowlisted(), None).await;
+    let mut conn = harness.connect().await;
+    let nonce = conn.register(SERVER_ID, &pubkey_b64(1)).await;
+    assert_eq!(
+        conn.respond(&sign(1, &relay_auth(SERVER_ID, &nonce))).await["type"],
+        "REGISTERED"
+    );
+    assert_eq!(harness.relay.registrations.len(), 1);
+
+    // Revocation (§6.2): the live trunk ends now, not when it reconnects.
+    let evicted = harness
+        .relay
+        .reload_allowlist(Allowlist::from_entries(std::iter::empty()));
+    assert_eq!(evicted, 1);
+    assert!(harness.relay.registrations.is_empty());
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match conn.socket.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the evicted trunk's socket stayed open");
+
+    // And it cannot come back.
+    let mut again = harness.connect().await;
+    again
+        .send(json!({
+            "v": 1, "type": "REGISTER_SERVER",
+            "server_id": SERVER_ID, "pubkey": pubkey_b64(1),
+        }))
+        .await;
+    assert_error(&again.recv().await, "auth_failed");
+}
+
+/// §6.3 (decision 114b): a relay logs lifecycle events and codes, never a
+/// client's address. Checked on the source, every level, so a debug line
+/// added later cannot quietly start writing them.
+#[test]
+fn no_log_line_names_a_peer_address() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut in_log = false;
+        for (n, line) in text.lines().enumerate() {
+            if line.contains("tracing::") && line.contains("!(") {
+                in_log = true;
+            }
+            if in_log {
+                for bad in [
+                    "%peer",
+                    "?peer",
+                    "peer_ip =",
+                    "peer.ip()",
+                    "%addr",
+                    "remote_addr =",
+                ] {
+                    assert!(
+                        !line.contains(bad),
+                        "{}:{}: a log line names a client address: {line}",
+                        path.display(),
+                        n + 1
+                    );
+                }
+            }
+            if line.trim_end().ends_with(");") {
+                in_log = false;
+            }
+        }
+    }
+}
