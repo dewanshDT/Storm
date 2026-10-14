@@ -1,5 +1,5 @@
-/// The Agent Runtime's records as the client sees them (`PLAN.md` decisions
-/// 77c and 77d). Field names are the server's; nothing here is invented.
+/// The Agent Runtime's records as the client sees them (decisions 77c and
+/// 77d). Field names are the server's; nothing here is invented.
 library;
 
 /// A provider a host offers.

@@ -1,4 +1,4 @@
-//! The provider contract (freeze §9.1, AM20; `PLAN.md` decision 77).
+//! The provider contract (freeze §9.1, AM20; decision 77).
 //!
 //! **The provider API is not the PTY.** A provider is described by its
 //! identity and availability, its *kind* (how a session of it is started) and

@@ -1,5 +1,5 @@
 //! Runtime Hosts: enrollment, key authentication and host tokens (Agent Runtime
-//! V1, freeze §5; `PLAN.md` decision 77b).
+//! V1, freeze §5; decision 77b).
 //!
 //! A Runtime Host is a machine that runs agents for this server. It is **not a
 //! user and not a device**: it holds no user credential, never learns who owns

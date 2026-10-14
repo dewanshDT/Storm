@@ -828,7 +828,7 @@ Build these once and reuse them. ✓ marks an existing widget to extend rather t
 | **"Edited by session" provenance** | **S** | Needs the last agent writer (session id, created or edited, timestamp) per note, exposed on note reads. Today only the `source: ai` frontmatter convention exists. It must not add Storm state inside the vault (H1) |
 | Unseen dot | U + S | A client-side last-opened version per note, compared with the provenance write. Depends on provenance |
 | **Split AI-write permissions** | **S** | Today `mcp_writable` gates both external apps and agent vault writes. Add a separate agent-write setting, with `mcp_writable` covering external apps only |
-| **Relay list in Connection** | **S** (likely) | No client screen exists. Whether the server exposes a relay-list read/write API is unverified; the PLAN lists "relay settings screen" as planned |
+| **Relay list in Connection** | **S** (likely) | No client screen exists. Whether the server exposes a relay-list read/write API is unverified; the plan lists "relay settings screen" as planned |
 | Signed-in devices list with Revoke | **S** (likely) | There is no devices / auth-sessions list in the client today. An endpoint is unverified |
 | Access keys, Add a device, Sign out, Disconnect | B | Existing |
 | Integrations (add, test, tools, re-auth, disable, disconnect) | B | Existing on staging; restyle only |

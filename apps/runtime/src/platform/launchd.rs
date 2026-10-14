@@ -134,7 +134,7 @@ pub fn plist(layout: &Layout, account: &str) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
         "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
-        "<!-- Written by `storm-runtime install` (PLAN.md decision 83, D14 AM35).\n",
+        "<!-- Written by `storm-runtime install` (decision 83, D14 AM35).\n",
         "     Re-run `sudo storm-runtime install` rather than editing this file. -->\n",
         "<plist version=\"1.0\">\n<dict>\n",
     ));

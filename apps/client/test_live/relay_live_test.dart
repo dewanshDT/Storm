@@ -14,7 +14,7 @@ import 'package:storm/api/storm_api.dart';
 ///
 /// `test/srp_tunnel_test.dart` pins the framing against a fake relay; this is
 /// the one place the three implementations meet. It exists because a relayed
-/// write hung until timeout (P2, PLAN decision 92) while every unit test was
+/// write hung until timeout (P2, decision 92) while every unit test was
 /// green: the fake answered after a fixed delay rather than at end of body.
 ///
 /// `make test-live` starts the relay, points the server at it and passes

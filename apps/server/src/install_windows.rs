@@ -1,4 +1,4 @@
-//! `up` / `down` / `status` / `uninstall` on Windows (PLAN 99, W-S1–S3): the
+//! `up` / `down` / `status` / `uninstall` on Windows (decision 99, W-S1–S3): the
 //! server runs as the person, at logon, from a Scheduled Task, with the notes
 //! in `%USERPROFILE%\Storm`. The counterpart of 84d's macOS LaunchAgent; no
 //! step needs an administrator.
