@@ -448,9 +448,18 @@ async fn relay_connection(
     }
 }
 
+/// A port that refuses connections and stays this process's: bound, never
+/// listening, and held for good. Dropping a listener instead let Windows,
+/// which hands out ephemeral ports in order, give the port to the next test's
+/// fake server, and the "down" relay answered as an impostor.
 fn closed_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let port = socket.local_addr().unwrap().as_socket().unwrap().port();
+    std::mem::forget(socket);
+    port
 }
 
 fn pin() -> ServerPin {
