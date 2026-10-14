@@ -988,7 +988,7 @@ async fn a_ping_overtakes_a_queued_upload_and_a_stalled_trunk_is_not_silent() {
         heartbeat: Duration::from_millis(200),
         silence_limit: Duration::from_millis(600),
     };
-    let trunk = within(SrpTrunk::connect_with(&url, SERVER_ID, config))
+    let trunk = within(SrpTrunk::connect_with(&url, SERVER_ID, SERVER_KEY, config))
         .await
         .unwrap();
 
