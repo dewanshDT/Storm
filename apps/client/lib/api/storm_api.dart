@@ -183,6 +183,17 @@ class StormApi {
     );
   }
 
+  /// Settings › Connection › "Discoverable on this network" (decision 118).
+  Future<void> setDiscoverable(bool on) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/discovery'),
+        headers: _headers,
+        body: jsonEncode({'enabled': on}),
+      ),
+    );
+  }
+
   /// Replaces the configured relay list. The server refuses the whole list
   /// on one bad URL.
   Future<List<String>> setRelays(List<String> relays) async {

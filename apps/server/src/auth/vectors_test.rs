@@ -282,3 +282,26 @@ fn sign_relay_auth_refuses_every_field_the_vectors_call_invalid() {
         }
     }
 }
+
+#[test]
+fn key_fingerprints_match_the_vectors() {
+    let doc = vectors();
+    let section = &doc["key_fingerprint"];
+    let cases = section["cases"]
+        .as_array()
+        .expect("section `key_fingerprint` missing from srp-vectors.json");
+    assert!(!cases.is_empty());
+    for case in cases {
+        let key = data_encoding::BASE64URL_NOPAD
+            .decode(s(case, "public_key_b64").as_bytes())
+            .unwrap();
+        assert_eq!(
+            super::identity::fingerprint(&key),
+            s(case, "fingerprint"),
+            "{}",
+            s(case, "name")
+        );
+    }
+    let identity = ServerIdentity::from_seed("srv_valid", SEED);
+    assert_eq!(identity.fingerprint(), s(&cases[0], "fingerprint"));
+}

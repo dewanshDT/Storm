@@ -122,6 +122,12 @@ class FakeServer {
   /// The configured relay URLs, as `PUT /v1/config/relays` stores them.
   List<String> relays = [];
 
+  /// LAN discovery's setting (decision 118); null answers as an older server.
+  bool? discoverable;
+
+  /// `--no-discovery` on the server.
+  bool discoveryForcedOff = false;
+
   /// Paired devices, as `GET /v1/auth/devices` returns them.
   final List<Map<String, dynamic>> devices = [];
 
@@ -271,6 +277,12 @@ class FakeServer {
       );
     }
 
+    if (path == '/v1/config/discovery' && request.method == 'PUT') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      discoverable = body['enabled'] as bool;
+      return http.Response(jsonEncode(_discoveryJson()), 200, headers: j(''));
+    }
+
     if (path == '/v1/config/relays' && request.method == 'PUT') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       final next = [for (final r in body['relays'] as List) r as String];
@@ -342,6 +354,7 @@ class FakeServer {
           'relays': relays,
           'agent_writes': ?agentWrites,
           'version': ?version,
+          if (discoverable != null) 'discovery': _discoveryJson(),
         }),
         200,
         headers: j(''),
@@ -631,4 +644,10 @@ class FakeServer {
 
     return http.Response('{"error":"unexpected"}', 500, headers: j(''));
   });
+
+  Map<String, dynamic> _discoveryJson() => {
+    'discoverable': discoverable ?? true,
+    'forced_off': discoveryForcedOff,
+    'active': (discoverable ?? true) && !discoveryForcedOff,
+  };
 }

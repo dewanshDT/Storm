@@ -1022,6 +1022,173 @@ pub async fn issue_pairing_qr(
     })
 }
 
+// ---- LAN discovery pairing (decision 118) -------------------------------
+
+pub const EVENT_DEVICE_PAIRED_PASSWORD: &str = "device_paired_password";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasswordPairing {
+    pub password: String,
+    pub device_name: String,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Where a request came from, as far as this server can know.
+#[derive(Debug, Clone, Copy)]
+pub struct Origin {
+    /// The socket's peer, or the relay's `relay_peer_ip`.
+    pub peer: Option<std::net::IpAddr>,
+    /// Dispatched from a relay trunk rather than accepted on the listener.
+    pub relayed: bool,
+}
+
+#[derive(Debug)]
+pub enum PasswordPairError {
+    /// Relayed, not from a LAN-scoped peer, or discovery is off.
+    LanOnly,
+    /// No account yet: a fresh server is claimed only with its setup QR.
+    SetupRequired,
+    BadRequest(String),
+    Refused(crate::auth::sessions::LoginFailure),
+    Internal(anyhow::Error),
+}
+
+/// `POST /v1/pairings/password`: a device found on the LAN pairs with the
+/// account password.
+///
+/// **Never over a relay and never from the internet.** Otherwise anyone who
+/// can reach a relay could mint devices by guessing the password. The relay
+/// marker is set by the trunk's dispatch, which a client cannot forge, and
+/// `relay_peer_ip` would otherwise look like a socket peer.
+pub async fn pair_with_password(
+    state: &Shared,
+    req: PasswordPairing,
+    origin: Origin,
+) -> Result<crate::auth::pairing::ConsumeResult, PasswordPairError> {
+    use crate::auth::ratelimit::CallerKey;
+    use crate::auth::sessions::{LoginError, LoginFailure};
+
+    let lan_peer = origin
+        .peer
+        .filter(|ip| crate::discovery::is_lan_scoped(*ip));
+    let Some(peer) = lan_peer.filter(|_| !origin.relayed && state.discovery.is_on()) else {
+        return Err(PasswordPairError::LanOnly);
+    };
+    let device_name = req.device_name.trim().to_string();
+    if device_name.is_empty() {
+        return Err(PasswordPairError::BadRequest(
+            "a device needs a name — it is how you recognise what to revoke".into(),
+        ));
+    }
+
+    let now = crate::index::now_rfc3339();
+    let internal = PasswordPairError::Internal;
+    if !state.auth_db.lock().await.has_account().map_err(internal)? {
+        return Err(PasswordPairError::SetupRequired);
+    }
+
+    let caller = CallerKey::Ip(peer);
+    if let Err(retry_after_secs) = state.login_limiter.check(&caller) {
+        let auth_db = state.auth_db.lock().await;
+        if let Err(e) = auth_db.record_event_from(
+            crate::auth::sessions::EVENT_LOGIN_THROTTLED,
+            None,
+            None,
+            Some(&peer.to_string()),
+            &now,
+            &format!(r#"{{"retry_after_secs":{retry_after_secs}}}"#),
+        ) {
+            tracing::warn!(error = %e, "could not record login_throttled event");
+        }
+        return Err(PasswordPairError::Refused(LoginFailure::RateLimited {
+            retry_after_secs,
+        }));
+    }
+    if req.password.len() > crate::auth::password::MAX_PASSWORD_BYTES {
+        return Err(PasswordPairError::Refused(LoginFailure::InvalidCredentials));
+    }
+
+    let mut auth_db = state.auth_db.lock().await;
+    let account = match crate::auth::sessions::check_password(
+        &mut auth_db,
+        &state.hasher,
+        req.password,
+        None,
+        &now,
+    )
+    .await
+    {
+        Ok(account) => account,
+        Err(LoginError::Refused(failure)) => return Err(PasswordPairError::Refused(failure)),
+        Err(LoginError::Internal(e)) => return Err(internal(e)),
+    };
+
+    let secret = crate::auth::token::mint(crate::auth::token::DEVICE_SECRET_PREFIX);
+    let device = crate::auth::devices::create_lan_paired(
+        &mut auth_db,
+        &device_name,
+        req.platform.as_deref(),
+        req.version.as_deref(),
+        &secret,
+        &now,
+    )
+    .map_err(|e| PasswordPairError::BadRequest(e.to_string()))?;
+    auth_db
+        .record_event_from(
+            EVENT_DEVICE_PAIRED_PASSWORD,
+            Some(&account.id),
+            Some(&device.id),
+            Some(&peer.to_string()),
+            &now,
+            &serde_json::json!({ "platform": device.platform }).to_string(),
+        )
+        .map_err(internal)?;
+    drop(auth_db);
+    state.login_limiter.refund(&caller);
+
+    Ok(crate::auth::pairing::ConsumeResult {
+        device_id: device.id,
+        device_secret: secret,
+        server_id: state.identity.server_id.clone(),
+        public_key: state.identity.public_key_b64(),
+        key_id: state.identity.key_id.clone(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveryView {
+    /// The persisted setting.
+    pub discoverable: bool,
+    /// `--no-discovery` / `STORM_DISCOVERY=0`: off whatever the setting says.
+    pub forced_off: bool,
+    /// Advertising and accepting password pairing right now.
+    pub active: bool,
+}
+
+pub fn discovery_view(state: &Shared) -> DiscoveryView {
+    DiscoveryView {
+        discoverable: state.discovery.setting(),
+        forced_off: state.discovery.forced_off(),
+        active: state.discovery.is_on(),
+    }
+}
+
+/// Settings › Server › "Discoverable on this network". Saved before it takes
+/// effect, so what the app shows is what a restart keeps.
+pub async fn set_discoverable(state: &Shared, on: bool) -> ApiResult<DiscoveryView> {
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.set_discoverable(on);
+        vaults.registry.save(&state.state_dir)?;
+    }
+    state.discovery.set_enabled(on);
+    tracing::info!(on, "LAN discovery setting changed");
+    Ok(discovery_view(state))
+}
+
 // ---- MCP keys (A14) ----------------------------------------------------
 
 /// A freshly minted key, **including the plaintext**.
@@ -3325,6 +3492,7 @@ mod tests {
             hasher: crate::auth::Hasher::new(),
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            discovery: crate::discovery::Discovery::new(false, true),
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
         })

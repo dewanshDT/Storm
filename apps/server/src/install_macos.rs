@@ -478,6 +478,11 @@ pub fn status() -> Result<()> {
     println!("vaults  : {}", r.vaults.display());
     println!("state   : {}", r.state.display());
     println!("log     : {}", layout.log_file.display());
+    if healthy {
+        for line in crate::discovery::status_identity(r.port, 8) {
+            println!("{line}");
+        }
+    }
     if !healthy {
         std::process::exit(1);
     }

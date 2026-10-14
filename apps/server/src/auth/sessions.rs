@@ -705,6 +705,32 @@ pub async fn login(
         return Err(LoginError::Refused(LoginFailure::DeviceRevoked));
     }
 
+    let account = check_password(db, hasher, password, Some(&device.id), now).await?;
+
+    let issued = create(db, &account.id, &device.id, now)?;
+    db.record_event(
+        EVENT_LOGIN_OK,
+        Some(&account.id),
+        Some(&device.id),
+        now,
+        &format!(r#"{{"session":{:?}}}"#, issued.session_id),
+    )?;
+    Ok(issued)
+}
+
+/// The account's password, checked as sign-in checks it: the lockout window,
+/// then one bounded Argon2id verify that costs the same whether or not an
+/// account exists, then the failure count or the rehash.
+///
+/// Shared with LAN password pairing (decision 118), so pairing can never be a
+/// way around the lockout.
+pub async fn check_password(
+    db: &mut AuthDb,
+    hasher: &Hasher,
+    password: String,
+    device_id: Option<&str>,
+    now: &str,
+) -> Result<Account, LoginError> {
     let account = db.account()?;
 
     if let Some(account) = &account
@@ -713,7 +739,7 @@ pub async fn login(
         db.record_event(
             EVENT_LOGIN_LOCKED,
             Some(&account.id),
-            Some(&device.id),
+            device_id,
             now,
             &format!(r#"{{"retry_after_secs":{remaining}}}"#),
         )?;
@@ -741,7 +767,7 @@ pub async fn login(
         db.record_event(
             EVENT_LOGIN_FAIL,
             Some(&account.id),
-            Some(&device.id),
+            device_id,
             now,
             &format!(r#"{{"locked":{}}}"#, locked.is_some()),
         )?;
@@ -758,15 +784,7 @@ pub async fn login(
         account::upgrade_password_hash(db, &account.id, &upgraded, now)?;
     }
 
-    let issued = create(db, &account.id, &device.id, now)?;
-    db.record_event(
-        EVENT_LOGIN_OK,
-        Some(&account.id),
-        Some(&device.id),
-        now,
-        &format!(r#"{{"session":{:?}}}"#, issued.session_id),
-    )?;
-    Ok(issued)
+    Ok(account)
 }
 
 /// Mints a short-lived, single-use ticket for WebSocket authentication.
