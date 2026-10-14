@@ -6843,8 +6843,9 @@ Discovery Pairing*; this entry records what was built and where it differs)*
 - **Tests.** Server: TXT keys and values, a TXT `mdns-sd` accepts, never a
   public interface (and not `100.64/10`), the flag over the setting, the
   registry default; pairing on the LAN (credential signs in, `paired_by`),
-  relayed (marker) and through a real tunnel, public, `100.64/10` and absent
-  peers, discovery off (persisted), no account, wrong password equals login,
+  every LAN-scoped peer class accepted, relayed (marker) and through a real
+  tunnel, public, `100.64/10` and absent peers, discovery off (persisted), no
+  account, wrong password equals login,
   limiter charged and refunded and shared with login, the event without a
   secret; status prints the fingerprint; the vector; the unit's
   `AF_NETLINK`. Client: adverts and the five states, the web rule, the
@@ -6856,7 +6857,7 @@ Discovery Pairing*; this entry records what was built and where it differs)*
   query on loopback in `make test-live`, checks the TXT, pairs, signs in,
   and follows the switch off (advert gone, `lan_only`) and on;
   `test_live/lan_pairing_live_test.dart` pairs through `openLanRoute`.
-- **Results.** `make check` green: server 629 unit tests (2 ignored), client
+- **Results.** `make check` green: server 630 unit tests (2 ignored), client
   1117 (1 skipped). `make test-live PORT=19610 AUTH_PORT=19611
   RELAY_PORT=19612` exits 0: server 81, mcp 86, LAN discovery 19, agent 93,
   gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect live 39, client

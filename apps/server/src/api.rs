@@ -8774,6 +8774,27 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn every_lan_scoped_peer_class_may_pair() {
+        let dir = tempdir::TempDir::new("storm-lan-classes").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        for peer in [
+            "127.0.0.1",
+            "::1",
+            "10.1.2.3",
+            "172.16.0.5",
+            "192.168.1.40",
+            "169.254.1.1",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:192.168.1.41",
+        ] {
+            let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, Some(peer))).await;
+            assert_eq!(status, StatusCode::OK, "{peer}: {body}");
+        }
+    }
+
+    #[tokio::test]
     async fn password_pairing_through_a_relay_is_lan_only() {
         let dir = tempdir::TempDir::new("storm-lan-relayed").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
