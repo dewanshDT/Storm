@@ -57,9 +57,13 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
     let list = args.iter().any(|a| a == "--list");
+    // `--open-only` keeps the checks that need `RELAY_OPEN_URL`, so a runner
+    // short of CPU can start the open relay only for them (cf.sh).
+    let open_only = args.iter().any(|a| a == "--open-only");
     let filters: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let selected: Vec<Check> = checks::all()
         .into_iter()
+        .filter(|c| !open_only || c.needs == Needs::Open)
         .filter(|c| {
             filters.is_empty()
                 || filters

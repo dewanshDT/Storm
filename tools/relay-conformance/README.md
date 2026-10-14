@@ -105,8 +105,11 @@ clients pace their `HELLO`s to a third of the per-IP limit, except in the
 checks that exceed it, which then wait two windows.
 
 `make relay-conformance-cf` (`cf.sh`) does the same for the Worker relay:
-three `wrangler dev` instances on 18910–18912, the `127.0.0.2` checks on, the
-latency check off.
+allowlist and TOFU `wrangler dev` instances on 18910/18911, then an open one
+on 18912 for a second pass with `--open-only` (the checks that need
+`RELAY_OPEN_URL`), so the load-sensitive 16 MiB checks never share the
+machine with a third workerd; the `127.0.0.2` checks on, the latency check
+off.
 
 `make relay-conformance-local` runs three storm-relays (`tools/relay-conformance/local.sh`):
 allowlist mode on 18900, TOFU on 18901 and open on 18902, with

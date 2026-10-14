@@ -7837,8 +7837,10 @@ hot-loop rule. Nothing is deployed and no deployment's mode changes.)*
   `open_registrations_are_keyed_by_server_id_and_pubkey`,
   `a_squatter_cannot_take_over`, `supersession_is_per_key`,
   `a_keyless_hello_is_refused_on_an_open_relay` and the bad-key check again.
-  `local.sh` and `cf.sh` start a third, open-mode instance (+2 on their
-  ports). `make test-live RELAY_MODE=open` runs every relayed live suite
+  `local.sh` starts a third, open-mode instance (+2 on its ports). `cf.sh`
+  starts its open Worker only for a second pass (`--open-only`): with three
+  workerds up, the 16 MiB check's known `client_backlogged` flake failed
+  CI twice in a row. `make test-live RELAY_MODE=open` runs every relayed live suite
   through an open relay. `mcp_connect_live.py`'s wrong-pin check over the
   relay now expects `server_offline` (the verdict change above).
 - **Results.** `make check` green (server 609, relay 51 + 21 + 48 + 8 + 10,
