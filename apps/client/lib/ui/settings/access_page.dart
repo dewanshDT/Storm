@@ -8,8 +8,10 @@ import '../../state/app_state.dart';
 import '../../state/health.dart' show relativeTime;
 import '../clipboard_copy.dart';
 import '../controls.dart';
+import '../shell/sidebar_rows.dart' show Twisty;
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
+import 'mcp_connect_config.dart';
 import 'settings_widgets.dart';
 
 /// Settings › Devices & access: where you are signed in, and the access keys
@@ -228,31 +230,23 @@ String _day(String iso) =>
 /// Deliberately hard to dismiss by accident: no barrier dismiss, and the only
 /// way out says what it means. The server keeps a hash, so "show it again" is
 /// not a feature anyone can build.
+///
+/// The setup it offers first is `storm-runtime mcp-connect` (decision 105e):
+/// one config that works on the LAN and, through the relays, away from it.
+/// Ready to paste, because assembling it by hand is where keys get mangled.
 class RevealMcpKeyDialog extends ConsumerWidget {
   const RevealMcpKeyDialog({super.key, required this.created});
 
   final CreatedMcpKey created;
 
-  /// A ready-to-paste MCP client entry; assembling it by hand is where keys
-  /// get mangled.
-  static String configSnippet(String baseUrl, String secret) =>
-      '{\n'
-      '  "mcpServers": {\n'
-      '    "storm": {\n'
-      '      "type": "http",\n'
-      '      "url": "$baseUrl/mcp",\n'
-      '      "headers": {\n'
-      '        "Authorization": "Bearer $secret"\n'
-      '      }\n'
-      '    }\n'
-      '  }\n'
-      '}';
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    final baseUrl = ref.read(settingsProvider).value?.baseUrl ?? '';
-    final snippet = configSnippet(baseUrl, created.secret);
+    final settings = ref.watch(settingsProvider).value ?? const Settings();
+    final target = McpConnectTarget.fromSettings(settings);
+    final secret = created.secret;
+    final http = httpMcpConfig(settings.baseUrl, secret);
+    final label = TextStyle(fontSize: t.labelSize, color: t.text3);
 
     return AlertDialog(
       title: const Text('Copy it now'),
@@ -268,14 +262,51 @@ class RevealMcpKeyDialog extends ConsumerWidget {
               style: TextStyle(color: t.amber),
             ),
             SizedBox(height: t.sp * 1.5),
-            _Copyable(label: 'Key', value: created.secret),
+            _Copyable(label: 'Key', id: 'key', value: secret),
             SizedBox(height: t.sp * 1.5),
-            Text(
-              'Or paste this straight into your AI app’s MCP config:',
-              style: TextStyle(fontSize: t.labelSize, color: t.text3),
-            ),
-            SizedBox(height: t.sp * 0.5),
-            _Copyable(label: 'Config', value: snippet),
+            if (target == null) ...[
+              Text(
+                'Paste this into your AI app’s MCP config. It works on your '
+                'home network only.',
+                style: label,
+              ),
+              SizedBox(height: t.sp * 0.5),
+              _Copyable(label: 'Config', id: 'http', value: http),
+            ] else ...[
+              Text('Claude Code: run this in a terminal.', style: label),
+              SizedBox(height: t.sp * 0.5),
+              _Copyable(
+                label: 'Command',
+                id: 'command',
+                value: target.claudeCommand(secret),
+              ),
+              SizedBox(height: t.sp),
+              Text(
+                'Claude Desktop, Cursor and other apps: add this to the MCP '
+                'config.',
+                style: label,
+              ),
+              SizedBox(height: t.sp * 0.5),
+              _Copyable(
+                label: 'Config',
+                id: 'config',
+                value: target.stdioConfig(secret),
+              ),
+              const SettingsNote(
+                'Both run storm-runtime, which the Storm installer puts on '
+                'that computer (choose MCP only). It reaches this server '
+                'directly at home and through its relays away, and checks it '
+                'is this server before sending the key. If an app can’t find '
+                'storm-runtime, use its full path.',
+                small: true,
+              ),
+              SizedBox(height: t.sp),
+              _Disclosure(
+                key: const Key('other-clients'),
+                title: 'Other clients (HTTP, LAN only)',
+                child: _Copyable(label: 'HTTP config', id: 'http', value: http),
+              ),
+            ],
           ],
         ),
       ),
@@ -290,10 +321,62 @@ class RevealMcpKeyDialog extends ConsumerWidget {
   }
 }
 
+class _Disclosure extends StatefulWidget {
+  const _Disclosure({super.key, required this.title, required this.child});
+
+  final String title;
+  final Widget child;
+
+  @override
+  State<_Disclosure> createState() => _DisclosureState();
+}
+
+class _DisclosureState extends State<_Disclosure> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          onTap: () => setState(() => _open = !_open),
+          borderRadius: BorderRadius.circular(t.rControl),
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+            child: Row(
+              spacing: t.sp * 0.5,
+              children: [
+                Twisty(open: _open),
+                Flexible(
+                  child: Text(
+                    widget.title,
+                    style: TextStyle(fontSize: t.labelSize, color: t.text3),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_open)
+          Padding(
+            padding: EdgeInsets.only(top: t.sp * 0.5),
+            child: widget.child,
+          ),
+      ],
+    );
+  }
+}
+
 class _Copyable extends StatelessWidget {
-  const _Copyable({required this.label, required this.value});
+  const _Copyable({required this.label, required this.id, required this.value});
 
   final String label;
+
+  /// Names the copy button's key, `copy-<id>`.
+  final String id;
   final String value;
 
   @override
@@ -321,7 +404,7 @@ class _Copyable extends StatelessWidget {
         Align(
           alignment: Alignment.centerRight,
           child: TextButton.icon(
-            key: Key('copy-${label.toLowerCase()}'),
+            key: Key('copy-$id'),
             // No `await` before the copy: the web's `execCommand` fallback
             // only works inside the click that triggered it.
             onPressed: () => copyToClipboard(value).then((copied) {

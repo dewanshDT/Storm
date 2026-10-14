@@ -8,6 +8,7 @@
 # check a secret arrived on stdin and never in argv.
 #
 # Knobs (env): FAKE_UNAME_S/M, FAKE_SERVER_VERSION, FAKE_RUNTIME_VERSION,
+# FAKE_NO_MCP_CONNECT,
 # FAKE_PORT, FAKE_HEALTH_DOWN, FAKE_LATEST, FAKE_ASSETS, FAKE_DIR,
 # STORM_TEST_SYSROOT.
 
@@ -162,6 +163,10 @@ case "$name" in
         echo "enrolled with http://127.0.0.1:8484 as host fake"
         ;;
       check) [ -f "$(rt_state)/host.json" ] && echo "online" ;;
+      mcp-connect)
+        [ -z "${FAKE_NO_MCP_CONNECT:-}" ] || exit 2
+        echo "Usage: storm-runtime mcp-connect --server <ID> --pk <KEY> --addr <URL>"
+        ;;
       uninstall) rm -f "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime" ;;
     esac
     ;;
