@@ -208,38 +208,44 @@ registration.
   `STORM_RELAY_MAX_CLIENT_BUFFER_BYTES=4194304` (SG-73), with the same values
   in the suite's `RELAY_ENV_OVERRIDES`.
 
-**Planned role suites (slice 116l).** The suite judges relays only. Revision
-115 adds two more roles, each held to a suite that plays the relay, by
-address, with no dependency on the code it judges:
+**Role suites (slice 116l).**
 
-- **Origin suite.** It runs a fake relay, points a real `storm-server` at it,
-  and checks: the server `PING`s every advertised interval (§4.2); it
-  reconnects with jitter and does not reset its backoff for a trunk under 60 s;
-  it answers every `PING` and sends `STREAM_ACK` ahead of 256 queued body
-  frames (§5.1, §5.2); it never sends `ERROR` (§5.1); a malformed or second
-  head ends that stream only, with 400 or `CLOSE{aborted}` (§5.2); it forgets
-  closed streams and aborts one whose head never comes within 30 s (§5.4); it
-  ends a failed body with `CLOSE{aborted: true}`; it treats an end-of-body
-  frame as end of input; it advertises only registered relays and signs them
-  (`relays_sig`, §4.3); it refuses a public-host `ws://` relay; it honours
-  `Range` on attachments (§5.5); and `/v1/stream` sends a comment at least
-  every 15 s (§5.3).
-- **Client suite.** It runs a fake relay and a fake origin behind it, drives
-  the Dart client and the Rust client / `mcp-connect` through their public
-  APIs, and checks §8: one `HELLO` per relay per race, trunk reuse, single
-  flight; the public round starting only after round 1 resolves; proof per
-  candidate and `identity_failed` for any non-signature answer; what may and
-  may not reset a connection; requests waiting for proof and never resent
-  after a sent head; status derived per race; heartbeats measured from write
-  time; a late `STREAM_READY` answered with `CLOSE`; at most 19 pending opens;
-  backoff with jitter and no reset for a transport lost within 60 s; a race
-  never cancelled by a reconnect timer, and at most one timer pending;
-  `HELLO.pubkey` and `?pubkey=` on every relay dial; and no public-host `ws://`
-  relay ever dialled. It runs once on a clean link and once on the emulated
-  link of 500 ms ± 300 ms per frame.
+- **Origin suite: `relay-conformance --role=origin`.** It plays the relay for
+  a real `storm-server` at `STORM_BASE` (owner session in `STORM_SESSION`,
+  the whole `Bearer …` value): it points the server at itself through
+  `PUT /v1/config/relays`, completes §4.1's handshake and verifies the
+  relay-auth signature, then checks that the server `PING`s at the advertised
+  interval and answers a relay `PING` (§4.2); serves a relayed request whole
+  and forgets the stream so its id opens again (§5.2, §5.4); ends every
+  `framing.malformed_request_heads` vector with `CLOSE` on that stream only,
+  never `ERROR`, and the trunk carries on; aborts a stream sent a second head;
+  advertises this relay and signs the set (`relays_sig`, §4.3); resumes an
+  attachment from `Range` (§5.5); keeps doubling its backoff when trunks die
+  young (§4.2, no hot loops); and refuses a public-host `ws://` relay (§4.3).
+  `make test-live` runs it against the live server. The 30 s head-wait is
+  checked by storm-server's own fake-relay test, not here.
+- **Client suite: the in-repo fake relays.** The Dart client's
+  `test/fake_relay.dart` suites and storm-runtime's `tests/srp_trunk.rs` and
+  `tests/mcp_race.rs` each play the relay against the real client, and every
+  implementation reads `docs/srp-vectors.json`'s revision 115 keys (`framing`,
+  `hello_pubkey`, `relay_set_message`, `plaintext_relay_hosts`). A separate
+  black-box client binary would drive the same code through a narrower door
+  for no new coverage, so §8 stays with those suites.
 
-Both role suites also read `docs/srp-vectors.json`'s revision 115 keys
-(`framing`, `hello_pubkey`, `relay_set_message`, `plaintext_relay_hosts`).
+**Landed in 116l, black-box against both relays** (`checks/rev115.rs`):
+`a_hello_for_another_server_id_is_a_protocol_error` (and the close after a
+trunk-scoped `ERROR`), `frames_before_ready_never_reach_the_origin` (which
+found storm-relay routing an `OPEN_STREAM` sent during a held `HELLO`),
+`a_non_boolean_aborted_is_a_protocol_error`,
+`attempt_ids_up_to_64_characters_are_echoed`,
+`server_trunk_death_ends_every_client_trunk`,
+`a_non_pinging_origin_is_dropped`, `a_stream_closed_after_ready_is_released`
+and `every_stream_the_relay_ends_is_closed_at_the_origin`. The full-queue
+checks (a `PING` and every stream-ending `ERROR` delivered past a backlog, one
+client's upload not holding another's open, a shared bound never ending a
+keeping-up peer) stay in each relay's own tests, where the queue can be seen.
+`RELAY_ENV_OVERRIDES` (`KEY=VALUE`, comma or space separated) overrides
+`relay.env` for a run against a deployed relay (SG-73).
 
 ## Not black-box: storm-relay only
 
@@ -260,11 +266,8 @@ the relay's internals or a restart:
   clients are told), the rate limiter's pruning, the byte budget's refund
   (`a_client_that_keeps_reading_receives_many_times_the_budget`), the
   writer's discard lane.
-- **storm-relay choices the spec does not make.** A `HELLO` whose `server_id`
-  disagrees with the path, a malformed `HTTP_REQUEST_HEAD`, a non-boolean
-  `aborted`, `CLOSE` to the origin when a client trunk dies or a stream times
-  out, a trunk-level `trunk_lost` to a client holding no stream, and closing
-  the superseded socket after the drain.
+- **Closing the superseded socket after the drain** (the rest of this list
+  became protocol and moved to `checks/rev115.rs` in 116l).
 - **TLS** (`tests/tls.rs`, decision 71): certificate load and reload, the
   handshake deadline, `relay_peer_ip` over TLS. Deployment, not protocol.
 - **Vectors** (`tests/vectors.rs`): the signed bytes as pure functions.

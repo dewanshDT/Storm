@@ -208,3 +208,91 @@ fn every_public_key_parses_as_recorded() {
         );
     }
 }
+
+// ---- framing (SRP §3, §5, §6; decision 116l) -------------------------------
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn payload(case: &Value) -> Vec<u8> {
+    match case["payload_utf8"].as_str() {
+        Some(text) => text.as_bytes().to_vec(),
+        None => hex(s(case, "payload_hex")),
+    }
+}
+
+fn control(name: &str) -> Value {
+    vectors()["framing"]["control_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no vector {name}"))
+        .clone()
+}
+
+#[test]
+fn body_frames_match_the_framing_vectors() {
+    let doc = vectors();
+    let f = &doc["framing"];
+    for case in f["body_frames"].as_array().unwrap() {
+        let kind = case["type"].as_u64().unwrap() as u8;
+        let id = case["stream_id"].as_u64().unwrap() as u32;
+        let bytes = hex(s(case, "frame_hex"));
+        if case["sender_may_send"] != false {
+            assert_eq!(
+                codec::encode_body_frame(kind, id, &payload(case)),
+                bytes,
+                "{case}"
+            );
+        }
+        let (k, i, p) = codec::decode_body_frame(&bytes).expect("a vector frame decodes");
+        assert_eq!((k, i, p.to_vec()), (kind, id, payload(case)), "{case}");
+    }
+    for case in f["too_short_frames"].as_array().unwrap() {
+        assert!(
+            codec::decode_body_frame(&hex(s(case, "frame_hex"))).is_none(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn the_control_frames_this_client_sends_match_the_vectors() {
+    let json = |s: String| serde_json::from_str::<Value>(&s).unwrap();
+    // The Worker answers exactly this PING without waking (SG-38).
+    assert_eq!(codec::ping(), s(&control("canonical_ping"), "exact_text"));
+    assert_eq!(codec::pong(), s(&control("canonical_pong"), "exact_text"));
+    let hello = control("hello_with_pubkey")["json"].clone();
+    assert_eq!(
+        json(codec::hello(
+            hello["server_id"].as_str().unwrap(),
+            hello["pubkey"].as_str().unwrap()
+        )),
+        hello
+    );
+    assert_eq!(
+        json(codec::close_stream(7)),
+        control("close_stream")["json"]
+    );
+    assert_eq!(json(codec::close_trunk()), control("close_trunk")["json"]);
+}
+
+#[test]
+fn the_attempt_ids_this_client_mints_are_valid_ones() {
+    // §5.1: a client sends 1–64 ASCII characters. The runtime mints `a<n>`.
+    for case in vectors()["framing"]["attempt_id"].as_array().unwrap() {
+        let valid = case["attempt_id"]
+            .as_str()
+            .is_some_and(|a| (1..=64).contains(&a.len()) && a.is_ascii());
+        assert_eq!(valid, case["valid"] == true, "{case}");
+    }
+    for n in [0u64, 1, u64::MAX] {
+        let minted = format!("a{n}");
+        assert!((1..=64).contains(&minted.len()) && minted.is_ascii());
+    }
+}

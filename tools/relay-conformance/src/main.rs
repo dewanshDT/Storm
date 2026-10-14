@@ -8,6 +8,7 @@
 mod checks;
 mod fixtures;
 mod harness;
+mod origin;
 mod wire;
 
 use std::collections::BTreeMap;
@@ -55,6 +56,14 @@ fn run() -> Result<bool> {
         let dir = args.get(1).map(PathBuf::from).unwrap_or_else(fixtures_dir);
         fixtures::write(&dir)?;
         return Ok(true);
+    }
+    // The origin role suite (decision 116l): this tool plays the relay for a
+    // real storm-server at STORM_BASE, authenticated as STORM_SESSION.
+    if args.iter().any(|a| a == "--role=origin") {
+        let base = env("STORM_BASE").context("--role=origin needs STORM_BASE")?;
+        let session = env("STORM_SESSION").context("--role=origin needs STORM_SESSION")?;
+        let runtime = tokio::runtime::Runtime::new()?;
+        return runtime.block_on(origin::run(base, session));
     }
     let list = args.iter().any(|a| a == "--list");
     // `--open-only` keeps the checks that need `RELAY_OPEN_URL`, so a runner

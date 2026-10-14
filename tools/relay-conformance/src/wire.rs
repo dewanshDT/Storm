@@ -130,7 +130,7 @@ pub async fn connect(url: &str, label: &str, source: Option<IpAddr>) -> Result<C
 }
 
 impl Conn {
-    fn spawn<S>(socket: tokio_tungstenite::WebSocketStream<S>, label: &str) -> Self
+    pub(crate) fn spawn<S>(socket: tokio_tungstenite::WebSocketStream<S>, label: &str) -> Self
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
@@ -246,6 +246,14 @@ impl Conn {
                 }
             }
         }));
+    }
+
+    /// Stops its own heartbeat but keeps answering the relay's `PING`s: an
+    /// origin that only ever replies.
+    pub fn stop_heartbeat(&mut self) {
+        if let Some(pinger) = self.pinger.take() {
+            pinger.abort();
+        }
     }
 
     /// Stops sending anything of its own accord, heartbeats and their answers

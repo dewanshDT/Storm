@@ -164,17 +164,21 @@ async fn hello(
 
     let server_id = hello.server_id.as_str();
     let found = match (relay.config.mode(), key) {
-        (_, Some(key)) => await_trunk(relay, || relay.registrations.get(server_id, &key)).await,
+        (_, Some(key)) => {
+            await_trunk(rx, tx, relay, || relay.registrations.get(server_id, &key)).await?
+        }
         // Storm's open relays refuse every keyless HELLO at once (§5, the 114f
         // addendum): without a key there is nothing to address.
         (Mode::Open, None) => None,
         // Before 115: the one registration, whatever its key.
         (_, None) => {
-            await_trunk(relay, || match relay.registrations.only(server_id) {
-                Only::One(registration) => Some(registration),
-                Only::None | Only::Several => None,
+            await_trunk(rx, tx, relay, || {
+                match relay.registrations.only(server_id) {
+                    Only::One(registration) => Some(registration),
+                    Only::None | Only::Several => None,
+                }
             })
-            .await
+            .await?
         }
     };
     let Some(registration) = found else {
@@ -228,21 +232,38 @@ fn hello_key(frame: &Frame, query_key: Option<&str>) -> Result<Option<KeyBytes>,
 /// registration, which means registration would have to know that client trunks
 /// exist — and the wait is bounded and rare enough that the coupling costs more
 /// than the polling does.
+///
+/// The socket is read throughout (§5 rule 3): a client may only `PING` before
+/// `READY`, and a stream frame sent during the hold would otherwise be read
+/// after `READY` and routed as if it had been sent after it.
 async fn await_trunk(
+    rx: &mut Rx,
+    tx: &Tx,
     relay: &Relay,
     find: impl Fn() -> Option<Registration>,
-) -> Option<Registration> {
+) -> Result<Option<Registration>, Fault> {
     const POLL: std::time::Duration = std::time::Duration::from_millis(20);
     let deadline = tokio::time::Instant::now() + relay.config.hello_wait;
     loop {
         if let Some(registration) = find() {
-            return Some(registration);
+            return Ok(Some(registration));
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return None;
+            return Ok(None);
         }
-        tokio::time::sleep(POLL.min(deadline - now)).await;
+        // `recv` is cancel-safe, so a poll that wins loses no frame.
+        tokio::select! {
+            () = tokio::time::sleep(POLL.min(deadline - now)) => {}
+            frame = trunk::recv(rx) => match frame? {
+                Incoming::Control(frame) if frame.ty() == "PING" => tx.send_control(proto::pong()),
+                Incoming::Control(frame) if frame.ty() == "PONG" => {}
+                _ => {
+                    tracing::debug!("refusing a stream frame sent before READY");
+                    return Err(ErrorCode::ProtocolError.into());
+                }
+            },
+        }
     }
 }
 

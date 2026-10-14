@@ -13,6 +13,16 @@ import {
   validateServerId,
   verifyRelayAuth,
 } from "../../src/auth";
+import {
+  closeStream,
+  error,
+  errorOnAttempt,
+  errorOnStream,
+  isRequestHead,
+  parseBodyHeader,
+  PING,
+  PONG,
+} from "../../src/proto";
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -95,5 +105,49 @@ describe("docs/srp-vectors.json", () => {
     const url = section.connect_url;
     expect(b64urlEncode(decodeKey(url.pubkey_b64)!)).toBe(url.pubkey_b64);
     expect(`${url.relay_base}/connect/${url.server_id}?pubkey=${url.pubkey_b64}`).toBe(url.url);
+  });
+});
+
+// SRP §3, §5, §6 (decision 116l): the frames this Worker sends and parses.
+describe("docs/srp-vectors.json framing", () => {
+  const framing = vectors.framing as unknown as {
+    body_frames: { name: string; type: number; stream_id: number; frame_hex: string }[];
+    too_short_frames: { frame_hex: string }[];
+    control_messages: { name: string; exact_text?: string; json?: Record<string, unknown> }[];
+    malformed_request_heads: { cases: { name: string; json: Record<string, unknown> }[] };
+  };
+  const bytes = (hex: string): ArrayBuffer => {
+    const out = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return out.buffer;
+  };
+  const control = (name: string) => framing.control_messages.find((c) => c.name === name)!;
+
+  it("parses every body frame header as recorded", () => {
+    for (const c of framing.body_frames) {
+      expect(parseBodyHeader(bytes(c.frame_hex)), c.name).toEqual({ kind: c.type, streamId: c.stream_id });
+    }
+    for (const c of framing.too_short_frames) {
+      expect(() => parseBodyHeader(bytes(c.frame_hex))).toThrow();
+    }
+  });
+
+  it("sends the canonical PING and PONG it auto-answers (SG-38)", () => {
+    expect(PING).toBe(control("canonical_ping").exact_text);
+    expect(PONG).toBe(control("canonical_pong").exact_text);
+  });
+
+  it("sends the control frames the vectors record", () => {
+    expect(JSON.parse(closeStream(7))).toEqual(control("close_stream").json);
+    expect(JSON.parse(error("rate_limited"))).toEqual(control("error_trunk_scoped").json);
+    expect(JSON.parse(errorOnAttempt("rate_limited", "a1"))).toEqual(control("error_attempt_scoped").json);
+    expect(JSON.parse(errorOnStream("client_backlogged", 7))).toEqual(control("error_stream_scoped").json);
+  });
+
+  it("refuses every malformed request head", () => {
+    for (const c of framing.malformed_request_heads.cases) {
+      expect(isRequestHead(c.json), c.name).toBe(false);
+    }
+    expect(isRequestHead(control("request_head").json!)).toBe(true);
   });
 });

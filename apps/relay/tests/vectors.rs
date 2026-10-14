@@ -241,3 +241,90 @@ fn every_hello_pubkey_spelling_decodes_exactly_as_recorded() {
         s(url, "url")
     );
 }
+
+// ---- framing (SRP §3, §5, §6; decision 116l) -------------------------------
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn every_body_frame_header_parses_as_recorded() {
+    let f = &vectors()["framing"];
+    for case in f["body_frames"].as_array().unwrap() {
+        let bytes = hex(s(case, "frame_hex"));
+        assert_eq!(
+            storm_relay::proto::parse_body_header(&bytes).unwrap(),
+            (
+                case["type"].as_u64().unwrap() as u8,
+                case["stream_id"].as_u64().unwrap() as u32
+            ),
+            "{case}"
+        );
+    }
+    for case in f["too_short_frames"].as_array().unwrap() {
+        assert!(
+            storm_relay::proto::parse_body_header(&hex(s(case, "frame_hex"))).is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn the_control_frames_this_relay_sends_match_the_vectors() {
+    use storm_relay::proto::{self, ErrorCode};
+    let f = &vectors()["framing"];
+    let named = |name: &str| -> Value {
+        f["control_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no vector {name}"))
+            .clone()
+    };
+    let json = |s: String| serde_json::from_str::<Value>(&s).unwrap();
+    // The Worker answers exactly this text without waking (SG-38).
+    assert_eq!(proto::pong(), s(&named("canonical_pong"), "exact_text"));
+    assert_eq!(json(proto::close_stream(7)), named("close_stream")["json"]);
+    assert_eq!(
+        json(proto::error(ErrorCode::RateLimited)),
+        named("error_trunk_scoped")["json"]
+    );
+    assert_eq!(
+        json(proto::error_on_attempt(
+            ErrorCode::RateLimited,
+            Value::String("a1".into())
+        )),
+        named("error_attempt_scoped")["json"]
+    );
+    assert_eq!(
+        json(proto::error_on_stream(ErrorCode::ClientBacklogged, 7)),
+        named("error_stream_scoped")["json"]
+    );
+}
+
+#[test]
+fn every_malformed_head_vector_is_refused() {
+    let f = &vectors()["framing"];
+    for case in f["malformed_request_heads"]["cases"].as_array().unwrap() {
+        let body = case["json"].as_object().unwrap();
+        assert!(
+            !storm_relay::proto::is_request_head(body),
+            "{} would be forwarded",
+            case["name"]
+        );
+    }
+    let good = f["control_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "request_head")
+        .unwrap();
+    assert!(storm_relay::proto::is_request_head(
+        good["json"].as_object().unwrap()
+    ));
+}

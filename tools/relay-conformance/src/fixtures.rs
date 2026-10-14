@@ -184,9 +184,21 @@ pub struct Knobs {
 }
 
 impl Knobs {
+    /// `relay.env`, then `RELAY_ENV_OVERRIDES` (`KEY=VALUE` pairs separated by
+    /// commas or whitespace) on top: a run against a deployed relay names that
+    /// relay's real settings, such as the edge's longer challenge TTL (SG-73),
+    /// without a second fixture to keep in step.
     pub fn load(path: &Path) -> Result<Self> {
-        let text =
+        let mut text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        if let Ok(overrides) = std::env::var("RELAY_ENV_OVERRIDES") {
+            for pair in overrides.split(|c: char| c == ',' || c.is_whitespace()) {
+                if !pair.is_empty() {
+                    text.push('\n');
+                    text.push_str(pair);
+                }
+            }
+        }
         Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
