@@ -33,6 +33,29 @@ const OUTBOUND_CAPACITY: usize = 64;
 
 const WRITER_DRAIN: Duration = Duration::from_secs(1);
 
+/// Unsent bytes the kernel may hold for a trunk socket (§5.2 "Control
+/// before bulk", decision 116b). The priority lane only reorders what has not
+/// reached the socket; on a slow uplink an autotuned send buffer holds
+/// seconds of body, and a `STREAM_ACK` or `PING` written after it waits that
+/// long. This bounds only what is unsent, not what is in flight, so it costs
+/// no throughput. Linux and Android only; elsewhere the kernel default stands.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const UNSENT_LOWAT: u32 = 128 * 1024;
+
+fn bound_unsent(socket: &MaybeTlsStream<TcpStream>) {
+    let tcp = match socket {
+        MaybeTlsStream::Plain(tcp) => tcp,
+        MaybeTlsStream::Rustls(tls) => tls.get_ref().0,
+        _ => return,
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_notsent_lowat(UNSENT_LOWAT) {
+        tracing::debug!(error = %e, "setting TCP_NOTSENT_LOWAT");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = tcp;
+}
+
 /// Timings, injectable so tests need not wait out real heartbeats.
 #[derive(Debug, Clone)]
 pub struct TrunkConfig {
@@ -170,6 +193,7 @@ impl SrpTrunk {
             Ok(Err(e)) => return Err(SrpError::RelayDown(e.to_string())),
             Ok(Ok((ws, _))) => ws,
         };
+        bound_unsent(ws.get_ref());
         let (mut sink, mut stream) = ws.split();
         let client_trunk_id =
             handshake(&mut sink, &mut stream, server_id, server_key, deadline).await?;
@@ -181,7 +205,7 @@ impl SrpTrunk {
             state: Mutex::new(State::default()),
             lost,
             open_order: tokio::sync::Mutex::new(()),
-            last_heard: Mutex::new(Instant::now()),
+            control: Control::default(),
         });
         tokio::spawn(write_loop(core.clone(), sink, out_rx));
         tokio::spawn(read_loop(core.clone(), stream));
@@ -236,8 +260,8 @@ impl SrpTrunk {
                 core: core.clone(),
                 attempt_id: attempt_id.clone(),
             };
-            core.send(Message::text(codec::open_stream(&attempt_id)))
-                .await?;
+            core.control
+                .push(Message::text(codec::open_stream(&attempt_id)));
             guard
         };
 
@@ -250,13 +274,14 @@ impl SrpTrunk {
                 .cloned()
                 .collect(),
         );
-        core.send(Message::text(codec::request_head(
+        // Ahead of any queued body, as every JSON message is; its own body
+        // is queued after it.
+        core.control.push(Message::text(codec::request_head(
             stream_id,
             method,
             path_and_query,
             &headers,
-        )))
-        .await?;
+        )));
 
         let mut offset = 0;
         while offset < body.len() && core.stream_live(stream_id) {
@@ -395,7 +420,80 @@ struct Core {
     state: Mutex<State>,
     lost: watch::Sender<Option<SrpError>>,
     open_order: tokio::sync::Mutex<()>,
-    last_heard: Mutex<Instant>,
+    control: Control,
+}
+
+/// Frames that go ahead of every queued request-body frame and are never
+/// dropped for want of room (SRP §5.2 "Control before bulk", decision 116b):
+/// every JSON message, `PING`, `PONG` and `CLOSE` among them. Outside the bounded queue because
+/// that queue is the upload: a `PING` behind 16 MiB of it never reaches a
+/// relay that has nothing else to answer.
+#[derive(Default)]
+struct Control {
+    state: Mutex<ControlState>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct ControlState {
+    /// Each frame, and whether it is the heartbeat `PING`.
+    queue: VecDeque<(Message, bool)>,
+    ping_unwritten: bool,
+    last_heard: Option<Instant>,
+    /// When the first `PING` since the relay last spoke reached the socket.
+    ping_written: Option<Instant>,
+}
+
+impl Control {
+    fn lock(&self) -> MutexGuard<'_, ControlState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn push(&self, message: Message) {
+        self.lock().queue.push_back((message, false));
+        self.notify.notify_one();
+    }
+
+    /// At most one `PING` waits at a time.
+    fn ping(&self) {
+        let mut state = self.lock();
+        if state.ping_unwritten {
+            return;
+        }
+        state.ping_unwritten = true;
+        state.queue.push_back((Message::text(codec::ping()), true));
+        drop(state);
+        self.notify.notify_one();
+    }
+
+    fn pop(&self) -> Option<(Message, bool)> {
+        self.lock().queue.pop_front()
+    }
+
+    fn ping_written(&self) {
+        let mut state = self.lock();
+        state.ping_unwritten = false;
+        state.ping_written.get_or_insert_with(Instant::now);
+    }
+
+    fn heard(&self) {
+        let mut state = self.lock();
+        state.last_heard = Some(Instant::now());
+        state.ping_written = None;
+    }
+
+    /// §5.2: never silent while our own `PING` has not reached the socket,
+    /// and silence counts from when it did. A relay cannot answer a `PING`
+    /// that is still in this process.
+    fn is_silent(&self, limit: Duration, heartbeat: Duration) -> bool {
+        let state = self.lock();
+        let (Some(heard), Some(written)) = (state.last_heard, state.ping_written) else {
+            return false;
+        };
+        !state.ping_unwritten
+            && heard.elapsed() >= limit
+            && written.elapsed() >= limit.saturating_sub(heartbeat)
+    }
 }
 
 #[derive(Default)]
@@ -449,17 +547,6 @@ impl Core {
             .map_err(|_| SrpError::TrunkLost)
     }
 
-    fn heard(&self) {
-        *self.last_heard.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-    }
-
-    fn silent_for(&self) -> Duration {
-        self.last_heard
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .elapsed()
-    }
-
     fn stream_live(&self, stream_id: u32) -> bool {
         self.lock().streams.contains_key(&stream_id)
     }
@@ -496,7 +583,7 @@ impl Core {
 
     fn shut_down(&self) {
         if !self.lock().dead {
-            let _ = self.out.try_send(Message::text(codec::close_trunk()));
+            self.control.push(Message::text(codec::close_trunk()));
         }
         self.fail(SrpError::Closed);
     }
@@ -527,9 +614,8 @@ impl Core {
         };
         state.streams.remove(&stream_id);
         drop(state);
-        let _ = self
-            .out
-            .try_send(Message::text(codec::close_stream(stream_id)));
+        self.control
+            .push(Message::text(codec::close_stream(stream_id)));
     }
 
     async fn on_control(&self, text: &str) -> Result<(), SrpError> {
@@ -566,7 +652,10 @@ impl Core {
                 self.end_stream(stream_id, aborted.then_some(SrpError::StreamAborted));
                 Ok(())
             }
-            Inbound::Ping => self.send(Message::text(codec::pong())).await,
+            Inbound::Ping => {
+                self.control.push(Message::text(codec::pong()));
+                Ok(())
+            }
             Inbound::Error(e) => {
                 let error = SrpError::from_relay_code(&e.code);
                 match e.stream_id {
@@ -641,8 +730,8 @@ impl Core {
         };
         if !delivered {
             self.lock().streams.remove(&stream_id);
-            self.send(Message::text(codec::close_stream(stream_id)))
-                .await?;
+            self.control
+                .push(Message::text(codec::close_stream(stream_id)));
         }
         Ok(())
     }
@@ -668,9 +757,8 @@ impl Core {
             if let Some(slot) = slot {
                 slot.end(Some(SrpError::ProtocolError));
             }
-            let _ = self
-                .out
-                .try_send(Message::text(codec::close_stream(stream_id)));
+            self.control
+                .push(Message::text(codec::close_stream(stream_id)));
             return Ok(());
         }
         let _ = slot.body.send(Ok(frame.slice(codec::BINARY_HEADER_LEN..)));
@@ -712,7 +800,7 @@ async fn read_loop(core: Arc<Core>, mut stream: SplitStream<Ws>) {
             }
             Some(Ok(message)) => message,
         };
-        core.heard();
+        core.control.heard();
         let outcome = match message {
             Message::Text(text) => core.on_control(text.as_str()).await,
             Message::Binary(frame) => core.on_body(frame),
@@ -732,10 +820,20 @@ async fn write_loop(
 ) {
     let mut lost = core.lost.subscribe();
     loop {
+        while let Some((message, is_ping)) = core.control.pop() {
+            if let Err(e) = sink.send(message).await {
+                core.fail(SrpError::RelayDown(e.to_string()));
+                return;
+            }
+            if is_ping {
+                core.control.ping_written();
+            }
+        }
         let message = tokio::select! {
             biased;
-            message = out.recv() => message,
             _ = lost.wait_for(Option::is_some) => None,
+            _ = core.control.notify.notified() => continue,
+            message = out.recv() => message,
         };
         let Some(message) = message else { break };
         if let Err(e) = sink.send(message).await {
@@ -745,7 +843,7 @@ async fn write_loop(
     }
     // A `CLOSE {}` queued by `close()` still goes out.
     let _ = tokio::time::timeout(WRITER_DRAIN, async {
-        while let Ok(message) = out.try_recv() {
+        while let Some((message, _)) = core.control.pop() {
             if sink.send(message).await.is_err() {
                 return;
             }
@@ -757,18 +855,27 @@ async fn write_loop(
 
 async fn heartbeat_loop(core: Arc<Core>, config: TrunkConfig) {
     let mut lost = core.lost.subscribe();
-    let mut tick = tokio::time::interval_at(Instant::now() + config.heartbeat, config.heartbeat);
+    core.control.heard();
+    let check = config.heartbeat.min(Duration::from_secs(1));
+    let mut tick = tokio::time::interval_at(Instant::now() + check, check);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut next_ping = Instant::now() + config.heartbeat;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = lost.wait_for(Option::is_some) => return,
         }
-        if core.silent_for() >= config.silence_limit {
+        if core
+            .control
+            .is_silent(config.silence_limit, config.heartbeat)
+        {
             core.fail(SrpError::RelaySilent);
             return;
         }
-        let _ = core.out.try_send(Message::text(codec::ping()));
+        if Instant::now() >= next_ping {
+            core.control.ping();
+            next_ping = Instant::now() + config.heartbeat;
+        }
     }
 }
 

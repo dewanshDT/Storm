@@ -72,7 +72,7 @@ class SrpHttpClient extends http.BaseClient {
       final body = request.finalize();
       await for (final chunk in body) {
         if (chunk.isEmpty) continue;
-        trunk.sendBody(stream, chunk);
+        await trunk.sendBody(stream, chunk);
       }
       trunk.endBody(stream);
 

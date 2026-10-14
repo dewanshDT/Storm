@@ -218,9 +218,18 @@ pub async fn serve(listener: tokio::net::TcpListener, relay: Arc<Relay>) -> anyh
 
 /// Every relayed exchange is several small frames in a row, and with Nagle on
 /// each waits out the peer's delayed ACK: about 40 ms a request (decision 91).
+///
+/// It also bounds what the kernel may hold unsent (decision 116b): the
+/// stream-end lane only reorders what has not reached the socket, and an
+/// autotuned send buffer toward a slow peer holds seconds of body. Only the
+/// unsent part is bounded, so throughput is unchanged. Linux and Android only.
 pub(crate) fn no_delay(socket: &mut tokio::net::TcpStream) {
     if let Err(e) = socket.set_nodelay(true) {
         tracing::debug!(error = %e, "setting TCP_NODELAY");
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(&*socket).set_tcp_notsent_lowat(128 * 1024) {
+        tracing::debug!(error = %e, "setting TCP_NOTSENT_LOWAT");
     }
 }
 

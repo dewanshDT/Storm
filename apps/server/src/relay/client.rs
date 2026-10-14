@@ -16,7 +16,7 @@
 //!    backoff; a connection that dies takes its own tasks with it and leaves
 //!    the listener untouched.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -75,6 +75,29 @@ const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(20);
 /// an Argon2 verify or any other real work — it is a handshake or it is a
 /// wedged peer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Unsent bytes the kernel may hold for a trunk socket (§5.2 "Control
+/// before bulk", decision 116b). The priority lane only reorders what has not
+/// reached the socket; on a slow uplink an autotuned send buffer holds
+/// seconds of body, and a `STREAM_ACK` or `PING` written after it waits that
+/// long. This bounds only what is unsent, not what is in flight, so it costs
+/// no throughput. Linux and Android only; elsewhere the kernel default stands.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const UNSENT_LOWAT: u32 = 128 * 1024;
+
+fn bound_unsent(socket: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>) {
+    let tcp = match socket {
+        tokio_tungstenite::MaybeTlsStream::Plain(tcp) => tcp,
+        tokio_tungstenite::MaybeTlsStream::Rustls(tls) => tls.get_ref().0,
+        _ => return,
+    };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(tcp).set_tcp_notsent_lowat(UNSENT_LOWAT) {
+        tracing::debug!(error = %e, "setting TCP_NOTSENT_LOWAT");
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = tcp;
+}
 
 /// How long a closing trunk waits for queued frames to reach the socket.
 const WRITER_DRAIN: Duration = Duration::from_secs(1);
@@ -203,7 +226,10 @@ async fn run_once(
     };
 
     let socket = match connected {
-        Ok((socket, _)) => socket,
+        Ok((socket, _)) => {
+            bound_unsent(socket.get_ref());
+            socket
+        }
         Err(e) => {
             // `wss://` without a TLS feature fails here with a message that
             // does not obviously name the cause, so it is called out.
@@ -363,37 +389,31 @@ async fn serve_trunk(
     heartbeat_secs: u64,
 ) {
     let (outbound, outbound_rx) = mpsc::channel::<Message>(OUTBOUND_CAPACITY);
-    let pongs = Arc::new(Pongs::default());
+    let control = Arc::new(Control::default());
 
     // The socket has exactly one writer. Every other task reaches it through
     // the bounded channel, which is what turns a slow relay into backpressure
     // instead of an unbounded buffer.
-    let writer = tokio::spawn(write_loop(sink, outbound_rx, pongs.clone()));
+    let writer = tokio::spawn(write_loop(sink, outbound_rx, control.clone()));
 
+    let period = Duration::from_secs(heartbeat_secs.max(1));
     let heartbeat = tokio::spawn({
-        let outbound = outbound.clone();
-        let period = Duration::from_secs(heartbeat_secs.max(1));
+        let control = control.clone();
         async move {
             let mut ticker = tokio::time::interval(period);
             ticker.tick().await; // fires immediately; skip it
             loop {
                 ticker.tick().await;
-                // `try_send`, never `send`: the heartbeat must not queue
-                // behind a backlog. If the outbound channel is full the trunk
-                // has bigger problems than a missed PING, and blocking here
-                // would hide them.
-                if outbound.try_send(Message::text(proto::ping())).is_err() {
-                    // Closed channel means the writer is gone.
-                    if outbound.is_closed() {
-                        return;
-                    }
-                }
+                control.ping();
             }
         }
     });
 
     let mut streams: HashMap<u32, StreamEntry> = HashMap::new();
     let silence_limit = liveness_deadline(heartbeat_secs);
+    let mut liveness_check = tokio::time::interval(period.min(Duration::from_secs(1)));
+    liveness_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    control.heard();
 
     let budget = BodyBudget::new(STREAM_BODY_BUDGET, TRUNK_BODY_BUDGET);
 
@@ -403,8 +423,8 @@ async fn serve_trunk(
             _ = shutdown.changed() => {
                 // Clean shutdown: tell the relay to free the `server_id` now
                 // rather than after a heartbeat timeout.
-                let _ = outbound.try_send(Message::text(proto::deregister()));
-                let _ = outbound.try_send(Message::text(proto::close_trunk()));
+                control.push(Message::text(proto::deregister()));
+                control.push(Message::text(proto::close_trunk()));
                 // Give the writer a moment to flush before the socket drops.
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 break;
@@ -413,33 +433,38 @@ async fn serve_trunk(
             // that is gone without the socket saying so: a network change, a
             // sleep, a NAT that dropped the mapping (decision 94). Waiting for
             // TCP to notice keeps the relay advertised for many minutes.
-            message = tokio::time::timeout(silence_limit, stream.next()) => match message {
-                Ok(Some(Ok(message))) => message,
-                Ok(Some(Err(e))) => {
-                    tracing::warn!(error = %e, "relay trunk read failed");
-                    break;
-                }
-                Ok(None) => {
-                    tracing::warn!("relay closed the trunk");
-                    break;
-                }
-                Err(_) => {
+            _ = liveness_check.tick() => {
+                if control.is_silent(silence_limit, period) {
                     tracing::warn!(
                         silent_secs = silence_limit.as_secs(),
                         "relay silent past the heartbeat deadline; dropping the trunk"
                     );
                     break;
                 }
+                continue;
+            }
+            message = stream.next() => match message {
+                Some(Ok(message)) => message,
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "relay trunk read failed");
+                    break;
+                }
+                None => {
+                    tracing::warn!("relay closed the trunk");
+                    break;
+                }
             },
         };
+        control.heard();
 
         match message {
             Message::Text(text) => {
-                if !handle_control(&text, &mut streams, &outbound, &pongs, tunnel, &budget).await {
+                if !handle_control(&text, &mut streams, &outbound, &control, tunnel, &budget).await
+                {
                     break;
                 }
             }
-            Message::Binary(bytes) => handle_body_frame(&bytes, &mut streams, &outbound),
+            Message::Binary(bytes) => handle_body_frame(&bytes, &mut streams, &control),
             Message::Close(_) => break,
             // tungstenite answers protocol-level pings itself.
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
@@ -469,41 +494,111 @@ fn liveness_deadline(heartbeat_secs: u64) -> Duration {
     Duration::from_secs(heartbeat_secs.max(1) * 3)
 }
 
-/// `PONG`s owed to the relay. SRP §4.2: every `PING` is answered. A relay
-/// may `PING` to learn how much this server has read, so a `PONG` dropped on
-/// a full outbound queue would read as a server that stopped reading.
+/// Frames that go ahead of every queued body frame and are never dropped for
+/// want of room (SRP §5.2 "Control before bulk", decision 116b): `PING`,
+/// `PONG`, `STREAM_ACK`, `CLOSE`, `DEREGISTER`.
+///
+/// Kept outside the bounded queue because the bounded queue is the backlog: a
+/// `STREAM_ACK` behind 64 MiB of download misses the relay's 5 s timeout, and
+/// a `PING` behind it lets the silence deadline fire on a relay that is fine.
+/// The end of a response is not here; its `CLOSE` stays behind its body.
 #[derive(Default)]
-struct Pongs {
-    owed: AtomicUsize,
+struct Control {
+    state: std::sync::Mutex<ControlState>,
     notify: tokio::sync::Notify,
 }
 
-impl Pongs {
-    fn owe(&self) {
-        self.owed.fetch_add(1, Ordering::SeqCst);
+#[derive(Default)]
+struct ControlState {
+    /// Each frame, and whether it is the heartbeat `PING`.
+    queue: VecDeque<(Message, bool)>,
+    ping_unwritten: bool,
+    last_heard: Option<tokio::time::Instant>,
+    /// When the first `PING` since the relay last spoke reached the socket.
+    ping_written: Option<tokio::time::Instant>,
+}
+
+impl Control {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ControlState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn push(&self, message: Message) {
+        self.lock().queue.push_back((message, false));
         self.notify.notify_one();
+    }
+
+    /// At most one `PING` waits at a time.
+    fn ping(&self) {
+        let mut state = self.lock();
+        if state.ping_unwritten {
+            return;
+        }
+        state.ping_unwritten = true;
+        state.queue.push_back((Message::text(proto::ping()), true));
+        drop(state);
+        self.notify.notify_one();
+    }
+
+    fn pop(&self) -> Option<(Message, bool)> {
+        self.lock().queue.pop_front()
+    }
+
+    fn ping_written(&self) {
+        let mut state = self.lock();
+        state.ping_unwritten = false;
+        state
+            .ping_written
+            .get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    fn heard(&self) {
+        let mut state = self.lock();
+        state.last_heard = Some(tokio::time::Instant::now());
+        state.ping_written = None;
+    }
+
+    /// §5.2: never silent while our own `PING` has not reached the socket,
+    /// and silence counts from when it did. A relay cannot answer a `PING`
+    /// that is still in this process.
+    fn is_silent(&self, limit: Duration, heartbeat: Duration) -> bool {
+        let state = self.lock();
+        let (Some(heard), Some(written)) = (state.last_heard, state.ping_written) else {
+            return false;
+        };
+        if state.ping_unwritten {
+            return false;
+        }
+        heard.elapsed() >= limit && written.elapsed() >= limit.saturating_sub(heartbeat)
     }
 }
 
-async fn write_loop(mut sink: Sink, mut outbound: mpsc::Receiver<Message>, pongs: Arc<Pongs>) {
+async fn write_loop(mut sink: Sink, mut outbound: mpsc::Receiver<Message>, control: Arc<Control>) {
     loop {
+        while let Some((message, is_ping)) = control.pop() {
+            if sink.send(message).await.is_err() {
+                return;
+            }
+            if is_ping {
+                control.ping_written();
+            }
+        }
         let message = tokio::select! {
             biased;
-            _ = pongs.notify.notified() => None,
+            _ = control.notify.notified() => continue,
             message = outbound.recv() => match message {
-                Some(message) => Some(message),
+                Some(message) => message,
                 None => break,
             },
         };
-        for _ in 0..pongs.owed.swap(0, Ordering::SeqCst) {
-            if sink.send(Message::text(proto::pong())).await.is_err() {
-                return;
-            }
+        if sink.send(message).await.is_err() {
+            return;
         }
-        if let Some(message) = message
-            && sink.send(message).await.is_err()
-        {
-            break;
+    }
+    // A clean shutdown queues DEREGISTER and the trunk's CLOSE last.
+    while let Some((message, _)) = control.pop() {
+        if sink.send(message).await.is_err() {
+            return;
         }
     }
     let _ = sink.close().await;
@@ -514,7 +609,7 @@ async fn handle_control(
     text: &str,
     streams: &mut HashMap<u32, StreamEntry>,
     outbound: &mpsc::Sender<Message>,
-    pongs: &Pongs,
+    control: &Control,
     tunnel: &Tunnel,
     budget: &BodyBudget,
 ) -> bool {
@@ -525,7 +620,7 @@ async fn handle_control(
         Ok(message) => message,
         Err(_) => {
             tracing::warn!("relay sent a frame this server cannot parse; closing the trunk");
-            let _ = outbound.try_send(Message::text(proto::close_trunk()));
+            control.push(Message::text(proto::close_trunk()));
             return false;
         }
     };
@@ -534,7 +629,7 @@ async fn handle_control(
         Inbound::StreamOpen { stream_id } => {
             if streams.contains_key(&stream_id) {
                 // §5.1: an id already open is never acknowledged twice.
-                refuse_stream(streams, outbound, stream_id);
+                refuse_stream(streams, control, stream_id);
                 return true;
             }
             streams.insert(
@@ -547,17 +642,17 @@ async fn handle_control(
             );
             // The ACK says only that this trunk accepted the id — not that a
             // request has been dispatched, and not that a response is coming.
-            let _ = outbound.try_send(Message::text(proto::stream_ack(stream_id)));
+            control.push(Message::text(proto::stream_ack(stream_id)));
         }
         Inbound::RequestHead(head) => {
             let stream_id = head.stream_id;
             match streams.get_mut(&stream_id) {
                 Some(entry) if !entry.head_seen => {
                     entry.head_seen = true;
-                    start_dispatch(entry, head, outbound.clone(), tunnel, budget);
+                    start_dispatch(entry, head, outbound.clone(), control, tunnel, budget);
                 }
                 // A second head, or one for a stream not open here.
-                _ => refuse_stream(streams, outbound, stream_id),
+                _ => refuse_stream(streams, control, stream_id),
             }
         }
         Inbound::BadHead { stream_id } => match streams.get(&stream_id) {
@@ -565,14 +660,14 @@ async fn handle_control(
                 // Nothing has been answered yet, so the honest answer is a
                 // complete one: 400, and the stream ends.
                 streams.remove(&stream_id);
-                let _ = outbound.try_send(Message::text(proto::response_head(
+                control.push(Message::text(proto::response_head(
                     stream_id,
                     400,
                     proto::WireHeaders::default(),
                 )));
-                let _ = outbound.try_send(Message::text(proto::close_stream(stream_id)));
+                control.push(Message::text(proto::close_stream(stream_id)));
             }
-            _ => refuse_stream(streams, outbound, stream_id),
+            _ => refuse_stream(streams, control, stream_id),
         },
         Inbound::Close {
             stream_id: Some(id),
@@ -580,7 +675,7 @@ async fn handle_control(
             close_stream(streams, id);
         }
         Inbound::Close { stream_id: None } => return false,
-        Inbound::Ping => pongs.owe(),
+        Inbound::Ping => control.push(Message::text(proto::pong())),
         Inbound::Pong => {}
         Inbound::Error(e) => match e.stream_id {
             Some(id) => {
@@ -600,14 +695,10 @@ async fn handle_control(
 
 /// Ends one stream as aborted (§5.1, §5.2): whatever it had started is
 /// abandoned, and the trunk's other streams carry on.
-fn refuse_stream(
-    streams: &mut HashMap<u32, StreamEntry>,
-    outbound: &mpsc::Sender<Message>,
-    stream_id: u32,
-) {
+fn refuse_stream(streams: &mut HashMap<u32, StreamEntry>, control: &Control, stream_id: u32) {
     tracing::debug!(stream_id, "refusing a stream");
     close_stream(streams, stream_id);
-    let _ = outbound.try_send(Message::text(proto::abort_stream(stream_id)));
+    control.push(Message::text(proto::abort_stream(stream_id)));
 }
 
 fn close_stream(streams: &mut HashMap<u32, StreamEntry>, stream_id: u32) {
@@ -635,6 +726,7 @@ fn start_dispatch(
     entry: &mut StreamEntry,
     head: RequestHead,
     outbound: mpsc::Sender<Message>,
+    control: &Control,
     tunnel: &Tunnel,
     budget: &BodyBudget,
 ) {
@@ -652,12 +744,12 @@ fn start_dispatch(
         Ok(request) => request,
         Err(bad) => {
             entry.body = None;
-            let _ = outbound.try_send(Message::text(proto::response_head(
+            control.push(Message::text(proto::response_head(
                 stream_id,
                 bad.status().as_u16(),
                 proto::WireHeaders::default(),
             )));
-            let _ = outbound.try_send(Message::text(proto::close_stream(stream_id)));
+            control.push(Message::text(proto::close_stream(stream_id)));
             return;
         }
     };
@@ -754,11 +846,7 @@ async fn serve_one(
         .await;
 }
 
-fn handle_body_frame(
-    bytes: &[u8],
-    streams: &mut HashMap<u32, StreamEntry>,
-    outbound: &mpsc::Sender<Message>,
-) {
+fn handle_body_frame(bytes: &[u8], streams: &mut HashMap<u32, StreamEntry>, control: &Control) {
     let Some((kind, stream_id, payload)) = proto::decode_body_frame(bytes) else {
         return;
     };
@@ -795,7 +883,7 @@ fn handle_body_frame(
                 "request body over its buffer budget; closing the stream"
             );
             close_stream(streams, stream_id);
-            let _ = outbound.try_send(Message::text(proto::close_stream(stream_id)));
+            control.push(Message::text(proto::close_stream(stream_id)));
         }
     }
 }
