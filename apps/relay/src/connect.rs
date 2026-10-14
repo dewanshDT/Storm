@@ -119,6 +119,9 @@ struct Session {
     /// supersession replaces the registration; this client stays on the trunk
     /// its streams are scoped to and learns about the change as `trunk_lost`.
     trunk: Arc<ServerTrunk>,
+    /// This client's own lane toward the origin (§5.5, decision 116d). Its
+    /// opens, heads and bodies wait only behind its own earlier frames.
+    to_origin: Tx,
 }
 
 async fn hello(
@@ -184,9 +187,11 @@ async fn hello(
         .attach_client(&client_trunk_id, tx.clone());
     tx.send_json(proto::ready(client_trunk_id.clone())).await?;
 
+    let to_origin = registration.trunk.tx().lane();
     Ok(Session {
         client_trunk_id,
         trunk: registration.trunk,
+        to_origin,
     })
 }
 
@@ -329,8 +334,7 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
     tx.send_json(proto::stream_ready(attempt_id, stream_id))
         .await?;
     session
-        .trunk
-        .tx()
+        .to_origin
         .send_json(proto::stream_open(stream_id))
         .await?;
 
@@ -420,13 +424,12 @@ async fn forward_request_head(
                 proto::error_on_stream(ErrorCode::StreamClosed, stream_id),
             );
             return session
-                .trunk
-                .tx()
+                .to_origin
                 .send_json(proto::close_stream(stream_id))
                 .await;
         }
     }
-    let server_tx = session.trunk.tx();
+    let server_tx = &session.to_origin;
 
     // `.ip()`, not the full socket address: the field is what the origin buckets
     // rate limits by, and an ephemeral source port would split one client into a
@@ -480,7 +483,7 @@ async fn route_client_ward(
         .trunk
         .client_owns(stream_id, &session.client_trunk_id)
     {
-        return Ok(Some(session.trunk.tx()));
+        return Ok(Some(session.to_origin.clone()));
     }
     tracing::debug!(
         client_trunk_id = %session.client_trunk_id,
