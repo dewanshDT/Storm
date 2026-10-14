@@ -1,13 +1,32 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
+import 'package:storm/api/auth_models.dart';
+import 'package:storm/api/pairing_route.dart';
 import 'package:storm/api/relay/srp_http_client.dart';
 import 'package:storm/api/relay/srp_trunk.dart';
 import 'package:storm/api/storm_api.dart';
+import 'package:storm/state/app_state.dart';
+import 'package:storm/ui/login_screen.dart';
+import 'package:storm/ui/theme.dart';
+
+class _FixedSettings extends SettingsNotifier {
+  _FixedSettings(this.value);
+  final Settings value;
+
+  @override
+  Future<Settings> build() async => value;
+
+  @override
+  Future<void> save(Settings next) async => state = AsyncData(next);
+}
 
 /// The Dart SRP client against a real `storm-relay` and a real storm-server.
 ///
@@ -28,6 +47,7 @@ void main() {
   late String vaultId;
   late String token;
   late String serverId;
+  late String relayUrl;
   late Uri relayAddress;
   late SrpTrunk trunk;
   late StormApi relayed;
@@ -82,6 +102,7 @@ void main() {
     if (relay == null) fail('The server never registered with the relay.');
 
     serverId = id!;
+    relayUrl = relay['url'] as String;
     relayAddress = Uri.parse(relay['public_address'] as String);
     trunk = SrpTrunk(url: relayAddress, serverId: serverId);
     relayed = StormApi(
@@ -230,6 +251,112 @@ void main() {
     final bytes = pattern(20 * 1024 * 1024);
     await bigApi.uploadAttachment(vaultId, path, bytes).timeout(deadline);
     expect(await direct.attachment(vaultId, path), bytes);
+  });
+
+  // ---- decision 111: a device added away from home signs in ---------------
+
+  testWidgets('an extra device pairs and signs in through the relay with the '
+      'address unreachable', (tester) async {
+    late PairingUri uri;
+    late Settings paired;
+    await tester.runAsync(() async {
+      final closed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final port = closed.port;
+      await closed.close();
+
+      final invite = await direct.issuePairing();
+      uri = PairingUri.parse(
+        PairingInvite(
+          serverId: invite.serverId,
+          publicKey: invite.publicKey,
+          nonce: invite.nonce,
+          expires: invite.expires,
+          address: '127.0.0.1:$port',
+          relays: [relayUrl],
+        ).toUri(),
+      )!;
+
+      // What the pairing screen's "account already exists" branch does.
+      final route = await openPairingRoute(uri).timeout(deadline);
+      expect(route.viaRelay, isTrue);
+      final device = await route.authApi.pair(
+        nonce: uri.nonce,
+        deviceName: 'relay live',
+        platform: 'test',
+      );
+      expect(
+        await route.authApi.accountExists(
+          deviceId: device.deviceId,
+          deviceSecret: device.deviceSecret,
+        ),
+        isTrue,
+      );
+      paired = Settings(
+        baseUrl: uri.baseUrl,
+        deviceId: device.deviceId,
+        deviceSecret: device.deviceSecret,
+        serverId: route.serverInfo.serverId,
+        serverKeyId: route.serverInfo.keyId,
+        serverPublicKey: route.serverInfo.publicKey,
+        relays: pairedRelays(uri, route.serverInfo),
+      );
+      route.close();
+    });
+
+    final c = ProviderContainer(
+      overrides: [settingsProvider.overrideWith(() => _FixedSettings(paired))],
+    );
+    addTearDown(c.dispose);
+    await tester.runAsync(() => c.read(settingsProvider.future));
+    await tester.runAsync(
+      () => tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: c,
+          child: MaterialApp(
+            theme: StormTheme.dark(),
+            home: const LoginScreen(),
+          ),
+        ),
+      ),
+    );
+    Future<void> waitFor(bool Function() done) async {
+      for (var i = 0; i < 500 && !done(); i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+    }
+
+    final field = find.byKey(const Key('login-password'));
+    await waitFor(() => field.evaluate().isNotEmpty);
+    await tester.enterText(field, 'correct horse battery staple');
+    await tester.pump();
+    await tester.runAsync(
+      () => tester.tap(find.byKey(const Key('login-submit'))),
+    );
+    await waitFor(
+      () => c.read(settingsProvider).value?.accessToken.isNotEmpty ?? false,
+    );
+
+    final signedIn = c.read(settingsProvider).value!;
+    expect(
+      signedIn.accessToken,
+      isNotEmpty,
+      reason: tester
+          .widgetList<Text>(find.byType(Text))
+          .map((t) => t.data)
+          .join('\n'),
+    );
+    await tester.runAsync(() async {
+      final api = StormApi(baseUrl: origin, token: signedIn.accessToken);
+      expect(await api.vaults(), isNotEmpty);
+      api.dispose();
+    });
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
   });
 
   test('MCP initializes and writes through the real relay', () async {

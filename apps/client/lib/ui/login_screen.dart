@@ -1,12 +1,18 @@
 /// Sign in on a device that is already paired — or, on a fresh Storm reached
 /// by web bootstrap, set up the account. One account, password only
 /// (decision 82).
+///
+/// Every call goes through a [ServerRoute] opened from the saved address and
+/// relays (decision 111): off the server's network the saved address is a LAN
+/// IP nothing answers, and the password must only ever reach a transport that
+/// has proved it holds the pinned key.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/auth_api.dart';
+import '../api/pairing_route.dart';
 import '../state/app_state.dart';
 import '../state/web_bootstrap.dart';
 import 'tokens.dart';
@@ -35,8 +41,82 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   void dispose() {
+    _closeRoute();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  ServerRoute? _route;
+  Future<ServerRoute>? _opening;
+
+  /// The proven route, opened once and shared by every call on this screen.
+  Future<ServerRoute> _openRoute(Settings settings) {
+    final open = _route;
+    if (open != null) return Future.value(open);
+    return _opening ??= () async {
+      try {
+        final route = await openSavedRoute(
+          baseUrl: settings.baseUrl,
+          serverId: settings.serverId,
+          publicKey: settings.serverPublicKey,
+          relays: settings.relays,
+        );
+        if (!mounted) {
+          route.close();
+          throw StateError('sign-in screen closed');
+        }
+        return _route = route;
+      } finally {
+        _opening = null;
+      }
+    }();
+  }
+
+  /// Drops the route, so the next attempt races again. Returns the relay it
+  /// was on, for the message.
+  String? _closeRoute() {
+    final route = _route;
+    _route = null;
+    route?.close();
+    return route?.relayHost;
+  }
+
+  String _unreachable(Settings settings, Object e) {
+    final relay = _closeRoute();
+    final via = relay == null ? '' : ' through the relay $relay';
+    return "Couldn't reach the server at ${_address(settings)}$via.\n\n$e";
+  }
+
+  static String _address(Settings settings) =>
+      Uri.tryParse(settings.baseUrl)?.authority ?? settings.baseUrl;
+
+  /// Names the hop that failed, as the pairing screen does.
+  static String _routeError(Settings settings, PairingRouteException e) {
+    final relay = e.relayHost;
+    final address = _address(settings);
+    return switch (e.failure) {
+      PairingFailure.serverUnreachable when relay != null =>
+        "The relay $relay has your server, but the server didn't answer "
+            'through it. Try again in a moment.',
+      PairingFailure.serverUnreachable =>
+        "Couldn't reach the server at $address, and this device knows no "
+            'relay for it.\n\n'
+            'Sign in on the same network as the server.',
+      PairingFailure.relayUnreachable =>
+        "Couldn't reach the server at $address, or its relay $relay.\n\n"
+            'Check this device has internet access, or sign in on the same '
+            'network as the server.',
+      PairingFailure.serverNotOnRelay =>
+        'The relay $relay answered, but your server is not connected to it.\n\n'
+            'Check the server is running and online.',
+      PairingFailure.identityFailed =>
+        'Server failed the cryptographic challenge'
+            '${relay == null ? '' : ' through the relay $relay'}. '
+            'Connection may be intercepted. Your password was not sent.',
+      PairingFailure.identityMismatch =>
+        'Server identity mismatch. This is not the server this device was '
+            'paired with. Your password was not sent.',
+    };
   }
 
   Future<void> _loadAccountState() async {
@@ -51,9 +131,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       setState(() => _loading = false);
       return;
     }
-    final api = AuthApi(baseUrl: settings.baseUrl);
     try {
-      final exists = await api.accountExists(
+      final route = await _openRoute(settings);
+      final exists = await route.authApi.accountExists(
         deviceId: settings.deviceId,
         deviceSecret: settings.deviceSecret,
       );
@@ -61,6 +141,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       setState(() {
         _needsSetup = !exists;
         _loading = false;
+      });
+    } on PairingRouteException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = _routeError(settings, e);
       });
     } on AuthApiException catch (e) {
       if (!mounted) return;
@@ -71,9 +157,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         }
       });
     } catch (_) {
+      _closeRoute();
       if (mounted) setState(() => _loading = false);
-    } finally {
-      api.dispose();
     }
   }
 
@@ -86,13 +171,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _error = null;
     });
 
-    final api = AuthApi(baseUrl: settings.baseUrl);
     try {
-      final tokens = await api.login(
+      final route = await _openRoute(settings);
+      final tokens = await route.authApi.login(
         deviceId: settings.deviceId,
         deviceSecret: settings.deviceSecret,
         password: _passwordController.text,
       );
+      _closeRoute();
       await ref
           .read(settingsProvider.notifier)
           .save(
@@ -115,6 +201,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           _busy = false;
         });
       }
+    } on PairingRouteException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = _routeError(settings, e);
+        _busy = false;
+      });
     } on AuthApiException catch (e) {
       if (!mounted) return;
       // The server no longer knows this device, so no password will help:
@@ -140,13 +232,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _busy = false;
       });
     } catch (e) {
+      final message = _unreachable(settings, e);
       if (!mounted) return;
       setState(() {
-        _error = "Couldn't reach the server.\n\n$e";
+        _error = message;
         _busy = false;
       });
-    } finally {
-      api.dispose();
     }
   }
 
@@ -163,15 +254,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       _error = null;
     });
 
-    final api = AuthApi(baseUrl: settings.baseUrl);
     try {
-      await api.setUpAccount(
+      final route = await _openRoute(settings);
+      await route.authApi.setUpAccount(
         password: _passwordController.text,
         deviceId: settings.deviceId,
         deviceSecret: settings.deviceSecret,
       );
       if (!mounted) return;
       await _signIn();
+    } on PairingRouteException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = _routeError(settings, e);
+        _busy = false;
+      });
     } on AuthApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -182,13 +279,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _busy = false;
       });
     } catch (e) {
+      final message = _unreachable(settings, e);
       if (!mounted) return;
       setState(() {
-        _error = "Couldn't reach the server.\n\n$e";
+        _error = message;
         _busy = false;
       });
-    } finally {
-      api.dispose();
     }
   }
 

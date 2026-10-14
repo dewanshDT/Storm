@@ -6037,6 +6037,9 @@ relay TODO §4; stacked on 93, which put the relays in the QR)*
   dropped; the four unreachable diagnoses; **through a real `SrpTrunk`** over
   the fake relay, `/v1/pair` completes and comes after the challenge; and
   `probeRelay` tells `server_unreachable` from no answer.
+- **Amended by 111:** that held only for a fresh server. The usual case, an
+  account that already exists, handed over to `/login`, which dialled the
+  saved address alone.
 
 **91. `TCP_NODELAY` on every relay socket (P1).** *(2026-10-12, relay TODO
 §12.)* A relayed exchange is several small writes each way — the head, body
@@ -6158,6 +6161,76 @@ failed about 1 run in 4 on PRs that never touched the web client)*
   document, or a case means to navigate within the same document (a
   same-document navigation keeps its `timeOrigin`, and `open` would time
   out).
+
+**111. Sign-in and session refresh go through the same proven route as
+pairing.** *(2026-10-14; found testing the relay on a real phone over mobile
+data)*
+- **The bug.** Pairing through the relay worked (96), but single-user Storm
+  nearly always takes the "account already exists" branch: it saves the
+  address, the device credential and the relays, closes the route and hands
+  over to `/login`. `LoginScreen` then built `AuthApi(baseUrl:
+  settings.baseUrl)` for the account check, sign-in and first-user set-up, so
+  it dialled the saved address only. Off the LAN that is a LAN IP nothing
+  answers ("Connection refused … /v1/auth/login"), so **a device added away
+  from home never got past sign-in**, and no signed-out device off the LAN
+  could sign back in. `SettingsNotifier.refreshSession` had the same shape,
+  so a session could not be renewed off the LAN either and lapsed into the
+  same dead end.
+- **The fix: one route, generalised, not a second path.**
+  `lib/api/pairing_route.dart` now has `openSavedRoute` beside
+  `openPairingRoute`; both are thin callers of one `_openProven`, which builds
+  a `StormConnection` with the pinned `serverId`/key and the relays, races
+  them (direct and self-hosted together, a public relay only on failure),
+  runs the identity challenge, and maps failures to the same
+  `PairingRouteException`s, with `probeRelay` diagnosing which hop failed.
+  `ServerRoute` is the proven transport; `PairingRoute` extends it with the
+  QR's `ServerInfo`. Only `wss://` or loopback relays are used
+  (`confidentialRelays`, which `pairingRelays` now calls).
+- **Why the route and not the app's `connectionProvider`.** That connection
+  exists only once the device has a session (`isConfigured`), it carries a
+  bearer token, and the sync engine drives its `connect()`/`reset()`. A
+  second caller racing it would change transports under the engine. The
+  route is the unauthenticated half of the same seam, already built for this
+  (one deliberate attempt, 10 s race, 30 s deadline, named failures), and it
+  closes when the caller is done.
+- **Call sites.** `LoginScreen._loadAccountState`, `_signIn` and `_setUp`
+  share one route per screen, opened lazily, dropped on a transport error so
+  the next attempt re-races, and closed on success and in `dispose`. Route
+  failures are worded per hop as the pairing screen's are, the identity ones
+  ending "Your password was not sent". `refreshSession` opens its own route
+  and closes it in `finally`.
+- **Audit of the rest of the client** (every `AuthApi(`, `StormApi(` and raw
+  `http` use outside `StormConnection`):
+  - `bootstrapWebDevice` (`app_state.dart`): web only, and its base URL is
+    the page's own origin, which served the page, so it is reachable by
+    definition. Left alone.
+  - `logout()` is local only (no server call), so it has nothing to route.
+    The client has no password-change call.
+  - Post-sign-in, not fixed here: `AddDeviceScreen` builds
+    `StormApi(baseUrl: settings.baseUrl)`, and `agentApiFactoryProvider` /
+    `integrationsApiFactoryProvider` (and `terminal_stream_io.dart`) build
+    their own clients from the saved address. All carry a session and bypass
+    the relay, so off the LAN "Add a device", Agents and Integrations fail.
+    Same class of bug, different fix (they should come from the app's
+    connection); left as a follow-up.
+- **Tests.** `test/login_through_relay_test.dart`, over the fake relay with
+  the saved address refused: sign-in succeeds through the relay, the
+  password only in `/v1/auth/login`, after `/v1/server/challenge`, and
+  nothing before the challenge carries a credential; an impostor on the
+  relay gets "failed the cryptographic challenge through the relay
+  127.0.0.1 … Your password was not sent" and the origin sees neither
+  `/v1/account` nor `/v1/auth/login`; a session refresh goes through the
+  relay after the challenge; a plain `ws://` relay off loopback is never
+  raced; a relay without the server is named. The two sign-in widget tests
+  fail on the old code (no token; no identity message). `FakeRelay` now
+  serves a second trunk. Live (`test_live/relay_live_test.dart`): an extra
+  device is paired from an invite whose address is a closed port, then signs
+  in through the real `LoginScreen` and the real `storm-relay`, and its
+  token reads the vaults.
+- *Revisit if:* the app's connection gains an unauthenticated mode the login
+  screen could share, the post-sign-in screens above move onto the
+  connection, or a relay becomes able to carry a confidential channel of its
+  own (then `ws://` relays could be allowed).
 
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was

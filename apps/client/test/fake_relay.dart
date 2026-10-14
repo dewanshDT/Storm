@@ -124,7 +124,10 @@ class FakeRelay {
 
   void _onControl(String text) {
     final frame = SrpControl.decode(text);
-    _ws.add(Map<String, dynamic>.from(frame.body)..['type'] = frame.type);
+    // [sent] ends with the first trunk; a later trunk is still served.
+    if (!_ws.isClosed) {
+      _ws.add(Map<String, dynamic>.from(frame.body)..['type'] = frame.type);
+    }
 
     switch (frame.type) {
       case 'HELLO':
