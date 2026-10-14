@@ -250,12 +250,7 @@ impl Tx {
     /// Queues a control frame ahead of everything this peer has queued, for
     /// the `PONG` that must not wait behind a backlog (§5.2).
     pub fn send_control(&self, json: String) {
-        if self
-            .ends
-            .lane
-            .try_send(Message::Text(json.into()))
-            .is_err()
-        {
+        if self.ends.lane.try_send(Message::Text(json.into())).is_err() {
             self.kill();
         }
     }

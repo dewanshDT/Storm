@@ -458,7 +458,8 @@ async fn serve_trunk(
 
         match message {
             Message::Text(text) => {
-                if !handle_control(&text, &mut streams, &outbound, &control, tunnel, &budget).await {
+                if !handle_control(&text, &mut streams, &outbound, &control, tunnel, &budget).await
+                {
                     break;
                 }
             }
