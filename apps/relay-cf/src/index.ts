@@ -1,4 +1,4 @@
-import { validateServerId } from "./auth";
+import { b64urlEncode, decodeKey, parsePublicKey, validateServerId } from "./auth";
 import { ConfigError, configFor, type Env } from "./config";
 import { HelloLimiter } from "./limiter";
 import { log } from "./log";
@@ -16,6 +16,15 @@ const CONNECT_PREFIX = "/connect/";
 const H_SERVER_ID = "x-storm-server-id";
 const H_PEER_IP = "x-storm-peer-ip";
 const H_PUBLIC_BASE = "x-storm-public-base";
+const H_PUBKEY = "x-storm-pubkey";
+
+// One room per server_id in allowlist and tofu (the binding lives there). In
+// open mode one per (server_id, pubkey), so nothing done under one key can
+// reach a registration under another (§4.1 rule 2). server_id has no ':', so
+// the two namings never meet.
+function roomName(serverId: string, key: string | null): string {
+  return key === null ? serverId : `${serverId}:${key}`;
+}
 
 function refuse(code: ErrorCode): Response {
   const [client, server] = Object.values(new WebSocketPair());
@@ -83,12 +92,12 @@ async function register(env: Env, url: URL): Promise<Response> {
     return false;
   };
 
-  const openRoom = async (first: string, serverId: string) => {
+  const openRoom = async (first: string, serverId: string, key: string | null) => {
     try {
-      const stub = env.ROOMS.get(env.ROOMS.idFromName(serverId));
-      const response = await stub.fetch("https://room/register", {
-        headers: { upgrade: "websocket", [H_SERVER_ID]: serverId, [H_PUBLIC_BASE]: base },
-      });
+      const stub = env.ROOMS.get(env.ROOMS.idFromName(roomName(serverId, key)));
+      const headers: Record<string, string> = { upgrade: "websocket", [H_SERVER_ID]: serverId, [H_PUBLIC_BASE]: base };
+      if (key !== null) headers[H_PUBKEY] = key;
+      const response = await stub.fetch("https://room/register", { headers });
       const ws = response.webSocket;
       if (!ws) throw new Error(`room answered ${response.status}`);
       ws.binaryType = "arraybuffer";
@@ -115,6 +124,7 @@ async function register(env: Env, url: URL): Promise<Response> {
       return;
     }
     let serverId: string;
+    let key: string | null = null;
     try {
       if (typeof event.data !== "string") throw new ProtocolError();
       const frame = parseFrame(event.data);
@@ -128,15 +138,20 @@ async function register(env: Env, url: URL): Promise<Response> {
       clearTimeout(timeout);
       if (frame.type !== "REGISTER_SERVER") throw new ProtocolError();
       serverId = stringField(frame.body, "server_id");
-      stringField(frame.body, "pubkey");
+      const pubkey = stringField(frame.body, "pubkey");
       if (!validateServerId(serverId)) throw new ProtocolError();
+      if (configFor(env).binding === "open") {
+        const bytes = parsePublicKey(pubkey);
+        if (!bytes) throw new ProtocolError();
+        key = b64urlEncode(bytes);
+      }
     } catch {
       pending = [];
       log("protocol_error", { reason: "register: first frame" });
       close(server, "protocol_error");
       return;
     }
-    void openRoom(event.data, serverId);
+    void openRoom(event.data, serverId, key);
   });
   const serverClosed = () => {
     serverGone = true;
@@ -176,8 +191,23 @@ async function connect(request: Request, env: Env, url: URL): Promise<Response> 
     return refuse("protocol_error");
   }
 
-  const stub = env.ROOMS.get(env.ROOMS.idFromName(serverId));
-  return stub.fetch("https://room/connect", {
-    headers: { upgrade: "websocket", [H_SERVER_ID]: serverId, [H_PEER_IP]: peerIp },
-  });
+  // §4.3: the key a client names on the URL, so this edge can pick the room
+  // before it reads HELLO. Checked against HELLO.pubkey in the room (§5).
+  let key: string | null = null;
+  const query = url.searchParams.get("pubkey");
+  if (query !== null) {
+    const bytes = decodeKey(query);
+    if (!bytes) {
+      log("protocol_error", { reason: "connect: bad pubkey in query" });
+      return refuse("protocol_error");
+    }
+    key = b64urlEncode(bytes);
+  }
+
+  // Without a key on the URL an open relay cannot route; that room holds no
+  // server and answers the HELLO itself.
+  const room = roomName(serverId, config.binding === "open" ? key : null);
+  const headers: Record<string, string> = { upgrade: "websocket", [H_SERVER_ID]: serverId, [H_PEER_IP]: peerIp };
+  if (key !== null) headers[H_PUBKEY] = key;
+  return env.ROOMS.get(env.ROOMS.idFromName(room)).fetch("https://room/connect", { headers });
 }

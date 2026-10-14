@@ -161,17 +161,23 @@ impl std::fmt::Debug for SrpTrunk {
 
 impl SrpTrunk {
     /// Dials `relay_url` (the relay's base URL, or the server's full
-    /// `public_address`) and completes `HELLO`/`READY` (§5).
-    pub async fn connect(relay_url: &str, server_id: &str) -> Result<SrpTrunk, SrpError> {
-        Self::connect_with(relay_url, server_id, TrunkConfig::default()).await
+    /// `public_address`) and completes `HELLO`/`READY` (§5), naming the
+    /// pinned `server_key` (unpadded base64url) on the URL and in `HELLO`.
+    pub async fn connect(
+        relay_url: &str,
+        server_id: &str,
+        server_key: &str,
+    ) -> Result<SrpTrunk, SrpError> {
+        Self::connect_with(relay_url, server_id, server_key, TrunkConfig::default()).await
     }
 
     pub async fn connect_with(
         relay_url: &str,
         server_id: &str,
+        server_key: &str,
         config: TrunkConfig,
     ) -> Result<SrpTrunk, SrpError> {
-        let url = connect_url(relay_url, server_id)?;
+        let url = connect_url(relay_url, server_id, server_key)?;
         // Tungstenite's `wss://` uses the process default provider, and rustls
         // panics if none is installed. Idempotent; `ring` as everywhere else.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -189,7 +195,8 @@ impl SrpTrunk {
         };
         bound_unsent(ws.get_ref());
         let (mut sink, mut stream) = ws.split();
-        let client_trunk_id = handshake(&mut sink, &mut stream, server_id, deadline).await?;
+        let client_trunk_id =
+            handshake(&mut sink, &mut stream, server_id, server_key, deadline).await?;
 
         let (out, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
         let (lost, _) = watch::channel(None);
@@ -330,11 +337,13 @@ fn body_frame(stream_id: u32, payload: &[u8]) -> Message {
     Message::Binary(codec::encode_body_frame(codec::FRAME_REQUEST_BODY, stream_id, payload).into())
 }
 
-/// `<relay>/connect/<server_id>` (§4.3). Plaintext only to this machine:
-/// without E2E the path must be private, and a `ws://` relay elsewhere is not.
-fn connect_url(relay_url: &str, server_id: &str) -> Result<String, SrpError> {
+/// `<relay>/connect/<server_id>?pubkey=<key>` (§4.3). Plaintext only to this
+/// machine: without E2E the path must be private, and a `ws://` relay
+/// elsewhere is not.
+fn connect_url(relay_url: &str, server_id: &str, server_key: &str) -> Result<String, SrpError> {
     let invalid = |why: &str| SrpError::InvalidTarget(why.to_string());
     codec::validate_server_id(server_id).map_err(invalid)?;
+    codec::validate_key(server_key).map_err(invalid)?;
     let uri: Uri = relay_url.parse().map_err(|_| invalid("not a URL"))?;
     let scheme = uri.scheme_str().unwrap_or_default();
     if scheme != "ws" && scheme != "wss" {
@@ -355,7 +364,8 @@ fn connect_url(relay_url: &str, server_id: &str) -> Result<String, SrpError> {
     if uri.query().is_some() {
         return Err(invalid("a relay URL has no query"));
     }
-    Ok(format!("{scheme}://{authority}{own}"))
+    // base64url needs no percent-encoding.
+    Ok(format!("{scheme}://{authority}{own}?pubkey={server_key}"))
 }
 
 fn is_loopback(host: &str) -> bool {
@@ -371,10 +381,11 @@ async fn handshake(
     sink: &mut SplitSink<Ws, Message>,
     stream: &mut SplitStream<Ws>,
     server_id: &str,
+    server_key: &str,
     deadline: Instant,
 ) -> Result<String, SrpError> {
     let closed = || SrpError::RelayDown("the relay closed the connection".into());
-    sink.send(Message::text(codec::hello(server_id)))
+    sink.send(Message::text(codec::hello(server_id, server_key)))
         .await
         .map_err(|e| SrpError::RelayDown(e.to_string()))?;
     loop {
@@ -872,20 +883,39 @@ async fn heartbeat_loop(core: Arc<Core>, config: TrunkConfig) {
 mod tests {
     use super::*;
 
+    const KEY: &str = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
+
+    fn connect_url(relay_url: &str, server_id: &str) -> Result<String, SrpError> {
+        super::connect_url(relay_url, server_id, KEY)
+    }
+
     #[test]
     fn a_relay_base_url_becomes_the_servers_connect_address() {
         assert_eq!(
             connect_url("wss://relay.example.com", "srv_A").unwrap(),
-            "wss://relay.example.com/connect/srv_A"
+            format!("wss://relay.example.com/connect/srv_A?pubkey={KEY}")
         );
         assert_eq!(
             connect_url("wss://relay.example.com:8443/", "srv_A").unwrap(),
-            "wss://relay.example.com:8443/connect/srv_A"
+            format!("wss://relay.example.com:8443/connect/srv_A?pubkey={KEY}")
         );
         assert_eq!(
             connect_url("wss://relay.example.com/connect/srv_A", "srv_A").unwrap(),
-            "wss://relay.example.com/connect/srv_A"
+            format!("wss://relay.example.com/connect/srv_A?pubkey={KEY}")
         );
+    }
+
+    #[test]
+    fn a_server_key_in_any_other_spelling_is_refused_before_dialling() {
+        for bad in ["", "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=", "AAAA"] {
+            assert_eq!(
+                super::connect_url("wss://relay.example.com", "srv_A", bad)
+                    .unwrap_err()
+                    .code(),
+                "invalid_relay_target",
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

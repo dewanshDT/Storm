@@ -34,6 +34,9 @@ RELAY_PORT ?= 8487
 # Which relay `test-live` runs the relayed suites through: rust (storm-relay)
 # or cf (apps/relay-cf under wrangler dev).
 RELAY_IMPL ?= rust
+# Its §4.1 mode: empty is each relay's own (TOFU for storm-relay, allowlist for
+# the Worker); `open` runs every relayed suite key-addressed (decision 116n).
+RELAY_MODE ?=
 # Four ports from here for the throttled-link relay test, which starts its own
 # server and storm-relay behind a slow link (decision 116b).
 THROTTLE_PORT ?= 18890
@@ -94,24 +97,25 @@ test-relay:
 #
 # Black-box: the relay is known only by its URL, and must have been started
 # with tools/relay-conformance's fixture contract (README there). Optional:
-# RELAY_TOFU_URL, a second relay in trust-on-first-use mode.
+# RELAY_TOFU_URL, a relay in trust-on-first-use mode; RELAY_OPEN_URL, one in
+# open (key-addressed) mode.
 relay-conformance:
 	@test -n "$(RELAY_URL)" || { \
-		echo "usage: make relay-conformance RELAY_URL=ws://host:port [RELAY_TOFU_URL=ws://...]" >&2; \
+		echo "usage: make relay-conformance RELAY_URL=ws://host:port [RELAY_TOFU_URL=ws://...] [RELAY_OPEN_URL=ws://...]" >&2; \
 		exit 2; }
 	@cd $(CONFORMANCE) && cargo build --release --quiet
-	RELAY_URL="$(RELAY_URL)" RELAY_TOFU_URL="$(RELAY_TOFU_URL)" \
+	RELAY_URL="$(RELAY_URL)" RELAY_TOFU_URL="$(RELAY_TOFU_URL)" RELAY_OPEN_URL="$(RELAY_OPEN_URL)" \
 		$(CONFORMANCE)/target/release/relay-conformance
 
-## relay-conformance-local: start storm-relay with the fixture contract (ports 18900-18901) and run the suite
+## relay-conformance-local: start storm-relay with the fixture contract (ports 18900-18902) and run the suite
 relay-conformance-local:
 	@cd $(RELAY) && cargo build --release --quiet
 	@cd $(CONFORMANCE) && cargo build --release --quiet
 	bash $(CONFORMANCE)/local.sh "$$PWD/$(RELAY)/target/release/storm-relay"
 
-## relay-conformance-cf: start the Worker relay under wrangler dev (ports 18910-18911) and run the suite
+## relay-conformance-cf: start the Worker relay under wrangler dev (ports 18910-18912) and run the suite
 #
-# Decision 108c: the same suite, allowlist and TOFU, with the 127.0.0.2
+# Decision 108c: the same suite, allowlist, TOFU and open, with the 127.0.0.2
 # checks and without the latency check. Needs Node 22.
 relay-conformance-cf:
 	@cd $(CONFORMANCE) && cargo build --release --quiet
@@ -167,7 +171,7 @@ test-browser:
 #
 # RELAY_IMPL=cf runs every relayed suite through the Worker relay under
 # wrangler dev, allowlisting the first server's key, instead of storm-relay
-# (decision 108c). Needs Node 22.
+# (decision 108c). Needs Node 22. RELAY_MODE=open runs them key-addressed.
 test-live:
 	@case "$(RELAY_IMPL)" in rust|cf) ;; *) echo "RELAY_IMPL must be rust or cf" >&2; exit 2;; esac
 	@cd $(SERVER) && cargo build --quiet
@@ -258,16 +262,17 @@ test-live:
 		[ $$i -eq 60 ] && { echo "second auth server did not start" >&2; exit 1; }; \
 		sleep 0.5; \
 	done; \
-	echo "--- a real relay ($(RELAY_IMPL)), registered by the first server ---"; \
+	echo "--- a real relay ($(RELAY_IMPL)$(if $(RELAY_MODE), $(RELAY_MODE))), registered by the first server ---"; \
 	if [ "$(RELAY_IMPL)" = cf ]; then \
 		curl -sf http://127.0.0.1:$(PORT)/v1/server | python3 -c \
 			'import json, sys; i = json.load(sys.stdin); print(i["server_id"], i["public_key"])' \
 			> "$$ROOT/.dev/live-relay-allowlist"; \
-		"$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" $(RELAY_PORT) allowlist \
+		"$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" $(RELAY_PORT) $(or $(RELAY_MODE),allowlist) \
 			"$$ROOT/.dev/live-relay-allowlist" "$$ROOT/.dev/live-relay-cf" \
 			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
 	else \
 		"$$ROOT/$(RELAY)/target/debug/storm-relay" --bind 127.0.0.1:$(RELAY_PORT) \
+			$(if $(RELAY_MODE),--mode $(RELAY_MODE)) \
 			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
 	fi; \
 	RELAY_PID=$$!; \

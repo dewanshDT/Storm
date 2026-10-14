@@ -44,6 +44,7 @@ export default defineConfig({
     projects: [
       project("unit", ["test/unit/**/*.test.ts"], {}),
       project("tofu", ["test/tofu/**/*.test.ts"], { STORM_RELAY_BINDING: "tofu" }),
+      project("open", ["test/open/**/*.test.ts"], { STORM_RELAY_BINDING: "open" }),
       project("allowlist", ["test/allowlist/**/*.test.ts"], {
         STORM_RELAY_BINDING: "allowlist",
         STORM_RELAY_PUBLIC_BASE: "wss://relay.example/",

@@ -16,13 +16,19 @@ or vault data, and stores no payload.
 server ─wss─▶ Worker /register ──(reads REGISTER_SERVER, then carries frames)──┐
 client ─wss─▶ Worker /connect/<server_id> ─(HELLO limit, then hands the socket)┼─▶ RelayRoom
                                                                                │   idFromName(server_id)
+                                                                               │   open: idFromName(server_id + ":" + pubkey)
 HELLO limit per source address ─▶ HelloLimiter idFromName("ip:" + CF-Connecting-IP)
 ```
 
-- **`RelayRoom`**, one SQLite-backed Durable Object per `server_id`, holds the
-  server trunk (and a superseded one while it drains) and every client trunk
-  routed to it, all through the WebSocket Hibernation API. Routing a frame
-  never leaves the object.
+- **`RelayRoom`**, one SQLite-backed Durable Object per `server_id` (in open
+  mode, per `(server_id, pubkey)`), holds the server trunk (and a superseded
+  one while it drains) and every client trunk routed to it, all through the
+  WebSocket Hibernation API. Routing a frame never leaves the object.
+- **Open mode routes on the key.** `/register` reads the key from
+  `REGISTER_SERVER`, `/connect` from `?pubkey=`, so two keys of one
+  `server_id` never share a room. A connect URL without `?pubkey=` lands in
+  the bare `server_id` room, which holds no server and refuses the `HELLO`
+  with `server_unreachable` at once.
 - **`/register` names no `server_id`**, so the Worker reads the first frame,
   picks the room, and then carries that trunk's frames both ways. Client
   trunks are handed to the room whole.
@@ -76,7 +82,7 @@ suite's fixture contract (`tools/relay-conformance/fixtures/relay.env`).
 
 | Var | Default | What |
 |---|---|---|
-| `STORM_RELAY_BINDING` | `allowlist` | `allowlist` (production) or `tofu`. TOFU exists for parity and the conformance suite only: a public `server_id` is squattable (§4.1). |
+| `STORM_RELAY_BINDING` | `allowlist` | `allowlist` (production), `tofu` or `open`. TOFU exists for parity and the conformance suite only: a public `server_id` is squattable (§4.1). `open` is key-addressed and refuses every keyless `HELLO`; the hosted relay moves to it only after slice 116k. |
 | `STORM_RELAY_ALLOWLIST` | empty | The allowlist **text**, in storm-relay's file format: `<server_id> <pubkey>` per line, `#` comments, no duplicates. A secret in production. Empty in allowlist mode refuses every registration. |
 | `STORM_RELAY_PUBLIC_BASE` | from the request | `ws://` or `wss://` plus host, no path. |
 | `STORM_RELAY_CHALLENGE_TTL_MS` | 30000 | A nonce is answerable this long; spent nonces stay spent for it. |

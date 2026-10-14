@@ -101,6 +101,10 @@ pub struct Config {
     /// `None` is trust-on-first-use. `Some` is the binding itself, and TOFU is
     /// off entirely — including on first sight (§4.1).
     pub allowlist: Option<Allowlist>,
+    /// Key-addressed registration (§4.1 `open`): no binding at all, and
+    /// registrations addressed by `(server_id, pubkey)`. Never with an
+    /// allowlist.
+    pub open: bool,
     pub challenge_ttl: Duration,
     pub handshake_timeout: Duration,
     pub hello_wait: Duration,
@@ -127,6 +131,7 @@ impl Config {
             bind,
             public_base: public_base.into(),
             allowlist: None,
+            open: false,
             challenge_ttl: DEFAULT_CHALLENGE_TTL,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             hello_wait: DEFAULT_HELLO_WAIT,
@@ -144,6 +149,24 @@ impl Config {
     pub fn public_address(&self, server_id: &str) -> String {
         format!("{}/connect/{}", self.public_base, server_id)
     }
+
+    pub fn mode(&self) -> Mode {
+        if self.open {
+            Mode::Open
+        } else if self.allowlist.is_some() {
+            Mode::Allowlist
+        } else {
+            Mode::Tofu
+        }
+    }
+}
+
+/// The §4.1 registration mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Allowlist,
+    Tofu,
+    Open,
 }
 
 /// `server_id` → the one public key the operator will accept for it.

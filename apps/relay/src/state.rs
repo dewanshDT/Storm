@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rand::Rng;
 
-use crate::auth::PublicKey;
+use crate::auth::{KeyBytes, PublicKey};
 use crate::config::Allowlist;
 use crate::proto::{self, ErrorCode};
 use crate::trunk::Tx;
@@ -599,22 +599,42 @@ impl Challenges {
     }
 }
 
+/// Live registrations, addressed by `(server_id, pubkey)` (§4.1).
+///
+/// In `allowlist` and `tofu` the binding leaves one key per `server_id`, so
+/// this is the old one-per-id table. In `open` two keys of one `server_id`
+/// coexist and nothing done under one key touches the other.
 #[derive(Default)]
 pub struct Registrations {
-    live: Mutex<HashMap<String, Registration>>,
+    live: Mutex<HashMap<String, HashMap<KeyBytes, Registration>>>,
+}
+
+/// What a keyless lookup found for a `server_id`.
+pub enum Only {
+    None,
+    One(Registration),
+    Several,
 }
 
 impl Registrations {
     /// Installs a registration, returning the trunk it displaced.
     ///
-    /// A new `REGISTER_SERVER` for a `server_id` that already has a live trunk
-    /// succeeds (§4.2 supersession): anyone completing the challenge already
-    /// holds the private key, so this is a reconnect, not a hijack.
-    pub fn install(&self, server_id: &str, registration: Registration) -> Option<Registration> {
+    /// A new `REGISTER_SERVER` for a `(server_id, pubkey)` that already has a
+    /// live trunk succeeds (§4.2 supersession): anyone completing the
+    /// challenge already holds the private key, so this is a reconnect, not a
+    /// hijack. A different key displaces nothing.
+    pub fn install(
+        &self,
+        server_id: &str,
+        key: KeyBytes,
+        registration: Registration,
+    ) -> Option<Registration> {
         self.live
             .lock()
             .expect("registrations mutex")
-            .insert(server_id.to_string(), registration)
+            .entry(server_id.to_string())
+            .or_default()
+            .insert(key, registration)
     }
 
     /// Removes a registration **only if `trunk_id` still owns it**.
@@ -623,32 +643,58 @@ impl Registrations {
     /// connection then notices its socket is gone and unregisters; an
     /// unconditional remove would delete the *new* trunk's entry and take the
     /// server offline on a successful reconnect.
-    pub fn release(&self, server_id: &str, trunk_id: &str) {
+    pub fn release(&self, server_id: &str, key: KeyBytes, trunk_id: &str) {
         let mut live = self.live.lock().expect("registrations mutex");
-        if live.get(server_id).is_some_and(|r| r.trunk_id == trunk_id) {
+        let Some(keys) = live.get_mut(server_id) else {
+            return;
+        };
+        if keys.get(&key).is_some_and(|r| r.trunk_id == trunk_id) {
+            keys.remove(&key);
+        }
+        if keys.is_empty() {
             live.remove(server_id);
         }
     }
 
-    pub fn touch(&self, server_id: &str, trunk_id: &str, now: Instant) {
+    pub fn touch(&self, server_id: &str, key: KeyBytes, trunk_id: &str, now: Instant) {
         let mut live = self.live.lock().expect("registrations mutex");
-        if let Some(registration) = live.get_mut(server_id)
+        if let Some(registration) = live.get_mut(server_id).and_then(|keys| keys.get_mut(&key))
             && registration.trunk_id == trunk_id
         {
             registration.last_seen = now;
         }
     }
 
-    pub fn get(&self, server_id: &str) -> Option<Registration> {
+    pub fn get(&self, server_id: &str, key: &KeyBytes) -> Option<Registration> {
         self.live
             .lock()
             .expect("registrations mutex")
             .get(server_id)
+            .and_then(|keys| keys.get(key))
             .cloned()
     }
 
+    /// For a `HELLO` that names no key (§5, a client older than 115).
+    pub fn only(&self, server_id: &str) -> Only {
+        let live = self.live.lock().expect("registrations mutex");
+        let Some(keys) = live.get(server_id) else {
+            return Only::None;
+        };
+        let mut regs = keys.values();
+        match (regs.next(), regs.next()) {
+            (None, _) => Only::None,
+            (Some(one), None) => Only::One(one.clone()),
+            (Some(_), Some(_)) => Only::Several,
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.live.lock().expect("registrations mutex").len()
+        self.live
+            .lock()
+            .expect("registrations mutex")
+            .values()
+            .map(HashMap::len)
+            .sum()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -951,15 +997,43 @@ mod tests {
             trunk: Arc::new(ServerTrunk::new(Tx::detached(1).0)),
         };
 
-        registrations.install("srv_A", make("trk_old"));
-        let displaced = registrations.install("srv_A", make("trk_new"));
+        let k = key(1).bytes();
+        registrations.install("srv_A", k, make("trk_old"));
+        let displaced = registrations.install("srv_A", k, make("trk_new"));
         assert_eq!(displaced.unwrap().trunk_id, "trk_old");
 
         // The old connection now notices its socket closed and cleans up.
-        registrations.release("srv_A", "trk_old");
-        assert_eq!(registrations.get("srv_A").unwrap().trunk_id, "trk_new");
+        registrations.release("srv_A", k, "trk_old");
+        assert_eq!(registrations.get("srv_A", &k).unwrap().trunk_id, "trk_new");
 
-        registrations.release("srv_A", "trk_new");
+        registrations.release("srv_A", k, "trk_new");
         assert!(registrations.is_empty());
+    }
+
+    #[test]
+    fn registrations_under_two_keys_of_one_server_id_coexist() {
+        let registrations = Registrations::default();
+        let make = |trunk_id: &str| Registration {
+            trunk_id: trunk_id.to_string(),
+            connected_at: SystemTime::now(),
+            last_seen: Instant::now(),
+            trunk: Arc::new(ServerTrunk::new(Tx::detached(1).0)),
+        };
+        let (a, b) = (key(1).bytes(), key(2).bytes());
+        assert!(matches!(registrations.only("srv_A"), Only::None));
+
+        registrations.install("srv_A", a, make("trk_a"));
+        assert!(matches!(registrations.only("srv_A"), Only::One(r) if r.trunk_id == "trk_a"));
+        assert!(registrations.install("srv_A", b, make("trk_b")).is_none());
+        assert!(matches!(registrations.only("srv_A"), Only::Several));
+        assert_eq!(registrations.len(), 2);
+
+        assert_eq!(registrations.get("srv_A", &a).unwrap().trunk_id, "trk_a");
+        assert_eq!(registrations.get("srv_A", &b).unwrap().trunk_id, "trk_b");
+        // A release under one key never frees the other.
+        registrations.release("srv_A", a, "trk_b");
+        registrations.release("srv_A", b, "trk_b");
+        assert_eq!(registrations.get("srv_A", &a).unwrap().trunk_id, "trk_a");
+        assert!(registrations.get("srv_A", &b).is_none());
     }
 }

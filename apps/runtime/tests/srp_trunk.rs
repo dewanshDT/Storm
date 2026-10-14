@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request as WsRequest, Response};
 
 const SERVER_ID: &str = "srv_test";
+const SERVER_KEY: &str = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
 const MAX_FRAME_PAYLOAD: usize = 256 * 1024;
 
 /// Generous: nothing here waits on it unless the client under test is broken.
@@ -183,11 +184,7 @@ async fn serve(
     let path_log = log.clone();
     let Ok(ws) =
         tokio_tungstenite::accept_hdr_async(tcp, move |req: &WsRequest, resp: Response| {
-            path_log
-                .lock()
-                .unwrap()
-                .paths
-                .push(req.uri().path().to_string());
+            path_log.lock().unwrap().paths.push(req.uri().to_string());
             Ok(resp)
         })
         .await
@@ -412,6 +409,7 @@ async fn connect(fake: &FakeRelay) -> SrpTrunk {
     within(SrpTrunk::connect_with(
         &fake.url,
         SERVER_ID,
+        SERVER_KEY,
         TrunkConfig::default(),
     ))
     .await
@@ -427,9 +425,14 @@ async fn the_trunk_opens_with_hello_at_the_servers_connect_path() {
     let fake = FakeRelay::start(Script::new(echo)).await;
     let trunk = connect(&fake).await;
     assert_eq!(trunk.client_trunk_id(), "ctk_fake");
-    assert_eq!(fake.log(|l| l.paths.clone()), vec!["/connect/srv_test"]);
+    // §4.3 and §5: the pinned key on the URL and in HELLO.
+    assert_eq!(
+        fake.log(|l| l.paths.clone()),
+        vec![format!("/connect/srv_test?pubkey={SERVER_KEY}")]
+    );
     let hello = fake.saw(|v| v["type"] == "HELLO").await;
     assert_eq!(hello["server_id"], SERVER_ID);
+    assert_eq!(hello["pubkey"], SERVER_KEY);
     assert_eq!(hello["v"], 1);
 }
 
@@ -676,9 +679,14 @@ async fn a_silent_relay_is_relay_silent_and_its_streams_are_trunk_lost() {
     });
     script.batch = 2;
     let fake = FakeRelay::start(script).await;
-    let trunk = within(SrpTrunk::connect_with(&fake.url, SERVER_ID, fast()))
-        .await
-        .unwrap();
+    let trunk = within(SrpTrunk::connect_with(
+        &fake.url,
+        SERVER_ID,
+        SERVER_KEY,
+        fast(),
+    ))
+    .await
+    .unwrap();
 
     let (mid_body, no_head) = within(async {
         tokio::join!(
@@ -706,9 +714,14 @@ async fn a_silent_relay_is_relay_silent_and_its_streams_are_trunk_lost() {
 #[tokio::test]
 async fn a_relay_that_answers_heartbeats_is_kept_past_the_silence_limit() {
     let fake = FakeRelay::start(Script::new(echo)).await;
-    let trunk = within(SrpTrunk::connect_with(&fake.url, SERVER_ID, fast()))
-        .await
-        .unwrap();
+    let trunk = within(SrpTrunk::connect_with(
+        &fake.url,
+        SERVER_ID,
+        SERVER_KEY,
+        fast(),
+    ))
+    .await
+    .unwrap();
     // The test's own clock, not the fake's: the fake only ever answers PING.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!trunk.is_closed(), "{:?}", trunk.loss_reason());
@@ -751,7 +764,7 @@ async fn server_unreachable_at_hello_is_server_offline() {
     let mut script = Script::new(echo);
     script.hello = Hello::Refuse("server_unreachable");
     let fake = FakeRelay::start(script).await;
-    let err = within(SrpTrunk::connect(&fake.url, SERVER_ID))
+    let err = within(SrpTrunk::connect(&fake.url, SERVER_ID, SERVER_KEY))
         .await
         .unwrap_err();
     assert_eq!(err, SrpError::ServerOffline);
@@ -763,7 +776,7 @@ async fn a_rate_limited_hello_is_not_server_offline() {
     let mut script = Script::new(echo);
     script.hello = Hello::Refuse("rate_limited");
     let fake = FakeRelay::start(script).await;
-    let err = within(SrpTrunk::connect(&fake.url, SERVER_ID))
+    let err = within(SrpTrunk::connect(&fake.url, SERVER_ID, SERVER_KEY))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "rate_limited");
@@ -778,9 +791,11 @@ async fn a_relay_that_never_answers_hello_is_a_handshake_timeout() {
         handshake_timeout: Duration::from_millis(300),
         ..TrunkConfig::default()
     };
-    let err = within(SrpTrunk::connect_with(&fake.url, SERVER_ID, config))
-        .await
-        .unwrap_err();
+    let err = within(SrpTrunk::connect_with(
+        &fake.url, SERVER_ID, SERVER_KEY, config,
+    ))
+    .await
+    .unwrap_err();
     assert_eq!(err.code(), "handshake_timeout");
 }
 
@@ -789,7 +804,7 @@ async fn a_relay_that_is_not_listening_is_relay_down() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     drop(listener);
-    let err = within(SrpTrunk::connect(&url, SERVER_ID))
+    let err = within(SrpTrunk::connect(&url, SERVER_ID, SERVER_KEY))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "relay_down");
@@ -797,7 +812,7 @@ async fn a_relay_that_is_not_listening_is_relay_down() {
 
 #[tokio::test]
 async fn a_public_relay_must_be_wss() {
-    let err = SrpTrunk::connect("ws://relay.example.com", SERVER_ID)
+    let err = SrpTrunk::connect("ws://relay.example.com", SERVER_ID, SERVER_KEY)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_relay_target");
@@ -973,7 +988,7 @@ async fn a_ping_overtakes_a_queued_upload_and_a_stalled_trunk_is_not_silent() {
         heartbeat: Duration::from_millis(200),
         silence_limit: Duration::from_millis(600),
     };
-    let trunk = within(SrpTrunk::connect_with(&url, SERVER_ID, config))
+    let trunk = within(SrpTrunk::connect_with(&url, SERVER_ID, SERVER_KEY, config))
         .await
         .unwrap();
 

@@ -307,6 +307,14 @@ void main() {
           seen.indexOf('POST /v1/pair'),
           greaterThan(seen.indexOf('POST /v1/server/challenge')),
         );
+        // §5: every dial names the QR's key, on the URL and in HELLO.
+        expect(relay.helloBodies, isNotEmpty);
+        for (final hello in relay.helloBodies) {
+          expect(hello['pubkey'], uri.publicKey);
+        }
+        for (final dialled in relay.connectUris) {
+          expect(dialled.queryParameters['pubkey'], uri.publicKey);
+        }
         route.close();
       } finally {
         await relay.close();
@@ -329,6 +337,14 @@ void main() {
           );
           expect(await probeRelay(advert(up.port), 'srv_test'), RelayReach.up);
           expect(await probeRelay(advert(1), 'srv_test'), RelayReach.down);
+
+          const key = 'A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg';
+          expect(
+            await probeRelay(advert(up.port), 'srv_test', publicKey: key),
+            RelayReach.up,
+          );
+          expect(up.helloBodies.last['pubkey'], key);
+          expect(up.connectUris.last.queryParameters['pubkey'], key);
         } finally {
           await absent.close();
           await up.close();

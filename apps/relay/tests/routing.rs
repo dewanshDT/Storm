@@ -1594,3 +1594,192 @@ async fn an_aborted_flag_that_is_not_a_boolean_is_a_protocol_error() {
         .await;
     assert_error(&server.recv().await, "protocol_error");
 }
+
+// ------------------------------------------------- key-addressed HELLO (114f)
+
+impl Harness {
+    async fn open() -> Self {
+        let mut config = config();
+        config.open = true;
+        Self::start(config).await
+    }
+
+    /// A client dialled with `query` and sending `hello`, before `READY`.
+    async fn hello(&self, query: &str, hello: Value) -> Conn {
+        let mut conn = self.dial(&format!("/connect/{SERVER_ID}{query}")).await;
+        conn.send(hello).await;
+        conn
+    }
+
+    /// A client naming the key of `seed`, in the query and in `HELLO` (§5).
+    async fn keyed_hello(&self, seed: u8) -> Conn {
+        let key = pubkey_b64(seed);
+        self.hello(
+            &format!("?pubkey={key}"),
+            json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": key }),
+        )
+        .await
+    }
+
+    async fn keyed_client(&self, seed: u8) -> Conn {
+        let mut conn = self.keyed_hello(seed).await;
+        let ready = conn.recv().await;
+        assert_eq!(ready["type"], "READY", "{ready}");
+        conn
+    }
+}
+
+fn keyless_hello() -> Value {
+    json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID })
+}
+
+#[tokio::test]
+async fn open_registrations_of_one_server_id_under_two_keys_coexist() {
+    let harness = Harness::open().await;
+    let mut owner = harness.server_as(SERVER_ID, 1).await;
+    let mut stranger = harness.server_as(SERVER_ID, 2).await;
+    assert_eq!(harness.relay.registrations.len(), 2);
+
+    // Each client reaches only the trunk its key names.
+    let mut client = harness.keyed_client(1).await;
+    let stream_id = client.open_stream("to-owner").await;
+    assert_eq!(owner.expect_stream_open_and_ack().await, stream_id);
+    assert!(stranger.is_silent_for(FAST).await);
+
+    let mut other = harness.keyed_client(2).await;
+    let stream_id = other.open_stream("to-stranger").await;
+    assert_eq!(stranger.expect_stream_open_and_ack().await, stream_id);
+    assert!(owner.is_silent_for(FAST).await);
+}
+
+#[tokio::test]
+async fn a_squatter_under_another_key_is_never_reached() {
+    let harness = Harness::open().await;
+    let _squatter = harness.server_as(SERVER_ID, 2).await;
+
+    // The owner is offline: its clients wait out the hold, never the squatter.
+    let mut client = harness.keyed_hello(1).await;
+    assert_error(&client.recv().await, "server_unreachable");
+
+    // And the squatter registering again takes nothing from the owner.
+    let mut owner = harness.server_as(SERVER_ID, 1).await;
+    let _again = harness.server_as(SERVER_ID, 2).await;
+    let mut client = harness.keyed_client(1).await;
+    let stream_id = client.open_stream("a1").await;
+    assert_eq!(owner.expect_stream_open_and_ack().await, stream_id);
+}
+
+#[tokio::test]
+async fn open_supersession_is_per_key() {
+    let mut config = config();
+    config.open = true;
+    config.supersession_drain = Duration::from_millis(200);
+    let harness = Harness::start(config).await;
+    let mut first = harness.server_as(SERVER_ID, 1).await;
+    let mut other_key = harness.server_as(SERVER_ID, 2).await;
+
+    let mut on_first = harness.keyed_client(1).await;
+    let first_stream = on_first.open_stream("a1").await;
+    first.expect_stream_open_and_ack().await;
+    let mut on_other = harness.keyed_client(2).await;
+    let other_stream = on_other.open_stream("a2").await;
+    other_key.expect_stream_open_and_ack().await;
+
+    let _second = harness.server_as(SERVER_ID, 1).await;
+    assert_eq!(harness.relay.registrations.len(), 2);
+
+    let reply = on_first.recv().await;
+    assert_error(&reply, "trunk_superseded");
+    assert_eq!(reply["stream_id"], first_stream, "{reply}");
+    // The other key's trunk and its stream are untouched.
+    assert!(on_other.is_silent_for(Duration::from_millis(400)).await);
+    other_key
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": other_stream }))
+        .await;
+    assert_eq!(on_other.recv().await["type"], "CLOSE");
+}
+
+#[tokio::test]
+async fn an_open_relay_refuses_a_keyless_hello_at_once() {
+    let mut config = config();
+    config.open = true;
+    config.hello_wait = Duration::from_secs(5);
+    let harness = Harness::start(config).await;
+    let _server = harness.server_as(SERVER_ID, 1).await;
+
+    let started = std::time::Instant::now();
+    let mut client = harness.hello("", keyless_hello()).await;
+    assert_error(&client.recv().await, "server_unreachable");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a keyless HELLO was held"
+    );
+
+    // A query alone names no key: the HELLO is still keyless.
+    let mut client = harness
+        .hello(&format!("?pubkey={}", pubkey_b64(1)), keyless_hello())
+        .await;
+    assert_error(&client.recv().await, "server_unreachable");
+}
+
+#[tokio::test]
+async fn an_allowlist_or_tofu_relay_routes_a_hello_only_to_the_key_it_names() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server_as(SERVER_ID, 1).await;
+
+    // Another key: as if no trunk were live.
+    let mut wrong = harness.keyed_hello(2).await;
+    assert_error(&wrong.recv().await, "server_unreachable");
+
+    let mut right = harness.keyed_client(1).await;
+    let stream_id = right.open_stream("keyed").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+
+    // A client older than 115 still reaches the one registration.
+    let mut old = harness.client().await;
+    let stream_id = old.open_stream("keyless").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+}
+
+#[tokio::test]
+async fn a_malformed_or_disagreeing_hello_pubkey_is_a_protocol_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/srp-vectors.json");
+    let vectors: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let hello_pubkey = &vectors["hello_pubkey"];
+
+    for open in [false, true] {
+        let mut config = config();
+        config.open = open;
+        let harness = Harness::start(config).await;
+        let _server = harness.server_as(SERVER_ID, 1).await;
+
+        let refused = hello_pubkey["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["accepted"] == false);
+        let mut seen = 0;
+        for case in refused {
+            seen += 1;
+            let hello = json!({
+                "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": case["pubkey"],
+            });
+            let mut client = harness.hello("", hello).await;
+            let reply = client.recv().await;
+            assert_eq!(reply["code"], "protocol_error", "{} {reply}", case["name"]);
+        }
+        assert!(seen > 0, "no refused spellings in the vectors");
+
+        let hello = json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": 7 });
+        let mut client = harness.hello("", hello).await;
+        assert_error(&client.recv().await, "protocol_error");
+
+        let agree = &hello_pubkey["query_and_hello_must_agree"];
+        let hello = json!({
+            "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": agree["hello_pubkey"],
+        });
+        let query = format!("?pubkey={}", agree["query_pubkey"].as_str().unwrap());
+        let mut client = harness.hello(&query, hello).await;
+        assert_error(&client.recv().await, agree["result"].as_str().unwrap());
+    }
+}

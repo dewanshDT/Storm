@@ -137,12 +137,20 @@ const srpServerSideCodes = {
   'trunk_lost',
 };
 
+/// [url] with `pubkey=<key>` set (§4.3), replacing any it carried. base64url
+/// needs no percent-encoding.
+Uri keyedConnectUrl(Uri url, String key) {
+  if (key.isEmpty) return url;
+  return url.replace(queryParameters: {...url.queryParameters, 'pubkey': key});
+}
+
 /// One relay at a time. Create a fresh trunk for each relayed connection; a
 /// dropped trunk re-races from scratch rather than migrating (§2).
 class SrpTrunk {
   SrpTrunk({
-    required this.url,
+    required Uri url,
     required this.serverId,
+    this.serverKey = '',
     this.connector,
     this.heartbeat = const Duration(seconds: 15),
     Duration? silenceLimit,
@@ -152,15 +160,22 @@ class SrpTrunk {
     this.maxPendingOpens = 19,
     this.maxQueuedFrames = 256,
     ConnectionLog? log,
-  }) : silenceLimit = silenceLimit ?? heartbeat * 3,
+  }) : url = keyedConnectUrl(url, serverKey),
+       silenceLimit = silenceLimit ?? heartbeat * 3,
        _log = log ?? ConnectionLog.instance;
 
   final ConnectionLog _log;
   final Stopwatch _age = Stopwatch();
 
-  /// The full `wss://<relay>/connect/<server_id>` URL to dial.
+  /// The full `wss://<relay>/connect/<server_id>` URL to dial, with
+  /// `?pubkey=` when [serverKey] is known (§4.3).
   final Uri url;
   final String serverId;
+
+  /// The key pinned at pairing, base64url unpadded. Named in `HELLO` and on
+  /// the URL so an open relay routes to that registration only (§5). Empty
+  /// only before pairing has pinned one.
+  final String serverKey;
 
   /// Test seam. Without one the trunk opens an [SrpSocket], whose writes
   /// wait for the network; a channel's sink only buffers.
@@ -317,7 +332,12 @@ class SrpTrunk {
         onDone: () => _fail('socket_closed'),
         cancelOnError: true,
       );
-      _send(SrpControl.encode('HELLO', {'server_id': serverId}));
+      _send(
+        SrpControl.encode('HELLO', {
+          'server_id': serverId,
+          if (serverKey.isNotEmpty) 'pubkey': serverKey,
+        }),
+      );
     } catch (_) {
       _fail('socket_error');
     }

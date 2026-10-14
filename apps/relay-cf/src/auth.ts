@@ -100,9 +100,15 @@ function isCurvePoint(bytes: Uint8Array): boolean {
 }
 
 export function parsePublicKey(text: string): Uint8Array | null {
+  const bytes = decodeKey(text);
+  return bytes && isCurvePoint(bytes) ? bytes : null;
+}
+
+// A key a client names (HELLO.pubkey, ?pubkey=): 32 bytes, strict base64url
+// (§5). Not checked as a point; it is only compared with keys that were.
+export function decodeKey(text: string): Uint8Array | null {
   const bytes = b64urlDecode(text);
-  if (!bytes || bytes.length !== 32) return null;
-  return isCurvePoint(bytes) ? bytes : null;
+  return bytes && bytes.length === 32 ? bytes : null;
 }
 
 export function sameKey(a: Uint8Array, b: Uint8Array): boolean {

@@ -373,15 +373,13 @@ class StormConnection {
     final url = c.relayUrl!;
     var trunk = _trunks[url];
     if (trunk == null || trunk.isClosed) {
-      final connector = relayConnector;
-      trunk = connector == null
-          ? SrpTrunk(url: Uri.parse(url), serverId: serverId, log: _log)
-          : SrpTrunk(
-              url: Uri.parse(url),
-              serverId: serverId,
-              log: _log,
-              connector: connector,
-            );
+      trunk = SrpTrunk(
+        url: Uri.parse(url),
+        serverId: serverId,
+        serverKey: publicKeyB64,
+        log: _log,
+        connector: relayConnector,
+      );
       final born = trunk;
       born.onTrunkLost.listen((reason) {
         if (identical(_trunks[url], born) && url == _activeRelayUrl) {

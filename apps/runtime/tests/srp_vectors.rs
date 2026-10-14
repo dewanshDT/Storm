@@ -75,11 +75,35 @@ async fn a_trunk_never_dials_a_server_id_the_vectors_refuse() {
             continue;
         }
         // Port 9 on loopback: nothing should ever be dialled to find out.
-        let err = SrpTrunk::connect("ws://127.0.0.1:9", s(case, "server_id"))
+        let key = s(&doc["keys"], "test_public_key_b64");
+        let err = SrpTrunk::connect("ws://127.0.0.1:9", s(case, "server_id"), key)
             .await
             .unwrap_err();
         assert_eq!(err.code(), "invalid_relay_target", "{}", s(case, "name"));
     }
+}
+
+#[tokio::test]
+async fn hello_pubkey_spellings_are_judged_as_recorded() {
+    let doc = vectors();
+    let section = &doc["hello_pubkey"];
+    for case in cases(section, "cases") {
+        let accepted = case["accepted"].as_bool().unwrap();
+        assert_eq!(
+            codec::validate_key(s(case, "pubkey")).is_ok(),
+            accepted,
+            "hello_pubkey vector `{}`",
+            s(case, "name")
+        );
+        if !accepted {
+            let err = SrpTrunk::connect("ws://127.0.0.1:9", "srv_A", s(case, "pubkey"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_relay_target", "{}", s(case, "name"));
+        }
+    }
+    let hello: Value = serde_json::from_str(&codec::hello("srv_A", "k")).unwrap();
+    assert_eq!(hello["pubkey"], "k");
 }
 
 #[test]
