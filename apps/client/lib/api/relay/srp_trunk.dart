@@ -256,6 +256,11 @@ class SrpTrunk {
   /// answer what it has not been sent (§5.2).
   final Stopwatch _sinceHeard = Stopwatch();
 
+  /// Frames received for any stream: heads, bodies, `STREAM_READY`, `CLOSE`,
+  /// `ERROR`. Not `PING`/`PONG`, which prove only the relay is there.
+  int get streamFramesReceived => _streamFrames;
+  int _streamFrames = 0;
+
   /// Why the trunk is dead: the relay's own `ERROR` code when it sent one,
   /// otherwise the [onTrunkLost] reason.
   String? get lossReason => _relayErrorCode ?? _lossReason;
@@ -365,6 +370,7 @@ class SrpTrunk {
       _fail('protocol_error');
       return;
     }
+    if (frame.type != 'PING' && frame.type != 'PONG') _streamFrames++;
     switch (frame.type) {
       case 'READY':
         _log.add('trunk ready after ${_age.elapsedMilliseconds} ms');
@@ -442,6 +448,7 @@ class SrpTrunk {
   }
 
   void _onBody(List<int> raw) {
+    _streamFrames++;
     final frame = decodeBodyFrame(raw);
     if (frame == null || frame.kind != bodyResponse) {
       _fail('protocol_error');

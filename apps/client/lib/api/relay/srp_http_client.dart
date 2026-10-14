@@ -92,10 +92,15 @@ class SrpHttpClient extends http.BaseClient {
       // The response is the head, which may have already arrived. If the trunk
       // finished this stream first (a refused open, trunk loss), surface that
       // as a transport error, not as an HTTP response.
-      final response = await pipe.response.timeout(
-        ttfb,
-        onTimeout: () => throw const SrpTransportException('server_silent'),
-      );
+      final ttfbWatch = QuietWatch(trunk, ttfb, () {
+        pipe.failSilent();
+      });
+      final http.StreamedResponse? response;
+      try {
+        response = await pipe.response;
+      } finally {
+        ttfbWatch.cancel();
+      }
       if (response == null) {
         throw const SrpTransportException('no_response_head');
       }
@@ -130,7 +135,7 @@ class _ResponsePipe {
   final SrpTrunk trunk;
   final SrpStream stream;
   final Duration idle;
-  Timer? _idleTimer;
+  QuietWatch? _idleTimer;
   bool _exempt = false;
   late final StreamController<Uint8List> _body;
   final _head = Completer<http.StreamedResponse?>();
@@ -176,11 +181,13 @@ class _ResponsePipe {
   void _armIdle() {
     _idleTimer?.cancel();
     if (_exempt) return;
-    _idleTimer = Timer(idle, () {
-      if (_done) return;
-      _fail(const SrpTransportException('server_silent'));
-      trunk.closeStream(stream);
-    });
+    _idleTimer = QuietWatch(trunk, idle, failSilent);
+  }
+
+  void failSilent() {
+    if (_done) return;
+    _fail(const SrpTransportException('server_silent'));
+    trunk.closeStream(stream);
   }
 
   void onDone() {
@@ -205,4 +212,43 @@ class _ResponsePipe {
       _head.completeError(error);
     }
   }
+}
+
+/// Calls [onSilent] once [limit] passes with no stream frame on [trunk]
+/// (§8.7 rule 4). A response queued at the relay behind another stream's body
+/// is waiting, not silent: the trunk is busy delivering, and on a 2 Mbps link
+/// a small response can wait minutes behind a download.
+class QuietWatch {
+  QuietWatch(this.trunk, this.limit, this.onSilent) {
+    _seen = trunk.streamFramesReceived;
+    _quiet.start();
+    var tick = limit ~/ 4;
+    if (tick > const Duration(seconds: 1)) tick = const Duration(seconds: 1);
+    if (tick < const Duration(milliseconds: 1)) {
+      tick = const Duration(milliseconds: 1);
+    }
+    _timer = Timer.periodic(tick, (_) => _check());
+  }
+
+  final SrpTrunk trunk;
+  final Duration limit;
+  final void Function() onSilent;
+  final Stopwatch _quiet = Stopwatch();
+  late int _seen;
+  late final Timer _timer;
+
+  void _check() {
+    final n = trunk.streamFramesReceived;
+    if (n != _seen) {
+      _seen = n;
+      _quiet.reset();
+      return;
+    }
+    if (_quiet.elapsed >= limit) {
+      cancel();
+      onSilent();
+    }
+  }
+
+  void cancel() => _timer.cancel();
 }

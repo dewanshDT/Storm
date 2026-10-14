@@ -8013,6 +8013,69 @@ comment and §5.4's `CLOSE` toward the origin.)*
   throughput, or 116d's per-stream queues make the origin's FIFO lane
   replaceable by the Dart client's round robin.
 
+**116g + 116h. The app follows the client state machine (§8); and the
+client half of 116c.** *(2026-10-14; Phase 2 slices of the relay spec gap
+audit. Spec: the vault's *Storm Relay Protocol* §8, §2.1–2.2 (114d), §4.3
+(114e as amended), §5.1.)*
+- **The phone bug it closes.** The operator's LTE connection log on the 113
+  build: after a trunk loss a scheduled "reconnect in 1s" fired a `reset` that
+  killed a race 999 ms into its handshake; two timers were then pending, and
+  another reset killed a race 2000 ms in. Recovery took ~10 s where one
+  uninterrupted race takes 2–4 s.
+- **Rules now held by `StormConnection` (§8):**
+  1. One owner, single flight; a race is never cancelled, and a race the
+     Connection's end overtook adopts nothing.
+  2. A scheduled reconnect only *ensures connected*: no-op while racing or
+     connected. At most one timer is pending, earliest wins.
+  3. Only positive failures reset: the active trunk lost (`trunk_lost`,
+     `trunk_superseded`), a connection-level error on the direct transport,
+     an identity failure, a race concluding with no candidate. A feed ending
+     re-opens on the same transport; a stream-scoped error or any HTTP status
+     changes nothing (`requestFailed`).
+  4. Backoff per Connection with jitter, cleared only after 60 s connected.
+  5. A network change or app resume probes the live transport and re-races
+     only if the probe fails.
+  6. Status per §8.6: `serverOffline` is decided per race, never latched by a
+     stream error; an identity failure stays its own state.
+- **Race tiers (114d).** `storm-relay.dewansh.space` is in `kPublicRelayHosts`;
+  the public round starts only after every direct and self-hosted candidate
+  failed or hit its 15 s deadline — no 2 s timer.
+- **Relay set (§4.3).** Adopted only from the proven winner, only when its
+  `server_id` and key match the pinned ones (keys compared as strictly
+  decoded bytes). `ws://` only on loopback, RFC 1918, link-local and ULA —
+  never `100.64/10` — on the session connection as on pairing and sign-in.
+- **116c, client half (§5.1).** No open timer while the open is unsent, at
+  least 15 s once written; a late `STREAM_READY` after a timeout is answered
+  with `CLOSE`; at most `cap − 1` opens pending.
+- **Also fixed on the way:** `refreshSession` read `connectionProvider` from
+  inside `SettingsNotifier` — a Riverpod cycle that made every refresh fail;
+  the connection is now handed to the notifier instead. `directHttpClient()`
+  built its own `IOClient`, bypassing `http.runWithClient`; it now honours an
+  injected client.
+- **Measured** (fake relay, LTE latency): a trunk loss recovers in **3.6 s
+  with one race (2.6 s)**, against ~10 s on the phone before.
+- Tests: `relayed_reconnect_test` (the LTE trunk-loss scenario, demand during
+  a race, feed end on the same trunk, stream-scoped errors, token change keeps
+  the trunk, refresh over the live transport, rebuilt connection closes the
+  old trunk), `storm_connection_test`, `srp_liveness_test`,
+  `server_verifier_test` (an HTTP refusal is `impostor` per 114i; identity
+  failure shown as untrusted, never offline), `router_test`. Client 1121 pass.
+- *Revisit if:* a phone log shows a reset not caused by one of the positive
+  failures above, or recovery after a trunk loss takes more than one race.
+
+*116h addendum (2026-10-15):* CI's throttled live test (2 Mbps, 20 MiB both
+ways) failed two small requests with `server_silent`: §8.7 rule 4's `T_ttfb`
+ran on the wall clock, and with no fairness yet (116d) a small response waits
+behind a download's body at the relay for longer than 30 s. The trunk was busy
+delivering the whole time, so the request was waiting, not silent. `T_ttfb` and
+`T_idle` now count only time in which the trunk receives no stream frame
+(`QuietWatch` over `SrpTrunk.streamFramesReceived`; `PING`/`PONG` do not
+count, or the client's own heartbeat would keep every request alive). A truly
+silent server on a quiet trunk still fails at `T_ttfb`. Amended into the vault
+spec's §8.7 rule 4 and its timer table. Merging 116n into this branch had
+dropped this entry from `PLAN.md` (the merge helper did not recognise a
+`116g + 116h` heading); it is restored here.
+
 **116n. Key-addressed registration: an `open` mode in both relays, and the
 pinned key in every client's `HELLO`.** *(2026-10-14; decision 114f, spec
 revision 115 §4.1, §4.2, §5 and the 114f addendum; gaps SG-62, SG-70. The
