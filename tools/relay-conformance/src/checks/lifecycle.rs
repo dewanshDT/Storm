@@ -23,6 +23,10 @@ pub fn checks() -> Vec<Check> {
         check!("§4.2", a_ping_is_answered_at_any_point_on_a_trunk),
         check!("§4.2", a_heartbeating_server_outlives_the_deadline),
         check!("§4.2", a_silent_server_is_dead_at_the_deadline),
+        check!(
+            "§5",
+            a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin
+        ),
         check!("§4.2", deregister_frees_the_server_id_at_once),
         check!("§4.2", a_superseded_trunk_drains_then_ends_trunk_superseded),
         check!("§4.2", an_unfinished_registration_supersedes_nothing),
@@ -169,6 +173,41 @@ async fn a_silent_server_is_dead_at_the_deadline(ctx: &Ctx) -> Result<()> {
     hello(&late, &pair.identity.server_id).await?;
     late.expect_error("server_unreachable", ctx.knobs.hello_wait + STEP)
         .await?;
+    Ok(())
+}
+
+/// §5 client heartbeat (116e): a client trunk heard nothing from for the
+/// deadline is ended as if the client had closed it, and each of its streams
+/// is closed at the origin. Without it a client that vanished holds its
+/// streams, and the origin's work for them, for ever.
+async fn a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin(
+    ctx: &Ctx,
+) -> Result<()> {
+    let mut pair = ctx.stream().await?;
+    pair.client.go_silent();
+    let silent_since = Instant::now();
+    let closed = pair
+        .server
+        .wait_for(
+            "CLOSE for the silent client's stream",
+            ctx.knobs.heartbeat_deadline + STEP,
+            |f| matches!(f, Frame::Text(v) if v["type"] == "CLOSE"),
+        )
+        .await?;
+    let Frame::Text(closed) = closed else {
+        unreachable!()
+    };
+    ensure!(
+        closed["stream_id"] == pair.stream_id,
+        "CLOSE {closed} for stream {}",
+        pair.stream_id
+    );
+    ensure!(
+        silent_since.elapsed() >= ctx.knobs.heartbeat_deadline / 2,
+        "the client was reaped after {:?} of silence; the deadline is {:?}",
+        silent_since.elapsed(),
+        ctx.knobs.heartbeat_deadline
+    );
     Ok(())
 }
 

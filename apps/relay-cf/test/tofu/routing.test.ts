@@ -474,6 +474,22 @@ describe("trunk loss", () => {
     await client(serverId);
   });
 
+  // §5 client heartbeat: a client heard nothing from for the deadline is gone,
+  // and each of its streams ends at the origin.
+  it("reaps a silent client trunk and closes its streams at the origin", async () => {
+    const { server, client: c } = await pair();
+    const stop = server.keepAlive();
+    try {
+      const streamId = await openStream(c);
+      await expectOpenAndAck(server);
+      const closed = await server.recv(5000);
+      expect(closed).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
+      await c.expectClosed(1000);
+    } finally {
+      stop();
+    }
+  });
+
   it("drops a silent server at the deadline and tells its clients", async () => {
     const { client: c, server } = await pair();
     const streamId = await openStream(c);
