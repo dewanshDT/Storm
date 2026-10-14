@@ -3,6 +3,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../state/app_state.dart' show sessionClientProvider;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/session_status.dart' show StatusPill;
@@ -22,7 +23,8 @@ final integrationsApiFactoryProvider = Provider<IntegrationsApi Function()?>((
   final session = ref.watch(sessionCredentialsProvider);
   if (session == null) return null;
   final (baseUrl, token) = session;
-  return () => IntegrationsApi(baseUrl: baseUrl, token: token);
+  final client = ref.watch(sessionClientProvider);
+  return () => IntegrationsApi(baseUrl: baseUrl, token: token, client: client);
 });
 
 /// Opens a URL in the system browser. Tests override it.

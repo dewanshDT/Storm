@@ -447,12 +447,11 @@ class StormApi {
     return r.bodyBytes;
   }
 
-  /// A URL an `Image.network` can fetch directly.
-  ///
-  /// The credential rides in the query string because Flutter's image widgets
-  /// can't set headers on the request they make.
-  Uri attachmentUrl(String vaultId, String path) =>
-      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': credential});
+  /// Where an attachment lives, for [StormImageProvider], which sends the
+  /// credential as a header on this client. No credential in the URL: the
+  /// query-string form this replaced was never used by the app.
+  Uri attachmentUri(String vaultId, String path) =>
+      _uri(_v(vaultId, '/attachments/${_path(path)}'));
 
   /// A single-use, 60-second credential for the change-feed handshake.
   ///

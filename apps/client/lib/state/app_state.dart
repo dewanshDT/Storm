@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
+import '../api/connection_client.dart';
 import '../api/models.dart';
 import '../api/pairing_route.dart';
 import '../api/storm_connection.dart';
@@ -806,8 +807,29 @@ bool _relaysEqual(List<RelayAdvert> a, List<RelayAdvert> b) {
 ///
 /// Derived from the connection rather than built beside it, so there is one
 /// answer to "where is the server" and it lives behind the seam.
+///
+/// Its calls go through a [ConnectionClient], not straight to `connection.api`:
+/// that follows whichever candidate is active, which before the first race is
+/// the saved address, so a device off the LAN with no vault open (nothing has
+/// started the sync engine) could not even list its vaults (decision 112).
 final apiProvider = Provider<StormApi?>((ref) {
-  return ref.watch(connectionProvider)?.api;
+  final connection = ref.watch(connectionProvider);
+  if (connection == null) return null;
+  return StormApi(
+    baseUrl: connection.localAddress,
+    token: connection.token,
+    client: ConnectionClient(() => connection),
+  );
+});
+
+/// An `http.Client` for session calls built outside [StormApi] (Agents,
+/// Integrations), over whatever connection the app has when each request is
+/// sent (decision 112). Those clients are addressed to the saved address and
+/// must not be rebuilt on every settings save, so this resolves the
+/// connection per request rather than watching it.
+final sessionClientProvider = Provider<ConnectionClient>((ref) {
+  final container = ref.container;
+  return ConnectionClient(() => container.read(connectionProvider));
 });
 
 /// The vault the note-level providers are serving, or `''` when none is open
