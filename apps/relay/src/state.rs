@@ -72,6 +72,9 @@ struct Stream {
     /// `STREAM_OPEN` sent, `STREAM_ACK` not yet seen. This is what the in-flight
     /// cap counts (§5.1).
     acked: bool,
+    /// The client's `HTTP_REQUEST_HEAD` has been forwarded. A stream carries
+    /// exactly one (§5.2).
+    head_sent: bool,
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +92,17 @@ struct StreamTable {
 pub enum OpenRefused {
     TooManyInFlight,
     IdsExhausted,
+}
+
+/// What a client's `HTTP_REQUEST_HEAD` may do on a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadClaim {
+    /// Not this client's stream, or not a live one: `stream_closed`.
+    NotOwned,
+    /// The stream's one head; forward it.
+    First,
+    /// A second head on the client's own stream (§5.2).
+    Repeat,
 }
 
 impl ServerTrunk {
@@ -165,6 +179,7 @@ impl ServerTrunk {
                 client_trunk_id: client_trunk_id.to_string(),
                 client,
                 acked: false,
+                head_sent: false,
             },
         );
         Ok(stream_id)
@@ -219,6 +234,21 @@ impl ServerTrunk {
             .open
             .get(&stream_id)
             .is_some_and(|stream| stream.client_trunk_id == client_trunk_id)
+    }
+
+    /// Records the head of a stream the client owns, once.
+    pub fn claim_head(&self, stream_id: u32, client_trunk_id: &str) -> HeadClaim {
+        let mut table = self.streams.lock().expect("streams mutex");
+        match table.open.get_mut(&stream_id) {
+            Some(stream) if stream.client_trunk_id == client_trunk_id => {
+                if std::mem::replace(&mut stream.head_sent, true) {
+                    HeadClaim::Repeat
+                } else {
+                    HeadClaim::First
+                }
+            }
+            _ => HeadClaim::NotOwned,
+        }
     }
 
     pub fn close_stream(&self, stream_id: u32) {

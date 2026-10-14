@@ -305,6 +305,7 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
                     Ok(false) => Ok(()),
                     Err(fault) => Err(fault),
                 },
+                "ERROR" => server_error(session, frame),
                 _ => Err(ErrorCode::ProtocolError.into()),
             },
             Incoming::Body {
@@ -401,6 +402,32 @@ fn drop_backlogged_client(session: &Session, stream_id: u32, client: &Tx) {
         .trunk
         .tx()
         .try_send_json(proto::close_stream(stream_id));
+}
+
+/// An `ERROR` from the origin, which §6 does not allow it to send.
+///
+/// Origins before 116a sent `ERROR{stream_closed, stream_id}` to refuse one
+/// stream. The trunk is shared by every client of the server, so a refusal
+/// that names a stream ends that stream only, as an aborted one.
+fn server_error(session: &Session, frame: Frame) -> Result<(), Fault> {
+    if !frame.body.contains_key("stream_id") {
+        return Err(ErrorCode::ProtocolError.into());
+    }
+    let stream_id = proto::stream_id_of(&frame.body)?;
+    tracing::debug!(stream_id, "origin refused a stream with ERROR");
+    let closing = session.trunk.client_for(stream_id);
+    session.trunk.close_stream(stream_id);
+    if let Some(client) = closing {
+        client.end_stream(
+            stream_id,
+            proto::error_on_stream(ErrorCode::StreamAborted, stream_id),
+        );
+    }
+    let _ = session
+        .trunk
+        .tx()
+        .try_send_json(proto::close_stream(stream_id));
+    Ok(())
 }
 
 /// `CLOSE` from the origin. Returns whether the whole trunk is going away.

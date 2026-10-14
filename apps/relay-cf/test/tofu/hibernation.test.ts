@@ -83,6 +83,34 @@ describe("after an eviction", () => {
     expect(await server.silentFor(150)).toBe(true);
   });
 
+  it("still refuses a second head", async () => {
+    const serverId = uniqueId();
+    const { peer: server } = await register(serverId);
+    const c = await client(serverId);
+    const streamId = await openStream(c);
+    await expectOpenAndAck(server);
+    c.send(requestHead(streamId));
+    expect((await server.recv()).type).toBe("HTTP_REQUEST_HEAD");
+    await evict(serverId);
+    c.send(requestHead(streamId));
+    expectError(await c.recv(), "stream_closed");
+    expect(await server.recv()).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
+  });
+
+  it("adds the head column to a streams table from before 116a", async () => {
+    const serverId = uniqueId();
+    const { peer: server } = await register(serverId);
+    const c = await client(serverId);
+    await runInDurableObject(room(serverId), (instance: RelayRoom) => {
+      (instance as unknown as { ctx: DurableObjectState }).ctx.storage.sql.exec("ALTER TABLE streams DROP COLUMN head");
+    });
+    await evict(serverId);
+    const streamId = await openStream(c);
+    await expectOpenAndAck(server);
+    c.send(requestHead(streamId));
+    expect((await server.recv()).type).toBe("HTTP_REQUEST_HEAD");
+  });
+
   it("times out an unacknowledged open from the alarm", async () => {
     const serverId = uniqueId();
     const { peer: server } = await register(serverId);

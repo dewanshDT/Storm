@@ -248,6 +248,109 @@ describe("a stream", () => {
   });
 });
 
+// Every client of a server shares its one trunk, so nothing a client puts in a
+// head may reach the origin in a form that ends it (116a).
+describe("one client and the shared trunk", () => {
+  // Acks the next STREAM_OPEN, past CLOSEs a refused client left behind; no
+  // head may reach the origin meanwhile.
+  async function ackNextOpen(server: Peer): Promise<number> {
+    for (;;) {
+      const frame = await server.recv();
+      expect(frame.type, JSON.stringify(frame)).not.toBe("HTTP_REQUEST_HEAD");
+      if (frame.type === "STREAM_OPEN") {
+        server.send({ v: 1, type: "STREAM_ACK", stream_id: frame.stream_id });
+        return frame.stream_id;
+      }
+    }
+  }
+
+  async function stillServes(server: Peer, bob: Peer) {
+    const streamId = await openStream(bob, "bob");
+    expect(await ackNextOpen(server)).toBe(streamId);
+    bob.send(requestHead(streamId));
+    const head = await server.recv();
+    expect(head.type).toBe("HTTP_REQUEST_HEAD");
+    expect(head.stream_id).toBe(streamId);
+    server.send(responseHead(streamId));
+    const reply = await bob.recv();
+    expect(reply.type).toBe("HTTP_RESPONSE_HEAD");
+    expect(reply.stream_id).toBe(streamId);
+  }
+
+  it("refuses a head whose header values are not strings, to its sender only", async () => {
+    const serverId = uniqueId();
+    const { peer: server } = await register(serverId);
+    const bob = await client(serverId);
+    for (const headers of [{ x: 1 }, { x: null }, { x: ["a"] }, [["x", "1"]]]) {
+      const mallory = await client(serverId);
+      const streamId = await openStream(mallory, "m");
+      expect(await ackNextOpen(server)).toBe(streamId);
+      mallory.send({ ...requestHead(streamId), headers });
+      expectError(await mallory.recv(), "protocol_error");
+    }
+    for (const [field, value] of [
+      ["method", ""],
+      ["method", "GE T"],
+      ["path", "v1/notes"],
+      ["path", "/a b"],
+    ]) {
+      const mallory = await client(serverId);
+      const streamId = await openStream(mallory, "m");
+      expect(await ackNextOpen(server)).toBe(streamId);
+      mallory.send({ ...requestHead(streamId), [field]: value });
+      expectError(await mallory.recv(), "protocol_error");
+    }
+    await stillServes(server, bob);
+  });
+
+  it("refuses a second head with stream_closed and never forwards it", async () => {
+    const serverId = uniqueId();
+    const { peer: server } = await register(serverId);
+    const mallory = await client(serverId);
+    const bob = await client(serverId);
+    const streamId = await openStream(mallory, "m");
+    await expectOpenAndAck(server);
+    mallory.send(requestHead(streamId));
+    expect((await server.recv()).type).toBe("HTTP_REQUEST_HEAD");
+
+    mallory.send(requestHead(streamId));
+    const refused = await mallory.recv();
+    expectError(refused, "stream_closed");
+    expect(refused.stream_id).toBe(streamId);
+    expect(await server.recv()).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
+
+    const next = await openStream(mallory, "m2");
+    expect(await ackNextOpen(server)).toBe(next);
+    await stillServes(server, bob);
+  });
+
+  it("ends only the stream an origin's ERROR names, as stream_aborted", async () => {
+    const serverId = uniqueId();
+    const { peer: server } = await register(serverId);
+    const alice = await client(serverId);
+    const bob = await client(serverId);
+    const streamId = await openStream(alice, "a");
+    await expectOpenAndAck(server);
+
+    server.send({ v: 1, type: "ERROR", code: "stream_closed", message: "stream closed", stream_id: streamId });
+    const ended = await alice.recv();
+    expectError(ended, "stream_aborted");
+    expect(ended.stream_id).toBe(streamId);
+    expect(await server.recv()).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
+    await stillServes(server, bob);
+  });
+
+  it("still ends the trunk on a trunk-scoped origin ERROR", async () => {
+    const { server, client: c } = await pair();
+    const streamId = await openStream(c);
+    await expectOpenAndAck(server);
+    server.send({ v: 1, type: "ERROR", code: "protocol_error", message: "x" });
+    const lost = await c.recv();
+    expectError(lost, "trunk_lost");
+    expect(lost.stream_id).toBe(streamId);
+  });
+});
+
 describe("a client trunk", () => {
   it("is told server_unreachable when nothing registers within the HELLO wait", async () => {
     const serverId = uniqueId();

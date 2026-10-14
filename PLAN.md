@@ -7548,6 +7548,110 @@ decision 108; vault: *Hosted Relay — Cloudflare*.)*
 `server_id` on the upgrade); or step 2 (relay accounts, Q14, Q15) changes
 who may register.
 
+**116a. A client can't end a shared trunk.** *(2026-10-14; the first slice
+of the relay spec gap audit's Phase 2, vault *Remote/Relay Spec Gap Audit*;
+gaps SG-04, SG-05, SG-13, SG-31 = audit A's G6, G7, G5, G10. Decisions 114
+and 115, the operator's choices and the spec text, land in their own PR.)*
+- **The bug (confirmed, cross-tenant).** Every client of a server shares the
+  server's one trunk at the relay, and any anonymous client could end it:
+  - **A malformed head (G6).** Both relays checked only that `headers` was
+    an object. `{"headers":{"x":1}}` failed storm-server's typed parse of the
+    whole frame; `handle_control` then sent `ERROR{protocol_error}` and
+    returned `false`, ending `serve_trunk` (`client.rs:521-526`). Every
+    relayed client of the server got `trunk_lost`; the server re-registered
+    after 1 s and the attacker could repeat.
+  - **A second head (G7).** Neither relay tracked heads, so two
+    `HTTP_REQUEST_HEAD`s on a client's *own* stream were both forwarded.
+    storm-server answered the second with `ERROR{stream_closed}`
+    (`client.rs:554-556`), as `srp-v1.md` §5.1 told it to, while §6 says
+    `ERROR` from anyone but the relay is `protocol_error`. Both relays
+    applied §6 (`register.rs:308`, `room.ts:359`) and dropped the server
+    trunk.
+  - Reproduced by the new tests below on `origin/staging`'s sources: each
+    one fails there (R 3/3, W 5/5, O 4/4).
+- **The fix, as rules** (for the spec PR to lift into §5.1, §5.2 and §6):
+  1. **Head shape (G5).** `headers` is a JSON object whose values are
+     strings; `method` is an HTTP token; `path` is origin-form (starts with
+     `/`, no space or control byte). storm-server drops the pair form it
+     accepted (`[["k","v"]]`): neither relay could deliver one.
+  2. **A relay refuses a malformed head** with `protocol_error` to that
+     client and never forwards it. **Chosen:** trunk-scoped on the sender's
+     own trunk (§6 says `protocol_error` is always trunk-scoped, and audit
+     item 11's text says so), not a new stream-scoped use of the code. The
+     server trunk, the one other clients share, is never touched.
+  3. **A relay refuses a second head** on a stream with
+     `ERROR{stream_closed, stream_id}`, never forwards it, ends the stream
+     and sends `CLOSE{stream_id}` to the origin (a party that sends a
+     stream-scoped `ERROR` forgets the stream). The sender's trunk carries
+     on. The Worker keeps the flag in its `streams` table (`head` column,
+     added by `ALTER TABLE` on wake for rooms from before this), so it holds
+     across hibernation.
+  4. **An origin never sends `ERROR`.** storm-server refuses one stream with
+     `CLOSE{stream_id, aborted:true}` (101's mechanism): a duplicate
+     `STREAM_OPEN`, a second head, a head for a stream it does not have. A
+     first head it cannot interpret (now `Inbound::BadHead`, parsed per
+     stream) is answered completely: `HTTP_RESPONSE_HEAD{400}` and `CLOSE`,
+     the path `build_request` failures already took. Only a frame from the
+     relay that does not parse at all ends the trunk, with `CLOSE {}`.
+  5. **A relay never drops a server trunk over a stream-scoped origin
+     `ERROR`.** One naming a `stream_id` ends that stream: `stream_aborted`
+     to its client, `CLOSE` to the origin. A trunk-scoped one is still
+     `protocol_error`.
+  6. **An empty `0x02` frame is ignored** (G10). The Dart client pushed an
+     empty chunk; the Rust client already ignored it.
+- **Compatibility.** Relays deploy first, as the audit orders, but either
+  side upgraded closes the hole:
+
+  | | old server | new server |
+  |---|---|---|
+  | **old relay** | open (both bugs) | closed: a bad head is 400 + `CLOSE`, a second one `CLOSE{aborted}` (`stream_aborted` at relays since 101, a plain `CLOSE` before), never `ERROR` |
+  | **new relay** | closed: nothing malformed or repeated reaches the server; an `ERROR` it still sends ends one stream | closed twice |
+
+  No correct client changes: Dart sends `Map<String,String>` headers, the
+  Rust client an object of strings, both an origin-form path. A client
+  that sends a bad path now gets `protocol_error` from the relay instead of
+  a 400 from the origin. The Worker's head flags for streams opened before
+  the deploy start unset, so such a stream could pass one second head, which
+  a new server aborts.
+- **Tests.** storm-relay `tests/routing.rs`:
+  `a_head_with_a_non_string_header_value_is_refused_and_never_forwarded`,
+  `a_second_head_is_refused_and_never_forwarded`,
+  `an_origin_error_naming_a_stream_ends_that_stream_only`,
+  `a_trunk_scoped_origin_error_is_still_a_protocol_error`, and a unit test
+  of the head shape; each multi-client test checks another client's request
+  still crosses the same server trunk. The Worker (vitest/workerd):
+  the same four in `routing.test.ts`, plus `hibernation.test.ts` "still
+  refuses a second head" across an eviction and the column migration on a
+  pre-116a table. storm-server `relay/tests.rs`:
+  `a_head_with_a_non_string_header_value_fails_its_stream_only`,
+  `a_second_head_aborts_its_stream_only`,
+  `a_stream_id_already_open_is_aborted_rather_than_acked_twice`,
+  `a_request_head_for_an_unopened_stream_is_aborted`, each then serving
+  another stream on the same trunk with no `ERROR` written and no
+  re-registration. Conformance, both relays: §5.2
+  `a_malformed_head_is_refused_to_that_client_only`,
+  `a_second_head_is_refused_and_not_forwarded`, §5.4
+  `an_origin_error_naming_a_stream_ends_that_stream_only`. Live
+  (`relay_live_test.dart`, R+O and W+O): raw sockets send a bad head and a
+  second head; the app's long-lived relayed client is still served and the
+  server still reports the relay. Dart: an empty `0x02` is not delivered.
+- **Against revision 115** (vault *Remote/Relay Protocol*, §5.1, §5.2, §3,
+  §6): rules 1–4 and 6 are its text. Rule 5 is not yet: 115 keeps "a relay
+  MUST treat an origin `ERROR` as `protocol_error`" *until 116a*, and says
+  nothing after it. The next spec edit should state rule 5, which the §5.4
+  conformance check already holds both relays to.
+- **Results.** `make check` green (server 609, relay 50 + 42 routing,
+  Worker 100, conformance 132, client 1089 + 1 skipped).
+  `make relay-conformance-local` and `make relay-conformance-cf` pass every
+  check (cf skips only the latency check, as before). `make test-live
+  PORT=19400 AUTH_PORT=19401 RELAY_PORT=19402` and the same with
+  `RELAY_IMPL=cf` on 19410–19412 exit 0: server 81, mcp 86, agent 93,
+  gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect live 39, client
+  integration 34, 1 skipped.
+- *Revisit if:* the spec words the malformed-head refusal as stream-scoped
+  (both relays and the conformance check change together), or a header that
+  cannot be folded (`Set-Cookie`) ever has to cross.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
