@@ -6136,6 +6136,28 @@ failed about 1 run in 4 on PRs that never touched the web client)*
   (it needs the same `_disposed` checks), `Settings.save` stops writing the
   credentials on every save, or the browser test needs a sign-out that
   happens inside the app.
+- **d. Addendum: the test typed into the page it was leaving (test bug).**
+  *(2026-10-14; CI run 38482550173 attempt 1 on #162, run 38483866802 on
+  #170)* After (c) landed, the same case failed a new way, staying on
+  `/login` with no token. The suspect was (c)'s preload script clearing a
+  token from a later page load. **Logging ruled that out:** the preload ran
+  exactly once in every run, failing runs included, and the tested tab loaded
+  exactly once. The cause was `browsingContext.navigate(wait="complete")`
+  returning while the **old** document was still current. The failing runs
+  report the old path (`/v/<id>/browse`) and the old `performance.timeOrigin`
+  right after the navigate. Flutter keeps its hidden password `<input>` in
+  that page, so `type_password` found it at once and typed into the page
+  being left. The new page then got only the Enter, logged at 70–120 ms
+  with an empty field, long before the app had drawn the login screen. This
+  had not been seen before (c), because then the case already failed earlier
+  at `/v/<id>/browse`. `Browser.open` now waits until a document with a
+  different `timeOrigin` has finished loading. Locally on staging (Firefox
+  158, 3 at a time) the case failed in 9 of 90 runs before the fix, every
+  failure with the old document still current, and in 0 of 45 after.
+  *Revisit if:* Firefox's navigate is fixed to resolve only on the new
+  document, or a case means to navigate within the same document (a
+  same-document navigation keeps its `timeOrigin`, and `open` would time
+  out).
 
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was

@@ -132,7 +132,22 @@ class Browser:
         return [e["params"].get("text", "") for e in self.events if e["method"] == "log.entryAdded"]
 
     async def open(self, url):
+        # Firefox can answer a navigate from a running app before the new
+        # document replaces it, so wait for a different document to be loaded.
+        try:
+            before = await self.js("performance.timeOrigin")
+        except RuntimeError:
+            before = 0  # a new tab's about:blank, which Firefox won't run scripts in
         await self.cmd("browsingContext.navigate", context=self.ctx, url=url, wait="complete")
+        for _ in range(150):
+            try:
+                if await self.js("performance.timeOrigin !== %r && document.readyState === 'complete'"
+                                 % before):
+                    return
+            except RuntimeError:
+                pass
+            await asyncio.sleep(0.1)
+        raise RuntimeError(f"{url} never replaced the previous document")
 
     async def key(self, value):
         await self.cmd("input.performActions", context=self.ctx, actions=[
