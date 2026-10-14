@@ -162,21 +162,19 @@ Some text.
   });
 
   group('attachment URLs', () {
-    test('carry the credential, since image widgets cannot set headers', () {
+    test('carry no credential: the image provider sends it as a header', () {
       final api = StormApi(baseUrl: 'http://host:8484', token: 'secret');
-      final url = api.attachmentUrl(
+      final url = api.attachmentUri(
         FakeServer.primaryVault,
-        'attachments/x.png',
+        'attachments/a b.png',
       );
 
       expect(
         url.path,
-        '/v1/vaults/${FakeServer.primaryVault}/attachments/attachments/x.png',
+        '/v1/vaults/${FakeServer.primaryVault}/attachments/attachments/a%20b.png',
       );
-      // The scheme has to be there. This asserted the bare token until
-      // 2026-08-26, which is exactly the value the server's query fallback
-      // refuses — so the test passed while the URL authenticated nothing.
-      expect(url.queryParameters['token'], 'Bearer secret');
+      expect(url.hasQuery, isFalse);
+      expect(url.toString(), isNot(contains('secret')));
       api.dispose();
     });
   });

@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../api/auth_models.dart';
-import '../api/storm_api.dart';
 import '../state/app_state.dart';
 import 'tokens.dart';
 
@@ -41,17 +40,16 @@ class _AddDeviceScreenState extends ConsumerState<AddDeviceScreen> {
       _error = null;
     });
     final settings = ref.read(settingsProvider).value;
-    if (settings == null || !settings.hasSession) {
+    // Over the session's connection, so a device off the LAN can add another
+    // through the relay (decision 112).
+    final api = ref.read(apiProvider);
+    if (settings == null || !settings.hasSession || api == null) {
       setState(() {
         _error = 'Sign in first — only a signed-in device can add another.';
         _loading = false;
       });
       return;
     }
-    final api = StormApi(
-      baseUrl: settings.baseUrl,
-      token: settings.accessToken,
-    );
     try {
       final invite = await api.issuePairing();
       if (!mounted) return;
@@ -65,8 +63,6 @@ class _AddDeviceScreenState extends ConsumerState<AddDeviceScreen> {
         _error = '$e';
         _loading = false;
       });
-    } finally {
-      api.dispose();
     }
   }
 

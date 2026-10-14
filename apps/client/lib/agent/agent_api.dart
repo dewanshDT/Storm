@@ -9,8 +9,9 @@ import 'agent_models.dart';
 /// REST client for the Agent Runtime routes (`/v1/agent/*`, owner only;
 /// decisions 77c and 77d).
 ///
-/// Direct network only in V1 (AM21), so it talks to the server's base URL with
-/// the session's bearer, exactly as the MCP keys screen does.
+/// Addressed to the server's saved address with the session's bearer. In the
+/// app its client is the session's connection, so it is relayed off the LAN
+/// like everything else (decision 112).
 class AgentApi {
   AgentApi({required this.baseUrl, required this.token, http.Client? client})
     : _client = client ?? http.Client();
@@ -18,6 +19,9 @@ class AgentApi {
   final String baseUrl;
   final String token;
   final http.Client _client;
+
+  /// What the terminal stream is sent on.
+  http.Client get client => _client;
 
   Map<String, String> get _headers => {
     'Authorization': 'Bearer $token',

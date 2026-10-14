@@ -3,14 +3,22 @@ import 'dart:js_interop';
 
 import 'package:web/web.dart' as web;
 
+import '../api/connection_client.dart';
 import 'agent_api.dart';
 import 'terminal_events.dart';
+import 'terminal_stream_http.dart';
 
+/// `EventSource` to the page's own server; over the relay, the streamed GET
+/// instead, since `EventSource` cannot ride the tunnel and the tunnel, unlike
+/// the browser's `http` client, does not buffer (decision 112).
 Stream<TerminalEvent> openTerminalStream(
   AgentApi api,
   String sessionId,
   int offset,
 ) {
+  if (api.client case ConnectionClient(isRelayed: true)) {
+    return openStreamedTerminal(api, sessionId, offset);
+  }
   late final StreamController<TerminalEvent> controller;
   web.EventSource? source;
 

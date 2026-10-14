@@ -19,10 +19,20 @@ import 'package:storm/api/relay/srp_codec.dart';
 
 /// A scripted response the fake relay serves for a request.
 class FakeResponse {
-  FakeResponse(this.status, this.headers, this.body);
+  FakeResponse(this.status, this.headers, this.body) : stream = null;
+
+  /// A response whose body goes out chunk by chunk as [stream] yields, the way
+  /// a relay forwards an SSE stream, and ends when it does.
+  FakeResponse.streamed(
+    this.status,
+    this.headers,
+    Stream<List<int>> this.stream,
+  ) : body = const [];
+
   final int status;
   final Map<String, String> headers;
   final List<int> body;
+  final Stream<List<int>>? stream;
 }
 
 /// A handler scripted per-test.
@@ -74,6 +84,10 @@ class FakeRelay {
 
   /// Every `0x01` frame the client sent, as `(stream_id, payload length)`.
   final requestBodyFrames = <(int, int)>[];
+
+  /// Streams the client ended with its own `CLOSE`.
+  final closedByClient = <int>{};
+  final _streaming = <int, StreamSubscription<List<int>>>{};
   int _nextStream = 1;
 
   int get port => _server!.port;
@@ -171,7 +185,9 @@ class FakeRelay {
         state.path = frame.body['path'] as String?;
         state.headers = _headersOf(frame.body['headers']);
       case 'CLOSE':
-      // Client ended a stream; nothing more to do for it.
+        final streamId = streamIdOf(frame.body);
+        closedByClient.add(streamId);
+        _streaming.remove(streamId)?.cancel();
       default:
         break;
     }
@@ -218,6 +234,18 @@ class FakeRelay {
         'headers': response.headers,
       }),
     );
+    final streamed = response.stream;
+    if (streamed != null) {
+      _streaming[streamId] = streamed.listen(
+        (chunk) => _send(encodeBodyFrame(bodyResponse, streamId, chunk)),
+        onDone: () {
+          if (_streaming.remove(streamId) != null) {
+            _send(SrpControl.encode('CLOSE', {'stream_id': streamId}));
+          }
+        },
+      );
+      return;
+    }
     for (final chunk in _chunk(response.body)) {
       _send(encodeBodyFrame(bodyResponse, streamId, chunk));
     }

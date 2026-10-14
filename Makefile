@@ -293,12 +293,31 @@ test-live:
 	RELAY_IMPL=$(RELAY_IMPL) RELAY_CF_DEV="$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
 		python3 "$$ROOT/$(RUNTIME)/tests/mcp_connect_live.py"; \
+	echo "--- a runtime host on the first server, for the relayed Agents suite ---"; \
+	HOST_DIR=$$(mktemp -d /tmp/storm-live-host.XXXXXX); \
+	mkdir -p "$$HOST_DIR/workspaces/storm"; \
+	printf 'workspace_roots = ["%s"]\nforbidden_roots = ["%s", "%s"]\nmax_sessions = 4\n\n[[providers]]\nid = "fake"\nkind = "fake"\n' \
+		"$$HOST_DIR/workspaces" "$$ROOT/.dev/live-state" "$$ROOT/.dev/live-vaults" \
+		> "$$HOST_DIR/runtime.toml"; \
+	curl -sf -X POST -H "Authorization: $$STORM_SESSION" -H 'Content-Type: application/json' \
+		-d '{"server_url":"http://127.0.0.1:$(PORT)"}' \
+		http://127.0.0.1:$(PORT)/v1/agent/hosts/enrollments \
+		| python3 -c 'import json, sys; print(json.load(sys.stdin)["enrollment"])' \
+		| "$$ROOT/$(RUNTIME)/target/debug/storm-runtime" enroll \
+			--state "$$HOST_DIR/state" --name live-host \
+		> "$$ROOT/.dev/live-host.log" 2>&1; \
+	"$$ROOT/$(RUNTIME)/target/debug/storm-runtime" serve \
+		--state "$$HOST_DIR/state" --config "$$HOST_DIR/runtime.toml" \
+		>> "$$ROOT/.dev/live-host.log" 2>&1 & \
+	HOST_PID=$$!; \
+	trap 'kill $$SERVER_PID $$AUTH_PID $$RELAY_PID $$HOST_PID 2>/dev/null || true; wait $$RELAY_PID 2>/dev/null || true; rm -rf "$$HOST_DIR"' EXIT; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
 		--dart-define=STORM_SESSION="$$STORM_SESSION" \
 		--dart-define=STORM_BASE=http://127.0.0.1:$(PORT) \
 		--dart-define=STORM_LIVE_LOG="$$ROOT/.dev/live-server.log" \
 		--dart-define=STORM_RELAY_ORIGIN=http://127.0.0.1:$(PORT) \
+		--dart-define=STORM_AGENT_HOST=live-host \
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
 		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
 

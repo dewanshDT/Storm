@@ -6212,7 +6212,7 @@ data)*
     their own clients from the saved address. All carry a session and bypass
     the relay, so off the LAN "Add a device", Agents and Integrations fail.
     Same class of bug, different fix (they should come from the app's
-    connection); left as a follow-up.
+    connection); left as a follow-up. **Fixed by 112.**
 - **Tests.** `test/login_through_relay_test.dart`, over the fake relay with
   the saved address refused: sign-in succeeds through the relay, the
   password only in `/v1/auth/login`, after `/v1/server/challenge`, and
@@ -6231,6 +6231,129 @@ data)*
   screen could share, the post-sign-in screens above move onto the
   connection, or a relay becomes able to carry a confidential channel of its
   own (then `ws://` relays could be allowed).
+
+**112. Every session call after sign-in goes over the app's connection,
+direct or relayed.** *(2026-10-14; the follow-up from 111's audit)*
+- **The bug.** 111 fixed sign-in and refresh. After them, off the LAN, the
+  features that built their own clients from `settings.baseUrl` still dialled
+  only the saved address: "Add a device" (`StormApi(baseUrl: …)`), Agents
+  (`agentApiFactoryProvider`, and the live terminal in
+  `terminal_stream_io.dart`, which made its own `http.Client`) and
+  Integrations (`integrationsApiFactoryProvider`). Notes and sync worked,
+  because they go through `StormConnection`. The audit turned up two more:
+  - **`apiProvider` was `connection.api`**, which follows the *active*
+    candidate, and before the first race that is the saved address. Only the
+    sync engine calls `connect()`, and only with a vault open, so a device
+    signed in off the LAN with no vault open (a new one, on the dashboard)
+    could not list its vaults.
+  - **Attachment images** captured `connection.transportClient` and a
+    transport-specific URL when the widget was built, so a reconnect left them
+    on a disposed trunk. And a markdown image with an absolute `http(s)` URL
+    was sent through the session's client **with the bearer header**, to
+    whatever host it named.
+- **The fix: one client that borrows the connection.**
+  `lib/api/connection_client.dart`, `ConnectionClient extends
+  http.BaseClient`. Callers keep addressing the saved address. Per request it
+  takes the connection as it is *now*: if it is connected the request goes on
+  `transportClient`, rebased onto the active candidate's base URL; if it has
+  not raced (idle, offline) it calls `connect()`; if it is `unproven` it
+  refuses. A URL that is not on the saved address is refused, never sent
+  with the credential. `close()` does nothing, since the connection owns the
+  transports.
+  - `apiProvider` is now a `StormApi` on the saved address over a
+    `ConnectionClient` of that connection. The engine still uses
+    `connection.api`.
+  - `sessionClientProvider` resolves `connectionProvider` per request
+    (`ref.container.read`), so the Agents and Integrations factories do not
+    rebuild on every settings save (the reason `sessionCredentialsProvider`
+    selects two fields). Both factories pass it as their client. `AgentApi`'s
+    `baseUrl` stays the saved address, because an enrollment sends it to the
+    runtime as `server_url`.
+  - `AddDeviceScreen` uses `apiProvider`. The invite's `addr` comes from the
+    server's `listen_addr`, not the request, so a relayed mint is the same
+    invite.
+  - Images: `StormImageProvider.attachment(api, vault, path)` takes
+    `apiProvider`'s client. The URL is the saved address on every transport,
+    so the image cache keeps one entry per attachment. External images are a
+    plain `NetworkImage`, with no credential.
+  - `StormApi.attachmentUrl` (credential in the query string, used by no app
+    code since 63) is removed for `attachmentUri`, which has no credential.
+    The server's `?token=` fallback is still there. That open item is now
+    server-side only.
+- **No second race.** `StormConnection.connect()` is single-flight: a caller
+  arriving during a race shares it, so the sync engine and these clients
+  never race side by side. `reset()` bumps an epoch, and a race it overtook
+  returns `unreachable` without adopting, setting status or releasing trunks.
+  Without that, the engine's reset-then-connect after a feed drop could
+  overlap a race a feature request had started. `transportClient` is now
+  `api.client`. It used to build a fresh `http.Client` per call when nothing
+  was cached.
+- **A reconnect does not pin anything.** Each request picks its transport
+  when it is sent. After `reset()` the next request joins (or starts) the
+  re-race and lands on the new trunk. A live terminal on the dead trunk errors,
+  and `SessionController` reconnects by offset, which is a new request.
+- **The terminal stream relayed (SRP §5.3).** `terminal_stream_http.dart` is
+  the streamed GET with the bearer header, on `AgentApi.client`, now shared by
+  native and by web when the connection is relayed. `EventSource` cannot ride
+  the tunnel, but the tunnel does not buffer as the browser's `http` client
+  does. Web stays on `EventSource` when direct. `SrpHttpClient` hands each
+  `0x01` chunk on as it arrives, like the change feed. Cancelling ends this
+  response and no longer closes the client, which is shared now. A response
+  that arrives after a cancel is drained.
+- **Defect fixed on the way: a cancelled relayed body never closed its
+  stream.** `SrpHttpClient`'s body controller had no `onCancel`, so a reader
+  that stopped listening (a closed terminal, a disposed SSE feed) left the
+  stream open and the origin streaming to nobody until the trunk died. The
+  body's `onCancel` now sends `CLOSE`.
+- **Cannot be relayed, and why.**
+  - Web `EventSource` when direct. It does not need to be relayed: web is
+    served by its server, so direct is the page's own origin.
+  - `bootstrapWebDevice`, same reason (111).
+  - The OAuth sign-in's browser leg goes to the upstream provider, not to
+    Storm. Only `{state, code}` comes back, through `IntegrationsApi`, so
+    relayed.
+  - What a runtime dials is its own business. The enrollment carries the
+    saved address.
+- **Tests.** `test/relayed_features_test.dart`, over the fake relay with the
+  saved address refused (port 1). Agents lists sessions and hosts;
+  Integrations lists connections; `apiProvider` lists vaults with no engine
+  started; Add a device mints an invite (widget); an attachment image decodes
+  (widget, `RawImage` has an image); and the terminal delivers a status event
+  and an output event while the body is still open, then cancelling sends
+  `CLOSE`. Each checks the request went through the relay, after
+  `/v1/server/challenge`, with nothing credentialed before it. Also covered:
+  a `reset()` followed by a request re-races and succeeds on a new trunk;
+  four callers together cause one challenge; a request to another host is
+  refused and nothing is sent; and an impostor on the relay gets no
+  credentialed request. **All 9 that compile on the old code fail on it**
+  (connection refused to `127.0.0.1:1`, or the widget never loads).
+  `srp_tunnel_test` adds "a reader that cancels a streamed body closes its
+  stream", red on the old `SrpHttpClient`. `FakeRelay` gains
+  `FakeResponse.streamed` and `closedByClient`. One test changed:
+  `attachments_test`'s URL now asserts no credential.
+  **Live** (`test_live/relay_features_live_test.dart`): `make test-live` now
+  enrolls a `storm-runtime` host (`live-host`, the `fake` provider) on the
+  first server. Against the real `storm-relay`, with the saved address a
+  closed port and the app's own providers, the test lists hosts and sessions,
+  launches a session, streams its terminal (the start line, then the echo of
+  input typed after the stream opened), ends it and sees `stopped`. It also
+  fetches an uploaded attachment through `StormImageProvider`, byte for byte.
+  The host's state lives in a `mktemp -d` under `/tmp`, removed on exit. Under
+  `.dev/` in a deep checkout, its bridge socket path passed `SUN_LEN` and the
+  runtime would not start.
+- **Results.** `make check` green: client 1072 tests, 1 skipped (was 1060).
+  `make test-live PORT=19200 AUTH_PORT=19201 RELAY_PORT=19202` exits 0:
+  server 81, mcp 86, agent 93, gateway 95, auth 72, mcp-connect 89 + 89,
+  mcp-connect live 39, client integration 33, 1 skipped (`agent_live_test`
+  still needs its own env). One earlier run had a gateway e2e failure, "the
+  open elicitation is cancelled toward the agent (R8)", 94/95. It has its own
+  server and host, none of this change is involved, and it passed in the other
+  two runs. Noted as a flake.
+- *Revisit if:* the app gains another client that does not take an
+  `http.Client` (it must get `sessionClientProvider`), the connection gains
+  liveness of its own (then `ConnectionClient` could stop racing an `offline`
+  connection on each request, which is what lets a feature recover with no
+  vault open), or web gains relays it would use instead of its origin.
 
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was

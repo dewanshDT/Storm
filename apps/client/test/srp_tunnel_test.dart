@@ -140,6 +140,40 @@ void main() {
     }
   });
 
+  test('a reader that cancels a streamed body closes its stream on the '
+      'trunk', () async {
+    final body = StreamController<List<int>>();
+    final relay = FakeRelay(
+      handler: (m, p, h, b) async => FakeResponse.streamed(200, {
+        'content-type': 'text/event-stream',
+      }, body.stream),
+    );
+    await relay.start();
+    final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+    final client = SrpHttpClient(trunk);
+    await trunk.connect();
+    try {
+      final response = await client.send(
+        http.Request('GET', Uri.parse('http://x/stream')),
+      );
+      final first = Completer<List<int>>();
+      final sub = response.stream.listen(first.complete);
+      body.add(utf8.encode('event: change\n\n'));
+      expect(utf8.decode(await first.future), 'event: change\n\n');
+
+      // A closed terminal or a disposed feed: the origin must stop streaming.
+      await sub.cancel();
+      for (var i = 0; i < 100 && relay.closedByClient.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(relay.closedByClient, isNotEmpty);
+    } finally {
+      trunk.dispose();
+      await body.close();
+      await relay.close();
+    }
+  });
+
   test('a request body travels as 0x01 chunks and is reassembled', () async {
     final relay = FakeRelay(
       handler: (m, p, h, body) async {

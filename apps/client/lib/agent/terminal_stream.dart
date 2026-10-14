@@ -2,7 +2,8 @@
 ///
 /// Native: a streamed HTTP GET carrying the bearer header. Web: `EventSource`
 /// with a single-use ticket, because a browser cannot put a header on it and
-/// `package:http`'s browser client buffers whole responses. Both resume by
+/// `package:http`'s browser client buffers whole responses; over the relay the
+/// web uses the streamed GET too, on the tunnel (decision 112). Both resume by
 /// `?offset=`, never `Last-Event-ID`, and both end when the server closes the
 /// stream, which it does once the session has ended.
 library;

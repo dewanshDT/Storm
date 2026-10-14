@@ -51,7 +51,7 @@ class SrpHttpClient extends http.BaseClient {
     // delivers events synchronously, so a response that starts the instant the
     // head does would be missed by a listener attached later — the race the
     // broadcast/sync design exists to prevent.
-    final pipe = _ResponsePipe(stream);
+    final pipe = _ResponsePipe(trunk, stream);
     stream.events.listen(pipe.onEvent, onDone: pipe.onDone);
     try {
       final uri = request.url;
@@ -99,10 +99,19 @@ class SrpHttpClient extends http.BaseClient {
 /// controller: the trunk's broadcast `events` is shared, but the response body
 /// belongs to exactly one consumer.
 class _ResponsePipe {
-  _ResponsePipe(this.stream) {
-    _body = StreamController<Uint8List>();
+  _ResponsePipe(this.trunk, this.stream) {
+    // A reader that stops listening (a closed terminal, a disposed feed) ends
+    // the stream on the trunk too, or the origin keeps streaming to nobody.
+    _body = StreamController<Uint8List>(
+      onCancel: () {
+        if (_done) return;
+        _done = true;
+        trunk.closeStream(stream);
+      },
+    );
   }
 
+  final SrpTrunk trunk;
   final SrpStream stream;
   late final StreamController<Uint8List> _body;
   final _head = Completer<http.StreamedResponse?>();

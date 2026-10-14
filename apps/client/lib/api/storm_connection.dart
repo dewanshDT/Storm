@@ -279,14 +279,7 @@ class StormConnection {
 
   /// The transport client for the active candidate (for SSE and other
   /// streaming uses that need direct client access).
-  http.Client get transportClient {
-    final pinned = _pinnedApi;
-    if (pinned != null) return pinned.client;
-    if (_cachedApi != null && _cachedApiFor == _active) {
-      return _cachedApi!.client;
-    }
-    return _apiFor(_active).client;
-  }
+  http.Client get transportClient => api.client;
 
   /// Auth headers for the active candidate.
   Map<String, String> get authHeaders => {
@@ -386,7 +379,24 @@ class StormConnection {
   ///
   /// Returns what the *identity* check concluded, because that is what the
   /// caller has to act on — reachability alone is not a connection.
-  Future<ServerProof> connect() async {
+  ///
+  /// One race at a time: a caller arriving while one is in flight shares it.
+  /// A race overtaken by [reset] reports unreachable and changes nothing.
+  Future<ServerProof> connect() {
+    final running = _connecting;
+    if (running != null) return running;
+    final race = _connect(_epoch);
+    _connecting = race;
+    race.whenComplete(() {
+      if (identical(_connecting, race)) _connecting = null;
+    }).ignore();
+    return race;
+  }
+
+  Future<ServerProof>? _connecting;
+  int _epoch = 0;
+
+  Future<ServerProof> _connect(int epoch) async {
     _setStatus(ConnectionStatus.connecting);
 
     // A pinned transport has nothing to race and nothing to refresh — probing
@@ -394,6 +404,7 @@ class StormConnection {
     // the sort of change a refactor is not allowed to make.
     if (_pinnedApi != null) {
       final proof = await _verifierFor(authApi).check();
+      if (epoch != _epoch) return ServerProof.unreachable;
       _setStatus(switch (proof) {
         ServerProof.verified => ConnectionStatus.connected,
         ServerProof.impostor => ConnectionStatus.unproven,
@@ -414,6 +425,7 @@ class StormConnection {
         .toList();
 
     var winner = await _race(firstRound);
+    if (epoch != _epoch) return ServerProof.unreachable;
 
     // **The public relay runs only if nothing the operator controls answered.**
     // Not a latency rule: without end-to-end encryption, whichever path carries
@@ -423,6 +435,7 @@ class StormConnection {
     // a privacy regression wearing a latency optimisation.
     if (winner == null && publicRound.isNotEmpty) {
       winner = await _race(publicRound);
+      if (epoch != _epoch) return ServerProof.unreachable;
     }
 
     if (winner == null) {
@@ -447,6 +460,7 @@ class StormConnection {
     // **Reachability is not trust.** The race chose a transport; only the
     // challenge decides whether we are connected to the server.
     final proof = await _verifierFor(authApi).check();
+    if (epoch != _epoch) return ServerProof.unreachable;
     _setStatus(switch (proof) {
       ServerProof.verified => ConnectionStatus.connected,
       ServerProof.impostor => ConnectionStatus.unproven,
@@ -461,6 +475,8 @@ class StormConnection {
   /// time — there is no mid-session transport migration, and reusing a stale
   /// winner is how you get one by accident.
   void reset() {
+    _epoch++;
+    _connecting = null;
     _setStatus(ConnectionStatus.idle);
     _serverBehindRelay = false;
     _cachedApi = null;
