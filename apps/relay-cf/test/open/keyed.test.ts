@@ -39,10 +39,15 @@ describe("an open relay", () => {
     expectError(await waiting.recv(), "server_unreachable");
 
     const { peer: owner } = await register(serverId, 1);
-    await register(serverId, 2);
-    const c = await keyedClient(serverId, 1);
-    const streamId = await openStream(c);
-    expect(await expectOpenAndAck(owner)).toBe(streamId);
+    const stop = owner.keepAlive();
+    try {
+      await register(serverId, 2);
+      const c = await keyedClient(serverId, 1);
+      const streamId = await openStream(c);
+      expect(await expectOpenAndAck(owner)).toBe(streamId);
+    } finally {
+      stop();
+    }
   });
 
   it("supersedes only within one key", async () => {

@@ -485,8 +485,10 @@ async fn a_body_over_16_mib_crosses_both_ways_in_256_kib_frames(ctx: &Ctx) -> Re
         Ok(received)
     };
     let (sent, received) = tokio::join!(send, receive);
-    sent?;
+    // A frame the client did not expect also stalls the origin's window, so
+    // the client's error is the cause and the origin's only its echo.
     let received = received?;
+    sent?;
     ensure!(
         received == body,
         "the client got {} bytes of a {}-byte download, or different bytes",
