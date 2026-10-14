@@ -29,7 +29,7 @@ use crate::Relay;
 use crate::auth::{KeyBytes, decode_key, validate_server_id};
 use crate::config::Mode;
 use crate::proto::{self, ErrorCode, Frame, Hello};
-use crate::state::{HeadClaim, Only, Registration, ServerTrunk};
+use crate::state::{HeadClaim, Only, OpenRefused, Registration, ServerTrunk};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// The largest `attempt_id` the relay will echo.
@@ -321,6 +321,16 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
         relay.config.max_total_streams,
     ) {
         Ok(stream_id) => stream_id,
+        // §4.2: no new streams on a draining trunk. A trunk-scoped
+        // `trunk_superseded` and a closed socket send the client to the
+        // replacement at once, with no backoff (§8.4).
+        Err(OpenRefused::Draining) => {
+            tracing::debug!(
+                client_trunk_id = %session.client_trunk_id,
+                "refusing OPEN_STREAM on a draining trunk"
+            );
+            return Err(ErrorCode::TrunkSuperseded.into());
+        }
         Err(refused) => {
             // Refused **immediately**, never queued (§5.1). Queueing would make
             // an overloaded relay look exactly like a slow server, and the two
