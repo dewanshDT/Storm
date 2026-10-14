@@ -83,6 +83,7 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
     tracing::info!(
         server_id = %session.server_id,
         trunk_id = %session.trunk_id,
+        bytes = session.trunk.bytes(),
         "server trunk closed"
     );
 
@@ -131,7 +132,7 @@ async fn handshake(
     } else {
         relay
             .bindings
-            .check(relay.config.allowlist.as_ref(), &register.server_id, pubkey)
+            .check(relay.allowlist().as_ref(), &register.server_id, pubkey)
             .map_err(|_| {
                 tracing::info!(
                     server_id = %register.server_id,
@@ -282,19 +283,24 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
         //
         // `recv` is cancel-safe (it only polls `StreamExt::next`), so timing it
         // out loses no frame.
-        let incoming =
-            match tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)).await {
-                Ok(Ok(incoming)) => incoming,
-                Ok(Err(fault)) => return fault,
-                Err(_) => {
-                    tracing::info!(
-                        server_id = %session.server_id,
-                        trunk_id = %session.trunk_id,
-                        "heartbeat deadline exceeded; closing trunk"
-                    );
-                    return Fault::Disconnected;
-                }
-            };
+        let read = tokio::select! {
+            biased;
+            // An operator's revocation (decision 116k).
+            () = tx.killed() => return Fault::Disconnected,
+            read = tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)) => read,
+        };
+        let incoming = match read {
+            Ok(Ok(incoming)) => incoming,
+            Ok(Err(fault)) => return fault,
+            Err(_) => {
+                tracing::info!(
+                    server_id = %session.server_id,
+                    trunk_id = %session.trunk_id,
+                    "heartbeat deadline exceeded; closing trunk"
+                );
+                return Fault::Disconnected;
+            }
+        };
         relay.registrations.touch(
             &session.server_id,
             session.key,
@@ -375,6 +381,7 @@ fn forward_response_body(
         tracing::debug!(stream_id, "dropping a body chunk for a closed stream");
         return Ok(());
     };
+    session.trunk.count_bytes(raw.len());
     // Forwarded chunk by chunk as the origin produces them, never accumulated
     // (§5.2) — buffering a response whole would break streaming *and* let one
     // large download hold the relay's memory.

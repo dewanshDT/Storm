@@ -41,7 +41,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::connect_info::{ConnectInfo, Connected};
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::IncomingStream;
 
@@ -86,6 +86,11 @@ pub struct Relay {
     pub registrations: state::Registrations,
     /// Rate limiter for HELLO attempts per source IP.
     hello_rate_limiter: rate_limit::RateLimiter,
+    /// Rate limiter for `/register` attempts per source IP (§6.2).
+    register_rate_limiter: rate_limit::RateLimiter,
+    /// The allowlist in force, swapped by [`Relay::reload_allowlist`]. The
+    /// mode stays what the relay started in.
+    allowlist: std::sync::RwLock<Option<config::Allowlist>>,
     nonce_source: NonceSource,
 }
 
@@ -97,8 +102,13 @@ impl Relay {
     pub fn with_nonce_source(config: Config, nonce_source: NonceSource) -> Self {
         let hello_rate_limiter =
             rate_limit::RateLimiter::new(config.hello_rate_limit, config.hello_rate_window);
+        let register_rate_limiter =
+            rate_limit::RateLimiter::new(config.register_rate_limit, config.register_rate_window);
+        let allowlist = std::sync::RwLock::new(config.allowlist.clone());
         Self {
             config,
+            register_rate_limiter,
+            allowlist,
             bindings: state::Bindings::default(),
             challenges: state::Challenges::default(),
             registrations: state::Registrations::default(),
@@ -124,6 +134,30 @@ impl Relay {
     pub fn check_hello_rate_limit(&self, ip: std::net::IpAddr) -> bool {
         self.hello_rate_limiter.try_take(ip)
     }
+
+    /// The `/register` limit for a source IP (§6.2).
+    pub fn check_register_rate_limit(&self, ip: std::net::IpAddr) -> bool {
+        self.register_rate_limiter.try_take(ip)
+    }
+
+    pub fn allowlist(&self) -> Option<config::Allowlist> {
+        self.allowlist.read().expect("allowlist lock").clone()
+    }
+
+    /// Installs a re-read allowlist and evicts every live registration it no
+    /// longer lists (§6.2, decision 116k): removing an entry must end that
+    /// server's trunk, or revocation waits for the server to disconnect on its
+    /// own. Returns how many were evicted.
+    pub fn reload_allowlist(&self, next: config::Allowlist) -> usize {
+        let evicted = self
+            .registrations
+            .retain(|server_id, key| next.get(server_id).is_some_and(|k| &k.bytes() == key));
+        *self.allowlist.write().expect("allowlist lock") = Some(next);
+        for registration in &evicted {
+            registration.trunk.evict();
+        }
+        evicted.len()
+    }
 }
 
 pub fn router(relay: Arc<Relay>) -> Router {
@@ -133,7 +167,18 @@ pub fn router(relay: Arc<Relay>) -> Router {
         .with_state(relay)
 }
 
-async fn register_upgrade(ws: WebSocketUpgrade, State(relay): State<Arc<Relay>>) -> Response {
+async fn register_upgrade(
+    ws: WebSocketUpgrade,
+    ConnectInfo(PeerAddr(peer)): ConnectInfo<PeerAddr>,
+    State(relay): State<Arc<Relay>>,
+) -> Response {
+    // §6.2: counted before anything is allocated for the attempt. Refused with
+    // a status rather than an upgrade, so the attempt costs no socket task;
+    // the log says it happened, never from where (§6.3).
+    if !relay.check_register_rate_limit(peer.ip()) {
+        tracing::info!("rate limiting /register");
+        return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     ws.on_upgrade(move |socket| register::serve(socket, relay))
 }
 

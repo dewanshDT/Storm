@@ -127,7 +127,14 @@ CREATE TABLE IF NOT EXISTS nonces (
   nonce TEXT PRIMARY KEY, expires INTEGER NOT NULL, spent INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS bindings (
   server_id TEXT PRIMARY KEY, pubkey TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS usage (
+  day TEXT PRIMARY KEY, bytes INTEGER NOT NULL);
 `;
+
+// Bytes counted in memory before a write to \`usage\`: one row update per
+// this much traffic, not per frame. Up to this much is lost to an eviction,
+// which a week's measurement does not notice.
+const USAGE_FLUSH_BYTES = 256 * 1024;
 
 class Refusal extends Error {
   constructor(readonly code: ErrorCode) {
@@ -149,6 +156,9 @@ export class RelayRoom extends DurableObject<Env> {
   private alarmAt: number | null = null;
   // Σ unread() over every socket in the room.
   private held = 0;
+  // Bytes moved through this room and not yet in \`usage\` (§6.2: bandwidth
+  // per registration, measured for a week before a budget is set; 116k).
+  private unsaved = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -163,9 +173,26 @@ export class RelayRoom extends DurableObject<Env> {
     // spelling of PING still reaches webSocketMessage and is answered there.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
 
+    // An allowlist entry removed by a redeploy (the only way its secret
+    // changes) must not leave a server it no longer lists on a socket that
+    // survived the deploy (§6.2, decision 116k).
+    let config: Config | null = null;
+    try {
+      config = configFor(env);
+    } catch {}
     for (const ws of ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as Att | null;
       if (!att) continue;
+      if (att.k === "s" && att.ph === 2 && config?.binding === "allowlist") {
+        const listed = config.allowlist.get(att.sid);
+        if (!listed || (att.pk !== undefined && b64urlEncode(listed) !== att.pk)) {
+          trySend(ws, error("auth_failed"));
+          try {
+            ws.close(1000);
+          } catch {}
+          continue;
+        }
+      }
       this.entries.set(idOf(att), { ws, att });
       this.held += this.unread(att);
     }
@@ -335,7 +362,8 @@ export class RelayRoom extends DurableObject<Env> {
     if (e instanceof ProtocolError) return this.fault(entry, "protocol_error", "protocol_error");
     // No honest code for the relay's own fault (§6): protocol_error, and the
     // real cause stays here.
-    log("relay_fault", { reason: String(e) });
+    // The error's class only: a message can carry a header or a payload (§6.3).
+    log("relay_fault", { reason: e instanceof Error ? e.name : "unknown" });
     this.fault(entry, "protocol_error", "relay_fault");
   }
 
@@ -663,7 +691,13 @@ export class RelayRoom extends DurableObject<Env> {
     this.close(entry, code);
     if (att.ph === 2) {
       this.failClientsOf(att.tid, fail);
-      log("server_closed", { server_id: att.sid, trunk_id: att.tid, reason, code: fail });
+      log("server_closed", {
+        server_id: att.sid,
+        trunk_id: att.tid,
+        reason,
+        code: fail,
+        bytes_today: this.saveUsage(),
+      });
     }
     this.arm();
   }
@@ -953,9 +987,28 @@ export class RelayRoom extends DurableObject<Env> {
     return worst;
   }
 
+  // Adds what is counted to today's row and returns the day's total.
+  private saveUsage(): number {
+    const day = new Date().toISOString().slice(0, 10);
+    const row = this.sql
+      .exec<{ bytes: number }>(
+        "INSERT INTO usage (day, bytes) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET bytes = bytes + excluded.bytes RETURNING bytes",
+        day,
+        this.unsaved,
+      )
+      .one();
+    this.unsaved = 0;
+    // Seven days are what is measured; older rows are no one's business.
+    const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
+    this.sql.exec("DELETE FROM usage WHERE day < ?", cutoff);
+    return row.bytes;
+  }
+
   private sendCounted(entry: Entry, data: string | ArrayBuffer, size: number, budget: number): boolean {
     const f = entry.att.f;
     f.s += size;
+    this.unsaved += size;
+    if (this.unsaved >= USAGE_FLUSH_BYTES) this.saveUsage();
     if (!this.send(entry, data)) return false;
     const last = f.m.length > 0 ? f.m[f.m.length - 1] : f.a;
     if (f.s - last >= Math.max(1, Math.floor(budget / 8))) {
@@ -994,7 +1047,11 @@ export class RelayRoom extends DurableObject<Env> {
     this.alarmAt = null;
     const now = Date.now();
     const config = this.config;
-    for (const entry of [...this.entries.values()]) {
+    // Servers before clients: a late alarm can find a silent server and its
+    // silent client both past the deadline, and the client must still be told
+    // trunk_lost by its server's end rather than dropped without a word.
+    const ordered = [...this.entries.values()].sort((a, b) => (a.att.k === b.att.k ? 0 : a.att.k === "s" ? -1 : 1));
+    for (const entry of ordered) {
       if (this.entries.get(idOf(entry.att)) !== entry) continue;
       if (entry.att.k === "s") {
         const server = entry as Entry<ServerAtt>;
