@@ -207,10 +207,11 @@ List<PairedDevice> _thisDeviceFirst(List<PairedDevice> all, String mine) => [
 ];
 
 String _deviceMeta(PairedDevice d) {
+  final lan = d.pairedOnLocalNetwork ? ' · paired on local network' : '';
   final seen = DateTime.tryParse(d.lastSeen ?? '');
-  if (seen == null) return 'paired ${_day(d.paired)}';
+  if (seen == null) return 'paired ${_day(d.paired)}$lan';
   final ago = relativeTime(seen);
-  return ago == 'just now' ? 'active now' : 'active $ago';
+  return '${ago == 'just now' ? 'active now' : 'active $ago'}$lan';
 }
 
 String _keyMeta(McpKey k) {

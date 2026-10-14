@@ -23,7 +23,7 @@ void main() {
       final c = shellContainer(configured: false);
       await pumpShell(tester, c);
 
-      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      expect(find.text('Connect to your Storm'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -51,7 +51,7 @@ void main() {
       await pumpShell(tester, c);
 
       expect(c.read(settingsProvider).value?.isPaired, isFalse);
-      expect(find.text('Pair with your Storm server'), findsNothing);
+      expect(find.text('Connect to your Storm'), findsNothing);
       expect(find.text('Daily'), findsOneWidget);
       await disposeShell(tester, c);
     });
@@ -64,7 +64,7 @@ void main() {
 
       c.read(routerProvider).go(Routes.pairing);
       await tester.pumpAndSettle();
-      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      expect(find.text('Connect to your Storm'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -81,7 +81,7 @@ void main() {
       await c.read(settingsProvider.notifier).save(const Settings());
       await tester.pumpAndSettle();
 
-      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      expect(find.text('Connect to your Storm'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -162,7 +162,7 @@ void main() {
       await tester.tap(find.byKey(const Key('login-secret-repair')));
       await tester.pumpAndSettle();
       expect(c.read(settingsProvider).value?.isPaired, isFalse);
-      expect(find.text('Pair with your Storm server'), findsOneWidget);
+      expect(find.text('Connect to your Storm'), findsOneWidget);
       await disposeShell(tester, c);
     });
 

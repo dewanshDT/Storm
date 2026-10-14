@@ -791,5 +791,25 @@
         "why": "A hostname that resolves to a public address, or cannot be checked."
       }
     ]
+  },
+  "key_fingerprint": {
+    "about": "What a person compares to tell two servers apart (decision 118): SHA-256 of the 32 raw public key bytes, the first 8 bytes as four space-separated groups of four uppercase hex digits. storm-server status, Settings > Connection > Server identity and the LAN pairing sheet all print this one format.",
+    "cases": [
+      {
+        "name": "test_key",
+        "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+        "fingerprint": "5647 5AA7 5463 474C"
+      },
+      {
+        "name": "zero_key",
+        "public_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "fingerprint": "6668 7AAD F862 BD77"
+      },
+      {
+        "name": "ff_key",
+        "public_key_b64": "__________________________________________8",
+        "fingerprint": "AF96 1376 0F72 635F"
+      }
+    ]
   }
 }

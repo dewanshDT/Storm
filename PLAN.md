@@ -6771,6 +6771,101 @@ relay spec gap audit; decisions 114a–i.)*
   revision, negotiated in the handshake), or the operator moves the spec back
   into the repo.
 
+**118. LAN discovery pairing: find storm-server on this network, pair with the
+account password.** *(2026-10-14; option A, the operator's decision. The
+normative spec and the locked UI are the vault note *Storm/Remote/LAN
+Discovery Pairing*; this entry records what was built and where it differs)*
+- **Server.** `discovery.rs` advertises `_storm._tcp` with `mdns-sd` (pure
+  Rust, its own thread, no Avahi or Bonjour daemon; `mdns-sd` alone checks
+  for musl, Windows and macOS with no C toolchain, and server CI builds it on
+  all three). Instance name is the identity's name, port is the bound port,
+  TXT is `v=1 sid pk ver claimed lan`. Interfaces: every LAN-scoped one for a
+  wildcard bind, only its own address for a concrete bind, never a public
+  one. **LAN-scoped is loopback, RFC 1918, link-local and IPv6 ULA**;
+  `100.64.0.0/10` is not (the operator's amendment the same day). The loop
+  follows the switch and `claimed` (re-registering when either changes, and
+  every 30 s so `storm-server passwd` from another process is picked up) and
+  sends goodbyes on a graceful stop. Never fatal: a host without multicast
+  serves everything else.
+- **The switch.** `Registry::discoverable` (absent = on), `PUT
+  /v1/config/discovery`, `GET /v1/config`'s `discovery {discoverable,
+  forced_off, active}`; `--no-discovery` / `STORM_DISCOVERY=0` wins over it.
+  Off means no advertisement and `lan_only` on every password pairing.
+- **`POST /v1/pairings/password`** (none tier, `ops::pair_with_password`):
+  `403 lan_only` when relayed, when the peer is not LAN-scoped (no peer
+  included) or while discovery is off; `409 setup_required` with no account;
+  then the login limiter (same buckets, refunded on success) and
+  `sessions::check_password`, now shared with login, so pairing honours the
+  account lockout too and a wrong password is login's exact 401. Records
+  `device_paired_password` (device, platform, peer; never the password).
+  **Relayed is an extension** (`relay::Relayed`, set by `dispatch.rs` on
+  every tunnelled request): `relay_peer_ip` becomes an ordinary `ConnectInfo`,
+  so a relay client on the relay's own LAN would otherwise look local.
+- **Fingerprint.** `identity::fingerprint`: SHA-256 of the key, 8 bytes,
+  `6FEC DC12 9A0B 44E1`. `docs/srp-vectors.json` gains `key_fingerprint`
+  (from `generate.py`), read by the server's and the client's vector tests.
+  Logged at boot; `storm-server status` (Linux, macOS, Windows) prints name,
+  `server_id` and fingerprint, read from the running server's `GET
+  /v1/server` because the state directory is the service account's alone.
+- **Client.** `bonsoir` 7 (Android NSD, Bonjour on macOS, Avahi over D-Bus on
+  Linux; maintained, and `bonsoir_android` uses Flutter's built-in Kotlin, no
+  KGP of its own). `lan_discovery.dart` reads adverts (unknown `v`, a bad
+  `sid` or `pk`, or no LAN address: ignored; a private IPv4 is dialled first,
+  then a ULA, never a public or link-local IPv6) into the five row states.
+  `lan_pairing.dart`: `openLanRoute` is `openSavedRoute` with **no relays and
+  no public relay**, then `GET /v1/server` must match the advert;
+  `pairOverLan` pairs and signs in with the same password. The pairing screen
+  is "Connect to your Storm": the list (browsing only while visible, so
+  Android's multicast lock is held only then; empty state after 5 s), Scan
+  QR code, and the old paste form behind "Enter address manually". Hidden on
+  the web and iOS. The sheet runs the challenge first and shows no password
+  field until it verifies. Settings › Connection shows the new fingerprint;
+  Devices & access says "paired on local network". Android main manifest
+  `CHANGE_WIFI_MULTICAST_STATE`; macOS `NSBonjourServices [_storm._tcp]`;
+  both guarded. `device_info_plus` prefills the device name ("Pixel 10").
+- **Where it differs from the note.**
+  - There is no Settings › Server page: the toggle is on Settings ›
+    Connection, the page that already holds the server's relays.
+  - A LAN-paired device has no pairing session for `paired_via` to reference,
+    so `client_devices` gains a nullable `paired_by` (`lan_password`), added by
+    an idempotent `ALTER` after the versioned migrations; no version bump.
+  - The sheet has one state the note does not draw: the server at the
+    advertised address did not answer ("…Your password was not sent").
+  - `deploy/storm-server.service` gains `AF_NETLINK`: interface enumeration
+    is netlink, and without it the packaged server never advertises.
+  - An IPv6 global address is not LAN-scoped, so a peer reaching the server
+    by one is refused; the client never dials one.
+- **Known gap.** Graceful shutdown is Ctrl-C only, so `systemctl stop`
+  (SIGTERM) sends no goodbye and browsers keep the entry until its TTL; the
+  row then fails its identity check as unreachable. Fixing it means deciding
+  how long a stop may wait on open `/v1/stream` connections, which is its own
+  change. This covers 116m's `storm-server status` identity line.
+- **Tests.** Server: TXT keys and values, a TXT `mdns-sd` accepts, never a
+  public interface (and not `100.64/10`), the flag over the setting, the
+  registry default; pairing on the LAN (credential signs in, `paired_by`),
+  every LAN-scoped peer class accepted, relayed (marker) and through a real
+  tunnel, public, `100.64/10` and absent peers, discovery off (persisted), no
+  account, wrong password equals login,
+  limiter charged and refunded and shared with login, the event without a
+  secret; status prints the fingerprint; the vector; the unit's
+  `AF_NETLINK`. Client: adverts and the five states, the web rule, the
+  vectors, impostor ⇒ no password request (route and sheet), every candidate
+  direct with a relay advertised, the sheet's verified/wrong-password/
+  setup-required paths saving the pinned identity and relays, the empty
+  state, browsing stopped on leave, the toggle and `--no-discovery`, the
+  manifest and plist guards. Live: `lan_discovery_e2e.py` sends a real mDNS
+  query on loopback in `make test-live`, checks the TXT, pairs, signs in,
+  and follows the switch off (advert gone, `lan_only`) and on;
+  `test_live/lan_pairing_live_test.dart` pairs through `openLanRoute`.
+- **Results.** `make check` green: server 630 unit tests (2 ignored), client
+  1117 (1 skipped). `make test-live PORT=19610 AUTH_PORT=19611
+  RELAY_PORT=19612` exits 0: server 81, mcp 86, LAN discovery 19, agent 93,
+  gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect live 39, client
+  integration 35, 1 skipped.
+- *Revisit if:* graceful shutdown learns SIGTERM (then the goodbye goes out
+  on every stop), iOS joins (its Info.plist keys and the support rule), or a
+  network the operator trusts uses addresses outside the LAN-scoped set.
+
 **94. Relay failure handling: a silent relay is dropped, and each §9 case has
 a test.** *(2026-10-12, relay TODO §9/§10; stacked on 91.)* Each case was
 established with a test first, then fixed where wrong.

@@ -413,6 +413,13 @@ impl AuthDb {
             self.conn
                 .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+
+        // Additive and nullable, so no version bump: after the versioned
+        // steps, which rebuild nothing it lives in. NULL is a QR pairing.
+        if !self.column_exists("client_devices", "paired_by")? {
+            self.conn
+                .execute_batch("ALTER TABLE client_devices ADD COLUMN paired_by TEXT;")?;
+        }
         Ok(())
     }
 

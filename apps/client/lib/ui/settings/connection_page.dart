@@ -1,9 +1,9 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/connection_log.dart';
+import '../../api/lan_discovery.dart' show keyFingerprint;
+import '../../api/models.dart' show DiscoveryConfig;
 import '../../api/storm_connection.dart' show CandidateTier;
 import '../../state/app_state.dart';
 import '../clipboard_copy.dart';
@@ -19,18 +19,6 @@ String serverAddress(String baseUrl) {
     return baseUrl.replaceAll(RegExp(r'^https?://'), '');
   }
   return uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
-}
-
-/// The first bytes of the pinned key, as `4F:2A:91…`; null if none is pinned.
-String? keyFingerprint(String publicKey) {
-  if (publicKey.isEmpty) return null;
-  try {
-    final padded = publicKey.padRight((publicKey.length + 3) ~/ 4 * 4, '=');
-    final bytes = base64Url.decode(padded);
-    return '${bytes.take(3).map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(':')}…';
-  } catch (_) {
-    return null;
-  }
 }
 
 String _relayHost(String url) => url.replaceFirst(RegExp(r'^wss?://'), '');
@@ -81,6 +69,13 @@ class ConnectionPage extends ConsumerWidget {
             key: const Key('server-identity'),
             color: engine.serverIdentityFailed ? t.danger : null,
           ),
+        ),
+        ...config.when(
+          loading: () => const <Widget>[],
+          error: (_, _) => const <Widget>[],
+          data: (c) => c?.discovery == null
+              ? const <Widget>[]
+              : [_discoverable(ref, c!.discovery!)],
         ),
         GroupLabel('Relays', top: t.sp * 3),
         const SettingsNote(
@@ -145,6 +140,33 @@ class ConnectionPage extends ConsumerWidget {
         ),
       ],
     );
+  }
+
+  /// The server's "Discoverable on this network" switch (decision 118).
+  Widget _discoverable(WidgetRef ref, DiscoveryConfig d) => SettingsRow(
+    key: const Key('discoverable'),
+    label: 'Discoverable on this network',
+    sub: d.forcedOff
+        ? 'Turned off on the server (--no-discovery or STORM_DISCOVERY=0). '
+              'Pair by QR.'
+        : 'Lets devices on your Wi-Fi find this server and pair with your '
+              'password. Turn off to pair by QR only.',
+    muted: d.forcedOff,
+    trailing: StormToggle(
+      key: const Key('discoverable-toggle'),
+      value: d.discoverable && !d.forcedOff,
+      onChanged: d.forcedOff ? null : (on) => _setDiscoverable(ref, on),
+    ),
+  );
+
+  Future<void> _setDiscoverable(WidgetRef ref, bool on) async {
+    final api = ref.read(apiProvider);
+    if (api == null) return;
+    try {
+      await api.setDiscoverable(on);
+    } finally {
+      ref.invalidate(serverConfigProvider);
+    }
   }
 
   Future<void> _copyLog(BuildContext context) async {

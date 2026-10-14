@@ -63,6 +63,33 @@ void main() {
       }
     });
   }
+
+  _infoPlistDeclaresBonjour();
+}
+
+/// LAN discovery (decision 118) needs Info.plist, not an entitlement: macOS
+/// 15 browses only the Bonjour types the app declares, and asks for the local
+/// network with the usage string. Either missing leaves the list empty.
+void _infoPlistDeclaresBonjour() {
+  test('Info.plist declares _storm._tcp and the local network use', () {
+    final text = File('macos/Runner/Info.plist').readAsStringSync();
+    expect(
+      text,
+      matches(
+        RegExp(
+          r'<key>NSBonjourServices</key>\s*<array>[^<]*(<string>[^<]*</string>\s*)*<string>_storm\._tcp</string>',
+        ),
+      ),
+    );
+    expect(
+      text,
+      matches(
+        RegExp(
+          r'<key>NSLocalNetworkUsageDescription</key>\s*<string>[^<]+</string>',
+        ),
+      ),
+    );
+  });
 }
 
 /// Matches a key granted `<true/>`, ignoring the whitespace between them.

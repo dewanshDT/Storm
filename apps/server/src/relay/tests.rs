@@ -1047,6 +1047,49 @@ async fn relay_peer_ip_becomes_the_limiters_caller_identity() {
     tunnels.shutdown().await;
 }
 
+#[tokio::test]
+async fn password_pairing_through_the_tunnel_is_lan_only() {
+    // Decision 118. The relay attests a LAN address here, as one on the
+    // client's own network would; the right password still mints nothing.
+    let dir = tempdir::TempDir::new("storm-relay-lan-pair").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+    crate::api::tests::seed_owner_with_password(&state, "correct horse battery staple").await;
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let body = serde_json::json!({
+        "password": "correct horse battery staple",
+        "device_name": "Pixel 10",
+    })
+    .to_string();
+    let response = relay
+        .request(
+            1,
+            TunnelRequest {
+                method: "POST",
+                path: "/v1/pairings/password",
+                headers: vec![("content-type".into(), serde_json::json!("application/json"))],
+                peer: Some("192.168.1.40"),
+                body: Some(body.as_bytes()),
+            },
+        )
+        .await;
+    assert_eq!(response.status, 403);
+    assert_eq!(response.json()["error"], "lan_only");
+    assert!(
+        state
+            .auth_db
+            .lock()
+            .await
+            .list_devices()
+            .unwrap()
+            .is_empty()
+    );
+
+    tunnels.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // 116a: nothing a client puts in a stream ends the trunk every client shares.
 // An origin never sends `ERROR`; it refuses one stream with `CLOSE{aborted}`.
