@@ -47,6 +47,11 @@ const MAX_ATTEMPT_ID_BYTES = 256;
 const SEEN_WRITE_MS = 1000;
 const STREAM_END_LANE = 256;
 
+// Budgets and limits count wire bytes. A JS string's length counts UTF-16
+// units, which undercounts every non-ASCII header and path (§5.5).
+const utf8 = new TextEncoder();
+const bytesOf = (text: string): number => utf8.encode(text).byteLength;
+
 // Bytes handed to one socket and bytes its peer has proved it read. `m` holds
 // the byte counts at which the relay sent a watermark PING; each PONG proves
 // the peer read everything up to the oldest one (a WebSocket is ordered).
@@ -303,7 +308,14 @@ export class RelayRoom extends DurableObject<Env> {
   private handle(entry: Entry, message: string | ArrayBuffer): Promise<void> | void {
     if (this.entries.get(idOf(entry.att)) !== entry) return;
     try {
-      const size = typeof message === "string" ? message.length : message.byteLength;
+      // A character is 1–3 bytes, so only a text frame near the limit is
+      // worth encoding to measure.
+      const size =
+        typeof message !== "string"
+          ? message.byteLength
+          : message.length * 3 > MAX_FRAME_BYTES
+            ? bytesOf(message)
+            : message.length;
       if (size > MAX_FRAME_BYTES) {
         return this.fault(entry, null, "frame over 16 MiB");
       }
@@ -380,7 +392,7 @@ export class RelayRoom extends DurableObject<Env> {
       case "HTTP_RESPONSE_HEAD": {
         const streamId = streamIdOf(frame.body);
         const json = control("HTTP_RESPONSE_HEAD", frame.body);
-        this.deliver(att.tid, streamId, json, json.length);
+        this.deliver(att.tid, streamId, json, bytesOf(json));
         return;
       }
       case "CLOSE":
@@ -407,7 +419,7 @@ export class RelayRoom extends DurableObject<Env> {
     const client = this.entries.get(stream.ctk) as Entry<ClientAtt> | undefined;
     if (!client) return;
     const json = errorOnStream("stream_aborted", streamId);
-    this.sendCounted(client, json, json.length, this.config.maxClientBufferBytes);
+    this.sendCounted(client, json, bytesOf(json), this.config.maxClientBufferBytes);
   }
 
   private challenge(entry: Entry<ServerAtt>, body: Body): void {
@@ -568,11 +580,34 @@ export class RelayRoom extends DurableObject<Env> {
     if (!stream) return;
     const client = this.entries.get(stream.ctk) as Entry<ClientAtt> | undefined;
     if (!client) return;
+    if (this.roomFull(size)) {
+      const behind = this.laggard();
+      if (behind === undefined || behind === client) {
+        this.dropBacklogged(tid, streamId, client);
+        return;
+      }
+      if (behind.att.k === "c") this.shed(behind as Entry<ClientAtt>);
+    }
     if (!this.admits(client, size, this.config.maxClientBufferBytes)) {
       this.dropBacklogged(tid, streamId, client);
       return;
     }
     this.sendCounted(client, data, size, this.config.maxClientBufferBytes);
+  }
+
+  // §5.4 shared bounds: the streams of a client that is furthest behind end,
+  // so a reader keeping up never pays for it. One with nothing left to end is
+  // holding the room's memory with bytes already sent, and its trunk goes.
+  private shed(client: Entry<ClientAtt>): void {
+    let ended = 0;
+    for (const [tid, table] of this.streams) {
+      for (const [streamId, stream] of [...table]) {
+        if (stream.ctk !== client.att.ctk) continue;
+        this.dropBacklogged(tid, streamId, client);
+        ended++;
+      }
+    }
+    if (ended === 0) this.dropClient(client, null);
   }
 
   // §5.4 (decision 106): the stream ends toward the client with
@@ -581,7 +616,7 @@ export class RelayRoom extends DurableObject<Env> {
     log("client_backlogged", { client_trunk_id: client.att.ctk, stream_id: streamId });
     this.removeStream(tid, streamId);
     const json = errorOnStream("client_backlogged", streamId);
-    this.sendCounted(client, json, json.length, this.config.maxClientBufferBytes);
+    this.sendCounted(client, json, bytesOf(json), this.config.maxClientBufferBytes);
     const server = this.entries.get(tid);
     if (server) this.sendCounted(server, closeStream(streamId), 0, this.config.maxServerBufferBytes);
     // Rule 3: storm-relay's stream-end lane holds 256; past that many ends
@@ -612,9 +647,9 @@ export class RelayRoom extends DurableObject<Env> {
       json = closeStream(streamId);
       // A plain CLOSE with no room would present what is queued as a whole
       // body if anything were ever discarded; it ends the stream as backlogged.
-      if (!this.admits(client, json.length, budget)) json = errorOnStream("client_backlogged", streamId);
+      if (!this.admits(client, bytesOf(json), budget)) json = errorOnStream("client_backlogged", streamId);
     }
-    this.sendCounted(client, json, json.length, budget);
+    this.sendCounted(client, json, bytesOf(json), budget);
   }
 
   // Ends a server trunk: every client bound to it is told and closed (§4.2,
@@ -639,7 +674,7 @@ export class RelayRoom extends DurableObject<Env> {
         const client = this.entries.get(stream.ctk);
         if (client) {
           const json = errorOnStream(code, streamId);
-          this.sendCounted(client, json, json.length, this.config.maxClientBufferBytes);
+          this.sendCounted(client, json, bytesOf(json), this.config.maxClientBufferBytes);
         }
         told.add(stream.ctk);
       }
@@ -660,7 +695,7 @@ export class RelayRoom extends DurableObject<Env> {
     const att = entry.att;
     const frame = typeof message === "string" ? parseFrame(message) : null;
     if (frame?.type === "PING") {
-      if (att.ph === 2) this.sendCounted(entry, PONG, PONG.length, this.config.maxClientBufferBytes);
+      if (att.ph === 2) this.sendCounted(entry, PONG, bytesOf(PONG), this.config.maxClientBufferBytes);
       else this.send(entry, PONG);
       return;
     }
@@ -731,14 +766,14 @@ export class RelayRoom extends DurableObject<Env> {
     delete entry.att.hw;
     this.persist(entry);
     const json = control("READY", { client_trunk_id: entry.att.ctk });
-    this.sendCounted(entry, json, json.length, this.config.maxClientBufferBytes);
+    this.sendCounted(entry, json, bytesOf(json), this.config.maxClientBufferBytes);
     log("client_opened", { server_id: entry.att.sid, client_trunk_id: entry.att.ctk });
   }
 
   private openStream(entry: Entry<ClientAtt>, body: Body): void {
     if (!("attempt_id" in body)) throw new ProtocolError();
     const attemptId = body.attempt_id;
-    if (JSON.stringify(attemptId).length > MAX_ATTEMPT_ID_BYTES) throw new ProtocolError();
+    if (bytesOf(JSON.stringify(attemptId)) > MAX_ATTEMPT_ID_BYTES) throw new ProtocolError();
     const server = this.entries.get(entry.att.tid ?? "") as Entry<ServerAtt> | undefined;
     if (!server) throw new Error("client bound to a missing trunk");
     if (!this.alive(server)) return;
@@ -749,9 +784,15 @@ export class RelayRoom extends DurableObject<Env> {
     for (const stream of table.values()) if (!stream.acked && stream.ctk === entry.att.ctk) inFlight++;
     const streamId = server.att.next;
     // Refused at once, never queued, naming its attempt; the trunk carries on (§5.1).
-    if (table.size >= config.maxTotalStreams || inFlight >= config.maxInFlightStreams || streamId > 0xffffffff) {
+    // A room past its memory bound takes no new streams (§5.4 shared bounds).
+    if (
+      table.size >= config.maxTotalStreams ||
+      inFlight >= config.maxInFlightStreams ||
+      streamId > 0xffffffff ||
+      this.held > config.maxRoomBufferBytes
+    ) {
       const json = errorOnAttempt("rate_limited", attemptId);
-      this.sendCounted(entry, json, json.length, config.maxClientBufferBytes);
+      this.sendCounted(entry, json, bytesOf(json), config.maxClientBufferBytes);
       return;
     }
     server.att.next = streamId + 1;
@@ -759,7 +800,7 @@ export class RelayRoom extends DurableObject<Env> {
     const ready = control("STREAM_READY", { attempt_id: attemptId, stream_id: streamId });
     // Before the stream exists, so a client already gone leaves the origin
     // nothing to be told about.
-    if (!this.sendCounted(entry, ready, ready.length, config.maxClientBufferBytes)) return;
+    if (!this.sendCounted(entry, ready, bytesOf(ready), config.maxClientBufferBytes)) return;
     const deadline = Date.now() + config.streamAckTimeoutMs;
     table.set(streamId, { ctk: entry.att.ctk, acked: false, deadline, head: false });
     this.sql.exec(
@@ -770,7 +811,7 @@ export class RelayRoom extends DurableObject<Env> {
       deadline,
     );
     const open = control("STREAM_OPEN", { stream_id: streamId });
-    this.sendCounted(server, open, open.length, config.maxServerBufferBytes);
+    this.sendCounted(server, open, bytesOf(open), config.maxServerBufferBytes);
     this.arm();
   }
 
@@ -794,27 +835,33 @@ export class RelayRoom extends DurableObject<Env> {
       log("stream_refused", { client_trunk_id: entry.att.ctk, stream_id: streamId, reason: "second head" });
       this.removeStream(tid, streamId);
       const refused = errorOnStream("stream_closed", streamId);
-      this.sendCounted(entry, refused, refused.length, this.config.maxClientBufferBytes);
+      this.sendCounted(entry, refused, bytesOf(refused), this.config.maxClientBufferBytes);
       this.sendCounted(server, closeStream(streamId), 0, this.config.maxServerBufferBytes);
       return;
     }
     stream.head = true;
     this.sql.exec("UPDATE streams SET head = 1 WHERE tid = ? AND sid = ?", tid, streamId);
     const json = control("HTTP_REQUEST_HEAD", { ...body, relay_peer_ip: entry.att.ip });
-    this.sendCounted(server, json, json.length, this.config.maxServerBufferBytes);
+    this.sendCounted(server, json, bytesOf(json), this.config.maxServerBufferBytes);
   }
 
   private requestBody(entry: Entry<ClientAtt>, streamId: number, raw: ArrayBuffer): void {
     const server = this.owned(entry, streamId);
     if (!server) return;
     const budget = this.config.maxServerBufferBytes;
-    if (!this.admits(server, raw.byteLength, budget)) {
+    let refuse = !this.admits(server, raw.byteLength, budget);
+    if (!refuse && this.roomFull(raw.byteLength)) {
+      const behind = this.laggard();
+      if (behind === undefined || behind === server) refuse = true;
+      else if (behind.att.k === "c") this.shed(behind as Entry<ClientAtt>);
+    }
+    if (refuse) {
       // The origin has not read what the relay already holds for it, and the
       // relay cannot slow this client down; the stream is refused instead.
       log("server_backlogged", { trunk_id: server.att.tid, stream_id: streamId });
       this.removeStream(server.att.tid, streamId);
       const json = errorOnStream("rate_limited", streamId);
-      this.sendCounted(entry, json, json.length, this.config.maxClientBufferBytes);
+      this.sendCounted(entry, json, bytesOf(json), this.config.maxClientBufferBytes);
       this.sendCounted(server, closeStream(streamId), 0, budget);
       return;
     }
@@ -829,7 +876,7 @@ export class RelayRoom extends DurableObject<Env> {
     if (!server) return;
     this.removeStream(server.att.tid, streamId);
     const json = closeStream(streamId);
-    this.sendCounted(server, json, json.length, this.config.maxServerBufferBytes);
+    this.sendCounted(server, json, bytesOf(json), this.config.maxServerBufferBytes);
   }
 
   // A stream_id this client was given, or stream_closed — the same answer for
@@ -840,7 +887,7 @@ export class RelayRoom extends DurableObject<Env> {
     const server = this.entries.get(tid) as Entry<ServerAtt> | undefined;
     if (stream && stream.ctk === entry.att.ctk && server) return server;
     const json = errorOnStream("stream_closed", streamId);
-    this.sendCounted(entry, json, json.length, this.config.maxClientBufferBytes);
+    this.sendCounted(entry, json, bytesOf(json), this.config.maxClientBufferBytes);
     return null;
   }
 
@@ -868,12 +915,31 @@ export class RelayRoom extends DurableObject<Env> {
 
   // With no watermark outstanding the peer has read all but the last step,
   // the nearest this relay can see to storm-relay's "empty queue", which
-  // admits any one frame. The room's total is a second bound: every socket
-  // here shares one isolate's memory.
+  // admits any one frame.
   private admits(entry: Entry, size: number, budget: number): boolean {
     const f = entry.att.f;
-    if (this.held > 0 && this.held + size > this.config.maxRoomBufferBytes) return false;
     return f.m.length === 0 || f.s - f.a + size <= budget;
+  }
+
+  // The room's total is a second bound: every socket here shares one
+  // isolate's memory. It decides who is shed, never whether a frame for a
+  // peer that keeps up is sent (§5.4 shared bounds).
+  private roomFull(size: number): boolean {
+    return this.held > 0 && this.held + size > this.config.maxRoomBufferBytes;
+  }
+
+  // The socket with the most bytes sent and not yet read.
+  private laggard(): Entry | undefined {
+    let worst: Entry | undefined;
+    let most = 0;
+    for (const entry of this.entries.values()) {
+      const unread = this.unread(entry.att);
+      if (unread > most) {
+        most = unread;
+        worst = entry;
+      }
+    }
+    return worst;
   }
 
   private sendCounted(entry: Entry, data: string | ArrayBuffer, size: number, budget: number): boolean {
@@ -949,7 +1015,7 @@ export class RelayRoom extends DurableObject<Env> {
         const client = this.entries.get(stream.ctk);
         if (client) {
           const json = errorOnStream("server_timeout", streamId);
-          this.sendCounted(client, json, json.length, config.maxClientBufferBytes);
+          this.sendCounted(client, json, bytesOf(json), config.maxClientBufferBytes);
         }
         const server = this.entries.get(tid);
         if (server) this.sendCounted(server, closeStream(streamId), 0, config.maxServerBufferBytes);

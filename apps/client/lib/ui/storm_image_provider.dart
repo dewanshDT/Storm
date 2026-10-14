@@ -6,6 +6,7 @@ import 'package:flutter/painting.dart';
 import 'package:http/http.dart' as http;
 
 import '../api/connection_client.dart';
+import '../api/resumable_get.dart';
 import '../api/storm_api.dart';
 
 /// An [ImageProvider] that fetches image bytes through a provided [http.Client].
@@ -68,21 +69,7 @@ class StormImageProvider extends ImageProvider<StormImageProvider> {
   }
 
   /// The image's bytes, as [loadImage] fetches them.
-  Future<Uint8List> fetch() async {
-    final request = http.Request('GET', uri);
-    request.headers.addAll(headers);
-
-    final streamed = await client.send(request);
-
-    if (streamed.statusCode != 200) {
-      unawaited(streamed.stream.listen(null).cancel());
-      throw http.ClientException(
-        'Failed to load image: ${streamed.statusCode}',
-        uri,
-      );
-    }
-    return streamed.stream.toBytes();
-  }
+  Future<Uint8List> fetch() => resumableGet(client, uri, headers);
 
   Future<ImageInfo> _loadAsync(
     StormImageProvider key,

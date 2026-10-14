@@ -8273,6 +8273,41 @@ rules are revision 115's §8, §8.10 in particular, plus §2.1–2.2 (114d), §4
   calls, or a hostname-resolving plaintext check is wanted (it would have to
   pin the resolved address for the dial).
 
+**116d. Flow-control stopgap.** *(2026-10-15; SG-08, SG-14, SG-27, SG-28;
+spec §5.4 shared bounds and §5.5)*
+- **Origin: `Range` on attachment downloads.** `GET …/attachments/*` answers
+  `Accept-Ranges: bytes` and a strong `ETag` (blake3 of the content), and a
+  single `bytes=` range with `206` and `Content-Range` (`416` past the end).
+  A `Range` whose `If-Range` no longer matches gets the whole new file: an
+  attachment replaced between attempts must never be spliced onto the old
+  prefix. The spec's rule 3 now names `ETag`/`If-Range` (vault note,
+  2026-10-15).
+- **Client: resume on `client_backlogged`.** `resumableGet` (attachments and
+  images) keeps what arrived and retries with `Range: bytes=<n>-` and
+  `If-Range`, checks the `206`'s `Content-Range` before appending, starts over
+  on `200`, and gives up after 8 resumes or one with no progress. Any other
+  transport error is not retried.
+- **Worker: shared bounds shed laggards only.** The room's total was checked
+  inside `admits`, so a full room ended whichever stream's frame came next,
+  often one whose client was keeping up — exactly what §5.4 forbids. Now a
+  full room ends the streams of the socket with the most unread (its trunk if
+  it has none left), the current frame still goes to a reader that keeps up,
+  a request body toward an origin that is itself the laggard is refused
+  `rate_limited`, and `OPEN_STREAM` is refused `rate_limited` while the room
+  is over its bound. Text frames are counted in UTF-8 bytes, not UTF-16
+  units (budgets, the attempt-id limit and the 16 MiB frame check).
+- **storm-relay: a lane per client toward the origin.** Every client's
+  request frames shared one blocking 64-frame queue on the server trunk, so
+  one upload to a slow origin held every other client's `STREAM_OPEN` and
+  heads behind up to 64 frames. Each client trunk now queues into its own
+  8-frame lane and the writer takes the lanes round-robin (`SelectAll`).
+  Measured: 70 upload frames reached a non-reading origin ahead of another
+  client's open before, a handful (socket buffers) after.
+- **Not done here:** the edge check of a 16 MiB message through Cloudflare
+  (108c's unverified item) needs the redeployed Worker, so it runs with the
+  pre-release device test. The per-trunk 32 MiB bound already meets §5.5
+  rule 1, so no separate per-stream budget was added.
+
 ## Data model
 
 A note is a `.md` file. Frontmatter carries identity:
