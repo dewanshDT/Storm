@@ -13,6 +13,7 @@ export type LogEvent =
   | "client_closed"
   | "client_backlogged"
   | "server_backlogged"
+  | "stream_refused"
   | "hello_rate_limited"
   | "protocol_error"
   | "relay_fault";

@@ -21,6 +21,7 @@ import {
   errorOnAttempt,
   errorOnStream,
   HEARTBEAT_INTERVAL_SECS,
+  isRequestHead,
   parseBodyHeader,
   parseFrame,
   PING,
@@ -99,6 +100,8 @@ interface Stream {
   ctk: string;
   acked: boolean;
   deadline: number | null;
+  // the client's one HTTP_REQUEST_HEAD has been forwarded (§5.2)
+  head: boolean;
 }
 
 const SCHEMA = `
@@ -136,6 +139,10 @@ export class RelayRoom extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec(SCHEMA);
+    // Rooms created before 116a have a streams table without it.
+    if (!this.sql.exec<{ name: string }>("PRAGMA table_info(streams)").toArray().some((c) => c.name === "head")) {
+      this.sql.exec("ALTER TABLE streams ADD COLUMN head INTEGER NOT NULL DEFAULT 0");
+    }
     // Answered by the runtime without waking the object. The bytes are what
     // storm-server, the Dart client and the Rust client all send; any other
     // spelling of PING still reaches webSocketMessage and is answered there.
@@ -147,16 +154,26 @@ export class RelayRoom extends DurableObject<Env> {
       this.entries.set(idOf(att), { ws, att });
       this.held += this.unread(att);
     }
-    for (const row of this.sql.exec<{ tid: string; sid: number; ctk: string; acked: number; deadline: number | null }>(
-      "SELECT tid, sid, ctk, acked, deadline FROM streams",
-    )) {
+    for (const row of this.sql.exec<{
+      tid: string;
+      sid: number;
+      ctk: string;
+      acked: number;
+      deadline: number | null;
+      head: number;
+    }>("SELECT tid, sid, ctk, acked, deadline, head FROM streams")) {
       const server = this.entries.get(row.tid);
       const client = this.entries.get(row.ctk);
       if (!server || !client) {
         this.sql.exec("DELETE FROM streams WHERE tid = ? AND sid = ?", row.tid, row.sid);
         continue;
       }
-      this.table(row.tid).set(row.sid, { ctk: row.ctk, acked: row.acked === 1, deadline: row.deadline });
+      this.table(row.tid).set(row.sid, {
+        ctk: row.ctk,
+        acked: row.acked === 1,
+        deadline: row.deadline,
+        head: row.head === 1,
+      });
     }
   }
 
@@ -356,9 +373,29 @@ export class RelayRoom extends DurableObject<Env> {
       }
       case "CLOSE":
         return this.serverClose(entry, frame.body);
+      case "ERROR":
+        return this.serverError(entry, frame.body);
       default:
         throw new ProtocolError();
     }
+  }
+
+  // §6 gives an origin no ERROR to send, but servers before 116a refused one
+  // stream with ERROR{stream_closed, stream_id}. The trunk is shared by every
+  // client of the server, so that ends the stream it names, as aborted.
+  private serverError(entry: Entry<ServerAtt>, body: Body): void {
+    if (!("stream_id" in body)) throw new ProtocolError();
+    const streamId = streamIdOf(body);
+    const tid = entry.att.tid;
+    const stream = this.streams.get(tid)?.get(streamId);
+    log("stream_refused", { trunk_id: tid, stream_id: streamId, reason: "origin error" });
+    this.sendCounted(entry, closeStream(streamId), 0, this.config.maxServerBufferBytes);
+    if (!stream) return;
+    this.removeStream(tid, streamId);
+    const client = this.entries.get(stream.ctk) as Entry<ClientAtt> | undefined;
+    if (!client) return;
+    const json = errorOnStream("stream_aborted", streamId);
+    this.sendCounted(client, json, json.length, this.config.maxClientBufferBytes);
   }
 
   private challenge(entry: Entry<ServerAtt>, body: Body): void {
@@ -673,7 +710,7 @@ export class RelayRoom extends DurableObject<Env> {
     // nothing to be told about.
     if (!this.sendCounted(entry, ready, ready.length, config.maxClientBufferBytes)) return;
     const deadline = Date.now() + config.streamAckTimeoutMs;
-    table.set(streamId, { ctk: entry.att.ctk, acked: false, deadline });
+    table.set(streamId, { ctk: entry.att.ctk, acked: false, deadline, head: false });
     this.sql.exec(
       "INSERT INTO streams (tid, sid, ctk, acked, deadline) VALUES (?, ?, ?, 0, ?)",
       server.att.tid,
@@ -694,18 +731,24 @@ export class RelayRoom extends DurableObject<Env> {
       throw new ProtocolError();
     }
     const streamId = streamIdOf(body);
-    const headers = body.headers;
-    if (
-      typeof body.method !== "string" ||
-      typeof body.path !== "string" ||
-      typeof headers !== "object" ||
-      headers === null ||
-      Array.isArray(headers)
-    ) {
-      throw new ProtocolError();
-    }
+    // The origin's trunk is shared by every client of the server, so a head
+    // it could not interpret is refused here, to its sender only (§5.2).
+    if (!isRequestHead(body)) throw new ProtocolError();
     const server = this.owned(entry, streamId);
     if (!server) return;
+    const tid = server.att.tid;
+    const stream = this.streams.get(tid)?.get(streamId);
+    if (!stream) return;
+    if (stream.head) {
+      log("stream_refused", { client_trunk_id: entry.att.ctk, stream_id: streamId, reason: "second head" });
+      this.removeStream(tid, streamId);
+      const refused = errorOnStream("stream_closed", streamId);
+      this.sendCounted(entry, refused, refused.length, this.config.maxClientBufferBytes);
+      this.sendCounted(server, closeStream(streamId), 0, this.config.maxServerBufferBytes);
+      return;
+    }
+    stream.head = true;
+    this.sql.exec("UPDATE streams SET head = 1 WHERE tid = ? AND sid = ?", tid, streamId);
     const json = control("HTTP_REQUEST_HEAD", { ...body, relay_peer_ip: entry.att.ip });
     this.sendCounted(server, json, json.length, this.config.maxServerBufferBytes);
   }

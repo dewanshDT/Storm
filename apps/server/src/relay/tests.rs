@@ -1047,45 +1047,140 @@ async fn relay_peer_ip_becomes_the_limiters_caller_identity() {
     tunnels.shutdown().await;
 }
 
-#[tokio::test]
-async fn a_stream_id_already_open_is_refused_rather_than_acked_twice() {
-    // §5.1, stated exactly: a duplicate is `stream_closed`, not a second ack.
-    let dir = tempdir::TempDir::new("storm-relay-dup").unwrap();
-    let identity = test_identity(dir.path());
+// ---------------------------------------------------------------------------
+// 116a: nothing a client puts in a stream ends the trunk every client shares.
+// An origin never sends `ERROR`; it refuses one stream with `CLOSE{aborted}`.
+// ---------------------------------------------------------------------------
+
+fn assert_aborted(frame: &serde_json::Value, stream_id: u32) {
+    assert_eq!(frame["type"], "CLOSE", "{frame}");
+    assert_eq!(frame["stream_id"], stream_id, "{frame}");
+    assert_eq!(frame["aborted"], true, "{frame}");
+}
+
+/// The trunk still serves another stream, and in everything the server wrote
+/// meanwhile there was no `ERROR`, and it never re-registered.
+async fn assert_trunk_serves_on(relay: &mut FakeRelay, stream_id: u32) {
+    let response = relay.request(stream_id, TunnelRequest::get("/echo")).await;
+    assert_eq!(response.status, 200);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(200), relay.events.recv()).await
+    {
+        match event {
+            Event::Text(value) => assert_ne!(value["type"], "ERROR", "{value}"),
+            Event::Binary(_) => {}
+            other => panic!("the trunk did not stay up: {other:?}"),
+        }
+    }
+    assert_eq!(
+        relay.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the server re-registered"
+    );
+}
+
+/// `/hang` never answers, so a stream stays open for a second head.
+fn hanging_router() -> Router {
+    echo_router().route(
+        "/hang",
+        axum::routing::get(std::future::pending::<&'static str>),
+    )
+}
+
+async fn tunnel_for(dir: &std::path::Path) -> (FakeRelay, super::Tunnels) {
+    let identity = test_identity(dir);
     let mut relay = FakeRelay::start(Behaviour::Normal).await;
-
-    let (_registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+    let (_registered, tunnels) = start_tunnel(&relay.url, hanging_router(), identity);
     let _ = relay.await_registration().await;
+    (relay, tunnels)
+}
 
-    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":7}));
-    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+fn open(relay: &FakeRelay, stream_id: u32) {
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+}
 
-    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":7}));
-    let second = relay.next_control().await;
-    assert_eq!(second["type"], "ERROR");
-    assert_eq!(second["code"], "stream_closed");
-    assert_eq!(second["stream_id"], 7);
+#[tokio::test]
+async fn a_head_with_a_non_string_header_value_fails_its_stream_only() {
+    // The anonymous cross-tenant DoS: this head used to fail the trunk's
+    // parse, and the server sent `ERROR` and dropped the trunk for every
+    // client of the server.
+    let dir = tempdir::TempDir::new("storm-relay-badhead").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
 
+    for (stream_id, headers) in [
+        (1, serde_json::json!({"x": 1})),
+        (2, serde_json::json!({"x": null})),
+        (3, serde_json::json!([["x", "1"]])),
+    ] {
+        open(&relay, stream_id);
+        assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+            "method":"GET","path":"/echo","headers":headers,
+        }));
+        let head = relay.next_control().await;
+        assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+        assert_eq!(head["stream_id"], stream_id);
+        assert_eq!(head["status"], 400);
+        let end = relay.next_control().await;
+        assert_eq!(end["type"], "CLOSE", "{end}");
+        assert_eq!(end["stream_id"], stream_id);
+    }
+
+    assert_trunk_serves_on(&mut relay, 9).await;
     tunnels.shutdown().await;
 }
 
 #[tokio::test]
-async fn a_request_head_for_an_unopened_stream_is_refused() {
-    let dir = tempdir::TempDir::new("storm-relay-nostream").unwrap();
-    let identity = test_identity(dir.path());
-    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+async fn a_second_head_aborts_its_stream_only() {
+    let dir = tempdir::TempDir::new("storm-relay-twohead").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
 
-    let (_registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
-    let _ = relay.await_registration().await;
+    open(&relay, 1);
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    for _ in 0..2 {
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":1,
+            "method":"GET","path":"/hang","headers":{},
+        }));
+    }
+    assert_aborted(&relay.next_control().await, 1);
+
+    assert_trunk_serves_on(&mut relay, 2).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stream_id_already_open_is_aborted_rather_than_acked_twice() {
+    let dir = tempdir::TempDir::new("storm-relay-dup").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    open(&relay, 7);
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    open(&relay, 7);
+    assert_aborted(&relay.next_control().await, 7);
+
+    assert_trunk_serves_on(&mut relay, 8).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_request_head_for_an_unopened_stream_is_aborted() {
+    let dir = tempdir::TempDir::new("storm-relay-nostream").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
 
     relay.send(serde_json::json!({
         "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":42,
         "method":"GET","path":"/echo","headers":{}
     }));
-    let response = relay.next_control().await;
-    assert_eq!(response["type"], "ERROR");
-    assert_eq!(response["code"], "stream_closed");
+    assert_aborted(&relay.next_control().await, 42);
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":43,
+        "method":"GET","path":"/echo","headers":{"x":1}
+    }));
+    assert_aborted(&relay.next_control().await, 43);
 
+    assert_trunk_serves_on(&mut relay, 1).await;
     tunnels.shutdown().await;
 }
 

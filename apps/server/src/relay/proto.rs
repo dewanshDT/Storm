@@ -32,18 +32,11 @@ pub const MAX_BODY_FRAME_PAYLOAD: usize = 256 * 1024;
 // Headers
 // ---------------------------------------------------------------------------
 
-/// One request's or response's headers, as they cross the wire.
+/// One request's or response's headers, as they cross the wire: a JSON object
+/// whose values are strings, a repeated field folded into one value (§5.2).
 ///
-/// **The spec does not pin this shape.** §5.2 and §6 both say `headers` and
-/// stop there, so an origin and a relay written independently can disagree
-/// about whether it is a JSON object or a list of pairs — and disagree
-/// silently, because a wrong-shaped `headers` deserializes as "no headers"
-/// rather than as an error. This type therefore *accepts both* and emits the
-/// object form, so interop does not rest on a coin flip that the document
-/// never called. See the report accompanying this change.
-///
-/// Order is preserved on the pair form and sorted on the object form, which is
-/// fine: HTTP gives no meaning to header order between different field names.
+/// Sorted by name on the way in, which is fine: HTTP gives no meaning to
+/// header order between different field names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WireHeaders(pub Vec<(String, String)>);
 
@@ -53,22 +46,10 @@ impl WireHeaders {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum HeadersRepr {
-    /// `{"accept": "application/json"}` — the object form.
-    Map(std::collections::BTreeMap<String, String>),
-    /// `[["accept", "application/json"]]` — the pair form, which is the only
-    /// one that can carry a repeated field name.
-    Pairs(Vec<(String, String)>),
-}
-
 impl<'de> Deserialize<'de> for WireHeaders {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(match HeadersRepr::deserialize(d)? {
-            HeadersRepr::Map(map) => WireHeaders(map.into_iter().collect()),
-            HeadersRepr::Pairs(pairs) => WireHeaders(pairs),
-        })
+        let map = std::collections::BTreeMap::<String, String>::deserialize(d)?;
+        Ok(WireHeaders(map.into_iter().collect()))
     }
 }
 
@@ -129,11 +110,22 @@ struct Frame {
 /// addressed to this slice.
 #[derive(Debug)]
 pub enum Inbound {
-    Challenge { nonce: String },
+    Challenge {
+        nonce: String,
+    },
     Registered(Registered),
-    StreamOpen { stream_id: u32 },
+    StreamOpen {
+        stream_id: u32,
+    },
     RequestHead(RequestHead),
-    Close { stream_id: Option<u32> },
+    /// An `HTTP_REQUEST_HEAD` this server cannot interpret. Its content is a
+    /// client's, so it fails that client's stream and nothing else (§5.2).
+    BadHead {
+        stream_id: u32,
+    },
+    Close {
+        stream_id: Option<u32>,
+    },
     Ping,
     Pong,
     Error(RelayError),
@@ -217,7 +209,17 @@ pub fn parse_text(text: &str) -> Result<Inbound, ProtocolError> {
                 stream_id: typed::<B>(body)?.stream_id,
             }
         }
-        "HTTP_REQUEST_HEAD" => Inbound::RequestHead(typed(body)?),
+        "HTTP_REQUEST_HEAD" => {
+            #[derive(Deserialize)]
+            struct B {
+                stream_id: u32,
+            }
+            let stream_id = typed::<B>(body.clone())?.stream_id;
+            match typed(body) {
+                Ok(head) => Inbound::RequestHead(head),
+                Err(ProtocolError) => Inbound::BadHead { stream_id },
+            }
+        }
         "CLOSE" => {
             #[derive(Deserialize)]
             struct B {
@@ -359,37 +361,6 @@ pub fn pong() -> String {
     control("PONG", serde_json::Map::new())
 }
 
-#[derive(Serialize)]
-struct ErrorBody<'a> {
-    code: &'a str,
-    message: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_id: Option<u32>,
-}
-
-/// §5.1: a `stream_id` already open is refused rather than acknowledged twice.
-pub fn error_stream_closed(stream_id: u32) -> String {
-    control(
-        "ERROR",
-        ErrorBody {
-            code: "stream_closed",
-            message: "stream closed",
-            stream_id: Some(stream_id),
-        },
-    )
-}
-
-pub fn error_protocol() -> String {
-    control(
-        "ERROR",
-        ErrorBody {
-            code: "protocol_error",
-            message: "protocol error",
-            stream_id: None,
-        },
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Binary frames
 // ---------------------------------------------------------------------------
@@ -432,8 +403,7 @@ mod tests {
             deregister(),
             ping(),
             pong(),
-            error_stream_closed(7),
-            error_protocol(),
+            abort_stream(7),
         ] {
             let value: serde_json::Value = serde_json::from_str(&json).unwrap();
             assert_eq!(value["v"], 1, "{json}");
@@ -531,8 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn headers_parse_from_either_shape() {
-        // The spec pins neither, so both have to work — see `WireHeaders`.
+    fn headers_are_an_object_of_strings() {
         let map = parse_head(r#"{"accept":"application/json","x-a":"1"}"#);
         assert_eq!(
             map.headers.0,
@@ -541,9 +510,45 @@ mod tests {
                 ("x-a".to_string(), "1".to_string())
             ]
         );
+    }
 
-        let pairs = parse_head(r#"[["accept","application/json"],["x-a","1"]]"#);
-        assert_eq!(pairs.headers.0, map.headers.0);
+    #[test]
+    fn a_head_this_server_cannot_interpret_is_a_bad_head_not_a_protocol_error() {
+        // Everything in a head but its `stream_id` is a client's, so a bad one
+        // must fail one stream, never the trunk every client shares.
+        for (field, bad) in [
+            ("headers", serde_json::json!({"x": 1})),
+            ("headers", serde_json::json!({"x": null})),
+            (
+                "headers",
+                serde_json::json!([["accept", "application/json"]]),
+            ),
+            ("headers", serde_json::json!("x")),
+            ("method", serde_json::json!(7)),
+        ] {
+            let mut frame = serde_json::json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": 4,
+                "method": "GET", "path": "/v1/health", "headers": {},
+            });
+            frame[field] = bad.clone();
+            assert!(
+                matches!(
+                    parse_text(&frame.to_string()),
+                    Ok(Inbound::BadHead { stream_id: 4 })
+                ),
+                "{field} = {bad}"
+            );
+        }
+        let no_path = r#"{"v":1,"type":"HTTP_REQUEST_HEAD","stream_id":4,"method":"GET"}"#;
+        assert!(matches!(
+            parse_text(no_path),
+            Ok(Inbound::BadHead { stream_id: 4 })
+        ));
+        // A head naming no stream names nothing to fail; the relay never
+        // sends one.
+        assert!(
+            parse_text(r#"{"v":1,"type":"HTTP_REQUEST_HEAD","method":"GET","path":"/"}"#).is_err()
+        );
     }
 
     #[test]

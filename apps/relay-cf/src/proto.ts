@@ -73,6 +73,19 @@ export function streamIdOf(body: Body): number {
   return value;
 }
 
+// §5.2's head shape: `method` an HTTP token, `path` origin-form, `headers` an
+// object of strings. Types are checked, values never read (§1).
+const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const ORIGIN_FORM = /^\/[^\x00-\x20\x7f]*$/;
+
+export function isRequestHead(body: Body): boolean {
+  const { method, path, headers } = body;
+  if (typeof method !== "string" || !TOKEN.test(method)) return false;
+  if (typeof path !== "string" || !ORIGIN_FORM.test(path)) return false;
+  if (typeof headers !== "object" || headers === null || Array.isArray(headers)) return false;
+  return Object.values(headers).every((value) => typeof value === "string");
+}
+
 export function control(type: string, body: Body = {}): string {
   return JSON.stringify({ v: PROTOCOL_VERSION, type, ...body });
 }

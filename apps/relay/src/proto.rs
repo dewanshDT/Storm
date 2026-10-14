@@ -353,9 +353,61 @@ pub fn stream_id_of(body: &serde_json::Map<String, serde_json::Value>) -> Result
         .ok_or(ErrorCode::ProtocolError)
 }
 
+/// Whether a client's `HTTP_REQUEST_HEAD` has the shape §5.2 pins: `method`
+/// an HTTP token, `path` an origin-form target, `headers` an object of
+/// strings. Values are type-checked, never read: the relay does not inspect a
+/// request (§1).
+pub fn is_request_head(body: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let method = body.get("method").and_then(serde_json::Value::as_str);
+    let path = body.get("path").and_then(serde_json::Value::as_str);
+    let headers = body.get("headers").and_then(serde_json::Value::as_object);
+    method.is_some_and(is_token)
+        && path.is_some_and(is_origin_form)
+        && headers.is_some_and(|h| h.values().all(serde_json::Value::is_string))
+}
+
+/// RFC 9110 §5.6.2 `token`.
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+fn is_origin_form(s: &str) -> bool {
+    s.starts_with('/') && !s.bytes().any(|b| b <= b' ' || b == 0x7f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_head_has_string_headers_a_token_method_and_an_origin_form_path() {
+        let head = |v: serde_json::Value| is_request_head(v.as_object().unwrap());
+        let ok = serde_json::json!({
+            "method": "GET", "path": "/v1/notes?q=a%20b", "headers": {"accept": "*/*"},
+        });
+        assert!(head(ok.clone()));
+        for (field, bad) in [
+            ("headers", serde_json::json!({"x": 1})),
+            ("headers", serde_json::json!({"x": null})),
+            ("headers", serde_json::json!({"x": ["a"]})),
+            ("headers", serde_json::json!([["x", "1"]])),
+            ("method", serde_json::json!("")),
+            ("method", serde_json::json!("GE T")),
+            ("method", serde_json::json!(1)),
+            ("path", serde_json::json!("v1/notes")),
+            ("path", serde_json::json!("/a b")),
+            ("path", serde_json::json!("/a\nb")),
+        ] {
+            let mut v = ok.clone();
+            v[field] = bad.clone();
+            assert!(!head(v), "{field} = {bad}");
+        }
+        let mut missing = ok.clone();
+        missing.as_object_mut().unwrap().remove("headers");
+        assert!(!head(missing));
+    }
 
     #[test]
     fn a_missing_or_wrong_version_is_a_protocol_error() {

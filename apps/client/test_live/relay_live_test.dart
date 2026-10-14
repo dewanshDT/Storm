@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -230,6 +231,80 @@ void main() {
     final bytes = pattern(20 * 1024 * 1024);
     await bigApi.uploadAttachment(vaultId, path, bytes).timeout(deadline);
     expect(await direct.attachment(vaultId, path), bytes);
+  });
+
+  test('a bad or repeated head from one client leaves the server trunk up for '
+      'the others (116a)', () async {
+    // Raw sockets: SrpTrunk never sends either frame. Before 116a each one
+    // reached storm-server, which sent ERROR and dropped its trunk, and every
+    // relayed client of the server was cut off.
+    Future<(WebSocket, StreamIterator<Map<String, dynamic>>)> raw() async {
+      final ws = await WebSocket.connect(relayAddress.toString());
+      final frames = StreamIterator(
+        ws
+            .where((m) => m is String)
+            .map((m) => jsonDecode(m as String) as Map<String, dynamic>)
+            .where((m) => m['type'] != 'PING'),
+      );
+      ws.add(jsonEncode({'v': 1, 'type': 'HELLO', 'server_id': serverId}));
+      expect(await frames.moveNext().timeout(deadline), isTrue);
+      expect(frames.current['type'], 'READY');
+      return (ws, frames);
+    }
+
+    Future<int> open(
+      WebSocket ws,
+      StreamIterator<Map<String, dynamic>> frames,
+    ) async {
+      ws.add(jsonEncode({'v': 1, 'type': 'OPEN_STREAM', 'attempt_id': 'm'}));
+      expect(await frames.moveNext().timeout(deadline), isTrue);
+      expect(frames.current['type'], 'STREAM_READY');
+      return frames.current['stream_id'] as int;
+    }
+
+    Map<String, dynamic> head(int id, Object headers) => {
+      'v': 1,
+      'type': 'HTTP_REQUEST_HEAD',
+      'stream_id': id,
+      'method': 'GET',
+      'path': '/v1/health',
+      'headers': headers,
+    };
+
+    Future<Map<String, dynamic>> nextError(
+      StreamIterator<Map<String, dynamic>> frames,
+    ) async {
+      while (await frames.moveNext().timeout(deadline)) {
+        if (frames.current['type'] == 'ERROR') return frames.current;
+      }
+      fail('the relay closed without an ERROR');
+    }
+
+    await relayed.vaults().timeout(deadline);
+
+    final (bad, badFrames) = await raw();
+    addTearDown(bad.close);
+    final badId = await open(bad, badFrames);
+    bad.add(jsonEncode(head(badId, {'x': 1})));
+    expect((await nextError(badFrames))['code'], 'protocol_error');
+
+    final (twice, twiceFrames) = await raw();
+    addTearDown(twice.close);
+    final twiceId = await open(twice, twiceFrames);
+    twice.add(jsonEncode(head(twiceId, <String, String>{})));
+    twice.add(jsonEncode(head(twiceId, <String, String>{})));
+    final refused = await nextError(twiceFrames);
+    expect(refused['code'], 'stream_closed');
+    expect(refused['stream_id'], twiceId);
+
+    // The shared trunk is still up: the long-lived client is served, and the
+    // server still reports itself registered.
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    expect(await relayed.vaults().timeout(deadline), isNotEmpty);
+    final info =
+        jsonDecode((await http.get(Uri.parse('$origin/v1/server'))).body)
+            as Map<String, dynamic>;
+    expect(info['relays'], isNotEmpty);
   });
 
   test('MCP initializes and writes through the real relay', () async {
