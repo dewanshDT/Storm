@@ -8273,6 +8273,27 @@ rules are revision 115's §8, §8.10 in particular, plus §2.1–2.2 (114d), §4
   calls, or a hostname-resolving plaintext check is wanted (it would have to
   pin the resolved address for the dial).
 
+**116c. Stream open lifecycle, origin side.** *(2026-10-15; the client half
+landed with 116g + 116h in #190)*
+- **Forgetting (§5.1).** storm-server kept every served stream in its table
+  for the life of the trunk: `serve_one` sent `CLOSE` and nothing removed the
+  entry. The table grew with every request, and a relay that reused a freed
+  id would have had it refused as already open. A dispatch now reports its
+  end to the read loop before it queues its last frame, so the id is
+  forgotten before the relay can see that frame; a generation number keeps a
+  late report from forgetting a newer stream that reused the id.
+- **Head-wait (§5.1).** A stream acknowledged but given no head is aborted
+  with `CLOSE{aborted}` 30 s after `STREAM_ACK`, checked on the trunk's
+  liveness tick (3 s under test).
+- **Not taken:** an open timer in storm-runtime's Rust client. It already
+  answers a late `STREAM_READY` with `CLOSE`, and an open there ends on the
+  relay's `server_timeout` or on trunk loss; the audit marked it optional.
+  The relay-side check (a stream count back to zero after a late-ready
+  `CLOSE`) is a conformance case, so it goes with 116l.
+- **Tests:** `a_served_stream_is_forgotten_so_its_id_can_be_opened_again`,
+  `a_stream_with_no_head_is_aborted_after_the_head_wait`; both fail on the
+  old code.
+
 **116d. Flow-control stopgap.** *(2026-10-15; SG-08, SG-14, SG-27, SG-28;
 spec §5.4 shared bounds and §5.5)*
 - **Origin: `Range` on attachment downloads.** `GET …/attachments/*` answers

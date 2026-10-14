@@ -1279,6 +1279,43 @@ async fn a_head_with_a_non_string_header_value_fails_its_stream_only() {
 }
 
 #[tokio::test]
+async fn a_served_stream_is_forgotten_so_its_id_can_be_opened_again() {
+    // §5.1: a party that sends `CLOSE{stream_id}` forgets the stream. A table
+    // that kept every served stream refused the relay's reuse of an id as
+    // "already open", and grew for the life of the trunk.
+    let dir = tempdir::TempDir::new("storm-relay-forget").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    for _ in 0..3 {
+        let response = relay.request(5, TunnelRequest::get("/echo")).await;
+        assert_eq!(response.status, 200);
+    }
+    assert_trunk_serves_on(&mut relay, 6).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stream_with_no_head_is_aborted_after_the_head_wait() {
+    let dir = tempdir::TempDir::new("storm-relay-headwait").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    open(&relay, 3);
+    let acked = std::time::Instant::now();
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    assert_aborted(&relay.next_control().await, 3);
+    assert!(
+        acked.elapsed() >= super::client::HEAD_WAIT,
+        "{:?}",
+        acked.elapsed()
+    );
+
+    // Forgotten as well as aborted: the id opens again.
+    let response = relay.request(3, TunnelRequest::get("/echo")).await;
+    assert_eq!(response.status, 200);
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_second_head_aborts_its_stream_only() {
     let dir = tempdir::TempDir::new("storm-relay-twohead").unwrap();
     let (mut relay, tunnels) = tunnel_for(dir.path()).await;

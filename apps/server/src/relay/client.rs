@@ -102,6 +102,14 @@ fn bound_unsent(socket: &tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream
 /// How long a closing trunk waits for queued frames to reach the socket.
 const WRITER_DRAIN: Duration = Duration::from_secs(1);
 
+/// How long an acknowledged stream may wait for its head before the origin
+/// aborts it (§5.1). A client that died between `STREAM_READY` and its head
+/// would otherwise hold the id for the life of the trunk.
+#[cfg(not(test))]
+pub(super) const HEAD_WAIT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+pub(super) const HEAD_WAIT: Duration = Duration::from_secs(3);
+
 /// Everything a trunk needs to serve. Cheap to clone — the router is `Router<()>`
 /// over an `Arc` state, which is what makes in-process dispatch free.
 #[derive(Clone)]
@@ -379,6 +387,25 @@ struct StreamEntry {
     task: Option<tokio::task::AbortHandle>,
     /// A head is accepted once per stream.
     head_seen: bool,
+    /// When `STREAM_ACK` was queued, for [`HEAD_WAIT`].
+    acked_at: tokio::time::Instant,
+    /// Tells this stream's own end apart from a later stream reusing its id.
+    generation: u64,
+}
+
+/// A dispatch task that has sent its stream's last frame, or been dropped.
+/// The read loop forgets the stream (§5.1) only if the id still belongs to
+/// that dispatch.
+struct Finished {
+    stream_id: u32,
+    generation: u64,
+    tx: mpsc::UnboundedSender<(u32, u64)>,
+}
+
+impl Drop for Finished {
+    fn drop(&mut self) {
+        let _ = self.tx.send((self.stream_id, self.generation));
+    }
 }
 
 async fn serve_trunk(
@@ -410,6 +437,8 @@ async fn serve_trunk(
     });
 
     let mut streams: HashMap<u32, StreamEntry> = HashMap::new();
+    let (finished_tx, mut finished) = mpsc::unbounded_channel::<(u32, u64)>();
+    let mut generation = 0u64;
     let silence_limit = liveness_deadline(heartbeat_secs);
     let mut liveness_check = tokio::time::interval(period.min(Duration::from_secs(1)));
     liveness_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -441,6 +470,16 @@ async fn serve_trunk(
                     );
                     break;
                 }
+                abort_headless(&mut streams, &control);
+                continue;
+            }
+            // Ahead of the socket: a dispatch queues its last frame only after
+            // saying so here, so the id is forgotten before the relay can see
+            // that frame and reuse it.
+            Some((stream_id, generation)) = finished.recv() => {
+                if streams.get(&stream_id).is_some_and(|e| e.generation == generation) {
+                    streams.remove(&stream_id);
+                }
                 continue;
             }
             message = stream.next() => match message {
@@ -459,8 +498,14 @@ async fn serve_trunk(
 
         match message {
             Message::Text(text) => {
-                if !handle_control(&text, &mut streams, &outbound, &control, tunnel, &budget).await
-                {
+                let trunk = Trunk {
+                    outbound: &outbound,
+                    control: &control,
+                    tunnel,
+                    budget: &budget,
+                    finished: &finished_tx,
+                };
+                if !handle_control(&text, &mut streams, &trunk, &mut generation).await {
                     break;
                 }
             }
@@ -604,15 +649,36 @@ async fn write_loop(mut sink: Sink, mut outbound: mpsc::Receiver<Message>, contr
     let _ = sink.close().await;
 }
 
+/// Aborts every stream still without a head [`HEAD_WAIT`] after its ack.
+fn abort_headless(streams: &mut HashMap<u32, StreamEntry>, control: &Control) {
+    let stale: Vec<u32> = streams
+        .iter()
+        .filter(|(_, e)| !e.head_seen && e.acked_at.elapsed() >= HEAD_WAIT)
+        .map(|(id, _)| *id)
+        .collect();
+    for stream_id in stale {
+        tracing::debug!(stream_id, "no head within the wait; aborting the stream");
+        refuse_stream(streams, control, stream_id);
+    }
+}
+
+/// What a trunk's control handling reaches besides its stream table.
+struct Trunk<'a> {
+    outbound: &'a mpsc::Sender<Message>,
+    control: &'a Control,
+    tunnel: &'a Tunnel,
+    budget: &'a BodyBudget,
+    finished: &'a mpsc::UnboundedSender<(u32, u64)>,
+}
+
 /// Returns `false` when the trunk should end.
 async fn handle_control(
     text: &str,
     streams: &mut HashMap<u32, StreamEntry>,
-    outbound: &mpsc::Sender<Message>,
-    control: &Control,
-    tunnel: &Tunnel,
-    budget: &BodyBudget,
+    trunk: &Trunk<'_>,
+    generation: &mut u64,
 ) -> bool {
+    let control = trunk.control;
     // An origin never sends `ERROR` (§6): a relay before 116a drops the whole
     // trunk on one. A stream is refused with `CLOSE{aborted}`, and only a
     // frame the relay itself got wrong ends the trunk.
@@ -632,12 +698,15 @@ async fn handle_control(
                 refuse_stream(streams, control, stream_id);
                 return true;
             }
+            *generation += 1;
             streams.insert(
                 stream_id,
                 StreamEntry {
                     body: None,
                     task: None,
                     head_seen: false,
+                    acked_at: tokio::time::Instant::now(),
+                    generation: *generation,
                 },
             );
             // The ACK says only that this trunk accepted the id — not that a
@@ -649,7 +718,9 @@ async fn handle_control(
             match streams.get_mut(&stream_id) {
                 Some(entry) if !entry.head_seen => {
                     entry.head_seen = true;
-                    start_dispatch(entry, head, outbound.clone(), control, tunnel, budget);
+                    if !start_dispatch(entry, head, trunk) {
+                        streams.remove(&stream_id);
+                    }
                 }
                 // A second head, or one for a stream not open here.
                 _ => refuse_stream(streams, control, stream_id),
@@ -722,14 +793,9 @@ fn is_bodyless(method: &str) -> bool {
     )
 }
 
-fn start_dispatch(
-    entry: &mut StreamEntry,
-    head: RequestHead,
-    outbound: mpsc::Sender<Message>,
-    control: &Control,
-    tunnel: &Tunnel,
-    budget: &BodyBudget,
-) {
+/// Returns `false` when the stream ended here, answered without a dispatch.
+fn start_dispatch(entry: &mut StreamEntry, head: RequestHead, trunk: &Trunk<'_>) -> bool {
+    let (control, tunnel, budget) = (trunk.control, trunk.tunnel, trunk.budget);
     let stream_id = head.stream_id;
 
     let body = if is_bodyless(&head.method) {
@@ -750,18 +816,25 @@ fn start_dispatch(
                 proto::WireHeaders::default(),
             )));
             control.push(Message::text(proto::close_stream(stream_id)));
-            return;
+            return false;
         }
     };
 
     let router = tunnel.router.clone();
+    let outbound = trunk.outbound.clone();
+    let finished = Finished {
+        stream_id,
+        generation: entry.generation,
+        tx: trunk.finished.clone(),
+    };
     // **Spawned, never awaited here.** The read loop returns to the socket
     // immediately, so one slow handler cannot stall the trunk's other streams
     // and no relayed work is ever inlined onto a path a LAN request travels.
     let task = tokio::spawn(async move {
-        serve_one(router, request, stream_id, outbound).await;
+        serve_one(router, request, stream_id, outbound, finished).await;
     });
     entry.task = Some(task.abort_handle());
+    true
 }
 
 async fn serve_one(
@@ -769,6 +842,7 @@ async fn serve_one(
     request: axum::http::Request<Body>,
     stream_id: u32,
     outbound: mpsc::Sender<Message>,
+    finished: Finished,
 ) {
     use tower::ServiceExt;
 
@@ -815,6 +889,7 @@ async fn serve_one(
                 // A plain `CLOSE` here would tell the client the body is
                 // complete, and it would keep a truncated note (decision 101).
                 tracing::warn!(stream_id, error = %e, "response body failed mid-stream");
+                drop(finished);
                 let _ = outbound
                     .send(Message::text(proto::abort_stream(stream_id)))
                     .await;
@@ -841,6 +916,7 @@ async fn serve_one(
         }
     }
 
+    drop(finished);
     let _ = outbound
         .send(Message::text(proto::close_stream(stream_id)))
         .await;
