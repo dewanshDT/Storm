@@ -27,6 +27,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/api/ed25519_verify.dart';
 import 'package:storm/api/lan_discovery.dart' show keyFingerprint;
+import 'package:storm/api/net.dart' show plaintextRelayAllowed;
 import 'package:storm/api/relay/srp_trunk.dart';
 import 'package:storm/api/server_verifier.dart';
 
@@ -196,6 +197,37 @@ void main() {
         keyFingerprint(c['public_key_b64'] as String),
         c['fingerprint'],
         reason: c['name'] as String,
+      );
+    }
+  });
+
+  test('every relay set message and signature matches (§4.3, 116j)', () async {
+    final section = doc['relay_set_message'] as Map<String, dynamic>;
+    for (final c in (section['cases'] as List).cast<Map<String, dynamic>>()) {
+      final urls = (c['relays'] as List).cast<String>();
+      final message = relaySetMessage(c['server_id'] as String, urls);
+      if (c['message_utf8'] != null) {
+        expect(message, c['message_utf8'], reason: c['name'] as String);
+      }
+      if (c['signature_b64'] != null) {
+        final ok = await verifyRelaySet(
+          publicKeyB64: c['public_key_b64'] as String,
+          signatureB64: c['signature_b64'] as String,
+          serverId: c['server_id'] as String,
+          urls: urls,
+        );
+        expect(ok, c['verifies'] == true, reason: c['name'] as String);
+      }
+    }
+  });
+
+  test('every plaintext relay host gets the verdict the file records', () {
+    final section = doc['plaintext_relay_hosts'] as Map<String, dynamic>;
+    for (final c in (section['cases'] as List).cast<Map<String, dynamic>>()) {
+      expect(
+        plaintextRelayAllowed(c['host'] as String),
+        c['ws_allowed'],
+        reason: c['host'] as String,
       );
     }
   });

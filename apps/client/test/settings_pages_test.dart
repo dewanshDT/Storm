@@ -609,6 +609,52 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('removing a relay offers to change the password and sign '
+        'every other device out (116j)', (tester) async {
+      final c = shellContainer(
+        settings: const Settings(
+          baseUrl: 'http://test',
+          accessToken: 'sta_test',
+          deviceId: 'dev_me',
+          activeVault: FakeServer.primaryVault,
+        ),
+      );
+      final server = serverOf(c)
+        ..relays = ['wss://relay.example.net']
+        ..devices.addAll([
+          {'id': 'dev_me', 'name': 'MacBook', 'paired': '2026-10-01T00:00:00Z'},
+          {
+            'id': 'dev_phone',
+            'name': 'Pixel',
+            'paired': '2026-10-01T00:00:00Z',
+          },
+        ]);
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+
+      await tapKey(tester, 'remove-relay-wss://relay.example.net');
+      expect(server.relays, isEmpty);
+      await tapKey(tester, 'confirm-after-relay');
+      await tester.enterText(
+        find.byKey(const Key('prompt-field')),
+        'correct horse',
+      );
+      await tapKey(tester, 'prompt-ok');
+      await tester.enterText(
+        find.byKey(const Key('prompt-field')),
+        'battery staple',
+      );
+      await tapKey(tester, 'prompt-ok');
+      await tester.pumpAndSettle();
+
+      expect(server.password, 'battery staple');
+      final revoked = {
+        for (final d in server.devices) d['id']: d['revoked'] != null,
+      };
+      expect(revoked, {'dev_me': false, 'dev_phone': true});
+      await disposeShell(tester, c);
+    });
+
     testWidgets('the server can stop being discoverable (decision 118)', (
       tester,
     ) async {

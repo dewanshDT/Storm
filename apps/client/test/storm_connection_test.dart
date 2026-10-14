@@ -24,6 +24,7 @@ void main() {
   /// `GET /v1/server` for a server advertising [relays].
   http.Client serverAnswering({
     List<Map<String, String>> relays = const [],
+    String? relaysSig,
     Duration delay = Duration.zero,
     bool dead = false,
   }) => MockClient((request) async {
@@ -36,6 +37,7 @@ void main() {
         'algorithm': 'ed25519',
         'public_key': pubkey,
         'relays': relays,
+        'relays_sig': ?relaysSig,
       }),
       200,
       headers: {'content-type': 'application/json'},
@@ -322,6 +324,30 @@ void main() {
       await c.connect();
 
       expect(c.relays.map((r) => r.url), [selfHosted.url]);
+    });
+
+    test('a signed set whose relays_sig does not verify is never adopted '
+        '(§4.3, 116j)', () async {
+      // The set may have crossed a relay, which could rewrite it; only the
+      // pinned key vouches for it.
+      final c = connectionWith(
+        byHost: {
+          'direct.test': serverAnswering(
+            relays: [
+              {
+                'url': selfHosted.url,
+                'public_address': selfHosted.publicAddress,
+              },
+            ],
+            relaysSig: 'B' * 86,
+          ),
+        },
+      );
+      await c.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // The same set unsigned is adopted (the test above), so only the
+      // signature can have refused it.
+      expect(c.relays, isEmpty);
     });
 
     test(

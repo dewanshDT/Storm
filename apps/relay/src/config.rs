@@ -174,6 +174,34 @@ impl Config {
     }
 }
 
+/// §4.1 (decision 116j): trust-on-first-use is refused on a bind that anyone
+/// on the internet may reach — a wildcard, or a public address — unless the
+/// operator says so. The packaged default binds loopback.
+pub fn check_tofu_bind(bind: std::net::SocketAddr, allow_public: bool) -> anyhow::Result<()> {
+    let ip = bind.ip();
+    let private = match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+    };
+    if private || allow_public {
+        return Ok(());
+    }
+    let what = if ip.is_unspecified() {
+        "every interface"
+    } else {
+        "a public address"
+    };
+    anyhow::bail!(
+        "trust-on-first-use on {what} ({bind}) lets whoever registers a server_id \
+         first keep it for good. Use --allowlist or --mode open, or pass \
+         --allow-public-tofu if every client and server reaches this relay \
+         over a network you control"
+    )
+}
+
 /// The §4.1 registration mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -259,6 +287,26 @@ impl Allowlist {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tofu_is_refused_on_a_public_or_wildcard_bind_unless_allowed() {
+        for ok in [
+            "127.0.0.1:8486",
+            "[::1]:8486",
+            "192.168.1.5:443",
+            "10.0.0.1:1",
+            "[fd00::1]:9",
+        ] {
+            assert!(check_tofu_bind(ok.parse().unwrap(), false).is_ok(), "{ok}");
+        }
+        for bad in ["0.0.0.0:443", "[::]:443", "8.8.8.8:443", "100.64.0.1:443"] {
+            assert!(
+                check_tofu_bind(bad.parse().unwrap(), false).is_err(),
+                "{bad}"
+            );
+            assert!(check_tofu_bind(bad.parse().unwrap(), true).is_ok(), "{bad}");
+        }
+    }
     use super::*;
     use data_encoding::BASE64URL_NOPAD;
 

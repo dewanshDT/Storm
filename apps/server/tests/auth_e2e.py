@@ -220,7 +220,8 @@ check("public_key is 32 base64url bytes", len(public_key) == 32, info.get("publi
 
 check(
     "exposes exactly the identity fields and nothing else",
-    set(info) == {"server_id", "name", "key_id", "algorithm", "public_key", "relays"},
+    # `relays_sig` signs the relay set (SRP §4.3, decision 116j).
+    set(info) == {"server_id", "name", "key_id", "algorithm", "public_key", "relays", "relays_sig"},
     sorted(info),
 )
 
