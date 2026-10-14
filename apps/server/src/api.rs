@@ -5824,7 +5824,7 @@ pub(crate) mod tests {
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(
             body["discovery"],
-            serde_json::json!({"discoverable": true, "forced_off": false, "active": true}),
+            serde_json::json!({"discoverable": true, "forced_off": false, "active": true, "untrusted": []}),
             "decision 118: discoverable unless turned off"
         );
         assert_eq!(
