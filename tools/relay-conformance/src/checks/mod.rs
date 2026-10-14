@@ -12,6 +12,7 @@ mod keyed;
 mod lifecycle;
 mod limits;
 mod registration;
+mod rev115;
 mod streams;
 
 pub type Run = for<'a> fn(&'a Ctx) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>>;
@@ -59,5 +60,6 @@ pub fn all() -> Vec<Check> {
     checks.extend(streams::checks());
     checks.extend(limits::checks());
     checks.extend(keyed::checks());
+    checks.extend(rev115::checks());
     checks
 }
