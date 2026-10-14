@@ -2302,6 +2302,7 @@ dependencies = [
  "diffy",
  "ed25519-dalek",
  "futures-util",
+ "if-addrs",
  "mdns-sd",
  "notify",
  "oauth2",

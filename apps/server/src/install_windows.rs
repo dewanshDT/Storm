@@ -482,6 +482,10 @@ mod imp {
             );
         }
 
+        let old_port = std::fs::read(&layout.record)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Record>(&b).ok())
+            .map(|old| old.port);
         std::fs::write(&layout.record, serde_json::to_string_pretty(&r)?)
             .with_context(|| format!("writing {}", layout.record))?;
         let user = user()?;
@@ -510,13 +514,28 @@ mod imp {
         println!("  log       : {}", layout.log_file);
         println!();
         println!("It runs as you while you are logged on, and starts again at logon.");
-        println!(
-            "So your phone can reach it, allow it through Windows Firewall once, in an \
-             elevated PowerShell:\n  New-NetFirewallRule -DisplayName 'Storm Server' \
-             -Direction Inbound -Program '{}' -Protocol TCP -LocalPort {} -Profile Private \
-             -Action Allow",
-            layout.binw, r.port
-        );
+        let reminder = old_port
+            .map(|old| {
+                crate::firewall::port_change_reminder(
+                    crate::nettrust::Platform::Windows,
+                    &crate::nettrust::RealOs,
+                    old,
+                    r.port,
+                    &layout.binw,
+                )
+            })
+            .unwrap_or_default();
+        if reminder.is_empty() {
+            println!(
+                "So your phone can reach it, allow it through Windows Firewall once, on \
+                 private networks only, in an elevated PowerShell:\n  {}",
+                crate::firewall::windows_rule_command(&layout.binw, r.port)
+            );
+        } else {
+            for line in reminder {
+                println!("{line}");
+            }
+        }
         if !healthy {
             bail!(
                 "the server did not answer on port {} — see {}",
@@ -572,6 +591,9 @@ mod imp {
             for line in crate::discovery::status_identity(r.port, 8) {
                 println!("{line}");
             }
+        }
+        for line in crate::firewall::status_here(r.port, &layout.binw, 8) {
+            println!("{line}");
         }
         if !healthy {
             std::process::exit(1);

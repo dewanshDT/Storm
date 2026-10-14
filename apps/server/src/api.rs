@@ -5877,7 +5877,7 @@ pub(crate) mod tests {
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(
             body["discovery"],
-            serde_json::json!({"discoverable": true, "forced_off": false, "active": true}),
+            serde_json::json!({"discoverable": true, "forced_off": false, "active": true, "untrusted": []}),
             "decision 118: discoverable unless turned off"
         );
         assert_eq!(
@@ -8888,6 +8888,56 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::FORBIDDEN, "{peer:?}");
             assert_eq!(body["error"], "lan_only", "{peer:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn password_pairing_from_an_untrusted_network_is_refused() {
+        let dir = tempdir::TempDir::new("storm-lan-untrusted").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        let os = crate::nettrust::fake::FakeOs::default()
+            .with("firewall-cmd --state", "running\n")
+            .with(
+                "firewall-cmd --get-active-zones",
+                "public\n  interfaces: wlan0\nhome\n  interfaces: enp3s0\n",
+            );
+        let ifaces = [
+            crate::nettrust::Iface {
+                name: "wlan0".into(),
+                ip: "192.168.1.13".parse().unwrap(),
+                prefix: 24,
+            },
+            crate::nettrust::Iface {
+                name: "enp3s0".into(),
+                ip: "10.0.0.5".parse().unwrap(),
+                prefix: 24,
+            },
+        ];
+        state
+            .discovery
+            .trust
+            .refresh(crate::nettrust::Platform::Linux, &os, &ifaces);
+
+        let (status, body) =
+            send(&app, pair_password_from(LAN_PASSWORD, Some("192.168.1.40"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "lan_only");
+        assert!(
+            state
+                .auth_db
+                .lock()
+                .await
+                .list_devices()
+                .unwrap()
+                .is_empty()
+        );
+
+        let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, Some("10.0.0.9"))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a trusted network still pairs: {body}"
+        );
     }
 
     #[tokio::test]

@@ -279,6 +279,45 @@ other account, after writing `state/auth.db.pre-v6`. If it has no active owner
 it refuses to start; name the account to keep with
 `sudo -u storm storm-server single-user --keep <username> --state /srv/storm/state`.
 
+## Firewalls
+
+Decision 119; the normative spec is the vault note *Reachability on Laptops
+and Desktops*. **Storm never needs an inbound port and never opens one
+silently.** Remote access dials out to a relay (WSS 443), so a laptop behind
+any firewall, NAT or hotel Wi-Fi works with nothing opened. A LAN opening is
+only a speed and privacy option, made with consent, for Storm alone, from the
+local network only, never to the internet and never by UPnP.
+
+| OS | What allows Storm | Scope |
+|---|---|---|
+| Windows | `install.ps1` asks, then adds the rule `Storm Server`: inbound TCP on Storm's port for `storm-serverw.exe` | **Private** profile only, never Public or Domain |
+| macOS | the Application Firewall's own "Allow incoming connections?" prompt | per app, so the release must be signed with a stable identity (`deploy/release-secrets.md`) |
+| Linux, ufw | the package ships `/etc/ufw/applications.d/storm-server`; `install.sh` asks, then runs `ufw allow from <each local RFC 1918/ULA subnet> to any app storm-server` | local subnets only |
+| Linux, firewalld | the package ships `/usr/lib/firewalld/services/storm-server.xml`; `install.sh` asks, then adds it to the home/trusted zone(s) | never `public`, `external`, `drop` or `block` |
+| Linux, neither | nothing to do | — |
+
+- The question: "Allow devices on your local network to reach Storm directly?
+  (Faster and more private than going through a relay. Storm stays
+  unreachable from the internet.)" Default yes; no (or `--no-firewall`,
+  `-NoFirewall`) prints the exact command instead. So does a run without
+  administrator rights; it never fails the install.
+- What `install.sh` added is listed in `/etc/storm/lan-firewall`, and
+  `install.sh uninstall --server` removes exactly that, nothing else.
+- `storm-server up --port N` keeps the ufw profile and firewalld service on
+  the new port, and, when the port changed, prints the command that refreshes
+  the rule (`sudo ufw app update storm-server`, `sudo firewall-cmd --reload`,
+  or `Set-NetFirewallRule … -LocalPort N` on Windows). It never edits a rule.
+- **Untrusted networks** (Layer 2): on a network the OS calls untrusted the
+  server does not advertise `_storm._tcp` there and refuses password pairing
+  from it (`403 lan_only`); paired devices and the relay work as before. The
+  signal is the Windows network category (Public), the firewalld zone
+  (`public`, `external`, `drop`, `block`), or else the NetworkManager
+  connection zone. macOS has none, so its "Discoverable on this network"
+  switch decides. Re-read whenever the interfaces change, and every 60 s.
+- `storm-server status` (run it with `sudo` where ufw is on: its rules are
+  root's) prints `lan` — `open (rule …)`, `blocked by ufw — run: …`, `no host
+  firewall` — and `network`, whether each LAN interface is trusted and why.
+
 ## Backups
 
 `storm-backup.timer` runs nightly at 03:30 with a randomised delay, and

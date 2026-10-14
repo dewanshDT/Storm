@@ -132,6 +132,19 @@ bool _validServerId(String sid) =>
     sid.length <= 128 &&
     sid.codeUnits.every((c) => c > 0x20 && c < 0x7F && c != 0x3A && c != 0x22);
 
+/// The LAN subnet a firewall rule would allow for [host], as a person types
+/// it: `192.168.1.13` → `192.168.1.0/24`. A guess at the usual home /24;
+/// `storm-server status` on the server prints the exact one.
+String lanSubnetGuess(String host) {
+  final v4 = _ipv4(host);
+  if (v4 != null) return '${v4[0]}.${v4[1]}.${v4[2]}.0/24';
+  final groups = host.split(':');
+  if (groups.length >= 4 && !host.contains('::')) {
+    return '${groups.take(4).join(':')}::/64';
+  }
+  return '<your local network>';
+}
+
 /// The address to pair over: a private IPv4 first, then a unique-local IPv6.
 /// Never a public address, which the server would refuse anyway, and never a
 /// link-local IPv6, which needs a zone the URL cannot carry.
@@ -175,7 +188,10 @@ enum LanServerState {
   alreadyPaired,
   needsSetup,
   pairingOff,
-  updateNeeded,
+
+  /// `ver` differs in major.minor. A warning, never a block (decision 119,
+  /// amending 118): the health check only warns about it either.
+  differentVersion,
 }
 
 LanServerState lanServerState(
@@ -188,7 +204,7 @@ LanServerState lanServerState(
   }
   if (!server.claimed) return LanServerState.needsSetup;
   if (!server.lanPairing) return LanServerState.pairingOff;
-  if (!compatible) return LanServerState.updateNeeded;
+  if (!compatible) return LanServerState.differentVersion;
   return LanServerState.available;
 }
 

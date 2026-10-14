@@ -55,6 +55,15 @@ jobs:
               cp target/debian/*.deb ../../dist/)
           done
           (cd dist && sha256sum * > checksums.txt && cat checksums.txt)
+      # Decision 119 against a real ufw. The runner is disposable; the SSH rule
+      # stands in for a rule of the operator's that Storm must leave alone.
+      - name: Turn ufw on (deny incoming)
+        run: |
+          set -eux
+          command -v ufw || sudo apt-get install -y ufw
+          sudo ufw allow 22/tcp
+          sudo ufw --force enable
+          sudo ufw status verbose
       - name: Install everything (non-interactive)
         run: |
           printf '%s\n' "$CI_PASSWORD" |
@@ -74,6 +83,24 @@ jobs:
           grep -q '^OK:' check.txt
           # The first workspace, the runtime account's own.
           test "$(sudo stat -c %U /var/lib/storm-runtime/workspaces/scratch)" = storm-runtime
+      - name: Check — the LAN-only ufw rule (decision 119)
+        run: |
+          set -eux
+          sudo ufw status | tee ufw.txt
+          sudo ufw app info storm-server
+          # Only from private subnets, never Anywhere.
+          grep -E '^storm-server( \(v6\))? +ALLOW( IN)? +(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|f[cd])' ufw.txt
+          ! grep -E '^storm-server.*Anywhere' ufw.txt
+          sudo cat /etc/storm/lan-firewall
+          sudo storm-server status | tee status.txt
+          grep -E '^lan +: open \(ufw: ' status.txt
+          grep -E '^network +: ' status.txt
+          # A changed port: up reminds, and prints the command.
+          sudo storm-server up --port 8485 | tee up.txt
+          grep -F 'sudo ufw app update storm-server' up.txt
+          grep -F 'ports=8485/tcp' /etc/ufw/applications.d/storm-server
+          sudo storm-server up --port 8484
+          curl -fsS --retry 10 --retry-connrefused http://127.0.0.1:8484/v1/health
       - name: Re-run changes nothing (AC-I4)
         run: |
           set -eux
@@ -97,6 +124,14 @@ jobs:
           ! grep -F "$CI_PASSWORD" "$log"
           ! grep -E 'storm-enroll:v1:[^ ]*sen_' "$log"
           ! sudo journalctl -u storm-runtime -u storm-server --no-pager | grep -E 'storm-enroll:v1:|sen_[A-Z0-9]{8}'
+      - name: Uninstall removes only Storm's ufw rules (decision 119)
+        run: |
+          set -eux
+          sh deploy/install.sh --yes uninstall --server --runtime
+          sudo ufw status | tee ufw.txt
+          ! grep storm-server ufw.txt
+          grep -E '^22/tcp +ALLOW' ufw.txt
+          sudo test ! -e /etc/storm/lan-firewall
       - name: Logs
         if: always()
         run: |

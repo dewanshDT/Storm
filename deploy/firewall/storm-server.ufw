@@ -1,0 +1,4 @@
+[storm-server]
+title=Storm server
+description=Storm notes sync server. Allow it from your local network only.
+ports=8484/tcp

@@ -8,8 +8,11 @@
   zips, checks each against the release's checksums.txt, and then:
 
   - Server: `storm-server up` as you (a logon task, notes in %USERPROFILE%\Storm),
-    one inbound firewall rule for private networks (as administrator), and a
-    pairing code for your first device when the server has no account yet.
+    after asking, one inbound firewall rule for storm-serverw.exe on Private
+    networks only, never Public or Domain (as administrator; otherwise the
+    command is printed), and a pairing code for your first device when the
+    server has no account yet. Remote access goes through a relay and needs no
+    rule at all (decision 119).
   - Runtime: `storm-runtime install` (the StormRuntime service, as administrator),
     then enrollment: straight from the server on this machine, or by pasting the
     app's enrollment string at a hidden prompt. It never reaches a command line,
@@ -42,6 +45,8 @@
 .PARAMETER PasswordStdin
   Set a new server's account password from stdin (one line), instead of pairing
   a device first. Never an argument: arguments are visible to other users.
+.PARAMETER NoFirewall
+  Don't add the firewall rule; print the command instead.
 .PARAMETER Yes
   Ask nothing: install what was chosen, and skip what needs an answer.
 .PARAMETER DryRun
@@ -56,6 +61,7 @@ param(
     [string]$FromDir,
     [string]$Workspace,
     [switch]$PasswordStdin,
+    [switch]$NoFirewall,
     [switch]$Yes,
     [switch]$DryRun
 )
@@ -67,6 +73,8 @@ $Repo = 'dewanshDT/Storm'
 $ServerZip = 'storm-server-windows-x86_64.zip'
 $RuntimeZip = 'storm-runtime-windows-x86_64.zip'
 $Port = 8484
+$RuleName = 'Storm Server'
+$FirewallPrompt = 'Allow devices on your local network to reach Storm directly? (Faster and more private than going through a relay. Storm stays unreachable from the internet.)'
 
 function Say($text) { Write-Host $text }
 function Step($text) { Write-Host "==> $text" -ForegroundColor Cyan }
@@ -120,7 +128,7 @@ $mcpDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm'
 Step "Plan ($(if ($Version) { $Version } else { "from $FromDir" }))"
 if ($Server) {
     Say "  server   : $ServerZip, checked; storm-server up as $env:USERNAME (logon task, notes in $env:USERPROFILE\Storm)"
-    Say "  firewall : inbound TCP $Port for storm-serverw.exe, private networks only $(if (-not $admin) { '(needs administrator: printed instead)' })"
+    Say "  firewall : asks; inbound TCP $Port for storm-serverw.exe, Private networks only $(if (-not $admin) { '(needs administrator: printed instead)' })"
 }
 if ($Runtime) {
     Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service) [administrator]"
@@ -167,14 +175,23 @@ if ($Server) {
     $dir = Checked $ServerZip
     & (Join-Path $dir 'storm-server.exe') up --port $Port
     if ($LASTEXITCODE -ne 0) { Fail 'storm-server up failed' }
-    $rule = "New-NetFirewallRule -DisplayName 'Storm Server' -Direction Inbound -Program '$(Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-serverw.exe')' -Protocol TCP -LocalPort $Port -Profile Private -Action Allow"
-    if ($admin) {
-        if (-not (Get-NetFirewallRule -DisplayName 'Storm Server' -ErrorAction SilentlyContinue)) {
+    # Decision 119: program-scoped, Storm's port, the Private profile only.
+    $rule = "New-NetFirewallRule -DisplayName '$RuleName' -Direction Inbound -Program '$(Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-serverw.exe')' -Protocol TCP -LocalPort $Port -Profile Private -Action Allow"
+    $allow = -not $NoFirewall -and -not ((Ask "$FirewallPrompt (Y/n)" 'Y') -match '^[nN]')
+    if (-not $allow) {
+        Say "Left the firewall as it is; devices reach Storm through a relay. To allow them directly later, as administrator:`n  $rule"
+    } elseif ($admin) {
+        $existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+        if (-not $existing) {
             Invoke-Expression $rule | Out-Null
+        } elseif (@($existing | Where-Object { "$($_.Profile)" -ne 'Private' }).Count -gt 0) {
+            # An older or hand-made rule open on Public or Domain networks too.
+            $existing | Set-NetFirewallRule -Profile Private
+            Say "Narrowed the '$RuleName' rule to Private networks only."
         }
-        Say 'Allowed inbound connections on private networks.'
+        Say 'Allowed inbound connections on Private networks only.'
     } else {
-        Say "So your phone can reach it, run once in PowerShell as administrator:`n  $rule"
+        Say "So your phone can reach it directly, run once in PowerShell as administrator:`n  $rule"
     }
     & $serverBin has-account --state $dataState *> $null
     if ($LASTEXITCODE -ne 0 -and $PasswordStdin) {
