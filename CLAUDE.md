@@ -73,7 +73,6 @@ Practical consequences worth knowing before you start:
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/relay/` | `storm-relay` — the SRP v1 relay. Standalone crate; **no workspace** (R6). |
 | `tools/relay-conformance/` | Black-box SRP v1 suite every relay must pass, by URL only (decision 108a). Its `fixtures/` are the contract a relay under test is started with. |
-
 | `apps/relay-cf/` | The same relay on Cloudflare Workers + Durable Objects (decision 108b). TypeScript; nothing in it may live only in memory, since hibernation evicts it. |
 | `apps/server/src/gateway/` | The MCP Gateway's store, data key and upstream client (M21, decision 81). Policy stays in `ops.rs`. |
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
@@ -388,6 +387,14 @@ lives in this repo**; the design rationale stays in the personal vault under
   `ReadWritePaths` entry is missing, so an NFS vault root that mounts late
   was a `226/NAMESPACE` loop, and with 0.2.9's live restart limit a dead
   server. `[Unit]` keys under `[Service]` are ignored with only a warning.
+- **Every `PING` is answered, at any point on a trunk, and a `PONG` is never
+  dropped** (SRP §4.2, decision 108c). The Worker relay `PING`s to measure
+  what a peer has read, so a `PONG` lost on a full queue reads as a stalled
+  reader. storm-server owes them through `Pongs`, outside the bounded queue.
+- **Two relays, one spec.** `apps/relay` and `apps/relay-cf` both pass
+  `tools/relay-conformance` (`make relay-conformance-local`,
+  `make relay-conformance-cf`). A behaviour the spec leaves open is amended
+  into `docs/srp-v1.md` in the same change, never settled in one relay's code.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.

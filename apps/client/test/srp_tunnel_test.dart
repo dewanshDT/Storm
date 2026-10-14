@@ -57,6 +57,23 @@ void main() {
     });
   });
 
+  test('every relay PING is answered, before READY and after', () async {
+    await _withRelay((relay) async {
+      relay.pings = 3;
+      var pongs = 0;
+      final six = Completer<void>();
+      relay.sent.listen((m) {
+        if (m['type'] == 'PONG' && ++pongs == 6) six.complete();
+      });
+      final trunk = _trunk(relay);
+      await trunk.connect();
+      await six.future.timeout(const Duration(seconds: 5));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(pongs, 6);
+      trunk.dispose();
+    });
+  });
+
   test('a GET request/response round-trips through the tunnel', () async {
     await _withRelay((relay) async {
       final trunk = _trunk(relay);

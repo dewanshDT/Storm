@@ -16,6 +16,7 @@ construction.
 
 ```sh
 make relay-conformance-local            # builds storm-relay, starts it, runs the suite
+make relay-conformance-cf               # the Worker relay under wrangler dev (Node 22)
 make relay-conformance RELAY_URL=ws://127.0.0.1:8787   # any relay already running
 ```
 
@@ -98,6 +99,10 @@ deadline and answer a relay's `PING`, so any relay heartbeat scheme works. Its
 clients pace their `HELLO`s to a third of the per-IP limit, except in the
 checks that exceed it, which then wait two windows.
 
+`make relay-conformance-cf` (`cf.sh`) does the same for the Worker relay:
+two `wrangler dev` instances on 18910/18911, the `127.0.0.2` checks on, the
+latency check off.
+
 `make relay-conformance-local` runs two storm-relays (`tools/relay-conformance/local.sh`):
 allowlist mode on 18900 and TOFU on 18901, with `RELAY_PEER_IP=127.0.0.1`,
 the latency check on, and on Linux the `127.0.0.2` checks. A run takes about
@@ -111,14 +116,16 @@ the latency check on, and on Linux the `127.0.0.2` checks. A run takes about
 | §4 registration | `a_correct_handshake_registers` (nonce rule, `REGISTERED`'s fields, derived `public_address`); `the_signature_covers_the_domain_and_both_fields`; `every_challenge_is_fresh_and_a_signature_answers_only_its_own`; `an_expired_nonce_is_refused`; `an_invalid_server_id_is_refused_before_any_challenge` (every invalid id in `docs/srp-vectors.json`) |
 | §4.0 base64url | `a_key_or_signature_in_another_spelling_is_refused` (padded, standard alphabet) |
 | §4.1 bindings | `the_allowlist_refuses_before_spending_a_nonce`; TOFU: `tofu_binds_the_first_key_for_good`, `tofu_records_only_after_a_good_signature`, `tofu_compares_keys_as_decoded_bytes_of_one_spelling` (the vectors' key spellings) |
-| §4.2 lifecycle | `a_server_ping_is_answered`; `a_heartbeating_server_outlives_the_deadline`; `a_silent_server_is_dead_at_the_deadline`; `deregister_frees_the_server_id_at_once`; `a_superseded_trunk_drains_then_ends_trunk_superseded`; `an_unfinished_registration_supersedes_nothing`; `a_server_lost_mid_body_is_trunk_lost_never_a_clean_end` |
+| §4.2 lifecycle | `a_server_ping_is_answered`; `a_ping_is_answered_at_any_point_on_a_trunk` (108c: before `REGISTER_SERVER`, mid-handshake, before `HELLO`, several in order); `a_heartbeating_server_outlives_the_deadline`; `a_silent_server_is_dead_at_the_deadline`; `deregister_frees_the_server_id_at_once`; `a_superseded_trunk_drains_then_ends_trunk_superseded`; `an_unfinished_registration_supersedes_nothing`; `a_server_lost_mid_body_is_trunk_lost_never_a_clean_end` |
 | §5 `HELLO` | `hello_gets_ready_and_no_challenge`; `hello_with_no_live_trunk_is_server_unreachable`; `hello_waits_for_a_server_mid_restart` |
 | §5.1 opening | `open_stream_echoes_any_attempt_id_and_reaches_the_origin`; `an_unacked_stream_is_server_timeout_and_never_retried`; `past_the_in_flight_cap_an_open_is_refused_by_attempt` (decision 106) |
 | §5.2 the exchange | `a_request_and_response_cross_unchanged`; `the_empty_end_of_body_frame_is_forwarded`; `body_frames_are_forwarded_unmerged_and_unsplit`; `a_body_over_16_mib_crosses_both_ways_in_256_kib_frames`; `a_16_mib_frame_crosses_both_ways`; `a_response_streams_unbuffered`; `an_acked_stream_that_stays_silent_is_never_timed_out`; `relay_peer_ip_is_the_socket_address_never_a_header`; `a_client_sent_relay_peer_ip_is_refused_even_null`; optional `a_relayed_exchange_does_not_wait_on_delayed_acks` (decision 91) |
 | §5.4 closing | `close_ends_one_stream_and_the_trunk_carries_on`; `an_origin_close_follows_its_body_to_its_client_only`; `close_without_a_stream_id_ends_the_whole_trunk`; `an_aborted_response_is_stream_aborted_for_that_stream_only` (101); `a_backlogged_client_is_told_and_its_other_streams_go_on` (106) |
 | §6 errors, abuse controls | `a_malformed_frame_gets_one_undetailed_protocol_error`; `a_message_from_the_wrong_party_is_a_protocol_error`; `an_open_stream_without_an_attempt_id_is_a_protocol_error`; `every_auth_failure_is_the_same_auth_failed`; `every_open_stream_is_told_trunk_lost`; `a_server_gone_is_unreachable_until_it_registers_again`; `past_the_total_cap_an_open_is_refused_by_attempt`; `hello_is_rate_limited_per_source_ip`; `the_hello_limit_is_per_source_address` (`RELAY_MULTI_IP`) |
 
-**Readings the suite takes** where the spec implies rather than states:
+**Readings the suite takes.** These were readings of an implicit spec until
+decision 108c wrote each into `docs/srp-v1.md` (marked *(108c)* there); they
+are now plain rules:
 
 - `protocol_error` is trunk-scoped and the relay then closes the connection
   (§6 "Close the connection"); its message is the same whatever the cause

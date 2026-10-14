@@ -133,7 +133,7 @@ async fn hello(
         ErrorCode::ProtocolError
     })?;
 
-    let frame = trunk::recv_control(rx).await?;
+    let frame = trunk::recv_handshake_control(rx, tx).await?;
     if frame.ty() != "HELLO" {
         return Err(ErrorCode::ProtocolError.into());
     }

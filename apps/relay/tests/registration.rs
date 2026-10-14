@@ -188,6 +188,21 @@ async fn a_correct_handshake_registers_and_returns_a_derived_public_address() {
     assert_eq!(registration.trunk_id, reply["trunk_id"].as_str().unwrap());
 }
 
+/// Decision 108c: a `PING` may arrive at any point on a trunk. Mid-handshake
+/// it is answered, and the registration goes on.
+#[tokio::test]
+async fn a_ping_during_the_handshake_is_answered_and_registration_goes_on() {
+    let harness = Harness::plain().await;
+    let mut conn = harness.connect().await;
+    conn.send(json!({ "v": 1, "type": "PING" })).await;
+    assert_eq!(conn.recv().await["type"], "PONG");
+    let nonce = conn.register(SERVER_ID, &pubkey_b64(1)).await;
+    conn.send(json!({ "v": 1, "type": "PING" })).await;
+    assert_eq!(conn.recv().await["type"], "PONG");
+    let reply = conn.respond(&sign(1, &relay_auth(SERVER_ID, &nonce))).await;
+    assert_eq!(reply["type"], "REGISTERED", "{reply}");
+}
+
 #[tokio::test]
 async fn a_registered_trunk_answers_ping_and_frees_its_id_on_deregister() {
     let harness = Harness::plain().await;

@@ -26,6 +26,10 @@ enum _Script {
   /// Head, one body chunk, then `ERROR{client_backlogged, stream_id}`: the
   /// relay dropped the stream because this client fell behind (decision 106).
   backloggedMidBody,
+
+  /// Head, one body chunk, then `ERROR{rate_limited, stream_id}`: a relay that
+  /// could hold no more for the origin ended this stream (decision 108c).
+  rateLimitedMidBody,
 }
 
 /// A relay that answers `HELLO` (or refuses it) and then follows a script.
@@ -104,6 +108,13 @@ class _ScriptedRelay {
             socket.add(
               SrpControl.encode('ERROR', {
                 'code': 'client_backlogged',
+                'stream_id': 1,
+              }),
+            );
+          case _Script.rateLimitedMidBody:
+            socket.add(
+              SrpControl.encode('ERROR', {
+                'code': 'rate_limited',
                 'stream_id': 1,
               }),
             );
@@ -200,6 +211,23 @@ void main() {
       final error = await _bodyError(client);
       expect(error, isA<SrpTransportException>());
       expect((error! as SrpTransportException).code, 'client_backlogged');
+      expect(trunk.isConnected, isTrue);
+    } finally {
+      trunk.dispose();
+      await relay.close();
+    }
+  });
+
+  test('a stream-scoped rate_limited is a body error, and the trunk stays '
+      'up', () async {
+    final relay = _ScriptedRelay(script: _Script.rateLimitedMidBody);
+    await relay.start();
+    final trunk = SrpTrunk(url: relay.url, serverId: 'srv_test');
+    final client = SrpHttpClient(trunk);
+    try {
+      final error = await _bodyError(client);
+      expect(error, isA<SrpTransportException>());
+      expect((error! as SrpTransportException).code, 'rate_limited');
       expect(trunk.isConnected, isTrue);
     } finally {
       trunk.dispose();

@@ -138,7 +138,7 @@ Future<RelayReach> probeRelay(RelayAdvert relay, String serverId) async {
 /// [ArgumentError] for a QR address that cannot be a URL.
 Future<PairingRoute> openPairingRoute(
   PairingUri uri, {
-  Set<String> publicRelayHosts = const {},
+  Set<String> publicRelayHosts = kPublicRelayHosts,
   AuthApi Function(ConnectionCandidate)? buildAuthApi,
   Future<RelayReach> Function(RelayAdvert relay)? probe,
   Duration raceTimeout = const Duration(seconds: 10),

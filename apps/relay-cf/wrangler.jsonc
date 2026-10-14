@@ -1,7 +1,7 @@
 // storm-relay-cf: SRP v1 on Workers + Durable Objects (PLAN.md decision 108b).
 // No account_id and no routes on purpose: deploying is the operator's step,
-// with their account (slice C writes the runbook). Every STORM_RELAY_* var is
-// documented in README.md; secrets and local overrides go in .dev.vars.
+// with their account (DEPLOY.md). Every STORM_RELAY_* var is documented in
+// README.md; secrets and local overrides go in .dev.vars.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "storm-relay",
@@ -22,5 +22,55 @@
   "dev": {
     "ip": "127.0.0.1",
     "port": 18910
+  },
+  // Separate Workers for verifying a deployment with the conformance suite
+  // (DEPLOY.md, "Verifying"): the fixture contract's knobs, and in
+  // `conformance` the fixture allowlist as a secret. Never the production
+  // Worker: the fixture keys' seeds are public.
+  "env": {
+    "conformance": {
+      "name": "storm-relay-conformance",
+      "durable_objects": {
+        "bindings": [
+          { "name": "ROOMS", "class_name": "RelayRoom" },
+          { "name": "HELLO_LIMITER", "class_name": "HelloLimiter" }
+        ]
+      },
+      "vars": {
+        "STORM_RELAY_BINDING": "allowlist",
+        "STORM_RELAY_CHALLENGE_TTL_MS": "2000",
+        "STORM_RELAY_HELLO_WAIT_MS": "1000",
+        "STORM_RELAY_STREAM_ACK_TIMEOUT_MS": "1000",
+        "STORM_RELAY_HEARTBEAT_DEADLINE_MS": "2000",
+        "STORM_RELAY_SUPERSESSION_DRAIN_MS": "1500",
+        "STORM_RELAY_HELLO_RATE_LIMIT": "30",
+        "STORM_RELAY_HELLO_RATE_WINDOW_MS": "1000",
+        "STORM_RELAY_MAX_IN_FLIGHT_STREAMS": "4",
+        "STORM_RELAY_MAX_TOTAL_STREAMS": "8",
+        "STORM_RELAY_MAX_CLIENT_BUFFER_BYTES": "1048576"
+      }
+    },
+    "conformance-tofu": {
+      "name": "storm-relay-conformance-tofu",
+      "durable_objects": {
+        "bindings": [
+          { "name": "ROOMS", "class_name": "RelayRoom" },
+          { "name": "HELLO_LIMITER", "class_name": "HelloLimiter" }
+        ]
+      },
+      "vars": {
+        "STORM_RELAY_BINDING": "tofu",
+        "STORM_RELAY_CHALLENGE_TTL_MS": "2000",
+        "STORM_RELAY_HELLO_WAIT_MS": "1000",
+        "STORM_RELAY_STREAM_ACK_TIMEOUT_MS": "1000",
+        "STORM_RELAY_HEARTBEAT_DEADLINE_MS": "2000",
+        "STORM_RELAY_SUPERSESSION_DRAIN_MS": "1500",
+        "STORM_RELAY_HELLO_RATE_LIMIT": "30",
+        "STORM_RELAY_HELLO_RATE_WINDOW_MS": "1000",
+        "STORM_RELAY_MAX_IN_FLIGHT_STREAMS": "4",
+        "STORM_RELAY_MAX_TOTAL_STREAMS": "8",
+        "STORM_RELAY_MAX_CLIENT_BUFFER_BYTES": "1048576"
+      }
+    }
   }
 }

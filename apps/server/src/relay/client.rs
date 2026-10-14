@@ -363,11 +363,12 @@ async fn serve_trunk(
     heartbeat_secs: u64,
 ) {
     let (outbound, outbound_rx) = mpsc::channel::<Message>(OUTBOUND_CAPACITY);
+    let pongs = Arc::new(Pongs::default());
 
     // The socket has exactly one writer. Every other task reaches it through
     // the bounded channel, which is what turns a slow relay into backpressure
     // instead of an unbounded buffer.
-    let writer = tokio::spawn(write_loop(sink, outbound_rx));
+    let writer = tokio::spawn(write_loop(sink, outbound_rx, pongs.clone()));
 
     let heartbeat = tokio::spawn({
         let outbound = outbound.clone();
@@ -434,7 +435,7 @@ async fn serve_trunk(
 
         match message {
             Message::Text(text) => {
-                if !handle_control(&text, &mut streams, &outbound, tunnel, &budget).await {
+                if !handle_control(&text, &mut streams, &outbound, &pongs, tunnel, &budget).await {
                     break;
                 }
             }
@@ -468,9 +469,40 @@ fn liveness_deadline(heartbeat_secs: u64) -> Duration {
     Duration::from_secs(heartbeat_secs.max(1) * 3)
 }
 
-async fn write_loop(mut sink: Sink, mut outbound: mpsc::Receiver<Message>) {
-    while let Some(message) = outbound.recv().await {
-        if sink.send(message).await.is_err() {
+/// `PONG`s owed to the relay. SRP §4.2: every `PING` is answered. A relay
+/// may `PING` to learn how much this server has read, so a `PONG` dropped on
+/// a full outbound queue would read as a server that stopped reading.
+#[derive(Default)]
+struct Pongs {
+    owed: AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl Pongs {
+    fn owe(&self) {
+        self.owed.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+}
+
+async fn write_loop(mut sink: Sink, mut outbound: mpsc::Receiver<Message>, pongs: Arc<Pongs>) {
+    loop {
+        let message = tokio::select! {
+            biased;
+            _ = pongs.notify.notified() => None,
+            message = outbound.recv() => match message {
+                Some(message) => Some(message),
+                None => break,
+            },
+        };
+        for _ in 0..pongs.owed.swap(0, Ordering::SeqCst) {
+            if sink.send(Message::text(proto::pong())).await.is_err() {
+                return;
+            }
+        }
+        if let Some(message) = message
+            && sink.send(message).await.is_err()
+        {
             break;
         }
     }
@@ -482,6 +514,7 @@ async fn handle_control(
     text: &str,
     streams: &mut HashMap<u32, StreamEntry>,
     outbound: &mpsc::Sender<Message>,
+    pongs: &Pongs,
     tunnel: &Tunnel,
     budget: &BodyBudget,
 ) -> bool {
@@ -531,9 +564,7 @@ async fn handle_control(
             close_stream(streams, id);
         }
         Inbound::Close { stream_id: None } => return false,
-        Inbound::Ping => {
-            let _ = outbound.try_send(Message::text(proto::pong()));
-        }
+        Inbound::Ping => pongs.owe(),
         Inbound::Pong => {}
         Inbound::Error(e) => match e.stream_id {
             Some(id) => {

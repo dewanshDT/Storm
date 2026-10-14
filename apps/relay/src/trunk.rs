@@ -406,6 +406,20 @@ pub async fn recv_control(rx: &mut Rx) -> Result<Frame, Fault> {
     }
 }
 
+/// The next control frame of a handshake. A `PING` may arrive at any point on
+/// a trunk and is answered in order (§4.2, decision 108c), so one sent before
+/// `REGISTERED` or `READY` is answered here rather than refused.
+pub async fn recv_handshake_control(rx: &mut Rx, tx: &Tx) -> Result<Frame, Fault> {
+    loop {
+        let frame = recv_control(rx).await?;
+        match frame.ty() {
+            "PING" => tx.send_json(proto::pong()).await?,
+            "PONG" => {}
+            _ => return Ok(frame),
+        }
+    }
+}
+
 /// Reports the fault, if there is still anyone to report it to, and closes.
 pub async fn close(tx: &Tx, fault: Fault) {
     if let Fault::Code(code) = fault {

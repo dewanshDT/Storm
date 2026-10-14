@@ -40,6 +40,37 @@ describe("registration", () => {
     expectError(await late.recv(), "server_unreachable");
   });
 
+  // Decision 108c: a PING may arrive at any point on a trunk. Both spellings,
+  // since the auto-response matches only the canonical bytes.
+  it("answers a PING before REGISTER_SERVER and mid-handshake, and registers", async () => {
+    const serverId = uniqueId();
+    const key = await signingKey(1);
+    const peer = await Peer.dial("/register");
+    peer.send({ v: 1, type: "PING" });
+    expect((await peer.recv()).type).toBe("PONG");
+    peer.sendRaw('{"type":"PING","v":1}');
+    expect((await peer.recv()).type).toBe("PONG");
+    peer.send({ v: 1, type: "REGISTER_SERVER", server_id: serverId, pubkey: key.pubkey });
+    const challenge = await peer.recv();
+    expect(challenge.type).toBe("CHALLENGE");
+    peer.sendRaw('{"type":"PING","v":1}');
+    expect((await peer.recv()).type).toBe("PONG");
+    peer.send({ v: 1, type: "CHALLENGE_RESPONSE", sig: await key.sign(relayAuth(serverId, challenge.nonce as string)) });
+    expect((await peer.recv()).type).toBe("REGISTERED");
+  });
+
+  it("answers a client's PING before HELLO and while HELLO waits", async () => {
+    const serverId = uniqueId();
+    const peer = await Peer.dial(`/connect/${serverId}`);
+    peer.sendRaw('{"type":"PING","v":1}');
+    expect((await peer.recv()).type).toBe("PONG");
+    peer.send({ v: 1, type: "HELLO", server_id: serverId });
+    peer.sendRaw('{"type":"PING","v":1}');
+    expect((await peer.recv()).type).toBe("PONG");
+    await register(serverId);
+    expect((await peer.recv()).type).toBe("READY");
+  });
+
   it("refuses a signature over the client-facing domain", async () => {
     const serverId = uniqueId();
     const { peer, key, nonce } = await challenged(serverId);

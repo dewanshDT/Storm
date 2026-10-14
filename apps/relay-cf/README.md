@@ -50,6 +50,12 @@ curl -X PUT -H "Authorization: $STORM_SESSION" -H 'Content-Type: application/jso
   -d '{"relays":["ws://127.0.0.1:18910"]}' http://127.0.0.1:8484/v1/config/relays
 ```
 
+From the repository root, `make relay-conformance-cf` runs the 108a suite
+against two `wrangler dev` instances (allowlist on 18910, TOFU on 18911), and
+`make test-live RELAY_IMPL=cf` runs every live suite with the server
+registered to the Worker instead of storm-relay (decision 108c).
+`scripts/dev-relay.sh` is what both use to start one.
+
 `scripts/smoke.mjs` then makes real requests through it: the identity
 challenge, a 1 MiB note written and read, a 20 MiB attachment both ways,
 concurrency, and the change feed.
@@ -110,7 +116,7 @@ deferred to step 2.
 
 ## Deploying
 
-Not from here. `wrangler.jsonc` carries no `account_id` and no routes on
-purpose: deploying needs the operator's Cloudflare account, a hostname and the
-production allowlist as a secret. Slice C (108c) writes the runbook. It is not
-part of `release.yml` or `apt-repo.yml`.
+`DEPLOY.md`: the operator's own Cloudflare account, `wrangler deploy`, a
+custom domain, the allowlist as a secret, verification, logging and the Free
+plan's limits. `wrangler.jsonc` carries no `account_id` and no routes on
+purpose. It is not part of `release.yml` or `apt-repo.yml`.

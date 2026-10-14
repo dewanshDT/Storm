@@ -324,6 +324,17 @@ export class RelayRoom extends DurableObject<Env> {
       return;
     }
     const frame = parseFrame(message);
+    // A PING may arrive at any point on a trunk, mid-handshake included, and is
+    // answered in order (§4.2, decision 108c). The auto-response covers only
+    // the canonical bytes.
+    if (frame.type === "PING") {
+      this.send(entry, PONG);
+      return;
+    }
+    if (frame.type === "PONG") {
+      if (att.ph === 2) this.watermarkAnswered(entry);
+      return;
+    }
     if (att.ph === 0) {
       if (frame.type !== "REGISTER_SERVER") throw new ProtocolError();
       return this.challenge(entry, frame.body);
@@ -333,12 +344,6 @@ export class RelayRoom extends DurableObject<Env> {
       return this.completeRegistration(entry, frame.body);
     }
     switch (frame.type) {
-      case "PING":
-        this.send(entry, PONG);
-        return;
-      case "PONG":
-        this.watermarkAnswered(entry);
-        return;
       case "DEREGISTER":
         return this.dropServer(entry, null, "deregistered");
       case "STREAM_ACK":
@@ -584,22 +589,29 @@ export class RelayRoom extends DurableObject<Env> {
 
   private onClient(entry: Entry<ClientAtt>, message: string | ArrayBuffer): void {
     const att = entry.att;
+    const frame = typeof message === "string" ? parseFrame(message) : null;
+    if (frame?.type === "PING") {
+      if (att.ph === 2) this.sendCounted(entry, PONG, PONG.length, this.config.maxClientBufferBytes);
+      else this.send(entry, PONG);
+      return;
+    }
+    if (frame?.type === "PONG") {
+      if (att.ph === 2) this.watermarkAnswered(entry);
+      return;
+    }
     if (att.ph === 0) {
-      if (typeof message !== "string") throw new ProtocolError();
-      const frame = parseFrame(message);
-      if (frame.type !== "HELLO") throw new ProtocolError();
+      if (!frame || frame.type !== "HELLO") throw new ProtocolError();
       return this.hello(entry, frame.body);
     }
-    // Frames sent before READY are not queued for later (storm-relay reads
-    // nothing until READY); a client that does not wait for READY is refused.
+    // Stream frames sent before READY are refused (§5, decision 108c), not
+    // queued for later.
     if (att.ph === 1) throw new ProtocolError();
 
-    if (typeof message !== "string") {
-      const { kind, streamId } = parseBodyHeader(message);
+    if (!frame) {
+      const { kind, streamId } = parseBodyHeader(message as ArrayBuffer);
       if (kind !== BODY_REQUEST) throw new ProtocolError();
-      return this.requestBody(entry, streamId, message);
+      return this.requestBody(entry, streamId, message as ArrayBuffer);
     }
-    const frame = parseFrame(message);
     switch (frame.type) {
       case "OPEN_STREAM":
         return this.openStream(entry, frame.body);
@@ -607,11 +619,6 @@ export class RelayRoom extends DurableObject<Env> {
         return this.requestHead(entry, frame.body);
       case "CLOSE":
         return this.clientClose(entry, frame.body);
-      case "PING":
-        this.sendCounted(entry, PONG, PONG.length, this.config.maxClientBufferBytes);
-        return;
-      case "PONG":
-        return this.watermarkAnswered(entry);
       default:
         throw new ProtocolError();
     }
