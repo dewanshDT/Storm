@@ -7729,8 +7729,8 @@ hot-loop rule. Nothing is deployed and no deployment's mode changes.)*
   Worker 110, runtime 133 + 78, client 1091 + 1 skipped).
   `make relay-conformance-local` 65/65 (three relays);
   `make relay-conformance-cf` 64 + the latency skip (the known 16 MiB
-  `client_backlogged` flake under the 1 MiB fixture budget failed twice in
-  five runs, as it does on `staging`). `make test-live` on 19720–19722
+  `client_backlogged` flake under the 1 MiB fixture budget, recorded since
+  108b, failed in two of five runs; the open-mode checks passed in all). `make test-live` on 19720–19722
   (storm-relay, TOFU), with `RELAY_MODE=open` on 19730–19732 and with
   `RELAY_IMPL=cf RELAY_MODE=open` on 19740–19742 all exit 0: server 81,
   mcp 86, agent 93, gateway 95, auth 72, mcp-connect 89 + 89, mcp-connect
