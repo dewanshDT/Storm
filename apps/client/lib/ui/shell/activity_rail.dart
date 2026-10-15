@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../agent/agent_state.dart';
@@ -40,14 +41,14 @@ class ActivityRail extends ConsumerWidget {
           children: [
             RailItem(
               key: const Key('rail-notes'),
-              icon: LucideIcons.file_text,
+              pixel: PixelGlyph.notes,
               label: 'Notes',
               active: current == Activity.notes,
               onTap: () => open(Activity.notes),
             ),
             RailItem(
               key: const Key('rail-agents'),
-              icon: LucideIcons.square_terminal,
+              pixel: PixelGlyph.agents,
               label: 'Agents',
               active: current == Activity.agents,
               badge: live,
@@ -59,7 +60,6 @@ class ActivityRail extends ConsumerWidget {
               key: const Key('rail-settings'),
               icon: LucideIcons.settings_2,
               label: 'Settings',
-              showLabel: false,
               active: current == Activity.settings,
               onTap: () => open(Activity.settings),
             ),
@@ -70,23 +70,38 @@ class ActivityRail extends ConsumerWidget {
   }
 }
 
+/// A pixel-art glyph from `assets/rail/`: one colour, tinted like an icon,
+/// and drawn on whole pixels so its cells stay crisp.
+class PixelGlyph {
+  const PixelGlyph._(this.asset, this.columns, this.rows);
+
+  static const notes = PixelGlyph._('assets/rail/notes.svg', 10, 11);
+  static const agents = PixelGlyph._('assets/rail/agents.svg', 11, 8);
+
+  final String asset;
+  final int columns;
+  final int rows;
+}
+
+/// One square rail button, glyph centred, no label: the label is its tooltip
+/// and its name for screen readers.
 class RailItem extends StatelessWidget {
   const RailItem({
     super.key,
-    required this.icon,
+    this.icon,
+    this.pixel,
     required this.label,
     required this.active,
     required this.onTap,
     this.badge = 0,
-    this.showLabel = true,
-  });
+  }) : assert((icon == null) != (pixel == null));
 
-  final IconData icon;
+  final IconData? icon;
+  final PixelGlyph? pixel;
   final String label;
   final bool active;
   final VoidCallback onTap;
   final int badge;
-  final bool showLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -94,7 +109,7 @@ class RailItem extends StatelessWidget {
     final ink = active ? t.accent : t.text3;
     final radius = BorderRadius.circular(t.rControl);
     return Tooltip(
-      message: showLabel ? '' : label,
+      message: label,
       child: Semantics(
         button: true,
         selected: active,
@@ -107,76 +122,61 @@ class RailItem extends StatelessWidget {
           child: InkWell(
             onTap: onTap,
             borderRadius: radius,
-            child: showLabel ? _labelled(t, ink) : _square(t, ink),
+            child: SizedBox.square(
+              dimension: railFootSize(t),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Center(child: _glyph(t, ink)),
+                  if (badge > 0)
+                    Positioned(
+                      top: -t.sp * 0.5,
+                      right: -t.sp * 0.5,
+                      child: _badge(t),
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
     );
   }
 
-  /// The rail's foot controls share one square, centred on the rail's axis.
-  Widget _square(StormTokens t, Color ink) => SizedBox.square(
-    dimension: railFootSize(t),
-    child: Center(
-      child: Icon(icon, size: t.sp * 2.5, color: ink),
-    ),
-  );
+  Widget _glyph(StormTokens t, Color ink) {
+    final pixel = this.pixel;
+    if (pixel == null) return Icon(icon, size: t.sp * 2.5, color: ink);
+    // Whole logical pixels per cell, so the art never lands between them.
+    final cell = (t.sp * 0.25).roundToDouble().clamp(1.0, double.infinity);
+    return SvgPicture.asset(
+      pixel.asset,
+      width: pixel.columns * cell,
+      height: pixel.rows * cell,
+      colorFilter: ColorFilter.mode(ink, BlendMode.srcIn),
+    );
+  }
 
-  Widget _labelled(StormTokens t, Color ink) => SizedBox(
-    width: t.sp * 5.75,
-    child: Stack(
-      clipBehavior: Clip.none,
-      children: [
-        Padding(
-          padding: EdgeInsets.symmetric(
-            vertical: t.sp * 0.875,
-            horizontal: t.sp * 0.625,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: t.sp * 2.5, color: ink),
-              SizedBox(height: t.sp * 0.375),
-              Text(
-                label,
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.labelSize,
-                  color: ink,
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (badge > 0)
-          Positioned(
-            top: t.sp * 0.375,
-            right: t.sp * 0.75,
-            child: Container(
-              key: const Key('rail-badge'),
-              constraints: BoxConstraints(
-                minWidth: t.sp * 1.875,
-                minHeight: t.sp * 1.875,
-              ),
-              padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: t.accent,
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Text(
-                '$badge',
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  fontWeight: FontWeight.w500,
-                  color: t.onAccent,
-                  height: 1.2,
-                ),
-              ),
-            ),
-          ),
-      ],
+  Widget _badge(StormTokens t) => Container(
+    key: const Key('rail-badge'),
+    constraints: BoxConstraints(
+      minWidth: t.sp * 1.875,
+      minHeight: t.sp * 1.875,
+    ),
+    padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
+    alignment: Alignment.center,
+    decoration: BoxDecoration(
+      color: t.accent,
+      borderRadius: BorderRadius.circular(999),
+    ),
+    child: Text(
+      '$badge',
+      style: TextStyle(
+        fontFamily: StormTokens.monoFamily,
+        fontSize: t.labelSize,
+        fontWeight: FontWeight.w500,
+        color: t.onAccent,
+        height: 1.2,
+      ),
     ),
   );
 }
