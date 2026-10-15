@@ -209,6 +209,24 @@ export async function register(serverId: string, seed = 1): Promise<{ peer: Peer
   return { peer, registered };
 }
 
+// A registration done up to its last frame. A test that registers while a
+// client's HELLO is held has 400 ms for it; the dial, the challenge and the
+// signature must not be inside that window on a slow runner.
+export async function preparedRegistration(serverId: string, seed = 1): Promise<() => Promise<Peer>> {
+  const key = await signingKey(seed);
+  const peer = await Peer.dial("/register");
+  peer.send({ v: 1, type: "REGISTER_SERVER", server_id: serverId, pubkey: key.pubkey });
+  const challenge = await peer.recv();
+  expect(challenge.type, JSON.stringify(challenge)).toBe("CHALLENGE");
+  const sig = await key.sign(relayAuth(serverId, challenge.nonce));
+  return async () => {
+    peer.send({ v: 1, type: "CHALLENGE_RESPONSE", sig });
+    const registered = await peer.recv();
+    expect(registered.type, JSON.stringify(registered)).toBe("REGISTERED");
+    return peer;
+  };
+}
+
 // A HELLO naming the key of `seed`, in the query and in the HELLO (§5).
 export async function keyedHello(serverId: string, seed: number): Promise<Peer> {
   const { pubkey } = await signingKey(seed);
