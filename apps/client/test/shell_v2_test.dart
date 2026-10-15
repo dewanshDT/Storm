@@ -12,6 +12,7 @@ import 'package:storm/state/health.dart';
 import 'package:storm/state/nav_memory.dart';
 import 'package:storm/ui/shell/activity_rail.dart';
 import 'package:storm/ui/shell/app_shell.dart';
+import 'package:storm/ui/theme.dart';
 import 'package:storm/ui/tokens.dart';
 
 import 'fake_server.dart';
@@ -166,6 +167,34 @@ void main() {
         await disposeShell(tester, c);
       },
     );
+
+    testWidgets('reduced motion keeps the alien still', (tester) async {
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(disableAnimations: true);
+      addTearDown(
+        tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: StormTheme.dark(),
+          home: Center(
+            child: RailItem(
+              pixel: PixelGlyph.agents,
+              label: 'Agents',
+              active: false,
+              animate: true,
+              onTap: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 600));
+      final frames = tester.widget<IndexedStack>(
+        find.byKey(const Key('rail-glyph-frames')),
+      );
+      expect(frames.index, 0);
+      expect(tester.hasRunningAnimations, isFalse);
+    });
 
     testWidgets('each activity reopens where it was left', (tester) async {
       final c = shellContainer();
