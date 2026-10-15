@@ -63,7 +63,7 @@ describe("registration", () => {
   it("answers a client's PING before HELLO and while HELLO waits", async () => {
     const serverId = uniqueId();
     // The server's dial, challenge and signature happen before the HELLO, so
-    // only one frame has to land inside the 400 ms hold on a slow runner.
+    // only one frame has to land inside the HELLO hold on a slow runner.
     const server = await challenged(serverId);
     const sig = await server.key.sign(relayAuth(serverId, server.nonce));
     const peer = await Peer.dial(`/connect/${serverId}`);

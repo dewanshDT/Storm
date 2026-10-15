@@ -11,6 +11,7 @@ import {
   expectOpenAndAck,
   openStream,
   Peer,
+  preparedRegistration,
   register,
   requestHead,
   responseHead,
@@ -125,17 +126,19 @@ describe("after an eviction", () => {
 
   it("holds a HELLO and answers it when the server registers", async () => {
     const serverId = uniqueId();
+    const finish = await preparedRegistration(serverId);
     const c = await Peer.dial(`/connect/${serverId}`);
     c.send({ v: 1, type: "HELLO", server_id: serverId });
     await sleep(50);
     await evict(serverId);
-    await register(serverId);
+    await finish();
     expect((await c.recv()).type).toBe("READY");
   });
 
   it("keeps a server whose PINGs the runtime answered while the object slept", async () => {
     const serverId = uniqueId();
     const { peer: server } = await register(serverId);
+    server.silent(); // its own PINGs below are the heartbeat under test
     await evict(serverId);
     for (let i = 0; i < 5; i++) {
       await sleep(500);
@@ -151,16 +154,11 @@ describe("after an eviction", () => {
   it("still drops a silent server, with nothing in memory to remember it", async () => {
     const serverId = uniqueId();
     const { peer: server } = await register(serverId);
+    server.silent();
     const c = await client(serverId);
     await evict(serverId);
-    // Only the server falls silent, or the client could be reaped first.
-    const stop = c.keepAlive();
-    try {
-      expectError(await c.recv(4000), "trunk_lost");
-      await server.expectClosed();
-    } finally {
-      stop();
-    }
+    expectError(await c.recv(4000), "trunk_lost");
+    await server.expectClosed();
   });
 
   it("still finishes a supersession drain", async () => {

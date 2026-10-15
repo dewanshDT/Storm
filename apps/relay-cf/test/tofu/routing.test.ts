@@ -7,6 +7,7 @@ import {
   expectOpenAndAck,
   openStream,
   Peer,
+  preparedRegistration,
   register,
   requestHead,
   responseHead,
@@ -67,29 +68,24 @@ describe("a stream", () => {
 
   it("forwards a body chunk of 256 KiB intact and streams chunk by chunk", async () => {
     const { server, client: c } = await pair();
-    const stop = server.keepAlive();
-    try {
-      const streamId = await openStream(c);
-      await expectOpenAndAck(server);
-      server.send(responseHead(streamId));
-      await c.recv();
-      const chunk = new Uint8Array(256 * 1024).map((_, i) => i & 0xff);
-      for (let i = 0; i < 3; i++) {
-        const pings = c.pingsSeen;
-        server.sendBody(0x02, streamId, chunk);
-        const f = await c.next();
-        expect(f.kind, `chunk ${i}: ${f.kind === "text" ? f.raw : f.kind}`).toBe("body");
-        if (f.kind === "body") expect(f.payload).toEqual(chunk);
-        // Each chunk is four times this project's 64 KiB budget, so the next is
-        // admitted only once the client's PONG has proved this one read. The
-        // room handles a socket's frames in order, so the answer to a PING sent
-        // after that PONG is the proof it landed; a fixed sleep was not.
-        while (c.pingsSeen === pings) await sleep(5);
-        c.send({ v: 1, type: "PING" });
-        expect((await c.recv()).type).toBe("PONG");
-      }
-    } finally {
-      stop();
+    const streamId = await openStream(c);
+    await expectOpenAndAck(server);
+    server.send(responseHead(streamId));
+    await c.recv();
+    const chunk = new Uint8Array(256 * 1024).map((_, i) => i & 0xff);
+    for (let i = 0; i < 3; i++) {
+      const pings = c.pingsSeen;
+      server.sendBody(0x02, streamId, chunk);
+      const f = await c.next();
+      expect(f.kind, `chunk ${i}: ${f.kind === "text" ? f.raw : f.kind}`).toBe("body");
+      if (f.kind === "body") expect(f.payload).toEqual(chunk);
+      // Each chunk is four times this project's 64 KiB budget, so the next is
+      // admitted only once the client's PONG has proved this one read. The
+      // room handles a socket's frames in order, so the answer to a PING sent
+      // after that PONG is the proof it landed; a fixed sleep was not.
+      while (c.pingsSeen === pings) await sleep(5);
+      c.send({ v: 1, type: "PING" });
+      expect((await c.recv()).type).toBe("PONG");
     }
   });
 
@@ -374,10 +370,11 @@ describe("a client trunk", () => {
 
   it("is held until a server registers during the wait", async () => {
     const serverId = uniqueId();
+    const finish = await preparedRegistration(serverId);
     const c = await Peer.dial(`/connect/${serverId}`);
     c.send({ v: 1, type: "HELLO", server_id: serverId });
     await sleep(100);
-    await register(serverId);
+    await finish();
     expect((await c.recv()).type).toBe("READY");
   });
 
@@ -453,6 +450,7 @@ describe("trunk loss", () => {
 
   it("keeps a heartbeating server past the deadline", async () => {
     const { serverId, server } = await pair();
+    server.silent(); // its own PINGs below are the heartbeat under test
     for (let i = 0; i < 5; i++) {
       await sleep(500);
       server.send({ v: 1, type: "PING" });
@@ -466,6 +464,7 @@ describe("trunk loss", () => {
   // are under a second apart is dropped as silent.
   it("counts the deadline from a server's newest frame, not its last written one", async () => {
     const { serverId, server } = await pair();
+    server.silent();
     for (let i = 0; i < 2; i++) {
       await sleep(900);
       server.send({ v: 1, type: "STREAM_ACK", stream_id: 999 });
@@ -478,33 +477,23 @@ describe("trunk loss", () => {
   // and each of its streams ends at the origin.
   it("reaps a silent client trunk and closes its streams at the origin", async () => {
     const { server, client: c } = await pair();
-    const stop = server.keepAlive();
-    try {
-      const streamId = await openStream(c);
-      await expectOpenAndAck(server);
-      const closed = await server.recv(5000);
-      expect(closed).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
-      await c.expectClosed(1000);
-    } finally {
-      stop();
-    }
+    c.silent();
+    const streamId = await openStream(c);
+    await expectOpenAndAck(server);
+    const closed = await server.recv(5000);
+    expect(closed).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
+    await c.expectClosed(1000);
   });
 
   it("drops a silent server at the deadline and tells its clients", async () => {
     const { client: c, server } = await pair();
+    server.silent();
     const streamId = await openStream(c);
     await expectOpenAndAck(server);
-    // Only the server falls silent: a client that did too would be reaped at
-    // the same deadline, sometimes before it heard about its server (§5).
-    const stop = c.keepAlive();
-    try {
-      const lost = await c.recv(4000);
-      expectError(lost, "trunk_lost");
-      expect(lost.stream_id).toBe(streamId);
-      await server.expectClosed();
-    } finally {
-      stop();
-    }
+    const lost = await c.recv(4000);
+    expectError(lost, "trunk_lost");
+    expect(lost.stream_id).toBe(streamId);
+    await server.expectClosed();
   });
 
   it("is server_unreachable for a HELLO after the server went away, and reachable again after a restart", async () => {
