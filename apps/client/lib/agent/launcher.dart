@@ -13,6 +13,7 @@ import '../ui/widgets.dart' show PopoverItem;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'integrations_api.dart' show integrationNamesOn;
 
 typedef NoteRef = ({String vaultId, String noteId});
 
@@ -225,11 +226,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         vaults.where((v) => v.id == _writeVault).firstOrNull?.id ??
         vaults.firstOrNull?.id;
     final writes = allowed && (_writes ?? true) && writeVault != null;
-    final integrations = [
-      for (final i
-          in ref.watch(integrationsSummaryProvider).value ?? const <Never>[])
-        if (!i.builtin && !i.disabled) i.displayName,
-    ];
+    final integrations = integrationNamesOn(
+      ref.watch(integrationsSummaryProvider).value,
+      host?.id,
+    );
     final hostName = host?.name ?? 'the host';
     final ctx = _context;
 

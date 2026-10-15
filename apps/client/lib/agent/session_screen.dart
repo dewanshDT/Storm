@@ -23,6 +23,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
+import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
 import 'session_inspector.dart';
@@ -1245,12 +1246,7 @@ List<(String, String)> aboutRows(
 List<String>? sessionIntegrations(WidgetRef ref, AgentSession s) {
   if (s.integrations != null) return s.integrations;
   final connections = ref.watch(integrationsSummaryProvider).value;
-  return connections == null
-      ? null
-      : [
-          for (final i in connections)
-            if (!i.builtin && !i.disabled) i.displayName,
-        ];
+  return connections == null ? null : integrationNamesOn(connections, s.hostId);
 }
 
 class _About extends ConsumerWidget {

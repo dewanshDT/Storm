@@ -218,7 +218,7 @@ def main():
     os.makedirs(os.path.join(WORK, "vaults", "primary"))
     with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
         f.write("# Seed\n")
-    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw"):
+    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw", "hs"):
         os.makedirs(os.path.join(WORKSPACES, ws))
     os.makedirs(UP_STATE)
     with open(CANARY_FILE, "w") as f:
@@ -360,6 +360,31 @@ args = ["-i"]
               "list_vaults" in stools and "create_note" not in stools and "delete_note" not in stools, stools)
         a.tool("storm", 103, "list_vaults")
         check("an agent reads the vault through the gateway", "result" in a.answer("storm", 103))
+
+        print("\n=== an integration scoped to another host (decision 121) ===")
+        _, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)
+        other_state = os.path.join(WORK, "other-host")
+        enrolled = subprocess.run([RUNTIME_BIN, "enroll", "--state", other_state, "--name", "gw-other"],
+                                  input=(issued["enrollment"] + "\n").encode(), capture_output=True)
+        check("a second host enrolls", enrolled.returncode == 0, enrolled.stderr.decode())
+        other_id = json.load(open(os.path.join(other_state, "host.json")))["host_id"]
+        status, view = call("PATCH", f"/v1/integrations/connections/{cid}", {"hosts": [other_id]}, auth=owner)
+        check("the owner scopes the integration to the other host",
+              status == 200 and view["hosts"] == [other_id], (status, view))
+        a.tool(slug, 120, "echo", {"text": "out-of-scope"})
+        refused = a.answer(slug, 120)
+        check("a call from a session on this host is refused with host_not_in_scope",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "host_not_in_scope", refused)
+        a.tool("storm", 121, "list_vaults")
+        check("storm is never scoped", "result" in a.answer("storm", 121))
+        rec = launch("claude-code", "hs")
+        check("a launch on this host grants storm only",
+              [g["id"] for g in rec["mcp"]["connections"]] == ["storm"], rec["mcp"])
+        call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
+        status, view = call("PATCH", f"/v1/integrations/connections/{cid}", {"hosts": "all"}, auth=owner)
+        check("back to every host", status == 200 and view["hosts"] == "all", (status, view))
+        a.tool(slug, 122, "caps")
+        check("and the live session's next call is allowed", "result" in a.answer(slug, 122))
 
         print("\n=== new upstream tools: recorded, off, and shown until reviewed (§9, 81k) ===")
         allowlist = sorted(call("GET", f"/v1/integrations/connections/{cid}", auth=owner)[1]["tool_allowlist"])
