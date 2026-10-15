@@ -37,9 +37,14 @@ final openBrowserProvider = Provider<Future<bool> Function(Uri)>(
 /// Whether this platform can sign in with OAuth. Tests override it.
 final oauthSupportedProvider = Provider<bool>((ref) => oauthSupported);
 
-/// A connection's host scope in a few words (decision 121).
+/// A connection's host scope in a few words (decision 121). [names] holds the
+/// enrolled hosts; a scope left with none of them reaches no host, and says so
+/// rather than naming a revoked one.
 String hostScopeLabel(List<String>? scope, Map<String, String> names) {
   if (scope == null) return 'All hosts';
+  if (names.isNotEmpty && !scope.any(names.containsKey)) {
+    return 'No enrolled host';
+  }
   if (scope.length == 1) return names[scope.single] ?? '1 host';
   return '${scope.length} hosts';
 }
@@ -115,15 +120,22 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     }
   }
 
-  /// The hosts, to name a connection's scope by. Without them it reads as a
-  /// count.
-  Future<void> _loadHosts() async {
+  /// The enrolled hosts, to name a connection's scope by and to choose from.
+  /// Without them a scope reads as a count. [quiet] keeps a failure off the
+  /// screen.
+  Future<List<AgentHost>?> _loadHosts({bool quiet = true}) async {
     final api = agentApi(ref);
-    if (api == null) return;
+    if (api == null) return null;
     try {
-      final hosts = await api.hosts();
+      final hosts = [
+        for (final h in await api.hosts())
+          if (h.status != 'revoked') h,
+      ];
       if (mounted) setState(() => _hosts = hosts);
-    } catch (_) {
+      return hosts;
+    } catch (e) {
+      if (!quiet) _say(describeFailure(e));
+      return null;
     } finally {
       api.dispose();
     }
@@ -240,28 +252,11 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   }
 
   Future<void> _chooseHosts(Integration i) async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    List<AgentHost> hosts;
-    try {
-      hosts = await api.hosts();
-    } catch (e) {
-      _say(describeFailure(e));
-      return;
-    } finally {
-      api.dispose();
-    }
-    if (!mounted) return;
-    setState(() => _hosts = hosts);
+    final hosts = await _loadHosts(quiet: false);
+    if (hosts == null || !mounted) return;
     final chosen = await showDialog<({List<String>? hosts})>(
       context: context,
-      builder: (_) => _HostsDialog(
-        integration: i,
-        hosts: [
-          for (final h in hosts)
-            if (h.status != 'revoked') h,
-        ],
-      ),
+      builder: (_) => _HostsDialog(integration: i, hosts: hosts),
     );
     if (chosen == null) return;
     await _with((api) => api.setHosts(i.id, chosen.hosts));

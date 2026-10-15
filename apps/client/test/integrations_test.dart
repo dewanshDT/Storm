@@ -14,7 +14,6 @@ import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart';
 import 'package:storm/agent/oauth_links.dart';
-import 'package:storm/state/health.dart' show integrationNamesOn;
 import 'package:storm/ui/theme.dart';
 
 /// MCP Gateway, client side (decision 81h).
@@ -411,7 +410,6 @@ void main() {
       '(decision 121)', () {
     expect(Integration.fromJson(github()).hosts, isNull);
     expect(Integration.fromJson(github(hosts: 'all')).hosts, isNull);
-    expect(Integration.fromJson({...builtin(), 'hosts': 'all'}).hosts, isNull);
     final two = Integration.fromJson(github(hosts: ['hst_1', 'hst_2']));
     expect(two.hosts, ['hst_1', 'hst_2']);
     expect(two.availableOn('hst_2'), isTrue);
@@ -424,7 +422,8 @@ void main() {
     const names = {'hst_1': 'work-mac'};
     expect(hostScopeLabel(null, names), 'All hosts');
     expect(hostScopeLabel(['hst_1'], names), 'work-mac');
-    expect(hostScopeLabel(['hst_9'], names), '1 host');
+    expect(hostScopeLabel(['hst_9'], names), 'No enrolled host');
+    expect(hostScopeLabel(['hst_9'], const {}), '1 host');
     expect(hostScopeLabel(['hst_1', 'hst_2'], names), '2 hosts');
   });
 

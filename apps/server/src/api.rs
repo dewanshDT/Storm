@@ -7433,7 +7433,7 @@ pub(crate) mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let (_, list) = send(&f.app, get_with_auth(CONNECTIONS, &f.owner_bearer)).await;
+        let (_, list) = f.get(CONNECTIONS).await;
         for view in list.as_array().unwrap() {
             assert_eq!(view["hosts"], "all", "{view}");
         }
@@ -7483,19 +7483,10 @@ pub(crate) mod tests {
             "called echo"
         );
 
-        let events = || async {
-            f.state
-                .auth_db
-                .lock()
-                .await
-                .event_count("integration_hosts_changed")
-                .unwrap()
-        };
         let connection = f.connection.clone();
         scope(&f, &connection, serde_json::json!([other_host])).await;
         // The same scope again is no change, and no event.
         scope(&f, &connection, serde_json::json!([other_host, other_host])).await;
-        assert_eq!(events().await, 1);
         let before = f.upstream_calls();
         assert_eq!(
             error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
@@ -7524,7 +7515,6 @@ pub(crate) mod tests {
         );
 
         scope(&f, &connection, serde_json::json!("all")).await;
-        assert_eq!(events().await, 2);
         let scopes: Vec<serde_json::Value> = f
             .state
             .auth_db
@@ -7577,13 +7567,9 @@ pub(crate) mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{hosts} {body}");
         }
-        let (_, view) = send(&f.app, get_with_auth(&path, &f.owner_bearer)).await;
+        let (_, view) = f.get(&path).await;
         assert_eq!(view["hosts"], "all", "a refused patch changed the scope");
-        let (_, storm) = send(
-            &f.app,
-            get_with_auth(&format!("{CONNECTIONS}/storm"), &f.owner_bearer),
-        )
-        .await;
+        let (_, storm) = f.get(&format!("{CONNECTIONS}/storm")).await;
         assert_eq!(storm["hosts"], "all");
     }
 

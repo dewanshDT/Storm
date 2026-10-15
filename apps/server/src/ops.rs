@@ -2070,6 +2070,22 @@ impl HostScope {
         HostScope::All(AllHosts::All)
     }
 
+    /// The store's form: empty is every host; a list is sorted, deduplicated
+    /// and never empty.
+    fn into_rows(self) -> Result<Vec<String>, &'static str> {
+        match self {
+            HostScope::All(_) => Ok(Vec::new()),
+            HostScope::Only(ids) if ids.is_empty() => {
+                Err("an integration needs at least one host; disable it instead")
+            }
+            HostScope::Only(mut ids) => {
+                ids.sort();
+                ids.dedup();
+                Ok(ids)
+            }
+        }
+    }
+
     /// The store's rows: none is every host.
     fn from_rows(hosts: Vec<String>) -> Self {
         if hosts.is_empty() {
@@ -2178,18 +2194,6 @@ fn own_connection(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Connecti
 /// upstream's **host only**. Never the URL — an owner can paste one with a key
 /// in its query string — and never a credential.
 fn integration_event(
-    state_auth: &crate::auth::AuthDb,
-    kind: &str,
-    actor: &Actor,
-    c: &Connection,
-    now: &str,
-) {
-    integration_event_with(state_auth, kind, actor, c, now, None);
-}
-
-/// [`integration_event`], plus the connection's host scope when it changed
-/// (decision 121).
-fn integration_event_with(
     state_auth: &crate::auth::AuthDb,
     kind: &str,
     actor: &Actor,
@@ -2334,7 +2338,7 @@ pub async fn create_integration(
         })?;
     {
         let auth_db = state.auth_db.lock().await;
-        integration_event(&auth_db, "integration_created", actor, &c, &now);
+        integration_event(&auth_db, "integration_created", actor, &c, &now, None);
     }
     Ok(integration_view(
         c,
@@ -2375,19 +2379,10 @@ pub async fn update_integration(
         return Err(bad_request("the built-in connection cannot be changed"));
     }
     let mut c = own_connection(state, actor, id)?;
-    // The store's form of the scope: empty is every host.
-    let hosts = match &patch.hosts {
+    let hosts = match patch.hosts.clone() {
         None => None,
-        Some(HostScope::All(_)) => Some(Vec::new()),
-        Some(HostScope::Only(ids)) => {
-            if ids.is_empty() {
-                return Err(bad_request(
-                    "an integration needs at least one host; disable it instead",
-                ));
-            }
-            let mut ids = ids.clone();
-            ids.sort();
-            ids.dedup();
+        Some(scope) => {
+            let ids = scope.into_rows().map_err(bad_request)?;
             let auth_db = state.auth_db.lock().await;
             for host in &ids {
                 match auth_db.host_by_id(host).map_err(internal)? {
@@ -2444,15 +2439,15 @@ pub async fn update_integration(
 
     let now = crate::index::now_rfc3339();
     c.updated_at = now.clone();
+    let mut hosts_changed = None;
     {
         let mut store = gateway_store(state);
-        if let Some(hosts) = &hosts
-            && *hosts != store.connection_hosts(&c.id).map_err(internal)?
+        if let Some(hosts) = hosts
+            && store
+                .set_connection_hosts(&c.id, &hosts, &now)
+                .map_err(internal)?
         {
-            store
-                .set_connection_hosts(&c.id, hosts, &now)
-                .map_err(internal)?;
-            events.push("integration_hosts_changed");
+            hosts_changed = Some(HostScope::from_rows(hosts));
         }
         if let Some(sealed) = &sealed {
             store
@@ -2471,14 +2466,20 @@ pub async fn update_integration(
     if c.status == status::DISABLED || sealed.is_some() {
         state.gateway.sessions.close_connection(&c.id);
     }
-    if !events.is_empty() {
+    if !events.is_empty() || hosts_changed.is_some() {
         let auth_db = state.auth_db.lock().await;
-        let scope = hosts.map(HostScope::from_rows);
         for kind in events {
-            let hosts = scope
-                .as_ref()
-                .filter(|_| kind == "integration_hosts_changed");
-            integration_event_with(&auth_db, kind, actor, &c, &now, hosts);
+            integration_event(&auth_db, kind, actor, &c, &now, None);
+        }
+        if let Some(scope) = &hosts_changed {
+            integration_event(
+                &auth_db,
+                "integration_hosts_changed",
+                actor,
+                &c,
+                &now,
+                Some(scope),
+            );
         }
     }
     view_of(state, c)
@@ -2514,7 +2515,7 @@ pub async fn delete_integration(state: &Shared, actor: &Actor, id: &str) -> ApiR
     state.agent.revoke_grants_for(&c.id).map_err(internal)?;
     state.gateway.sessions.close_connection(&c.id);
     let auth_db = state.auth_db.lock().await;
-    integration_event(&auth_db, "integration_deleted", actor, &c, &now);
+    integration_event(&auth_db, "integration_deleted", actor, &c, &now, None);
     Ok(())
 }
 
@@ -2804,7 +2805,8 @@ async fn authorize_call(
     let connection = if connection_id == BUILTIN_ID {
         None
     } else {
-        let c = gateway_store(state)
+        let store = gateway_store(state);
+        let c = store
             .connection(connection_id)
             .map_err(|_| "not_granted".to_string())?
             .ok_or_else(|| "not_granted".to_string())?;
@@ -2812,7 +2814,7 @@ async fn authorize_call(
             return Err("not_granted".into());
         }
         // Checked per call, so narrowing the scope cuts off a live session.
-        if !gateway_store(state)
+        if !store
             .in_host_scope(&c.id, &session.host_id)
             .map_err(|_| "not_granted".to_string())?
         {
@@ -3527,7 +3529,7 @@ pub async fn oauth_callback(
         } else {
             "integration_authorized"
         };
-        integration_event(&auth_db, kind, actor, &c, &now);
+        integration_event(&auth_db, kind, actor, &c, &now, None);
     }
     // §10 step 6: a test listing, which also turns every tool on.
     test_integration(state, actor, &c.id).await

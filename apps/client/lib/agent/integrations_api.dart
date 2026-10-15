@@ -53,10 +53,7 @@ class Integration {
       status == 'needs_reauth' || status == 'pending_auth';
 
   /// Whether a session on [hostId] can use this connection.
-  bool availableOn(String? hostId) {
-    final scope = hosts;
-    return scope == null || scope.contains(hostId);
-  }
+  bool availableOn(String? hostId) => hosts?.contains(hostId) ?? true;
 
   /// What the status chip says, in plain words.
   String get statusLabel => switch (status) {
@@ -342,3 +339,10 @@ class IntegrationsApi {
 
   void dispose() => _client.close();
 }
+
+/// The names of the connections a session on [hostId] can use: enabled, not
+/// built in, and scoped to that host or to every host (decision 121).
+List<String> integrationNamesOn(List<Integration>? all, String? hostId) => [
+  for (final i in all ?? const <Integration>[])
+    if (!i.builtin && !i.disabled && i.availableOn(hostId)) i.displayName,
+];

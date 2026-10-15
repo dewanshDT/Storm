@@ -4,8 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
 import '../state/app_state.dart';
-import '../state/health.dart'
-    show integrationNamesOn, integrationsSummaryProvider;
+import '../state/health.dart' show integrationsSummaryProvider;
 import '../ui/controls.dart';
 import '../ui/states.dart';
 import '../ui/surfaces.dart';
@@ -14,6 +13,7 @@ import '../ui/widgets.dart' show PopoverItem;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'integrations_api.dart' show integrationNamesOn;
 
 typedef NoteRef = ({String vaultId, String noteId});
 
