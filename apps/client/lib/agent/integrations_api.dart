@@ -19,6 +19,7 @@ class Integration {
     required this.newTools,
     required this.lastError,
     required this.vaultWritesAvailable,
+    required this.hosts,
   });
 
   final String id;
@@ -43,9 +44,19 @@ class Integration {
   /// Built-in only: whether the server lets agents write at all.
   final bool? vaultWritesAvailable;
 
+  /// The hosts whose sessions may use it, or null for every host
+  /// (decision 121).
+  final List<String>? hosts;
+
   bool get disabled => status == 'disabled';
   bool get needsReconnect =>
       status == 'needs_reauth' || status == 'pending_auth';
+
+  /// Whether a session on [hostId] can use this connection.
+  bool availableOn(String? hostId) {
+    final scope = hosts;
+    return scope == null || scope.contains(hostId);
+  }
 
   /// What the status chip says, in plain words.
   String get statusLabel => switch (status) {
@@ -73,6 +84,11 @@ class Integration {
     ],
     lastError: j['last_error_code'] as String?,
     vaultWritesAvailable: j['vault_writes_available'] as bool?,
+    // `"all"`, or missing from an older server: every host.
+    hosts: switch (j['hosts']) {
+      final List<dynamic> ids => [for (final h in ids) h as String],
+      _ => null,
+    },
   );
 }
 
@@ -164,6 +180,7 @@ String describeIntegrationError(String? code) => switch (code) {
   'oauth_registration_failed' => 'The service refused to register Storm.',
   'oauth_exchange_failed' => 'Signing in did not complete. Try again.',
   'oauth_flow_expired_or_used' => 'That sign-in expired. Start it again.',
+  'host_not_in_scope' => "This integration isn't available on this host.",
   _ => code,
 };
 
@@ -262,6 +279,19 @@ class IntegrationsApi {
         )
         as Map<String, dynamic>,
   );
+
+  /// Which hosts' sessions may use it: null for every host. The server
+  /// refuses an empty list.
+  Future<Integration> setHosts(String id, List<String>? hosts) async {
+    final json = _decode(
+      await _client.patch(
+        _uri(_one(id)),
+        headers: _headers,
+        body: jsonEncode({'hosts': hosts ?? 'all'}),
+      ),
+    );
+    return Integration.fromJson(json as Map<String, dynamic>);
+  }
 
   Future<void> delete(String id) async {
     _decode(await _client.delete(_uri(_one(id)), headers: _headers));

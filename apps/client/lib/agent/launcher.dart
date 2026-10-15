@@ -4,7 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
 import '../state/app_state.dart';
-import '../state/health.dart' show integrationsSummaryProvider;
+import '../state/health.dart'
+    show integrationNamesOn, integrationsSummaryProvider;
 import '../ui/controls.dart';
 import '../ui/states.dart';
 import '../ui/surfaces.dart';
@@ -225,11 +226,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         vaults.where((v) => v.id == _writeVault).firstOrNull?.id ??
         vaults.firstOrNull?.id;
     final writes = allowed && (_writes ?? true) && writeVault != null;
-    final integrations = [
-      for (final i
-          in ref.watch(integrationsSummaryProvider).value ?? const <Never>[])
-        if (!i.builtin && !i.disabled) i.displayName,
-    ];
+    final integrations = integrationNamesOn(
+      ref.watch(integrationsSummaryProvider).value,
+      host?.id,
+    );
     final hostName = host?.name ?? 'the host';
     final ctx = _context;
 

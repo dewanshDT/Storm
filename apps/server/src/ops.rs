@@ -1688,15 +1688,21 @@ pub async fn launch_session(
         vault_of(state, actor, Access::Write, v).await?;
     }
     let unhonoured_writes = req.allow_vault_writes && req.write_vault_id.is_none();
-    // Every non-disabled connection of the owner, plus `storm` (spec §6,
-    // G-D9). Snapshotted here; the manager drops them for `shell` and for a
-    // host that cannot bridge.
-    let connections = gateway_store(state)
-        .connections_of(actor.user_id())
-        .map_err(internal)?
-        .into_iter()
-        .filter(|c| c.status != status::DISABLED)
-        .collect::<Vec<_>>();
+    // Every non-disabled connection of the owner scoped to this host, plus
+    // `storm` (spec §6, G-D9, decision 121). Snapshotted here; the manager
+    // drops them for `shell` and for a host that cannot bridge.
+    let connections = {
+        let store = gateway_store(state);
+        let mut out = Vec::new();
+        for c in store.connections_of(actor.user_id()).map_err(internal)? {
+            if c.status != status::DISABLED
+                && store.in_host_scope(&c.id, &req.host_id).map_err(internal)?
+            {
+                out.push(c);
+            }
+        }
+        out
+    };
     let meta = crate::agent::LaunchMeta {
         context,
         write_vault_id: req.write_vault_id.clone(),
@@ -2031,6 +2037,8 @@ pub struct IntegrationView {
     pub new_tools: Vec<String>,
     pub expose_resources: bool,
     pub expose_prompts: bool,
+    /// The Runtime Hosts whose sessions may use it (decision 121).
+    pub hosts: HostScope,
     pub upstream_account_label: Option<String>,
     pub last_ok: Option<String>,
     pub last_error_code: Option<String>,
@@ -2040,6 +2048,36 @@ pub struct IntegrationView {
     /// session also needs a write vault chosen at launch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_writes_available: Option<bool>,
+}
+
+/// Which Runtime Hosts a connection serves (decision 121): `"all"` on the
+/// wire, or the host ids it is limited to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HostScope {
+    All(AllHosts),
+    Only(Vec<String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AllHosts {
+    All,
+}
+
+impl HostScope {
+    fn all() -> Self {
+        HostScope::All(AllHosts::All)
+    }
+
+    /// The store's rows: none is every host.
+    fn from_rows(hosts: Vec<String>) -> Self {
+        if hosts.is_empty() {
+            Self::all()
+        } else {
+            HostScope::Only(hosts)
+        }
+    }
 }
 
 fn builtin_view(state: &Shared) -> IntegrationView {
@@ -2057,6 +2095,7 @@ fn builtin_view(state: &Shared) -> IntegrationView {
         new_tools: Vec::new(),
         expose_resources: false,
         expose_prompts: false,
+        hosts: HostScope::all(),
         upstream_account_label: None,
         last_ok: None,
         last_error_code: None,
@@ -2074,6 +2113,7 @@ fn integration_view(
     c: Connection,
     has_credential: bool,
     new_tools: Vec<String>,
+    hosts: HostScope,
 ) -> IntegrationView {
     IntegrationView {
         id: c.id,
@@ -2089,6 +2129,7 @@ fn integration_view(
         new_tools,
         expose_resources: c.expose_resources,
         expose_prompts: c.expose_prompts,
+        hosts,
         upstream_account_label: c.upstream_account_label,
         last_ok: c.last_ok,
         last_error_code: c.last_error_code,
@@ -2099,14 +2140,20 @@ fn integration_view(
 }
 
 fn view_of(state: &Shared, c: Connection) -> ApiResult<IntegrationView> {
-    let (held, new_tools) = {
+    let (held, new_tools, hosts) = {
         let store = gateway_store(state);
         (
             store.has_credential(&c.id).map_err(internal)?,
             store.new_tools(&c.id).map_err(internal)?,
+            store.connection_hosts(&c.id).map_err(internal)?,
         )
     };
-    Ok(integration_view(c, held, new_tools))
+    Ok(integration_view(
+        c,
+        held,
+        new_tools,
+        HostScope::from_rows(hosts),
+    ))
 }
 
 /// The gateway's store. A `std::sync::Mutex`: never hold the guard across an
@@ -2137,17 +2184,33 @@ fn integration_event(
     c: &Connection,
     now: &str,
 ) {
+    integration_event_with(state_auth, kind, actor, c, now, None);
+}
+
+/// [`integration_event`], plus the connection's host scope when it changed
+/// (decision 121).
+fn integration_event_with(
+    state_auth: &crate::auth::AuthDb,
+    kind: &str,
+    actor: &Actor,
+    c: &Connection,
+    now: &str,
+    hosts: Option<&HostScope>,
+) {
     let host = c
         .url
         .parse::<axum::http::Uri>()
         .ok()
         .and_then(|u| u.host().map(str::to_string));
-    let detail = serde_json::json!({
+    let mut detail = serde_json::json!({
         "connection_id": c.id,
         "slug": c.slug,
         "auth_kind": c.auth_kind,
         "upstream_host": host,
     });
+    if let Some(hosts) = hosts {
+        detail["hosts"] = serde_json::json!(hosts);
+    }
     let _ = state_auth.record_event(kind, Some(actor.user_id()), None, now, &detail.to_string());
 }
 
@@ -2273,7 +2336,12 @@ pub async fn create_integration(
         let auth_db = state.auth_db.lock().await;
         integration_event(&auth_db, "integration_created", actor, &c, &now);
     }
-    Ok(integration_view(c, sealed.is_some(), Vec::new()))
+    Ok(integration_view(
+        c,
+        sealed.is_some(),
+        Vec::new(),
+        HostScope::all(),
+    ))
 }
 
 /// The request body of `PATCH /v1/integrations/connections/{id}`; every
@@ -2289,6 +2357,8 @@ pub struct IntegrationPatch {
     pub expose_prompts: Option<bool>,
     /// A replacement static credential (a rotated PAT).
     pub credential: Option<StaticCredential>,
+    /// `"all"`, or the enrolled hosts it is limited to (decision 121).
+    pub hosts: Option<HostScope>,
 }
 
 /// Changes what may change. **Never the URL, the slug or the auth kind**: a
@@ -2305,6 +2375,29 @@ pub async fn update_integration(
         return Err(bad_request("the built-in connection cannot be changed"));
     }
     let mut c = own_connection(state, actor, id)?;
+    // The store's form of the scope: empty is every host.
+    let hosts = match &patch.hosts {
+        None => None,
+        Some(HostScope::All(_)) => Some(Vec::new()),
+        Some(HostScope::Only(ids)) => {
+            if ids.is_empty() {
+                return Err(bad_request(
+                    "an integration needs at least one host; disable it instead",
+                ));
+            }
+            let mut ids = ids.clone();
+            ids.sort();
+            ids.dedup();
+            let auth_db = state.auth_db.lock().await;
+            for host in &ids {
+                match auth_db.host_by_id(host).map_err(internal)? {
+                    Some(h) if !h.is_revoked() => {}
+                    _ => return Err(bad_request(format!("no such host: {host}"))),
+                }
+            }
+            Some(ids)
+        }
+    };
     if let Some(name) = &patch.display_name {
         conn::validate_display_name(name).map_err(bad_request)?;
         c.display_name = name.trim().to_string();
@@ -2353,6 +2446,14 @@ pub async fn update_integration(
     c.updated_at = now.clone();
     {
         let mut store = gateway_store(state);
+        if let Some(hosts) = &hosts
+            && *hosts != store.connection_hosts(&c.id).map_err(internal)?
+        {
+            store
+                .set_connection_hosts(&c.id, hosts, &now)
+                .map_err(internal)?;
+            events.push("integration_hosts_changed");
+        }
         if let Some(sealed) = &sealed {
             store
                 .put_credential(&c.id, credential_kind::STATIC, sealed, None, &now)
@@ -2372,8 +2473,12 @@ pub async fn update_integration(
     }
     if !events.is_empty() {
         let auth_db = state.auth_db.lock().await;
+        let scope = hosts.map(HostScope::from_rows);
         for kind in events {
-            integration_event(&auth_db, kind, actor, &c, &now);
+            let hosts = scope
+                .as_ref()
+                .filter(|_| kind == "integration_hosts_changed");
+            integration_event_with(&auth_db, kind, actor, &c, &now, hosts);
         }
     }
     view_of(state, c)
@@ -2705,6 +2810,13 @@ async fn authorize_call(
             .ok_or_else(|| "not_granted".to_string())?;
         if c.owner_user_id != session.owner_user_id {
             return Err("not_granted".into());
+        }
+        // Checked per call, so narrowing the scope cuts off a live session.
+        if !gateway_store(state)
+            .in_host_scope(&c.id, &session.host_id)
+            .map_err(|_| "not_granted".to_string())?
+        {
+            return Err("host_not_in_scope".into());
         }
         match c.status.as_str() {
             status::CONNECTED => {}

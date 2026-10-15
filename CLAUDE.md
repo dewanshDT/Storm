@@ -617,6 +617,11 @@ Specification*; the slices are decisions 81 and 81a onward):
   `observe_tools` and `review_tools`, never by `update_connection`, so an
   older copy of the row cannot undo a review. Tool names are the upstream's:
   the client shows them through `displayToolName`.
+- **An integration's host scope is enforced at launch and again on every
+  call** (decision 121). No `connection_hosts` rows means every host; a scope
+  whose hosts are all revoked reaches nothing and never widens back to all.
+  The per-call check (`host_not_in_scope`) is what makes narrowing cut off a
+  live session — grants alone are fixed at launch. `storm` is never scoped.
 
 From M26 (Windows — the vault's *Agent Runtime/Windows Runtime Host*, D16,
 and *Installer/Windows Server*; decision 99):

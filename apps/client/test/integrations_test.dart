@@ -14,6 +14,7 @@ import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart';
 import 'package:storm/agent/oauth_links.dart';
+import 'package:storm/state/health.dart' show integrationNamesOn;
 import 'package:storm/ui/theme.dart';
 
 /// MCP Gateway, client side (decision 81h).
@@ -35,6 +36,7 @@ void main() {
     String status = 'connected',
     String? error,
     List<String> newTools = const [],
+    Object? hosts,
   }) => {
     'id': 'mcc_GH',
     'slug': 'github',
@@ -48,6 +50,14 @@ void main() {
     'known_tools': ['search', 'delete_repo'],
     'new_tools': newTools,
     'last_error_code': error,
+    'hosts': ?hosts,
+  };
+
+  /// Another connection, on one host only.
+  Map<String, dynamic> scoped(String id, String name, String host) => {
+    ...github(hosts: [host]),
+    'id': id,
+    'display_name': name,
   };
 
   Map<String, dynamic> check(Map<String, dynamic> integration) => {
@@ -72,6 +82,16 @@ void main() {
           return http.Response('{"error":"forbidden"}', listStatus);
         }
         return http.Response(jsonEncode(items ?? [builtin(), github()]), 200);
+      }
+      if (path == '/v1/agent/hosts') {
+        return http.Response(
+          jsonEncode([
+            {'id': 'hst_1', 'name': 'build-vm', 'status': 'online'},
+            {'id': 'hst_2', 'name': 'work-mac', 'status': 'offline'},
+            {'id': 'hst_3', 'name': 'old-box', 'status': 'revoked'},
+          ]),
+          200,
+        );
       }
       if (path == '/v1/integrations/connections' && req.method == 'POST') {
         return http.Response(jsonEncode(github()), 201);
@@ -105,6 +125,9 @@ void main() {
   }) => ProviderScope(
     overrides: [
       oauthLinksProvider.overrideWithValue(links ?? OAuthLinks.detached()),
+      agentApiFactoryProvider.overrideWithValue(
+        () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
+      ),
       integrationsApiFactoryProvider.overrideWithValue(
         () => IntegrationsApi(baseUrl: 'http://s', token: 't', client: client),
       ),
@@ -384,6 +407,105 @@ void main() {
     expect(seen.any((r) => r.method == 'DELETE'), isTrue);
   });
 
+  test('a connection is on every host unless the server names some '
+      '(decision 121)', () {
+    expect(Integration.fromJson(github()).hosts, isNull);
+    expect(Integration.fromJson(github(hosts: 'all')).hosts, isNull);
+    expect(Integration.fromJson({...builtin(), 'hosts': 'all'}).hosts, isNull);
+    final two = Integration.fromJson(github(hosts: ['hst_1', 'hst_2']));
+    expect(two.hosts, ['hst_1', 'hst_2']);
+    expect(two.availableOn('hst_2'), isTrue);
+    expect(two.availableOn('hst_9'), isFalse);
+    expect(two.availableOn(null), isFalse);
+    expect(Integration.fromJson(github()).availableOn('hst_9'), isTrue);
+  });
+
+  test('a scope reads as all hosts, a host by name, or a count', () {
+    const names = {'hst_1': 'work-mac'};
+    expect(hostScopeLabel(null, names), 'All hosts');
+    expect(hostScopeLabel(['hst_1'], names), 'work-mac');
+    expect(hostScopeLabel(['hst_9'], names), '1 host');
+    expect(hostScopeLabel(['hst_1', 'hst_2'], names), '2 hosts');
+  });
+
+  testWidgets('the owner scopes an integration to chosen hosts', (
+    tester,
+  ) async {
+    final (client, seen) = server(
+      items: [
+        builtin(),
+        github(hosts: ['hst_1']),
+      ],
+    );
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    expect(find.text('Token · 1 tool on · build-vm'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('menu-mcc_GH')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Choose hosts'));
+    await tester.pumpAndSettle();
+    // A revoked host is not offered.
+    expect(find.byKey(const Key('host-hst_3')), findsNothing);
+    FilledButton save() =>
+        tester.widget<FilledButton>(find.byKey(const Key('save-hosts')));
+    await tester.tap(find.byKey(const Key('host-hst_1')));
+    await tester.pumpAndSettle();
+    expect(save().onPressed, isNull, reason: 'an empty scope is refused');
+    expect(find.byKey(const Key('hosts-empty')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('host-hst_2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('save-hosts')));
+    await tester.pumpAndSettle();
+    final patch = seen.firstWhere((r) => r.method == 'PATCH');
+    expect(jsonDecode(patch.body), {
+      'hosts': ['hst_2'],
+    });
+  });
+
+  testWidgets('All hosts is sent as "all"', (tester) async {
+    final (client, seen) = server(
+      items: [
+        builtin(),
+        github(hosts: ['hst_1', 'hst_2']),
+      ],
+    );
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    expect(find.text('Token · 1 tool on · 2 hosts'), findsOneWidget);
+    // The built-in connection has no scope to choose.
+    expect(find.textContaining('All hosts'), findsNothing);
+    await tester.tap(find.byKey(const Key('menu-mcc_GH')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Choose hosts'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('hosts-all')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('host-hst_1')), findsNothing);
+    await tester.tap(find.byKey(const Key('save-hosts')));
+    await tester.pumpAndSettle();
+    final patch = seen.firstWhere((r) => r.method == 'PATCH');
+    expect(jsonDecode(patch.body), {'hosts': 'all'});
+  });
+
+  test('a session lists only the integrations scoped to its host', () {
+    final off = {
+      ...github(status: 'disabled'),
+      'id': 'mcc_X',
+      'display_name': 'Off',
+    };
+    final all = [
+      builtin(),
+      github(),
+      scoped('mcc_LI', 'Linear', 'hst_1'),
+      scoped('mcc_NO', 'Notion', 'hst_2'),
+      off,
+    ].map(Integration.fromJson).toList();
+    expect(integrationNamesOn(all, 'hst_1'), ['GitHub', 'Linear']);
+    expect(integrationNamesOn(all, 'hst_2'), ['GitHub', 'Notion']);
+    expect(integrationNamesOn(all, null), ['GitHub']);
+    expect(integrationNamesOn(null, 'hst_1'), isEmpty);
+  });
+
   group('the launcher', () {
     final hosts = [
       AgentHost.fromJson({
@@ -438,11 +560,24 @@ void main() {
       return (client, seen);
     }
 
-    Widget launcher(MockClient client) => ProviderScope(
+    Widget launcher(
+      MockClient client, {
+      List<Map<String, dynamic>>? integrations,
+    }) => ProviderScope(
       overrides: [
         agentApiFactoryProvider.overrideWithValue(
           () => AgentApi(baseUrl: 'http://s', token: 't', client: client),
         ),
+        if (integrations != null)
+          integrationsApiFactoryProvider.overrideWithValue(
+            () => IntegrationsApi(
+              baseUrl: 'http://s',
+              token: 't',
+              client: MockClient(
+                (_) async => http.Response(jsonEncode(integrations), 200),
+              ),
+            ),
+          ),
       ],
       child: MaterialApp(
         theme: StormTheme.light(),
@@ -468,6 +603,28 @@ void main() {
         isFalse,
         reason: 'the pre-v2 toggle is never sent (decision 82)',
       );
+    });
+
+    testWidgets("the risk line names only the chosen host's integrations "
+        '(decision 121)', (tester) async {
+      final (client, _) = agentServer();
+      await tester.pumpWidget(
+        launcher(
+          client,
+          integrations: [
+            builtin(),
+            github(),
+            scoped('mcc_LI', 'Linear', 'hst_1'),
+            scoped('mcc_NO', 'Notion', 'hst_2'),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('your integrations (GitHub, Linear)'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Notion'), findsNothing);
     });
 
     testWidgets('a shell gets no write field and no integrations (G-D9)', (

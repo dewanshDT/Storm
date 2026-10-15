@@ -455,7 +455,7 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'integrations');
       expect(find.byKey(const Key('integrations-attention')), findsNothing);
-      expect(find.text('Signed in · 1 tool on'), findsOneWidget);
+      expect(find.text('Signed in · 1 tool on · All hosts'), findsOneWidget);
       expect(find.byKey(const Key('tools-mcc_GH')), findsOneWidget);
       await disposeShell(tester, c);
     });

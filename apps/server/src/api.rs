@@ -7399,6 +7399,194 @@ pub(crate) mod tests {
         let _ = &f.owner;
     }
 
+    // ---- MCP Gateway: host scope (decision 121) ---------------------------
+
+    fn granted_ids(launched: &serde_json::Value) -> Vec<String> {
+        launched["mcp"]["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    async fn scope(f: &GatewayFixture, id: &str, hosts: serde_json::Value) -> serde_json::Value {
+        let (status, body) = send(
+            &f.app,
+            patch_json_with_auth(
+                &format!("{CONNECTIONS}/{id}"),
+                serde_json::json!({"hosts": hosts}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    #[tokio::test]
+    async fn a_launch_grants_only_the_integrations_scoped_to_its_host() {
+        let dir = tempdir::TempDir::new("storm-host-scope-launch").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (other_host, _) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let elsewhere = create_github(&f.app, &f.owner_bearer, "ghp_elsewhere").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, list) = send(&f.app, get_with_auth(CONNECTIONS, &f.owner_bearer)).await;
+        for view in list.as_array().unwrap() {
+            assert_eq!(view["hosts"], "all", "{view}");
+        }
+
+        let body = scope(&f, &elsewhere, serde_json::json!([other_host])).await;
+        assert_eq!(body["hosts"], serde_json::json!([other_host]));
+        let launched = f.launch("claude-code", false).await;
+        assert_eq!(
+            granted_ids(&launched),
+            vec!["storm".to_string(), f.connection.clone()]
+        );
+        let start = serde_json::to_string(&f.link.try_recv().unwrap()).unwrap();
+        assert!(!start.contains(&elsewhere), "{start}");
+        let integrations: Vec<&str> = launched["integrations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(integrations, vec![f.connection.as_str()]);
+
+        // In scope by name, and back to every host: granted.
+        scope(&f, &elsewhere, serde_json::json!([other_host, f.host_id])).await;
+        let mut granted = granted_ids(&f.launch("claude-code", false).await);
+        granted.sort();
+        let mut want = vec!["storm".to_string(), f.connection.clone(), elsewhere.clone()];
+        want.sort();
+        assert_eq!(granted, want);
+        let body = scope(&f, &elsewhere, serde_json::json!("all")).await;
+        assert_eq!(body["hosts"], "all");
+        assert_eq!(granted_ids(&f.launch("claude-code", false).await).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn narrowing_the_scope_refuses_the_next_call_and_storm_keeps_working() {
+        let dir = tempdir::TempDir::new("storm-host-scope-call").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (other_host, _) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, &f.connection).await;
+        f.initialize(&session, "storm").await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+
+        let events = || async {
+            f.state
+                .auth_db
+                .lock()
+                .await
+                .event_count("integration_hosts_changed")
+                .unwrap()
+        };
+        let connection = f.connection.clone();
+        scope(&f, &connection, serde_json::json!([other_host])).await;
+        // The same scope again is no change, and no event.
+        scope(&f, &connection, serde_json::json!([other_host, other_host])).await;
+        assert_eq!(events().await, 1);
+        let before = f.upstream_calls();
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "echo").await).as_deref(),
+            Some("host_not_in_scope")
+        );
+        assert_eq!(
+            f.upstream_calls(),
+            before,
+            "an out-of-scope call went upstream"
+        );
+        assert!(
+            f.state
+                .gateway
+                .store
+                .lock()
+                .unwrap()
+                .recent_calls(20)
+                .unwrap()
+                .iter()
+                .any(|c| c.error_code.as_deref() == Some("host_not_in_scope"))
+        );
+        let storm = f.call(&session, "storm", "list_vaults").await;
+        assert!(
+            storm.last().unwrap().pointer("/message/result").is_some(),
+            "{storm:?}"
+        );
+
+        scope(&f, &connection, serde_json::json!("all")).await;
+        assert_eq!(events().await, 2);
+        let scopes: Vec<serde_json::Value> = f
+            .state
+            .auth_db
+            .lock()
+            .await
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|(kind, _)| kind == "integration_hosts_changed")
+            .map(|(_, detail)| {
+                serde_json::from_str::<serde_json::Value>(&detail).unwrap()["hosts"].clone()
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            [serde_json::json!([other_host]), serde_json::json!("all")]
+        );
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_scope_names_live_hosts_only() {
+        let dir = tempdir::TempDir::new("storm-host-scope-patch").unwrap();
+        let f = gateway_fixture(dir.path()).await;
+        let (revoked, _) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (status, _) = send(
+            &f.app,
+            delete_with_auth(&format!("/v1/agent/hosts/{revoked}"), &f.owner_bearer),
+        )
+        .await;
+        assert!(status.is_success(), "{status}");
+        let path = format!("{CONNECTIONS}/{}", f.connection);
+        for (target, hosts) in [
+            (&path, serde_json::json!(["hst_NOPE"])),
+            (&path, serde_json::json!([revoked])),
+            (&path, serde_json::json!([f.host_id, revoked])),
+            (&path, serde_json::json!([])),
+            (
+                &format!("{CONNECTIONS}/storm"),
+                serde_json::json!([f.host_id]),
+            ),
+        ] {
+            let (status, body) = send(
+                &f.app,
+                patch_json_with_auth(target, serde_json::json!({"hosts": hosts}), &f.owner_bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{hosts} {body}");
+        }
+        let (_, view) = send(&f.app, get_with_auth(&path, &f.owner_bearer)).await;
+        assert_eq!(view["hosts"], "all", "a refused patch changed the scope");
+        let (_, storm) = send(
+            &f.app,
+            get_with_auth(&format!("{CONNECTIONS}/storm"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(storm["hosts"], "all");
+    }
+
     #[tokio::test]
     async fn the_single_user_sweep_retires_what_a_removed_account_left() {
         let dir = tempdir::TempDir::new("storm-single-user-sweep").unwrap();
