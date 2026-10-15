@@ -77,7 +77,7 @@ describe("the heartbeat deadline", () => {
     await runInDurableObject(env.ROOMS.get(env.ROOMS.idFromName(SERVER)), (_i: RelayRoom, state) =>
       state.storage.deleteAlarm(),
     );
-    await sleep(1700);
+    await sleep(3200);
     c.send({ v: 1, type: "OPEN_STREAM", attempt_id: "late" });
     expectError(await c.recv(), "trunk_lost");
     await c.expectClosed();

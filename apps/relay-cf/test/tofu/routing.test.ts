@@ -451,7 +451,7 @@ describe("trunk loss", () => {
   it("keeps a heartbeating server past the deadline", async () => {
     const { serverId, server } = await pair();
     server.silent(); // its own PINGs below are the heartbeat under test
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       await sleep(500);
       server.send({ v: 1, type: "PING" });
       expect((await server.recv()).type).toBe("PONG");
@@ -461,15 +461,19 @@ describe("trunk loss", () => {
 
   // The attachment's copy of last-seen is written at most once a second; the
   // deadline must still count from the newest frame, or a trunk whose frames
-  // are under a second apart is dropped as silent.
+  // are under a second apart is dropped as silent. The frame at 0.9 s is too
+  // soon after registration to be written, so counting from the written copy
+  // drops the server at 3.0 s, and counting from the newest frame keeps it to
+  // 3.9 s; the check at 3.3 s sits between them, nearer the side a slow runner
+  // can only make late.
   it("counts the deadline from a server's newest frame, not its last written one", async () => {
-    const { serverId, server } = await pair();
-    server.silent();
-    for (let i = 0; i < 2; i++) {
-      await sleep(900);
-      server.send({ v: 1, type: "STREAM_ACK", stream_id: 999 });
-    }
-    expect(await server.silentFor(300)).toBe(true);
+    // Silent from REGISTERED, before its first heartbeat: an answered PING
+    // would carry the trunk by the runtime's own timestamp, and prove nothing.
+    const serverId = uniqueId();
+    const server = (await register(serverId)).peer.silent();
+    await sleep(900);
+    server.send({ v: 1, type: "STREAM_ACK", stream_id: 999 });
+    await sleep(2400);
     await client(serverId);
   });
 
@@ -480,7 +484,7 @@ describe("trunk loss", () => {
     c.silent();
     const streamId = await openStream(c);
     await expectOpenAndAck(server);
-    const closed = await server.recv(5000);
+    const closed = await server.recv(8000);
     expect(closed).toEqual({ v: 1, type: "CLOSE", stream_id: streamId });
     await c.expectClosed(1000);
   });
@@ -490,7 +494,7 @@ describe("trunk loss", () => {
     server.silent();
     const streamId = await openStream(c);
     await expectOpenAndAck(server);
-    const lost = await c.recv(4000);
+    const lost = await c.recv(8000);
     expectError(lost, "trunk_lost");
     expect(lost.stream_id).toBe(streamId);
     await server.expectClosed();

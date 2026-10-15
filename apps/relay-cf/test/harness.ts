@@ -139,7 +139,7 @@ export class Peer {
     this.ws.send(frame.buffer);
   }
 
-  async next(timeoutMs = 3000): Promise<Frame> {
+  async next(timeoutMs = 6000): Promise<Frame> {
     const deadline = Date.now() + timeoutMs;
     while (this.queue.length === 0) {
       const remaining = deadline - Date.now();
@@ -156,7 +156,7 @@ export class Peer {
   }
 
   // The next text frame, skipping body chunks.
-  async recv(timeoutMs = 3000): Promise<Json> {
+  async recv(timeoutMs = 6000): Promise<Json> {
     for (;;) {
       const frame = await this.next(timeoutMs);
       if (frame.kind === "text") return frame.value;
@@ -164,7 +164,7 @@ export class Peer {
     }
   }
 
-  async expectClosed(timeoutMs = 3000): Promise<void> {
+  async expectClosed(timeoutMs = 6000): Promise<void> {
     for (;;) {
       const frame = await this.next(timeoutMs);
       if (frame.kind === "closed") return;

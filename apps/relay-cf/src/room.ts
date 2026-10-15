@@ -1065,7 +1065,7 @@ export class RelayRoom extends DurableObject<Env> {
         if (att.ph < 2) {
           if (att.hs <= now) this.dropServer(server, null, "handshake timeout");
         } else if (this.lastSeen(server) + config.heartbeatDeadlineMs <= now) {
-          log("server_heartbeat_expired", { server_id: att.sid, trunk_id: att.tid });
+          log("server_heartbeat_expired", { server_id: att.sid, trunk_id: att.tid, ...this.seenAges(server, now) });
           this.dropServer(server, null, "heartbeat deadline");
         } else if (att.sup !== undefined && att.sup <= now) {
           // trunk_superseded, not trunk_lost: the server is up on a newer
@@ -1079,7 +1079,7 @@ export class RelayRoom extends DurableObject<Env> {
         // §5: a client heard from for none of the deadline is gone, and its
         // streams end at the origin as if it had closed.
         else if (client.att.ph === 2 && this.lastSeen(client) + config.heartbeatDeadlineMs <= now) {
-          log("client_heartbeat_expired", { client_trunk_id: client.att.ctk });
+          log("client_heartbeat_expired", { client_trunk_id: client.att.ctk, ...this.seenAges(client, now) });
           this.dropClient(client, null);
         }
         else if (client.att.ph === 1 && (client.att.hw ?? 0) <= now) this.dropClient(client, "server_unreachable");
@@ -1114,6 +1114,17 @@ export class RelayRoom extends DurableObject<Env> {
       if (auto) seen = Math.max(seen, auto.getTime());
     } catch {}
     return seen;
+  }
+
+  // How long ago each source of lastSeen last heard the trunk, for the log
+  // of a deadline: which one fell behind is what explains an early drop.
+  private seenAges(entry: Entry, now: number): Record<string, number | null> {
+    let auto: number | null = null;
+    try {
+      auto = this.ctx.getWebSocketAutoResponseTimestamp(entry.ws)?.getTime() ?? null;
+    } catch {}
+    const age = (t: number | null | undefined) => (t ? now - t : null);
+    return { saved_ms: age(entry.att.seen), memory_ms: age(entry.seen), auto_ms: age(auto) };
   }
 
   private arm(): void {
@@ -1184,7 +1195,11 @@ export class RelayRoom extends DurableObject<Env> {
   // if the alarm that ends it has not run yet.
   private alive(server: Entry<ServerAtt>): boolean {
     if (this.lastSeen(server) + this.config.heartbeatDeadlineMs > Date.now()) return true;
-    log("server_heartbeat_expired", { server_id: server.att.sid, trunk_id: server.att.tid });
+    log("server_heartbeat_expired", {
+      server_id: server.att.sid,
+      trunk_id: server.att.tid,
+      ...this.seenAges(server, Date.now()),
+    });
     this.dropServer(server, null, "heartbeat deadline");
     return false;
   }
