@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -18,11 +19,12 @@ import 'package:storm/api/storm_connection.dart';
 /// rule rather than a latency one.
 void main() {
   const serverId = 'srv_TESTSERVER';
-  final pubkey = 'x' * 43;
+  final pubkey = 'A' * 43;
 
   /// `GET /v1/server` for a server advertising [relays].
   http.Client serverAnswering({
     List<Map<String, String>> relays = const [],
+    String? relaysSig,
     Duration delay = Duration.zero,
     bool dead = false,
   }) => MockClient((request) async {
@@ -35,6 +37,7 @@ void main() {
         'algorithm': 'ed25519',
         'public_key': pubkey,
         'relays': relays,
+        'relays_sig': ?relaysSig,
       }),
       200,
       headers: {'content-type': 'application/json'},
@@ -54,7 +57,6 @@ void main() {
     List<RelayAdvert> relays = const [],
     Set<String> publicRelayHosts = const {},
     ServerVerifier? verifier,
-    Duration publicRelayDelay = const Duration(milliseconds: 200),
   }) => StormConnection(
     localAddress: 'http://direct.test',
     token: 't',
@@ -62,7 +64,6 @@ void main() {
     publicKeyB64: pubkey,
     relays: relays,
     publicRelayHosts: publicRelayHosts,
-    publicRelayDelay: publicRelayDelay,
     buildAuthApi: (c) {
       final host = Uri.parse(c.baseUrl).host;
       final client = byHost[host];
@@ -175,6 +176,63 @@ void main() {
       },
     );
 
+    test('a self-hosted relay slower than the public-relay delay still wins '
+        'when it is the only relay', () async {
+      // A phone on mobile data: the relay answers after the 2 s that used to
+      // end the whole race (decision 113).
+      final c = connectionWith(
+        byHost: {
+          'direct.test': serverAnswering(dead: true),
+          'mine.example': serverAnswering(
+            delay: const Duration(milliseconds: 600),
+          ),
+        },
+        relays: const [selfHosted],
+      );
+
+      expect(await c.connect(), ServerProof.verified);
+      expect(c.active.tier, CandidateTier.selfHosted);
+    });
+
+    test('a slow self-hosted relay still wins after the public relay joins, '
+        'if it answers first', () async {
+      final c = connectionWith(
+        byHost: {
+          'direct.test': serverAnswering(dead: true),
+          'mine.example': serverAnswering(
+            delay: const Duration(milliseconds: 400),
+          ),
+          'relay.storm.dev': serverAnswering(
+            delay: const Duration(milliseconds: 600),
+          ),
+        },
+        relays: const [selfHosted, public],
+        publicRelayHosts: const {'relay.storm.dev'},
+      );
+
+      expect(await c.connect(), ServerProof.verified);
+      expect(c.active.tier, CandidateTier.selfHosted);
+    });
+
+    test('a race nothing answers gives up at its timeout', () async {
+      final c = StormConnection(
+        localAddress: 'http://direct.test',
+        token: 't',
+        serverId: serverId,
+        publicKeyB64: pubkey,
+        relays: const [selfHosted],
+        candidateDeadline: const Duration(milliseconds: 300),
+        buildAuthApi: (cand) => AuthApi(
+          baseUrl: cand.baseUrl,
+          client: MockClient((_) => Completer<http.Response>().future),
+        ),
+        buildVerifier: (_) => alwaysVerifies(),
+      );
+
+      expect(await c.connect(), ServerProof.unreachable);
+      expect(c.status, ConnectionStatus.offline);
+    });
+
     test('nothing answering at all is offline', () async {
       // Two candidates, both dead, so the race genuinely resolves to nothing.
       final c = connectionWith(
@@ -189,31 +247,29 @@ void main() {
       expect(c.status, ConnectionStatus.offline);
     });
 
-    test(
-      'with one candidate the challenge is the reachability signal',
-      () async {
-        // There is nothing to race, so the probe is best-effort on purpose — a
-        // server predating `GET /v1/server` must still connect. That makes the
-        // identity challenge the thing that decides reachability, which is also
-        // what the pre-seam client did.
-        final c = connectionWith(
-          byHost: {'direct.test': serverAnswering(dead: true)},
-          verifier: ServerVerifier(
-            authApi: AuthApi(
-              baseUrl: 'http://direct.test',
-              client: MockClient(
-                (_) async => throw http.ClientException('Connection refused'),
-              ),
+    test('a candidate that answers the probe with an error still faces the '
+        'challenge, which decides', () async {
+      // A server predating `GET /v1/server` answers it 404 and must still
+      // connect; an HTTP answer is not unreachable.
+      final c = connectionWith(
+        byHost: {
+          'direct.test': MockClient((_) async => http.Response('{}', 404)),
+        },
+        verifier: ServerVerifier(
+          authApi: AuthApi(
+            baseUrl: 'http://direct.test',
+            client: MockClient(
+              (_) async => throw http.ClientException('Connection refused'),
             ),
-            serverId: serverId,
-            publicKeyB64: pubkey,
           ),
-        );
+          serverId: serverId,
+          publicKeyB64: pubkey,
+        ),
+      );
 
-        expect(await c.connect(), ServerProof.unreachable);
-        expect(c.status, ConnectionStatus.offline);
-      },
-    );
+      expect(await c.connect(), ServerProof.unreachable);
+      expect(c.status, ConnectionStatus.offline);
+    });
   });
 
   group('the identity gate', () {
@@ -270,6 +326,99 @@ void main() {
       expect(c.relays.map((r) => r.url), [selfHosted.url]);
     });
 
+    test('a signed set whose relays_sig does not verify is never adopted '
+        '(§4.3, 116j)', () async {
+      // The set may have crossed a relay, which could rewrite it; only the
+      // pinned key vouches for it.
+      final c = connectionWith(
+        byHost: {
+          'direct.test': serverAnswering(
+            relays: [
+              {
+                'url': selfHosted.url,
+                'public_address': selfHosted.publicAddress,
+              },
+            ],
+            relaysSig: 'B' * 86,
+          ),
+        },
+      );
+      await c.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      // The same set unsigned is adopted (the test above), so only the
+      // signature can have refused it.
+      expect(c.relays, isEmpty);
+    });
+
+    test(
+      'a device seeded from its pairing QR reaches the server through a relay '
+      'before any refresh',
+      () async {
+        // Paired on the LAN, then off it before the app ever raced: the QR's
+        // relays are all it has, and they must be enough.
+        final qr = PairingUri.parse(
+          'storm://pair?v=1&sid=$serverId&pk=$pubkey&n=NONCE'
+          '&exp=2026-08-18T20:00:00Z&addr=192.168.91.51:8585'
+          '&relay=${Uri.encodeQueryComponent(selfHosted.url)}',
+        )!;
+        final seeded = pairedRelays(
+          qr,
+          const ServerInfo(
+            serverId: serverId,
+            keyId: 'key_1',
+            algorithm: 'ed25519',
+            publicKey: '',
+          ),
+        );
+        expect(seeded.single.publicAddress, selfHosted.publicAddress);
+
+        final c = connectionWith(
+          byHost: {
+            'direct.test': serverAnswering(dead: true),
+            'mine.example': serverAnswering(),
+          },
+          relays: seeded,
+        );
+
+        expect(await c.connect(), ServerProof.verified);
+        expect(c.active.tier, CandidateTier.selfHosted);
+      },
+    );
+
+    test(
+      'a relay from a QR grants no trust: it still faces the challenge',
+      () async {
+        final qr = PairingUri.parse(
+          'storm://pair?v=1&sid=$serverId&pk=$pubkey&n=NONCE'
+          '&exp=2026-08-18T20:00:00Z&addr=192.168.91.51:8585'
+          '&relay=${Uri.encodeQueryComponent(selfHosted.url)}',
+        )!;
+        final c = connectionWith(
+          byHost: {
+            'direct.test': serverAnswering(dead: true),
+            'mine.example': serverAnswering(),
+          },
+          relays: qr.relayAdverts,
+          verifier: ServerVerifier(
+            authApi: AuthApi(
+              baseUrl: 'http://test',
+              client: MockClient(
+                (_) async => http.Response(
+                  jsonEncode({'signature': 'not-a-signature'}),
+                  200,
+                ),
+              ),
+            ),
+            serverId: serverId,
+            publicKeyB64: pubkey,
+          ),
+        );
+
+        expect(await c.connect(), ServerProof.impostor);
+        expect(c.status, ConnectionStatus.unproven);
+      },
+    );
+
     test('a server predating the field still connects', () async {
       // `relays` absent entirely, not `[]`. This endpoint is what a stranded
       // client reaches, so it must not be the thing that strands it.
@@ -300,14 +449,13 @@ void main() {
 
   group('reconnect', () {
     test(
-      'reset re-races rather than resuming on the previous winner',
+      'a lost transport re-races rather than resuming on the previous winner',
       () async {
         var directAlive = false;
         final c = StormConnection(
           localAddress: 'http://direct.test',
           token: 't',
           relays: const [selfHosted],
-          publicRelayDelay: const Duration(milliseconds: 200),
           buildAuthApi: (candidate) => AuthApi(
             baseUrl: candidate.baseUrl,
             client: MockClient((_) async {
@@ -337,9 +485,12 @@ void main() {
           reason: 'direct is down',
         );
 
-        // The LAN comes back. Only a re-race can notice.
+        // The LAN comes back. Only a re-race can notice: the network change
+        // probes the relayed transport, which has no trunk here, so it is
+        // lost and the connection re-races.
         directAlive = true;
-        c.reset();
+        await c.onNetworkChanged();
+        expect(c.phase, ConnectionPhase.racing);
         await c.connect();
 
         expect(

@@ -80,6 +80,10 @@ impl ServerIdentity {
         BASE64URL_NOPAD.encode(self.verifying_key().as_bytes())
     }
 
+    pub fn fingerprint(&self) -> String {
+        fingerprint(self.verifying_key().as_bytes())
+    }
+
     /// Signs a client's nonce, proving this host holds the private half of the
     /// key the client pinned from a QR.
     ///
@@ -111,6 +115,11 @@ impl ServerIdentity {
         validate_server_id(&self.server_id)?;
         validate_nonce(nonce)?;
         Ok(self.sign_domain(&relay_auth_message(&self.server_id, nonce)))
+    }
+
+    /// Signs the relay set this server advertises (SRP §4.3).
+    pub fn sign_relay_set(&self, urls: &[String]) -> String {
+        self.sign_domain(&relay_set_message(&self.server_id, urls))
     }
 
     /// Signs `message` and encodes the result the way the wire carries every
@@ -146,6 +155,19 @@ impl ServerIdentity {
     }
 }
 
+/// What a person compares to tell two servers apart (decision 118):
+/// SHA-256 of the raw key, first 8 bytes, as `6FEC DC12 9A0B 44E1`. The client
+/// derives the same string; `docs/srp-vectors.json` keeps them in agreement.
+pub fn fingerprint(public_key: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(public_key);
+    digest[..8]
+        .chunks(2)
+        .map(|pair| format!("{:02X}{:02X}", pair[0], pair[1]))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The exact bytes a challenge signature covers.
 ///
 /// The client rebuilds this from the `server_id` it read out of the QR and the
@@ -166,6 +188,18 @@ pub fn challenge_message(server_id: &str, nonce: &str) -> Vec<u8> {
 #[allow(dead_code)] // Called by `sign_relay_auth` and relay registration; tested directly here.
 pub fn relay_auth_message(server_id: &str, nonce: &str) -> Vec<u8> {
     format!("storm-relay-auth:v1:{server_id}:{nonce}").into_bytes()
+}
+
+/// The exact bytes `relays_sig` covers (SRP §4.3, decision 116j): the relay
+/// set reaches a client through whatever path won, a relay included, so the
+/// transport does not authenticate it and the server's key must. A fourth
+/// domain, never coinciding with the other three. The URLs are sorted
+/// bytewise and joined by `\n`, so the order a set was built in never
+/// changes what is signed.
+pub fn relay_set_message(server_id: &str, urls: &[String]) -> Vec<u8> {
+    let mut sorted: Vec<&str> = urls.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    format!("storm-relays:v1:{server_id}:{}", sorted.join("\n")).into_bytes()
 }
 
 /// Loads this server's identity, creating it on first boot.

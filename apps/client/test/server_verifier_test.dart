@@ -13,6 +13,7 @@ import 'package:storm/api/server_verifier.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/cache/cache_db.dart';
 import 'package:storm/sync/sync_engine.dart';
+import 'package:storm/ui/widgets.dart';
 
 import 'fake_server.dart';
 
@@ -118,15 +119,16 @@ void main() {
       expect(await verifier.check(), ServerProof.unreachable);
     });
 
-    test('an HTTP refusal is unreachable, not an impostor', () async {
-      // A server predating the endpoint answers 404. That is not a forgery,
-      // and treating it as one would brick an upgrade.
+    test('an HTTP refusal is an impostor, not unreachable (114i)', () async {
+      // Something answered and did not prove the key: identity failed.
+      // Unreachable means no HTTP answer at all. Every server since 0.2.6
+      // has the endpoint, so no real upgrade lands here.
       final verifier = ServerVerifier(
         authApi: authApiThat((_) async => http.Response('{}', 404)),
         serverId: serverId,
         publicKeyB64: publicKeyB64,
       );
-      expect(await verifier.check(), ServerProof.unreachable);
+      expect(await verifier.check(), ServerProof.impostor);
     });
 
     test('nothing pinned means nothing to verify', () async {
@@ -200,11 +202,17 @@ void main() {
       await engine.start();
 
       expect(engine.serverIdentityFailed, isTrue);
-      // Not folded into offline: the server answered, it just is not the
+      // Not shown as offline: the server answered, it just is not the
       // server. Reporting this as offline would send the user to check wifi.
       expect(
-        engine.isOnline,
-        isTrue,
+        dotStatusFor(
+          online: engine.isOnline,
+          syncing: false,
+          pending: 0,
+          identityFailed: engine.serverIdentityFailed,
+          connection: engine.connection.status,
+        ),
+        DotStatus.untrusted,
         reason: 'identity failure is a third state, not offline',
       );
     });
@@ -268,9 +276,10 @@ void main() {
       await engine.start();
       expect(challenges, 1);
 
-      engine.debugSimulateSocketDrop();
-      // The first backoff is one second.
-      await Future<void>.delayed(const Duration(milliseconds: 1400));
+      // A dropped feed alone is not a new connection (§8.4). A lost
+      // transport is, and the next connection races and proves the server.
+      engine.connection.requestFailed(http.ClientException('reset by peer'));
+      await engine.connection.connect();
 
       expect(
         challenges,

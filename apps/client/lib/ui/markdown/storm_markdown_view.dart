@@ -4,10 +4,9 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
-import 'package:http/http.dart' as http;
 
 import '../../state/app_state.dart';
-import '../../api/storm_connection.dart';
+import '../../api/storm_api.dart';
 import '../states.dart';
 import '../tokens.dart';
 import '../widgets.dart';
@@ -53,7 +52,7 @@ class StormMarkdownView extends ConsumerWidget {
     }
 
     final settings = ref.watch(settingsProvider).value ?? const Settings();
-    final connection = ref.watch(connectionProvider);
+    final api = ref.watch(apiProvider);
     final vaultId = ref.watch(activeVaultProvider);
     final fontSize = context.tokens.proseSize;
     final checkboxSize = stormMarkdownCheckboxSize(context.tokens.fs);
@@ -105,12 +104,8 @@ class StormMarkdownView extends ConsumerWidget {
               size: checkboxSize,
             ),
           ),
-          imageBuilder: (uri, title, alt) => _MarkdownImage(
-            uri: uri,
-            alt: alt,
-            connection: connection,
-            vaultId: vaultId,
-          ),
+          imageBuilder: (uri, title, alt) =>
+              _MarkdownImage(uri: uri, alt: alt, api: api, vaultId: vaultId),
           onTapLink: (text, href, title) =>
               _onTapLink(context, text: text, href: href),
         ),
@@ -186,13 +181,13 @@ class _MarkdownImage extends StatelessWidget {
   const _MarkdownImage({
     required this.uri,
     required this.alt,
-    required this.connection,
+    required this.api,
     required this.vaultId,
   });
 
   final Uri uri;
   final String? alt;
-  final StormConnection? connection;
+  final StormApi? api;
   final String vaultId;
 
   static const _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'};
@@ -200,38 +195,26 @@ class _MarkdownImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final resolved = _resolveUri();
-    if (resolved == null || connection == null) {
+    final provider = _provider();
+    if (provider == null) {
       return _ImageFallback(
         message: alt?.isNotEmpty == true ? alt! : 'Missing image',
       );
     }
-
-    final client = connection!.transportClient;
-    final headers = connection!.authHeaders;
-    final provider = StormImageProvider(
-      uri: resolved,
-      client: client,
-      headers: headers,
-    );
 
     return Padding(
       padding: EdgeInsets.symmetric(vertical: t.sp),
       child: GestureDetector(
         onTap: () => Navigator.of(context).push(
           MaterialPageRoute<void>(
-            builder: (_) => _ImageViewer(
-              uri: resolved,
-              client: client,
-              headers: headers,
-              title: alt ?? uri.path,
-            ),
+            builder: (_) =>
+                _ImageViewer(provider: provider, title: alt ?? uri.path),
           ),
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(t.rControl),
           child: Image(
-            image: provider as ImageProvider<Object>,
+            image: provider,
             fit: BoxFit.contain,
             loadingBuilder: (context, child, progress) {
               if (progress == null) return child;
@@ -258,8 +241,14 @@ class _MarkdownImage extends StatelessWidget {
     );
   }
 
-  Uri? _resolveUri() {
-    if (uri.scheme == 'http' || uri.scheme == 'https') return uri;
+  /// An image elsewhere on the web is fetched as any page would, with no
+  /// credential. An attachment goes over the session's connection with the
+  /// credential as a header, so it loads through the relay too (decision 112),
+  /// and the session token is never sent to another host.
+  ImageProvider<Object>? _provider() {
+    if (uri.scheme == 'http' || uri.scheme == 'https') {
+      return NetworkImage(uri.toString());
+    }
 
     // Vault-relative attachment path, the form the editor inserts on upload.
     final path = uri.hasScheme ? uri.toString() : uri.path;
@@ -267,17 +256,9 @@ class _MarkdownImage extends StatelessWidget {
     final ext = path.contains('.') ? path.split('.').last.toLowerCase() : '';
     if (ext.isNotEmpty && !_imageExtensions.contains(ext)) return null;
 
-    // Build the attachment URL using the connection's active transport
-    if (connection == null) return null;
-    if (connection!.active.relayUrl != null) {
-      return Uri.parse(
-        '${connection!.active.baseUrl}/v1/vaults/$vaultId/attachments/$path',
-      );
-    } else {
-      return Uri.parse(
-        '${connection!.localAddress}/v1/vaults/$vaultId/attachments/$path',
-      );
-    }
+    final api = this.api;
+    if (api == null) return null;
+    return StormImageProvider.attachment(api, vaultId, path);
   }
 }
 
@@ -318,26 +299,14 @@ class _ImageFallback extends StatelessWidget {
 }
 
 class _ImageViewer extends StatelessWidget {
-  const _ImageViewer({
-    required this.uri,
-    required this.client,
-    required this.headers,
-    required this.title,
-  });
+  const _ImageViewer({required this.provider, required this.title});
 
-  final Uri uri;
-  final http.Client client;
-  final Map<String, String> headers;
+  final ImageProvider<Object> provider;
   final String title;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final provider = StormImageProvider(
-      uri: uri,
-      client: client,
-      headers: headers,
-    );
     return Scaffold(
       appBar: AppBar(title: Text(title, overflow: TextOverflow.ellipsis)),
       backgroundColor: const Color(0xFF000000),
@@ -345,7 +314,7 @@ class _ImageViewer extends StatelessWidget {
         child: InteractiveViewer(
           maxScale: 6,
           child: Image(
-            image: provider as ImageProvider<Object>,
+            image: provider,
             errorBuilder: (c, _, _) => Padding(
               padding: EdgeInsets.all(t.cardPad),
               child: Text(

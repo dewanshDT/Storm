@@ -23,6 +23,13 @@ use tokio::sync::{oneshot, watch};
 
 pub use client::Tunnel;
 
+/// Set on every request a relay trunk dispatches. An extension, which no
+/// client can set: `relay_peer_ip` arrives as an ordinary peer address, so
+/// without this a relayed request from a LAN-addressed relay client would
+/// look local (decision 118).
+#[derive(Debug, Clone, Copy)]
+pub struct Relayed;
+
 use crate::auth::ServerIdentity;
 use crate::registry::RegisteredRelays;
 

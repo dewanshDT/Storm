@@ -134,6 +134,9 @@ pub struct AppState {
     /// The MCP Gateway's store and data key (decision 81b). Opened at boot so
     /// the key exists before the first backup.
     pub gateway: Arc<crate::gateway::Gateway>,
+    /// LAN discovery's switch (decision 118): the advertisement follows it, and
+    /// password pairing is refused while it is off.
+    pub discovery: crate::discovery::Discovery,
 }
 
 pub type Shared = Arc<AppState>;
@@ -315,6 +318,10 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/server", get(server_info))
         .route("/v1/server/challenge", post(server_challenge))
         .route("/v1/pair", post(pair_handler))
+        // LAN discovery pairing (decision 118). Unauthenticated like
+        // `/v1/pair`; the account password is the credential, and the op
+        // refuses anything relayed or not from the LAN.
+        .route("/v1/pairings/password", post(pair_password_handler))
         // A Runtime Host's way in (decision 77b). Unauthenticated by nature —
         // the enrollment token and the host key *are* the credentials — and
         // rate-limited by `host_limiter`.
@@ -376,6 +383,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/mcp", put(put_mcp))
         .route("/v1/config/relays", put(put_relays))
+        .route("/v1/config/discovery", put(put_discovery))
         // MCP keys (A14). **Session tier**: minting a key costs a real
         // sign-in on a paired device, which is also what makes "a key cannot
         // mint a key" true without a special case — a key never reaches here.
@@ -644,8 +652,10 @@ async fn create_first_user(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     crate::auth::account::create_account(&mut auth_db, &hash, &now)
-        .map(|_| StatusCode::CREATED)
-        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))
+        .map_err(|e| ApiError(StatusCode::CONFLICT, e.to_string()))?;
+    // `claimed=1` in the advertisement.
+    state.discovery.poke();
+    Ok(StatusCode::CREATED)
 }
 
 /// v0.3.x clients still send a username; it is ignored.
@@ -1238,6 +1248,40 @@ async fn pair_handler(
         }
     })
     .map(Json)
+}
+
+/// POST /v1/pairings/password — pair a device found by LAN discovery with the
+/// account password (decision 118). The logic, and every refusal, is
+/// `ops::pair_with_password`; this maps them onto the wire. A wrong password
+/// answers exactly as `/v1/auth/login` does.
+async fn pair_password_handler(
+    State(state): State<Shared>,
+    MaybePeer(peer): MaybePeer,
+    relayed: Option<Extension<crate::relay::Relayed>>,
+    Json(body): Json<crate::ops::PasswordPairing>,
+) -> Result<Json<crate::auth::pairing::ConsumeResult>, Response> {
+    use crate::ops::PasswordPairError as E;
+    let origin = crate::ops::Origin {
+        peer: peer.map(|p| p.ip()),
+        relayed: relayed.is_some(),
+    };
+    match crate::ops::pair_with_password(&state, body, origin).await {
+        Ok(result) => Ok(Json(result)),
+        Err(E::LanOnly) => Err(ApiError(StatusCode::FORBIDDEN, "lan_only".into()).into_response()),
+        Err(E::SetupRequired) => {
+            Err(ApiError(StatusCode::CONFLICT, "setup_required".into()).into_response())
+        }
+        Err(E::BadRequest(msg)) => Err(bad_request(msg).into_response()),
+        Err(E::Refused(crate::auth::sessions::LoginFailure::RateLimited { retry_after_secs })) => {
+            Err(rate_limited(retry_after_secs))
+        }
+        Err(E::Refused(failure)) => {
+            Err(ApiError(StatusCode::UNAUTHORIZED, failure.code().to_string()).into_response())
+        }
+        Err(E::Internal(e)) => {
+            Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2469,6 +2513,9 @@ struct ConfigResponse {
     relays: Vec<String>,
     /// This server's release version, for the client's compatibility check.
     version: &'static str,
+    /// LAN discovery (decision 118): the setting, whether a flag overrides it,
+    /// and whether the server is advertising now.
+    discovery: crate::ops::DiscoveryView,
 }
 
 async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigResponse>> {
@@ -2482,6 +2529,7 @@ async fn get_config(State(state): State<Shared>) -> ApiResult<Json<ConfigRespons
         agent_writes: vaults.registry.agent_writes(),
         relays: vaults.registry.relays.clone(),
         version: env!("CARGO_PKG_VERSION"),
+        discovery: crate::ops::discovery_view(&state),
     }))
 }
 
@@ -2546,6 +2594,22 @@ async fn put_mcp(
         "mcp_writable": writable,
         "agent_writes": agent_writes,
     })))
+}
+
+#[derive(Deserialize)]
+struct DiscoveryBody {
+    enabled: bool,
+}
+
+/// PUT /v1/config/discovery — Settings › Server › "Discoverable on this
+/// network" (decision 118).
+async fn put_discovery(
+    State(state): State<Shared>,
+    Json(body): Json<DiscoveryBody>,
+) -> ApiResult<Json<crate::ops::DiscoveryView>> {
+    crate::ops::set_discoverable(&state, body.enabled)
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -3041,12 +3105,89 @@ async fn get_attachment(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
     let bytes = ix.attachment(&path).map_err(|e| not_found(e.to_string()))?;
+    drop(ix);
+    Ok(ranged(bytes, content_type_for(&path), &headers))
+}
 
-    Ok(([(header::CONTENT_TYPE, content_type_for(&path))], bytes).into_response())
+/// A whole attachment, or the single range a resuming client asked for
+/// (SRP §5.5 rule 3). A relay ends a download that outruns its reader with
+/// `client_backlogged`; the client resumes from what it has rather than
+/// starting a 64 MiB file again.
+///
+/// The `ETag` is the content's hash, and a `Range` whose `If-Range` no longer
+/// matches gets the whole new file: an attachment replaced between two
+/// attempts must never be spliced onto the old one's prefix.
+fn ranged(bytes: Vec<u8>, content_type: &'static str, headers: &HeaderMap) -> Response {
+    let etag = format!("\"{}\"", &blake3::hash(&bytes).to_hex()[..32]);
+    let len = bytes.len();
+    let fresh = headers
+        .get(header::IF_RANGE)
+        .is_none_or(|v| v.to_str().is_ok_and(|v| v == etag));
+    let range = headers
+        .get(header::RANGE)
+        .filter(|_| fresh)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| parse_byte_range(v, len));
+    let common = [
+        (header::CONTENT_TYPE, content_type.to_string()),
+        (header::ACCEPT_RANGES, "bytes".to_string()),
+        (header::ETAG, etag),
+    ];
+    match range {
+        None => (common, bytes).into_response(),
+        Some(Err(())) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            common,
+            [(header::CONTENT_RANGE, format!("bytes */{len}"))],
+        )
+            .into_response(),
+        Some(Ok((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            common,
+            [(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"))],
+            bytes[start..=end].to_vec(),
+        )
+            .into_response(),
+    }
+}
+
+/// One `bytes=` range over `len` bytes, inclusive. `None` for anything this
+/// does not serve as a range (several ranges, another unit, a malformed
+/// header), which gets the whole body as RFC 9110 allows; `Err` for a range
+/// that starts past the end.
+fn parse_byte_range(value: &str, len: usize) -> Option<Result<(usize, usize), ()>> {
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (first, last) = spec.split_once('-')?;
+    let (first, last) = (first.trim(), last.trim());
+    if first.is_empty() {
+        let suffix: usize = last.parse().ok()?;
+        if suffix == 0 || len == 0 {
+            return Some(Err(()));
+        }
+        return Some(Ok((len.saturating_sub(suffix), len - 1)));
+    }
+    let start: usize = first.parse().ok()?;
+    let end = if last.is_empty() {
+        len.checked_sub(1)?
+    } else {
+        let end: usize = last.parse().ok()?;
+        if end < start {
+            return None;
+        }
+        end.min(len.checked_sub(1)?)
+    };
+    if start >= len {
+        return Some(Err(()));
+    }
+    Some(Ok((start, end)))
 }
 
 async fn put_attachment(
@@ -3111,6 +3252,10 @@ const WS_RESYNC: &str = r#"{"kind":"resync"}"#;
 
 /// The SSE form of the same thing (`docs/srp-v1.md` §5.3). Empty `data:`.
 const SSE_RESYNC: &str = "event: resync\ndata:\n\n";
+
+/// An SSE comment, which every reader ignores (SRP §5.3, decision 116b).
+const SSE_KEEPALIVE: &str = ":\n\n";
+const SSE_KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The peer is gone; stop the feed.
 struct Gone;
@@ -3273,19 +3418,48 @@ fn sse_response(headers: &HeaderMap, rx: broadcast::Receiver<Change>) -> Respons
     // `Lagged`, and the client is told to resync — the same recovery a slow
     // WebSocket gets.
     let (tx, body_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(push_changes(SseSink(tx), rx));
+    tokio::spawn(feed_with_keepalive(tx, rx, SSE_KEEPALIVE_EVERY));
 
     (
         [
             (header::CONTENT_TYPE, "text/event-stream"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        // No keep-alive comments and no inactivity timeout: a quiet vault is a
-        // normal vault, and a feed that hung up on silence would be
-        // indistinguishable from a broken one.
+        // No inactivity timeout: a quiet vault is a normal vault. The comment
+        // every 15 s is what lets a reader tell a quiet feed from a dead one.
         axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx)),
     )
         .into_response()
+}
+
+/// The feed, with a comment every `period` (SRP §5.3). Over a
+/// relay this is the one long-lived stream every client holds, so it is also
+/// traffic both trunks can see. Ends with the feed.
+async fn feed_with_keepalive(
+    tx: tokio::sync::mpsc::Sender<Result<String, std::convert::Infallible>>,
+    rx: broadcast::Receiver<Change>,
+    period: std::time::Duration,
+) {
+    let keepalive = {
+        let tx = tx.clone();
+        async move {
+            let mut every = tokio::time::interval(period);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                // A full queue is already traffic; this one can be skipped.
+                if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
+                    tx.try_send(Ok(SSE_KEEPALIVE.into()))
+                {
+                    return;
+                }
+            }
+        }
+    };
+    tokio::select! {
+        () = push_changes(SseSink(tx), rx) => {}
+        () = keepalive => {}
+    }
 }
 
 /// Pushes change events so other devices update without polling.
@@ -3363,7 +3537,12 @@ pub(crate) mod tests {
         dir: &FsPath,
         policy: Arc<dyn crate::auth::authz::VaultPolicy>,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_full(dir, policy, crate::auth::ratelimit::LoginLimiter::new())
+        test_router_full(
+            dir,
+            policy,
+            crate::auth::ratelimit::LoginLimiter::new(),
+            vec![],
+        )
     }
 
     /// As [`test_router_with_state`], but with the login limiter's numbers
@@ -3374,13 +3553,33 @@ pub(crate) mod tests {
         dir: &FsPath,
         limiter: crate::auth::ratelimit::LoginLimiter,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
-        test_router_full(dir, Arc::new(crate::auth::authz::StormPolicy), limiter)
+        test_router_full(
+            dir,
+            Arc::new(crate::auth::authz::StormPolicy),
+            limiter,
+            vec![],
+        )
+    }
+
+    /// As [`test_router_with_state`], but with rmcp's DNS-rebinding list set,
+    /// the way a server bound to a concrete address has it.
+    pub(crate) fn test_router_with_mcp_hosts(
+        dir: &FsPath,
+        allowed_hosts: Vec<String>,
+    ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
+        test_router_full(
+            dir,
+            Arc::new(crate::auth::authz::StormPolicy),
+            crate::auth::ratelimit::LoginLimiter::new(),
+            allowed_hosts,
+        )
     }
 
     fn test_router_full(
         dir: &FsPath,
         policy: Arc<dyn crate::auth::authz::VaultPolicy>,
         login_limiter: crate::auth::ratelimit::LoginLimiter,
+        allowed_hosts: Vec<String>,
     ) -> (Router, Arc<crate::auth::ServerIdentity>, Shared) {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -3418,16 +3617,12 @@ pub(crate) mod tests {
             hasher: crate::auth::Hasher::new(),
             login_limiter,
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            discovery: crate::discovery::Discovery::new(false, true),
             agent,
             gateway,
         });
         (
-            router(
-                state.clone(),
-                crate::mcp::McpOptions {
-                    allowed_hosts: vec![],
-                },
-            ),
+            router(state.clone(), crate::mcp::McpOptions { allowed_hosts }),
             identity,
             state,
         )
@@ -3444,6 +3639,58 @@ pub(crate) mod tests {
             .unwrap();
         let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, body)
+    }
+
+    #[test]
+    fn a_byte_range_is_parsed_as_rfc_9110_says() {
+        assert_eq!(parse_byte_range("bytes=4-", 10), Some(Ok((4, 9))));
+        assert_eq!(parse_byte_range("bytes=2-5", 10), Some(Ok((2, 5))));
+        assert_eq!(parse_byte_range("bytes=2-50", 10), Some(Ok((2, 9))));
+        assert_eq!(parse_byte_range("bytes=-3", 10), Some(Ok((7, 9))));
+        assert_eq!(parse_byte_range("bytes=-30", 10), Some(Ok((0, 9))));
+        assert_eq!(parse_byte_range("bytes=10-", 10), Some(Err(())));
+        assert_eq!(parse_byte_range("bytes=-0", 10), Some(Err(())));
+        for whole in ["bytes=0-1,4-5", "items=0-1", "bytes=5-2", "bytes=x-", "0-1"] {
+            assert_eq!(parse_byte_range(whole, 10), None, "{whole}");
+        }
+    }
+
+    async fn ranged_parts(
+        headers: &[(header::HeaderName, &str)],
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let mut map = HeaderMap::new();
+        for (k, v) in headers {
+            map.insert(k.clone(), v.parse().unwrap());
+        }
+        let response = ranged(b"0123456789".to_vec(), "application/pdf", &map);
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, 1 << 20).await.unwrap().to_vec();
+        (parts.status, parts.headers, body)
+    }
+
+    #[tokio::test]
+    async fn an_attachment_resumes_from_a_range_and_only_while_it_is_unchanged() {
+        let (status, headers, body) = ranged_parts(&[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"0123456789");
+        assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+        let etag = headers[header::ETAG].to_str().unwrap().to_string();
+
+        let (status, headers, body) =
+            ranged_parts(&[(header::RANGE, "bytes=4-"), (header::IF_RANGE, &etag)]).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes 4-9/10");
+        assert_eq!(body, b"456789");
+
+        // Replaced since the first attempt: the whole new file, never a splice.
+        let (status, _, body) =
+            ranged_parts(&[(header::RANGE, "bytes=4-"), (header::IF_RANGE, "\"stale\"")]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"0123456789");
+
+        let (status, headers, _) = ranged_parts(&[(header::RANGE, "bytes=10-")]).await;
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes */10");
     }
 
     fn get(path: &str) -> axum::http::Request<axum::body::Body> {
@@ -5593,6 +5840,26 @@ pub(crate) mod tests {
         assert_ne!(ids[0], ids[1], "a bare seq would have collided here");
     }
 
+    /// SRP §5.3 (decision 116b): a quiet feed still says something every
+    /// period, and the comment ends with the feed rather than holding it open.
+    #[tokio::test]
+    async fn a_quiet_sse_feed_sends_a_comment_every_period() {
+        assert_eq!(SSE_KEEPALIVE_EVERY, std::time::Duration::from_secs(15));
+        let period = std::time::Duration::from_millis(200);
+        let (events, rx) = broadcast::channel::<Change>(4);
+        let (tx, mut frames) = tokio::sync::mpsc::channel(8);
+        let feed = tokio::spawn(feed_with_keepalive(tx, rx, period));
+
+        tokio::time::sleep(period / 2).await;
+        assert!(frames.try_recv().is_err(), "a comment before the period");
+        let comment = tokio::time::timeout(period * 5, frames.recv()).await;
+        assert_eq!(comment.unwrap().unwrap().unwrap(), ":\n\n");
+
+        drop(events);
+        feed.await.unwrap();
+        assert!(frames.recv().await.is_none(), "the feed ended");
+    }
+
     #[tokio::test]
     async fn a_lagging_sse_client_is_sent_a_resync_event() {
         let (tx, mut frames) = tokio::sync::mpsc::channel(8);
@@ -5738,8 +6005,13 @@ pub(crate) mod tests {
         );
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(
+            body["discovery"],
+            serde_json::json!({"discoverable": true, "forced_off": false, "active": true, "untrusted": []}),
+            "decision 118: discoverable unless turned off"
+        );
+        assert_eq!(
             body.as_object().unwrap().len(),
-            8,
+            9,
             "a new key showed up that this test does not know about"
         );
     }
@@ -8615,5 +8887,325 @@ pub(crate) mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"], "refused");
+    }
+
+    // ---- LAN discovery pairing (decision 118) ------------------------------
+
+    const LAN_PASSWORD: &str = "correct horse battery staple";
+
+    pub(crate) async fn seed_owner_with_password(state: &Shared, password: &str) {
+        let hash = state.hasher.hash(password.to_string()).await.unwrap();
+        let mut auth_db = state.auth_db.lock().await;
+        crate::auth::account::create_account(&mut auth_db, &hash, "2026-10-14T00:00:00Z").unwrap();
+    }
+
+    pub(crate) fn pair_password_from(
+        password: &str,
+        peer: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut req = post_json(
+            "/v1/pairings/password",
+            serde_json::json!({
+                "password": password,
+                "device_name": "Pixel 10",
+                "platform": "android",
+                "version": "0.9.0",
+            }),
+        );
+        if let Some(peer) = peer {
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    peer.parse().unwrap(),
+                    54321,
+                )));
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn password_pairing_on_the_lan_returns_device_credentials() {
+        let dir = tempdir::TempDir::new("storm-lan-pair").unwrap();
+        let (app, identity, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+
+        let (status, body) =
+            send(&app, pair_password_from(LAN_PASSWORD, Some("192.168.1.40"))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let device_id = body["device_id"].as_str().unwrap();
+        let secret = body["device_secret"].as_str().unwrap();
+        assert!(device_id.starts_with("dev_") && secret.starts_with("dvs_"));
+        assert_eq!(body["server_id"], identity.server_id);
+        assert_eq!(body["public_key"], identity.public_key_b64());
+
+        // The credential is a real device credential: it signs in.
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"password": LAN_PASSWORD}),
+                &format!("StormDevice {device_id}:{secret}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let devices = state.auth_db.lock().await.list_devices().unwrap();
+        let device = devices.iter().find(|d| d.id == device_id).unwrap();
+        assert_eq!(device.paired_by.as_deref(), Some("lan_password"));
+        assert_eq!(device.name, "Pixel 10");
+    }
+
+    #[tokio::test]
+    async fn every_lan_scoped_peer_class_may_pair() {
+        let dir = tempdir::TempDir::new("storm-lan-classes").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        for peer in [
+            "127.0.0.1",
+            "::1",
+            "10.1.2.3",
+            "172.16.0.5",
+            "192.168.1.40",
+            "169.254.1.1",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:192.168.1.41",
+        ] {
+            let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, Some(peer))).await;
+            assert_eq!(status, StatusCode::OK, "{peer}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn password_pairing_through_a_relay_is_lan_only() {
+        let dir = tempdir::TempDir::new("storm-lan-relayed").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+
+        // A relay attests a LAN address when its client is on the relay's
+        // LAN; the marker, not the address, is what refuses it.
+        let mut req = pair_password_from(LAN_PASSWORD, Some("192.168.1.40"));
+        req.extensions_mut().insert(crate::relay::Relayed);
+        let (status, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "lan_only");
+        assert!(
+            state
+                .auth_db
+                .lock()
+                .await
+                .list_devices()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn password_pairing_from_off_the_lan_is_refused() {
+        let dir = tempdir::TempDir::new("storm-lan-public").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+
+        for peer in [
+            Some("203.0.113.9"),
+            Some("2606:4700::1111"),
+            Some("100.64.0.1"),
+            Some("100.101.102.103"),
+            None,
+        ] {
+            let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, peer)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{peer:?}");
+            assert_eq!(body["error"], "lan_only", "{peer:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn password_pairing_from_an_untrusted_network_is_refused() {
+        let dir = tempdir::TempDir::new("storm-lan-untrusted").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        let os = crate::nettrust::fake::FakeOs::default()
+            .with("firewall-cmd --state", "running\n")
+            .with(
+                "firewall-cmd --get-active-zones",
+                "public\n  interfaces: wlan0\nhome\n  interfaces: enp3s0\n",
+            );
+        let ifaces = [
+            crate::nettrust::Iface {
+                name: "wlan0".into(),
+                ip: "192.168.1.13".parse().unwrap(),
+                prefix: 24,
+            },
+            crate::nettrust::Iface {
+                name: "enp3s0".into(),
+                ip: "10.0.0.5".parse().unwrap(),
+                prefix: 24,
+            },
+        ];
+        state
+            .discovery
+            .trust
+            .refresh(crate::nettrust::Platform::Linux, &os, &ifaces);
+
+        let (status, body) =
+            send(&app, pair_password_from(LAN_PASSWORD, Some("192.168.1.40"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"], "lan_only");
+        assert!(
+            state
+                .auth_db
+                .lock()
+                .await
+                .list_devices()
+                .unwrap()
+                .is_empty()
+        );
+
+        let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, Some("10.0.0.9"))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a trusted network still pairs: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn password_pairing_is_refused_while_discovery_is_off() {
+        let dir = tempdir::TempDir::new("storm-lan-off").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        let user = state.auth_db.lock().await.account().unwrap().unwrap().id;
+        let token = session_token(&state, &user).await;
+
+        let (status, body) = send(
+            &app,
+            put_json(
+                "/v1/config/discovery",
+                serde_json::json!({"enabled": false}),
+                Some(&format!("Bearer {token}")),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["active"], false);
+        assert!(
+            !state.vaults.read().await.registry.discoverable(),
+            "persisted"
+        );
+
+        let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, Some("10.0.0.7"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "lan_only");
+
+        let (_, config) = send(
+            &app,
+            get_with_auth("/v1/config", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(config["discovery"]["discoverable"], false);
+        assert_eq!(config["discovery"]["forced_off"], false);
+    }
+
+    #[tokio::test]
+    async fn password_pairing_never_claims_a_fresh_server() {
+        let dir = tempdir::TempDir::new("storm-lan-fresh").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (status, body) =
+            send(&app, pair_password_from(LAN_PASSWORD, Some("192.168.1.40"))).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "setup_required");
+        assert!(
+            state
+                .auth_db
+                .lock()
+                .await
+                .list_devices()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!state.auth_db.lock().await.has_account().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_wrong_pairing_password_answers_as_login_does() {
+        let dir = tempdir::TempDir::new("storm-lan-wrong").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        let device = pair_a_device(&state).await;
+
+        let (pair_status, pair_body) = send(
+            &app,
+            pair_password_from("not the password", Some("192.168.1.40")),
+        )
+        .await;
+        let (login_status, login_body) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/auth/login",
+                serde_json::json!({"password": "not the password"}),
+                &device,
+            ),
+        )
+        .await;
+        assert_eq!(pair_status, StatusCode::UNAUTHORIZED);
+        assert_eq!((pair_status, pair_body), (login_status, login_body));
+    }
+
+    #[tokio::test]
+    async fn password_pairing_is_charged_to_the_login_limiter_and_refunded() {
+        let dir = tempdir::TempDir::new("storm-lan-limiter").unwrap();
+        let (app, _, state) = test_router_with_limiter(dir.path(), throttling_limiter());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        let peer = Some("192.168.1.40");
+
+        // More successes than the burst: each is refunded.
+        for _ in 0..crate::auth::ratelimit::tests::TEST_BURST + 1 {
+            let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, peer)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        // Failures are not.
+        for _ in 0..crate::auth::ratelimit::tests::TEST_BURST {
+            let (status, _) = send(&app, pair_password_from("wrong", peer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (status, body) = send(&app, pair_password_from(LAN_PASSWORD, peer)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], "rate_limited");
+        assert!(body["retry_after"].as_i64().unwrap() > 0);
+
+        // The same bucket as sign-in: a login from that peer is throttled too.
+        let device = pair_a_device(&state).await;
+        let (status, _) = send(&app, login_from(&device, "", Some("192.168.1.40"))).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn password_pairing_records_a_security_event_without_the_secret() {
+        let dir = tempdir::TempDir::new("storm-lan-event").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        seed_owner_with_password(&state, LAN_PASSWORD).await;
+        let (status, body) =
+            send(&app, pair_password_from(LAN_PASSWORD, Some("192.168.1.40"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let secret = body["device_secret"].as_str().unwrap().to_string();
+        let device_id = body["device_id"].as_str().unwrap().to_string();
+
+        let db = state.auth_db.lock().await;
+        let kind = crate::ops::EVENT_DEVICE_PAIRED_PASSWORD;
+        assert_eq!(db.event_count(kind).unwrap(), 1);
+        assert_eq!(
+            db.latest_event_remote(kind).unwrap().as_deref(),
+            Some("192.168.1.40")
+        );
+        let rows = db.all_events().unwrap();
+        let detail = &rows.iter().find(|(k, _)| k == kind).unwrap().1;
+        assert!(detail.contains("android"), "{detail}");
+        let device = db.find_device(&device_id).unwrap().unwrap();
+        assert_eq!(device.paired_by.as_deref(), Some("lan_password"));
+        for (kind, detail) in &rows {
+            assert!(!detail.contains(LAN_PASSWORD), "{kind}: {detail}");
+            assert!(!detail.contains(&secret), "{kind}: {detail}");
+            assert!(!detail.contains("argon2"), "{kind}: {detail}");
+        }
     }
 }

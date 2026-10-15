@@ -3,23 +3,34 @@
 ///
 /// Flow:
 /// 1. User scans a `storm://pair` QR, or pastes the URI (slice 14).
-/// 2. Client verifies the server's identity via the challenge step.
+/// 2. Client reaches the server — at the QR's address, or through one of the
+///    QR's relays when that does not answer (decision 96) — and verifies its
+///    identity via the challenge step before sending anything else.
 /// 3. Client consumes the pairing nonce → device credentials.
 /// 4. Client creates the owner account (first user).
 /// 5. Client logs in → session tokens.
 /// 6. Done — saved to Settings, router redirects to the dashboard.
+///
+/// Or, on Android, macOS and Linux, pick the server from the "On this
+/// network" list and pair with the account password (decision 118,
+/// `lan_servers.dart`).
 library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
-import '../api/ed25519_verify.dart';
-import '../api/server_verifier.dart';
+import '../api/lan_discovery.dart';
+import '../api/lan_pairing.dart';
+import '../api/pairing_route.dart';
+import '../router.dart';
 import '../state/app_state.dart';
+import 'controls.dart';
+import 'lan_servers.dart';
 import 'scan_pairing_screen.dart';
 import 'tokens.dart';
 import 'widgets.dart';
@@ -51,14 +62,20 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   // Step 4: login.
   bool _loggingIn = false;
 
-  // Server info from verification.
+  // The proven transport, and the server info fetched over it.
+  PairingRoute? _route;
   ServerInfo? _serverInfo;
 
   // Device credentials from pairing.
   PairingResult? _pairResult;
 
+  // The pasted-URI form, folded away behind "Enter address manually" while
+  // the discovery list is showing.
+  bool _manual = false;
+
   @override
   void dispose() {
+    _route?.close();
     _uriController.dispose();
     _passwordController.dispose();
     super.dispose();
@@ -112,44 +129,15 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       _error = null;
     });
 
+    _route?.close();
+    _route = null;
     try {
-      final authApi = AuthApi(baseUrl: uri.baseUrl);
-
-      // 1. Fetch server identity and verify it matches the QR.
-      final serverInfo = await authApi.serverInfo();
-      if (serverInfo.serverId != uri.serverId) {
-        setState(() {
-          _error = 'Server id mismatch. This QR may be for a different server.';
-          _verifying = false;
-        });
-        return;
-      }
-      if (serverInfo.publicKey != uri.publicKey) {
-        setState(() {
-          _error =
-              'Server public key mismatch. This QR may be for a different server.';
-          _verifying = false;
-        });
-        return;
-      }
-
-      // 2. Challenge — send a random nonce, verify the Ed25519 signature.
-      final challengeNonce = randomNonce();
-      final answer = await authApi.challenge(challengeNonce);
-      final valid = await verifyChallenge(
-        publicKeyB64: uri.publicKey,
-        signatureB64: answer.signature,
-        serverId: uri.serverId,
-        nonce: challengeNonce,
-      );
-      if (!valid) {
-        setState(() {
-          _error =
-              'Server failed the cryptographic challenge. Connection may be intercepted.';
-          _verifying = false;
-        });
-        return;
-      }
+      // 1–2. Reach the server and prove it holds the QR's key. Nothing below
+      // is sent until this has returned.
+      final route = await openPairingRoute(uri);
+      _route = route;
+      final authApi = route.authApi;
+      final serverInfo = route.serverInfo;
 
       // 3. Consume the pairing nonce.
       final packageInfo = await PackageInfo.fromPlatform();
@@ -178,8 +166,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 serverId: serverInfo.serverId,
                 serverKeyId: serverInfo.keyId,
                 serverPublicKey: serverInfo.publicKey,
+                relays: pairedRelays(uri, serverInfo),
               ),
             );
+        route.close();
+        _route = null;
         if (!mounted) return;
         setState(() => _verifying = false);
         if (widget.rePair) Navigator.of(context).pop(true);
@@ -189,6 +180,11 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
       setState(() {
         _serverInfo = serverInfo;
         _pairResult = pairResult;
+        _verifying = false;
+      });
+    } on PairingRouteException catch (e) {
+      setState(() {
+        _error = _routeError(uri, e);
         _verifying = false;
       });
     } on AuthApiException catch (e) {
@@ -231,6 +227,59 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     }
   }
 
+  // ---- LAN discovery (decision 118) ----
+
+  Future<void> _openLanSheet(DiscoveredServer server) async {
+    final paired = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: context.tokens.bg,
+      builder: (_) => LanPairSheet(
+        server: server,
+        onPaired: _saveLanPairing,
+        onScanQr: canScanPairingQr ? _scan : null,
+      ),
+    );
+    if (paired == true && widget.rePair && mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  /// Pins what the verified route proved, then the session when the sign-in
+  /// that followed pairing worked. Without one, `/login` takes it from here.
+  Future<void> _saveLanPairing(LanRoute route, LanPairing paired) async {
+    final info = route.serverInfo;
+    final session = paired.session;
+    final current = ref.read(settingsProvider).value ?? const Settings();
+    await ref
+        .read(settingsProvider.notifier)
+        .save(
+          current.copyWith(
+            baseUrl: route.server.baseUrl,
+            deviceId: paired.device.deviceId,
+            deviceSecret: paired.device.deviceSecret,
+            serverId: info.serverId,
+            serverKeyId: info.keyId,
+            serverPublicKey: info.publicKey,
+            relays: info.relays,
+            // Never keep a session from a server this device paired with
+            // before.
+            accessToken: session?.accessToken ?? '',
+            refreshToken: session?.refreshToken ?? '',
+            userId: session?.userId ?? '',
+            accessTokenExpiresAt: session?.expires ?? '',
+          ),
+        );
+  }
+
+  void _openPaired() {
+    if (widget.rePair) {
+      Navigator.of(context).pop(false);
+    } else {
+      context.go(Routes.root);
+    }
+  }
+
   // ---- Step 3: set up the account ----
 
   Future<void> _createAccount() async {
@@ -246,8 +295,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     });
 
     try {
-      final uri = _parsedUri!;
-      final authApi = AuthApi(baseUrl: uri.baseUrl);
+      final authApi = _route!.authApi;
       // Device tier: the credential from pairing, a step earlier in this flow.
       final pair = _pairResult!;
       await authApi.setUpAccount(
@@ -284,7 +332,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
     try {
       final uri = _parsedUri!;
       final pair = _pairResult!;
-      final authApi = AuthApi(baseUrl: uri.baseUrl);
+      final authApi = _route!.authApi;
       final tokens = await authApi.login(
         deviceId: pair.deviceId,
         deviceSecret: pair.deviceSecret,
@@ -308,6 +356,7 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               serverId: _serverInfo!.serverId,
               serverKeyId: _serverInfo!.keyId,
               serverPublicKey: _serverInfo!.publicKey,
+              relays: pairedRelays(uri, _serverInfo!),
               // Session tokens.
               accessToken: tokens.accessToken,
               refreshToken: tokens.refreshToken,
@@ -316,6 +365,8 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
               // Clear legacy token — we're paired now.
             ),
           );
+      _route?.close();
+      _route = null;
       if (widget.rePair && mounted) Navigator.of(context).pop(true);
     } on AuthApiException catch (e) {
       setState(() {
@@ -328,6 +379,32 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
         _loggingIn = false;
       });
     }
+  }
+
+  /// The message for a failed reach, naming what was dialled so the person
+  /// knows whether to look at the server, the relay, or the network between.
+  static String _routeError(PairingUri uri, PairingRouteException e) {
+    final relay = e.relayHost;
+    return switch (e.failure) {
+      PairingFailure.serverUnreachable when relay != null =>
+        "The relay $relay has your server, but the server didn't answer "
+            'through it. Try again in a moment.',
+      PairingFailure.serverUnreachable =>
+        "Couldn't reach the server at ${uri.address}.",
+      PairingFailure.relayUnreachable =>
+        "Couldn't reach the server at ${uri.address}, or its relay $relay.\n\n"
+            'Check this device has internet access, or pair on the same '
+            'network as the server.',
+      PairingFailure.serverNotOnRelay =>
+        'The relay $relay answered, but your server is not connected to it.\n\n'
+            'Check the server is running and online.',
+      PairingFailure.identityFailed =>
+        'Server failed the cryptographic challenge'
+            '${relay == null ? '' : ' through the relay $relay'}. '
+            'Connection may be intercepted.',
+      PairingFailure.identityMismatch =>
+        'Server identity mismatch. This QR may be for a different server.',
+    };
   }
 
   // ---- UI ----
@@ -368,104 +445,157 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   }
 
   Widget _buildUriInput(StormTokens t) {
+    final lan = ref.watch(lanDiscoverySupportedProvider);
+    final showForm = !lan || _manual;
     return Scaffold(
       body: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: t.sp * 52),
-          child: Padding(
-            padding: EdgeInsets.all(t.cardPad),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Center(child: BrandMark(size: 44, withWordmark: true)),
-                SizedBox(height: t.sp * 2),
-                Text(
-                  'Pair with your Storm server',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
-                    color: t.text3,
-                  ),
-                ),
-                SizedBox(height: t.sp * 1),
-                Text(
-                  // Not "scan": there is no scanner in this app, and offering
-                  // one that does not exist sends people hunting for a camera
-                  // button on their first run. `storm-server pair` prints the
-                  // URI as text — say the thing that is actually possible.
-                  'Run `storm-server pair` and paste the URI it prints.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
-                    color: t.text3,
-                  ),
-                ),
-                SizedBox(height: t.sp * 3.5),
-                StormInput(
-                  controller: _uriController,
-                  autofocus: true,
-                  labelText: 'Pairing URI',
-                  hintText: 'storm://pair?v=1&sid=...',
-                  autocorrect: false,
-                  keyboardType: TextInputType.url,
-                  onChanged: _onUriChanged,
-                ),
-                // Only where a camera exists. On desktop and web the paste
-                // field is the whole story, and a button that opens nothing is
-                // the same broken promise the old "Scan or paste" copy made.
-                if (canScanPairingQr) ...[
-                  SizedBox(height: t.sp * 1.5),
-                  OutlinedButton.icon(
-                    key: const Key('scan-pairing-qr'),
-                    onPressed: _scan,
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Scan a code instead'),
-                  ),
-                ],
-                if (widget.rePair) ...[
-                  SizedBox(height: t.sp),
-                  TextButton(
-                    key: const Key('re-pair-cancel'),
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('Cancel'),
-                  ),
-                ],
-                if (_error != null) ...[
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: t.sp * 52),
+            child: Padding(
+              padding: EdgeInsets.all(t.cardPad),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Center(child: BrandMark(size: 44, withWordmark: true)),
                   SizedBox(height: t.sp * 2),
-                  Container(
-                    padding: EdgeInsets.all(t.sp * 1.5),
-                    decoration: BoxDecoration(
-                      color: t.surface,
-                      borderRadius: BorderRadius.circular(t.rControl),
-                      border: Border.all(color: t.danger, width: t.bw),
+                  Text(
+                    'Connect to your Storm',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: t.text2,
                     ),
-                    child: Text(
-                      _error!,
+                  ),
+                  if (lan) ...[
+                    SizedBox(height: t.sp * 3),
+                    LanServersSection(
+                      onPair: _openLanSheet,
+                      onScanQr: canScanPairingQr ? _scan : null,
+                      onOpenPaired: _openPaired,
+                    ),
+                    SizedBox(height: t.sp * 2.5),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        if (canScanPairingQr)
+                          Flexible(
+                            child: StormButton.outline(
+                              key: const Key('scan-pairing-qr'),
+                              label: 'Scan QR code',
+                              onPressed: _scan,
+                            ),
+                          ),
+                        SizedBox(width: t.sp),
+                        Flexible(
+                          child: StormButton.text(
+                            key: const Key('enter-address-manually'),
+                            label: 'Enter address manually',
+                            onPressed: () => setState(() => _manual = !_manual),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  if (showForm) ...[
+                    SizedBox(height: t.sp * 1),
+                    Text(
+                      // Not "scan": there is no scanner in this app, and offering
+                      // one that does not exist sends people hunting for a camera
+                      // button on their first run. `storm-server pair` prints the
+                      // URI as text — say the thing that is actually possible.
+                      'Run `storm-server pair` and paste the URI it prints.',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         fontFamily: StormTokens.sansFamily,
                         fontSize: t.codeSize,
-                        color: t.danger,
+                        color: t.text3,
                       ),
                     ),
-                  ),
+                    SizedBox(height: t.sp * 3.5),
+                    StormInput(
+                      controller: _uriController,
+                      autofocus: true,
+                      labelText: 'Pairing URI',
+                      hintText: 'storm://pair?v=1&sid=...',
+                      autocorrect: false,
+                      keyboardType: TextInputType.url,
+                      onChanged: _onUriChanged,
+                    ),
+                    // Only where a camera exists. On desktop and web the paste
+                    // field is the whole story, and a button that opens nothing is
+                    // the same broken promise the old "Scan or paste" copy made.
+                    if (canScanPairingQr && !lan) ...[
+                      SizedBox(height: t.sp * 1.5),
+                      OutlinedButton.icon(
+                        key: const Key('scan-pairing-qr'),
+                        onPressed: _scan,
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text('Scan a code instead'),
+                      ),
+                    ],
+                  ],
+                  if (widget.rePair) ...[
+                    SizedBox(height: t.sp),
+                    TextButton(
+                      key: const Key('re-pair-cancel'),
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: const Text('Cancel'),
+                    ),
+                  ],
+                  if (_error != null) ...[
+                    SizedBox(height: t.sp * 2),
+                    Container(
+                      padding: EdgeInsets.all(t.sp * 1.5),
+                      decoration: BoxDecoration(
+                        color: t.surface,
+                        borderRadius: BorderRadius.circular(t.rControl),
+                        border: Border.all(color: t.danger, width: t.bw),
+                      ),
+                      child: Text(
+                        _error!,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.codeSize,
+                          color: t.danger,
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (showForm) ...[
+                    SizedBox(height: t.sp * 2.5),
+                    FilledButton(
+                      onPressed: (_parsedUri != null && !_verifying)
+                          ? _verifyAndPair
+                          : null,
+                      child: _verifying
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Verify & Pair'),
+                    ),
+                    if (_verifying &&
+                        pairingRelays(_parsedUri!).isNotEmpty) ...[
+                      SizedBox(height: t.sp * 1.5),
+                      Text(
+                        key: const Key('pairing-via-relay'),
+                        'Connecting to ${_parsedUri!.address}, or through '
+                        '${_relayHosts(_parsedUri!)} if it is not on this network.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.codeSize,
+                          color: t.text3,
+                        ),
+                      ),
+                    ],
+                  ],
                 ],
-                SizedBox(height: t.sp * 2.5),
-                FilledButton(
-                  onPressed: (_parsedUri != null && !_verifying)
-                      ? _verifyAndPair
-                      : null,
-                  child: _verifying
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Verify & Pair'),
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -497,7 +627,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
                 ),
                 SizedBox(height: t.sp * 1),
                 Text(
-                  'Paired with ${_parsedUri?.address ?? 'server'}.',
+                  _route?.viaRelay ?? false
+                      ? 'Paired with ${_parsedUri?.address ?? 'server'} '
+                            'through the relay ${_route!.relayHost}.'
+                      : 'Paired with ${_parsedUri?.address ?? 'server'}.',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
@@ -554,6 +687,10 @@ class _PairingScreenState extends ConsumerState<PairingScreen> {
   }
 
   // ---- helpers ----
+
+  static String _relayHosts(PairingUri uri) => pairingRelays(
+    uri,
+  ).map((r) => Uri.tryParse(r.url)?.host ?? r.url).join(', ');
 
   static String _platformName() {
     switch (defaultTargetPlatform) {

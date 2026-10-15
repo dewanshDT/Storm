@@ -1,0 +1,93 @@
+// storm-relay-cf: SRP v1 on Workers + Durable Objects (decision 108b).
+// No account_id and no routes on purpose: deploying is the operator's step,
+// with their account, and the custom domain is added in the dashboard
+// (DEPLOY.md step 3). Every STORM_RELAY_* var is documented in
+// README.md; secrets and local overrides go in .dev.vars.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "storm-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // Off here, not only in the dashboard: wrangler re-enables both on every
+  // deploy whose config leaves them out, giving the relay a second address.
+  "workers_dev": false,
+  "preview_urls": false,
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "RelayRoom" },
+      { "name": "HELLO_LIMITER", "class_name": "HelloLimiter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RelayRoom", "HelloLimiter"] }
+  ],
+  "vars": {
+    "STORM_RELAY_BINDING": "allowlist"
+  },
+  "dev": {
+    "ip": "127.0.0.1",
+    "port": 18910
+  },
+  // Separate Workers for verifying a deployment with the conformance suite
+  // (DEPLOY.md, "Verifying"): the fixture contract's knobs, and in
+  // `conformance` the fixture allowlist as a secret. Never the production
+  // Worker: the fixture keys' seeds are public.
+  "env": {
+    "conformance": {
+      "name": "storm-relay-conformance",
+      // Never inherit a production route: deleting this Worker would take the
+      // custom domain with it (DEPLOY.md step 3).
+      "routes": [],
+      "workers_dev": true,
+      "durable_objects": {
+        "bindings": [
+          { "name": "ROOMS", "class_name": "RelayRoom" },
+          { "name": "HELLO_LIMITER", "class_name": "HelloLimiter" }
+        ]
+      },
+      "vars": {
+        "STORM_RELAY_BINDING": "allowlist",
+        "STORM_RELAY_CHALLENGE_TTL_MS": "2000",
+        "STORM_RELAY_HELLO_WAIT_MS": "1000",
+        "STORM_RELAY_STREAM_ACK_TIMEOUT_MS": "1000",
+        "STORM_RELAY_HEARTBEAT_DEADLINE_MS": "2000",
+        "STORM_RELAY_SUPERSESSION_DRAIN_MS": "1500",
+        "STORM_RELAY_HELLO_RATE_LIMIT": "30",
+        "STORM_RELAY_HELLO_RATE_WINDOW_MS": "1000",
+        "STORM_RELAY_REGISTER_RATE_LIMIT": "600",
+        "STORM_RELAY_REGISTER_RATE_WINDOW_MS": "1000",
+        "STORM_RELAY_MAX_IN_FLIGHT_STREAMS": "4",
+        "STORM_RELAY_MAX_TOTAL_STREAMS": "8",
+        "STORM_RELAY_MAX_CLIENT_BUFFER_BYTES": "1048576"
+      }
+    },
+    "conformance-tofu": {
+      "name": "storm-relay-conformance-tofu",
+      // Never inherit a production route: deleting this Worker would take the
+      // custom domain with it (DEPLOY.md step 3).
+      "routes": [],
+      "workers_dev": true,
+      "durable_objects": {
+        "bindings": [
+          { "name": "ROOMS", "class_name": "RelayRoom" },
+          { "name": "HELLO_LIMITER", "class_name": "HelloLimiter" }
+        ]
+      },
+      "vars": {
+        "STORM_RELAY_BINDING": "tofu",
+        "STORM_RELAY_CHALLENGE_TTL_MS": "2000",
+        "STORM_RELAY_HELLO_WAIT_MS": "1000",
+        "STORM_RELAY_STREAM_ACK_TIMEOUT_MS": "1000",
+        "STORM_RELAY_HEARTBEAT_DEADLINE_MS": "2000",
+        "STORM_RELAY_SUPERSESSION_DRAIN_MS": "1500",
+        "STORM_RELAY_HELLO_RATE_LIMIT": "30",
+        "STORM_RELAY_HELLO_RATE_WINDOW_MS": "1000",
+        "STORM_RELAY_REGISTER_RATE_LIMIT": "600",
+        "STORM_RELAY_REGISTER_RATE_WINDOW_MS": "1000",
+        "STORM_RELAY_MAX_IN_FLIGHT_STREAMS": "4",
+        "STORM_RELAY_MAX_TOTAL_STREAMS": "8",
+        "STORM_RELAY_MAX_CLIENT_BUFFER_BYTES": "1048576"
+      }
+    }
+  }
+}

@@ -26,6 +26,10 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:storm/api/ed25519_verify.dart';
+import 'package:storm/api/lan_discovery.dart' show keyFingerprint;
+import 'package:storm/api/relay/srp_codec.dart';
+import 'package:storm/api/net.dart' show plaintextRelayAllowed;
+import 'package:storm/api/relay/srp_trunk.dart';
 import 'package:storm/api/server_verifier.dart';
 
 /// The vectors live at the repo root, not in the client — three implementations
@@ -137,6 +141,25 @@ void main() {
     }
   });
 
+  test('every HELLO.pubkey spelling decodes as recorded, and the connect URL '
+      'carries the key', () {
+    final hello = doc['hello_pubkey'] as Map<String, dynamic>;
+    for (final c in section(hello, 'cases').cast<Map<String, dynamic>>()) {
+      final decoded = decodeBase64UrlNoPad(c['pubkey'] as String);
+      expect(
+        decoded != null && decoded.length == 32,
+        c['accepted'],
+        reason: 'hello_pubkey vector `${c['name']}`',
+      );
+    }
+    final url = hello['connect_url'] as Map<String, dynamic>;
+    final base = Uri.parse('${url['relay_base']}/connect/${url['server_id']}');
+    expect(
+      keyedConnectUrl(base, url['pubkey_b64'] as String).toString(),
+      url['url'],
+    );
+  });
+
   test('the generated nonce satisfies the rule the server enforces', () {
     // `randomNonce` is the client's half of a constraint checked on the server
     // and on the relay. The vectors carry that rule, so assert against them
@@ -162,6 +185,119 @@ void main() {
         expect(rune, isNot(0x22), reason: 'the nonce travels inside JSON');
       }
       expect(invalid.map((c) => c['nonce']), isNot(contains(nonce)));
+    }
+  });
+
+  test('key fingerprints match the vectors (decision 118)', () {
+    final fp = doc['key_fingerprint'] as Map<String, dynamic>?;
+    if (fp == null) fail('section `key_fingerprint` missing');
+    final cases = (fp['cases'] as List).cast<Map<String, dynamic>>();
+    expect(cases, isNotEmpty);
+    for (final c in cases) {
+      expect(
+        keyFingerprint(c['public_key_b64'] as String),
+        c['fingerprint'],
+        reason: c['name'] as String,
+      );
+    }
+  });
+
+  group('framing (§3, §5, §6; decision 116l)', () {
+    final framing = doc['framing'] as Map<String, dynamic>;
+    List<int> hex(String s) => [
+      for (var i = 0; i < s.length; i += 2)
+        int.parse(s.substring(i, i + 2), radix: 16),
+    ];
+    List<int> payload(Map<String, dynamic> c) => c['payload_utf8'] != null
+        ? utf8.encode(c['payload_utf8'] as String)
+        : hex(c['payload_hex'] as String);
+    Map<String, dynamic> control(String name) =>
+        (framing['control_messages'] as List)
+            .cast<Map<String, dynamic>>()
+            .firstWhere((c) => c['name'] == name);
+
+    test('body frames encode and decode as recorded', () {
+      for (final c
+          in (framing['body_frames'] as List).cast<Map<String, dynamic>>()) {
+        final bytes = hex(c['frame_hex'] as String);
+        if (c['sender_may_send'] != false) {
+          expect(
+            encodeBodyFrame(
+              c['type'] as int,
+              c['stream_id'] as int,
+              payload(c),
+            ),
+            bytes,
+            reason: c['name'] as String,
+          );
+        }
+        final f = decodeBodyFrame(bytes)!;
+        expect([f.kind, f.streamId], [c['type'], c['stream_id']]);
+        expect(f.payload, payload(c), reason: c['name'] as String);
+      }
+      for (final c
+          in (framing['too_short_frames'] as List)
+              .cast<Map<String, dynamic>>()) {
+        expect(decodeBodyFrame(hex(c['frame_hex'] as String)), isNull);
+      }
+    });
+
+    test('the control frames this client sends match the vectors', () {
+      // The Worker answers exactly this PING without waking (SG-38).
+      expect(
+        SrpControl.encode('PING'),
+        control('canonical_ping')['exact_text'],
+      );
+      expect(
+        SrpControl.encode('PONG'),
+        control('canonical_pong')['exact_text'],
+      );
+      final hello =
+          control('hello_with_pubkey')['json'] as Map<String, dynamic>;
+      expect(
+        jsonDecode(
+          SrpControl.encode('HELLO', {
+            'server_id': hello['server_id'],
+            'pubkey': hello['pubkey'],
+          }),
+        ),
+        hello,
+      );
+      expect(
+        jsonDecode(SrpControl.encode('CLOSE', {'stream_id': 7})),
+        control('close_stream')['json'],
+      );
+    });
+  });
+
+  test('every relay set message and signature matches (§4.3, 116j)', () async {
+    final section = doc['relay_set_message'] as Map<String, dynamic>;
+    for (final c in (section['cases'] as List).cast<Map<String, dynamic>>()) {
+      final urls = (c['relays'] as List).cast<String>();
+      final message = relaySetMessage(c['server_id'] as String, urls);
+      if (c['message_utf8'] != null) {
+        expect(message, c['message_utf8'], reason: c['name'] as String);
+      }
+      if (c['signature_b64'] != null) {
+        final ok = await verifyRelaySet(
+          publicKeyB64: c['public_key_b64'] as String,
+          signatureB64: c['signature_b64'] as String,
+          serverId: c['server_id'] as String,
+          urls: urls,
+        );
+        expect(ok, c['verifies'] == true, reason: c['name'] as String);
+      }
+    }
+  });
+
+  test('every plaintext relay host gets the verdict the file records', () {
+    final section = doc['plaintext_relay_hosts'] as Map<String, dynamic>;
+    for (final c in (section['cases'] as List).cast<Map<String, dynamic>>()) {
+      expect(
+        plaintextRelayAllowed(c['host'] as String),
+        c['ws_allowed'],
+        reason: c['host'] as String,
+      );
     }
   });
 }

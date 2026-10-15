@@ -21,6 +21,7 @@ DotStatus engineStatus(SyncEngine engine) => dotStatusFor(
   syncing: engine.isSyncing,
   pending: engine.pendingCount,
   tier: engine.connectionTier,
+  connection: engine.connectionStatus,
 );
 
 /// "Synced 2m ago", or what is wrong instead.

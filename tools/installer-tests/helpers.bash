@@ -56,6 +56,7 @@ setup_world() {
   # storm-runtime or storm, the installer would rightly skip sudo.
   export FAKE_USER=tester FAKE_REAL_USER FAKE_REAL_ID FAKE_REAL_STAT
   unset STORM_TTY_OUT STORM_LINE_MODE FAKE_HEALTH_DOWN FAKE_PAIR_CREATES_ACCOUNT FAKE_LATEST FAKE_ASSETS
+  unset FAKE_FIREWALLD FAKE_FIREWALLD_ZONES FAKE_SUDO_DENIED FAKE_IP4_LINK FAKE_IP6
   os_release ubuntu
   mkdir -p "$STORM_TEST_SYSROOT/Applications"
   # shellcheck disable=SC1090
@@ -72,6 +73,20 @@ os_release() {
     mint) printf 'ID=linuxmint\nID_LIKE="ubuntu debian"\nPRETTY_NAME="Linux Mint 22"\n' ;;
     fedora) printf 'ID=fedora\nPRETTY_NAME="Fedora Linux 40"\n' ;;
   esac >"$STORM_TEST_OS_RELEASE"
+}
+
+# An active ufw: its config under the sysroot, the fake on PATH.
+use_ufw() {
+  mkdir -p "$STORM_TEST_SYSROOT/etc/ufw"
+  printf 'ENABLED=yes\nLOGLEVEL=low\n' >"$STORM_TEST_SYSROOT/etc/ufw/ufw.conf"
+  ln -sf "$FAKE_DIR/fake.sh" "$FAKE_DIR/bin/ufw"
+}
+
+# A running firewalld, with ZONES as `--get-active-zones` prints them.
+use_firewalld() {
+  ln -sf "$FAKE_DIR/fake.sh" "$FAKE_DIR/bin/firewall-cmd"
+  export FAKE_FIREWALLD=1
+  [ $# -eq 0 ] || export FAKE_FIREWALLD_ZONES="$1"
 }
 
 use_macos() {
@@ -105,11 +120,12 @@ make_assets() {
     echo "readme" >"$stage/$d/README-macos.txt"
   done
   local names="$*"
-  [ -n "$names" ] || names="server-tar runtime-tar app-zip apk server-deb runtime-deb"
+  [ -n "$names" ] || names="server-tar runtime-tar runtime-linux app-zip apk server-deb runtime-deb"
   for n in $names; do
     case "$n" in
       server-tar) tar -C "$stage/server" -czf "$ASSETS/storm-server-$v-macos-universal.tar.gz" . ;;
       runtime-tar) tar -C "$stage/runtime" -czf "$ASSETS/storm-runtime-$v-macos-universal.tar.gz" . ;;
+      runtime-linux) cp "$FAKE_DIR/tools/storm-runtime" "$ASSETS/storm-runtime-$v-x86_64-linux" ;;
       app-zip) echo "zip" >"$ASSETS/Storm-$v-macos-arm64.zip" ;;
       apk) echo "apk" >"$ASSETS/storm-$v.apk" ;;
       server-deb) echo "deb" >"$ASSETS/storm-server_$v-1_amd64.deb" ;;

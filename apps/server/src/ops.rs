@@ -888,6 +888,9 @@ pub struct ServerInfo {
     /// is the honest answer, not a placeholder: an empty list means "no relay
     /// path to me", which is true.
     pub relays: Vec<RelayAdvert>,
+    /// The server's signature over `relays`' URLs (SRP §4.3, decision 116j),
+    /// so a set that arrived through a relay cannot have been rewritten by it.
+    pub relays_sig: String,
 }
 
 /// One reachable relay path, as a client should read it.
@@ -923,6 +926,7 @@ pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
         let vaults = state.vaults.read().await;
         vaults.registry.registered_relays.snapshot()
     };
+    let relays_sig = identity.sign_relay_set(&registered);
     let relays = registered
         .into_iter()
         .map(|url| RelayAdvert {
@@ -938,6 +942,7 @@ pub async fn server_info(state: &Shared) -> ApiResult<ServerInfo> {
         algorithm: crate::auth::identity::ALGORITHM.to_string(),
         public_key: identity.public_key_b64(),
         relays,
+        relays_sig,
     })
 }
 
@@ -972,6 +977,9 @@ pub struct PairingQrPayload {
     pub n: String,
     pub exp: String,
     pub addr: String,
+    /// Relay URLs the server is registered with right now — the same set
+    /// `GET /v1/server` reports, frozen into the QR (SRP v1 §4.3).
+    pub relays: Vec<String>,
 }
 
 /// Creates a new pairing session and returns the QR payload.
@@ -991,13 +999,22 @@ pub async fn issue_pairing_qr(
     let (nonce, session) =
         crate::auth::pairing::create(&mut auth_db, purpose, user_id, peer_ip, &now)
             .map_err(|e| ApiError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(auth_db);
 
+    let relays = state
+        .vaults
+        .read()
+        .await
+        .registry
+        .registered_relays
+        .snapshot();
     let qr = crate::auth::pairing::encode_qr(
         &state.identity.server_id,
         &state.identity.public_key_b64(),
         &nonce,
         &session.expires,
         &state.listen_addr,
+        relays,
     );
 
     Ok(PairingQrPayload {
@@ -1006,7 +1023,202 @@ pub async fn issue_pairing_qr(
         n: qr.n,
         exp: qr.exp,
         addr: qr.addr,
+        relays: qr.relays,
     })
+}
+
+// ---- LAN discovery pairing (decision 118) -------------------------------
+
+pub const EVENT_DEVICE_PAIRED_PASSWORD: &str = "device_paired_password";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasswordPairing {
+    pub password: String,
+    pub device_name: String,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Where a request came from, as far as this server can know.
+#[derive(Debug, Clone, Copy)]
+pub struct Origin {
+    /// The socket's peer, or the relay's `relay_peer_ip`.
+    pub peer: Option<std::net::IpAddr>,
+    /// Dispatched from a relay trunk rather than accepted on the listener.
+    pub relayed: bool,
+}
+
+#[derive(Debug)]
+pub enum PasswordPairError {
+    /// Relayed, not from a LAN-scoped peer, or discovery is off.
+    LanOnly,
+    /// No account yet: a fresh server is claimed only with its setup QR.
+    SetupRequired,
+    BadRequest(String),
+    Refused(crate::auth::sessions::LoginFailure),
+    Internal(anyhow::Error),
+}
+
+/// `POST /v1/pairings/password`: a device found on the LAN pairs with the
+/// account password.
+///
+/// **Never over a relay and never from the internet.** Otherwise anyone who
+/// can reach a relay could mint devices by guessing the password. The relay
+/// marker is set by the trunk's dispatch, which a client cannot forge, and
+/// `relay_peer_ip` would otherwise look like a socket peer.
+pub async fn pair_with_password(
+    state: &Shared,
+    req: PasswordPairing,
+    origin: Origin,
+) -> Result<crate::auth::pairing::ConsumeResult, PasswordPairError> {
+    use crate::auth::ratelimit::CallerKey;
+    use crate::auth::sessions::{LoginError, LoginFailure};
+
+    let lan_peer = origin
+        .peer
+        .filter(|ip| crate::discovery::is_lan_scoped(*ip));
+    let Some(peer) = lan_peer.filter(|_| !origin.relayed && state.discovery.is_on()) else {
+        return Err(PasswordPairError::LanOnly);
+    };
+    // Decision 119, Layer 2: not from a network the OS calls untrusted.
+    if let Some(v) = state.discovery.trust.peer_untrusted(peer) {
+        tracing::info!(
+            peer = %peer,
+            interface = %v.iface.name,
+            why = %v.reason,
+            "password pairing refused: untrusted network"
+        );
+        return Err(PasswordPairError::LanOnly);
+    }
+    let device_name = req.device_name.trim().to_string();
+    if device_name.is_empty() {
+        return Err(PasswordPairError::BadRequest(
+            "a device needs a name — it is how you recognise what to revoke".into(),
+        ));
+    }
+
+    let now = crate::index::now_rfc3339();
+    let internal = PasswordPairError::Internal;
+    if !state.auth_db.lock().await.has_account().map_err(internal)? {
+        return Err(PasswordPairError::SetupRequired);
+    }
+
+    let caller = CallerKey::Ip(peer);
+    if let Err(retry_after_secs) = state.login_limiter.check(&caller) {
+        let auth_db = state.auth_db.lock().await;
+        if let Err(e) = auth_db.record_event_from(
+            crate::auth::sessions::EVENT_LOGIN_THROTTLED,
+            None,
+            None,
+            Some(&peer.to_string()),
+            &now,
+            &format!(r#"{{"retry_after_secs":{retry_after_secs}}}"#),
+        ) {
+            tracing::warn!(error = %e, "could not record login_throttled event");
+        }
+        return Err(PasswordPairError::Refused(LoginFailure::RateLimited {
+            retry_after_secs,
+        }));
+    }
+    if req.password.len() > crate::auth::password::MAX_PASSWORD_BYTES {
+        return Err(PasswordPairError::Refused(LoginFailure::InvalidCredentials));
+    }
+
+    let mut auth_db = state.auth_db.lock().await;
+    let account = match crate::auth::sessions::check_password(
+        &mut auth_db,
+        &state.hasher,
+        req.password,
+        None,
+        &now,
+    )
+    .await
+    {
+        Ok(account) => account,
+        Err(LoginError::Refused(failure)) => return Err(PasswordPairError::Refused(failure)),
+        Err(LoginError::Internal(e)) => return Err(internal(e)),
+    };
+
+    let secret = crate::auth::token::mint(crate::auth::token::DEVICE_SECRET_PREFIX);
+    let device = crate::auth::devices::create_lan_paired(
+        &mut auth_db,
+        &device_name,
+        req.platform.as_deref(),
+        req.version.as_deref(),
+        &secret,
+        &now,
+    )
+    .map_err(|e| PasswordPairError::BadRequest(e.to_string()))?;
+    auth_db
+        .record_event_from(
+            EVENT_DEVICE_PAIRED_PASSWORD,
+            Some(&account.id),
+            Some(&device.id),
+            Some(&peer.to_string()),
+            &now,
+            &serde_json::json!({ "platform": device.platform }).to_string(),
+        )
+        .map_err(internal)?;
+    drop(auth_db);
+    state.login_limiter.refund(&caller);
+
+    Ok(crate::auth::pairing::ConsumeResult {
+        device_id: device.id,
+        device_secret: secret,
+        server_id: state.identity.server_id.clone(),
+        public_key: state.identity.public_key_b64(),
+        key_id: state.identity.key_id.clone(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveryView {
+    /// The persisted setting.
+    pub discoverable: bool,
+    /// `--no-discovery` / `STORM_DISCOVERY=0`: off whatever the setting says.
+    pub forced_off: bool,
+    /// Advertising and accepting password pairing right now.
+    pub active: bool,
+    /// Interfaces on a network the OS calls untrusted (decision 119): not
+    /// advertised there, and password pairing from them is refused.
+    pub untrusted: Vec<String>,
+}
+
+pub fn discovery_view(state: &Shared) -> DiscoveryView {
+    DiscoveryView {
+        discoverable: state.discovery.setting(),
+        forced_off: state.discovery.forced_off(),
+        active: state.discovery.is_on(),
+        untrusted: state
+            .discovery
+            .trust
+            .snapshot()
+            .map(|s| {
+                let mut names: Vec<String> = s
+                    .untrusted()
+                    .filter(|v| crate::discovery::is_lan_scoped(v.iface.ip))
+                    .map(|v| v.iface.name.clone())
+                    .collect();
+                names.dedup();
+                names
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Settings › Server › "Discoverable on this network". Saved before it takes
+/// effect, so what the app shows is what a restart keeps.
+pub async fn set_discoverable(state: &Shared, on: bool) -> ApiResult<DiscoveryView> {
+    {
+        let mut vaults = state.vaults.write().await;
+        vaults.registry.set_discoverable(on);
+        vaults.registry.save(&state.state_dir)?;
+    }
+    state.discovery.set_enabled(on);
+    tracing::info!(on, "LAN discovery setting changed");
+    Ok(discovery_view(state))
 }
 
 // ---- MCP keys (A14) ----------------------------------------------------
@@ -3312,6 +3524,7 @@ mod tests {
             hasher: crate::auth::Hasher::new(),
             login_limiter: crate::auth::ratelimit::LoginLimiter::new(),
             host_limiter: crate::auth::ratelimit::LoginLimiter::new(),
+            discovery: crate::discovery::Discovery::new(false, true),
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
         })
@@ -3346,15 +3559,53 @@ mod tests {
                 "name".to_string(),
                 "public_key".to_string(),
                 "relays".to_string(),
+                "relays_sig".to_string(),
                 "server_id".to_string(),
             ],
-            "the addition is additive — nothing was added but `relays`, nothing removed"
+            "additions are additive — `relays` and `relays_sig` only, nothing removed"
         );
         assert_eq!(json["server_id"], state.identity.server_id.as_str());
         assert_eq!(json["name"], state.identity.name.as_str());
         assert_eq!(json["key_id"], state.identity.key_id.as_str());
         assert_eq!(json["algorithm"], crate::auth::identity::ALGORITHM);
         assert_eq!(json["public_key"], state.identity.public_key_b64().as_str());
+    }
+
+    #[tokio::test]
+    async fn the_relay_set_is_signed_over_its_sorted_urls() {
+        // §4.3 (116j): the set reaches a client through whatever path won, a
+        // relay included, so only the server's key can vouch for it.
+        use ed25519_dalek::Verifier;
+        let dir = tempdir::TempDir::new("storm-ops-relays-sig").unwrap();
+        let state = server_state(dir.path());
+        {
+            let vaults = state.vaults.read().await;
+            for url in ["wss://b.example", "wss://a.example"] {
+                vaults
+                    .registry
+                    .registered_relays
+                    .mark_registered(url)
+                    .unwrap();
+            }
+        }
+        let info = must(server_info(&state).await);
+        let sig = data_encoding::BASE64URL_NOPAD
+            .decode(info.relays_sig.as_bytes())
+            .unwrap();
+        let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
+        let message = b"storm-relays:v1:"
+            .iter()
+            .chain(state.identity.server_id.as_bytes())
+            .chain(b":wss://a.example\nwss://b.example")
+            .copied()
+            .collect::<Vec<u8>>();
+        assert!(
+            state
+                .identity
+                .verifying_key()
+                .verify(&message, &sig)
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -3416,5 +3667,47 @@ mod tests {
             assert_eq!(vaults.registry.relays.len(), 2, "still configured");
         }
         assert!(must(server_info(&state).await).relays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pairing_qr_carries_registered_relays_never_configured_ones() {
+        let dir = tempdir::TempDir::new("storm-ops-pair-relays").unwrap();
+        let state = server_state(dir.path());
+        {
+            let mut vaults = state.vaults.write().await;
+            vaults
+                .registry
+                .set_relays(&[
+                    "wss://relay.example.com".to_string(),
+                    "wss://relay.two.example".to_string(),
+                ])
+                .unwrap();
+        }
+
+        let qr = must(issue_pairing_qr(&state, "add_device", None, None).await);
+        assert!(
+            qr.relays.is_empty(),
+            "a configured relay that never registered is a dead path"
+        );
+
+        state
+            .vaults
+            .read()
+            .await
+            .registry
+            .registered_relays
+            .mark_registered("wss://relay.two.example")
+            .unwrap();
+        let qr = must(issue_pairing_qr(&state, "add_device", None, None).await);
+        assert_eq!(qr.relays, vec!["wss://relay.two.example".to_string()]);
+        assert_eq!(
+            qr.relays,
+            must(server_info(&state).await)
+                .relays
+                .into_iter()
+                .map(|r| r.url)
+                .collect::<Vec<_>>(),
+            "the QR and GET /v1/server advertise the same set"
+        );
     }
 }

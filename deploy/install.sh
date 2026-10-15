@@ -41,9 +41,11 @@ STORM_LATEST_API="https://api.github.com/repos/dewanshDT/Storm/releases/latest"
 STORM_INSTALL_URL="https://dewanshdt.github.io/Storm/install.sh"
 STORM_DEFAULT_PORT=8484
 # The registry. Its order is the checklist's and the plan's.
-STORM_COMPONENTS="server runtime agents app mobile relay"
+STORM_COMPONENTS="server runtime mcp agents app mobile relay"
 # The first release with a macOS server tarball.
 STORM_MACOS_SERVER_SINCE="0.6.0"
+# The first release whose storm-runtime has `mcp-connect`; empty until one does.
+STORM_MCP_CONNECT_SINCE=""
 # A step returns this when the person chose to skip it.
 STEP_SKIPPED=10
 # Seconds between polls (health, account). Tests set it to 0.
@@ -53,6 +55,7 @@ HEALTH_TRIES=15
 # Defaults until parse_args and ui_init set them properly.
 OPT_YES=0 OPT_DRY_RUN=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
 WORK_DIR="" LOG_FILE=/dev/null STTY_SAVED="" SPIN_PID=""
+FW_KIND=none FW_TARGETS="" FW_CONSENT="" FW_PUBLIC_ONLY=0 FW_RECORD="" FW_UFW_CONF=""
 
 # ------------------------------------------------------------ arguments
 
@@ -72,6 +75,8 @@ Components:
   --everything         server, runtime, agent CLIs, desktop app, phone pairing
   --server             the Storm server (notes, sync, the web client)
   --runtime            the Runtime Host (runs coding agents for a Storm server)
+  --mcp                MCP only: storm-runtime on PATH so AI apps here can reach
+                       your Storm (mcp-connect); no host, no service
   --agents             Claude Code / OpenCode for the Runtime Host
   --app                the desktop app (macOS; on Linux, the web client's address)
   --mobile             phone or tablet: pairing QR, Android APK QR, web address
@@ -87,6 +92,8 @@ Options:
   --workspace NAME|URL the runtime's first workspace: a folder to make, or a
                        git repository to clone (only if it has none)
   --password-stdin     set the new server account's password from stdin
+  --no-firewall        don't add the LAN-only firewall rule for the server
+                       (ufw or firewalld); the default is to add it
   --from-dir DIR       take release files from DIR (with its checksums.txt)
                        instead of downloading them
   -h, --help           this help
@@ -100,6 +107,7 @@ Examples:
   sh install.sh --yes --server --app --data ~/Storm --port 8484
   sh install.sh --yes --runtime --enroll-from-stdin < enrollment.txt
   sh install.sh --yes --runtime --workspace https://github.com/me/app.git
+  sh install.sh --yes --mcp
   sh install.sh --dry-run --everything
   sh install.sh status
 EOF
@@ -113,7 +121,7 @@ arg_error() {
 args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
-  OPT_WORKSPACE=""
+  OPT_WORKSPACE="" OPT_NO_FIREWALL=0
   OPT_HELP=0 SUBCOMMAND=install
 }
 
@@ -220,7 +228,7 @@ parse_args() {
       --version=* | --data=* | --port=* | --addr=* | --from-dir=* | --workspace=*)
         set_opt "${1%%=*}" "${1#*=}" || return 2
         ;;
-      --server | --runtime | --app | --mobile | --agents) add_component "${1#--}" ;;
+      --server | --runtime | --mcp | --app | --mobile | --agents) add_component "${1#--}" ;;
       --everything)
         for c in $(preset_components everything); do add_component "$c"; done
         ;;
@@ -230,6 +238,7 @@ parse_args() {
         ;;
       --enroll-from-stdin) OPT_ENROLL_STDIN=1 ;;
       --password-stdin) OPT_PASSWORD_STDIN=1 ;;
+      --no-firewall) OPT_NO_FIREWALL=1 ;;
       -h | --help) OPT_HELP=1 ;;
       status | upgrade | uninstall | install) SUBCOMMAND=$1 ;;
       *)
@@ -378,9 +387,13 @@ set_paths() {
       KEYRING_DIR="$root/usr/share/keyrings"
       KEYRING_PATH="$KEYRING_DIR/storm.gpg"
       LIST_PATH="$root/etc/apt/sources.list.d/storm.list"
+      FW_UFW_CONF="$root/etc/ufw/ufw.conf"
+      FW_RECORD="$root/etc/storm/lan-firewall"
       LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/storm/install.log"
       ;;
   esac
+  # MCP only: a plain copy where a GUI app's PATH and a shell's both look.
+  MCP_BIN="$root/usr/local/bin/storm-runtime"
   LOG_PATH=$LOG_FILE
 }
 
@@ -1020,6 +1033,7 @@ asset_name() {
   case "$1" in
     server-macos) printf 'storm-server-%s-macos-universal.tar.gz' "$2" ;;
     runtime-macos) printf 'storm-runtime-%s-macos-universal.tar.gz' "$2" ;;
+    runtime-linux) printf 'storm-runtime-%s-x86_64-linux' "$2" ;;
     app-macos) printf 'Storm-%s-macos-arm64.zip' "$2" ;;
     apk) printf 'storm-%s.apk' "$2" ;;
     *) return 1 ;;
@@ -1218,6 +1232,7 @@ comp_label() {
   case "$1" in
     server) printf 'Storm server' ;;
     runtime) printf 'Runtime Host' ;;
+    mcp) printf 'MCP connector' ;;
     agents) printf 'Agent CLIs' ;;
     app) printf 'Desktop app' ;;
     mobile) printf 'Phone / tablet' ;;
@@ -1229,6 +1244,7 @@ comp_blurb() {
   case "$1" in
     server) printf 'your notes, sync and the web client' ;;
     runtime) printf 'runs coding agents for a Storm server' ;;
+    mcp) printf 'storm-runtime on PATH for AI apps (mcp-connect); no host, no service' ;;
     agents) printf 'Claude Code and OpenCode for the runtime' ;;
     app)
       if [ "$OS" = macos ]; then printf 'Storm.app in /Applications'; else printf 'the web client (no Linux desktop app yet)'; fi
@@ -1253,6 +1269,7 @@ comp_installed() {
   case "$1" in
     server) [ "$SRV_INSTALLED" = 1 ] ;;
     runtime) [ "$RT_INSTALLED" = 1 ] ;;
+    mcp) [ "$MCP_INSTALLED" = 1 ] ;;
     app) [ "$APP_INSTALLED" = 1 ] ;;
     *) return 1 ;;
   esac
@@ -1262,6 +1279,7 @@ comp_version() {
   case "$1" in
     server) printf '%s' "$SRV_VERSION" ;;
     runtime) printf '%s' "$RT_VERSION" ;;
+    mcp) printf '%s' "$MCP_VERSION" ;;
     app) printf '%s' "$APP_VERSION" ;;
   esac
 }
@@ -1489,8 +1507,10 @@ server_plan() {
   if [ "$mode" = uninstall ]; then
     case "$OS" in
       linux)
+        local fw_rm
+        fw_rm=$(fw_remove_display)
         plan_add spin 1 "Stop the server and remove the storm-server package (data in $DATA_ROOT stays)" \
-          "sudo storm-server down\nsudo apt-get remove -y storm-server" server_uninstall
+          "${fw_rm:+$fw_rm\n}sudo storm-server down\nsudo apt-get remove -y storm-server" server_uninstall
         ;;
       macos)
         plan_add spin 0 "Remove the server's LaunchAgent and binary (data in $DATA_ROOT stays)" \
@@ -1510,6 +1530,7 @@ server_plan() {
         else
           plan_add spin 1 "Restart the server on the new files" "sudo systemctl restart storm-server" server_install restart
         fi
+        fw_plan
         ;;
       macos)
         plan_fetch server
@@ -1632,11 +1653,228 @@ server_pair_and_wait() {
 server_uninstall() {
   case "$OS" in
     linux)
+      fw_uninstall
       as_root storm-server down || :
       as_root env DEBIAN_FRONTEND=noninteractive apt-get remove -y storm-server
       ;;
     macos) "$SRV_INSTALLED_BIN" uninstall ;;
   esac
+}
+
+# ------------------------------------------------------------ the host firewall
+#
+# Decision 119, Layer 1. Storm never needs an inbound port (remote access is
+# the relay's job), so opening one is a LAN-only speed and privacy option:
+# asked first, only for Storm's port, only from this machine's own local
+# subnets (ufw) or home/trusted zones (firewalld), never public. What it adds
+# is recorded in FW_RECORD, and uninstall removes exactly that.
+
+FW_PROMPT="Allow devices on your local network to reach Storm directly? (Faster and more private than going through a relay. Storm stays unreachable from the internet.)"
+FW_APP=storm-server
+
+fw_ufw_active() {
+  command -v ufw >/dev/null 2>&1 || return 1
+  [ -r "$FW_UFW_CONF" ] || return 1
+  grep -qi '^[[:space:]]*ENABLED=yes[[:space:]]*$' "$FW_UFW_CONF"
+}
+
+# The local RFC 1918 and IPv6 unique-local subnets, from the routing table.
+fw_subnets() {
+  local net out=""
+  for net in $({
+    ip -4 route show scope link 2>/dev/null
+    ip -6 route show 2>/dev/null
+  } | awk '!/ linkdown/ {print $1}'); do
+    case "$net" in
+      10.*/* | 192.168.*/* | 172.1[6-9].*/* | 172.2[0-9].*/* | 172.3[01].*/*) ;;
+      [fF][cCdD]*:*/*) ;;
+      *) continue ;;
+    esac
+    case " $out " in *" $net "*) continue ;; esac
+    out="${out:+$out }$net"
+  done
+  printf '%s' "$out"
+}
+
+# firewalld's active zones that are not public, external, drop or block (and
+# not trusted, which already allows everything); home when there are none.
+fw_zones() {
+  local z out=""
+  for z in $(probe firewall-cmd --get-active-zones | sed -n 's/^\([^[:space:]][^[:space:]]*\).*/\1/p'); do
+    case "$z" in
+      public | external | drop | block | trusted) continue ;;
+    esac
+    out="${out:+$out }$z"
+  done
+  printf '%s' "${out:-home}"
+}
+
+# FW_KIND: ufw, firewalld or none; FW_TARGETS: the subnets or zones.
+fw_detect() {
+  FW_KIND=none FW_TARGETS="" FW_PUBLIC_ONLY=0
+  [ "$OS" = linux ] || return 0
+  if fw_ufw_active; then
+    FW_KIND=ufw
+    FW_TARGETS=$(fw_subnets)
+  elif command -v firewall-cmd >/dev/null 2>&1 && [ "$(probe firewall-cmd --state)" = running ]; then
+    FW_KIND=firewalld
+    FW_TARGETS=$(fw_zones)
+    [ "$FW_TARGETS" = home ] && FW_PUBLIC_ONLY=1
+  fi
+  return 0
+}
+
+# The exact commands, for the plan, a "no" and a missing sudo.
+fw_allow_display() {
+  local t out=""
+  case "$FW_KIND" in
+    ufw)
+      for t in $FW_TARGETS; do
+        out="${out:+$out\n}sudo ufw allow from $t to any app $FW_APP"
+      done
+      ;;
+    firewalld)
+      out="sudo firewall-cmd --reload"
+      for t in $FW_TARGETS; do
+        out="$out\nsudo firewall-cmd --permanent --zone=$t --add-service=$FW_APP"
+      done
+      out="$out\nsudo firewall-cmd --reload"
+      ;;
+  esac
+  printf '%s' "$out"
+}
+
+fw_remove_display() {
+  local kind target out="" reload=0
+  [ -r "$FW_RECORD" ] || return 0
+  while read -r kind target; do
+    case "$kind" in
+      ufw) out="${out:+$out\n}sudo ufw delete allow from $target to any app $FW_APP" ;;
+      firewalld)
+        out="${out:+$out\n}sudo firewall-cmd --permanent --zone=$target --remove-service=$FW_APP"
+        reload=1
+        ;;
+    esac
+  done <"$FW_RECORD"
+  [ "$reload" = 1 ] && out="$out\nsudo firewall-cmd --reload"
+  printf '%s' "$out"
+}
+
+fw_describe() {
+  case "$FW_KIND" in
+    ufw) printf 'ufw, from %s only' "$(printf '%s' "$FW_TARGETS" | sed 's/ /, /g')" ;;
+    firewalld) printf "firewalld's %s zone, never public" "$(printf '%s' "$FW_TARGETS" | sed 's/ /, /g')" ;;
+  esac
+}
+
+fw_record() {
+  as_root mkdir -p "$(dirname "$FW_RECORD")" &&
+    printf '%s %s\n' "$1" "$2" | as_root tee -a "$FW_RECORD" >/dev/null
+}
+
+fw_ufw_has() {
+  as_root ufw status 2>/dev/null |
+    awk -v n="$1" -v a="$FW_APP" '$1==a && $2=="ALLOW" && $NF==n { f=1 } END { exit !f }'
+}
+
+# Never fails the install: without administrator rights, or if the firewall
+# refuses, it prints the commands and carries on.
+fw_print_instead() {
+  ui_warn "$1 To let devices on your network reach Storm directly, run:"
+  printf '%b\n' "$(fw_allow_display)" | sed 's/^/      /' >&"$UI_FD"
+}
+
+server_firewall() {
+  local t reload=0
+  if [ "$MY_UID" != 0 ] && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true 2>/dev/null; }; then
+    fw_print_instead "The firewall needs administrator rights, so it was left as it is."
+    return 0
+  fi
+  case "$FW_KIND" in
+    ufw)
+      if [ -z "$FW_TARGETS" ]; then
+        fw_print_instead "This $MACHINE has no local network address right now."
+        return 0
+      fi
+      for t in $FW_TARGETS; do
+        fw_ufw_has "$t" && continue
+        if ! logged as_root ufw allow from "$t" to any app "$FW_APP"; then
+          fw_print_instead "ufw refused the rule."
+          return 0
+        fi
+        fw_record ufw "$t" || :
+      done
+      ;;
+    firewalld)
+      logged as_root firewall-cmd --reload || :
+      for t in $FW_TARGETS; do
+        logged as_root firewall-cmd --permanent --zone="$t" --query-service="$FW_APP" && continue
+        if ! logged as_root firewall-cmd --permanent --zone="$t" --add-service="$FW_APP"; then
+          fw_print_instead "firewalld refused the change."
+          return 0
+        fi
+        fw_record firewalld "$t" || :
+        reload=1
+      done
+      [ "$reload" = 1 ] && { logged as_root firewall-cmd --reload || :; }
+      ;;
+  esac
+  ui_ok "Devices on your local network can reach Storm ($(fw_describe))"
+  return 0
+}
+
+# Removes exactly the rules server_firewall added, and nothing else.
+fw_uninstall() {
+  local kind target reload=0
+  [ -r "$FW_RECORD" ] || return 0
+  while read -r kind target; do
+    case "$kind" in
+      ufw) as_root ufw delete allow from "$target" to any app "$FW_APP" || : ;;
+      firewalld)
+        as_root firewall-cmd --permanent --zone="$target" --remove-service="$FW_APP" || :
+        reload=1
+        ;;
+    esac
+  done <"$FW_RECORD"
+  if [ "$reload" = 1 ]; then as_root firewall-cmd --reload || :; fi
+  as_root rm -f "$FW_RECORD"
+}
+
+# Asked once, with the server's other questions.
+fw_ask() {
+  FW_CONSENT=""
+  [ "$OS" = linux ] || return 0
+  in_sel server || return 0
+  case "$(comp_mode server)" in
+    install | upgrade) ;;
+    *) return 0 ;;
+  esac
+  [ -e "$FW_RECORD" ] && return 0
+  fw_detect
+  [ "$FW_KIND" != none ] || return 0
+  if [ "$OPT_NO_FIREWALL" = 1 ]; then
+    FW_CONSENT=no
+  elif ui_confirm "$FW_PROMPT" y; then
+    FW_CONSENT=yes
+  else
+    FW_CONSENT=no
+  fi
+}
+
+fw_plan() {
+  case "$FW_CONSENT" in
+    yes)
+      plan_add fg 1 "Allow Storm from your local network only ($(fw_describe))" \
+        "$(fw_allow_display)" server_firewall
+      if [ "$FW_PUBLIC_ONLY" = 1 ]; then
+        plan_note "Firewall: this network is in firewalld's public zone, so Storm stays closed on it; devices reach it through a relay. Trust a home network with: sudo firewall-cmd --zone=home --change-interface=<its interface>"
+      fi
+      ;;
+    no)
+      plan_note "Firewall: left as it is; devices on your network reach Storm through a relay. To allow them directly later: $(fw_allow_display | sed 's/\\n/ \&\& /g')"
+      ;;
+  esac
+  return 0
 }
 
 # ------------------------------------------------------------ component: runtime
@@ -1660,12 +1898,23 @@ runtime_available() {
   esac
 }
 
+# The package's storm-runtime, not the MCP-only copy, which is no host.
+rt_on_path() {
+  local p
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ "$p" != "$MCP_BIN" ] && return 0
+  done <<EOF
+$(type -aP storm-runtime 2>/dev/null)
+EOF
+  return 1
+}
+
 runtime_detect() {
   local out
   RT_INSTALLED=0 RT_VERSION="" RT_ENROLLED=no RT_RUNNING=no
   case "$OS" in
     macos) [ -x "$RT_BIN" ] && RT_INSTALLED=1 ;;
-    linux) command -v storm-runtime >/dev/null 2>&1 && RT_INSTALLED=1 ;;
+    linux) rt_on_path && RT_INSTALLED=1 ;;
     *) return 0 ;;
   esac
   [ "$RT_INSTALLED" = 1 ] || return 0
@@ -2011,6 +2260,163 @@ runtime_uninstall() {
       fi
       ;;
   esac
+}
+
+# ------------------------------------------------------------ component: mcp
+#
+# MCP only: the storm-runtime binary on PATH, so an AI app on this machine can
+# run `storm-runtime mcp-connect`. No account, no service, no enrollment: the
+# binary from the runtime's release asset, copied to $MCP_BIN.
+
+mcp_asset() {
+  if [ "$OS" = macos ]; then asset_name runtime-macos "$REL_VERSION"; else asset_name runtime-linux "$REL_VERSION"; fi
+}
+
+mcp_available() {
+  local name
+  REASON=""
+  case "$OS" in
+    macos) ;;
+    linux)
+      if [ "$ARCH" != x86_64 ]; then
+        REASON="storm-runtime's Linux binary is built for x86_64 (this machine is $ARCH); see $STORM_REPO_URL/releases"
+        return 1
+      fi
+      ;;
+    *)
+      REASON="the installer supports macOS and Linux"
+      return 1
+      ;;
+  esac
+  release_ok || return 1
+  # --from-dir is someone's own build, which may be ahead of every release.
+  if [ -z "$OPT_FROM_DIR" ]; then
+    if [ -z "$STORM_MCP_CONNECT_SINCE" ]; then
+      REASON="mcp-connect isn't in a Storm release yet"
+      return 1
+    fi
+    if ver_lt "$REL_VERSION" "$STORM_MCP_CONNECT_SINCE"; then
+      REASON="mcp-connect ships from v$STORM_MCP_CONNECT_SINCE; this release is v$REL_VERSION"
+      return 1
+    fi
+  fi
+  name=$(mcp_asset)
+  checksum_has "$name" && return 0
+  REASON="$name isn't in v$REL_VERSION's checksums.txt"
+  return 1
+}
+
+mcp_detect() {
+  local out
+  MCP_INSTALLED=0 MCP_VERSION="" MCP_LINKED=0
+  if [ -L "$MCP_BIN" ]; then
+    MCP_LINKED=1
+    return 0
+  fi
+  [ -x "$MCP_BIN" ] || return 0
+  MCP_INSTALLED=1
+  out=$(probe "$MCP_BIN" --version) && MCP_VERSION=$(printf '%s\n' "$out" | parse_version_out)
+  return 0
+}
+
+# On Linux the Runtime Host's package already puts storm-runtime on PATH.
+mcp_via_runtime() {
+  [ "$OS" = linux ] || return 1
+  if in_sel runtime; then
+    [ "$(comp_mode runtime)" != uninstall ]
+    return
+  fi
+  [ "$RT_INSTALLED" = 1 ]
+}
+
+mcp_status_line() {
+  if [ "$MCP_LINKED" = 1 ]; then
+    printf '%s is a link (Homebrew?), left alone' "$MCP_BIN"
+  elif [ "$MCP_INSTALLED" = 1 ]; then
+    printf 'installed%s %s %s' "${MCP_VERSION:+ v$MCP_VERSION}" "$G_DOT" "$MCP_BIN"
+  elif [ "$OS" = linux ] && [ "$RT_INSTALLED" = 1 ]; then
+    printf 'storm-runtime is on PATH (the Runtime Host)'
+  else
+    printf 'not installed'
+  fi
+}
+
+mcp_plan() {
+  local mode name
+  mode=$(comp_mode mcp)
+  if [ "$mode" = uninstall ]; then
+    plan_add spin 1 "Remove storm-runtime from $(dirname "$MCP_BIN")" "sudo rm -f $(shq "$MCP_BIN")" mcp_uninstall
+    return 0
+  fi
+  if [ "$MCP_LINKED" = 1 ]; then
+    plan_note "MCP: $MCP_BIN is a link (Homebrew's storm-runtime?), so it is left alone; mcp-connect uses it."
+    return 0
+  fi
+  if [ "$MCP_INSTALLED" != 1 ] && mcp_via_runtime; then
+    plan_note "MCP: the Runtime Host's storm-runtime is on PATH already; AI apps run its mcp-connect."
+    return 0
+  fi
+  if [ "$mode" != keep ]; then
+    name=$(mcp_asset)
+    if [ "$OS" = macos ]; then
+      plan_fetch runtime
+    else
+      plan_add spin 0 "Download and verify $name" "$(mcp_fetch_display "$name")" fetch_asset "$name" mcp
+    fi
+    plan_add spin 1 "Put storm-runtime on PATH at $MCP_BIN (no host, no service)" \
+      "sudo mkdir -p $(shq "$(dirname "$MCP_BIN")")\nsudo cp $(mcp_src_display) $(shq "$MCP_BIN")\nsudo chmod 0755 $(shq "$MCP_BIN")" \
+      mcp_install
+  fi
+  plan_add spin 0 "Check storm-runtime has mcp-connect" "$(shq "$MCP_BIN") mcp-connect --help" mcp_verify
+  plan_note "MCP: in the Storm app, Settings › Devices & access › New key shows the line to paste into your AI app."
+  return 0
+}
+
+mcp_fetch_display() {
+  local disp
+  if [ -n "$OPT_FROM_DIR" ]; then
+    disp="cp $(shq "$OPT_FROM_DIR/$1") ."
+  else
+    disp="curl -fL -o $1 $(release_url "$1")"
+  fi
+  printf '%s\n%s %s   # must match checksums.txt' "$disp" "$(sha_tool_display)" "$1"
+}
+
+mcp_src() {
+  if [ "$OS" = macos ]; then
+    printf '%s' "$WORK_DIR/runtime/storm-runtime"
+  else
+    printf '%s' "$WORK_DIR/mcp/$(mcp_asset)"
+  fi
+}
+
+mcp_src_display() {
+  if [ "$OS" = macos ]; then printf 'storm-runtime'; else mcp_asset; fi
+}
+
+mcp_install() {
+  local src
+  src=$(mcp_src)
+  if [ ! -f "$src" ]; then
+    echo "the download has no storm-runtime ($src)"
+    return 1
+  fi
+  as_root mkdir -p "$(dirname "$MCP_BIN")" || return 1
+  as_root cp "$src" "$MCP_BIN" || return 1
+  as_root chmod 0755 "$MCP_BIN"
+}
+
+mcp_verify() {
+  "$MCP_BIN" --version || return 1
+  if ! "$MCP_BIN" mcp-connect --help >/dev/null 2>&1; then
+    echo "this storm-runtime has no mcp-connect: it predates it"
+    return 1
+  fi
+  return 0
+}
+
+mcp_uninstall() {
+  as_root rm -f "$MCP_BIN"
 }
 
 # ------------------------------------------------------------ component: agents
@@ -2469,6 +2875,7 @@ apt_install_pkg() {
 
 plan_fetch() {
   local c=$1 name disp
+  plan_once "fetch-$c" || return 0
   name=$(asset_name "$c-macos" "$REL_VERSION")
   if [ -n "$OPT_FROM_DIR" ]; then
     disp="cp $(shq "$OPT_FROM_DIR/$name") ."
@@ -2677,7 +3084,7 @@ settle_config() {
 choose_mode() {
   local c=$1 have want
   case "$c" in
-    server | runtime | app) ;;
+    server | runtime | mcp | app) ;;
     *)
       set_mode "$c" install
       return 0
@@ -2806,6 +3213,7 @@ ask_questions() {
       *) ADVERTISE="$UI_RESULT:$PORT" ;;
     esac
   fi
+  fw_ask
   local_server_now
   choose_enroll_action
 }
@@ -2850,7 +3258,7 @@ choose_components() {
 
 status_lines() {
   local c
-  for c in server runtime agents app relay; do
+  for c in server runtime mcp agents app relay; do
     printf '  %-14s %s\n' "$(comp_label "$c")" "$(comp_call "$c" status_line)"
   done
 }
@@ -2886,6 +3294,7 @@ first_screen() {
     "Everything|Server, runtime, app — and pair your phone" \
     "Server and app|Your notes on this $MACHINE, reachable from your devices" \
     "Runtime only|Run coding agents here for a Storm server elsewhere" \
+    "MCP only|Let AI apps on this $MACHINE reach your Storm; no host, no service" \
     "Custom…|Pick components" \
     "-" \
     "Status|What's installed and running" \
@@ -2896,14 +3305,15 @@ first_screen() {
     1) SEL=$(preset_components everything) ;;
     2) SEL=$(preset_components server-app) ;;
     3) SEL=$(preset_components runtime) ;;
-    4)
+    4) SEL=mcp ;;
+    5)
       SEL=""
       choose_components || return 1
       ;;
-    6) FIRST_ACTION=status ;;
-    7) FIRST_ACTION=pair ;;
-    8) FIRST_ACTION=enroll ;;
-    9) FIRST_ACTION=uninstall ;;
+    7) FIRST_ACTION=status ;;
+    8) FIRST_ACTION=pair ;;
+    9) FIRST_ACTION=enroll ;;
+    10) FIRST_ACTION=uninstall ;;
   esac
   return 0
 }
@@ -3016,7 +3426,7 @@ flow_legacy_bootstrap() {
 flow_upgrade() {
   local c rc
   SEL=""
-  for c in server runtime app; do
+  for c in server runtime mcp app; do
     if comp_installed "$c"; then SEL="${SEL:+$SEL }$c"; fi
   done
   if [ -z "$SEL" ]; then
@@ -3081,7 +3491,7 @@ flow_uninstall() {
   local -a items
   items=()
   SEL=""
-  for c in server runtime app; do
+  for c in server runtime mcp app; do
     comp_installed "$c" || continue
     items[${#items[@]}]="$c|$(comp_label "$c")|off|$(comp_call "$c" status_line)"
   done
@@ -3097,7 +3507,7 @@ flow_uninstall() {
       if comp_installed "$c"; then SEL="${SEL:+$SEL }$c"; fi
     done
     if [ -z "$SEL" ]; then
-      arg_error "uninstall: say which installed components to remove (--server --runtime --app, or --everything)"
+      arg_error "uninstall: say which installed components to remove (--server --runtime --mcp --app, or --everything)"
       return 2
     fi
   fi
@@ -3144,6 +3554,10 @@ summary_screen() {
     else
       ui_info "The Runtime Host runs as $RT_ACCOUNT (systemd storm-runtime); workspaces: $RT_WORKSPACES"
     fi
+  fi
+  if in_sel mcp && [ "$MCP_INSTALLED" = 1 ]; then
+    ui_info "AI apps here can run $MCP_BIN mcp-connect. In the Storm app, Settings ›"
+    ui_info "Devices & access › New key shows the line to paste into the app's MCP config."
   fi
   i=1
   while [ "$i" -le "$PLAN_N" ]; do

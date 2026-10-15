@@ -48,6 +48,6 @@ signs test messages and nothing else.
 ## Regenerating is a protocol change
 
 The file is a commitment, not a fixture. If a regeneration changes an existing
-vector, that is a wire-format change: it belongs in `PLAN.md`'s decision log
-and in `docs/srp-v1.md`, not in a quiet commit. Adding new vectors alongside
+vector, that is a wire-format change: it belongs in a numbered decision
+and in the vault's *Storm Relay Protocol*, not in a quiet commit. Adding new vectors alongside
 the existing ones is ordinary work.

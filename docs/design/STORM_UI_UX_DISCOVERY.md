@@ -22,7 +22,7 @@
   (`personal` → `Storm/…`), read through Storm MCP. Per `CLAUDE.md`, that
   vault holds the authoritative product and spec material, including the
   frozen Agent Runtime and MCP Gateway specifications.
-- `PLAN.md` (on `staging`), `CLAUDE.md`, `README.md`, `kit/`.
+- the vault's plan notes, `CLAUDE.md`, `README.md`, `kit/`.
 - The screenshots in `docs/screenshots/`.
 
 **Not consulted.** The repo's older design briefs (`docs/storm-ui.md`,
@@ -111,7 +111,7 @@ navigation:
   and four different "MCP"s.
 - **Kit and the agent-role definitions are invisible**, though the product
   treats them as core (decision 64).
-- **The two-way Notes | Agents switch** is explicitly marked in `PLAN.md` as
+- **The two-way Notes | Agents switch** is explicitly marked in the decision log as
   the structure to revisit when a third space appears. The roadmap contains
   several candidates.
 
@@ -632,7 +632,7 @@ A Material `AppBar` page. Sections, in order:
 - **Mounted inside AgentsShell.** On desktop, arriving from Server settings
   swaps the sidebar from Notes to Agents.
 
-### 6.12 Integrations, `/settings/integrations` (`staging` only) [FACT: `agent/integrations_screen.dart`; PLAN 81h, 81k, 81n; *MCP Gateway V1 Specification* §14]
+### 6.12 Integrations, `/settings/integrations` (`staging` only) [FACT: `agent/integrations_screen.dart`; decision 81h, 81k, 81n; *MCP Gateway V1 Specification* §14]
 
 - **Owner only**, by the server's 403. The entry is shown only when the
   owner check passes.
@@ -1909,7 +1909,7 @@ Certainty levels:
 | More providers | Codex, Cursor Agent, Gemini CLI, "any CLI agent" | Proposed | *Vision* |
 | Named agents / Agent Definitions | User-defined agents with capabilities and policies | Deferred | *V1 Freeze* §6, *Configuration* "Later" |
 | Notifications | Approvals, failures, completion only | Proposed | *Client UX* |
-| Sessions as routes, deep links, switch shortcuts, shared sidebar frame | Navigation follow-ups | Deferred (decision 78) | PLAN 78, *Global Todo* parking lot |
+| Sessions as routes, deep links, switch shortcuts, shared sidebar frame | Navigation follow-ups | Deferred (decision 78) | decision 78, *Global Todo* parking lot |
 | Per-workspace integration defaults, admin-shared connections, device-code grant, data-key rotation | Gateway LATER | Proposed | *Gateway* §17 |
 | Staged agent writes | Agent scratch space a human promotes | Open question | *Shared Knowledge* |
 | Context/retrieval (`get_context`), embeddings | Bounded context delivery | Open | *Context and Retrieval*, *Open Questions* |
@@ -2182,7 +2182,7 @@ them unless a citation says so.
 - `README.md`: thesis line, architecture diagram, MCP summary. It says
   v0.2.9 and is stale relative to v0.3.1.
 - `CLAUDE.md`: invariants (vault, M9/M10, M19, relay, M20).
-- `PLAN.md` decision log:
+- decision log:
   - 3, 17, 20–25, 30–34 (layout), 38–44 (MCP, chrome, sheets, note
     actions, tokens);
   - 64 (kit);

@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../api/connection_log.dart';
 import '../api/models.dart';
+import '../api/net.dart';
+import '../api/relay/srp_http_client.dart';
 import '../api/server_verifier.dart';
 import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
@@ -58,15 +62,45 @@ class SyncEngine extends ChangeNotifier {
     required this.connection,
     required this.cache,
     required this.vaultId,
-  });
+    this.outboxRetryMin = const Duration(seconds: 5),
+    this.outboxRetryMax = const Duration(seconds: 60),
+    this.feedRetryMin = const Duration(seconds: 1),
+    this.feedRetryMax = const Duration(seconds: 60),
+  }) {
+    // The connection's state is followed, never inferred: whoever re-raced,
+    // entering `Connected` is when the outbox drains and the feed re-opens
+    // (§8.9 rule 3), and `Unproven` is what stops every request.
+    _statusSub = connection.statusChanges.listen((status) {
+      switch (status) {
+        case ConnectionStatus.connected:
+          _setImpostor(false);
+          if (_started) _onConnected();
+        case ConnectionStatus.unproven:
+          _setImpostor(true);
+        case _:
+          break;
+      }
+      notifyListeners();
+    });
+  }
+
+  /// The outbox retry while writes wait on a connected transport (§8.8):
+  /// from [outboxRetryMin], doubling to [outboxRetryMax], ±20 %.
+  final Duration outboxRetryMin;
+  final Duration outboxRetryMax;
+
+  /// The change feed's own re-open backoff (§8.4): the feed ending never
+  /// touches the connection.
+  final Duration feedRetryMin;
+  final Duration feedRetryMax;
+
+  StreamSubscription<ConnectionStatus>? _statusSub;
 
   /// How the server is reached, and the only object that knows.
   ///
-  /// The engine is where this has to live, because it is the only thing owning
-  /// *both* ends of the connection lifecycle — [start] for a cold start and a
-  /// vault switch, and [_scheduleReconnect] for everything else. Connecting in
-  /// `start` alone would leave every reconnect on an unchecked transport, and
-  /// a reconnect is exactly when the path may have changed underneath us.
+  /// The engine only asks it to *ensure connected* and follows its state;
+  /// it never resets it. Racing, re-proving, backoff and deciding that a
+  /// transport is lost all belong to the connection (§8.1, decision 116h).
   final StormConnection connection;
 
   /// The API client for whatever transport currently wins.
@@ -74,7 +108,7 @@ class SyncEngine extends ChangeNotifier {
   /// A getter, so every `api.x()` below follows a re-race without knowing one
   /// happened. That is the seam doing its job: nothing here distinguishes a
   /// direct dial from a relayed one.
-  StormApi get api => connection.api;
+  StormApi get api => connection.sessionApi;
 
   final CacheDb cache;
 
@@ -87,7 +121,14 @@ class SyncEngine extends ChangeNotifier {
   final String vaultId;
 
   bool _online = true;
-  bool get isOnline => _online;
+
+  /// Whether requests are getting through: the last one did, and the
+  /// connection is not racing, unreachable or unproven (§8.6). A sync
+  /// engine's own idea of being synced is never enough.
+  bool get isOnline =>
+      _online &&
+      (connection.status == ConnectionStatus.connected ||
+          connection.status == ConnectionStatus.idle);
 
   /// Set when the server answered a challenge and could not prove it holds the
   /// key we pinned at pairing.
@@ -106,7 +147,9 @@ class SyncEngine extends ChangeNotifier {
   /// An unverified server gets nothing — not a note body, not a save. The
   /// point of the check is to avoid handing plaintext to whatever is
   /// answering, so "block sync" has to mean every request, not just the pull.
-  bool get _mayReachServer => _online && !_impostor;
+  /// Offline is re-checked, never latched (§8.9 rule 1): only a connection
+  /// waiting out its backoff skips the attempt.
+  bool get _mayReachServer => !_impostor && !connection.inBackoff;
 
   int _pending = 0;
   int get pendingCount => _pending;
@@ -129,10 +172,21 @@ class SyncEngine extends ChangeNotifier {
   WebSocketChannel? _ws;
   StreamSubscription? _wsSub;
   StreamSubscription? _sseSub;
-  Timer? _reconnect;
   Timer? _pullDebounce;
-  int _backoffSeconds = 1;
   bool _disposed = false;
+  bool _started = false;
+  final _random = Random();
+
+  _Feed _feed = _Feed.closed;
+  int _feedRun = 0;
+  Timer? _feedRetry;
+  DateTime? _feedRetryDue;
+  Duration? _feedBackoff;
+
+  Timer? _outboxTimer;
+  DateTime? _outboxDue;
+  Duration? _outboxBackoff;
+  bool _drainHitStreamError = false;
 
   /// The active connection's tier (direct, self-hosted relay, public relay).
   /// Used by the UI to show direct-vs-relayed.
@@ -141,45 +195,43 @@ class SyncEngine extends ChangeNotifier {
   /// Whether the active connection is relayed (vs direct LAN).
   bool get isRelayed => connection.isRelayed;
 
-  /// The connection status from the seam (idle, connecting, connected, unproven, offline).
+  /// The connection status from the seam (idle, connecting, connected,
+  /// unproven, offline, serverOffline).
   ConnectionStatus get connectionStatus => connection.status;
 
   // ---- lifecycle -----------------------------------------------------
 
   Future<void> start() async {
     _pending = await cache.pendingCount(vaultId);
+    if (_disposed) return;
     notifyListeners();
-    if (!await _proveServer()) return;
-    await sync();
-    await _openSocket();
-  }
-
-  /// Runs the connect-time identity check, and reports whether to proceed.
-  ///
-  /// An unreachable server is ordinary offline — the reconnect timer will try
-  /// again, and nothing about identity has been learned either way. An
-  /// impostor stops everything and stays stopped until a later check passes,
-  /// which is what makes this a gate rather than an indicator.
-  Future<bool> _proveServer() async {
-    if (_disposed) return false;
-
+    _started = true;
+    // The feed wants a transport for as long as the engine lives: that is
+    // the demand under which the connection's backoff re-races (§8.3).
+    connection.addDemand(this);
     final proof = await connection.connect();
-    if (_disposed) return false;
-
+    if (_disposed) return;
     switch (proof) {
       case ServerProof.verified:
-        // A server that proves itself clears a previous failure: the relay may
-        // have been swapped out, or the interception may have stopped.
+        // A server that proves itself clears a previous failure.
         _setImpostor(false);
-        return true;
+        _onConnected();
       case ServerProof.impostor:
         _setImpostor(true);
-        _scheduleReconnect();
-        return false;
       case ServerProof.unreachable:
+        // The connection retries on its own backoff; entering `Connected`
+        // brings the engine back.
         _setOnline(false);
-        _scheduleReconnect();
-        return false;
+    }
+  }
+
+  /// A proven transport: drain, pull, and make sure the feed is open.
+  void _onConnected() {
+    if (_disposed || _impostor) return;
+    unawaited(sync());
+    if (_feed == _Feed.closed) {
+      _cancelFeedRetry();
+      unawaited(_openSocket());
     }
   }
 
@@ -198,8 +250,11 @@ class SyncEngine extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    connection.removeDemand(this);
+    _statusSub?.cancel();
     _pullDebounce?.cancel();
-    _reconnect?.cancel();
+    _feedRetry?.cancel();
+    _outboxTimer?.cancel();
     _wsSub?.cancel();
     _ws?.sink.close();
     _sseSub?.cancel();
@@ -208,12 +263,27 @@ class SyncEngine extends ChangeNotifier {
   }
 
   void _setOnline(bool value) {
-    if (_online == value) return;
+    if (_disposed || _online == value) return;
     _online = value;
     notifyListeners();
     // Coming back online is the moment queued edits must go out.
-    if (value) unawaited(sync());
+    if (value && _pending > 0) unawaited(sync());
   }
+
+  /// A request failed with something other than an HTTP answer. A
+  /// stream-scoped error is that request's alone (§8.4): it changes no
+  /// status, and a queued write is retried by the outbox timer. Anything
+  /// else says requests are not getting through; whether the transport is
+  /// lost is the connection's call, made where the request was sent.
+  void _requestFailed(Object e) {
+    if (_streamScoped(e)) return;
+    _setOnline(false);
+  }
+
+  static bool _streamScoped(Object e) =>
+      e is SrpTransportException &&
+      e.code != 'trunk_lost' &&
+      e.code != 'trunk_superseded';
 
   // ---- reads ---------------------------------------------------------
 
@@ -239,8 +309,8 @@ class SyncEngine extends ChangeNotifier {
         return null;
       }
       rethrow;
-    } catch (_) {
-      _setOnline(false);
+    } catch (e) {
+      _requestFailed(e);
       return cached;
     }
   }
@@ -265,8 +335,8 @@ class SyncEngine extends ChangeNotifier {
         _folders = vault.folders;
         _setOnline(true);
         return vault.notes;
-      } catch (_) {
-        _setOnline(false);
+      } catch (e) {
+        _requestFailed(e);
       }
     }
     final cached = await cache.allNotes(vaultId);
@@ -309,6 +379,8 @@ class SyncEngine extends ChangeNotifier {
       await _storeWrite(id, result);
       await cache.dequeue(vaultId, id);
       await _refreshPending();
+      // After every successful write, whatever else waits goes too (§8.8).
+      if (_pending > 0) unawaited(sync());
 
       if (result.conflict) {
         return SaveOutcome(
@@ -329,9 +401,13 @@ class SyncEngine extends ChangeNotifier {
       // The server answered and refused. Retrying identically won't help, so
       // don't queue it — surface it instead.
       return SaveOutcome(SaveStatus.failed, error: e.message);
-    } catch (_) {
-      _setOnline(false);
-      return _queue(id, baseVersion, content);
+    } catch (e) {
+      _requestFailed(e);
+      final queued = await _queue(id, baseVersion, content);
+      if (_streamScoped(e)) {
+        _scheduleOutboxRetry('a save failed: ${logError(e)}');
+      }
+      return queued;
     }
   }
 
@@ -385,8 +461,9 @@ class SyncEngine extends ChangeNotifier {
       _setOnline(true);
     } on StormApiException catch (e) {
       return (meta: null, error: e.message);
-    } catch (_) {
-      _setOnline(false);
+    } catch (e) {
+      // Never resent: a create whose head went out may have happened (§8.5).
+      _requestFailed(e);
       return (
         meta: null,
         error: 'Cannot reach the server — new notes need a connection.',
@@ -438,7 +515,7 @@ class SyncEngine extends ChangeNotifier {
     required String id,
     required String newPath,
   }) async {
-    if (_online) {
+    if (_mayReachServer) {
       try {
         final result = await api.moveNote(
           vaultId: vaultId,
@@ -450,8 +527,8 @@ class SyncEngine extends ChangeNotifier {
         return SaveOutcome(SaveStatus.saved, version: result.meta.version);
       } on StormApiException catch (e) {
         return SaveOutcome(SaveStatus.failed, error: e.message);
-      } catch (_) {
-        _setOnline(false);
+      } catch (e) {
+        _requestFailed(e);
       }
     }
 
@@ -501,8 +578,8 @@ class SyncEngine extends ChangeNotifier {
       return (path: path, error: null);
     } on StormApiException catch (e) {
       return (path: null, error: e.message);
-    } catch (_) {
-      _setOnline(false);
+    } catch (e) {
+      _requestFailed(e);
       return (
         path: null,
         error: 'Cannot reach the server — attachments need a connection.',
@@ -537,8 +614,8 @@ class SyncEngine extends ChangeNotifier {
     if (pinned && _mayReachServer) {
       try {
         await _store(await api.note(vaultId, id));
-      } catch (_) {
-        _setOnline(false);
+      } catch (e) {
+        _requestFailed(e);
       }
     }
     await cache.setPinned(vaultId, id, pinned);
@@ -560,8 +637,14 @@ class SyncEngine extends ChangeNotifier {
     notifyListeners();
     try {
       await _drainOutbox();
+      if (_disposed) return;
+      if (_drainHitStreamError) _scheduleOutboxRetry('a queued write failed');
       await _pull();
-      if (_online) _lastSyncedAt = DateTime.now();
+      if (_online && !_disposed) _lastSyncedAt = DateTime.now();
+    } catch (_) {
+      // Sign-out or a server/vault switch closes the cache under an in-flight
+      // sync; a query already sent to it can still fail.
+      if (!_disposed) rethrow;
     } finally {
       _syncing = false;
       if (!_disposed) notifyListeners();
@@ -575,10 +658,15 @@ class SyncEngine extends ChangeNotifier {
   /// this device was away.
   Future<void> _drainOutbox() async {
     final queued = await cache.pending(vaultId);
-    if (queued.isEmpty) return;
+    _drainHitStreamError = false;
+    if (queued.isEmpty) {
+      _outboxBackoff = null;
+      return;
+    }
 
     final touched = <String>{};
     for (final item in queued) {
+      if (_disposed) return;
       try {
         if (item.op == 'delete') {
           await api.deleteNote(vaultId, item.noteId);
@@ -622,16 +710,55 @@ class SyncEngine extends ChangeNotifier {
           touched.add(item.noteId);
         }
         // Any other refusal: leave it queued for a human to notice.
-      } catch (_) {
-        // Still unreachable — stop, keep the rest queued, try again later.
-        _setOnline(false);
+      } catch (e) {
+        // Still unreachable, or this one stream failed: stop, keep the rest
+        // queued, try again later.
+        _drainHitStreamError = _streamScoped(e);
+        _requestFailed(e);
         break;
       }
     }
 
     await _refreshPending();
-    if (touched.isNotEmpty) _changes.add(touched);
+    if (_pending == 0) _outboxBackoff = null;
+    _emit(touched);
   }
+
+  /// The outbox timer (§8.8): one pending, the earliest wins, and it fires
+  /// only into a connected transport, since entering `Connected` drains
+  /// anyway.
+  void _scheduleOutboxRetry(String why) {
+    if (_disposed) return;
+    final base = _outboxBackoff ?? outboxRetryMin;
+    final next = base * 2;
+    _outboxBackoff = next > outboxRetryMax ? outboxRetryMax : next;
+    final delay = _jitter(base);
+    final due = DateTime.now().add(delay);
+    final pending = _outboxDue;
+    if (_outboxTimer?.isActive == true &&
+        pending != null &&
+        !pending.isAfter(due)) {
+      return;
+    }
+    _outboxTimer?.cancel();
+    _outboxDue = due;
+    ConnectionLog.instance.add(
+      'outbox retry in ${delay.inMilliseconds} ms: $why',
+    );
+    _outboxTimer = Timer(delay, () {
+      _outboxDue = null;
+      if (_disposed || _pending == 0) return;
+      if (connection.phase == ConnectionPhase.racing || connection.inBackoff) {
+        return;
+      }
+      unawaited(sync());
+    });
+  }
+
+  Duration _jitter(Duration d) => Duration(
+    milliseconds: (d.inMilliseconds * (0.8 + _random.nextDouble() * 0.4))
+        .round(),
+  );
 
   /// How many changes to request per page.
   static const _pageSize = 500;
@@ -650,21 +777,23 @@ class SyncEngine extends ChangeNotifier {
     // Bounded so a server that keeps changing can't spin here forever; the
     // next sync picks up whatever is left.
     for (var page = 0; page < 100; page++) {
+      if (_disposed) return;
       final SyncBatch batch;
       try {
         batch = await api.sync(vaultId, since: since, limit: _pageSize);
         _setOnline(true);
-      } catch (_) {
-        _setOnline(false);
-        if (touched.isNotEmpty) _changes.add(touched);
+      } catch (e) {
+        _requestFailed(e);
+        _emit(touched);
         return;
       }
 
       final applied = await _applyChanges(batch.changes, touched);
+      if (_disposed) return;
       if (!applied) {
         // A request failed mid-page. Everything up to here is committed;
         // leave `since` where it is so the rest is retried.
-        if (touched.isNotEmpty) _changes.add(touched);
+        _emit(touched);
         return;
       }
 
@@ -679,13 +808,19 @@ class SyncEngine extends ChangeNotifier {
       await cache.setLastSeq(vaultId, since);
     }
 
+    if (_disposed) return;
     await cache.evict(vaultId);
-    if (touched.isNotEmpty) _changes.add(touched);
+    _emit(touched);
+  }
+
+  void _emit(Set<String> touched) {
+    if (touched.isNotEmpty && !_disposed) _changes.add(touched);
   }
 
   /// Applies one page. Returns false if the server became unreachable.
   Future<bool> _applyChanges(List<Change> changes, Set<String> touched) async {
     for (final change in changes) {
+      if (_disposed) return false;
       if (change.kind == 'deleted') {
         await cache.removeNote(vaultId, change.noteId);
         touched.add(change.noteId);
@@ -699,20 +834,23 @@ class SyncEngine extends ChangeNotifier {
 
       // Don't overwrite a note whose local edit hasn't been sent yet.
       if (await cache.outboxFor(vaultId, change.noteId) != null) continue;
+      if (_disposed) return false;
 
       final Note fresh;
       try {
         fresh = await api.note(vaultId, change.noteId);
       } on StormApiException catch (e) {
+        if (_disposed) return false;
         if (e.isNotFound) {
           await cache.removeNote(vaultId, change.noteId);
           touched.add(change.noteId);
         }
         continue;
-      } catch (_) {
-        _setOnline(false);
+      } catch (e) {
+        _requestFailed(e);
         return false; // leave lastSeq alone so this page is retried
       }
+      if (_disposed) return false;
 
       // Storing is local, and failing to store must not stall the cursor.
       // Conflating the two meant a bad cache schema pinned `lastSeq` forever:
@@ -734,7 +872,9 @@ class SyncEngine extends ChangeNotifier {
   /// `GET /v1/sync?since=`. A dropped or missed frame costs nothing — the
   /// next pull catches up regardless.
   Future<void> _openSocket() async {
-    if (_disposed || _impostor) return;
+    if (_disposed || _impostor || _feed != _Feed.closed) return;
+    _feed = _Feed.opening;
+    final run = ++_feedRun;
     _wsSub?.cancel();
     _ws?.sink.close();
     _sseSub?.cancel();
@@ -747,84 +887,83 @@ class SyncEngine extends ChangeNotifier {
     final String ticket;
     try {
       ticket = await api.wsTicket();
-    } catch (_) {
-      // No ticket, no socket. Treated as a feed failure rather than an
-      // error, because it is one from the feed's point of view — and the
-      // reconnect timer is already the thing that retries it.
-      _scheduleReconnect();
+    } catch (e) {
+      _feedEnded(run, 'no feed ticket: ${logError(e)}');
       return;
     }
     if (_disposed) return;
 
     if (connection.isRelayed) {
-      await _openSseStream(ticket);
+      await _openSseStream(run, ticket);
     } else {
-      await _openWebSocket(ticket);
+      await _openWebSocket(run, ticket);
     }
   }
 
   /// Opens a WebSocket change feed (direct LAN connection).
-  Future<void> _openWebSocket(String ticket) async {
+  Future<void> _openWebSocket(int run, String ticket) async {
     final uri = connection.streamUri(ticket);
 
     try {
-      final channel = WebSocketChannel.connect(uri);
+      final channel = connectFeed(uri);
       _ws = channel;
-
-      // `connect` reports a failed handshake through `ready`, not by
-      // throwing. With nothing listening to it, an unreachable host — no DNS,
-      // no route, server down — becomes an *unhandled* async error in the
-      // zone. Reconnection is driven by the stream's `onError` below; this
-      // exists purely so the rejection is observed.
-      unawaited(channel.ready.catchError((Object _) {}));
 
       _wsSub = channel.stream.listen(
         (_) {
-          _setOnline(true);
-          _backoffSeconds = 1;
+          _feedHeard();
           // Coalesce bursts: a rename or a multi-note edit fires several
           // frames, and one pull covers them all.
           _pullDebounce?.cancel();
           _pullDebounce = Timer(const Duration(milliseconds: 300), sync);
         },
-        onError: (_) => _scheduleReconnect(),
-        onDone: _scheduleReconnect,
+        onError: (Object e) => _feedEnded(run, 'feed error: ${logError(e)}'),
+        onDone: () => _feedEnded(run, 'feed closed'),
         cancelOnError: true,
       );
-    } catch (_) {
-      _scheduleReconnect();
+
+      // The server subscribes before answering the upgrade, so from here no
+      // change is missed. A failed handshake also errors the stream.
+      await channel.ready;
+      if (run == _feedRun && _feed == _Feed.opening) _feed = _Feed.open;
+    } catch (e) {
+      _feedEnded(run, 'feed socket failed: ${logError(e)}');
     }
   }
 
   /// Opens an SSE change feed (relayed connection).
-  Future<void> _openSseStream(String ticket) async {
+  Future<void> _openSseStream(int run, String ticket) async {
     final uri = connection.sseUri(ticket);
     final client = connection.transportClient;
 
     try {
       final request = http.Request('GET', uri);
       request.headers.addAll(connection.authHeaders);
-      // Accept SSE
       request.headers['Accept'] = 'text/event-stream';
 
       final streamed = await client.send(request);
-
-      if (streamed.statusCode != 200) {
-        _scheduleReconnect();
+      if (_disposed) {
+        unawaited(streamed.stream.listen(null).cancel());
         return;
       }
 
+      if (streamed.statusCode != 200) {
+        _feedEnded(run, 'feed answered ${streamed.statusCode}');
+        return;
+      }
+
+      if (run == _feedRun && _feed == _Feed.opening) _feed = _Feed.open;
       _sseSub = streamed.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen(
             _handleSseLine,
-            onError: (_) => _scheduleReconnect(),
-            onDone: _scheduleReconnect,
+            onError: (Object e) =>
+                _feedEnded(run, 'feed error: ${logError(e)}'),
+            onDone: () => _feedEnded(run, 'feed closed'),
             cancelOnError: true,
           );
-    } catch (_) {
-      _scheduleReconnect();
+    } catch (e) {
+      _feedEnded(run, 'feed request failed: ${logError(e)}');
     }
   }
 
@@ -835,41 +974,79 @@ class SyncEngine extends ChangeNotifier {
     if (line.startsWith('event:')) {
       final event = line.substring(6).trim();
       if (event == 'change' || event == 'resync') {
-        _setOnline(true);
-        _backoffSeconds = 1;
+        _feedHeard();
         _pullDebounce?.cancel();
         _pullDebounce = Timer(const Duration(milliseconds: 300), sync);
       }
     }
   }
 
+  void _feedHeard() {
+    _setOnline(true);
+    _feedBackoff = null;
+  }
+
+  /// Simulates a change frame arriving on the feed, for tests.
+  @visibleForTesting
+  void debugSimulateChangeFrame() => _handleSseLine('event: change');
+
+  @visibleForTesting
+  bool get isDisposed => _disposed;
+
   /// Simulates the change feed closing, for tests.
   @visibleForTesting
-  void debugSimulateSocketDrop() => _scheduleReconnect();
+  void debugSimulateSocketDrop() => _feedEnded(_feedRun, 'simulated drop');
 
-  void _scheduleReconnect() {
-    if (_disposed) return;
-    // Deliberately does NOT mark the client offline. The socket only delivers
-    // *push*; HTTP is what "online" means. Treating a closed socket as offline
-    // disabled note creation and made freshly created notes unopenable, even
-    // though every request was succeeding. Sockets close routinely — app
-    // backgrounding, wifi handover, a server restart.
-    _reconnect?.cancel();
-    _reconnect = Timer(Duration(seconds: _backoffSeconds), () async {
-      // Capped exponential backoff: a server that is down for an hour
-      // shouldn't be probed every second.
-      _backoffSeconds = (_backoffSeconds * 2).clamp(1, 60);
-      // Re-prove identity *before* reopening anything. This is the branch that
-      // fires on wifi handover, server restart, and waking from sleep — the
-      // moments when the path to the server may have changed and a relay may
-      // now be in it. A check that only ran at startup would never see any of
-      // them. `_proveServer` reschedules on failure, so a refusal here is not
-      // the end of retrying.
-      connection.reset();
-      if (!await _proveServer()) return;
-      await _openSocket();
-      unawaited(sync());
-    });
+  /// The feed ended. It re-opens on its own backoff, over whatever transport
+  /// is connected then. It never resets the connection or cancels a race:
+  /// on a phone, the 113 build's feed timer did both (§8.3, §8.4).
+  void _feedEnded(int run, String why) {
+    if (_disposed || run != _feedRun || _feed == _Feed.closed) return;
+    _feed = _Feed.closed;
+    _scheduleFeedRetry(why);
+  }
+
+  /// At most one feed retry pending; the earliest wins.
+  void _scheduleFeedRetry(String why) {
+    final base = _feedBackoff ?? feedRetryMin;
+    final next = base * 2;
+    _feedBackoff = next > feedRetryMax ? feedRetryMax : next;
+    final delay = _jitter(base);
+    final due = DateTime.now().add(delay);
+    final pending = _feedRetryDue;
+    if (_feedRetry?.isActive == true &&
+        pending != null &&
+        !pending.isAfter(due)) {
+      ConnectionLog.instance.add('feed retry kept: an earlier one is pending');
+      return;
+    }
+    _feedRetry?.cancel();
+    _feedRetryDue = due;
+    ConnectionLog.instance.add(
+      'feed re-open in ${delay.inMilliseconds} ms: $why',
+    );
+    _feedRetry = Timer(delay, _feedRetryFired);
+  }
+
+  void _cancelFeedRetry() {
+    _feedRetry?.cancel();
+    _feedRetry = null;
+    _feedRetryDue = null;
+  }
+
+  /// Ensures connected, then re-opens the feed. Joining a race in flight,
+  /// or finding the connection waiting out a backoff, is all it does there:
+  /// entering `Connected` re-opens the feed.
+  Future<void> _feedRetryFired() async {
+    _feedRetry = null;
+    _feedRetryDue = null;
+    if (_disposed || _feed != _Feed.closed) return;
+    ConnectionLog.instance.add(
+      'feed retry: ensure connected (${connection.phase.name})',
+    );
+    final proof = await connection.connect();
+    if (_disposed || proof != ServerProof.verified) return;
+    await _openSocket();
   }
 
   // ---- helpers -------------------------------------------------------
@@ -914,7 +1091,10 @@ class SyncEngine extends ChangeNotifier {
   }
 
   Future<void> _refreshPending() async {
+    if (_disposed) return;
     _pending = await cache.pendingCount(vaultId);
     if (!_disposed) notifyListeners();
   }
 }
+
+enum _Feed { closed, opening, open }

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rand::Rng;
 
-use crate::auth::PublicKey;
+use crate::auth::{KeyBytes, PublicKey};
 use crate::config::Allowlist;
 use crate::proto::{self, ErrorCode};
 use crate::trunk::Tx;
@@ -58,6 +58,11 @@ pub struct ServerTrunk {
     /// tell every one of them, including clients that hold no open stream and
     /// would otherwise wait for a timeout on a destination that is gone.
     clients: Mutex<HashMap<String, Tx>>,
+    /// Body bytes carried both ways for this registration (§6.2): what the
+    /// week of measurement reads before a budget is set (decision 116k).
+    bytes: std::sync::atomic::AtomicU64,
+    /// Set by [`ServerTrunk::start_drain`]; no stream opens after it.
+    draining: std::sync::atomic::AtomicBool,
 }
 
 /// One multiplexed stream.
@@ -72,6 +77,9 @@ struct Stream {
     /// `STREAM_OPEN` sent, `STREAM_ACK` not yet seen. This is what the in-flight
     /// cap counts (§5.1).
     acked: bool,
+    /// The client's `HTTP_REQUEST_HEAD` has been forwarded. A stream carries
+    /// exactly one (§5.2).
+    head_sent: bool,
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +97,20 @@ struct StreamTable {
 pub enum OpenRefused {
     TooManyInFlight,
     IdsExhausted,
+    /// The trunk is draining after a supersession (§4.2): a new stream
+    /// belongs on the replacement, which the client reaches by re-dialling.
+    Draining,
+}
+
+/// What a client's `HTTP_REQUEST_HEAD` may do on a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadClaim {
+    /// Not this client's stream, or not a live one: `stream_closed`.
+    NotOwned,
+    /// The stream's one head; forward it.
+    First,
+    /// A second head on the client's own stream (§5.2).
+    Repeat,
 }
 
 impl ServerTrunk {
@@ -102,7 +124,18 @@ impl ServerTrunk {
                 next_id: 1,
             }),
             clients: Mutex::new(HashMap::new()),
+            bytes: std::sync::atomic::AtomicU64::new(0),
+            draining: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn count_bytes(&self, n: usize) {
+        self.bytes
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The socket toward the origin server.
@@ -135,6 +168,9 @@ impl ServerTrunk {
         max_in_flight: usize,
         max_total: usize,
     ) -> Result<u32, OpenRefused> {
+        if self.draining.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(OpenRefused::Draining);
+        }
         let mut table = self.streams.lock().expect("streams mutex");
 
         // Global cap: total concurrent streams across all clients on this trunk.
@@ -165,6 +201,7 @@ impl ServerTrunk {
                 client_trunk_id: client_trunk_id.to_string(),
                 client,
                 acked: false,
+                head_sent: false,
             },
         );
         Ok(stream_id)
@@ -221,6 +258,21 @@ impl ServerTrunk {
             .is_some_and(|stream| stream.client_trunk_id == client_trunk_id)
     }
 
+    /// Records the head of a stream the client owns, once.
+    pub fn claim_head(&self, stream_id: u32, client_trunk_id: &str) -> HeadClaim {
+        let mut table = self.streams.lock().expect("streams mutex");
+        match table.open.get_mut(&stream_id) {
+            Some(stream) if stream.client_trunk_id == client_trunk_id => {
+                if std::mem::replace(&mut stream.head_sent, true) {
+                    HeadClaim::Repeat
+                } else {
+                    HeadClaim::First
+                }
+            }
+            _ => HeadClaim::NotOwned,
+        }
+    }
+
     pub fn close_stream(&self, stream_id: u32) {
         self.streams
             .lock()
@@ -271,6 +323,8 @@ impl ServerTrunk {
     /// old trunk outlives its window. Usually the server has already dropped
     /// it, but a half-open socket would then sit until the heartbeat deadline.
     pub fn start_drain(self: Arc<Self>, drain: std::time::Duration) {
+        self.draining
+            .store(true, std::sync::atomic::Ordering::Release);
         let trunk = self;
         tokio::spawn(async move {
             tokio::time::sleep(drain).await;
@@ -291,9 +345,9 @@ impl ServerTrunk {
 
         let mut told: HashMap<&str, ()> = HashMap::new();
         for (stream_id, stream) in &streams {
-            let _ = stream
+            stream
                 .client
-                .try_send_json(proto::error_on_stream(code, *stream_id));
+                .end_stream(*stream_id, proto::error_on_stream(code, *stream_id));
             told.insert(stream.client_trunk_id.as_str(), ());
         }
         for (client_trunk_id, tx) in &clients {
@@ -302,6 +356,14 @@ impl ServerTrunk {
             }
             tx.close();
         }
+    }
+
+    /// Ends this trunk for a server the operator revoked: its socket closes,
+    /// and the trunk's own teardown tells every client `trunk_lost`.
+    pub fn evict(&self) {
+        let _ = self.tx.try_send_json(proto::error(ErrorCode::AuthFailed));
+        self.tx.close();
+        self.tx.kill();
     }
 
     #[cfg(test)]
@@ -569,22 +631,42 @@ impl Challenges {
     }
 }
 
+/// Live registrations, addressed by `(server_id, pubkey)` (§4.1).
+///
+/// In `allowlist` and `tofu` the binding leaves one key per `server_id`, so
+/// this is the old one-per-id table. In `open` two keys of one `server_id`
+/// coexist and nothing done under one key touches the other.
 #[derive(Default)]
 pub struct Registrations {
-    live: Mutex<HashMap<String, Registration>>,
+    live: Mutex<HashMap<String, HashMap<KeyBytes, Registration>>>,
+}
+
+/// What a keyless lookup found for a `server_id`.
+pub enum Only {
+    None,
+    One(Registration),
+    Several,
 }
 
 impl Registrations {
     /// Installs a registration, returning the trunk it displaced.
     ///
-    /// A new `REGISTER_SERVER` for a `server_id` that already has a live trunk
-    /// succeeds (§4.2 supersession): anyone completing the challenge already
-    /// holds the private key, so this is a reconnect, not a hijack.
-    pub fn install(&self, server_id: &str, registration: Registration) -> Option<Registration> {
+    /// A new `REGISTER_SERVER` for a `(server_id, pubkey)` that already has a
+    /// live trunk succeeds (§4.2 supersession): anyone completing the
+    /// challenge already holds the private key, so this is a reconnect, not a
+    /// hijack. A different key displaces nothing.
+    pub fn install(
+        &self,
+        server_id: &str,
+        key: KeyBytes,
+        registration: Registration,
+    ) -> Option<Registration> {
         self.live
             .lock()
             .expect("registrations mutex")
-            .insert(server_id.to_string(), registration)
+            .entry(server_id.to_string())
+            .or_default()
+            .insert(key, registration)
     }
 
     /// Removes a registration **only if `trunk_id` still owns it**.
@@ -593,32 +675,75 @@ impl Registrations {
     /// connection then notices its socket is gone and unregisters; an
     /// unconditional remove would delete the *new* trunk's entry and take the
     /// server offline on a successful reconnect.
-    pub fn release(&self, server_id: &str, trunk_id: &str) {
+    pub fn release(&self, server_id: &str, key: KeyBytes, trunk_id: &str) {
         let mut live = self.live.lock().expect("registrations mutex");
-        if live.get(server_id).is_some_and(|r| r.trunk_id == trunk_id) {
+        let Some(keys) = live.get_mut(server_id) else {
+            return;
+        };
+        if keys.get(&key).is_some_and(|r| r.trunk_id == trunk_id) {
+            keys.remove(&key);
+        }
+        if keys.is_empty() {
             live.remove(server_id);
         }
     }
 
-    pub fn touch(&self, server_id: &str, trunk_id: &str, now: Instant) {
+    pub fn touch(&self, server_id: &str, key: KeyBytes, trunk_id: &str, now: Instant) {
         let mut live = self.live.lock().expect("registrations mutex");
-        if let Some(registration) = live.get_mut(server_id)
+        if let Some(registration) = live.get_mut(server_id).and_then(|keys| keys.get_mut(&key))
             && registration.trunk_id == trunk_id
         {
             registration.last_seen = now;
         }
     }
 
-    pub fn get(&self, server_id: &str) -> Option<Registration> {
+    pub fn get(&self, server_id: &str, key: &KeyBytes) -> Option<Registration> {
         self.live
             .lock()
             .expect("registrations mutex")
             .get(server_id)
+            .and_then(|keys| keys.get(key))
             .cloned()
     }
 
+    /// For a `HELLO` that names no key (§5, a client older than 115).
+    pub fn only(&self, server_id: &str) -> Only {
+        let live = self.live.lock().expect("registrations mutex");
+        let Some(keys) = live.get(server_id) else {
+            return Only::None;
+        };
+        let mut regs = keys.values();
+        match (regs.next(), regs.next()) {
+            (None, _) => Only::None,
+            (Some(one), None) => Only::One(one.clone()),
+            (Some(_), Some(_)) => Only::Several,
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.live.lock().expect("registrations mutex").len()
+        self.live
+            .lock()
+            .expect("registrations mutex")
+            .values()
+            .map(HashMap::len)
+            .sum()
+    }
+
+    /// Keeps the registrations `keep` accepts and returns the rest, removed.
+    pub fn retain(&self, keep: impl Fn(&str, &KeyBytes) -> bool) -> Vec<Registration> {
+        let mut live = self.live.lock().expect("registrations mutex");
+        let mut gone = vec![];
+        for (server_id, keys) in live.iter_mut() {
+            keys.retain(|key, registration| {
+                let kept = keep(server_id, key);
+                if !kept {
+                    gone.push(registration.clone());
+                }
+                kept
+            });
+        }
+        live.retain(|_, keys| !keys.is_empty());
+        gone
     }
 
     pub fn is_empty(&self) -> bool {
@@ -921,15 +1046,43 @@ mod tests {
             trunk: Arc::new(ServerTrunk::new(Tx::detached(1).0)),
         };
 
-        registrations.install("srv_A", make("trk_old"));
-        let displaced = registrations.install("srv_A", make("trk_new"));
+        let k = key(1).bytes();
+        registrations.install("srv_A", k, make("trk_old"));
+        let displaced = registrations.install("srv_A", k, make("trk_new"));
         assert_eq!(displaced.unwrap().trunk_id, "trk_old");
 
         // The old connection now notices its socket closed and cleans up.
-        registrations.release("srv_A", "trk_old");
-        assert_eq!(registrations.get("srv_A").unwrap().trunk_id, "trk_new");
+        registrations.release("srv_A", k, "trk_old");
+        assert_eq!(registrations.get("srv_A", &k).unwrap().trunk_id, "trk_new");
 
-        registrations.release("srv_A", "trk_new");
+        registrations.release("srv_A", k, "trk_new");
         assert!(registrations.is_empty());
+    }
+
+    #[test]
+    fn registrations_under_two_keys_of_one_server_id_coexist() {
+        let registrations = Registrations::default();
+        let make = |trunk_id: &str| Registration {
+            trunk_id: trunk_id.to_string(),
+            connected_at: SystemTime::now(),
+            last_seen: Instant::now(),
+            trunk: Arc::new(ServerTrunk::new(Tx::detached(1).0)),
+        };
+        let (a, b) = (key(1).bytes(), key(2).bytes());
+        assert!(matches!(registrations.only("srv_A"), Only::None));
+
+        registrations.install("srv_A", a, make("trk_a"));
+        assert!(matches!(registrations.only("srv_A"), Only::One(r) if r.trunk_id == "trk_a"));
+        assert!(registrations.install("srv_A", b, make("trk_b")).is_none());
+        assert!(matches!(registrations.only("srv_A"), Only::Several));
+        assert_eq!(registrations.len(), 2);
+
+        assert_eq!(registrations.get("srv_A", &a).unwrap().trunk_id, "trk_a");
+        assert_eq!(registrations.get("srv_A", &b).unwrap().trunk_id, "trk_b");
+        // A release under one key never frees the other.
+        registrations.release("srv_A", a, "trk_b");
+        registrations.release("srv_A", b, "trk_b");
+        assert_eq!(registrations.get("srv_A", &a).unwrap().trunk_id, "trk_a");
+        assert!(registrations.get("srv_A", &b).is_none());
     }
 }

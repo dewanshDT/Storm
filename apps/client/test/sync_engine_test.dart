@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -10,7 +12,7 @@ import 'package:storm/sync/sync_engine.dart';
 import 'fake_server.dart';
 
 /// Offline, outbox and reconnect behaviour — scenarios 3-6 and 9 of the sync
-/// matrix in PLAN.md, exercised in-process.
+/// matrix (the vault's sync design notes), exercised in-process.
 ///
 /// A fake server stands in for storm-server so connectivity can be cut
 /// deterministically. `unreachable` throws a socket-style error (what a dead
@@ -38,7 +40,7 @@ void main() {
   });
 
   tearDown(() async {
-    engine.dispose();
+    if (!engine.isDisposed) engine.dispose();
     await cache.close();
   });
 
@@ -431,6 +433,55 @@ void main() {
       await engine.sync();
 
       expect(engine.lastSyncedAt, first);
+    });
+  });
+
+  group('disposed mid-sync', () {
+    // Sign-out and a server or vault switch dispose the engine and close its
+    // cache while a pull a change frame scheduled may still be running.
+    test('a pull answered after dispose touches nothing', () async {
+      await seed('n1', 'original\n');
+      server.notes.remove('n1');
+      server.pushChange('n1', 'deleted', 1);
+      server.syncGate = Completer<void>();
+
+      final pending = engine.sync();
+      await pumpEventQueue();
+      engine.dispose();
+      await cache.close();
+      server.syncGate!.complete();
+
+      await expectLater(pending, completes);
+    });
+
+    test('a note fetch answered after dispose touches nothing', () async {
+      await seed('n1', 'original\n');
+      server.notes['n1'] = server.notes['n1']!.copyWith(
+        content: 'changed elsewhere\n',
+        version: 2,
+      );
+      server.pushChange('n1', 'updated', 2);
+      server.noteGate = Completer<void>();
+
+      final pending = engine.sync();
+      await pumpEventQueue();
+      engine.dispose();
+      await cache.close();
+      server.noteGate!.complete();
+
+      await expectLater(pending, completes);
+    });
+
+    test('a scheduled pull never runs after dispose', () async {
+      await seed('n1', 'original\n');
+      final before = server.requests;
+
+      engine.debugSimulateChangeFrame();
+      engine.dispose();
+      await cache.close();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
+      expect(server.requests, before);
     });
   });
 

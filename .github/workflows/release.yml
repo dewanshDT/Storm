@@ -327,9 +327,44 @@ jobs:
             target/x86_64-apple-darwin/release/storm-server \
             -output dist/pkg/storm-server
           lipo -info dist/pkg/storm-server
-          codesign --force --sign - dist/pkg/storm-server
-          codesign --verify --verbose dist/pkg/storm-server
-          dist/pkg/storm-server --version
+      # Decision 119: the macOS firewall remembers "allow incoming" per signing
+      # identity. An ad-hoc signature is new on every build, so each update
+      # would ask again; a Developer ID keeps the approval. With the secrets
+      # set, the release fails unless the binary carries that identity.
+      - name: Sign the server binary
+        working-directory: apps/server
+        env:
+          CERT_P12: ${{ secrets.STORM_MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.STORM_MACOS_CERT_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.STORM_MACOS_SIGN_IDENTITY }}
+        run: |
+          set -eu
+          bin=dist/pkg/storm-server
+          if [ -n "$CERT_P12" ] && [ -n "$SIGN_IDENTITY" ]; then
+            kc="$RUNNER_TEMP/storm-signing.keychain-db"
+            kcpw=$(openssl rand -hex 16)
+            security create-keychain -p "$kcpw" "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p "$kcpw" "$kc"
+            printf '%s' "$CERT_P12" | base64 --decode >"$RUNNER_TEMP/storm-cert.p12"
+            security import "$RUNNER_TEMP/storm-cert.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+            rm -f "$RUNNER_TEMP/storm-cert.p12"
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" >/dev/null
+            # shellcheck disable=SC2046
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+            info=$(codesign -dvv "$bin" 2>&1)
+            printf '%s\n' "$info"
+            printf '%s\n' "$info" | grep -q '^Authority=' || { echo "::error::storm-server is not signed with an identity"; exit 1; }
+            if printf '%s\n' "$info" | grep -q 'Signature=adhoc'; then echo "::error::storm-server is ad-hoc signed"; exit 1; fi
+            printf '%s\n' "$info" | grep -Eq '^TeamIdentifier=[A-Z0-9]{10}$' || { echo "::error::storm-server has no Team ID"; exit 1; }
+          else
+            echo "::warning::No macOS signing secrets (STORM_MACOS_CERT_P12_BASE64, STORM_MACOS_CERT_PASSWORD, STORM_MACOS_SIGN_IDENTITY): storm-server is ad-hoc signed, so the macOS firewall asks again after every update (decision 119)."
+            codesign --force --sign - "$bin"
+            codesign --verify --verbose "$bin"
+          fi
+          "$bin" --version
       - name: Package tarball
         working-directory: apps/server
         run: |
@@ -356,7 +391,8 @@ jobs:
 
           Status, stop, remove (your notes in ~/Storm are always kept):
             storm-server status | down | uninstall
-          Ad-hoc signed and not notarized. Full guide: deploy/README.md.
+          Signed with a Developer ID when the release had one, otherwise
+          ad-hoc; not notarized. Full guide: deploy/README.md.
           EOF
           tar -C dist/pkg -czf "dist/storm-server-${VERSION}-macos-universal.tar.gz" \
             storm-server storm-backup.sh web LICENSE README-macos.txt

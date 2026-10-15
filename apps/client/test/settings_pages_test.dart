@@ -1,16 +1,19 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:storm/agent/oauth_links.dart';
+import 'package:storm/api/connection_log.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/pairing_screen.dart';
 import 'package:storm/ui/settings/settings_shell.dart';
+import 'package:storm/ui/settings/settings_widgets.dart';
 import 'package:storm/ui/tokens.dart';
 
 import 'fake_server.dart';
@@ -176,6 +179,7 @@ void main() {
               .subtract(const Duration(hours: 2))
               .toUtc()
               .toIso8601String(),
+          'paired_by': 'lan_password',
         },
         {
           'id': 'dev_old',
@@ -201,7 +205,10 @@ void main() {
       final c = await withDevices(tester, desk);
       expect(find.text('MacBook (this device)'), findsOneWidget);
       expect(find.text('Pixel 8'), findsOneWidget);
-      expect(find.text('active 2h ago'), findsOneWidget);
+      expect(
+        find.text('active 2h ago · paired on local network'),
+        findsOneWidget,
+      );
       expect(find.text('Old laptop'), findsNothing, reason: 'revoked');
       expect(find.byKey(const Key('sign-out')), findsOneWidget);
       expect(
@@ -573,7 +580,7 @@ void main() {
         settings: const Settings(
           baseUrl: 'http://storm.home:7420',
           accessToken: 'sta_test',
-          // base64url of 0x4F 0x2A 0x91 …
+          // SHA-256 of 0x4F 0x2A 0x91 0 … 0 starts C670 7650 3088 8312.
           serverPublicKey: 'TyqRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
           activeVault: FakeServer.primaryVault,
         ),
@@ -582,8 +589,11 @@ void main() {
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'connection');
       expect(find.text('storm.home:7420'), findsOneWidget);
-      expect(find.text('verified · 4F:2A:91…'), findsOneWidget);
+      expect(find.text('verified · C670 7650 3088 8312'), findsOneWidget);
       expect(find.text('relay.example.net'), findsOneWidget);
+      // Configured, but not in the set the server says it is registered
+      // with (116m).
+      expect(find.text('Not connected'), findsOneWidget);
 
       await tapKey(tester, 'add-relay');
       await tester.enterText(
@@ -599,6 +609,95 @@ void main() {
 
       await tapKey(tester, 'remove-relay-wss://relay.example.net');
       expect(serverOf(c).relays, ['wss://relay.two.net']);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('removing a relay offers to change the password and sign '
+        'every other device out (116j)', (tester) async {
+      final c = shellContainer(
+        settings: const Settings(
+          baseUrl: 'http://test',
+          accessToken: 'sta_test',
+          deviceId: 'dev_me',
+          activeVault: FakeServer.primaryVault,
+        ),
+      );
+      final server = serverOf(c)
+        ..relays = ['wss://relay.example.net']
+        ..devices.addAll([
+          {'id': 'dev_me', 'name': 'MacBook', 'paired': '2026-10-01T00:00:00Z'},
+          {
+            'id': 'dev_phone',
+            'name': 'Pixel',
+            'paired': '2026-10-01T00:00:00Z',
+          },
+        ]);
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+
+      await tapKey(tester, 'remove-relay-wss://relay.example.net');
+      expect(server.relays, isEmpty);
+      await tapKey(tester, 'confirm-after-relay');
+      await tester.enterText(
+        find.byKey(const Key('prompt-field')),
+        'correct horse',
+      );
+      await tapKey(tester, 'prompt-ok');
+      await tester.enterText(
+        find.byKey(const Key('prompt-field')),
+        'battery staple',
+      );
+      await tapKey(tester, 'prompt-ok');
+      await tester.pumpAndSettle();
+
+      expect(server.password, 'battery staple');
+      final revoked = {
+        for (final d in server.devices) d['id']: d['revoked'] != null,
+      };
+      expect(revoked, {'dev_me': false, 'dev_phone': true});
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the server can stop being discoverable (decision 118)', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      serverOf(c).discoverable = true;
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      expect(find.text('Discoverable on this network'), findsOneWidget);
+      expect(
+        find.text(
+          'Lets devices on your Wi-Fi find this server and pair with your '
+          'password. Turn off to pair by QR only.',
+        ),
+        findsOneWidget,
+      );
+      await tapKey(tester, 'discoverable-toggle');
+      expect(serverOf(c).discoverable, isFalse);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a server started with --no-discovery cannot be switched on', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      serverOf(c)
+        ..discoverable = true
+        ..discoveryForcedOff = true;
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      expect(find.textContaining('--no-discovery'), findsOneWidget);
+      await tapKey(tester, 'discoverable-toggle');
+      expect(serverOf(c).discoverable, isTrue, reason: 'nothing was sent');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an older server shows no discovery switch', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      expect(find.byKey(const Key('discoverable')), findsNothing);
       await disposeShell(tester, c);
     });
 
@@ -619,6 +718,59 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('the relays note says a relay can read the traffic', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      final note = tester
+          .widget<SettingsNote>(find.byKey(const Key('relays-note')))
+          .text;
+      expect(note, contains('whoever runs a relay can read what passes'));
+      expect(note, isNot(contains("can't read")));
+      await tapKey(tester, 'add-relay');
+      expect(find.textContaining('can read the traffic'), findsOneWidget);
+      expect(find.textContaining('cannot read'), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the connection log copies without a credential', (
+      tester,
+    ) async {
+      final calls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          calls.add(call);
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      ConnectionLog.instance
+        ..clear()
+        ..add('race start: selfHosted wss://relay.example.net');
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      await tapKey(tester, 'copy-connection-log');
+      final copied =
+          (calls.lastWhere((c) => c.method == 'Clipboard.setData').arguments
+                  as Map)['text']
+              as String;
+      expect(
+        copied,
+        contains('race start: selfHosted wss://relay.example.net'),
+      );
+      expect(copied, isNot(contains('sta_')));
+      await disposeShell(tester, c);
+    });
+
     testWidgets('disconnect asks, then forgets the server', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);
@@ -626,6 +778,39 @@ void main() {
       await tapKey(tester, 'disconnect');
       await tapKey(tester, 'confirm-disconnect');
       expect(c.read(settingsProvider).value!.baseUrl, isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('disconnect revokes this device on the server, so pairing '
+        'again leaves no duplicate', (tester) async {
+      final c = shellContainer(
+        settings: const Settings(
+          baseUrl: 'http://test',
+          accessToken: 'sta_test',
+          deviceId: 'dev_this',
+          deviceSecret: 'sec',
+          theme: StormPreset.stormDark,
+          activeVault: FakeServer.primaryVault,
+        ),
+      );
+      serverOf(c).devices.addAll([
+        {'id': 'dev_this', 'name': 'Pixel 10'},
+        {'id': 'dev_other', 'name': 'Mac'},
+      ]);
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      await tapKey(tester, 'disconnect');
+      await tapKey(tester, 'confirm-disconnect');
+      expect(c.read(settingsProvider).value!.deviceId, isEmpty);
+      final devices = serverOf(c).devices;
+      expect(
+        devices.firstWhere((d) => d['id'] == 'dev_this')['revoked'],
+        isNotNull,
+      );
+      expect(
+        devices.firstWhere((d) => d['id'] == 'dev_other')['revoked'],
+        isNull,
+      );
       await disposeShell(tester, c);
     });
   });

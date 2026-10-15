@@ -153,7 +153,7 @@ async fn accept_loop(
 ) {
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
     loop {
-        let (socket, peer) = match tcp.accept().await {
+        let (mut socket, peer) = match tcp.accept().await {
             Ok(accepted) => accepted,
             Err(e) => {
                 // Usually EMFILE. Spinning on it would starve everything else,
@@ -163,8 +163,9 @@ async fn accept_loop(
                 continue;
             }
         };
+        crate::no_delay(&mut socket);
         let Ok(permit) = permits.clone().try_acquire_owned() else {
-            tracing::debug!(%peer, "too many handshakes in progress; dropping");
+            tracing::debug!("too many handshakes in progress; dropping");
             continue;
         };
         let acceptor = acceptor.clone();
@@ -177,8 +178,8 @@ async fn accept_loop(
                     // down; the stream is dropped with it.
                     let _ = handed_off.send((stream, peer)).await;
                 }
-                Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
-                Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
+                Ok(Err(e)) => tracing::debug!(error = %e, "TLS handshake failed"),
+                Err(_) => tracing::debug!("TLS handshake timed out"),
             }
         });
         if ready.is_closed() {

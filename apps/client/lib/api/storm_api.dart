@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import 'auth_models.dart';
 import 'models.dart';
+import 'resumable_get.dart';
 
 /// REST client for `storm-server`.
 ///
@@ -183,6 +184,17 @@ class StormApi {
     );
   }
 
+  /// Settings › Connection › "Discoverable on this network" (decision 118).
+  Future<void> setDiscoverable(bool on) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/config/discovery'),
+        headers: _headers,
+        body: jsonEncode({'enabled': on}),
+      ),
+    );
+  }
+
   /// Replaces the configured relay list. The server refuses the whole list
   /// on one bad URL.
   Future<List<String>> setRelays(List<String> relays) async {
@@ -208,6 +220,21 @@ class StormApi {
   }
 
   /// Revokes a device and every session it holds.
+  /// Changes the account password; the server checks [current] first.
+  Future<void> changePassword(String current, String next) async {
+    final r = await _client.post(
+      _uri('/v1/auth/password'),
+      headers: {..._headers, 'content-type': 'application/json'},
+      body: jsonEncode({'current_password': current, 'new_password': next}),
+    );
+    if (r.statusCode < 200 || r.statusCode >= 300) {
+      throw StormApiException(
+        r.statusCode,
+        r.statusCode == 401 ? 'wrong password' : 'HTTP ${r.statusCode}',
+      );
+    }
+  }
+
   Future<void> revokeDevice(String id) async {
     final r = await _client.delete(
       _uri('/v1/auth/devices/${Uri.encodeComponent(id)}'),
@@ -437,22 +464,24 @@ class StormApi {
   }
 
   Future<List<int>> attachment(String vaultId, String path) async {
-    final r = await _client.get(
-      _uri(_v(vaultId, '/attachments/${_path(path)}')),
-      headers: {'Authorization': 'Bearer $token'},
-    );
-    if (r.statusCode < 200 || r.statusCode >= 300) {
-      throw StormApiException(r.statusCode, 'HTTP ${r.statusCode}');
+    try {
+      return await resumableGet(
+        _client,
+        _uri(_v(vaultId, '/attachments/${_path(path)}')),
+        {'Authorization': 'Bearer $token'},
+      );
+    } on http.ClientException catch (e) {
+      final status = RegExp(r'^HTTP (\d+)$').firstMatch(e.message);
+      if (status == null) rethrow;
+      throw StormApiException(int.parse(status.group(1)!), e.message);
     }
-    return r.bodyBytes;
   }
 
-  /// A URL an `Image.network` can fetch directly.
-  ///
-  /// The credential rides in the query string because Flutter's image widgets
-  /// can't set headers on the request they make.
-  Uri attachmentUrl(String vaultId, String path) =>
-      _uri(_v(vaultId, '/attachments/${_path(path)}'), {'token': credential});
+  /// Where an attachment lives, for [StormImageProvider], which sends the
+  /// credential as a header on this client. No credential in the URL: the
+  /// query-string form this replaced was never used by the app.
+  Uri attachmentUri(String vaultId, String path) =>
+      _uri(_v(vaultId, '/attachments/${_path(path)}'));
 
   /// A single-use, 60-second credential for the change-feed handshake.
   ///

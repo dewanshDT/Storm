@@ -2,7 +2,7 @@
 //! a tunnelled HTTP exchange.
 //!
 //! ```text
-//! Client → Relay:  HELLO { server_id }
+//! Client → Relay:  HELLO { server_id, pubkey }
 //! Relay → Client:  READY { client_trunk_id }
 //! Client → Relay:  OPEN_STREAM { attempt_id }
 //! Relay → Client:  STREAM_READY { attempt_id, stream_id }
@@ -26,9 +26,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::Relay;
-use crate::auth::validate_server_id;
+use crate::auth::{KeyBytes, decode_key, validate_server_id};
+use crate::config::Mode;
 use crate::proto::{self, ErrorCode, Frame, Hello};
-use crate::state::ServerTrunk;
+use crate::state::{HeadClaim, Only, OpenRefused, Registration, ServerTrunk};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
 
 /// The largest `attempt_id` the relay will echo.
@@ -47,6 +48,7 @@ pub async fn serve(
     socket: axum::extract::ws::WebSocket,
     relay: Arc<Relay>,
     path_server_id: String,
+    query_key: Option<String>,
     peer: SocketAddr,
 ) {
     // The byte budget applies here and only here: this is the queue the
@@ -62,7 +64,14 @@ pub async fn serve(
     // the door, so anyone who can connect can start one and leave it hanging.
     let opened = match tokio::time::timeout(
         relay.config.handshake_timeout,
-        hello(&mut rx, &tx, &relay, &path_server_id, peer.ip()),
+        hello(
+            &mut rx,
+            &tx,
+            &relay,
+            &path_server_id,
+            query_key.as_deref(),
+            peer.ip(),
+        ),
     )
     .await
     {
@@ -94,7 +103,7 @@ pub async fn serve(
     let orphaned = session.trunk.close_streams_of(&session.client_trunk_id);
     let server_tx = session.trunk.tx();
     for stream_id in orphaned {
-        let _ = server_tx.try_send_json(proto::close_stream(stream_id));
+        server_tx.close_toward_origin(stream_id);
     }
 
     tracing::info!(
@@ -110,6 +119,9 @@ struct Session {
     /// supersession replaces the registration; this client stays on the trunk
     /// its streams are scoped to and learns about the change as `trunk_lost`.
     trunk: Arc<ServerTrunk>,
+    /// This client's own lane toward the origin (§5.5, decision 116d). Its
+    /// opens, heads and bodies wait only behind its own earlier frames.
+    to_origin: Tx,
 }
 
 async fn hello(
@@ -117,11 +129,13 @@ async fn hello(
     tx: &Tx,
     relay: &Relay,
     path_server_id: &str,
+    query_key: Option<&str>,
     peer_ip: std::net::IpAddr,
 ) -> Result<Session, Fault> {
     // Rate limit HELLO attempts per source IP.
     if !relay.check_hello_rate_limit(peer_ip) {
-        tracing::info!(peer_ip = %peer_ip, "rate limiting HELLO");
+        // That it happened, never from where (§6.3, decision 114b).
+        tracing::info!("rate limiting HELLO");
         return Err(ErrorCode::RateLimited.into());
     }
 
@@ -133,23 +147,42 @@ async fn hello(
         ErrorCode::ProtocolError
     })?;
 
-    let frame = trunk::recv_control(rx).await?;
+    let frame = trunk::recv_handshake_control(rx, tx).await?;
     if frame.ty() != "HELLO" {
         return Err(ErrorCode::ProtocolError.into());
     }
+    let key = hello_key(&frame, query_key)?;
     let hello: Hello = frame.body()?;
 
-    // The `server_id` arrives twice — in the URL and in `HELLO` — and §5 does
-    // not say what a disagreement means. Refused rather than resolved: picking
-    // one silently would let a client dial one server's address and be routed
-    // to another, and there is no reading under which a mismatch is meaningful.
+    // §5: `HELLO.server_id` must equal the path. Refused rather than resolved:
+    // picking one silently would let a client dial one server's address and be
+    // routed to another.
     if hello.server_id != path_server_id {
         tracing::debug!("rejecting HELLO: server_id disagrees with the path");
         return Err(ErrorCode::ProtocolError.into());
     }
 
-    let Some(registration) = await_trunk(relay, &hello.server_id).await else {
-        tracing::debug!(server_id = %hello.server_id, "no live server trunk for HELLO");
+    let server_id = hello.server_id.as_str();
+    let found = match (relay.config.mode(), key) {
+        (_, Some(key)) => {
+            await_trunk(rx, tx, relay, || relay.registrations.get(server_id, &key)).await?
+        }
+        // Storm's open relays refuse every keyless HELLO at once (§5, the 114f
+        // addendum): without a key there is nothing to address.
+        (Mode::Open, None) => None,
+        // Before 115: the one registration, whatever its key.
+        (_, None) => {
+            await_trunk(rx, tx, relay, || {
+                match relay.registrations.only(server_id) {
+                    Only::One(registration) => Some(registration),
+                    Only::None | Only::Several => None,
+                }
+            })
+            .await?
+        }
+    };
+    let Some(registration) = found else {
+        tracing::debug!(server_id, "no live server trunk for HELLO");
         return Err(ErrorCode::ServerUnreachable.into());
     };
 
@@ -159,10 +192,38 @@ async fn hello(
         .attach_client(&client_trunk_id, tx.clone());
     tx.send_json(proto::ready(client_trunk_id.clone())).await?;
 
+    let to_origin = registration.trunk.tx().lane();
     Ok(Session {
         client_trunk_id,
         trunk: registration.trunk,
+        to_origin,
     })
+}
+
+/// The key a `HELLO` names (§5), if any: `HELLO.pubkey`, which must decode to
+/// 32 bytes and agree with `?pubkey=` when both are present. A query without
+/// a `HELLO.pubkey` names nothing; the table in §5 is keyed on the `HELLO`.
+fn hello_key(frame: &Frame, query_key: Option<&str>) -> Result<Option<KeyBytes>, Fault> {
+    let refuse = |why: &str| {
+        tracing::debug!(reason = why, "rejecting HELLO: bad pubkey");
+        Fault::from(ErrorCode::ProtocolError)
+    };
+    let query = query_key
+        .map(|q| decode_key(q).map_err(|_| refuse("query")))
+        .transpose()?;
+    let named = match frame.body.get("pubkey") {
+        None => None,
+        Some(serde_json::Value::String(text)) => {
+            Some(decode_key(text).map_err(|_| refuse("HELLO"))?)
+        }
+        Some(_) => return Err(refuse("HELLO.pubkey is not a string")),
+    };
+    if let (Some(named), Some(query)) = (named, query)
+        && named != query
+    {
+        return Err(refuse("HELLO and query disagree"));
+    }
+    Ok(named)
 }
 
 /// Waits up to `hello_wait` for a live trunk, covering a server mid-restart.
@@ -171,18 +232,38 @@ async fn hello(
 /// registration, which means registration would have to know that client trunks
 /// exist — and the wait is bounded and rare enough that the coupling costs more
 /// than the polling does.
-async fn await_trunk(relay: &Relay, server_id: &str) -> Option<crate::state::Registration> {
+///
+/// The socket is read throughout (§5 rule 3): a client may only `PING` before
+/// `READY`, and a stream frame sent during the hold would otherwise be read
+/// after `READY` and routed as if it had been sent after it.
+async fn await_trunk(
+    rx: &mut Rx,
+    tx: &Tx,
+    relay: &Relay,
+    find: impl Fn() -> Option<Registration>,
+) -> Result<Option<Registration>, Fault> {
     const POLL: std::time::Duration = std::time::Duration::from_millis(20);
     let deadline = tokio::time::Instant::now() + relay.config.hello_wait;
     loop {
-        if let Some(registration) = relay.registrations.get(server_id) {
-            return Some(registration);
+        if let Some(registration) = find() {
+            return Ok(Some(registration));
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return None;
+            return Ok(None);
         }
-        tokio::time::sleep(POLL.min(deadline - now)).await;
+        // `recv` is cancel-safe, so a poll that wins loses no frame.
+        tokio::select! {
+            () = tokio::time::sleep(POLL.min(deadline - now)) => {}
+            frame = trunk::recv(rx) => match frame? {
+                Incoming::Control(frame) if frame.ty() == "PING" => tx.send_control(proto::pong()),
+                Incoming::Control(frame) if frame.ty() == "PONG" => {}
+                _ => {
+                    tracing::debug!("refusing a stream frame sent before READY");
+                    return Err(ErrorCode::ProtocolError.into());
+                }
+            },
+        }
     }
 }
 
@@ -194,9 +275,25 @@ async fn trunk_loop(
     peer: SocketAddr,
 ) -> Fault {
     loop {
-        let incoming = match trunk::recv(rx).await {
-            Ok(incoming) => incoming,
-            Err(fault) => return fault,
+        // §5 client heartbeat: a client sends `PING` at least every 15 s, so a
+        // trunk silent for the deadline is gone, and the caller's teardown
+        // ends its streams at the origin as if it had closed. A timeout on the
+        // read itself, as on the server side, or a silent client is never
+        // noticed at all.
+        let incoming = tokio::select! {
+            biased;
+            () = tx.killed() => return Fault::Disconnected,
+            incoming = tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)) => match incoming {
+                Ok(Ok(incoming)) => incoming,
+                Ok(Err(fault)) => return fault,
+                Err(_) => {
+                    tracing::info!(
+                        client_trunk_id = %session.client_trunk_id,
+                        "client silent past the heartbeat deadline; closing its trunk"
+                    );
+                    return Fault::Disconnected;
+                }
+            },
         };
 
         let outcome = match incoming {
@@ -208,7 +305,10 @@ async fn trunk_loop(
                     Ok(false) => Ok(()),
                     Err(fault) => Err(fault),
                 },
-                "PING" => tx.send_json(proto::pong()).await,
+                "PING" => {
+                    tx.send_control(proto::pong());
+                    Ok(())
+                }
                 "PONG" => Ok(()),
                 // Including `STREAM_ACK`, `HTTP_RESPONSE_HEAD` and everything
                 // else that is server→relay: a client sending one is not a
@@ -243,6 +343,16 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
         relay.config.max_total_streams,
     ) {
         Ok(stream_id) => stream_id,
+        // §4.2: no new streams on a draining trunk. A trunk-scoped
+        // `trunk_superseded` and a closed socket send the client to the
+        // replacement at once, with no backoff (§8.4).
+        Err(OpenRefused::Draining) => {
+            tracing::debug!(
+                client_trunk_id = %session.client_trunk_id,
+                "refusing OPEN_STREAM on a draining trunk"
+            );
+            return Err(ErrorCode::TrunkSuperseded.into());
+        }
         Err(refused) => {
             // Refused **immediately**, never queued (§5.1). Queueing would make
             // an overloaded relay look exactly like a slow server, and the two
@@ -254,7 +364,11 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
             );
             // One code for both bounds. Which limit a caller hit is the relay's
             // business, and §6 has exactly one code for "a limit was hit".
-            return tx.send_json(proto::error(ErrorCode::RateLimited)).await;
+            // The `attempt_id` names the open this refuses; without it a client
+            // can only guess, and the trunk carries on either way (§5.1).
+            return tx
+                .send_json(proto::error_on_attempt(ErrorCode::RateLimited, attempt_id))
+                .await;
         }
     };
 
@@ -264,8 +378,7 @@ async fn open_stream(tx: &Tx, relay: &Relay, session: &Session, frame: Frame) ->
     tx.send_json(proto::stream_ready(attempt_id, stream_id))
         .await?;
     session
-        .trunk
-        .tx()
+        .to_origin
         .send_json(proto::stream_open(stream_id))
         .await?;
 
@@ -289,8 +402,11 @@ fn arm_ack_timeout(trunk: Arc<ServerTrunk>, client: Tx, stream_id: u32, relay: &
         trunk.close_stream(stream_id);
         // No retry (§5.1). The client owns the decision to try again; a relay
         // retrying would duplicate a request whose side effects it cannot see.
-        let _ = client.try_send_json(proto::error_on_stream(ErrorCode::ServerTimeout, stream_id));
-        let _ = trunk.tx().try_send_json(proto::close_stream(stream_id));
+        client.end_stream(
+            stream_id,
+            proto::error_on_stream(ErrorCode::ServerTimeout, stream_id),
+        );
+        trunk.tx().close_toward_origin(stream_id);
     });
 }
 
@@ -324,20 +440,40 @@ async fn forward_request_head(
     }
 
     let stream_id = proto::stream_id_of(&body)?;
-    // Enough shape to route and to be a plausible HTTP head. Not inspection:
-    // the relay never looks at a header's value or at a byte of the body (§1).
-    if !body.get("method").is_some_and(serde_json::Value::is_string)
-        || !body.get("path").is_some_and(serde_json::Value::is_string)
-        || !body
-            .get("headers")
-            .is_some_and(serde_json::Value::is_object)
-    {
+    // The trunk toward the origin is shared by every client of the server, so
+    // a head the origin could not interpret is refused here, to its sender
+    // only, and never forwarded (§5.2).
+    if !proto::is_request_head(&body) {
         return Err(ErrorCode::ProtocolError.into());
     }
 
-    let Some(server_tx) = route_client_ward(tx, session, stream_id).await? else {
-        return Ok(());
-    };
+    match session
+        .trunk
+        .claim_head(stream_id, &session.client_trunk_id)
+    {
+        HeadClaim::First => {}
+        HeadClaim::NotOwned => {
+            route_client_ward(tx, session, stream_id).await?;
+            return Ok(());
+        }
+        HeadClaim::Repeat => {
+            tracing::debug!(
+                client_trunk_id = %session.client_trunk_id,
+                stream_id,
+                "refusing a second HTTP_REQUEST_HEAD"
+            );
+            session.trunk.close_stream(stream_id);
+            tx.end_stream(
+                stream_id,
+                proto::error_on_stream(ErrorCode::StreamClosed, stream_id),
+            );
+            return session
+                .to_origin
+                .send_json(proto::close_stream(stream_id))
+                .await;
+        }
+    }
+    let server_tx = &session.to_origin;
 
     // `.ip()`, not the full socket address: the field is what the origin buckets
     // rate limits by, and an ephemeral source port would split one client into a
@@ -368,6 +504,7 @@ async fn forward_request_body(
     };
     // Forwarded as the bytes arrived, unbuffered and unrewritten (§5.2). The
     // relay does not reassemble, re-chunk or look inside a body.
+    session.trunk.count_bytes(raw.len());
     server_tx.send_raw(raw).await
 }
 
@@ -391,7 +528,7 @@ async fn route_client_ward(
         .trunk
         .client_owns(stream_id, &session.client_trunk_id)
     {
-        return Ok(Some(session.trunk.tx()));
+        return Ok(Some(session.to_origin.clone()));
     }
     tracing::debug!(
         client_trunk_id = %session.client_trunk_id,

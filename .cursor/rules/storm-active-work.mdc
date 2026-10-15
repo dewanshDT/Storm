@@ -8,7 +8,8 @@ alwaysApply: true
 Maintain live checklists in the **personal** vault using the Storm MCP:
 `Storm/Active Work.md` is the short in-flight queue and `Storm/Global Todo.md`
 is the one aggregate view (milestones, Agent Runtime phases, in-flight,
-backlog, parking lot). `PLAN.md` remains the decision log and milestone record.
+backlog, parking lot). There is no `PLAN.md`: decisions live in the vault note
+for their area, and these two notes carry status.
 
 ## When to touch them
 
@@ -32,7 +33,7 @@ backlog, parking lot). `PLAN.md` remains the decision log and milestone record.
 
 ## Do not
 
-- Duplicate the whole of `PLAN.md` into the vault notes.
+- Recreate `PLAN.md` or any decision log in the repo.
 - Create a second competing todo note; update these.
-- Skip the update because the repo `PLAN.md` already changed — update all when
+- Skip the update because a design note already changed — update all when
   the active queue moved.

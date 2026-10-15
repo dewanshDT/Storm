@@ -8,8 +8,10 @@
 # check a secret arrived on stdin and never in argv.
 #
 # Knobs (env): FAKE_UNAME_S/M, FAKE_SERVER_VERSION, FAKE_RUNTIME_VERSION,
+# FAKE_NO_MCP_CONNECT,
 # FAKE_PORT, FAKE_HEALTH_DOWN, FAKE_LATEST, FAKE_ASSETS, FAKE_DIR,
-# STORM_TEST_SYSROOT.
+# STORM_TEST_SYSROOT, FAKE_IP4_LINK, FAKE_IP6 (the routing table),
+# FAKE_FIREWALLD, FAKE_FIREWALLD_ZONES, FAKE_SUDO_DENIED.
 
 name=${0##*/}
 self=$0
@@ -65,7 +67,17 @@ case "$name" in
     if [ "$out" = "$FAKE_REAL_USER" ]; then echo "$FAKE_USER"; else printf '%s\n' "$out"; fi
     ;;
   ipconfig) [ "${2:-}" = en0 ] && echo 192.168.1.20 ;;
-  ip) echo "1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.10 uid 1000" ;;
+  ip)
+    case "$*" in
+      "-4 route show scope link")
+        printf '%b' "${FAKE_IP4_LINK-192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.10\n}"
+        ;;
+      "-6 route show")
+        printf '%b' "${FAKE_IP6-fd12:3456:789a:1::/64 dev eth0 proto ra metric 100 pref medium\n2001:db8:1::/64 dev eth0 proto ra metric 100 pref medium\nfe80::/64 dev eth0 proto kernel metric 256 pref medium\ndefault via fe80::1 dev eth0 proto ra metric 100\n}"
+        ;;
+      *) echo "1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.10 uid 1000" ;;
+    esac
+    ;;
 
   sudo)
     while [ $# -gt 0 ]; do
@@ -79,6 +91,8 @@ case "$name" in
       esac
     done
     [ $# -eq 0 ] && exit 0
+    # Someone who may not sudo: every command is refused.
+    [ -n "${FAKE_SUDO_DENIED:-}" ] && exit 1
     if [ "$1" = env ]; then
       shift
       while [ $# -gt 0 ] && [ "${1#*=}" != "$1" ]; do shift; done
@@ -162,6 +176,10 @@ case "$name" in
         echo "enrolled with http://127.0.0.1:8484 as host fake"
         ;;
       check) [ -f "$(rt_state)/host.json" ] && echo "online" ;;
+      mcp-connect)
+        [ -z "${FAKE_NO_MCP_CONNECT:-}" ] || exit 2
+        echo "Usage: storm-runtime mcp-connect --server <ID> --pk <KEY> --addr <URL>"
+        ;;
       uninstall) rm -f "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime" ;;
     esac
     ;;
@@ -268,6 +286,69 @@ case "$name" in
     else
       cp -R "$1" "$2"
     fi
+    ;;
+
+  ufw)
+    # The rules live in a file; `status` prints them the way ufw does.
+    rules="$FAKE_DIR/ufw.rules"
+    touch "$rules"
+    case "${1:-}" in
+      status)
+        printf 'Status: active\n\nTo                         Action      From\n'
+        printf -- '--                         ------      ----\n'
+        awk '{ printf "%-26s %-11s %s\n", $1, $2, $3 }' "$rules"
+        ;;
+      allow)
+        # allow from NET to any app APP | allow PORT/tcp
+        if [ "${2:-}" = from ]; then echo "$7 ALLOW $3" >>"$rules"; else echo "$2 ALLOW Anywhere" >>"$rules"; fi
+        echo "Rule added"
+        ;;
+      delete)
+        # delete allow from NET to any app APP
+        awk -v a="$8" -v n="$4" '!($1==a && $3==n)' "$rules" >"$rules.new"
+        mv "$rules.new" "$rules"
+        echo "Rule deleted"
+        ;;
+    esac
+    ;;
+
+  firewall-cmd)
+    svc="$FAKE_DIR/firewalld.services"
+    touch "$svc"
+    case "$*" in
+      --state)
+        [ -n "${FAKE_FIREWALLD:-}" ] || {
+          echo "not running"
+          exit 252
+        }
+        echo running
+        ;;
+      --get-active-zones) printf '%b' "${FAKE_FIREWALLD_ZONES-public\n  interfaces: eth0\n}" ;;
+      --reload) echo success ;;
+      *)
+        zone="" act=""
+        for a in "$@"; do
+          case "$a" in
+            --zone=*) zone=${a#--zone=} ;;
+            --add-service=* | --remove-service=* | --query-service=*) act=$a ;;
+          esac
+        done
+        case "$act" in
+          --add-service=*) echo "$zone ${act#*=}" >>"$svc" ;;
+          --remove-service=*)
+            grep -vxF "$zone ${act#*=}" "$svc" >"$svc.new" || :
+            mv "$svc.new" "$svc"
+            ;;
+          --query-service=*)
+            grep -qxF "$zone ${act#*=}" "$svc" || {
+              echo no
+              exit 1
+            }
+            echo yes
+            ;;
+        esac
+        ;;
+    esac
     ;;
 
   defaults) echo "${FAKE_APP_VERSION:-0.5.0}" ;;

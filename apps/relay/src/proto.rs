@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 /// support: an incompatible change is a new relay deployment.
 pub const PROTOCOL_VERSION: u64 = 1;
 
-/// What the relay tells a server to send it: §4.2's `PING`/`PONG` cadence.
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 15;
+/// What the relay tells a server to send it: §4.2's `PING`/`PONG` cadence,
+/// three to the deadline it is held to, so the two can never disagree
+/// (decision 116e). 15 s at the default 45 s.
+pub fn heartbeat_interval_secs(deadline: std::time::Duration) -> u64 {
+    (deadline.as_secs() / 3).max(1)
+}
 
 /// A control frame, parsed **envelope first**.
 ///
@@ -127,6 +131,10 @@ pub struct ErrorBody {
     /// Present when the failure belongs to one stream rather than the trunk.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<u32>,
+    /// The `OPEN_STREAM` this refuses (§5.1). Echoed as sent, like
+    /// `STREAM_READY` echoes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<serde_json::Value>,
 }
 
 /// The §6 codes this relay can actually emit.
@@ -140,6 +148,8 @@ pub enum ErrorCode {
     RateLimited,
     StreamClosed,
     TrunkSuperseded,
+    StreamAborted,
+    ClientBacklogged,
 }
 
 impl ErrorCode {
@@ -153,6 +163,8 @@ impl ErrorCode {
             Self::RateLimited => "rate_limited",
             Self::StreamClosed => "stream_closed",
             Self::TrunkSuperseded => "trunk_superseded",
+            Self::StreamAborted => "stream_aborted",
+            Self::ClientBacklogged => "client_backlogged",
         }
     }
 
@@ -174,6 +186,8 @@ impl ErrorCode {
             Self::RateLimited => "rate limited",
             Self::StreamClosed => "stream closed",
             Self::TrunkSuperseded => "trunk superseded",
+            Self::StreamAborted => "stream aborted",
+            Self::ClientBacklogged => "client backlogged",
         }
     }
 
@@ -182,6 +196,7 @@ impl ErrorCode {
             code: self.code(),
             message: self.message(),
             stream_id: None,
+            attempt_id: None,
         }
     }
 
@@ -190,6 +205,14 @@ impl ErrorCode {
             code: self.code(),
             message: self.message(),
             stream_id: Some(stream_id),
+            attempt_id: None,
+        }
+    }
+
+    pub fn body_on_attempt(self, attempt_id: serde_json::Value) -> ErrorBody {
+        ErrorBody {
+            attempt_id: Some(attempt_id),
+            ..self.body()
         }
     }
 }
@@ -227,13 +250,17 @@ pub fn challenge(nonce: String) -> String {
     Control::new("CHALLENGE", Challenge { nonce }).to_json()
 }
 
-pub fn registered(trunk_id: String, public_address: String) -> String {
+pub fn registered(
+    trunk_id: String,
+    public_address: String,
+    deadline: std::time::Duration,
+) -> String {
     Control::new(
         "REGISTERED",
         Registered {
             trunk_id,
             public_address,
-            heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+            heartbeat_interval_secs: heartbeat_interval_secs(deadline),
         },
     )
     .to_json()
@@ -289,6 +316,10 @@ pub fn error_on_stream(code: ErrorCode, stream_id: u32) -> String {
     Control::new("ERROR", code.body_on_stream(stream_id)).to_json()
 }
 
+pub fn error_on_attempt(code: ErrorCode, attempt_id: serde_json::Value) -> String {
+    Control::new("ERROR", code.body_on_attempt(attempt_id)).to_json()
+}
+
 pub fn pong() -> String {
     Control::new("PONG", serde_json::Map::new()).to_json()
 }
@@ -330,9 +361,61 @@ pub fn stream_id_of(body: &serde_json::Map<String, serde_json::Value>) -> Result
         .ok_or(ErrorCode::ProtocolError)
 }
 
+/// Whether a client's `HTTP_REQUEST_HEAD` has the shape §5.2 pins: `method`
+/// an HTTP token, `path` an origin-form target, `headers` an object of
+/// strings. Values are type-checked, never read: the relay does not inspect a
+/// request (§1).
+pub fn is_request_head(body: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let method = body.get("method").and_then(serde_json::Value::as_str);
+    let path = body.get("path").and_then(serde_json::Value::as_str);
+    let headers = body.get("headers").and_then(serde_json::Value::as_object);
+    method.is_some_and(is_token)
+        && path.is_some_and(is_origin_form)
+        && headers.is_some_and(|h| h.values().all(serde_json::Value::is_string))
+}
+
+/// RFC 9110 §5.6.2 `token`.
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+fn is_origin_form(s: &str) -> bool {
+    s.starts_with('/') && !s.bytes().any(|b| b <= b' ' || b == 0x7f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_head_has_string_headers_a_token_method_and_an_origin_form_path() {
+        let head = |v: serde_json::Value| is_request_head(v.as_object().unwrap());
+        let ok = serde_json::json!({
+            "method": "GET", "path": "/v1/notes?q=a%20b", "headers": {"accept": "*/*"},
+        });
+        assert!(head(ok.clone()));
+        for (field, bad) in [
+            ("headers", serde_json::json!({"x": 1})),
+            ("headers", serde_json::json!({"x": null})),
+            ("headers", serde_json::json!({"x": ["a"]})),
+            ("headers", serde_json::json!([["x", "1"]])),
+            ("method", serde_json::json!("")),
+            ("method", serde_json::json!("GE T")),
+            ("method", serde_json::json!(1)),
+            ("path", serde_json::json!("v1/notes")),
+            ("path", serde_json::json!("/a b")),
+            ("path", serde_json::json!("/a\nb")),
+        ] {
+            let mut v = ok.clone();
+            v[field] = bad.clone();
+            assert!(!head(v), "{field} = {bad}");
+        }
+        let mut missing = ok.clone();
+        missing.as_object_mut().unwrap().remove("headers");
+        assert!(!head(missing));
+    }
 
     #[test]
     fn a_missing_or_wrong_version_is_a_protocol_error() {
@@ -384,7 +467,11 @@ mod tests {
     fn every_outbound_message_carries_the_version_envelope() {
         for json in [
             challenge("nonce-0123456789".into()),
-            registered("trk_1".into(), "wss://relay/connect/srv_A".into()),
+            registered(
+                "trk_1".into(),
+                "wss://relay/connect/srv_A".into(),
+                crate::config::DEFAULT_HEARTBEAT_DEADLINE,
+            ),
             error(ErrorCode::AuthFailed),
             pong(),
         ] {

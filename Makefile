@@ -10,6 +10,8 @@
 
 SERVER := apps/server
 RELAY  := apps/relay
+CONFORMANCE := tools/relay-conformance
+RELAY_CF := apps/relay-cf
 RUNTIME := apps/runtime
 CLIENT := apps/client
 WWW    := apps/www
@@ -26,6 +28,20 @@ PORT  ?= 8484
 # pairing nonce and creates the first user, both of which are once-per-server
 # and both of which `auth_e2e.py` has already used up on $(PORT).
 AUTH_PORT ?= 8485
+# A real storm-relay for the client's relayed suite (decision 92). Not
+# 8486, the relay's own default, so a dev relay left running is not borrowed.
+RELAY_PORT ?= 8487
+# Which relay `test-live` runs the relayed suites through: rust (storm-relay)
+# or cf (apps/relay-cf under wrangler dev).
+RELAY_IMPL ?= rust
+# Its §4.1 mode: empty is each relay's own (TOFU for storm-relay, allowlist for
+# the Worker); `open` runs every relayed suite key-addressed (decision 116n).
+RELAY_MODE ?=
+# Four ports from here for the throttled-link relay test, which starts its own
+# server and storm-relay behind a slow link (decision 116b).
+THROTTLE_PORT ?= 18890
+# mcp_connect_live.py's own servers and relays take ten ports from here.
+MCP_LIVE_PORT ?= 18870
 
 .DEFAULT_GOAL := help
 
@@ -52,6 +68,7 @@ check: fmt-check lint test
 fmt-check:
 	cd $(SERVER) && cargo fmt --check
 	cd $(RELAY) && cargo fmt --check
+	cd $(CONFORMANCE) && cargo fmt --check
 	cd $(RUNTIME) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
@@ -59,11 +76,12 @@ fmt-check:
 lint:
 	cd $(SERVER) && cargo clippy --all-targets -- -D warnings
 	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
+	cd $(CONFORMANCE) && cargo clippy --all-targets -- -D warnings
 	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-runtime test-client
+test: test-server test-relay test-relay-cf test-runtime test-client
 
 ## test-server: Rust unit tests
 test-server:
@@ -75,6 +93,43 @@ test-server:
 # workspace) and a crate outside `make check` is one CI compiles first.
 test-relay:
 	cd $(RELAY) && cargo test
+	cd $(CONFORMANCE) && cargo test
+
+## relay-conformance: the SRP v1 conformance suite against any relay (RELAY_URL=ws://...)
+#
+# Black-box: the relay is known only by its URL, and must have been started
+# with tools/relay-conformance's fixture contract (README there). Optional:
+# RELAY_TOFU_URL, a relay in trust-on-first-use mode; RELAY_OPEN_URL, one in
+# open (key-addressed) mode.
+relay-conformance:
+	@test -n "$(RELAY_URL)" || { \
+		echo "usage: make relay-conformance RELAY_URL=ws://host:port [RELAY_TOFU_URL=ws://...] [RELAY_OPEN_URL=ws://...]" >&2; \
+		exit 2; }
+	@cd $(CONFORMANCE) && cargo build --release --quiet
+	RELAY_URL="$(RELAY_URL)" RELAY_TOFU_URL="$(RELAY_TOFU_URL)" RELAY_OPEN_URL="$(RELAY_OPEN_URL)" \
+		$(CONFORMANCE)/target/release/relay-conformance
+
+## relay-conformance-local: start storm-relay with the fixture contract (ports 18900-18902) and run the suite
+relay-conformance-local:
+	@cd $(RELAY) && cargo build --release --quiet
+	@cd $(CONFORMANCE) && cargo build --release --quiet
+	bash $(CONFORMANCE)/local.sh "$$PWD/$(RELAY)/target/release/storm-relay"
+
+## relay-conformance-cf: start the Worker relay under wrangler dev (ports 18910-18912) and run the suite
+#
+# Decision 108c: the same suite, allowlist, TOFU and open, with the 127.0.0.2
+# checks and without the latency check. Needs Node 22.
+relay-conformance-cf:
+	@cd $(CONFORMANCE) && cargo build --release --quiet
+	@cd $(RELAY_CF) && npm ci --no-audit --no-fund >/dev/null
+	bash $(CONFORMANCE)/cf.sh
+
+## test-relay-cf: the Cloudflare relay's typecheck + workerd tests (needs Node 22)
+#
+# Decision 108b. `npm ci` from the committed lockfile, then tsc and the vitest
+# suite, which runs inside workerd and reads docs/srp-vectors.json.
+test-relay-cf:
+	cd $(RELAY_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
 
 ## test-runtime: storm-runtime unit + provider-contract tests
 #
@@ -115,8 +170,15 @@ test-browser:
 	python3 $(CLIENT)/test_browser/web_sign_in.py "$$PWD/$(SERVER)/target/debug/storm-server" "$$PWD/$(CLIENT)/build/web"
 
 ## test-live: integration suites against a real server, started and torn down
+#
+# RELAY_IMPL=cf runs every relayed suite through the Worker relay under
+# wrangler dev, allowlisting the first server's key, instead of storm-relay
+# (decision 108c). Needs Node 22. RELAY_MODE=open runs them key-addressed.
 test-live:
+	@case "$(RELAY_IMPL)" in rust|cf) ;; *) echo "RELAY_IMPL must be rust or cf" >&2; exit 2;; esac
 	@cd $(SERVER) && cargo build --quiet
+	@cd $(RELAY) && cargo build --quiet
+	@if [ "$(RELAY_IMPL)" = cf ]; then cd $(RELAY_CF) && npm ci --no-audit --no-fund >/dev/null; fi
 	@cd $(RUNTIME) && cargo build --quiet
 	@set -e; \
 	ROOT="$$PWD"; \
@@ -148,9 +210,20 @@ test-live:
 		http://127.0.0.1:$(PORT) "$$ROOT/.dev/live-server.log")"; \
 	export STORM_SESSION STORM_DEVICE; \
 	echo "--- server e2e ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/e2e.py"; \
 	echo "--- mcp e2e ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) \
 	VAULT_ROOT="$$ROOT/.dev/live-vaults" python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- the origin role suite: this server against a relay the suite plays (decision 116l) ---"; \
+	cd "$$ROOT/tools/relay-conformance" && STORM_BASE=http://127.0.0.1:$(PORT) \
+		cargo run --quiet -- --role=origin; cd "$$ROOT"; \
+	echo "--- LAN discovery pairing: mDNS on loopback, password pairing (decision 118) ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/lan_discovery_e2e.py"; \
+	echo "--- an untrusted network: no advert, no password pairing (its own server; decision 119) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+		python3 "$$ROOT/$(SERVER)/tests/lan_untrusted_e2e.py"; \
 	echo "--- agent runtime e2e (its own server and host; decision 77c) ---"; \
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
@@ -197,16 +270,86 @@ test-live:
 		[ $$i -eq 60 ] && { echo "second auth server did not start" >&2; exit 1; }; \
 		sleep 0.5; \
 	done; \
+	echo "--- a real relay ($(RELAY_IMPL)$(if $(RELAY_MODE), $(RELAY_MODE))), registered by the first server ---"; \
+	if [ "$(RELAY_IMPL)" = cf ]; then \
+		curl -sf http://127.0.0.1:$(PORT)/v1/server | python3 -c \
+			'import json, sys; i = json.load(sys.stdin); print(i["server_id"], i["public_key"])' \
+			> "$$ROOT/.dev/live-relay-allowlist"; \
+		"$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" $(RELAY_PORT) $(or $(RELAY_MODE),allowlist) \
+			"$$ROOT/.dev/live-relay-allowlist" "$$ROOT/.dev/live-relay-cf" \
+			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
+	else \
+		"$$ROOT/$(RELAY)/target/debug/storm-relay" --bind 127.0.0.1:$(RELAY_PORT) \
+			$(if $(RELAY_MODE),--mode $(RELAY_MODE)) \
+			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
+	fi; \
+	RELAY_PID=$$!; \
+	trap 'kill $$SERVER_PID $$AUTH_PID $$RELAY_PID 2>/dev/null || true; wait $$RELAY_PID 2>/dev/null || true' EXIT; \
+	for i in $$(seq 1 120); do \
+		curl -s -o /dev/null http://127.0.0.1:$(RELAY_PORT)/ && break; \
+		[ $$i -eq 120 ] && { echo "relay did not start" >&2; cat "$$ROOT/.dev/live-relay.log" >&2; exit 1; }; \
+		sleep 0.5; \
+	done; \
+	curl -sf -o /dev/null -X PUT -H "Authorization: $$STORM_SESSION" \
+		-H 'Content-Type: application/json' \
+		-d '{"relays":["ws://127.0.0.1:$(RELAY_PORT)"]}' \
+		http://127.0.0.1:$(PORT)/v1/config/relays; \
+	echo "--- mcp e2e through mcp-connect, direct (decision 105d) ---"; \
+	STORM_BASE=http://127.0.0.1:$(PORT) VAULT_ROOT="$$ROOT/.dev/live-vaults" \
+	MCP_CONNECT_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_CONNECT_ADDR=http://127.0.0.1:$(PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- mcp e2e through mcp-connect and the real relay, the address unreachable ---"; \
+	CLOSED=$$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'); \
+	STORM_BASE=http://127.0.0.1:$(PORT) VAULT_ROOT="$$ROOT/.dev/live-vaults" \
+	MCP_CONNECT_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_CONNECT_ADDR=http://127.0.0.1:$$CLOSED \
+	MCP_CONNECT_RELAY=ws://127.0.0.1:$(RELAY_PORT) \
+		python3 "$$ROOT/$(SERVER)/tests/mcp_e2e.py"; \
+	echo "--- mcp-connect live: relay cache, LAN merge over the relay, impostors (own servers, ten ports from $(MCP_LIVE_PORT)) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
+	RELAY_IMPL=$(RELAY_IMPL) RELAY_CF_DEV="$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+	MCP_LIVE_PORT=$(MCP_LIVE_PORT) \
+		python3 "$$ROOT/$(RUNTIME)/tests/mcp_connect_live.py"; \
+	echo "--- a runtime host on the first server, for the relayed Agents suite ---"; \
+	HOST_DIR=$$(mktemp -d /tmp/storm-live-host.XXXXXX); \
+	mkdir -p "$$HOST_DIR/workspaces/storm"; \
+	printf 'workspace_roots = ["%s"]\nforbidden_roots = ["%s", "%s"]\nmax_sessions = 4\n\n[[providers]]\nid = "fake"\nkind = "fake"\n' \
+		"$$HOST_DIR/workspaces" "$$ROOT/.dev/live-state" "$$ROOT/.dev/live-vaults" \
+		> "$$HOST_DIR/runtime.toml"; \
+	curl -sf -X POST -H "Authorization: $$STORM_SESSION" -H 'Content-Type: application/json' \
+		-d '{"server_url":"http://127.0.0.1:$(PORT)"}' \
+		http://127.0.0.1:$(PORT)/v1/agent/hosts/enrollments \
+		| python3 -c 'import json, sys; print(json.load(sys.stdin)["enrollment"])' \
+		| "$$ROOT/$(RUNTIME)/target/debug/storm-runtime" enroll \
+			--state "$$HOST_DIR/state" --name live-host \
+		> "$$ROOT/.dev/live-host.log" 2>&1; \
+	"$$ROOT/$(RUNTIME)/target/debug/storm-runtime" serve \
+		--state "$$HOST_DIR/state" --config "$$HOST_DIR/runtime.toml" \
+		>> "$$ROOT/.dev/live-host.log" 2>&1 & \
+	HOST_PID=$$!; \
+	trap 'kill $$SERVER_PID $$AUTH_PID $$RELAY_PID $$HOST_PID 2>/dev/null || true; wait $$RELAY_PID 2>/dev/null || true; rm -rf "$$HOST_DIR"' EXIT; \
 	echo "--- client integration ---"; \
 	cd "$$ROOT/$(CLIENT)" && flutter test test_live/ \
 		--dart-define=STORM_SESSION="$$STORM_SESSION" \
+		--dart-define=STORM_BASE=http://127.0.0.1:$(PORT) \
+		--dart-define=STORM_LIVE_LOG="$$ROOT/.dev/live-server.log" \
+		--dart-define=STORM_RELAY_ORIGIN=http://127.0.0.1:$(PORT) \
+		--dart-define=STORM_AGENT_HOST=live-host \
 		--dart-define=STORM_AUTH_BASE=http://127.0.0.1:$(AUTH_PORT) \
-		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log"
+		--dart-define=STORM_AUTH_LOG="$$ROOT/.dev/auth-server.log" \
+		--dart-define=STORM_SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+		--dart-define=STORM_RELAY_BIN="$$ROOT/$(RELAY)/target/debug/storm-relay" \
+		--dart-define=STORM_BOOTSTRAP="$$ROOT/$(SERVER)/tests/bootstrap.py" \
+		--dart-define=STORM_THROTTLE_PORT=$(THROTTLE_PORT)
 
 ## fmt: format every codebase
 fmt:
 	cd $(SERVER) && cargo fmt
 	cd $(RELAY) && cargo fmt
+	cd $(CONFORMANCE) && cargo fmt
 	cd $(RUNTIME) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
@@ -400,7 +543,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-client test-live test-browser test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
         dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

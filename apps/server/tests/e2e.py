@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end exercise of the Storm server API — M1's exit criterion.
 
-Drives scenarios 3-7 of the sync matrix in PLAN.md against a live server,
+Drives scenarios 3-7 of the sync matrix (the vault's sync design notes) against a live server,
 checking behaviour the Rust unit tests can't: real HTTP, real files on disk,
 and the file watcher reacting to an external edit.
 
@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = "http://127.0.0.1:8484"
+BASE = os.environ.get("STORM_BASE", "http://127.0.0.1:8484")
 # **No shared token.** The cutover removed it, so this suite now signs in the
 # way a real client does — pair a device from the boot nonce, create the first
 # account, log in — via the one helper every suite shares.

@@ -11,7 +11,7 @@
 #   * everything is torn down at the end, and prod is re-checked afterwards.
 #
 # Needs to be run from a machine on the homelab LAN — the server is LAN-only
-# (PLAN.md decision 4), so this fails fast and clearly when it is not.
+# (decision 4), so this fails fast and clearly when it is not.
 #
 #   ./vm-q18.sh                  # benchmark only: copies one static binary
 #   ./vm-q18.sh --with-staging   # also deploy a throwaway server, needs

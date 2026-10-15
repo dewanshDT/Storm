@@ -1,4 +1,4 @@
-//! The host's half of the MCP Gateway (spec §11; `PLAN.md` decision 81f).
+//! The host's half of the MCP Gateway (spec §11; decision 81f).
 //!
 //! **The host forwards; it never authorizes and never holds a credential.**
 //! The server tells it which connections a session may use — ids and slugs,

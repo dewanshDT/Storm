@@ -3,30 +3,27 @@
 Self-hosted markdown notes: Flutter clients + a Rust sync server in the homelab,
 replacing Obsidian + Syncthing.
 
-## Read PLAN.md first
+## The vault is the source of truth
 
-**`PLAN.md` is the living plan and status.** Read it before starting work in
-this repo, and **update it as part of the change** — not afterwards:
+**Storm's plan, status and decisions live in the personal vault (Storm MCP),
+never in this repo.** There is no `PLAN.md`; it grew to 600 KB and was removed
+on 2026-10-15 (its text is in git history). Read the vault before starting
+work, and **update it as part of the change** — not afterwards:
 
-- A milestone changing state, a new blocker, or a finding that would have
-  changed an earlier decision all belong in `PLAN.md` in the same change that
-  produced them.
-- Its **Decision log** records settled choices and what would justify revisiting
-  each. Don't relitigate them without a reason; if one does change, amend the
-  entry with why.
-- Leaving `PLAN.md` stale is a defect. A finding that exists only in a chat
-  transcript is lost.
-
-**Also keep `Storm/Active Work.md` current** (personal vault, via Storm MCP) —
-the short in-flight checklist. Read it when starting multi-step work; update it
-when an item moves. `.cursor/rules/storm-active-work.mdc` requires this.
-`PLAN.md` still wins for decisions; Active Work is the queue.
-
-**`Storm/Global Todo.md` is the one aggregate tracking surface** — every
-milestone, the Agent Runtime phases, in-flight items, backlog and parking lot
-in a single checklist. `PLAN.md` and Active Work stay authoritative for
-decisions and the queue; Global Todo mirrors their status. When a milestone,
-phase, or queue item changes state, update Global Todo in the same change.
+- **`Storm/Active Work.md`** is the short in-flight queue. Read it when
+  starting multi-step work; update it when an item moves.
+  `.cursor/rules/storm-active-work.mdc` requires this.
+- **`Storm/Global Todo.md`** is the one aggregate checklist — every milestone,
+  the Agent Runtime phases, in-flight items, backlog and parking lot. When a
+  milestone, phase or queue item changes state, update it in the same change.
+- **Decisions are numbered** and recorded in the vault note for their area
+  (the feature's design note, `Storm/Remote/…`, the area's *Decisions* note),
+  with what would justify revisiting each. Don't relitigate a settled one
+  without a reason; if one changes, amend it there with why. Code and docs
+  cite them as "decision 77b". Active Work names the next free number.
+- **Specs are normative in the vault**, never written into the repo.
+- A finding that exists only in a chat transcript is lost. A slice that
+  lands without its vault note updated is not done.
 
 **Every vault note an agent edits carries a `summary:` in its frontmatter.**
 Add it when creating a note; refresh it whenever you update one — one
@@ -34,8 +31,8 @@ plain-text line capturing what the note is (for a change, what it now is).
 It is what search indexes and what a later agent skims first; a note whose
 summary still says "proposed" long after it shipped is a note that lied.
 
-`docs/prd.md` is the original brief and is **not** maintained.
-Where it and `PLAN.md` disagree, `PLAN.md` is current.
+`docs/prd.md` is the original brief and is **not** maintained. Where it and
+the vault disagree, the vault is current.
 
 ## Branches: `staging` is where development lands
 
@@ -60,11 +57,11 @@ Practical consequences worth knowing before you start:
 
 - **Branch from `staging`, not `main`**, or your PR will carry every commit
   that is on `staging` and not yet released, and its diff will be unreviewable.
-- **`PLAN.md`'s decision log is numbered, and `staging` may already carry
-  entries `main` has never seen.** Read `PLAN.md` **on `staging`** before
-  choosing a number. A gap is harmless; a duplicate is not.
+- **Decision numbers are global, and work on `staging` may already have used
+  some `main` has never seen.** Take the next free number from
+  `Storm/Active Work.md`. A gap is harmless; a duplicate is not.
 - When a release does happen, `main` gets the merge and the tag together — see
-  `PLAN.md`'s release entries for how versioning works.
+  the vault's *Storm Releases* for how versioning works.
 
 ## Layout
 
@@ -72,14 +69,16 @@ Practical consequences worth knowing before you start:
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
 | `apps/relay/` | `storm-relay` — the SRP v1 relay. Standalone crate; **no workspace** (R6). |
+| `tools/relay-conformance/` | Black-box SRP v1 suite every relay must pass, by URL only (decision 108a). Its `fixtures/` are the contract a relay under test is started with. |
+| `apps/relay-cf/` | The same relay on Cloudflare Workers + Durable Objects (decision 108b). TypeScript; nothing in it may live only in memory, since hibernation evicts it. |
 | `apps/server/src/gateway/` | The MCP Gateway's store, data key and upstream client (M21, decision 81). Policy stays in `ops.rs`. |
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
-| `docs/srp-v1.md` | The relay wire spec, normative. `docs/srp-vectors.json` is its shared test vectors. |
+| `docs/srp-v1.md` | A pointer: the normative relay spec is the vault note *Storm Relay Protocol*. `docs/srp-vectors.json` is its shared test vectors. |
 | *Storm Relay Dart Client* (vault) | The client half's accepted architecture. Read before writing any Dart SRP code. |
-| *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then `PLAN.md` decision 77, before touching `apps/runtime` or `/v1/agent/*`. |
-| `docs/prd.md` | Original brief. Superseded by `PLAN.md`; not maintained. |
+| *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then decision 77, before touching `apps/runtime` or `/v1/agent/*`. |
+| `docs/prd.md` | Original brief. Superseded by the vault; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
 | `docs/storm-ui-refactor.md` | M7/M8 design brief — dashboard, nav bubble, toolbar. |
 | `docs/storm-multi-vault.md` | M9/M10 design brief — vaults, folders, storage root. |
@@ -317,9 +316,10 @@ From M19 slice 2 (users and passwords):
 - **`security_events` never contains a secret** — not a password, not a hash,
   not a token. A test asserts it for every administrative act.
 
-From the relay (SRP v1 — **`docs/srp-v1.md` is the normative wire spec and
-lives in this repo**; the design rationale stays in the personal vault under
-`Storm/Remote/`, and ADRs R1–R13 in *Storm Remote Decisions*):
+From the relay (SRP v1 — **the normative wire spec is the vault note
+*Storm Relay Protocol*** (Storm MCP, personal vault); specs live in the vault,
+never in this repo. `docs/srp-v1.md` only points there, and section numbers
+cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
 
 - **The relay is never an authority (R5) and authenticates no clients (R12).**
   It has no user database, no vault data and no authorization. A client
@@ -341,22 +341,27 @@ lives in this repo**; the design rationale stays in the personal vault under
   forwards it verbatim — so a client could otherwise set headers that other
   code treats as *proxy-set* facts. `web_bootstrap_nonce` refuses to mint a
   nonce when one is present, which a client that could set them would turn
-  into a remote off-switch. The peer address comes from the accepted socket,
-  never from a header.
+  into a remote off-switch. The peer address comes from the accepted socket —
+  or, on the Worker, whose provider edge *is* the front end, from the
+  `CF-Connecting-IP` that edge attests and refuses to accept from a client
+  (403, error 1000) — never from a header a client can set.
 - **A shutdown may cancel the phases before registration, never the serving
   phase.** Connect and registration have announced nothing, so dropping them
   costs nothing. `serve_trunk` owes the relay a `DEREGISTER` — cancelling it
   leaves the relay holding the `server_id` until a heartbeat timeout, which is
   the outage `DEREGISTER` exists to prevent.
-- **The wire format is re-derived in three places and `docs/srp-vectors.json`
-  is what makes them agree.** `relay_auth_message`, `validate_nonce`,
-  `validate_server_id` and the base64url rules exist in `apps/server`,
-  `apps/relay` and `apps/client`, which cannot depend on one another. Nothing
-  in any build makes them agree, and drift surfaces at runtime as
-  `auth_failed` — identical to a genuine attack, an expired nonce and a
-  refused binding. All three test suites read the one vector file; regenerate
-  it with `tools/srp-vectors/generate.py`, and treat a changed vector as a
-  protocol change.
+- **The wire format is re-derived in five places and `docs/srp-vectors.json`
+  is what makes them agree.** The signed messages (`storm-relay-auth:v1:`,
+  `storm-challenge:v1:`, `storm-relays:v1:`), `validate_nonce`,
+  `validate_server_id`, the base64url rules, body-frame bytes and control
+  shapes exist in `apps/server`, `apps/relay`, `apps/relay-cf`, `apps/client`
+  and `apps/runtime`, which cannot depend on one another. Nothing in any build
+  makes them agree, and drift surfaces at runtime as `auth_failed` — identical
+  to a genuine attack, an expired nonce and a refused binding. All five test
+  suites read the one vector file; regenerate it with
+  `tools/srp-vectors/generate.py`, and treat a changed vector as a protocol
+  change: the vault spec first, then a conformance or role-suite check
+  (`tools/relay-conformance`, `--role=origin`).
 - **base64url, unpadded, and decoders must *reject* the alternatives.** One key
   has one spelling. `dart:convert`'s `base64Url` decoder accepts the standard
   `+/` alphabet and accepts padding; `data_encoding`'s `BASE64URL_NOPAD` does
@@ -385,6 +390,39 @@ lives in this repo**; the design rationale stays in the personal vault under
   `ReadWritePaths` entry is missing, so an NFS vault root that mounts late
   was a `226/NAMESPACE` loop, and with 0.2.9's live restart limit a dead
   server. `[Unit]` keys under `[Service]` are ignored with only a warning.
+- **Every `PING` is answered, at any point on a trunk, and a `PONG` is never
+  dropped** (SRP §4.2, decision 108c). The Worker relay `PING`s to measure
+  what a peer has read, so a `PONG` lost on a full queue reads as a stalled
+  reader. storm-server queues them on its `Control` lane, outside the
+  bounded queue.
+- **Control before bulk** (SRP §5.2, decision 116b). Every sender — storm-server,
+  storm-runtime's client, the Dart trunk, storm-relay — writes `PING`, `PONG`,
+  `STREAM_ACK`, `CLOSE` and stream `ERROR` ahead of queued body frames and
+  never drops one for want of room. Silence is not judged while a side's
+  own `PING` is unwritten.
+  Trunk sockets set `TCP_NOTSENT_LOWAT` (Linux, Android, Apple for Dart), or
+  the kernel's send buffer undoes the lane on a slow uplink. A response's
+  own `CLOSE` stays behind its body.
+- **Two relays, one spec.** `apps/relay` and `apps/relay-cf` both pass
+  `tools/relay-conformance` (`make relay-conformance-local`,
+  `make relay-conformance-cf`). A behaviour the spec leaves open is amended
+  into the vault spec in the same change, never settled in one relay's code.
+- **Password pairing is LAN-only** (decision 118). `POST
+  /v1/pairings/password` refuses a request the relay dispatched (the
+  `relay::Relayed` extension, set in `dispatch.rs`; `relay_peer_ip` alone looks
+  like any socket peer), a peer outside loopback, RFC 1918, link-local and
+  IPv6 ULA, and everything while discovery is off. The client sends the
+  password only on a direct route whose challenge verified against the
+  advertised key, with no relay candidate at all.
+- **Storm never opens a port silently, and never needs one** (decision 119).
+  Only the installers add a firewall rule, after asking, LAN-only (ufw from
+  local subnets, firewalld home/trusted zones, Windows Private), recorded in
+  `/etc/storm/lan-firewall` so uninstall removes exactly that; the package and
+  the server never run `ufw` or `firewall-cmd` against a rule. On a network the
+  OS calls untrusted (`nettrust.rs`: Windows Public, firewalld or
+  NetworkManager `public`/`external`/`drop`/`block`) the server neither
+  advertises nor accepts password pairing. Installer tests use the fakes;
+  never touch a real firewall from a test.
 - **The two signing domains must never coincide.**
   `storm-relay-auth:v1:<server_id>:<nonce>` proves the right to register at a
   relay; `storm-challenge:v1:<server_id>:<nonce>` proves identity to a client.
@@ -392,7 +430,7 @@ lives in this repo**; the design rationale stays in the personal vault under
   halves of one signed string, so a colon in *either* re-splits it.
 
 From M20 (Agent Runtime V1 — the spec is the vault's *Agent Runtime/V1
-Specification Freeze*; the slices and slice 1's decisions are `PLAN.md`
+Specification Freeze*; the slices and slice 1's decisions are
 decision 77):
 
 - **A Runtime Host is never an authority.** `storm-runtime` runs agents and
@@ -451,7 +489,7 @@ decision 77):
   (SRP §5.3).
 
 From M21 (the MCP Gateway — the spec is the vault's *MCP Gateway/V1
-Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
+Specification*; the slices are decisions 81 and 81a onward):
 
 - **`state/gateway/gateway.db` and `state/gateway/keys/` cannot be rebuilt,
   and travel together** (81b). `backup_all()` carries both, before the "no
@@ -581,7 +619,7 @@ Specification*; the slices are `PLAN.md` decisions 81 and 81a onward):
   the client shows them through `displayToolName`.
 
 From M26 (Windows — the vault's *Agent Runtime/Windows Runtime Host*, D16,
-and *Installer/Windows Server*; `PLAN.md` decision 99):
+and *Installer/Windows Server*; decision 99):
 
 - **The carrier is per platform, the ending policy is not.** `pty/` holds
   the PTY (Unix) and ConPTY (Windows) behind one interface; `cli.rs` decides

@@ -27,8 +27,12 @@ Group=storm-relay
 EnvironmentFile=/etc/storm-relay/storm-relay.env
 ExecStart=/usr/bin/storm-relay
 # Re-reads the TLS certificate and key in place (decision 71), without
-# dropping a trunk. A renewal hook runs `systemctl reload storm-relay`.
+# dropping a trunk, and the allowlist, evicting any server it no longer lists
+# (decision 116k). A renewal hook runs `systemctl reload storm-relay`.
 ExecReload=/bin/kill -HUP $MAINPID
+# Its own journal, kept at most 7 days (SRP §6.3; journald@storm-relay.conf).
+# `journalctl --namespace=storm-relay` reads it.
+LogNamespace=storm-relay
 
 # Port 443 as a non-root user, and nothing else. The bounding set drops every
 # other capability, so granting this one narrows the unit rather than widening

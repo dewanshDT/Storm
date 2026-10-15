@@ -1,5 +1,5 @@
 //! `storm-runtime` — a Storm Runtime Host, the execution plane of the Agent
-//! Runtime (`PLAN.md` decision 77; the vault's *Agent Runtime/V1
+//! Runtime (decision 77; the vault's *Agent Runtime/V1
 //! Specification Freeze* is the spec).
 //!
 //! The Storm Server is the control plane. It owns identity, ownership,
@@ -46,6 +46,15 @@
 //!   daemon socket's line format. The host forwards; it never authorizes.
 //! - [`bridge`]: `storm-runtime mcp-bridge`, the agent's stdio MCP server.
 //!
+//! ## mcp-connect (decision 105)
+//!
+//! - [`transport`]: one HTTP exchange with the server over a verified path.
+//! - [`race`]: which path (the address or a relay) reaches the server.
+//! - [`connection`]: SRP §8's Connection — single-flight races, what may
+//!   reset a transport, backoff and status (decision 116i).
+//! - [`mcp_connect`]: `storm-runtime mcp-connect`, an external MCP client's
+//!   stdio server for the server's own `/mcp`.
+//!
 //! ## macOS (D14, decision 83)
 //!
 //! - [`platform`]: everything that differs between Linux and macOS — paths,
@@ -56,15 +65,20 @@ pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod connection;
 pub mod fake;
 pub mod harness;
 pub mod host;
 pub mod identity;
 pub mod mcp;
+pub mod mcp_connect;
 pub mod platform;
 pub mod provider;
 mod pty;
+pub mod race;
 pub mod scrollback;
 pub mod serve;
+pub mod srp;
 pub mod status;
 pub mod terminal;
+pub mod transport;

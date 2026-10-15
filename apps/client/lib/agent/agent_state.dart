@@ -38,11 +38,16 @@ final sessionCredentialsProvider = Provider<(String, String)?>(
 
 /// How this client builds an [AgentApi], or null without a session. Tests
 /// override it.
+///
+/// Addressed to the saved address but sent over the session's connection,
+/// direct or relayed (decision 112). `baseUrl` stays the saved address because
+/// it is also what an enrollment tells a runtime to dial.
 final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
   final session = ref.watch(sessionCredentialsProvider);
   if (session == null) return null;
   final (baseUrl, token) = session;
-  return () => AgentApi(baseUrl: baseUrl, token: token);
+  final client = ref.watch(sessionClientProvider);
+  return () => AgentApi(baseUrl: baseUrl, token: token, client: client);
 });
 
 /// An [AgentApi] for the signed-in session, or null without one.

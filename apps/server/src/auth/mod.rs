@@ -1,6 +1,6 @@
 //! Authentication: who this server is, and who may use it.
 //!
-//! Phase 1 of the remote-access work (`PLAN.md` decisions 52 / 52a / 52c).
+//! Phase 1 of the remote-access work (decisions 52 / 52a / 52c).
 //! Five slices:
 //!
 //! 1. **Server identity** — the database and the keypair, plus the two

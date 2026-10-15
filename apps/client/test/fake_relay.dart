@@ -19,10 +19,20 @@ import 'package:storm/api/relay/srp_codec.dart';
 
 /// A scripted response the fake relay serves for a request.
 class FakeResponse {
-  FakeResponse(this.status, this.headers, this.body);
+  FakeResponse(this.status, this.headers, this.body) : stream = null;
+
+  /// A response whose body goes out chunk by chunk as [stream] yields, the way
+  /// a relay forwards an SSE stream, and ends when it does.
+  FakeResponse.streamed(
+    this.status,
+    this.headers,
+    Stream<List<int>> this.stream,
+  ) : body = const [];
+
   final int status;
   final Map<String, String> headers;
   final List<int> body;
+  final Stream<List<int>>? stream;
 }
 
 /// A handler scripted per-test.
@@ -37,7 +47,11 @@ typedef FakeHandler =
 /// Stands up a local WebSocket relay on an ephemeral port and exposes what it
 /// has been asked to do.
 class FakeRelay {
-  FakeRelay({this.onHandshake, this.handler});
+  FakeRelay({this.onHandshake, this.handler, this.helloError});
+
+  /// When set, `HELLO` is refused with a trunk-scoped `ERROR` of this code —
+  /// `server_unreachable` is what a relay with no trunk for the id answers.
+  final String? helloError;
 
   /// Fired when the client trunk sends a control message (for the test to
   /// assert on what it saw). Each frame is decoded; the first is `HELLO`.
@@ -55,7 +69,64 @@ class FakeRelay {
   FakeHandler? handler;
 
   final _streams = <int, _RequestState>{};
+
+  /// How many of the next `OPEN_STREAM`s to refuse with `rate_limited`, as a
+  /// relay at its in-flight cap does (§5.1).
+  int refuseOpens = 0;
+
+  /// Whether a refusal names its `attempt_id` (decision 106). False is a
+  /// relay that predates it: a trunk-scoped `ERROR` naming nothing.
+  bool refusalNamesAttempt = true;
+
+  /// `PING`s sent before `READY` and again after it: a relay may `PING` any
+  /// trunk to learn how much its peer has read (§4.2, decision 108c).
+  int pings = 0;
+
+  /// Every `0x01` frame the client sent, as `(stream_id, payload length)`.
+  final requestBodyFrames = <(int, int)>[];
+
+  /// Streams the client ended with its own `CLOSE`.
+  final closedByClient = <int>{};
+  final _streaming = <int, StreamSubscription<List<int>>>{};
   int _nextStream = 1;
+
+  /// How long every frame the relay sends takes to arrive, in order: a phone
+  /// on mobile data, where a probe is several round trips.
+  Duration latency = Duration.zero;
+  Future<void> _wire = Future.value();
+
+  /// Request paths the relay answers with a stream-scoped `ERROR` of the
+  /// given code instead of forwarding, as it does for a `server_timeout`.
+  final streamErrors = <String, String>{};
+
+  /// Trunks the client has opened (`HELLO`s seen).
+  int hellos = 0;
+
+  /// When set, the relay answers nothing at all, as a socket that went
+  /// silent without a FIN does.
+  bool mute = false;
+
+  /// How long the relay holds each `STREAM_READY`, as one waiting on a slow
+  /// origin's acknowledgement does.
+  Duration openDelay = Duration.zero;
+
+  /// The relay's in-flight open cap (§5.1): past it an `OPEN_STREAM` is
+  /// refused with `rate_limited` at once. Null is no cap.
+  int? openCap;
+  int _inFlightOpens = 0;
+
+  /// The most opens the client had outstanding at once.
+  int maxInFlightOpens = 0;
+
+  /// Opens refused for the cap.
+  int capRefusals = 0;
+
+  /// Sees every request head's path and headers.
+  void Function(String path, Map<String, String> headers)? onHeaders;
+
+  /// Every `HELLO` body, and every URL a trunk was dialled at.
+  final helloBodies = <Map<String, dynamic>>[];
+  final connectUris = <Uri>[];
 
   int get port => _server!.port;
 
@@ -70,6 +141,7 @@ class FakeRelay {
         await req.response.close();
         return;
       }
+      connectUris.add(req.uri);
       final socket = await WebSocketTransformer.upgrade(req);
       _socket = socket;
       socket.listen(
@@ -87,50 +159,106 @@ class FakeRelay {
     }
     if (frame is List<int>) {
       final decoded = decodeBodyFrame(frame);
-      // A 0x01 chunk contributes to the in-flight request body.
       if (decoded != null && decoded.kind == bodyRequest) {
-        _streams
-            .putIfAbsent(decoded.streamId, _RequestState.new)
-            .body
-            .addAll(decoded.payload);
+        requestBodyFrames.add((decoded.streamId, decoded.payload.length));
+        // An empty 0x01 frame ends the body (§5.2): serve then, as the origin
+        // does. Any other 0x01 chunk contributes to the body.
+        if (decoded.payload.isEmpty) {
+          unawaited(_serve(decoded.streamId));
+        } else {
+          _streams
+              .putIfAbsent(decoded.streamId, _RequestState.new)
+              .body
+              .addAll(decoded.payload);
+        }
       }
     }
   }
 
   void _onControl(String text) {
+    if (mute) return;
     final frame = SrpControl.decode(text);
-    _ws.add(Map<String, dynamic>.from(frame.body)..['type'] = frame.type);
+    // [sent] ends with the first trunk; a later trunk is still served.
+    if (!_ws.isClosed) {
+      _ws.add(Map<String, dynamic>.from(frame.body)..['type'] = frame.type);
+    }
 
     switch (frame.type) {
       case 'HELLO':
+        hellos++;
+        helloBodies.add(Map<String, dynamic>.from(frame.body));
         onHandshake?.call(Map<String, dynamic>.from(frame.body));
+        final refusal = helloError;
+        if (refusal != null) {
+          _send(SrpControl.encode('ERROR', {'code': refusal}));
+          return;
+        }
+        for (var i = 0; i < pings; i++) {
+          _send(SrpControl.encode('PING'));
+        }
         _send('{"v":1,"type":"READY","client_trunk_id":"ctk_fake"}');
+        for (var i = 0; i < pings; i++) {
+          _send(SrpControl.encode('PING'));
+        }
+      case 'PING':
+        _send(SrpControl.encode('PONG'));
       case 'OPEN_STREAM':
         final attemptId = frame.body['attempt_id'];
+        final cap = openCap;
+        if (cap != null && _inFlightOpens >= cap) {
+          capRefusals++;
+          _send(
+            SrpControl.encode('ERROR', {
+              'code': 'rate_limited',
+              'attempt_id': attemptId,
+            }),
+          );
+          return;
+        }
+        if (refuseOpens > 0) {
+          refuseOpens--;
+          _send(
+            SrpControl.encode('ERROR', {
+              'code': 'rate_limited',
+              'message': 'rate limited',
+              if (refusalNamesAttempt) 'attempt_id': attemptId,
+            }),
+          );
+          return;
+        }
         final streamId = _nextStream++;
-        _send(
+        void ready() => _send(
           SrpControl.encode('STREAM_READY', {
             'attempt_id': attemptId,
             'stream_id': streamId,
           }),
         );
+        if (openDelay == Duration.zero) {
+          ready();
+          return;
+        }
+        _inFlightOpens++;
+        if (_inFlightOpens > maxInFlightOpens) {
+          maxInFlightOpens = _inFlightOpens;
+        }
+        Timer(openDelay, () {
+          _inFlightOpens--;
+          ready();
+        });
       case 'HTTP_REQUEST_HEAD':
         final streamId = streamIdOf(frame.body);
         final state = _streams.putIfAbsent(streamId, _RequestState.new);
         state.method = frame.body['method'] as String?;
         state.path = frame.body['path'] as String?;
         state.headers = _headersOf(frame.body['headers']);
-        // Serve once the client's body chunks have drained. A bounded delay is
-        // deterministic for the small payloads these tests send; the head and
-        // the 0x01 chunks arrive as separate frames, so the serve must not run
-        // on the head frame itself.
-        unawaited(
-          Future<void>.delayed(const Duration(milliseconds: 20), () {
-            _serve(streamId);
-          }),
+        onHeaders?.call(
+          (state.path ?? '/').split('?').first,
+          state.headers ?? const {},
         );
       case 'CLOSE':
-      // Client ended a stream; nothing more to do for it.
+        final streamId = streamIdOf(frame.body);
+        closedByClient.add(streamId);
+        _streaming.remove(streamId)?.cancel();
       default:
         break;
     }
@@ -153,6 +281,13 @@ class FakeRelay {
   Future<void> _serve(int streamId) async {
     final state = _streams.remove(streamId);
     if (state == null) return;
+    final scripted = streamErrors[(state.path ?? '/').split('?').first];
+    if (scripted != null) {
+      _send(
+        SrpControl.encode('ERROR', {'code': scripted, 'stream_id': streamId}),
+      );
+      return;
+    }
     final handler = this.handler;
     if (handler == null) {
       // Nothing scripted: refuse the open like a closed channel.
@@ -177,6 +312,18 @@ class FakeRelay {
         'headers': response.headers,
       }),
     );
+    final streamed = response.stream;
+    if (streamed != null) {
+      _streaming[streamId] = streamed.listen(
+        (chunk) => _send(encodeBodyFrame(bodyResponse, streamId, chunk)),
+        onDone: () {
+          if (_streaming.remove(streamId) != null) {
+            _send(SrpControl.encode('CLOSE', {'stream_id': streamId}));
+          }
+        },
+      );
+      return;
+    }
     for (final chunk in _chunk(response.body)) {
       _send(encodeBodyFrame(bodyResponse, streamId, chunk));
     }
@@ -191,8 +338,34 @@ class FakeRelay {
   }
 
   void _send(Object text) {
-    _socket?.add(text);
+    final socket = _socket;
+    if (latency == Duration.zero) {
+      _add(socket, text);
+      return;
+    }
+    final due = DateTime.now().add(latency);
+    _wire = _wire.then((_) async {
+      final wait = due.difference(DateTime.now());
+      if (wait > Duration.zero) await Future<void>.delayed(wait);
+      _add(socket, text);
+    });
   }
+
+  /// A frame for a socket the client already closed goes nowhere, as on a
+  /// real relay.
+  void _add(WebSocket? socket, Object frame) {
+    try {
+      socket?.add(frame);
+    } on StateError {
+      // Closed.
+    }
+  }
+
+  /// Whether the last trunk's socket has closed.
+  bool get socketClosed => _socket?.closeCode != null;
+
+  /// Drops the client's trunk without a `CLOSE`, as a carrier does.
+  Future<void> dropTrunk() async => _socket?.close();
 
   void sendRaw(List<int> bytes) {
     _socket?.add(bytes);

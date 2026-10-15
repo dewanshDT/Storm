@@ -90,10 +90,14 @@ class ServerVerifier {
     try {
       signature = (await authApi.challenge(nonce)).signature;
     } on AuthApiException {
-      // The server answered and refused to sign. Older servers predate the
-      // endpoint, and a refusal is not a forgery — treat it as unreachable so
-      // the client retries rather than accusing a healthy server.
-      return ServerProof.unreachable;
+      // An answer that is not a signature over the pinned key failed the
+      // proof (§8.3 rule 3, decision 114i): `unreachable` means only that no
+      // HTTP answer arrived. Every paired server has the endpoint.
+      return ServerProof.impostor;
+    } on FormatException {
+      return ServerProof.impostor;
+    } on TypeError {
+      return ServerProof.impostor;
     } catch (_) {
       return ServerProof.unreachable;
     }

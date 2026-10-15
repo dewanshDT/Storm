@@ -1,5 +1,5 @@
 {
-  "about": "Agent conversation ids a Runtime Host reports and resumes (PLAN.md decision 89). apps/runtime and apps/server both read this file: an id one accepts and the other refuses is a resume that silently never happens.",
+  "about": "Agent conversation ids a Runtime Host reports and resumes (decision 89). apps/runtime and apps/server both read this file: an id one accepts and the other refuses is a resume that silently never happens.",
   "valid": [
     { "provider": "claude-code", "id": "80d0cf8c-8176-43b4-8206-7908d74d1387" },
     { "provider": "claude-code", "id": "0c2bf366-2db2-42da-9c3c-9498392b1f63" },

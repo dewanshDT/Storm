@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -121,8 +122,17 @@ class FakeServer {
   /// The configured relay URLs, as `PUT /v1/config/relays` stores them.
   List<String> relays = [];
 
+  /// LAN discovery's setting (decision 118); null answers as an older server.
+  bool? discoverable;
+
+  /// `--no-discovery` on the server.
+  bool discoveryForcedOff = false;
+
   /// Paired devices, as `GET /v1/auth/devices` returns them.
   final List<Map<String, dynamic>> devices = [];
+
+  /// The account password, for `POST /v1/auth/password`.
+  String password = 'correct horse';
 
   /// Access keys, as `GET /v1/keys` returns them.
   final List<Map<String, dynamic>> keys = [];
@@ -192,6 +202,11 @@ class FakeServer {
   /// For the tests that assert a request was *not* sent — "the engine stayed
   /// silent" cannot be shown by inspecting a response that never came.
   int requests = 0;
+
+  /// Holds `/v1/sync` and note fetches until completed, so a test can act
+  /// while a pull is in flight.
+  Completer<void>? syncGate;
+  Completer<void>? noteGate;
 
   http.Client get client => MockClient((request) async {
     requests++;
@@ -265,6 +280,12 @@ class FakeServer {
       );
     }
 
+    if (path == '/v1/config/discovery' && request.method == 'PUT') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      discoverable = body['enabled'] as bool;
+      return http.Response(jsonEncode(_discoveryJson()), 200, headers: j(''));
+    }
+
     if (path == '/v1/config/relays' && request.method == 'PUT') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       final next = [for (final r in body['relays'] as List) r as String];
@@ -279,6 +300,14 @@ class FakeServer {
       return http.Response(jsonEncode({'relays': relays}), 200, headers: j(''));
     }
 
+    if (path == '/v1/auth/password' && request.method == 'POST') {
+      final body = jsonDecode(request.body) as Map<String, dynamic>;
+      if (body['current_password'] != password) {
+        return http.Response('wrong password', 401);
+      }
+      password = body['new_password'] as String;
+      return http.Response('', 204);
+    }
     if (path == '/v1/auth/devices' && request.method == 'GET') {
       return http.Response(jsonEncode(devices), 200, headers: j(''));
     }
@@ -336,6 +365,7 @@ class FakeServer {
           'relays': relays,
           'agent_writes': ?agentWrites,
           'version': ?version,
+          if (discoverable != null) 'discovery': _discoveryJson(),
         }),
         200,
         headers: j(''),
@@ -462,6 +492,7 @@ class FakeServer {
     }
 
     if (path == '/v1/sync') {
+      await syncGate?.future;
       final since = int.parse(request.url.queryParameters['since'] ?? '0');
       return http.Response(
         jsonEncode({
@@ -570,6 +601,7 @@ class FakeServer {
     }
 
     if (request.method == 'GET' && path.startsWith('/v1/notes/')) {
+      await noteGate?.future;
       final note = vaultNotes[id];
       if (note == null) {
         return http.Response('{"error":"no such note"}', 404, headers: j(''));
@@ -623,4 +655,10 @@ class FakeServer {
 
     return http.Response('{"error":"unexpected"}', 500, headers: j(''));
   });
+
+  Map<String, dynamic> _discoveryJson() => {
+    'discoverable': discoverable ?? true,
+    'forced_off': discoveryForcedOff,
+    'active': (discoverable ?? true) && !discoveryForcedOff,
+  };
 }

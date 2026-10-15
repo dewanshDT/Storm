@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
+use axum::body::Bytes;
 use data_encoding::BASE64URL_NOPAD;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
@@ -52,25 +53,40 @@ struct FakeRelay {
     to_server: mpsc::UnboundedSender<Message>,
     /// Registration attempts seen, so a reconnect test can count them.
     attempts: Arc<std::sync::atomic::AtomicUsize>,
+    /// Drops the live trunk's socket without a `CLOSE`: the relay vanishing.
+    vanish: Arc<tokio::sync::Notify>,
+    /// While `false` the relay stops reading the trunk but still writes to it.
+    reading: tokio::sync::watch::Sender<bool>,
     _task: tokio::task::JoinHandle<()>,
 }
 
 impl FakeRelay {
     async fn start(behaviour: Behaviour) -> Self {
+        Self::start_with(behaviour, 15).await
+    }
+
+    async fn start_with(behaviour: Behaviour, heartbeat_secs: u64) -> Self {
         // Ephemeral port: never 8484/8485, and safe to run many at once.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let (events_tx, events) = mpsc::unbounded_channel();
         let (to_server, mut commands) = mpsc::unbounded_channel::<Message>();
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let vanish = Arc::new(tokio::sync::Notify::new());
+        let (reading, reading_rx) = tokio::sync::watch::channel(true);
 
         let task = tokio::spawn({
             let attempts = attempts.clone();
+            let vanish = vanish.clone();
+            let mut reading_rx = reading_rx;
             async move {
                 loop {
                     let Ok((socket, _)) = listener.accept().await else {
                         return;
                     };
+                    // As the real relay does, so a delay measured through the
+                    // tunnel can only be the server's own socket.
+                    socket.set_nodelay(true).unwrap();
                     attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else {
                         continue;
@@ -125,7 +141,7 @@ impl FakeRelay {
                         serde_json::json!({
                             "v":1,"type":"REGISTERED","trunk_id":"trk_test",
                             "public_address": format!("ws://relay.test/connect/{server_id}"),
-                            "heartbeat_interval_secs": 15
+                            "heartbeat_interval_secs": heartbeat_secs
                         })
                         .to_string(),
                     ))
@@ -136,20 +152,30 @@ impl FakeRelay {
                     if behaviour == Behaviour::HangAfterRegister {
                         // Registered, then dead to the world: never read,
                         // never write, never close. The socket stays open, so
-                        // the server has no error to react to.
-                        std::future::pending::<()>().await;
+                        // the server has no error to react to. Held on its own
+                        // task so a redial can still be accepted and counted.
+                        tokio::spawn(async move {
+                            let _held = ws;
+                            std::future::pending::<()>().await;
+                        });
+                        continue;
                     }
 
                     // ---- pump ---------------------------------------------
                     loop {
                         tokio::select! {
+                            _ = vanish.notified() => {
+                                let _ = events_tx.send(Event::Disconnected);
+                                break;
+                            }
+                            Ok(()) = reading_rx.changed() => continue,
                             command = commands.recv() => match command {
                                 Some(message) => {
                                     if ws.send(message).await.is_err() { break; }
                                 }
                                 None => break,
                             },
-                            incoming = ws.next() => match incoming {
+                            incoming = ws.next(), if *reading_rx.borrow() => match incoming {
                                 Some(Ok(Message::Text(text))) => {
                                     let value: serde_json::Value =
                                         serde_json::from_str(&text).unwrap();
@@ -178,8 +204,15 @@ impl FakeRelay {
             events,
             to_server,
             attempts,
+            vanish,
+            reading,
             _task: task,
         }
+    }
+
+    /// Drops the socket mid-whatever, with no `CLOSE` and no `ERROR`.
+    fn vanish(&self) {
+        self.vanish.notify_one();
     }
 
     fn send(&self, value: serde_json::Value) {
@@ -689,6 +722,184 @@ async fn a_tunnelled_get_reaches_the_router_and_comes_back_intact() {
     tunnels.shutdown().await;
 }
 
+/// SRP §4.2 (decision 108c): every `PING` is answered, including one a relay
+/// sends while the trunk's outbound queue is full. A relay may `PING` to learn
+/// how much the server has read, so a dropped `PONG` reads as a stalled server.
+#[tokio::test]
+async fn a_relay_ping_is_answered_even_behind_a_full_outbound_queue() {
+    static BIG: std::sync::OnceLock<Bytes> = std::sync::OnceLock::new();
+    let dir = tempdir::TempDir::new("storm-relay-ping").unwrap();
+    let identity = test_identity(dir.path());
+    let router = Router::new().route(
+        "/big",
+        axum::routing::get(|| async {
+            BIG.get_or_init(|| Bytes::from(vec![0u8; 4 << 20])).clone()
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.reading.send_replace(false);
+    for stream_id in 1..=24u32 {
+        relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+            "method":"GET","path":"/big","headers":{}
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    relay.send(serde_json::json!({"v":1,"type":"PING"}));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    relay.reading.send_replace(true);
+
+    loop {
+        match relay.next_event().await {
+            Event::Text(value) if value["type"] == "PONG" => break,
+            Event::Disconnected => panic!("the trunk dropped before the PONG"),
+            _ => {}
+        }
+    }
+
+    tunnels.shutdown().await;
+}
+
+fn big_download_router() -> Router {
+    static BIG: std::sync::OnceLock<Bytes> = std::sync::OnceLock::new();
+    Router::new().route(
+        "/big",
+        axum::routing::get(|| async {
+            BIG.get_or_init(|| Bytes::from(vec![0u8; 4 << 20])).clone()
+        }),
+    )
+}
+
+/// Fills the outbound queue: 24 downloads of 4 MiB toward a relay that has
+/// stopped reading.
+fn stall_behind_downloads(relay: &FakeRelay) {
+    relay.reading.send_replace(false);
+    for stream_id in 1..=24u32 {
+        relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+            "method":"GET","path":"/big","headers":{}
+        }));
+    }
+}
+
+/// Body frames the relay reads before the first control frame `wanted` picks.
+/// What the sockets themselves buffer arrives first, so a frame that went
+/// ahead of the queue still comes after a few dozen.
+async fn body_frames_before(
+    relay: &mut FakeRelay,
+    wanted: impl Fn(&serde_json::Value) -> bool,
+) -> usize {
+    let mut bodies = 0;
+    loop {
+        match relay.next_event().await {
+            Event::Text(value) if wanted(&value) => return bodies,
+            Event::Binary(_) => bodies += 1,
+            Event::Disconnected => panic!("the trunk dropped"),
+            _ => {}
+        }
+    }
+}
+
+/// SRP §5.1/§5.2 (decision 116b): `STREAM_ACK` goes ahead of the response
+/// bodies already queued, and is never dropped for want of room. Behind a
+/// full queue it used to be dropped, so every request made during a large
+/// download got `server_timeout`.
+#[tokio::test]
+async fn a_stream_ack_overtakes_a_full_download_queue() {
+    let dir = tempdir::TempDir::new("storm-relay-ack").unwrap();
+    let identity = test_identity(dir.path());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, big_download_router(), identity);
+    let _ = relay.await_registration().await;
+
+    stall_behind_downloads(&relay);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":100}));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    relay.reading.send_replace(true);
+
+    let bodies = body_frames_before(&mut relay, |v| {
+        v["type"] == "STREAM_ACK" && v["stream_id"] == 100
+    })
+    .await;
+    assert!(
+        bodies < super::client::OUTBOUND_CAPACITY / 2,
+        "the ACK waited behind {bodies} body frames"
+    );
+
+    tunnels.shutdown().await;
+}
+
+/// SRP §5.2 (decision 116b): the heartbeat overtakes queued response bodies,
+/// and the trunk is not judged silent while its own `PING` is still waiting
+/// to be written. A long download over a slow uplink used to drop the trunk
+/// at the deadline although the relay was fine.
+#[tokio::test]
+async fn a_heartbeat_overtakes_a_full_download_queue_and_a_stalled_trunk_is_not_silent() {
+    let dir = tempdir::TempDir::new("storm-relay-hb-bulk").unwrap();
+    let identity = test_identity(dir.path());
+    // A 1 s heartbeat makes the silence deadline 3 s.
+    let mut relay = FakeRelay::start_with(Behaviour::Normal, 1).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, big_download_router(), identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    stall_behind_downloads(&relay);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        registered.snapshot().len(),
+        1,
+        "the trunk was judged silent while its own PING could not be written"
+    );
+    assert_eq!(relay.attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    relay.reading.send_replace(true);
+    let bodies = body_frames_before(&mut relay, |v| v["type"] == "PING").await;
+    assert!(
+        bodies < super::client::OUTBOUND_CAPACITY / 2,
+        "the PING waited behind {bodies} body frames"
+    );
+
+    tunnels.shutdown().await;
+}
+
+/// A tunnelled response is a head, body chunks and a `CLOSE`, written one after
+/// another. With Nagle on the tunnel, each after the first waited out the
+/// relay's delayed ACK: about 40 ms a request on localhost (P1, decision 91).
+#[tokio::test]
+async fn a_tunnelled_request_does_not_wait_on_delayed_acks() {
+    let dir = tempdir::TempDir::new("storm-relay-latency").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+
+    let (_registered, tunnels) = start_tunnel(&relay.url, router.clone(), identity);
+    let _ = relay.await_registration().await;
+
+    let mut samples = Vec::new();
+    for stream_id in 1..=21 {
+        let started = std::time::Instant::now();
+        let response = relay
+            .request(stream_id, TunnelRequest::get("/v1/health"))
+            .await;
+        assert_eq!(response.status, 200);
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    assert!(
+        median < Duration::from_millis(15),
+        "median tunnelled request took {median:?}; TCP_NODELAY missing?"
+    );
+
+    tunnels.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_tunnelled_response_matches_what_the_same_request_gets_on_the_lan() {
     // R13 stated as an assertion: one `Service`, two ways in.
@@ -941,44 +1152,219 @@ async fn relay_peer_ip_becomes_the_limiters_caller_identity() {
 }
 
 #[tokio::test]
-async fn a_stream_id_already_open_is_refused_rather_than_acked_twice() {
-    // §5.1, stated exactly: a duplicate is `stream_closed`, not a second ack.
-    let dir = tempdir::TempDir::new("storm-relay-dup").unwrap();
-    let identity = test_identity(dir.path());
+async fn password_pairing_through_the_tunnel_is_lan_only() {
+    // Decision 118. The relay attests a LAN address here, as one on the
+    // client's own network would; the right password still mints nothing.
+    let dir = tempdir::TempDir::new("storm-relay-lan-pair").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+    crate::api::tests::seed_owner_with_password(&state, "correct horse battery staple").await;
     let mut relay = FakeRelay::start(Behaviour::Normal).await;
-
-    let (_registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
     let _ = relay.await_registration().await;
 
-    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":7}));
-    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
-
-    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":7}));
-    let second = relay.next_control().await;
-    assert_eq!(second["type"], "ERROR");
-    assert_eq!(second["code"], "stream_closed");
-    assert_eq!(second["stream_id"], 7);
+    let body = serde_json::json!({
+        "password": "correct horse battery staple",
+        "device_name": "Pixel 10",
+    })
+    .to_string();
+    let response = relay
+        .request(
+            1,
+            TunnelRequest {
+                method: "POST",
+                path: "/v1/pairings/password",
+                headers: vec![("content-type".into(), serde_json::json!("application/json"))],
+                peer: Some("192.168.1.40"),
+                body: Some(body.as_bytes()),
+            },
+        )
+        .await;
+    assert_eq!(response.status, 403);
+    assert_eq!(response.json()["error"], "lan_only");
+    assert!(
+        state
+            .auth_db
+            .lock()
+            .await
+            .list_devices()
+            .unwrap()
+            .is_empty()
+    );
 
     tunnels.shutdown().await;
 }
 
-#[tokio::test]
-async fn a_request_head_for_an_unopened_stream_is_refused() {
-    let dir = tempdir::TempDir::new("storm-relay-nostream").unwrap();
-    let identity = test_identity(dir.path());
-    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+// ---------------------------------------------------------------------------
+// 116a: nothing a client puts in a stream ends the trunk every client shares.
+// An origin never sends `ERROR`; it refuses one stream with `CLOSE{aborted}`.
+// ---------------------------------------------------------------------------
 
-    let (_registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+fn assert_aborted(frame: &serde_json::Value, stream_id: u32) {
+    assert_eq!(frame["type"], "CLOSE", "{frame}");
+    assert_eq!(frame["stream_id"], stream_id, "{frame}");
+    assert_eq!(frame["aborted"], true, "{frame}");
+}
+
+/// The trunk still serves another stream, and in everything the server wrote
+/// meanwhile there was no `ERROR`, and it never re-registered.
+async fn assert_trunk_serves_on(relay: &mut FakeRelay, stream_id: u32) {
+    let response = relay.request(stream_id, TunnelRequest::get("/echo")).await;
+    assert_eq!(response.status, 200);
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(200), relay.events.recv()).await
+    {
+        match event {
+            Event::Text(value) => assert_ne!(value["type"], "ERROR", "{value}"),
+            Event::Binary(_) => {}
+            other => panic!("the trunk did not stay up: {other:?}"),
+        }
+    }
+    assert_eq!(
+        relay.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the server re-registered"
+    );
+}
+
+/// `/hang` never answers, so a stream stays open for a second head.
+fn hanging_router() -> Router {
+    echo_router().route(
+        "/hang",
+        axum::routing::get(std::future::pending::<&'static str>),
+    )
+}
+
+async fn tunnel_for(dir: &std::path::Path) -> (FakeRelay, super::Tunnels) {
+    let identity = test_identity(dir);
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, hanging_router(), identity);
     let _ = relay.await_registration().await;
+    (relay, tunnels)
+}
+
+fn open(relay: &FakeRelay, stream_id: u32) {
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+}
+
+#[tokio::test]
+async fn a_head_with_a_non_string_header_value_fails_its_stream_only() {
+    // The anonymous cross-tenant DoS: this head used to fail the trunk's
+    // parse, and the server sent `ERROR` and dropped the trunk for every
+    // client of the server.
+    let dir = tempdir::TempDir::new("storm-relay-badhead").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    for (stream_id, headers) in [
+        (1, serde_json::json!({"x": 1})),
+        (2, serde_json::json!({"x": null})),
+        (3, serde_json::json!([["x", "1"]])),
+    ] {
+        open(&relay, stream_id);
+        assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+            "method":"GET","path":"/echo","headers":headers,
+        }));
+        let head = relay.next_control().await;
+        assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+        assert_eq!(head["stream_id"], stream_id);
+        assert_eq!(head["status"], 400);
+        let end = relay.next_control().await;
+        assert_eq!(end["type"], "CLOSE", "{end}");
+        assert_eq!(end["stream_id"], stream_id);
+    }
+
+    assert_trunk_serves_on(&mut relay, 9).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_served_stream_is_forgotten_so_its_id_can_be_opened_again() {
+    // §5.1: a party that sends `CLOSE{stream_id}` forgets the stream. A table
+    // that kept every served stream refused the relay's reuse of an id as
+    // "already open", and grew for the life of the trunk.
+    let dir = tempdir::TempDir::new("storm-relay-forget").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    for _ in 0..3 {
+        let response = relay.request(5, TunnelRequest::get("/echo")).await;
+        assert_eq!(response.status, 200);
+    }
+    assert_trunk_serves_on(&mut relay, 6).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stream_with_no_head_is_aborted_after_the_head_wait() {
+    let dir = tempdir::TempDir::new("storm-relay-headwait").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    open(&relay, 3);
+    let acked = std::time::Instant::now();
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    assert_aborted(&relay.next_control().await, 3);
+    assert!(
+        acked.elapsed() >= super::client::HEAD_WAIT,
+        "{:?}",
+        acked.elapsed()
+    );
+
+    // Forgotten as well as aborted: the id opens again.
+    let response = relay.request(3, TunnelRequest::get("/echo")).await;
+    assert_eq!(response.status, 200);
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_second_head_aborts_its_stream_only() {
+    let dir = tempdir::TempDir::new("storm-relay-twohead").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    open(&relay, 1);
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    for _ in 0..2 {
+        relay.send(serde_json::json!({
+            "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":1,
+            "method":"GET","path":"/hang","headers":{},
+        }));
+    }
+    assert_aborted(&relay.next_control().await, 1);
+
+    assert_trunk_serves_on(&mut relay, 2).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stream_id_already_open_is_aborted_rather_than_acked_twice() {
+    let dir = tempdir::TempDir::new("storm-relay-dup").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
+
+    open(&relay, 7);
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    open(&relay, 7);
+    assert_aborted(&relay.next_control().await, 7);
+
+    assert_trunk_serves_on(&mut relay, 8).await;
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_request_head_for_an_unopened_stream_is_aborted() {
+    let dir = tempdir::TempDir::new("storm-relay-nostream").unwrap();
+    let (mut relay, tunnels) = tunnel_for(dir.path()).await;
 
     relay.send(serde_json::json!({
         "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":42,
         "method":"GET","path":"/echo","headers":{}
     }));
-    let response = relay.next_control().await;
-    assert_eq!(response["type"], "ERROR");
-    assert_eq!(response["code"], "stream_closed");
+    assert_aborted(&relay.next_control().await, 42);
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":43,
+        "method":"GET","path":"/echo","headers":{"x":1}
+    }));
+    assert_aborted(&relay.next_control().await, 43);
 
+    assert_trunk_serves_on(&mut relay, 1).await;
     tunnels.shutdown().await;
 }
 
@@ -1228,5 +1614,1051 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
         .await;
     assert_eq!(whoami.status, 401);
 
+    tunnels.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// MCP over the tunnel (relay TODO §5, decision 95)
+// ---------------------------------------------------------------------------
+
+impl<'a> TunnelRequest<'a> {
+    fn mcp(body: &'a [u8], auth: &str) -> Self {
+        Self {
+            method: "POST",
+            path: "/mcp",
+            body: Some(body),
+            ..Default::default()
+        }
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("authorization", auth)
+    }
+}
+
+fn rpc(method: &str, params: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        .to_string()
+        .into_bytes()
+}
+
+fn tool(name: &str, args: serde_json::Value) -> Vec<u8> {
+    rpc(
+        "tools/call",
+        serde_json::json!({"name": name, "arguments": args}),
+    )
+}
+
+async fn lan(router: &Router, body: &[u8], auth: &str, host: &str) -> (u16, serde_json::Value) {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("authorization", auth)
+                .header("host", host)
+                .body(axum::body::Body::from(body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 22)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+async fn mcp_vault(router: &Router, bearer: &str, name: &str) -> String {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/vaults")
+                .header("content-type", "application/json")
+                .header("authorization", bearer)
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "name": name }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_string()
+}
+
+fn set_mcp(state: &crate::api::Shared, enabled: bool, writable: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    state.mcp_enabled.store(enabled, Relaxed);
+    state.mcp_writable.store(writable, Relaxed);
+}
+
+fn structured(response: &serde_json::Value) -> &serde_json::Value {
+    &response["result"]["structuredContent"]
+}
+
+struct McpTunnel {
+    relay: FakeRelay,
+    tunnels: super::Tunnels,
+    router: Router,
+    state: crate::api::Shared,
+    bearer: String,
+    next_stream: u32,
+    _dir: tempdir::TempDir,
+}
+
+impl McpTunnel {
+    async fn start(name: &str) -> Self {
+        let dir = tempdir::TempDir::new(name).unwrap();
+        let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+        Self::over(dir, router, identity, state).await
+    }
+
+    async fn over(
+        dir: tempdir::TempDir,
+        router: Router,
+        identity: Arc<ServerIdentity>,
+        state: crate::api::Shared,
+    ) -> Self {
+        let owner = crate::api::tests::seed_owner(&state).await;
+        let bearer = format!(
+            "Bearer {}",
+            crate::api::tests::session_token(&state, &owner).await
+        );
+        let mut relay = FakeRelay::start(Behaviour::Normal).await;
+        let (_registered, tunnels) = start_tunnel(&relay.url, router.clone(), identity);
+        let _ = relay.await_registration().await;
+        Self {
+            relay,
+            tunnels,
+            router,
+            state,
+            bearer,
+            next_stream: 1,
+            _dir: dir,
+        }
+    }
+
+    async fn relayed(&mut self, body: &[u8]) -> (u16, serde_json::Value) {
+        let bearer = self.bearer.clone();
+        self.relayed_as(body, &bearer).await
+    }
+
+    async fn relayed_as(&mut self, body: &[u8], auth: &str) -> (u16, serde_json::Value) {
+        let id = self.next_stream;
+        self.next_stream += 1;
+        let response = self.relay.request(id, TunnelRequest::mcp(body, auth)).await;
+        (response.status, response.json())
+    }
+
+    async fn lan(&self, body: &[u8]) -> (u16, serde_json::Value) {
+        lan(&self.router, body, &self.bearer, "localhost").await
+    }
+}
+
+#[tokio::test]
+async fn mcp_over_the_tunnel_answers_exactly_as_on_the_lan() {
+    let mut t = McpTunnel::start("storm-relay-mcp-parity").await;
+    set_mcp(&t.state, true, true);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+
+    let (status, made) = t
+        .relayed(&tool(
+            "create_note",
+            serde_json::json!({"vault": vault, "path": "Relayed.md", "content": "# Relayed\n\nbody\n"}),
+        ))
+        .await;
+    assert_eq!(status, 200, "{made}");
+    let note_id = structured(&made)["note"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{made}"))
+        .to_string();
+
+    let calls = [
+        rpc(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "relay-test", "version": "0"},
+            }),
+        ),
+        rpc("tools/list", serde_json::json!({})),
+        tool("get_vault", serde_json::json!({"vault": vault})),
+        tool(
+            "get_note",
+            serde_json::json!({"vault": vault, "note_id": note_id}),
+        ),
+    ];
+    for call in calls {
+        let relayed = t.relayed(&call).await;
+        let direct = t.lan(&call).await;
+        assert_eq!(relayed.0, 200, "{}", relayed.1);
+        assert_eq!(relayed, direct, "{}", String::from_utf8_lossy(&call));
+    }
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_mcp_write_merges_against_a_concurrent_lan_edit() {
+    let mut t = McpTunnel::start("storm-relay-mcp-merge").await;
+    set_mcp(&t.state, true, true);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+    let original = "# Shared\n\nfirst line\n\nmiddle\n\nlast line\n";
+
+    let (_, made) = t
+        .lan(&tool(
+            "create_note",
+            serde_json::json!({"vault": vault, "path": "Shared.md", "content": original}),
+        ))
+        .await;
+    let note = structured(&made)["note"].clone();
+    let (_, read) = t
+        .lan(&tool(
+            "get_note",
+            serde_json::json!({"vault": vault, "note_id": note["id"]}),
+        ))
+        .await;
+    let base = structured(&read)["version"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{read}"));
+    let original = structured(&read)["content"].as_str().unwrap().to_string();
+
+    // The phone's edit lands first, on the LAN…
+    let (_, phone) = t
+        .lan(&tool(
+            "update_note",
+            serde_json::json!({"vault": vault, "note_id": note["id"], "base_version": base,
+                "content": original.replace("first line", "first line, from the phone")}),
+        ))
+        .await;
+    assert_eq!(structured(&phone)["merged"], false, "{phone}");
+
+    // …and the agent's, written against the same base, arrives over the relay.
+    let (status, agent) = t
+        .relayed(&tool(
+            "update_note",
+            serde_json::json!({"vault": vault, "note_id": note["id"], "base_version": base,
+                "content": original.replace("last line", "last line, from the agent")}),
+        ))
+        .await;
+    assert_eq!(status, 200, "{agent}");
+    let result = structured(&agent);
+    assert_eq!(result["merged"], true, "{agent}");
+    assert_eq!(result["conflict"], false, "{agent}");
+    let content = result["content"].as_str().unwrap();
+    assert!(content.contains("from the phone"), "{content}");
+    assert!(content.contains("from the agent"), "{content}");
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_tool_error_over_the_tunnel_is_still_a_tool_error() {
+    let mut t = McpTunnel::start("storm-relay-mcp-tool-error").await;
+    set_mcp(&t.state, true, false);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+
+    let missing = tool(
+        "get_note",
+        serde_json::json!({"vault": vault, "note_id": "no-such-note"}),
+    );
+    let relayed = t.relayed(&missing).await;
+    assert_eq!(relayed.0, 200, "a 4xx inside a tool is not an HTTP failure");
+    assert_eq!(relayed.1["result"]["isError"], true, "{}", relayed.1);
+    assert_eq!(relayed, t.lan(&missing).await);
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_mcp_switches_gate_a_relayed_call_as_they_gate_a_lan_one() {
+    let mut t = McpTunnel::start("storm-relay-mcp-switches").await;
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+    let list = rpc("tools/list", serde_json::json!({}));
+    let write = tool(
+        "create_note",
+        serde_json::json!({"vault": vault, "path": "Nope.md", "content": "x"}),
+    );
+
+    set_mcp(&t.state, false, false);
+    let relayed = t.relayed(&list).await;
+    assert_eq!(relayed.0, 404, "{}", relayed.1);
+    assert_eq!(relayed, t.lan(&list).await);
+
+    set_mcp(&t.state, true, false);
+    let relayed = t.relayed(&list).await;
+    let names: Vec<&str> = relayed.1["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    for write_tool in crate::mcp::WRITE_TOOLS {
+        assert!(!names.contains(write_tool), "{write_tool} listed read-only");
+    }
+    assert_eq!(relayed, t.lan(&list).await);
+
+    let relayed = t.relayed(&write).await;
+    assert_eq!(relayed, t.lan(&write).await);
+    assert!(
+        relayed.1.get("error").is_some() || relayed.1["result"]["isError"] == true,
+        "a write must be refused while MCP is read-only: {}",
+        relayed.1
+    );
+    let (_, described) = t
+        .lan(&tool("get_vault", serde_json::json!({"vault": vault})))
+        .await;
+    assert_eq!(
+        structured(&described)["note_count"],
+        0,
+        "nothing was written: {described}"
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_mcp_key_works_over_the_tunnel_on_mcp_and_nowhere_else() {
+    let mut t = McpTunnel::start("storm-relay-mcp-key").await;
+    set_mcp(&t.state, true, false);
+
+    let key = {
+        use tower::ServiceExt;
+        let response = t
+            .router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/keys")
+                    .header("content-type", "application/json")
+                    .header("authorization", &t.bearer)
+                    .body(axum::body::Body::from(r#"{"name":"relayed agent"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        format!("Bearer {}", created["secret"].as_str().unwrap())
+    };
+    assert!(key.starts_with("Bearer stk_"), "{key}");
+
+    let (status, listed) = t
+        .relayed_as(&rpc("tools/list", serde_json::json!({})), &key)
+        .await;
+    assert_eq!(status, 200, "{listed}");
+    assert!(listed["result"]["tools"].as_array().is_some(), "{listed}");
+
+    let id = t.next_stream;
+    let rest = t
+        .relay
+        .request(
+            id,
+            TunnelRequest::get("/v1/vaults").header("authorization", &key),
+        )
+        .await;
+    assert_eq!(
+        rest.status, 401,
+        "an MCP key never reaches REST, relayed or not"
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_mcp_call_passes_rebinding_protection_on_a_concrete_bind() {
+    // The `Host` rewrite (dispatch.rs) end to end: with the server bound to a
+    // real address, the relay's hostname would be refused by rmcp.
+    let dir = tempdir::TempDir::new("storm-relay-mcp-host").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_mcp_hosts(
+        dir.path(),
+        crate::mcp::allowed_hosts("127.0.0.1", 8484),
+    );
+    let mut t = McpTunnel::over(dir, router, identity, state).await;
+    set_mcp(&t.state, true, false);
+    let list = rpc("tools/list", serde_json::json!({}));
+
+    let bearer = t.bearer.clone();
+    let (direct_status, _) = lan(&t.router, &list, &bearer, "relay.example.com").await;
+    assert_ne!(
+        direct_status, 200,
+        "the protection is live for a foreign Host"
+    );
+
+    let id = t.next_stream;
+    let relayed = t
+        .relay
+        .request(
+            id,
+            TunnelRequest::mcp(&list, &bearer).header("host", "relay.example.com"),
+        )
+        .await;
+    assert_eq!(
+        relayed.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&relayed.body)
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relayed_write_whose_stream_closes_before_its_body_ends_writes_nothing() {
+    let mut t = McpTunnel::start("storm-relay-mcp-cut").await;
+    set_mcp(&t.state, true, true);
+    let vault = mcp_vault(&t.router, &t.bearer, "Notes").await;
+    let call = tool(
+        "create_note",
+        serde_json::json!({"vault": vault, "path": "Half.md", "content": "never whole"}),
+    );
+
+    t.relay
+        .send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":7}));
+    assert_eq!(t.relay.next_control().await["type"], "STREAM_ACK");
+    t.relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":7,"method":"POST","path":"/mcp",
+        "headers": {"content-type":"application/json",
+            "accept":"application/json, text/event-stream","authorization": t.bearer},
+    }));
+    t.relay
+        .to_server
+        .send(Message::binary(proto::encode_body_frame(
+            proto::FRAME_REQUEST_BODY,
+            7,
+            &call[..call.len() / 2],
+        )))
+        .unwrap();
+    t.relay
+        .send(serde_json::json!({"v":1,"type":"CLOSE","stream_id":7}));
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, listed) = t
+        .lan(&tool(
+            "search",
+            serde_json::json!({"vault": vault, "query": "never whole"}),
+        ))
+        .await;
+    assert!(
+        !listed.to_string().contains("Half.md"),
+        "a request cut off mid-body must not run: {listed}"
+    );
+
+    t.tunnels.shutdown().await;
+}
+
+/// A route that holds its body unread until `release`, then records how many
+/// bytes and which digest it got.
+fn held_upload_router(
+    release: Arc<tokio::sync::Notify>,
+    served: Arc<std::sync::Mutex<Option<(usize, blake3::Hash)>>>,
+) -> Router {
+    Router::new().route(
+        "/upload",
+        axum::routing::post(move |body: axum::body::Body| async move {
+            release.notified().await;
+            if let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await {
+                *served.lock().unwrap() = Some((bytes.len(), blake3::hash(&bytes)));
+            }
+            "stored"
+        }),
+    )
+}
+
+/// Opens stream 3 as `POST /upload` and sends `frames` request-body frames of
+/// `frame` bytes back to back, then the end of body — a client at line rate.
+async fn upload_at_line_rate(relay: &mut FakeRelay, frames: usize, frame: &[u8]) {
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":3}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":3,"method":"POST","path":"/upload","headers":{},
+    }));
+    for _ in 0..frames {
+        relay
+            .to_server
+            .send(Message::binary(proto::encode_body_frame(
+                proto::FRAME_REQUEST_BODY,
+                3,
+                frame,
+            )))
+            .unwrap();
+    }
+    relay
+        .to_server
+        .send(Message::binary(proto::encode_body_frame(
+            proto::FRAME_REQUEST_BODY,
+            3,
+            b"",
+        )))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_large_upload_at_line_rate_reaches_a_slow_handler_whole() {
+    // 20 MiB as the Dart client sends it, 80 frames of 256 KiB, to a handler
+    // that has not started reading. Decision 95 bounded the buffer at 32
+    // chunks and shed this ordinary upload; decision 102 bounds it in bytes.
+    let dir = tempdir::TempDir::new("storm-relay-body-line-rate").unwrap();
+    let identity = test_identity(dir.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let served = Arc::new(std::sync::Mutex::new(None));
+    let router = held_upload_router(release.clone(), served.clone());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let frame: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    upload_at_line_rate(&mut relay, 80, &frame).await;
+    // Every frame is buffered before the handler reads a byte.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    release.notify_waiters();
+
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["status"], 200);
+    let expected = blake3::hash(&frame.repeat(80));
+    assert_eq!(*served.lock().unwrap(), Some((80 * frame.len(), expected)));
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_body_over_its_buffer_budget_is_closed_not_truncated() {
+    // Before decision 95 a full body channel was dropped, which the handler
+    // read as end-of-body: it served the prefix as the whole request.
+    let dir = tempdir::TempDir::new("storm-relay-body-shed").unwrap();
+    let identity = test_identity(dir.path());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let served = Arc::new(std::sync::Mutex::new(None));
+    let router = held_upload_router(release.clone(), served.clone());
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let frame = vec![b'x'; 1024 * 1024];
+    let frames = super::client::STREAM_BODY_BUDGET / frame.len() + 1;
+    upload_at_line_rate(&mut relay, frames, &frame).await;
+
+    let closed = relay.next_control().await;
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], 3);
+    release.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        *served.lock().unwrap(),
+        None,
+        "the handler must never see a truncated body as a whole one"
+    );
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_response_leaves_the_server_chunk_by_chunk() {
+    // A long tool call or the change feed must reach the client as it is
+    // produced; the second chunk exists only after the first has arrived.
+    let dir = tempdir::TempDir::new("storm-relay-unbuffered").unwrap();
+    let identity = test_identity(dir.path());
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let router = Router::new().route(
+        "/slow",
+        axum::routing::get({
+            let gate = gate.clone();
+            move || async move {
+                let stream = futures_util::stream::unfold(0u8, move |step| {
+                    let gate = gate.clone();
+                    async move {
+                        match step {
+                            0 => Some((
+                                Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first")),
+                                1,
+                            )),
+                            1 => {
+                                gate.notified().await;
+                                Some((Ok(axum::body::Bytes::from_static(b"second")), 2))
+                            }
+                            _ => None,
+                        }
+                    }
+                });
+                axum::body::Body::from_stream(stream)
+            }
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":5}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":5,"method":"GET","path":"/slow","headers":{},
+    }));
+    assert_eq!(relay.next_control().await["type"], "HTTP_RESPONSE_HEAD");
+    match relay.next_event().await {
+        Event::Binary(frame) => {
+            let (_, _, payload) = proto::decode_body_frame(&frame).unwrap();
+            assert_eq!(payload, b"first");
+        }
+        other => panic!("the first chunk must arrive before the second exists: {other:?}"),
+    }
+    gate.notify_one();
+    match relay.next_event().await {
+        Event::Binary(frame) => {
+            let (_, _, payload) = proto::decode_body_frame(&frame).unwrap();
+            assert_eq!(payload, b"second");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    tunnels.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Bodies larger than a WebSocket frame (decision 98)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_response_larger_than_a_websocket_frame_crosses_in_bounded_frames() {
+    // A 17 MiB attachment used to leave as one 0x02 frame. The relay refuses a
+    // frame over 16 MiB by closing the connection, and that connection is the
+    // server's trunk: every relayed client lost the server, not just this one.
+    let dir = tempdir::TempDir::new("storm-relay-big-response").unwrap();
+    let identity = test_identity(dir.path());
+    const SIZE: usize = 20 * 1024 * 1024;
+    let router = Router::new().route(
+        "/big",
+        axum::routing::get(|| async { axum::body::Bytes::from(vec![7u8; SIZE]) }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":9}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":9,"method":"GET","path":"/big","headers":{},
+    }));
+    assert_eq!(relay.next_control().await["type"], "HTTP_RESPONSE_HEAD");
+
+    let (mut received, mut largest) = (0usize, 0usize);
+    loop {
+        match relay.next_event().await {
+            Event::Binary(frame) => {
+                let (_, _, payload) = proto::decode_body_frame(&frame).unwrap();
+                received += payload.len();
+                largest = largest.max(payload.len());
+            }
+            Event::Text(value) if value["type"] == "PING" => continue,
+            Event::Text(value) if value["type"] == "CLOSE" => break,
+            other => panic!("the trunk must survive a large response: {other:?}"),
+        }
+    }
+    assert_eq!(received, SIZE);
+    assert!(
+        largest <= proto::MAX_BODY_FRAME_PAYLOAD,
+        "a frame carried {largest} bytes"
+    );
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_chunked_upload_sent_back_to_back_lands_whole() {
+    // Decision 95 closes a stream whose body outruns its handler by 32 chunks.
+    // A sender splitting at the recommended 256 KiB (§5.2) sends a 15 MiB
+    // attachment as 60 frames with nothing in between, so the real attachment
+    // route must keep up with that or the limit is a defect, not a guard.
+    let dir = tempdir::TempDir::new("storm-relay-chunked-upload").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+    let user = crate::api::tests::seed_owner(&state).await;
+    let bearer = format!(
+        "Bearer {}",
+        crate::api::tests::session_token(&state, &user).await
+    );
+    let vault = mcp_vault(&router, &bearer, "uploads").await;
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    let path = format!("/v1/vaults/{vault}/attachments/big.bin");
+
+    const SIZE: usize = 15 * 1024 * 1024;
+    let body: Vec<u8> = (0..SIZE).map(|i| (i * 31 + 7) as u8).collect();
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":2}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":2,"method":"PUT","path":path,
+        "headers":{"authorization":bearer},
+    }));
+    for piece in body.chunks(proto::MAX_BODY_FRAME_PAYLOAD) {
+        relay
+            .to_server
+            .send(Message::binary(proto::encode_body_frame(
+                proto::FRAME_REQUEST_BODY,
+                2,
+                piece,
+            )))
+            .unwrap();
+    }
+    relay
+        .to_server
+        .send(Message::binary(proto::encode_body_frame(
+            proto::FRAME_REQUEST_BODY,
+            2,
+            b"",
+        )))
+        .unwrap();
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["status"], 200, "{head}");
+    loop {
+        match relay.next_event().await {
+            Event::Text(value) if value["type"] == "CLOSE" => break,
+            Event::Text(value) if value["type"] == "PING" => continue,
+            Event::Binary(_) => continue,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    let fetched = relay
+        .request(
+            3,
+            TunnelRequest::get(&path).header("authorization", &bearer),
+        )
+        .await;
+    assert_eq!(fetched.status, 200);
+    assert!(
+        fetched.body == body,
+        "{} of {SIZE} bytes came back",
+        fetched.body.len()
+    );
+
+    tunnels.shutdown().await;
+}
+
+// A response that fails mid-body (decision 101)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_response_body_that_fails_midway_is_aborted_not_closed() {
+    let dir = tempdir::TempDir::new("storm-relay-abort").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let broken = Router::new().route(
+        "/broken",
+        axum::routing::get(|| async {
+            let body = futures_util::stream::iter([
+                Ok::<_, std::io::Error>(Bytes::from_static(b"first")),
+                Err(std::io::Error::other("disk went away")),
+            ]);
+            axum::body::Body::from_stream(body)
+        }),
+    );
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router.merge(broken), identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":1}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":1,
+        "method":"GET","path":"/broken","headers":{}
+    }));
+    let head = relay.next_control().await;
+    assert_eq!(head["status"], 200, "{head}");
+
+    let mut body = Vec::new();
+    let end = loop {
+        match relay.next_event().await {
+            Event::Binary(frame) => {
+                let (_, id, payload) = proto::decode_body_frame(&frame).unwrap();
+                assert_eq!(id, 1);
+                body.extend_from_slice(payload);
+            }
+            Event::Text(value) if value["type"] == "PING" => continue,
+            Event::Text(value) => break value,
+            other => panic!("expected the body or its end, got {other:?}"),
+        }
+    };
+    assert_eq!(body, b"first");
+    assert_eq!(end["type"], "CLOSE", "{end}");
+    assert_eq!(end["stream_id"], 1, "{end}");
+    assert_eq!(
+        end["aborted"], true,
+        "a plain CLOSE tells the client a truncated body is complete: {end}"
+    );
+
+    tunnels.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// §9: failure handling (decision 94)
+// ---------------------------------------------------------------------------
+
+/// Signals when it is dropped, so a test can see a handler being cancelled.
+struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// `/slow` answers a head and one chunk, then never finishes: the shape of a
+/// long download or the change feed. `dropped` fires when the response body
+/// is dropped, which is what cancelling the dispatch task does.
+fn slow_router() -> (Router, tokio::sync::oneshot::Receiver<()>) {
+    let (tx, dropped) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let router = Router::new().route(
+        "/slow",
+        axum::routing::get(move || {
+            let signal = DropSignal(tx.lock().unwrap().take());
+            async move {
+                let body = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"first"))
+                })
+                .chain(futures_util::stream::pending())
+                .map(move |chunk| {
+                    let _keep = &signal;
+                    chunk
+                });
+                axum::body::Body::from_stream(body)
+            }
+        }),
+    );
+    (router, dropped)
+}
+
+/// Opens `/slow` on `stream_id` and waits for its first chunk.
+async fn start_slow_response(relay: &mut FakeRelay, stream_id: u32) {
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":stream_id}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":stream_id,
+        "method":"GET","path":"/slow","headers":{}
+    }));
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    loop {
+        match relay.next_event().await {
+            Event::Binary(frame) => {
+                let (_, id, payload) = proto::decode_body_frame(&frame).unwrap();
+                assert_eq!((id, payload), (stream_id, &b"first"[..]));
+                return;
+            }
+            Event::Text(value) if value["type"] == "PING" => continue,
+            other => panic!("expected the first chunk, got {other:?}"),
+        }
+    }
+}
+
+async fn serve_lan(router: Router) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    addr
+}
+
+async fn await_attempts(relay: &FakeRelay, count: usize, within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    while relay.attempts.load(std::sync::atomic::Ordering::SeqCst) < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {count} connection attempts within {within:?}, saw {}",
+            relay.attempts.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_relay_vanishing_mid_response_cancels_the_handler_and_the_trunk_comes_back() {
+    // The load-bearing R6 case the hung and silent relays did not cover: the
+    // relay goes away while a relayed response is half sent.
+    let dir = tempdir::TempDir::new("storm-relay-vanish").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let (slow, dropped) = slow_router();
+    let router = router.merge(slow);
+    let lan = serve_lan(router.clone()).await;
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    start_slow_response(&mut relay, 1).await;
+    relay.vanish();
+
+    tokio::time::timeout(Duration::from_secs(5), dropped)
+        .await
+        .expect("an in-flight relayed handler must be cancelled when its trunk dies")
+        .unwrap();
+    // Not advertised while there is no trunk, or clients race a dead path.
+    await_advertised(&registered, 0).await;
+
+    let elapsed = lan_health(lan).await;
+    assert!(elapsed < Duration::from_secs(2), "LAN took {elapsed:?}");
+
+    // Served-then-closed resets the backoff, so the redial comes after 1 s.
+    loop {
+        match relay.next_event().await {
+            Event::Registered { .. } => break,
+            Event::Disconnected | Event::Text(_) => continue,
+            other => panic!("expected a redial, got {other:?}"),
+        }
+    }
+    await_advertised(&registered, 1).await;
+    let response = relay.request(2, TunnelRequest::get("/v1/health")).await;
+    assert_eq!(response.status, 200);
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_closing_a_stream_mid_response_cancels_only_that_handler() {
+    // What the relay sends when the *client* hop dies mid-response (§5.4).
+    let dir = tempdir::TempDir::new("storm-relay-close-mid").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let (slow, dropped) = slow_router();
+    let router = router.merge(slow);
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    start_slow_response(&mut relay, 7).await;
+    relay.send(serde_json::json!({"v":1,"type":"CLOSE","stream_id":7}));
+
+    tokio::time::timeout(Duration::from_secs(5), dropped)
+        .await
+        .expect("CLOSE must cancel the handler, not leave it streaming into nothing")
+        .unwrap();
+
+    // The trunk and its other streams are untouched.
+    let response = relay.request(8, TunnelRequest::get("/v1/health")).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(registered.snapshot().len(), 1);
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_erroring_a_stream_mid_response_cancels_that_handler() {
+    // `ERROR{.., stream_id}` toward the server — a relay-side timeout or limit.
+    let dir = tempdir::TempDir::new("storm-relay-error-mid").unwrap();
+    let (router, identity, _state) = crate::api::tests::test_router_with_state(dir.path());
+    let (slow, dropped) = slow_router();
+    let router = router.merge(slow);
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    start_slow_response(&mut relay, 3).await;
+    relay.send(serde_json::json!({
+        "v":1,"type":"ERROR","code":"rate_limited","message":"limit","stream_id":3
+    }));
+
+    tokio::time::timeout(Duration::from_secs(5), dropped)
+        .await
+        .expect("a stream-scoped ERROR must cancel the handler")
+        .unwrap();
+    assert_eq!(registered.snapshot().len(), 1, "only the stream ends");
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_gone_silent_is_dropped_at_the_heartbeat_deadline_and_redialled() {
+    // A sleep, a network change or a NAT timeout leaves the socket open with
+    // nobody behind it. Before decision 94 the trunk stayed advertised until
+    // TCP gave up, which is many minutes.
+    let dir = tempdir::TempDir::new("storm-relay-silent-deadline").unwrap();
+    let identity = test_identity(dir.path());
+    // A 1 s heartbeat makes the deadline 3 s.
+    let relay = FakeRelay::start_with(Behaviour::HangAfterRegister, 1).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+
+    await_advertised(&registered, 1).await;
+    let registered_at = Instant::now();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while !registered.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a relay that stopped answering PING is still advertised after {:?}",
+            registered_at.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let dropped_after = registered_at.elapsed();
+    assert!(
+        dropped_after >= Duration::from_millis(2500),
+        "dropped after {dropped_after:?}, before three heartbeats had been missed"
+    );
+
+    await_attempts(&relay, 2, Duration::from_secs(5)).await;
+
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_relay_that_answers_heartbeats_is_kept_past_the_deadline() {
+    let dir = tempdir::TempDir::new("storm-relay-alive").unwrap();
+    let identity = test_identity(dir.path());
+    let mut relay = FakeRelay::start_with(Behaviour::Normal, 1).await;
+    let (registered, tunnels) = start_tunnel(&relay.url, echo_router(), identity);
+    let _ = relay.await_registration().await;
+    await_advertised(&registered, 1).await;
+
+    // Answer every PING for twice the deadline.
+    let until = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < until {
+        if let Ok(Some(Event::Text(value))) =
+            tokio::time::timeout(Duration::from_millis(200), relay.events.recv()).await
+            && value["type"] == "PING"
+        {
+            relay.send(serde_json::json!({"v":1,"type":"PONG"}));
+        }
+    }
+
+    assert_eq!(registered.snapshot().len(), 1, "a live relay must be kept");
+    assert_eq!(
+        relay.attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "and never redialled"
+    );
     tunnels.shutdown().await;
 }

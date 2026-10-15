@@ -76,7 +76,9 @@ It shows its plan (every `sudo` step included) before changing anything, and
 re-running it is how you upgrade, check status, pair a device, enroll a
 runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
-`--dry-run`; `sh install.sh --help` lists the rest.
+`--dry-run`; `sh install.sh --help` lists the rest. **MCP only** (`--mcp`)
+will put just `storm-runtime` on a laptop's PATH for an AI app's
+`mcp-connect` (below); it is offered once a release carries `mcp-connect`.
 
 ### By hand (server on Debian / Ubuntu)
 
@@ -154,16 +156,20 @@ limits live in `/etc/storm-runtime/runtime.toml`, and a root outside
 `/var/lib/storm-runtime` needs a `ReadWritePaths` drop-in on the unit. Log the
 agent CLIs in once as `storm-runtime` (`claude`, `opencode auth login`) — the
 unit's `HOME` is its own, not yours. Setup and the package's guarantees:
-[`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). V1 is
-direct-network only; the relay does not carry agent sessions yet.
+[`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). A Runtime
+Host connects to its server directly; the app reaches agent sessions through
+the relay like everything else.
 
 ### Relay (optional)
 
 `storm-relay` lets clients reach a server from outside its network: the server
-dials out to the relay, so nothing is port-forwarded. It is a separate package
-in the same apt repository and nothing depends on it. The relay holds no vault
-data and authenticates no one — a client's credential rides inside the tunnel
-to the origin server, which checks it exactly as it would on the LAN. Setup,
+dials out to the relay, so nothing is port-forwarded. The app races the
+server's address and its relays, and uses whichever answers first. It is a
+separate package in the same apt repository and nothing depends on it. The
+relay holds no vault data and authenticates no one — a client's credential rides
+inside the tunnel to the origin server, which checks it exactly as it would on
+the LAN. It stores nothing, but until end-to-end encryption it can read the
+traffic it carries, so run your own or use one you trust. Setup,
 TLS and key bindings: [`deploy/README.md`](deploy/README.md#relay-optional);
 wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 
@@ -178,7 +184,6 @@ wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 | [`apps/www`](apps/www/README.md) | Marketing site (Astro) → [storm.dewansh.space](https://storm.dewansh.space) |
 | [`deploy/`](deploy/README.md) | systemd units, apt bootstrap, backup, relay setup |
 | [`docs/`](docs) | Design briefs, editor findings, the relay spec and its test vectors |
-| [`PLAN.md`](PLAN.md) | Living plan, status, and decision log |
 
 ## Development
 
@@ -218,6 +223,32 @@ authenticate with MCP keys minted in the app. Updates carry a `base_version`
 into the same three-way merge the clients use. See
 [`apps/server/README.md`](apps/server/README.md#mcp).
 
+**Connecting an AI app: `storm-runtime mcp-connect`** *(unreleased: it lands
+with the next release; until then use the HTTP config)*. A stdio adapter the
+AI app starts itself. It dials the server's LAN address first and falls back
+to the server's relays, so one config works at home and away, and before it
+sends the key anywhere it checks the server answers to the pinned public key.
+The key comes from `STORM_MCP_KEY` (or `--key-file`), never an argument. When
+it cannot get through, the client sees a JSON-RPC error carrying a
+`storm_error` code rather than a hang. Making a key under **Settings ▸ Devices
+& access** shows both lines, filled in for your server:
+
+```sh
+claude mcp add storm -e STORM_MCP_KEY=stk_… -- \
+  storm-runtime mcp-connect --server srv_… --pk <server key> \
+    --addr http://192.168.1.20:8484 --relay wss://relay.example.net
+```
+
+```json
+{"mcpServers": {"storm": {"command": "storm-runtime",
+  "args": ["mcp-connect", "--server", "srv_…", "--pk", "…",
+           "--addr", "http://192.168.1.20:8484", "--relay", "wss://relay.example.net"],
+  "env": {"STORM_MCP_KEY": "stk_…"}}}}
+```
+
+The raw HTTP entry (`"type": "http"`, `http://<host>:<port>/mcp`, the key as a
+Bearer token) still works on the LAN, with no adapter and no identity check.
+
 ## Status
 
 M0–M15, M18 (desktop shortcuts) and M19 (auth phase 1 — server identity,
@@ -225,10 +256,10 @@ accounts, pairing, sessions, MCP keys) are done; the shared token is gone.
 M20 (Agent Runtime V1 — runtime hosts, enrollment, agent sessions in a
 terminal) shipped decisions 77–78 in **v0.3.0** and the operator's first
 on-device fixes in **v0.3.1**; AM22, a host-owned terminal protocol, is
-drafted and awaiting approval. The relay is built, packaged and TLS-capable
-but still runs on the LAN only — a public VPS is next. M16 (marketing site,
+drafted and awaiting approval. The relay is built, packaged and TLS-capable,
+and a Cloudflare Worker relay is deployed for testing. M16 (marketing site,
 live at [storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown
 read mode) are in progress. Per-vault authorization is its own later release.
 
-See [`PLAN.md`](PLAN.md) for milestone status, the decision log, and open
-items. License: [MIT](LICENSE).
+Milestone status and the decision log are kept in the maintainer's notes, not
+in this repo. License: [MIT](LICENSE).

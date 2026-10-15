@@ -82,12 +82,19 @@ pub const DEFAULT_MAX_CLIENT_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 /// remaining streams on the old trunk get `ERROR{trunk_superseded}`.
 pub const DEFAULT_SUPERSESSION_DRAIN: Duration = Duration::from_secs(30);
 
-/// Heartbeat deadline: how long a server trunk may go without sending **any**
-/// frame before the relay treats it as dead (§4.2).
+/// Heartbeat deadline: how long a server trunk, or a client trunk once ready,
+/// may go without sending **any** frame before the relay treats it as dead
+/// (§4.2, §5).
 ///
 /// Any frame, not only `PONG`. The server heartbeats by *sending* `PING` every
 /// 15 s, which the relay answers, and the relay never pings, so a server has no
 /// reason ever to send `PONG`. 45 s is three missed heartbeats.
+/// `/register` attempts per source address per window (§6.2). A server
+/// registers once per relay and reconnects with backoff, so this only binds
+/// someone minting registrations; a whole NAT of homes stays well under it.
+pub const DEFAULT_REGISTER_RATE_LIMIT: usize = 30;
+pub const DEFAULT_REGISTER_RATE_WINDOW: Duration = Duration::from_secs(60);
+
 pub const DEFAULT_HEARTBEAT_DEADLINE: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone)]
@@ -101,6 +108,10 @@ pub struct Config {
     /// `None` is trust-on-first-use. `Some` is the binding itself, and TOFU is
     /// off entirely — including on first sight (§4.1).
     pub allowlist: Option<Allowlist>,
+    /// Key-addressed registration (§4.1 `open`): no binding at all, and
+    /// registrations addressed by `(server_id, pubkey)`. Never with an
+    /// allowlist.
+    pub open: bool,
     pub challenge_ttl: Duration,
     pub handshake_timeout: Duration,
     pub hello_wait: Duration,
@@ -112,6 +123,10 @@ pub struct Config {
     pub hello_rate_limit: usize,
     /// Time window for the HELLO rate limit.
     pub hello_rate_window: Duration,
+    /// `/register` attempts per source address (IPv6 per /64) per window
+    /// (§6.2, decision 116k).
+    pub register_rate_limit: usize,
+    pub register_rate_window: Duration,
     /// Bytes queued and unwritten toward one client trunk before its streams
     /// start being dropped. See [`DEFAULT_MAX_CLIENT_BUFFER_BYTES`].
     pub max_client_buffer_bytes: usize,
@@ -127,6 +142,7 @@ impl Config {
             bind,
             public_base: public_base.into(),
             allowlist: None,
+            open: false,
             challenge_ttl: DEFAULT_CHALLENGE_TTL,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             hello_wait: DEFAULT_HELLO_WAIT,
@@ -135,6 +151,8 @@ impl Config {
             max_total_streams: DEFAULT_MAX_TOTAL_STREAMS,
             hello_rate_limit: DEFAULT_HELLO_RATE_LIMIT,
             hello_rate_window: DEFAULT_HELLO_RATE_WINDOW,
+            register_rate_limit: DEFAULT_REGISTER_RATE_LIMIT,
+            register_rate_window: DEFAULT_REGISTER_RATE_WINDOW,
             max_client_buffer_bytes: DEFAULT_MAX_CLIENT_BUFFER_BYTES,
             supersession_drain: DEFAULT_SUPERSESSION_DRAIN,
             heartbeat_deadline: DEFAULT_HEARTBEAT_DEADLINE,
@@ -144,6 +162,52 @@ impl Config {
     pub fn public_address(&self, server_id: &str) -> String {
         format!("{}/connect/{}", self.public_base, server_id)
     }
+
+    pub fn mode(&self) -> Mode {
+        if self.open {
+            Mode::Open
+        } else if self.allowlist.is_some() {
+            Mode::Allowlist
+        } else {
+            Mode::Tofu
+        }
+    }
+}
+
+/// §4.1 (decision 116j): trust-on-first-use is refused on a bind that anyone
+/// on the internet may reach — a wildcard, or a public address — unless the
+/// operator says so. The packaged default binds loopback.
+pub fn check_tofu_bind(bind: std::net::SocketAddr, allow_public: bool) -> anyhow::Result<()> {
+    let ip = bind.ip();
+    let private = match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+    };
+    if private || allow_public {
+        return Ok(());
+    }
+    let what = if ip.is_unspecified() {
+        "every interface"
+    } else {
+        "a public address"
+    };
+    anyhow::bail!(
+        "trust-on-first-use on {what} ({bind}) lets whoever registers a server_id \
+         first keep it for good. Use --allowlist or --mode open, or pass \
+         --allow-public-tofu if every client and server reaches this relay \
+         over a network you control"
+    )
+}
+
+/// The §4.1 registration mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Allowlist,
+    Tofu,
+    Open,
 }
 
 /// `server_id` → the one public key the operator will accept for it.
@@ -223,6 +287,26 @@ impl Allowlist {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tofu_is_refused_on_a_public_or_wildcard_bind_unless_allowed() {
+        for ok in [
+            "127.0.0.1:8486",
+            "[::1]:8486",
+            "192.168.1.5:443",
+            "10.0.0.1:1",
+            "[fd00::1]:9",
+        ] {
+            assert!(check_tofu_bind(ok.parse().unwrap(), false).is_ok(), "{ok}");
+        }
+        for bad in ["0.0.0.0:443", "[::]:443", "8.8.8.8:443", "100.64.0.1:443"] {
+            assert!(
+                check_tofu_bind(bad.parse().unwrap(), false).is_err(),
+                "{bad}"
+            );
+            assert!(check_tofu_bind(bad.parse().unwrap(), true).is_ok(), "{bad}");
+        }
+    }
     use super::*;
     use data_encoding::BASE64URL_NOPAD;
 

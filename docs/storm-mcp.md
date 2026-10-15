@@ -1,6 +1,6 @@
 # Storm MCP — design brief (v0.1)
 
-> **Status: Phase 1 + writes built.** M13 in `PLAN.md`, decisions 37–39. Eleven
+> **Status: Phase 1 + writes built.** M13, decisions 37–39. Eleven
 > read tools and five write tools at `/mcp`, behind `--mcp` (off by default) and
 > the existing bearer token. In addition to notes, the kit vault's canonical
 > scripts are readable and writable through four `*_script` tools.
@@ -68,7 +68,7 @@ objection that mattered before this branch existed: building MCP against a
 single-vault domain shape and reworking it once multi-vault landed.
 
 **What it doesn't remove: the real vault cutover finished one day before this
-plan is being written.** Every milestone in `PLAN.md` that reached production
+plan is being written.** Every milestone that reached production
 found real bugs there that no test suite caught first — that's not
 incidental, it's the single most repeated lesson in the decision log. Adding
 a new class of writer (an AI agent calling `update_note`) is exactly the kind
@@ -182,6 +182,16 @@ established: `_storm/vault.md`, the hidden per-vault config note, gains a
 `storm.options.*` keys. `get_vault` reads it the same way the properties panel
 reads vault colour. No schema change, no endpoint, stays greppable — the
 same reasoning that put colour and property types there in the first place.
+
+## Connecting a client (decision 105e)
+
+*Unreleased.* External clients reach `/mcp` through `storm-runtime
+mcp-connect`, a stdio adapter that tries the server's LAN address first and
+its relays after, checks the server's identity against the pinned key before
+sending the access key, reads the key from `STORM_MCP_KEY` or `--key-file`,
+and reports failures as JSON-RPC errors carrying `storm_error`. The app's key
+reveal writes the config; `deploy/README.md` (*MCP clients*) has the details.
+The raw `type: http` entry stays for LAN-only clients.
 
 ## Security
 

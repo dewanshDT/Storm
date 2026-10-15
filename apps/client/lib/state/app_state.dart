@@ -9,7 +9,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/auth_api.dart';
 import '../api/auth_models.dart';
+import '../api/connection_client.dart';
 import '../api/models.dart';
+import '../api/pairing_route.dart';
 import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
@@ -268,6 +270,10 @@ class Settings {
 }
 
 class SettingsNotifier extends AsyncNotifier<Settings> {
+  /// The session's connection, handed over by [connectionProvider]. Reading
+  /// that provider from here would be a cycle: it is built from these settings.
+  StormConnection? liveConnection;
+
   static const _kUrl = 'storm.baseUrl';
 
   static String? _storedUrl(SharedPreferences prefs) {
@@ -627,16 +633,33 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   Future<bool> refreshSession() async {
     final s = state.value;
     if (s == null || s.refreshToken.isEmpty) return false;
-    final api = AuthApi(baseUrl: s.baseUrl);
+    ServerRoute? route;
     try {
+      // The refresh token and device secret go only to a proven server, over
+      // the relay when the saved address is not reachable (decision 111). A
+      // connected session already has one: a second race beside it would
+      // dial a second trunk (§8.1 rule 1, decision 116h).
+      final connection = liveConnection;
+      final AuthApi authApi;
+      if (connection != null && connection.isConnected) {
+        authApi = connection.authApi;
+      } else {
+        route = await openSavedRoute(
+          baseUrl: s.baseUrl,
+          serverId: s.serverId,
+          publicKey: s.serverPublicKey,
+          relays: s.relays,
+        );
+        authApi = route.authApi;
+      }
       // Device tier: refresh is bound to the device holding the session.
-      final tokens = await api.refresh(
+      final tokens = await authApi.refresh(
         s.refreshToken,
         deviceId: s.deviceId,
         deviceSecret: s.deviceSecret,
       );
       await save(
-        s.copyWith(
+        (state.value ?? s).copyWith(
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
           accessTokenExpiresAt: tokens.expires,
@@ -646,7 +669,7 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
     } catch (_) {
       return false;
     } finally {
-      api.dispose();
+      route?.close();
     }
   }
 
@@ -752,8 +775,23 @@ final settingsProvider = AsyncNotifierProvider<SettingsNotifier, Settings>(
 /// would loop, since watching it means `connect()` → notify → rebuild → a new
 /// engine → `start()` → `connect()`.
 final connectionProvider = Provider<StormConnection?>((ref) {
-  final settings = ref.watch(settingsProvider).value;
-  if (settings == null || !settings.isConfigured) return null;
+  // Only what the connection's identity and candidates are built from.
+  // Watching the whole value rebuilt it, and the engine, on every save (a
+  // theme, the relay mirror below), and each rebuild raced a new trunk
+  // (decision 113). A new access token changes request headers only and is
+  // handed over by [apiProvider] (§8.1 rule 3, decision 116h).
+  final key = ref.watch(
+    settingsProvider.select(
+      (s) => (
+        configured: s.value?.isConfigured ?? false,
+        baseUrl: s.value?.baseUrl,
+        serverId: s.value?.serverId,
+        serverPublicKey: s.value?.serverPublicKey,
+      ),
+    ),
+  );
+  if (!key.configured) return null;
+  final settings = ref.read(settingsProvider).value!;
 
   final settingsNotifier = ref.read(settingsProvider.notifier);
   final connection = StormConnection(
@@ -775,7 +813,17 @@ final connectionProvider = Provider<StormConnection?>((ref) {
       settingsNotifier.save(current.copyWith(relays: relays));
     },
   );
-  ref.onDispose(connection.api.dispose);
+  ref.listen(
+    settingsProvider.select((s) => s.value?.bearerToken ?? ''),
+    (_, token) => connection.token = token,
+  );
+  settingsNotifier.liveConnection = connection;
+  ref.onDispose(() {
+    if (identical(settingsNotifier.liveConnection, connection)) {
+      settingsNotifier.liveConnection = null;
+    }
+    connection.dispose();
+  });
   return connection;
 });
 
@@ -797,8 +845,28 @@ bool _relaysEqual(List<RelayAdvert> a, List<RelayAdvert> b) {
 ///
 /// Derived from the connection rather than built beside it, so there is one
 /// answer to "where is the server" and it lives behind the seam.
+///
+/// Its calls go through a [ConnectionClient], not straight to `connection.api`:
+/// that follows whichever candidate is active, which before the first race is
+/// the saved address, so a device off the LAN with no vault open (nothing has
+/// started the sync engine) could not even list its vaults (decision 112).
 final apiProvider = Provider<StormApi?>((ref) {
-  return ref.watch(connectionProvider)?.api;
+  final connection = ref.watch(connectionProvider);
+  if (connection == null) return null;
+  connection.token = ref.watch(
+    settingsProvider.select((s) => s.value?.bearerToken ?? ''),
+  );
+  return connection.sessionApi;
+});
+
+/// An `http.Client` for session calls built outside [StormApi] (Agents,
+/// Integrations), over whatever connection the app has when each request is
+/// sent (decision 112). Those clients are addressed to the saved address and
+/// must not be rebuilt on every settings save, so this resolves the
+/// connection per request rather than watching it.
+final sessionClientProvider = Provider<ConnectionClient>((ref) {
+  final container = ref.container;
+  return ConnectionClient(() => container.read(connectionProvider));
 });
 
 /// The vault the note-level providers are serving, or `''` when none is open

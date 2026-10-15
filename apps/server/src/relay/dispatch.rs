@@ -110,6 +110,7 @@ pub fn build_request(
     // invented header. A peer that is absent or unparseable leaves no
     // `ConnectInfo`, which is `CallerKey::Unattributed` — a bounded shared
     // bucket, never unlimited (§5.2).
+    request.extensions_mut().insert(super::Relayed);
     if let Some(ip) = head.relay_peer_ip.as_deref().and_then(parse_peer_ip) {
         // Port 0: the relay attests an address, not a port, and nothing reads
         // the port. Inventing one would look like information it is not.

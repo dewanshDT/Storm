@@ -4,7 +4,7 @@ A single static binary, a systemd unit, and a nightly backup. No container, no
 runtime dependencies — the server is a ~5 MB musl binary that runs on a bare
 Ubuntu or Debian box with nothing installed.
 
-See decision 8 in `PLAN.md` for why this isn't a Docker image. Prefer the
+See decision 8 for why this isn't a Docker image. Prefer the
 packaged install (`apt install storm-server` then `sudo storm-server up`) once
 a release exists; the steps below are the manual equivalent. Secrets and the
 **clean-install** runbook are in [release-secrets.md](release-secrets.md).
@@ -279,6 +279,45 @@ other account, after writing `state/auth.db.pre-v6`. If it has no active owner
 it refuses to start; name the account to keep with
 `sudo -u storm storm-server single-user --keep <username> --state /srv/storm/state`.
 
+## Firewalls
+
+Decision 119; the normative spec is the vault note *Reachability on Laptops
+and Desktops*. **Storm never needs an inbound port and never opens one
+silently.** Remote access dials out to a relay (WSS 443), so a laptop behind
+any firewall, NAT or hotel Wi-Fi works with nothing opened. A LAN opening is
+only a speed and privacy option, made with consent, for Storm alone, from the
+local network only, never to the internet and never by UPnP.
+
+| OS | What allows Storm | Scope |
+|---|---|---|
+| Windows | `install.ps1` asks, then adds the rule `Storm Server`: inbound TCP on Storm's port for `storm-serverw.exe` | **Private** profile only, never Public or Domain |
+| macOS | the Application Firewall's own "Allow incoming connections?" prompt | per app, so the release must be signed with a stable identity (`deploy/release-secrets.md`) |
+| Linux, ufw | the package ships `/etc/ufw/applications.d/storm-server`; `install.sh` asks, then runs `ufw allow from <each local RFC 1918/ULA subnet> to any app storm-server` | local subnets only |
+| Linux, firewalld | the package ships `/usr/lib/firewalld/services/storm-server.xml`; `install.sh` asks, then adds it to the home/trusted zone(s) | never `public`, `external`, `drop` or `block` |
+| Linux, neither | nothing to do | — |
+
+- The question: "Allow devices on your local network to reach Storm directly?
+  (Faster and more private than going through a relay. Storm stays
+  unreachable from the internet.)" Default yes; no (or `--no-firewall`,
+  `-NoFirewall`) prints the exact command instead. So does a run without
+  administrator rights; it never fails the install.
+- What `install.sh` added is listed in `/etc/storm/lan-firewall`, and
+  `install.sh uninstall --server` removes exactly that, nothing else.
+- `storm-server up --port N` keeps the ufw profile and firewalld service on
+  the new port, and, when the port changed, prints the command that refreshes
+  the rule (`sudo ufw app update storm-server`, `sudo firewall-cmd --reload`,
+  or `Set-NetFirewallRule … -LocalPort N` on Windows). It never edits a rule.
+- **Untrusted networks** (Layer 2): on a network the OS calls untrusted the
+  server does not advertise `_storm._tcp` there and refuses password pairing
+  from it (`403 lan_only`); paired devices and the relay work as before. The
+  signal is the Windows network category (Public), the firewalld zone
+  (`public`, `external`, `drop`, `block`), or else the NetworkManager
+  connection zone. macOS has none, so its "Discoverable on this network"
+  switch decides. Re-read whenever the interfaces change, and every 60 s.
+- `storm-server status` (run it with `sudo` where ufw is on: its rules are
+  root's) prints `lan` — `open (rule …)`, `blocked by ufw — run: …`, `no host
+  firewall` — and `network`, whether each LAN interface is trusted and why.
+
 ## Backups
 
 `storm-backup.timer` runs nightly at 03:30 with a randomised delay, and
@@ -372,7 +411,7 @@ a client's credential rides inside the tunnel to the origin.
 sudo apt install storm-relay
 sudoedit /etc/storm-relay/storm-relay.env   # set STORM_RELAY_PUBLIC_BASE
 sudo systemctl enable --now storm-relay
-journalctl -u storm-relay -f
+journalctl --namespace=storm-relay -u storm-relay -f   # its own journal, kept 7 days
 ```
 
 The package does not start the relay, because a relay with the wrong public
@@ -385,10 +424,33 @@ both stops the relay.
 
 - `STORM_RELAY_BINDINGS` (the default): trust-on-first-use, persisted to
   `/var/lib/storm-relay/bindings`. The first key to register a `server_id` owns
-  it. Safe only where you control who can reach the relay.
+  it. Safe only where you control who can reach the relay, so the relay
+  refuses to start in this mode on a public or wildcard bind unless you pass
+  `--allow-public-tofu` (decision 116j).
 - `STORM_RELAY_ALLOWLIST`: only listed keys register. **Use this on a public
   address.** Same format as the bindings file, so a bindings file you trust can
   be copied over as the allowlist.
+
+**Revoking a server** on an allowlist relay: remove its line and run `sudo
+systemctl reload storm-relay`. The relay re-reads the file and ends that
+server's live trunk at once, not only its next registration (decision 116k).
+
+**Limits** (all on by default; `storm-relay --help` names the flags): `/register`
+attempts and `HELLO`s per source address, an IPv6 /64 counting as one;
+streams per server and opens in flight per client; 32 MiB unread per stream.
+A client past one gets `rate_limited` or `client_backlogged`; the server's
+trunk and every other client carry on.
+
+**Logs** go to the relay's own journal namespace, kept at most 7 days
+(`/etc/systemd/journald@storm-relay.conf`, decision 114b):
+`journalctl --namespace=storm-relay -u storm-relay`. They hold lifecycle
+events and error codes, server ids and trunk ids; never a client's address, a
+payload or a credential.
+
+**If a server's identity changes** (a restore without `state/identity/`, see
+*Backups*), its key changes with it. Every paired device must pair again, and
+every allowlist line naming the old key must be replaced; until then the relay
+refuses the server with `auth_failed`.
 
 `/var/lib/storm-relay` is the relay's only state, and it **cannot be rebuilt**.
 Lose the bindings file and every `server_id` is open to whoever registers
@@ -436,13 +498,86 @@ and a `ws://` public base, and warns about a `wss://` base without
 `--tls-cert`. **storm-server trusts the public web PKI only**, so the relay
 needs a real certificate; a self-signed one will not register.
 
-**Pointing a server at it.** There is no app screen for this yet. As an
-owner, `PUT /v1/config/relays` with `{"relays": ["wss://relay.example.com"]}`.
+**Pointing a server at it.** In the app, Settings › Connection › Relays ›
+Add relay. Or, as the owner, `PUT /v1/config/relays` with
+`{"relays": ["wss://relay.example.com"]}`.
 The server connects to an added relay and disconnects from a removed one (with
 a `DEREGISTER`) right away, without a restart; relays in both lists are left
 alone (decision 74). `GET /v1/server` lists the relays it has actually
 registered with, which is the check that it worked; the `PUT` itself returns
 before any connection is attempted. Clients learn the relay from the server when they pair.
+
+### On Cloudflare instead (optional)
+
+`apps/relay-cf` is the same relay as a Cloudflare Worker with Durable
+Objects, for an operator who would rather not run a public box (decision
+108). It deploys to **your own** Cloudflare account, on the Free plan, with
+`wrangler`; nothing in Storm's release or apt pipeline touches it. The runbook
+is `apps/relay-cf/DEPLOY.md`. In short:
+
+1. `cd apps/relay-cf && npm ci && npx wrangler login && npx wrangler deploy --env=""`.
+2. Add a custom domain to the Worker (`relay.example.com`).
+3. `npx wrangler secret put STORM_RELAY_ALLOWLIST --env=""` with one
+   `<server_id> <public_key>` line per server, both from `GET /v1/server`.
+   Allowlist only, never TOFU, on a public address.
+4. Set `STORM_RELAY_PUBLIC_BASE=wss://relay.example.com`.
+5. Settings › Connection › Relays › Add relay, then check `GET /v1/server`
+   lists it.
+6. Add the host to `PUBLIC_RELAY_HOSTS` in both the app and mcp-connect, so
+   clients race it after direct and self-hosted relays.
+
+Here Cloudflare's edge is the relay and attests each client's address
+(`CF-Connecting-IP`), so the "no proxy in front" rule above is met as long as
+you put nothing else in front of the Worker. Past the Free plan's daily limits
+the relay errors until the day resets; the server and the LAN are unaffected.
+
+## MCP clients: `storm-runtime mcp-connect`
+
+> **Unreleased.** `mcp-connect` is pending (decision 105e); the installer's
+> MCP only choice stays unavailable until a release carries it. Until then,
+> point a client at `http://<host>:<port>/mcp` with the key as a Bearer token.
+
+An AI app on another computer (Claude Code, Claude Desktop, Cursor) reaches
+Storm through `storm-runtime mcp-connect`, a stdio adapter the app starts
+itself. It is the same `storm-runtime` binary as a Runtime Host, but needs
+none of a host's setup: no account, no service, no enrollment.
+
+- **Direct first, relay as fallback.** It dials `--addr` (the server's LAN
+  address) and, when that is unreachable, each `--relay` in turn, so one
+  config works at home and away.
+- **Identity before the key.** It runs the server challenge against `--pk`
+  for `--server` before it sends anything, on either route, so the key is
+  never sent to a server that is not yours. (A relay still carries the
+  traffic, as it does the app's.)
+- **The key from the environment.** `STORM_MCP_KEY`, or `--key-file`; never an
+  argument, where every user on the machine could read it in `ps`.
+- **Errors say why.** A request it cannot deliver is answered with a JSON-RPC
+  error carrying a `storm_error` code, so the app shows the reason instead of
+  timing out.
+
+The app writes the configuration: **Settings ▸ Devices & access ▸ New key**
+shows a `claude mcp add` line and a JSON entry, filled in with the server id,
+its pinned key, its LAN address and its registered relays. The raw HTTP entry
+is under *Other clients (HTTP, LAN only)*.
+
+To put the binary on a computer that is not a Runtime Host, run the installer
+and choose **MCP only**, or:
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --yes --mcp
+```
+
+It downloads `storm-runtime` from the release (the Linux x86_64 binary, or the
+macOS universal tarball), checks it against `checksums.txt` and copies it to
+`/usr/local/bin/storm-runtime`, the one `sudo` step. On Linux a machine with
+the `storm-runtime` package already has it on PATH, so there is nothing to do;
+on macOS a Homebrew link at that path is left alone. `install.sh uninstall
+--mcp` removes the copy. On Windows, `install.ps1 -Mcp` copies
+`storm-runtime.exe` into `%LOCALAPPDATA%\Programs\Storm` and adds that to your
+user PATH, without administrator.
+
+Apps started from a desktop (Claude Desktop on macOS in particular) may not
+see `/usr/local/bin` on their PATH; give `"command"` the full path then.
 
 ## Runtime Hosts (Agent Runtime)
 
@@ -796,15 +931,28 @@ the vault root), which must be refused.
 
 ## Security
 
-v1 is **LAN-only**: one shared bearer token, no TLS. That is defensible on a
-home network and nowhere else. Before this is reachable from the internet it
-needs TLS and per-device tokens — see decision 4 in `PLAN.md`. Do not
-port-forward it as it stands.
+**Who can get in.** Storm has one account (decision 82), protected by a
+password hashed with Argon2id. Each device pairs — by QR, or on the LAN with
+the password (decision 118) — and gets its own device credential and session
+tokens, revocable in Settings › Access. MCP clients use separate keys. Logins
+are rate-limited per address.
 
-The unit runs as a dedicated `storm` user with `ProtectSystem=strict` and
-write access to `/srv/storm` only. That bounds where the storage root can go:
-a root outside `/srv/storm` fails validation as unwritable, so moving it
-elsewhere means widening `ReadWritePaths` in the unit first.
+**How a client knows it reached your server.** Pairing pins the server's
+public key, and every connection proves it with a signed challenge before a
+credential is sent, on the LAN and through a relay alike.
+
+**On the network.** On the LAN the app talks to the server over plain HTTP.
+Away from home it goes through a relay over `wss://`, and the relay can read
+what it carries, notes and sign-ins included, until end-to-end encryption
+(Q19): run your own relay or use one you trust. Do not port-forward
+storm-server itself; reach it through a relay instead. The installer adds a
+LAN-only firewall rule only after asking (decision 119).
+
+**On disk.** The unit runs as a dedicated `storm` user with
+`ProtectSystem=strict` and write access to `/srv/storm` only. That bounds where
+the storage root can go: a root outside `/srv/storm` fails validation as
+unwritable, so moving it elsewhere means widening `ReadWritePaths` in the unit
+first.
 
 The data tree is the service user's and its group's alone (decision 76):
 `/srv/storm` is 0750 and both units set `UMask=0027`, so no other local account
@@ -812,5 +960,9 @@ can read a note, an index or `state/auth.db`. Check it with
 `sudo -u nobody ls /srv/storm`, which must be refused. A vault root on a NAS
 keeps the modes the NAS assigns.
 
-One token covers the whole server and every vault on it. There is no per-vault
-access control — a second vault is organisation, not isolation.
+**One account sees every vault.** A second vault is organisation, not
+isolation.
+
+`storm-server status` prints the server's name, id, key fingerprint and the
+relays it is registered with: what a device pairing from the LAN list shows,
+and what a relay allowlist line must contain.

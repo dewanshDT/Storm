@@ -32,6 +32,8 @@ mod api;
 mod auth;
 mod backup;
 mod db;
+mod discovery;
+mod firewall;
 mod frontmatter;
 mod gateway;
 mod index;
@@ -42,6 +44,7 @@ mod install_windows;
 mod kit;
 mod mcp;
 mod merge;
+mod nettrust;
 mod ops;
 mod parse;
 mod registry;
@@ -69,7 +72,7 @@ struct Cli {
     command: Commands,
 
     /// Append the log to this file instead of the terminal. Windows'
-    /// windowless `storm-serverw` has no terminal (PLAN 99, W-S1).
+    /// windowless `storm-serverw` has no terminal (decision 99, W-S1).
     #[arg(long, global = true, value_name = "FILE")]
     log_file: Option<PathBuf>,
 }
@@ -148,7 +151,7 @@ enum Commands {
     /// Back up the vaults, the indexes and the account into
     /// `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones:
     /// `deploy/storm-backup.sh` without bash, for Windows' nightly task
-    /// (PLAN 99, W-S3).
+    /// (decision 99, W-S3).
     Backup {
         /// The storage root to fall back on when the registry names none.
         #[arg(long)]
@@ -293,6 +296,17 @@ struct ServeArgs {
     /// the clear.
     #[arg(long, hide = true)]
     gateway_allow_http_upstreams: bool,
+
+    /// Do not advertise on the local network, and refuse pairing with the
+    /// password, whatever the app's setting says (decision 118). Also
+    /// `STORM_DISCOVERY=0`.
+    #[arg(long)]
+    no_discovery: bool,
+
+    /// Test suites only: treat this interface's network as untrusted
+    /// (decision 119, Layer 2) whatever the OS says. Repeatable.
+    #[arg(long = "test-untrusted-interface", hide = true)]
+    test_untrusted_interfaces: Vec<String>,
     // Deliberately no `--relay` here, however much it looks like `--mcp`'s
     // sibling. `Registry::relays` is a setting the app can also change at
     // runtime, and a flag would seed it before `state/vaults.json` exists —
@@ -875,6 +889,9 @@ fn run_pair(args: PairArgs) -> Result<()> {
         &nonce,
         &session.expires,
         &addr,
+        // A separate process from the server: it cannot know what the running
+        // one is registered with. The client learns it from `/v1/server`.
+        Vec::new(),
     );
 
     // Whether a block actually reached the terminal, which is not the same
@@ -1009,6 +1026,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         server_id = %identity.server_id,
         name = %identity.name,
         key_id = %identity.key_id,
+        fingerprint = %identity.fingerprint(),
         "server identity"
     );
 
@@ -1026,6 +1044,12 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     }
     let mcp_writable = mcp_enabled && vault_set.registry.mcp_writable;
     let agent_writes = vault_set.registry.agent_writes();
+    let discoverable = vault_set.registry.discoverable();
+    let discovery_forced_off = args.no_discovery
+        || discovery::env_forces_off(std::env::var("STORM_DISCOVERY").ok().as_deref());
+    if discovery_forced_off {
+        tracing::info!("LAN discovery is off (--no-discovery / STORM_DISCOVERY)");
+    }
     tracing::info!(
         enabled = mcp_enabled,
         writable = mcp_writable,
@@ -1086,6 +1110,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 &nonce,
                 &session.expires,
                 &listen_addr,
+                // Before the tunnels start, so nothing is registered yet.
+                Vec::new(),
             );
             tracing::info!(
                 uri = %qr.to_uri(),
@@ -1149,6 +1175,11 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         host_limiter: auth::ratelimit::LoginLimiter::new(),
         agent,
         gateway,
+        discovery: discovery::Discovery::with_trust(
+            discovery_forced_off,
+            discoverable,
+            nettrust::NetTrust::new(args.test_untrusted_interfaces.clone()),
+        ),
     });
 
     ops::reconcile_single_user(&state)
@@ -1164,6 +1195,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // Kept for the web fallback below, which mints bootstrap nonces and so
     // needs the same state the API has.
     let web_state = state.clone();
+    let discovery_state = state.clone();
 
     let mut app = api::router(
         state,
@@ -1285,6 +1317,15 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     let (stop_tunnels, tunnels_stop) = tokio::sync::oneshot::channel();
     let tunnels = tokio::spawn(relay::manage(tunnels, relays_rx, tunnels_stop));
 
+    let (stop_discovery, discovery_stop) = tokio::sync::oneshot::channel();
+    let bound = listener.local_addr().context("reading the bound address")?;
+    let discovery = tokio::spawn(discovery::run(
+        discovery_state,
+        bound.ip(),
+        bound.port(),
+        discovery_stop,
+    ));
+
     tracing::info!("storm-server listening on http://{addr}");
     // `into_make_service_with_connect_info` is what makes the peer address
     // available to handlers. `/v1/pair/local` refuses anything that is not
@@ -1306,7 +1347,9 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // this server waits that out — a restart would look like an outage for as
     // long as the timeout lasts.
     let _ = stop_tunnels.send(());
+    let _ = stop_discovery.send(());
     let _ = tunnels.await;
+    let _ = discovery.await;
     Ok(())
 }
 
@@ -1401,7 +1444,7 @@ fn advertised_host(bind_host: &str) -> String {
 }
 
 /// The `storm-server` command line: `storm-server` and Windows' windowless
-/// `storm-serverw` are both this (PLAN 99, W-S1).
+/// `storm-serverw` are both this (decision 99, W-S1).
 #[tokio::main]
 pub async fn main() -> Result<()> {
     // Before anything can open a TLS connection. The relay tunnel dials

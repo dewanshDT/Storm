@@ -166,7 +166,7 @@ excluded, so it cannot forge the message's field boundaries).
 how to check a restore actually brought the identity back.
 
 Sessions and pairing are not built yet; the shared bearer token is unchanged.
-See `PLAN.md` decisions 52 / 52a / 52c.
+See decisions 52 / 52a / 52c.
 
 ### The account
 
@@ -188,6 +188,30 @@ Run these **as the service user** (`sudo -u storm storm-server …`).
   reporting success.
 - Upgrading from v5 writes `state/auth.db.pre-v6`, keeps the oldest active
   owner and removes every other account in one transaction.
+
+### LAN discovery pairing
+
+The server advertises `_storm._tcp` over mDNS on its LAN-scoped interfaces
+(loopback, RFC 1918, link-local, IPv6 unique-local; never a public one), so the
+app can list it under "On this network" and pair with the account password
+(decision 118). The TXT carries `v`, `sid`, `pk`, `ver`, `claimed` and `lan`,
+nothing secret.
+
+```
+POST /v1/pairings/password  {"password", "device_name", "platform", "version"}
+  → {device_id, device_secret, server_id, public_key, key_id}
+```
+
+Refused `403 lan_only` when the request came through a relay, from a peer that
+is not LAN-scoped, or while discovery is off; `409 setup_required` before the
+account exists (a fresh server is claimed only by its setup QR). It shares the
+login rate limiter and lockout, and a wrong password answers as
+`/v1/auth/login` does.
+
+Turn it off in the app (Settings › Connection › "Discoverable on this
+network"), or for good with `--no-discovery` / `STORM_DISCOVERY=0`.
+`storm-server status` prints the key's fingerprint (`6FEC DC12 9A0B 44E1`),
+the one the app shows before it asks for the password.
 
 ### Vaults, folders, and the storage root
 

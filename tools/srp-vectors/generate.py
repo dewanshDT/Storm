@@ -2,10 +2,12 @@
 """Generate docs/srp-vectors.json.
 
 Run from the repo root. Regenerating is not routine: the file is a wire
-commitment, so a change to it is a protocol change and belongs in PLAN.md.
+commitment, so a change to it is a protocol change and belongs in a numbered
+decision in the vault.
 """
 
 import base64
+import hashlib
 import json
 import pathlib
 import sys
@@ -111,7 +113,7 @@ doc["delimiter_confusion"] = {
         "re-splits it. Both pairs below produce identical signed bytes: one "
         "signature would cover two different (server_id, nonce) readings. "
         "Validating only the nonce leaves the server_id half open — that was "
-        "PLAN.md decision 60. An implementation is correct here only if it "
+        "decision 60. An implementation is correct here only if it "
         "rejects both pairs before signing or verifying."
     ),
     "colliding_pairs": [
@@ -317,6 +319,32 @@ doc["public_key_parsing"] = {
         {"name": "too_short", "public_key_b64": b64(PK[:31]), "accepted": False},
         {"name": "too_long", "public_key_b64": b64(PK + b"\x00"), "accepted": False},
         {"name": "empty", "public_key_b64": "", "accepted": False},
+    ],
+}
+
+
+
+def fingerprint(pk: bytes) -> str:
+    digest = hashlib.sha256(pk).digest()[:8].hex().upper()
+    return " ".join(digest[i : i + 4] for i in range(0, 16, 4))
+
+
+doc["key_fingerprint"] = {
+    "about": (
+        "What a person compares to tell two servers apart (decision 118): "
+        "SHA-256 of the 32 raw public key bytes, the first 8 bytes as four "
+        "space-separated groups of four uppercase hex digits. storm-server "
+        "status, Settings > Connection > Server identity and the LAN pairing "
+        "sheet all print this one format."
+    ),
+    "cases": [
+        {"name": "test_key", "public_key_b64": b64(PK), "fingerprint": fingerprint(PK)},
+        {"name": "zero_key", "public_key_b64": b64(bytes(32)), "fingerprint": fingerprint(bytes(32))},
+        {
+            "name": "ff_key",
+            "public_key_b64": b64(b"\xff" * 32),
+            "fingerprint": fingerprint(b"\xff" * 32),
+        },
     ],
 }
 

@@ -21,22 +21,22 @@ pub const FRAME_RESPONSE_BODY: u8 = 0x02;
 /// The fixed size of a binary frame's header: one kind byte, four id bytes.
 pub const BINARY_HEADER_LEN: usize = 5;
 
+/// The largest body payload this server puts in one binary frame (§5.2).
+///
+/// A WebSocket peer refuses a frame over 16 MiB by closing the connection, and
+/// at the relay that connection is the whole trunk: one large download used to
+/// cut off every relayed client of this server (decision 98).
+pub const MAX_BODY_FRAME_PAYLOAD: usize = 256 * 1024;
+
 // ---------------------------------------------------------------------------
 // Headers
 // ---------------------------------------------------------------------------
 
-/// One request's or response's headers, as they cross the wire.
+/// One request's or response's headers, as they cross the wire: a JSON object
+/// whose values are strings, a repeated field folded into one value (§5.2).
 ///
-/// **The spec does not pin this shape.** §5.2 and §6 both say `headers` and
-/// stop there, so an origin and a relay written independently can disagree
-/// about whether it is a JSON object or a list of pairs — and disagree
-/// silently, because a wrong-shaped `headers` deserializes as "no headers"
-/// rather than as an error. This type therefore *accepts both* and emits the
-/// object form, so interop does not rest on a coin flip that the document
-/// never called. See the report accompanying this change.
-///
-/// Order is preserved on the pair form and sorted on the object form, which is
-/// fine: HTTP gives no meaning to header order between different field names.
+/// Sorted by name on the way in, which is fine: HTTP gives no meaning to
+/// header order between different field names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WireHeaders(pub Vec<(String, String)>);
 
@@ -46,22 +46,10 @@ impl WireHeaders {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum HeadersRepr {
-    /// `{"accept": "application/json"}` — the object form.
-    Map(std::collections::BTreeMap<String, String>),
-    /// `[["accept", "application/json"]]` — the pair form, which is the only
-    /// one that can carry a repeated field name.
-    Pairs(Vec<(String, String)>),
-}
-
 impl<'de> Deserialize<'de> for WireHeaders {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(match HeadersRepr::deserialize(d)? {
-            HeadersRepr::Map(map) => WireHeaders(map.into_iter().collect()),
-            HeadersRepr::Pairs(pairs) => WireHeaders(pairs),
-        })
+        let map = std::collections::BTreeMap::<String, String>::deserialize(d)?;
+        Ok(WireHeaders(map.into_iter().collect()))
     }
 }
 
@@ -122,11 +110,22 @@ struct Frame {
 /// addressed to this slice.
 #[derive(Debug)]
 pub enum Inbound {
-    Challenge { nonce: String },
+    Challenge {
+        nonce: String,
+    },
     Registered(Registered),
-    StreamOpen { stream_id: u32 },
+    StreamOpen {
+        stream_id: u32,
+    },
     RequestHead(RequestHead),
-    Close { stream_id: Option<u32> },
+    /// An `HTTP_REQUEST_HEAD` this server cannot interpret. Its content is a
+    /// client's, so it fails that client's stream and nothing else (§5.2).
+    BadHead {
+        stream_id: u32,
+    },
+    Close {
+        stream_id: Option<u32>,
+    },
     Ping,
     Pong,
     Error(RelayError),
@@ -210,7 +209,17 @@ pub fn parse_text(text: &str) -> Result<Inbound, ProtocolError> {
                 stream_id: typed::<B>(body)?.stream_id,
             }
         }
-        "HTTP_REQUEST_HEAD" => Inbound::RequestHead(typed(body)?),
+        "HTTP_REQUEST_HEAD" => {
+            #[derive(Deserialize)]
+            struct B {
+                stream_id: u32,
+            }
+            let stream_id = typed::<B>(body.clone())?.stream_id;
+            match typed(body) {
+                Ok(head) => Inbound::RequestHead(head),
+                Err(ProtocolError) => Inbound::BadHead { stream_id },
+            }
+        }
         "CLOSE" => {
             #[derive(Deserialize)]
             struct B {
@@ -318,6 +327,24 @@ pub fn close_stream(stream_id: u32) -> String {
     control("CLOSE", StreamId { stream_id })
 }
 
+/// The response failed after its head: the body the client has is incomplete
+/// (§5.4). A `CLOSE` rather than an `ERROR`, because a relay that predates the
+/// rule drops the whole trunk on an origin-sent `ERROR`.
+pub fn abort_stream(stream_id: u32) -> String {
+    #[derive(Serialize)]
+    struct Aborted {
+        stream_id: u32,
+        aborted: bool,
+    }
+    control(
+        "CLOSE",
+        Aborted {
+            stream_id,
+            aborted: true,
+        },
+    )
+}
+
 pub fn close_trunk() -> String {
     control("CLOSE", serde_json::Map::new())
 }
@@ -332,37 +359,6 @@ pub fn ping() -> String {
 
 pub fn pong() -> String {
     control("PONG", serde_json::Map::new())
-}
-
-#[derive(Serialize)]
-struct ErrorBody<'a> {
-    code: &'a str,
-    message: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_id: Option<u32>,
-}
-
-/// §5.1: a `stream_id` already open is refused rather than acknowledged twice.
-pub fn error_stream_closed(stream_id: u32) -> String {
-    control(
-        "ERROR",
-        ErrorBody {
-            code: "stream_closed",
-            message: "stream closed",
-            stream_id: Some(stream_id),
-        },
-    )
-}
-
-pub fn error_protocol() -> String {
-    control(
-        "ERROR",
-        ErrorBody {
-            code: "protocol_error",
-            message: "protocol error",
-            stream_id: None,
-        },
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -407,8 +403,7 @@ mod tests {
             deregister(),
             ping(),
             pong(),
-            error_stream_closed(7),
-            error_protocol(),
+            abort_stream(7),
         ] {
             let value: serde_json::Value = serde_json::from_str(&json).unwrap();
             assert_eq!(value["v"], 1, "{json}");
@@ -506,8 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn headers_parse_from_either_shape() {
-        // The spec pins neither, so both have to work — see `WireHeaders`.
+    fn headers_are_an_object_of_strings() {
         let map = parse_head(r#"{"accept":"application/json","x-a":"1"}"#);
         assert_eq!(
             map.headers.0,
@@ -516,9 +510,45 @@ mod tests {
                 ("x-a".to_string(), "1".to_string())
             ]
         );
+    }
 
-        let pairs = parse_head(r#"[["accept","application/json"],["x-a","1"]]"#);
-        assert_eq!(pairs.headers.0, map.headers.0);
+    #[test]
+    fn a_head_this_server_cannot_interpret_is_a_bad_head_not_a_protocol_error() {
+        // Everything in a head but its `stream_id` is a client's, so a bad one
+        // must fail one stream, never the trunk every client shares.
+        for (field, bad) in [
+            ("headers", serde_json::json!({"x": 1})),
+            ("headers", serde_json::json!({"x": null})),
+            (
+                "headers",
+                serde_json::json!([["accept", "application/json"]]),
+            ),
+            ("headers", serde_json::json!("x")),
+            ("method", serde_json::json!(7)),
+        ] {
+            let mut frame = serde_json::json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": 4,
+                "method": "GET", "path": "/v1/health", "headers": {},
+            });
+            frame[field] = bad.clone();
+            assert!(
+                matches!(
+                    parse_text(&frame.to_string()),
+                    Ok(Inbound::BadHead { stream_id: 4 })
+                ),
+                "{field} = {bad}"
+            );
+        }
+        let no_path = r#"{"v":1,"type":"HTTP_REQUEST_HEAD","stream_id":4,"method":"GET"}"#;
+        assert!(matches!(
+            parse_text(no_path),
+            Ok(Inbound::BadHead { stream_id: 4 })
+        ));
+        // A head naming no stream names nothing to fail; the relay never
+        // sends one.
+        assert!(
+            parse_text(r#"{"v":1,"type":"HTTP_REQUEST_HEAD","method":"GET","path":"/"}"#).is_err()
+        );
     }
 
     #[test]
@@ -591,5 +621,105 @@ mod tests {
         assert_eq!(decode_body_frame(&empty).unwrap().2, b"");
         assert!(decode_body_frame(&[FRAME_REQUEST_BODY, 0, 0]).is_none());
         assert!(decode_body_frame(&[]).is_none());
+    }
+
+    /// `docs/srp-vectors.json` → `framing` (SRP §3, §5, §6; decision 116l):
+    /// the bytes and shapes this origin produces and parses, held to the file
+    /// both relays and both clients read.
+    fn framing() -> serde_json::Value {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/srp-vectors.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        doc["framing"].clone()
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn payload(case: &serde_json::Value) -> Vec<u8> {
+        match case["payload_utf8"].as_str() {
+            Some(text) => text.as_bytes().to_vec(),
+            None => hex(case["payload_hex"].as_str().unwrap()),
+        }
+    }
+
+    #[test]
+    fn body_frames_match_the_framing_vectors() {
+        let f = framing();
+        for case in f["body_frames"].as_array().unwrap() {
+            let kind = case["type"].as_u64().unwrap() as u8;
+            let id = case["stream_id"].as_u64().unwrap() as u32;
+            let bytes = hex(case["frame_hex"].as_str().unwrap());
+            if case["sender_may_send"] != false {
+                assert_eq!(encode_body_frame(kind, id, &payload(case)), bytes, "{case}");
+            }
+            let (k, i, p) = decode_body_frame(&bytes).expect("a vector frame decodes");
+            assert_eq!((k, i, p.to_vec()), (kind, id, payload(case)), "{case}");
+        }
+        for case in f["too_short_frames"].as_array().unwrap() {
+            assert!(
+                decode_body_frame(&hex(case["frame_hex"].as_str().unwrap())).is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_frames_match_the_framing_vectors() {
+        let f = framing();
+        let named = |name: &str| {
+            f["control_messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("no vector {name}"))
+                .clone()
+        };
+        // The canonical spellings, byte for byte: the Worker answers exactly
+        // this PING without waking (SG-38).
+        assert_eq!(
+            ping(),
+            named("canonical_ping")["exact_text"].as_str().unwrap()
+        );
+        assert_eq!(
+            pong(),
+            named("canonical_pong")["exact_text"].as_str().unwrap()
+        );
+        let json = |s: String| serde_json::from_str::<serde_json::Value>(&s).unwrap();
+        assert_eq!(json(close_stream(7)), named("close_stream")["json"]);
+        assert_eq!(json(abort_stream(7)), named("close_stream_aborted")["json"]);
+        assert_eq!(json(close_trunk()), named("close_trunk")["json"]);
+        assert!(matches!(
+            parse_text(&named("request_head")["json"].to_string()),
+            Ok(Inbound::RequestHead(_))
+        ));
+    }
+
+    #[test]
+    fn a_malformed_head_vector_never_reaches_the_router() {
+        // Refused at parse, or when the request is built: either way the
+        // stream gets 400 and CLOSE and the trunk carries on (client.rs).
+        let host = axum::http::HeaderValue::from_static("storm.test");
+        for case in framing()["malformed_request_heads"]["cases"]
+            .as_array()
+            .unwrap()
+        {
+            match parse_text(&case["json"].to_string()) {
+                Ok(Inbound::BadHead { .. }) => {}
+                Ok(Inbound::RequestHead(head)) => assert!(
+                    super::super::dispatch::build_request(&head, &host, axum::body::Body::empty())
+                        .is_err(),
+                    "{} would be dispatched",
+                    case["name"]
+                ),
+                other => panic!("{}: {other:?}", case["name"]),
+            }
+        }
     }
 }

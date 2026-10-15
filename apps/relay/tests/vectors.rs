@@ -21,7 +21,9 @@ use std::path::PathBuf;
 
 use data_encoding::BASE64URL_NOPAD;
 use serde_json::Value;
-use storm_relay::auth::{PublicKey, relay_auth_message, validate_nonce, validate_server_id};
+use storm_relay::auth::{
+    PublicKey, decode_key, relay_auth_message, validate_nonce, validate_server_id,
+};
 
 /// The vectors live at the repo root, not in the crate — three implementations
 /// read the one file, and a copy per crate is exactly the drift being guarded
@@ -202,4 +204,127 @@ fn a_parsed_key_round_trips_to_the_unpadded_spelling() {
     let canonical = s(&doc["keys"], "test_public_key_b64");
     let key = PublicKey::from_b64(canonical).expect("the file's own test key must parse");
     assert_eq!(key.to_b64(), canonical);
+}
+
+#[test]
+fn every_hello_pubkey_spelling_decodes_exactly_as_recorded() {
+    let doc = vectors();
+    let section = &doc["hello_pubkey"];
+    let list = section["cases"]
+        .as_array()
+        .expect("hello_pubkey.cases missing");
+    assert!(list.iter().any(|c| c["accepted"] == true));
+    for case in list {
+        let expected = case["accepted"].as_bool().expect("`accepted` is a bool");
+        assert_eq!(
+            decode_key(s(case, "pubkey")).is_ok(),
+            expected,
+            "hello_pubkey vector `{}`",
+            s(case, "name")
+        );
+    }
+    let agree = &section["query_and_hello_must_agree"];
+    assert_ne!(
+        decode_key(s(agree, "query_pubkey")).unwrap(),
+        decode_key(s(agree, "hello_pubkey")).unwrap()
+    );
+    let url = &section["connect_url"];
+    let key = decode_key(s(url, "pubkey_b64")).unwrap();
+    assert_eq!(BASE64URL_NOPAD.encode(&key), s(url, "pubkey_b64"));
+    assert_eq!(
+        format!(
+            "{}/connect/{}?pubkey={}",
+            s(url, "relay_base"),
+            s(url, "server_id"),
+            s(url, "pubkey_b64")
+        ),
+        s(url, "url")
+    );
+}
+
+// ---- framing (SRP §3, §5, §6; decision 116l) -------------------------------
+
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn every_body_frame_header_parses_as_recorded() {
+    let f = &vectors()["framing"];
+    for case in f["body_frames"].as_array().unwrap() {
+        let bytes = hex(s(case, "frame_hex"));
+        assert_eq!(
+            storm_relay::proto::parse_body_header(&bytes).unwrap(),
+            (
+                case["type"].as_u64().unwrap() as u8,
+                case["stream_id"].as_u64().unwrap() as u32
+            ),
+            "{case}"
+        );
+    }
+    for case in f["too_short_frames"].as_array().unwrap() {
+        assert!(
+            storm_relay::proto::parse_body_header(&hex(s(case, "frame_hex"))).is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn the_control_frames_this_relay_sends_match_the_vectors() {
+    use storm_relay::proto::{self, ErrorCode};
+    let f = &vectors()["framing"];
+    let named = |name: &str| -> Value {
+        f["control_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no vector {name}"))
+            .clone()
+    };
+    let json = |s: String| serde_json::from_str::<Value>(&s).unwrap();
+    // The Worker answers exactly this text without waking (SG-38).
+    assert_eq!(proto::pong(), s(&named("canonical_pong"), "exact_text"));
+    assert_eq!(json(proto::close_stream(7)), named("close_stream")["json"]);
+    assert_eq!(
+        json(proto::error(ErrorCode::RateLimited)),
+        named("error_trunk_scoped")["json"]
+    );
+    assert_eq!(
+        json(proto::error_on_attempt(
+            ErrorCode::RateLimited,
+            Value::String("a1".into())
+        )),
+        named("error_attempt_scoped")["json"]
+    );
+    assert_eq!(
+        json(proto::error_on_stream(ErrorCode::ClientBacklogged, 7)),
+        named("error_stream_scoped")["json"]
+    );
+}
+
+#[test]
+fn every_malformed_head_vector_is_refused() {
+    let f = &vectors()["framing"];
+    for case in f["malformed_request_heads"]["cases"].as_array().unwrap() {
+        let body = case["json"].as_object().unwrap();
+        assert!(
+            !storm_relay::proto::is_request_head(body),
+            "{} would be forwarded",
+            case["name"]
+        );
+    }
+    let good = f["control_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "request_head")
+        .unwrap();
+    assert!(storm_relay::proto::is_request_head(
+        good["json"].as_object().unwrap()
+    ));
 }

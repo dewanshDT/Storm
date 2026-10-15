@@ -24,7 +24,8 @@ use std::time::{Instant, SystemTime};
 use axum::extract::ws::WebSocket;
 
 use crate::Relay;
-use crate::auth::{PublicKey, validate_nonce, validate_server_id};
+use crate::auth::{KeyBytes, PublicKey, validate_nonce, validate_server_id};
+use crate::config::Mode;
 use crate::proto::{self, ChallengeResponse, ErrorCode, Frame, RegisterServer};
 use crate::state::{Binding, RecordError, Registration, ServerTrunk, new_trunk_id};
 use crate::trunk::{self, Fault, Incoming, Rx, Tx};
@@ -74,7 +75,7 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
     // trunk reaching here must not evict the trunk that replaced it.
     relay
         .registrations
-        .release(&session.server_id, &session.trunk_id);
+        .release(&session.server_id, session.key, &session.trunk_id);
     // Streams do not survive trunk loss (§5.4): every client holding one is
     // told `trunk_lost` rather than left waiting for a response that can no
     // longer arrive.
@@ -82,6 +83,7 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
     tracing::info!(
         server_id = %session.server_id,
         trunk_id = %session.trunk_id,
+        bytes = session.trunk.bytes(),
         "server trunk closed"
     );
 
@@ -90,6 +92,7 @@ pub async fn serve(socket: WebSocket, relay: Arc<Relay>) {
 
 struct Session {
     server_id: String,
+    key: KeyBytes,
     trunk_id: String,
     trunk: Arc<ServerTrunk>,
 }
@@ -100,7 +103,7 @@ async fn handshake(
     relay: &Relay,
     server_trunk: &Arc<ServerTrunk>,
 ) -> Result<Session, Fault> {
-    let frame = trunk::recv_control(rx).await?;
+    let frame = trunk::recv_handshake_control(rx, tx).await?;
     if frame.ty() != "REGISTER_SERVER" {
         return Err(ErrorCode::ProtocolError.into());
     }
@@ -122,18 +125,23 @@ async fn handshake(
 
     // **Binding first, challenge second** (§4.1). There is no reason to spend a
     // nonce on a registration that cannot succeed, and issuing one anyway would
-    // let an unbound caller farm nonces from the relay for free.
-    let binding = relay
-        .bindings
-        .check(relay.config.allowlist.as_ref(), &register.server_id, pubkey)
-        .map_err(|_| {
-            tracing::info!(
-                server_id = %register.server_id,
-                pubkey = %pubkey.to_b64(),
-                "refusing registration: pubkey does not match the binding"
-            );
-            ErrorCode::AuthFailed
-        })?;
+    // let an unbound caller farm nonces from the relay for free. An open relay
+    // binds nothing: the key is the address.
+    let binding = if relay.config.mode() == Mode::Open {
+        Binding::Established
+    } else {
+        relay
+            .bindings
+            .check(relay.allowlist().as_ref(), &register.server_id, pubkey)
+            .map_err(|_| {
+                tracing::info!(
+                    server_id = %register.server_id,
+                    pubkey = %pubkey.to_b64(),
+                    "refusing registration: pubkey does not match the binding"
+                );
+                ErrorCode::AuthFailed
+            })?
+    };
 
     let nonce = relay.mint_nonce();
     // The nonce generator satisfies `validate_nonce` by construction, so this
@@ -152,7 +160,7 @@ async fn handshake(
         .issue(&nonce, relay.config.challenge_ttl, Instant::now());
     tx.send_json(proto::challenge(nonce.clone())).await?;
 
-    let frame = trunk::recv_control(rx).await?;
+    let frame = trunk::recv_handshake_control(rx, tx).await?;
     if frame.ty() != "CHALLENGE_RESPONSE" {
         return Err(ErrorCode::ProtocolError.into());
     }
@@ -218,6 +226,7 @@ async fn handshake(
     let now = Instant::now();
     if let Some(displaced) = relay.registrations.install(
         &register.server_id,
+        pubkey.bytes(),
         Registration {
             trunk_id: trunk_id.clone(),
             connected_at: SystemTime::now(),
@@ -241,11 +250,13 @@ async fn handshake(
     tx.send_json(proto::registered(
         trunk_id.clone(),
         relay.config.public_address(&register.server_id),
+        relay.config.heartbeat_deadline,
     ))
     .await?;
 
     Ok(Session {
         server_id: register.server_id,
+        key: pubkey.bytes(),
         trunk_id,
         trunk: server_trunk.clone(),
     })
@@ -272,26 +283,37 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
         //
         // `recv` is cancel-safe (it only polls `StreamExt::next`), so timing it
         // out loses no frame.
-        let incoming =
-            match tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)).await {
-                Ok(Ok(incoming)) => incoming,
-                Ok(Err(fault)) => return fault,
-                Err(_) => {
-                    tracing::info!(
-                        server_id = %session.server_id,
-                        trunk_id = %session.trunk_id,
-                        "heartbeat deadline exceeded; closing trunk"
-                    );
-                    return Fault::Disconnected;
-                }
-            };
-        relay
-            .registrations
-            .touch(&session.server_id, &session.trunk_id, Instant::now());
+        let read = tokio::select! {
+            biased;
+            // An operator's revocation (decision 116k).
+            () = tx.killed() => return Fault::Disconnected,
+            read = tokio::time::timeout(relay.config.heartbeat_deadline, trunk::recv(rx)) => read,
+        };
+        let incoming = match read {
+            Ok(Ok(incoming)) => incoming,
+            Ok(Err(fault)) => return fault,
+            Err(_) => {
+                tracing::info!(
+                    server_id = %session.server_id,
+                    trunk_id = %session.trunk_id,
+                    "heartbeat deadline exceeded; closing trunk"
+                );
+                return Fault::Disconnected;
+            }
+        };
+        relay.registrations.touch(
+            &session.server_id,
+            session.key,
+            &session.trunk_id,
+            Instant::now(),
+        );
 
         let outcome = match incoming {
             Incoming::Control(frame) => match frame.ty() {
-                "PING" => tx.send_json(proto::pong()).await,
+                "PING" => {
+                    tx.send_control(proto::pong());
+                    Ok(())
+                }
                 // A server SHOULD send this before closing, so the relay frees
                 // the `server_id` immediately rather than making clients wait
                 // out a timeout for a deliberate restart (§4.2).
@@ -305,6 +327,7 @@ async fn trunk_loop(rx: &mut Rx, tx: &Tx, relay: &Relay, session: &Session) -> F
                     Ok(false) => Ok(()),
                     Err(fault) => Err(fault),
                 },
+                "ERROR" => server_error(session, frame),
                 _ => Err(ErrorCode::ProtocolError.into()),
             },
             Incoming::Body {
@@ -358,11 +381,12 @@ fn forward_response_body(
         tracing::debug!(stream_id, "dropping a body chunk for a closed stream");
         return Ok(());
     };
+    session.trunk.count_bytes(raw.len());
     // Forwarded chunk by chunk as the origin produces them, never accumulated
     // (§5.2) — buffering a response whole would break streaming *and* let one
     // large download hold the relay's memory.
     if client.try_send_raw(raw).is_err() {
-        drop_backlogged_client(session, stream_id);
+        drop_backlogged_client(session, stream_id, &client);
     }
     Ok(())
 }
@@ -375,7 +399,7 @@ fn deliver(session: &Session, stream_id: u32, json: String) -> Result<(), Fault>
         return Ok(());
     };
     if client.try_send_json(json).is_err() {
-        drop_backlogged_client(session, stream_id);
+        drop_backlogged_client(session, stream_id, &client);
     }
     Ok(())
 }
@@ -386,13 +410,41 @@ fn deliver(session: &Session, stream_id: u32, json: String) -> Result<(), Fault>
 /// one origin, so waiting on any single client would stall the responses of
 /// every other client on that server. Dropping the stream is the bounded
 /// alternative — the cost lands on the client that caused it.
-fn drop_backlogged_client(session: &Session, stream_id: u32) {
+///
+/// The client is told, with `ERROR{client_backlogged}` on the stream (§5.4).
+/// Silence would leave a started body that never ends and a pending head that
+/// never comes, and a client cannot turn silence into an error.
+fn drop_backlogged_client(session: &Session, stream_id: u32, client: &Tx) {
     tracing::info!(stream_id, "client cannot keep up; dropping its stream");
     session.trunk.close_stream(stream_id);
-    let _ = session
-        .trunk
-        .tx()
-        .try_send_json(proto::close_stream(stream_id));
+    client.end_stream(
+        stream_id,
+        proto::error_on_stream(ErrorCode::ClientBacklogged, stream_id),
+    );
+    session.trunk.tx().close_toward_origin(stream_id);
+}
+
+/// An `ERROR` from the origin, which §6 does not allow it to send.
+///
+/// Origins before 116a sent `ERROR{stream_closed, stream_id}` to refuse one
+/// stream. The trunk is shared by every client of the server, so a refusal
+/// that names a stream ends that stream only, as an aborted one.
+fn server_error(session: &Session, frame: Frame) -> Result<(), Fault> {
+    if !frame.body.contains_key("stream_id") {
+        return Err(ErrorCode::ProtocolError.into());
+    }
+    let stream_id = proto::stream_id_of(&frame.body)?;
+    tracing::debug!(stream_id, "origin refused a stream with ERROR");
+    let closing = session.trunk.client_for(stream_id);
+    session.trunk.close_stream(stream_id);
+    if let Some(client) = closing {
+        client.end_stream(
+            stream_id,
+            proto::error_on_stream(ErrorCode::StreamAborted, stream_id),
+        );
+    }
+    session.trunk.tx().close_toward_origin(stream_id);
+    Ok(())
 }
 
 /// `CLOSE` from the origin. Returns whether the whole trunk is going away.
@@ -404,10 +456,33 @@ fn server_close(session: &Session, frame: Frame) -> Result<bool, Fault> {
         return Err(ErrorCode::ProtocolError.into());
     }
     let stream_id = proto::stream_id_of(&frame.body)?;
+    // The origin's response failed after its head (§5.4). Forwarded as a plain
+    // `CLOSE`, the client would keep a truncated body as complete.
+    let aborted = match frame.body.get("aborted") {
+        None => false,
+        Some(serde_json::Value::Bool(aborted)) => *aborted,
+        Some(_) => return Err(ErrorCode::ProtocolError.into()),
+    };
     let closing = session.trunk.client_for(stream_id);
     session.trunk.close_stream(stream_id);
     if let Some(client) = closing {
-        let _ = client.try_send_json(proto::close_stream(stream_id));
+        if aborted {
+            client.end_stream(
+                stream_id,
+                proto::error_on_stream(ErrorCode::StreamAborted, stream_id),
+            );
+        } else if client
+            .try_send_json(proto::close_stream(stream_id))
+            .is_err()
+        {
+            // The end of a body is ordered behind the body, so it cannot jump
+            // the queue the way an error can. Without room for it the client
+            // has lost the stream like any other backlogged one.
+            client.end_stream(
+                stream_id,
+                proto::error_on_stream(ErrorCode::ClientBacklogged, stream_id),
+            );
+        }
     }
     Ok(false)
 }

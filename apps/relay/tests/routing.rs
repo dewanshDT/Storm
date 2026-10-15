@@ -85,9 +85,15 @@ impl Harness {
     }
 
     async fn dial(&self, path: &str) -> Conn {
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{}{path}", self.addr))
-            .await
-            .unwrap();
+        // Nagle off on this end, as on a real server's tunnel, so a delay the
+        // latency test measures can only be the relay's own sockets.
+        let (socket, _) = tokio_tungstenite::connect_async_with_config(
+            format!("ws://{}{path}", self.addr),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
         Conn { socket }
     }
 
@@ -300,6 +306,90 @@ async fn a_request_and_response_travel_client_relay_server_client_with_bodies() 
     }
 }
 
+/// The end-of-body frame (§5.2) is a `0x01` with an empty payload. It is the
+/// only thing that lets the origin answer a bodied request, so the relay must
+/// carry it like any other chunk rather than drop it as empty.
+#[tokio::test]
+async fn an_empty_request_body_frame_reaches_the_server_as_end_of_body() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let stream_id = client.open_stream("attempt-end").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+
+    client.send(request_head(stream_id, "/v1/notes")).await;
+    client.send_body(0x01, stream_id, b"{}").await;
+    client.send_body(0x01, stream_id, b"").await;
+
+    let head = server.recv().await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+    for expected in [&b"{}"[..], &b""[..]] {
+        match server.next_frame().await {
+            Frame::Body {
+                kind,
+                stream_id: id,
+                payload,
+            } => {
+                assert_eq!(kind, 0x01);
+                assert_eq!(id, stream_id);
+                assert_eq!(payload, expected);
+            }
+            Frame::Text(value) => panic!("expected a body frame, got {value}"),
+        }
+    }
+}
+
+// ------------------------------------------------------------------ latency
+
+/// A relayed exchange is several small frames each way. With Nagle on the
+/// relay's sockets, each frame after the first waited out the peer's delayed
+/// ACK: about 40 ms a request on localhost, against well under 1 ms direct
+/// (P1, decision 91).
+#[tokio::test]
+async fn a_relayed_exchange_does_not_wait_on_delayed_acks() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let mut samples = Vec::new();
+    for i in 0..21 {
+        let started = std::time::Instant::now();
+        let stream_id = client.open_stream(&format!("attempt-{i}")).await;
+        server.expect_stream_open_and_ack().await;
+
+        client.send(request_head(stream_id, "/v1/notes")).await;
+        client.send_body(0x01, stream_id, b"{\"body\":1}").await;
+        client.send_body(0x01, stream_id, b"").await;
+        server.recv().await;
+        server.next_frame().await;
+        server.next_frame().await;
+
+        server
+            .send(json!({
+                "v": 1, "type": "HTTP_RESPONSE_HEAD",
+                "stream_id": stream_id, "status": 200, "headers": {},
+            }))
+            .await;
+        server.send_body(0x02, stream_id, b"{}").await;
+        server
+            .send(json!({ "v": 1, "type": "CLOSE", "stream_id": stream_id }))
+            .await;
+        client.recv().await;
+        client.next_frame().await;
+        let closed = client.recv().await;
+        assert_eq!(closed["type"], "CLOSE", "{closed}");
+        samples.push(started.elapsed());
+    }
+
+    samples.sort();
+    let median = samples[samples.len() / 2];
+    assert!(
+        median < Duration::from_millis(15),
+        "median relayed exchange took {median:?}; TCP_NODELAY missing?"
+    );
+}
+
 // --------------------------------------------------- the cross-talk trap (§3)
 
 #[tokio::test]
@@ -472,6 +562,22 @@ async fn even_a_null_relay_peer_ip_from_a_client_is_refused() {
 
 // -------------------------------------------------------------- failure modes
 
+/// Decision 108c: a `PING` may arrive at any point on a trunk, before `HELLO`
+/// included, and is answered in order.
+#[tokio::test]
+async fn a_ping_before_hello_is_answered_and_hello_still_succeeds() {
+    let harness = Harness::plain().await;
+    let _server = harness.server().await;
+    let mut client = harness.dial(&format!("/connect/{SERVER_ID}")).await;
+    client.send(json!({ "v": 1, "type": "PING" })).await;
+    assert_eq!(client.recv().await["type"], "PONG");
+    client
+        .send(json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID }))
+        .await;
+    let ready = client.recv().await;
+    assert_eq!(ready["type"], "READY", "{ready}");
+}
+
 #[tokio::test]
 async fn hello_for_an_unregistered_server_id_is_server_unreachable() {
     let harness = Harness::plain().await;
@@ -589,6 +695,8 @@ async fn past_the_in_flight_cap_open_stream_is_rate_limited_immediately() {
         .await;
     let reply = client.recv().await;
     assert_error(&reply, "rate_limited");
+    assert_eq!(reply["attempt_id"], "over", "{reply}");
+    assert!(reply.get("stream_id").is_none(), "{reply}");
     // *Immediately*, never queued (§5.1): an overloaded relay and a slow server
     // want opposite responses from a client, so they must not look alike.
     assert!(
@@ -607,6 +715,36 @@ async fn past_the_in_flight_cap_open_stream_is_rate_limited_immediately() {
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     client.open_stream("after-the-ack").await;
+}
+
+/// A refused open names its attempt, so a client can fail exactly that request
+/// and keep the trunk (§5.1, decision 106). `attempt_id` is untyped on the
+/// wire, so it comes back as whatever JSON was sent.
+#[tokio::test]
+async fn a_refused_open_names_its_attempt_and_the_trunk_carries_on() {
+    let mut config = config();
+    config.max_in_flight_streams = 1;
+    config.stream_ack_timeout = Duration::from_secs(30);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let first = client.open_stream("first").await;
+    client
+        .send(json!({ "v": 1, "type": "OPEN_STREAM", "attempt_id": { "n": 2 } }))
+        .await;
+    let reply = client.recv().await;
+    assert_error(&reply, "rate_limited");
+    assert_eq!(reply["attempt_id"], json!({ "n": 2 }), "{reply}");
+    assert!(reply.get("stream_id").is_none(), "{reply}");
+
+    assert_eq!(server.expect_stream_open_and_ack().await, first);
+    client.send(request_head(first, "/v1/notes/x")).await;
+    assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+    server.send(response_head(first)).await;
+    assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+
+    client.open_stream("third").await;
 }
 
 #[tokio::test]
@@ -696,6 +834,147 @@ async fn a_dying_client_trunk_frees_its_streams_on_the_server_side() {
     let closed = server.recv().await;
     assert_eq!(closed["type"], "CLOSE", "{closed}");
     assert_eq!(closed["stream_id"], stream_id, "{closed}");
+}
+
+/// §5.4 (decision 116b): a relay that ends a stream sends the origin `CLOSE`
+/// even while the server-ward queue is full. It used to be dropped, and the
+/// origin kept serving a stream nobody would read.
+#[tokio::test]
+async fn a_dying_clients_close_reaches_the_origin_past_a_full_server_ward_queue() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut gone = harness.client().await;
+    let mut uploader = harness.client().await;
+
+    let gone_stream = gone.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+    let upload_stream = uploader.open_stream("b1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // The origin stops reading while another client uploads far more than
+    // the 64-frame queue and the loopback buffers hold.
+    let upload = tokio::spawn(async move {
+        uploader
+            .send(json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": upload_stream,
+                "method": "PUT", "path": "/up", "headers": {},
+            }))
+            .await;
+        let chunk = vec![0u8; 256 * 1024];
+        for _ in 0..256 {
+            uploader.send_body(0x01, upload_stream, &chunk).await;
+        }
+        uploader
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(gone);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let closed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Frame::Text(value) = server.next_frame().await
+                && value["type"] == "CLOSE"
+                && value["stream_id"] == gone_stream
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the origin was never told the stream ended");
+    upload.abort();
+}
+
+/// §5 client heartbeat: a client heard nothing from for the deadline is gone,
+/// and each of its streams ends at the origin as if it had closed.
+#[tokio::test]
+async fn a_silent_client_trunk_is_reaped_and_its_streams_closed_at_the_origin() {
+    let mut config = config();
+    config.heartbeat_deadline = Duration::from_millis(600);
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    // The server heartbeats; the client says nothing at all.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            server.send(json!({ "v": 1, "type": "PING" })).await;
+            if let Ok(Frame::Text(value)) =
+                tokio::time::timeout(Duration::from_millis(150), server.next_frame()).await
+                && value["type"] == "CLOSE"
+            {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("the origin was never told the silent client's stream ended");
+    assert_eq!(closed["stream_id"], stream_id);
+}
+
+#[test]
+fn the_advertised_interval_is_a_third_of_the_deadline() {
+    use storm_relay::proto::heartbeat_interval_secs;
+    assert_eq!(heartbeat_interval_secs(Duration::from_secs(45)), 15);
+    assert_eq!(heartbeat_interval_secs(Duration::from_millis(600)), 1);
+}
+
+/// One client's upload to an origin that stopped reading must not hold another
+/// client's `STREAM_OPEN` behind its backlog (§5.5, decision 116d). With one
+/// shared server-ward queue it waited behind up to 64 queued body frames;
+/// with a lane per client, behind at most the frame being written.
+#[tokio::test]
+async fn an_upload_to_a_slow_origin_does_not_hold_another_clients_open() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut uploader = harness.client().await;
+    let mut other = harness.client().await;
+
+    let upload_stream = uploader.open_stream("u1").await;
+    server.expect_stream_open_and_ack().await;
+    let upload = tokio::spawn(async move {
+        uploader
+            .send(json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": upload_stream,
+                "method": "PUT", "path": "/up", "headers": {},
+            }))
+            .await;
+        let chunk = vec![0u8; 256 * 1024];
+        for _ in 0..512 {
+            uploader.send_body(0x01, upload_stream, &chunk).await;
+        }
+        uploader
+    });
+    // Long enough for the backlog to fill every buffer it can.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    other
+        .send(json!({ "v": 1, "type": "OPEN_STREAM", "attempt_id": "o1" }))
+        .await;
+    let mut bodies_first = 0;
+    let opened = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match server.next_frame().await {
+                Frame::Body { .. } => bodies_first += 1,
+                Frame::Text(value) if value["type"] == "STREAM_OPEN" => return,
+                Frame::Text(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        opened.is_ok(),
+        "the other client's open never reached the origin"
+    );
+    // What the sockets themselves buffer arrives first either way; the
+    // relay's own queue must add at most a frame to it.
+    assert!(
+        bodies_first < storm_relay::trunk::SERVER_WARD_QUEUE,
+        "{bodies_first} upload frames reached the origin before another client's open"
+    );
+    upload.abort();
 }
 
 // ------------------------------------------------------------------ streaming
@@ -850,6 +1129,144 @@ async fn a_request_head_missing_its_routing_or_shape_fields_is_refused() {
     }
 }
 
+// -------------------------------------------- one client cannot end the trunk
+//
+// Every client of a server shares its one trunk, so nothing a client puts in a
+// head may reach the origin in a form that ends it (116a).
+
+const WITHIN: Duration = Duration::from_secs(5);
+
+async fn recv_within(conn: &mut Conn) -> Value {
+    tokio::time::timeout(WITHIN, conn.recv())
+        .await
+        .expect("no frame arrived")
+}
+
+/// Acks the next `STREAM_OPEN`, past the `CLOSE`s of streams a refused client
+/// left behind. No head may reach the origin meanwhile.
+async fn ack_next_open(server: &mut Conn) -> u32 {
+    loop {
+        let frame = recv_within(server).await;
+        assert_ne!(frame["type"], "HTTP_REQUEST_HEAD", "{frame}");
+        if frame["type"] == "STREAM_OPEN" {
+            let stream_id = frame["stream_id"].as_u64().unwrap() as u32;
+            server
+                .send(json!({ "v": 1, "type": "STREAM_ACK", "stream_id": stream_id }))
+                .await;
+            return stream_id;
+        }
+    }
+}
+
+/// Bob's request crosses the shared trunk and his response comes back.
+async fn assert_trunk_still_serves(server: &mut Conn, bob: &mut Conn) {
+    let stream_id = bob.open_stream("bob").await;
+    assert_eq!(ack_next_open(server).await, stream_id);
+    bob.send(request_head(stream_id, "/v1/notes")).await;
+    let head = recv_within(server).await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+    assert_eq!(head["stream_id"], stream_id, "{head}");
+    server.send(response_head(stream_id)).await;
+    let reply = recv_within(bob).await;
+    assert_eq!(reply["type"], "HTTP_RESPONSE_HEAD", "{reply}");
+    assert_eq!(reply["stream_id"], stream_id, "{reply}");
+}
+
+#[tokio::test]
+async fn a_head_with_a_non_string_header_value_is_refused_and_never_forwarded() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut bob = harness.client().await;
+
+    for headers in [json!({ "x": 1 }), json!({ "x": null }), json!([["x", "1"]])] {
+        let mut mallory = harness.client().await;
+        let stream_id = mallory.open_stream("m").await;
+        assert_eq!(ack_next_open(&mut server).await, stream_id);
+        mallory
+            .send(json!({
+                "v": 1, "type": "HTTP_REQUEST_HEAD", "stream_id": stream_id,
+                "method": "GET", "path": "/v1/notes", "headers": headers,
+            }))
+            .await;
+        assert_error(&recv_within(&mut mallory).await, "protocol_error");
+    }
+
+    assert_trunk_still_serves(&mut server, &mut bob).await;
+    assert_eq!(harness.relay.registrations.len(), 1);
+}
+
+#[tokio::test]
+async fn a_second_head_is_refused_and_never_forwarded() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut mallory = harness.client().await;
+    let mut bob = harness.client().await;
+
+    let stream_id = mallory.open_stream("m").await;
+    server.expect_stream_open_and_ack().await;
+    mallory.send(request_head(stream_id, "/v1/notes")).await;
+    let head = recv_within(&mut server).await;
+    assert_eq!(head["type"], "HTTP_REQUEST_HEAD", "{head}");
+
+    mallory.send(request_head(stream_id, "/v1/notes")).await;
+    let refused = recv_within(&mut mallory).await;
+    assert_error(&refused, "stream_closed");
+    assert_eq!(refused["stream_id"], stream_id, "{refused}");
+
+    // The origin hears the stream end, never the second head.
+    let closed = recv_within(&mut server).await;
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], stream_id, "{closed}");
+
+    // Mallory's own trunk carries on: the refusal was the stream's.
+    let next = mallory.open_stream("m2").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, next);
+    assert_trunk_still_serves(&mut server, &mut bob).await;
+}
+
+#[tokio::test]
+async fn an_origin_error_naming_a_stream_ends_that_stream_only() {
+    // What a server from before 116a sends for a second head.
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut alice = harness.client().await;
+    let mut bob = harness.client().await;
+    let alice_stream = alice.open_stream("a").await;
+    server.expect_stream_open_and_ack().await;
+
+    server
+        .send(json!({
+            "v": 1, "type": "ERROR", "code": "stream_closed",
+            "message": "stream closed", "stream_id": alice_stream,
+        }))
+        .await;
+    let ended = recv_within(&mut alice).await;
+    assert_error(&ended, "stream_aborted");
+    assert_eq!(ended["stream_id"], alice_stream, "{ended}");
+    let closed = recv_within(&mut server).await;
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], alice_stream, "{closed}");
+
+    assert_trunk_still_serves(&mut server, &mut bob).await;
+    assert_eq!(harness.relay.registrations.len(), 1);
+}
+
+#[tokio::test]
+async fn a_trunk_scoped_origin_error_is_still_a_protocol_error() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut alice = harness.client().await;
+    let alice_stream = alice.open_stream("a").await;
+    server.expect_stream_open_and_ack().await;
+
+    server
+        .send(json!({ "v": 1, "type": "ERROR", "code": "protocol_error", "message": "x" }))
+        .await;
+    let lost = recv_within(&mut alice).await;
+    assert_error(&lost, "trunk_lost");
+    assert_eq!(lost["stream_id"], alice_stream, "{lost}");
+}
+
 // ------------------------------------------------------------------- closing
 
 #[tokio::test]
@@ -947,10 +1364,20 @@ async fn a_silent_server_is_dropped_at_the_deadline_and_its_clients_told() {
     let stream_id = client.open_stream("a1").await;
     server.expect_stream_open_and_ack().await;
 
-    // `server` stays open and says nothing from here on.
-    let reply = tokio::time::timeout(Duration::from_secs(3), client.recv())
-        .await
-        .expect("the deadline never fired for a silent server");
+    // `server` stays open and says nothing from here on. The client keeps
+    // heartbeating, as a real one does, or it would be reaped first (§5).
+    let reply = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            client.send(json!({ "v": 1, "type": "PING" })).await;
+            if let Ok(value) = tokio::time::timeout(Duration::from_millis(100), client.recv()).await
+                && value["type"] != "PONG"
+            {
+                return value;
+            }
+        }
+    })
+    .await
+    .expect("the deadline never fired for a silent server");
     assert_error(&reply, "trunk_lost");
     assert_eq!(reply["stream_id"], stream_id, "{reply}");
     assert!(harness.relay.registrations.is_empty());
@@ -1035,6 +1462,77 @@ async fn a_client_that_stops_reading_loses_its_stream_at_the_byte_budget() {
     drop(client);
 }
 
+/// The backlogged client is told, and the error reaches it past its own full
+/// queue (§5.4, decision 106). Before, it was sent nothing: a body already
+/// started never ended, and no client can turn silence into an error.
+#[tokio::test]
+async fn a_backlogged_client_is_told_its_stream_failed_and_its_other_streams_go_on() {
+    let mut config = config();
+    config.max_client_buffer_bytes = 256 * 1024;
+    let harness = Harness::start(config).await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let flooded = client.open_stream("flooded").await;
+    server.expect_stream_open_and_ack().await;
+    let other = client.open_stream("other").await;
+    server.expect_stream_open_and_ack().await;
+
+    server.send(response_head(other)).await;
+    server.send(response_head(flooded)).await;
+    let chunk = vec![0u8; 256 * 1024];
+    for _ in 0..128 {
+        server.send_body(0x02, flooded, &chunk).await;
+    }
+    let closed = tokio::time::timeout(Duration::from_secs(10), server.recv())
+        .await
+        .expect("a client that stopped reading was never dropped");
+    assert_eq!(closed["type"], "CLOSE", "{closed}");
+    assert_eq!(closed["stream_id"], flooded, "{closed}");
+
+    // The client reads again. Whatever was already in the socket buffers comes
+    // first; then the error, and nothing more for that stream.
+    let mut errored = false;
+    loop {
+        match client.next_frame().await {
+            Frame::Body { stream_id, .. } if stream_id == flooded => {
+                assert!(!errored, "a body frame followed the stream's error");
+            }
+            Frame::Body { stream_id, .. } => panic!("unexpected body for {stream_id}"),
+            Frame::Text(value) if value["type"] == "ERROR" => {
+                assert_error(&value, "client_backlogged");
+                assert_eq!(value["stream_id"], flooded, "{value}");
+                errored = true;
+                break;
+            }
+            Frame::Text(value) => {
+                assert_eq!(value["type"], "HTTP_RESPONSE_HEAD", "{value}");
+            }
+        }
+    }
+    assert!(errored);
+
+    // The trunk and its other stream are untouched.
+    server.send_body(0x02, other, b"still here").await;
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": other }))
+        .await;
+    match client.next_frame().await {
+        Frame::Body {
+            stream_id, payload, ..
+        } => {
+            assert_eq!(stream_id, other);
+            assert_eq!(payload, b"still here");
+        }
+        Frame::Text(value) => panic!("expected the other stream's body, got {value}"),
+    }
+    let end = client.recv().await;
+    assert_eq!(end["type"], "CLOSE", "{end}");
+    assert_eq!(end["stream_id"], other, "{end}");
+
+    client.open_stream("afterwards").await;
+    server.expect_stream_open_and_ack().await;
+}
+
 #[tokio::test]
 async fn a_client_that_keeps_reading_receives_many_times_the_budget() {
     // The budget measures backlog, not throughput: bytes are refunded as the
@@ -1063,4 +1561,327 @@ async fn a_client_that_keeps_reading_receives_many_times_the_budget() {
     assert_eq!(received, CHUNKS * chunk.len());
     // 1.6 MiB through a 64 KiB budget, and the origin was never told to stop.
     assert!(server.is_silent_for(FAST).await);
+}
+
+// ------------------------------------------------- §9 failure handling (94)
+
+#[tokio::test]
+async fn a_server_dying_mid_response_body_is_trunk_lost_on_that_stream_not_a_clean_end() {
+    // A `CLOSE` here would read as a complete response, and the client would
+    // take a truncated note body for the whole of it.
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+    client.send(request_head(stream_id, "/v1/notes/x")).await;
+    assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+    server
+        .send(json!({
+            "v": 1, "type": "HTTP_RESPONSE_HEAD",
+            "stream_id": stream_id, "status": 200, "headers": {},
+        }))
+        .await;
+    assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+    server.send_body(0x02, stream_id, b"half a bo").await;
+    assert!(matches!(client.next_frame().await, Frame::Body { .. }));
+
+    drop(server);
+
+    let reply = client.recv().await;
+    assert_error(&reply, "trunk_lost");
+    assert_eq!(reply["stream_id"], stream_id, "{reply}");
+}
+
+#[tokio::test]
+async fn a_hello_after_the_server_went_away_is_server_unreachable() {
+    // Server offline, relay up: the client must be told the *server* is
+    // unreachable, which is a different thing to show than a dead relay.
+    let harness = Harness::plain().await;
+    let server = harness.server().await;
+    drop(server);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !harness.relay.registrations.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "registration never released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let mut client = harness.dial(&format!("/connect/{SERVER_ID}")).await;
+    client
+        .send(json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID }))
+        .await;
+    assert_error(&client.recv().await, "server_unreachable");
+}
+
+#[tokio::test]
+async fn a_restarted_server_is_reachable_again_on_a_fresh_client_trunk() {
+    // Restart = the old trunk dies, a new one registers under the same key.
+    // Clients re-race from scratch rather than resuming (§9).
+    let harness = Harness::plain().await;
+    let server = harness.server().await;
+    let mut client = harness.client().await;
+    drop(server);
+    assert_error(&client.recv().await, "trunk_lost");
+
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("again").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+}
+
+// ------------------------------------------------------- aborted responses
+
+/// The origin's body failed after the head (§5.4, decision 101). The client
+/// must learn the body is incomplete, and nothing else on the trunk may notice.
+#[tokio::test]
+async fn an_aborted_response_reaches_only_its_client_as_stream_aborted() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut broken = harness.client().await;
+    let mut healthy = harness.client().await;
+
+    let broken_id = broken.open_stream("broken").await;
+    server.expect_stream_open_and_ack().await;
+    let healthy_id = healthy.open_stream("healthy").await;
+    server.expect_stream_open_and_ack().await;
+
+    for (client, id) in [(&mut broken, broken_id), (&mut healthy, healthy_id)] {
+        client.send(request_head(id, "/v1/notes/x")).await;
+        assert_eq!(server.recv().await["type"], "HTTP_REQUEST_HEAD");
+        server
+            .send(json!({
+                "v": 1, "type": "HTTP_RESPONSE_HEAD",
+                "stream_id": id, "status": 200, "headers": {},
+            }))
+            .await;
+        assert_eq!(client.recv().await["type"], "HTTP_RESPONSE_HEAD");
+    }
+
+    server.send_body(0x02, broken_id, b"half a bo").await;
+    assert!(matches!(broken.next_frame().await, Frame::Body { .. }));
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": broken_id, "aborted": true }))
+        .await;
+    let reply = broken.recv().await;
+    assert_error(&reply, "stream_aborted");
+    assert_eq!(reply["stream_id"], broken_id, "{reply}");
+
+    server.send_body(0x02, healthy_id, b"whole").await;
+    assert!(matches!(healthy.next_frame().await, Frame::Body { .. }));
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": healthy_id }))
+        .await;
+    let end = healthy.recv().await;
+    assert_eq!(
+        end["type"], "CLOSE",
+        "a complete response still ends with CLOSE: {end}"
+    );
+}
+
+#[tokio::test]
+async fn an_aborted_flag_that_is_not_a_boolean_is_a_protocol_error() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server().await;
+    let mut client = harness.client().await;
+    let stream_id = client.open_stream("a1").await;
+    server.expect_stream_open_and_ack().await;
+
+    server
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": stream_id, "aborted": "yes" }))
+        .await;
+    assert_error(&server.recv().await, "protocol_error");
+}
+
+// ------------------------------------------------- key-addressed HELLO (114f)
+
+impl Harness {
+    async fn open() -> Self {
+        let mut config = config();
+        config.open = true;
+        Self::start(config).await
+    }
+
+    /// A client dialled with `query` and sending `hello`, before `READY`.
+    async fn hello(&self, query: &str, hello: Value) -> Conn {
+        let mut conn = self.dial(&format!("/connect/{SERVER_ID}{query}")).await;
+        conn.send(hello).await;
+        conn
+    }
+
+    /// A client naming the key of `seed`, in the query and in `HELLO` (§5).
+    async fn keyed_hello(&self, seed: u8) -> Conn {
+        let key = pubkey_b64(seed);
+        self.hello(
+            &format!("?pubkey={key}"),
+            json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": key }),
+        )
+        .await
+    }
+
+    async fn keyed_client(&self, seed: u8) -> Conn {
+        let mut conn = self.keyed_hello(seed).await;
+        let ready = conn.recv().await;
+        assert_eq!(ready["type"], "READY", "{ready}");
+        conn
+    }
+}
+
+fn keyless_hello() -> Value {
+    json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID })
+}
+
+#[tokio::test]
+async fn open_registrations_of_one_server_id_under_two_keys_coexist() {
+    let harness = Harness::open().await;
+    let mut owner = harness.server_as(SERVER_ID, 1).await;
+    let mut stranger = harness.server_as(SERVER_ID, 2).await;
+    assert_eq!(harness.relay.registrations.len(), 2);
+
+    // Each client reaches only the trunk its key names.
+    let mut client = harness.keyed_client(1).await;
+    let stream_id = client.open_stream("to-owner").await;
+    assert_eq!(owner.expect_stream_open_and_ack().await, stream_id);
+    assert!(stranger.is_silent_for(FAST).await);
+
+    let mut other = harness.keyed_client(2).await;
+    let stream_id = other.open_stream("to-stranger").await;
+    assert_eq!(stranger.expect_stream_open_and_ack().await, stream_id);
+    assert!(owner.is_silent_for(FAST).await);
+}
+
+#[tokio::test]
+async fn a_squatter_under_another_key_is_never_reached() {
+    let harness = Harness::open().await;
+    let _squatter = harness.server_as(SERVER_ID, 2).await;
+
+    // The owner is offline: its clients wait out the hold, never the squatter.
+    let mut client = harness.keyed_hello(1).await;
+    assert_error(&client.recv().await, "server_unreachable");
+
+    // And the squatter registering again takes nothing from the owner.
+    let mut owner = harness.server_as(SERVER_ID, 1).await;
+    let _again = harness.server_as(SERVER_ID, 2).await;
+    let mut client = harness.keyed_client(1).await;
+    let stream_id = client.open_stream("a1").await;
+    assert_eq!(owner.expect_stream_open_and_ack().await, stream_id);
+}
+
+#[tokio::test]
+async fn open_supersession_is_per_key() {
+    let mut config = config();
+    config.open = true;
+    config.supersession_drain = Duration::from_millis(200);
+    let harness = Harness::start(config).await;
+    let mut first = harness.server_as(SERVER_ID, 1).await;
+    let mut other_key = harness.server_as(SERVER_ID, 2).await;
+
+    let mut on_first = harness.keyed_client(1).await;
+    let first_stream = on_first.open_stream("a1").await;
+    first.expect_stream_open_and_ack().await;
+    let mut on_other = harness.keyed_client(2).await;
+    let other_stream = on_other.open_stream("a2").await;
+    other_key.expect_stream_open_and_ack().await;
+
+    let _second = harness.server_as(SERVER_ID, 1).await;
+    assert_eq!(harness.relay.registrations.len(), 2);
+
+    let reply = on_first.recv().await;
+    assert_error(&reply, "trunk_superseded");
+    assert_eq!(reply["stream_id"], first_stream, "{reply}");
+    // The other key's trunk and its stream are untouched.
+    assert!(on_other.is_silent_for(Duration::from_millis(400)).await);
+    other_key
+        .send(json!({ "v": 1, "type": "CLOSE", "stream_id": other_stream }))
+        .await;
+    assert_eq!(on_other.recv().await["type"], "CLOSE");
+}
+
+#[tokio::test]
+async fn an_open_relay_refuses_a_keyless_hello_at_once() {
+    let mut config = config();
+    config.open = true;
+    config.hello_wait = Duration::from_secs(5);
+    let harness = Harness::start(config).await;
+    let _server = harness.server_as(SERVER_ID, 1).await;
+
+    let started = std::time::Instant::now();
+    let mut client = harness.hello("", keyless_hello()).await;
+    assert_error(&client.recv().await, "server_unreachable");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a keyless HELLO was held"
+    );
+
+    // A query alone names no key: the HELLO is still keyless.
+    let mut client = harness
+        .hello(&format!("?pubkey={}", pubkey_b64(1)), keyless_hello())
+        .await;
+    assert_error(&client.recv().await, "server_unreachable");
+}
+
+#[tokio::test]
+async fn an_allowlist_or_tofu_relay_routes_a_hello_only_to_the_key_it_names() {
+    let harness = Harness::plain().await;
+    let mut server = harness.server_as(SERVER_ID, 1).await;
+
+    // Another key: as if no trunk were live.
+    let mut wrong = harness.keyed_hello(2).await;
+    assert_error(&wrong.recv().await, "server_unreachable");
+
+    let mut right = harness.keyed_client(1).await;
+    let stream_id = right.open_stream("keyed").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+
+    // A client older than 115 still reaches the one registration.
+    let mut old = harness.client().await;
+    let stream_id = old.open_stream("keyless").await;
+    assert_eq!(server.expect_stream_open_and_ack().await, stream_id);
+}
+
+#[tokio::test]
+async fn a_malformed_or_disagreeing_hello_pubkey_is_a_protocol_error() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/srp-vectors.json");
+    let vectors: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let hello_pubkey = &vectors["hello_pubkey"];
+
+    for open in [false, true] {
+        let mut config = config();
+        config.open = open;
+        let harness = Harness::start(config).await;
+        let _server = harness.server_as(SERVER_ID, 1).await;
+
+        let refused = hello_pubkey["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["accepted"] == false);
+        let mut seen = 0;
+        for case in refused {
+            seen += 1;
+            let hello = json!({
+                "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": case["pubkey"],
+            });
+            let mut client = harness.hello("", hello).await;
+            let reply = client.recv().await;
+            assert_eq!(reply["code"], "protocol_error", "{} {reply}", case["name"]);
+        }
+        assert!(seen > 0, "no refused spellings in the vectors");
+
+        let hello = json!({ "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": 7 });
+        let mut client = harness.hello("", hello).await;
+        assert_error(&client.recv().await, "protocol_error");
+
+        let agree = &hello_pubkey["query_and_hello_must_agree"];
+        let hello = json!({
+            "v": 1, "type": "HELLO", "server_id": SERVER_ID, "pubkey": agree["hello_pubkey"],
+        });
+        let query = format!("?pubkey={}", agree["query_pubkey"].as_str().unwrap());
+        let mut client = harness.hello(&query, hello).await;
+        assert_error(&client.recv().await, agree["result"].as_str().unwrap());
+    }
 }

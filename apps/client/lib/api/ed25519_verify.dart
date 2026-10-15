@@ -33,15 +33,49 @@ Future<bool> verifyChallenge({
   required String signatureB64,
   required String serverId,
   required String nonce,
-}) async {
+}) => _verify(
+  publicKeyB64,
+  signatureB64,
+  utf8.encode(challengeMessage(serverId, nonce)),
+);
+
+/// What a server signs as `relays_sig` over its relay set (SRP §4.3):
+/// `storm-relays:v1:<server_id>:` and the URLs sorted bytewise, one per line.
+String relaySetMessage(String serverId, Iterable<String> urls) {
+  final sorted = urls.map(utf8.encode).toList()
+    ..sort((a, b) {
+      for (var i = 0; i < a.length && i < b.length; i++) {
+        if (a[i] != b[i]) return a[i] - b[i];
+      }
+      return a.length - b.length;
+    });
+  return 'storm-relays:v1:$serverId:${sorted.map(utf8.decode).join('\n')}';
+}
+
+/// Verifies `relays_sig` against the pinned key (§4.3). A set that reached
+/// the client through a relay was not authenticated by the transport.
+Future<bool> verifyRelaySet({
+  required String publicKeyB64,
+  required String signatureB64,
+  required String serverId,
+  required Iterable<String> urls,
+}) => _verify(
+  publicKeyB64,
+  signatureB64,
+  utf8.encode(relaySetMessage(serverId, urls)),
+);
+
+Future<bool> _verify(
+  String publicKeyB64,
+  String signatureB64,
+  List<int> message,
+) async {
   try {
     final publicKeyBytes = decodeBase64UrlNoPad(publicKeyB64);
     if (publicKeyBytes == null || publicKeyBytes.length != 32) return false;
 
     final signatureBytes = decodeBase64UrlNoPad(signatureB64);
     if (signatureBytes == null || signatureBytes.length != 64) return false;
-
-    final message = utf8.encode(challengeMessage(serverId, nonce));
 
     final publicKey = SimplePublicKey(
       publicKeyBytes,

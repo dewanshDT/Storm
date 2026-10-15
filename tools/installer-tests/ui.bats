@@ -88,9 +88,9 @@ typed() {
 
 @test "interactive custom flow in line mode: checklist, questions, plan, quit" {
   make_assets 0.6.0
-  # Custom… (4), keep server only (toggle off app 4 and mobile 5? none are on),
-  # tick 1 (server), Enter; data, port, address defaults; then Quit (3).
-  typed "4" "1" "" "" "" "" "3"
+  # Custom… (5), tick 1 (server), Enter; data, port, address defaults; then
+  # Quit (3).
+  typed "5" "1" "" "" "" "" "3"
   run storm_main --from-dir "$ASSETS"
   [ "$status" -eq 0 ]
   out=$(cat "$STORM_TTY_OUT")
@@ -104,10 +104,10 @@ typed() {
   [ -n "$REAL_PYTHON" ] || skip "no python3 for the pty driver"
   make_assets 0.6.0
   unset STORM_TTY NO_COLOR
-  # Custom… (three downs), tick server and runtime, keep the three defaults,
+  # Custom… (four downs), tick server and runtime, keep the three defaults,
   # Install, then "Set a password here" for the account.
   run env TERM=xterm-256color "$REAL_PYTHON" "$BATS_TEST_DIRNAME/pty_drive.py" \
-    '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' '\r' '\r' '\r' '\r' 'j' '\r' 'scratch\r' -- \
+    '\x1b[B' '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' '\r' '\r' '\r' '\r' 'j' '\r' 'scratch\r' -- \
     bash -c 'source "$1"; POLL_SLEEP=0; HEALTH_TRIES=2; storm_main --from-dir "$2"' _ "$INSTALLER" "$ASSETS"
   [[ "$output" == *"EXIT=0"* ]]
   [[ "$output" == *"› Custom…"* ]]

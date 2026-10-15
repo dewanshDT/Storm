@@ -1,4 +1,4 @@
-# The Storm Runtime Host for macOS (PLAN.md decision 83, AM41).
+# The Storm Runtime Host for macOS (decision 83, AM41).
 #
 # This repository is the tap:
 #   brew tap dewanshdt/storm https://github.com/dewanshDT/Storm
@@ -10,7 +10,7 @@
 class StormRuntime < Formula
   desc "Storm Runtime Host: runs agent sessions for a Storm Server"
   homepage "https://github.com/dewanshDT/Storm"
-  url "https://github.com/dewanshDT/Storm.git", tag: "v0.8.0"
+  url "https://github.com/dewanshDT/Storm.git", tag: "v0.9.0"
   license "MIT"
   head "https://github.com/dewanshDT/Storm.git", branch: "staging"
 
