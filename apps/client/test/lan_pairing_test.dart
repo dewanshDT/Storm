@@ -615,7 +615,7 @@ void main() {
         await tester.pump();
         expect(
           find.text(
-            'sudo ufw allow from 192.168.1.0/24 to any app storm-server',
+            'sudo ufw allow from 192.168.1.0/24 to any port 19484 proto tcp',
           ),
           findsOneWidget,
         );
@@ -651,7 +651,11 @@ void main() {
         },
       )!;
       final steps = howToAllowStorm(server).map((s) => s.$2).join('\n');
-      expect(steps, contains('from 10.20.30.0/24 to any app storm-server'));
+      expect(steps, contains('from 10.20.30.0/24 to any port 8484 proto tcp'));
+      expect(steps, contains('--add-port=8484/tcp'));
+      // A profile or service name exists only after a .deb install.
+      expect(steps, isNot(contains('app storm-server')));
+      expect(steps, isNot(contains('--add-service')));
       expect(steps, contains('--zone=home'));
       expect(steps, isNot(contains('--zone=public')));
       expect(steps, contains('-Profile Private'));
