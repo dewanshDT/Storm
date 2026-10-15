@@ -297,6 +297,26 @@ class ConnectionPage extends ConsumerWidget {
       confirmKey: const Key('confirm-disconnect'),
     );
     if (!ok) return;
+    // Revoke this device on the server first, so a disconnect does not leave
+    // a row behind on Devices & access for every pair-again. Offline, it
+    // still disconnects: forgetting the server must never depend on reaching
+    // it.
+    final deviceId = ref.read(settingsProvider).value?.deviceId ?? '';
+    final api = ref.read(apiProvider);
+    var revoked = deviceId.isEmpty;
+    if (!revoked && api != null) {
+      try {
+        await api.revokeDevice(deviceId).timeout(const Duration(seconds: 10));
+        revoked = true;
+      } catch (_) {}
+    }
     await ref.read(settingsProvider.notifier).save(const Settings());
+    if (!revoked && context.mounted) {
+      settingsToast(
+        context,
+        "Disconnected. The server couldn't be reached, so revoke this "
+        'device from Devices & access on another one.',
+      );
+    }
   }
 }
