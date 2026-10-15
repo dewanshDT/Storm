@@ -138,6 +138,7 @@ describe("after an eviction", () => {
   it("keeps a server whose PINGs the runtime answered while the object slept", async () => {
     const serverId = uniqueId();
     const { peer: server } = await register(serverId);
+    server.silent(); // its own PINGs below are the heartbeat under test
     await evict(serverId);
     for (let i = 0; i < 5; i++) {
       await sleep(500);
@@ -153,16 +154,11 @@ describe("after an eviction", () => {
   it("still drops a silent server, with nothing in memory to remember it", async () => {
     const serverId = uniqueId();
     const { peer: server } = await register(serverId);
+    server.silent();
     const c = await client(serverId);
     await evict(serverId);
-    // Only the server falls silent, or the client could be reaped first.
-    const stop = c.keepAlive();
-    try {
-      expectError(await c.recv(4000), "trunk_lost");
-      await server.expectClosed();
-    } finally {
-      stop();
-    }
+    expectError(await c.recv(4000), "trunk_lost");
+    await server.expectClosed();
   });
 
   it("still finishes a supersession drain", async () => {

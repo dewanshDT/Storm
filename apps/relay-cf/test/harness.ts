@@ -47,7 +47,14 @@ export class Peer {
   // Real clients and storm-server answer every PING; the relay's watermark
   // PINGs depend on it. A test of a client that stops reading turns this off.
   answerPings = true;
-  private swallowPongs = false;
+  // Like real servers and clients, a peer heartbeats once its handshake is
+  // done (REGISTERED or READY), so a test's idle moment never reads as
+  // silence on a slow runner. The PONGs answering those PINGs are counted
+  // and kept out of the queue: the relay answers in order, so a test's own
+  // PING still gets exactly one PONG. A test about silence calls silent().
+  private beat: ReturnType<typeof setInterval> | null = null;
+  private quiet = false;
+  private ownPongs = 0;
   pingsSeen = 0;
   closed = false;
   private unanswered = 0;
@@ -73,7 +80,11 @@ export class Peer {
     ws.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
         const value = JSON.parse(event.data);
-        if (value.type === "PONG" && this.swallowPongs) return;
+        if (value.type === "PONG" && this.ownPongs > 0) {
+          this.ownPongs--;
+          return;
+        }
+        if (value.type === "READY" || value.type === "REGISTERED") this.startBeat();
         if (value.type === "PING") {
           this.pingsSeen++;
           if (this.answerPings) this.pong();
@@ -88,6 +99,7 @@ export class Peer {
       }
     });
     ws.addEventListener("close", () => {
+      this.stopBeat();
       this.closed = true;
       this.push({ kind: "closed" });
     });
@@ -169,22 +181,29 @@ export class Peer {
     }
   }
 
-  // A heartbeat, as real servers and clients send: a PING every `everyMs`,
-  // its PONG kept out of the queue a test reads. Without it a slow runner can
-  // pass the test deadline between a test's own frames, and the relay drops
-  // the trunk as silent (servers §4.2, clients §5).
-  keepAlive(everyMs = 300): () => void {
-    this.swallowPongs = true;
-    const timer = setInterval(() => {
-      if (this.ws.readyState === WebSocket.READY_STATE_OPEN) this.send({ v: 1, type: "PING" });
-    }, everyMs);
-    return () => {
-      clearInterval(timer);
-      this.swallowPongs = false;
-    };
+  private startBeat() {
+    if (this.beat || this.quiet) return;
+    this.beat = setInterval(() => {
+      if (this.ws.readyState !== WebSocket.READY_STATE_OPEN) return;
+      this.ownPongs++;
+      this.send({ v: 1, type: "PING" });
+    }, 300);
+  }
+
+  private stopBeat() {
+    if (this.beat) clearInterval(this.beat);
+    this.beat = null;
+  }
+
+  // Stops this peer's heartbeat for good: the tests of the relay's deadlines.
+  silent(): this {
+    this.quiet = true;
+    this.stopBeat();
+    return this;
   }
 
   close() {
+    this.stopBeat();
     try {
       this.ws.close(1000);
     } catch {}
@@ -210,7 +229,7 @@ export async function register(serverId: string, seed = 1): Promise<{ peer: Peer
 }
 
 // A registration done up to its last frame. A test that registers while a
-// client's HELLO is held has 400 ms for it; the dial, the challenge and the
+// client's HELLO is held has only the hold for it; the dial, the challenge and the
 // signature must not be inside that window on a slow runner.
 export async function preparedRegistration(serverId: string, seed = 1): Promise<() => Promise<Peer>> {
   const key = await signingKey(seed);
