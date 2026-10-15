@@ -343,6 +343,9 @@ class _LanServerRow extends StatelessWidget {
 
 /// "How to allow Storm", per OS, for the server [s] found at its address
 /// (decision 119). Every way is LAN-only; none opens Storm to the internet.
+///
+/// By port, not by the package's ufw profile or firewalld service: those exist
+/// only after a `.deb` install, and on any other install the command fails.
 List<(String, String)> howToAllowStorm(DiscoveredServer s) {
   final subnet = lanSubnetGuess(s.host);
   return [
@@ -351,10 +354,13 @@ List<(String, String)> howToAllowStorm(DiscoveredServer s) {
       'storm-server status\n'
           '# says what blocks Storm and prints the command that allows it',
     ),
-    ('Linux with ufw', 'sudo ufw allow from $subnet to any app storm-server'),
+    (
+      'Linux with ufw',
+      'sudo ufw allow from $subnet to any port ${s.port} proto tcp',
+    ),
     (
       'Linux with firewalld',
-      'sudo firewall-cmd --permanent --zone=home --add-service=storm-server\n'
+      'sudo firewall-cmd --permanent --zone=home --add-port=${s.port}/tcp\n'
           'sudo firewall-cmd --reload',
     ),
     (
