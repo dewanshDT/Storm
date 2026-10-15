@@ -5,7 +5,8 @@ import { defineConfig } from "vitest/config";
 const timers = {
   STORM_RELAY_CHALLENGE_TTL_MS: "30000",
   STORM_RELAY_HANDSHAKE_TIMEOUT_MS: "3000",
-  STORM_RELAY_HELLO_WAIT_MS: "400",
+  // Long enough that a test's own steps around a held HELLO never race it.
+  STORM_RELAY_HELLO_WAIT_MS: "1000",
   STORM_RELAY_STREAM_ACK_TIMEOUT_MS: "400",
   STORM_RELAY_SUPERSESSION_DRAIN_MS: "500",
   STORM_RELAY_HEARTBEAT_DEADLINE_MS: "1500",

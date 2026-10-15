@@ -11,7 +11,6 @@ describe("the room's total", () => {
   // §5.4 shared bounds: never by ending a stream whose own client keeps up.
   it("sheds the client furthest behind, never one that keeps up, and takes no new streams while full", async () => {
     const { peer: server } = await register(SERVER, 3);
-    const stop = server.keepAlive();
     try {
       const chunk = new Uint8Array(40 * 1024);
       const slow = [];
@@ -65,7 +64,6 @@ describe("the room's total", () => {
       server.send(responseHead(again));
       expect((await third.recv()).type).toBe("HTTP_RESPONSE_HEAD");
     } finally {
-      stop();
       server.close();
     }
   });
@@ -74,6 +72,7 @@ describe("the room's total", () => {
 describe("the heartbeat deadline", () => {
   it("stops a trunk taking new streams even before its alarm has run", async () => {
     const { peer: server } = await register(SERVER, 3);
+    server.silent();
     const c = await client(SERVER);
     await runInDurableObject(env.ROOMS.get(env.ROOMS.idFromName(SERVER)), (_i: RelayRoom, state) =>
       state.storage.deleteAlarm(),
