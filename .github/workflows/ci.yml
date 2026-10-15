@@ -90,7 +90,7 @@ jobs:
       - run: npm run typecheck
       # Three runs: the suite proves deadlines in milliseconds, and a test that
       # races one fails here, in review, rather than in a release's check.
-      - run: for i in 1 2 3 4 5 6 7 8 9 10; do npm test || exit 1; done  # TEMPORARY: diagnosing flakes
+      - run: for i in 1 2 3; do npm test || exit 1; done
 
   # The 108a suite against the Worker under wrangler dev (decision 108c):
   # allowlist and TOFU, the 127.0.0.2 checks, no latency check.

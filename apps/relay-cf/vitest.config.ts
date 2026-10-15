@@ -1,15 +1,17 @@
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
-// Shortened timers so the suite proves each deadline in milliseconds.
+// Shortened timers so the suite proves each deadline in seconds, not minutes.
+// Each still leaves a shared CI runner a few times its worst observed stall:
+// at 1.5 s and 1 s, a stall of about a second dropped live peers (#220).
 const timers = {
   STORM_RELAY_CHALLENGE_TTL_MS: "30000",
   STORM_RELAY_HANDSHAKE_TIMEOUT_MS: "3000",
   // Long enough that a test's own steps around a held HELLO never race it.
-  STORM_RELAY_HELLO_WAIT_MS: "1000",
+  STORM_RELAY_HELLO_WAIT_MS: "2000",
   STORM_RELAY_STREAM_ACK_TIMEOUT_MS: "400",
   STORM_RELAY_SUPERSESSION_DRAIN_MS: "500",
-  STORM_RELAY_HEARTBEAT_DEADLINE_MS: "1500",
+  STORM_RELAY_HEARTBEAT_DEADLINE_MS: "3000",
   STORM_RELAY_MAX_IN_FLIGHT_STREAMS: "3",
   STORM_RELAY_MAX_TOTAL_STREAMS: "50",
   STORM_RELAY_HELLO_RATE_LIMIT: "100",
