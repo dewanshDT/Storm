@@ -62,13 +62,18 @@ describe("registration", () => {
 
   it("answers a client's PING before HELLO and while HELLO waits", async () => {
     const serverId = uniqueId();
+    // The server's dial, challenge and signature happen before the HELLO, so
+    // only one frame has to land inside the 400 ms hold on a slow runner.
+    const server = await challenged(serverId);
+    const sig = await server.key.sign(relayAuth(serverId, server.nonce));
     const peer = await Peer.dial(`/connect/${serverId}`);
     peer.sendRaw('{"type":"PING","v":1}');
     expect((await peer.recv()).type).toBe("PONG");
     peer.send({ v: 1, type: "HELLO", server_id: serverId });
     peer.sendRaw('{"type":"PING","v":1}');
     expect((await peer.recv()).type).toBe("PONG");
-    await register(serverId);
+    server.peer.send({ v: 1, type: "CHALLENGE_RESPONSE", sig });
+    expect((await server.peer.recv()).type).toBe("REGISTERED");
     expect((await peer.recv()).type).toBe("READY");
   });
 
