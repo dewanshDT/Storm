@@ -11,6 +11,7 @@ import {
   expectOpenAndAck,
   openStream,
   Peer,
+  preparedRegistration,
   register,
   requestHead,
   responseHead,
@@ -125,11 +126,12 @@ describe("after an eviction", () => {
 
   it("holds a HELLO and answers it when the server registers", async () => {
     const serverId = uniqueId();
+    const finish = await preparedRegistration(serverId);
     const c = await Peer.dial(`/connect/${serverId}`);
     c.send({ v: 1, type: "HELLO", server_id: serverId });
     await sleep(50);
     await evict(serverId);
-    await register(serverId);
+    await finish();
     expect((await c.recv()).type).toBe("READY");
   });
 
