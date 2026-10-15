@@ -644,7 +644,7 @@ class StormConnection {
           .where((v) => v.outcome == _Outcome.identityFailed)
           .firstOrNull
           ?.candidate,
-      serverSide: verdicts.any((v) => v.serverSide),
+      serverSide: _provesServerDown(verdicts),
       millis: watch.elapsedMilliseconds,
     );
   }
@@ -697,12 +697,20 @@ class StormConnection {
           '  $label: probe answered ${e.statusCode} at ${watch.elapsedMilliseconds} ms',
         );
       } catch (e) {
-        final serverSide = _refusedByServerSide(c, e);
+        final relayed = c.relayUrl != null;
+        final serverSide = relayed && _relayRefusedServer(c);
+        final refused = !relayed && isConnectionRefused(e);
         _log.add(
           '  $label: failed at ${watch.elapsedMilliseconds} ms: '
-          '${serverSide ? 'server not there' : logError(e)}',
+          '${serverSide ? 'server not there' : (refused ? 'connection refused' : logError(e))}',
         );
-        return _Verdict(c, _Outcome.unreachable, serverSide: serverSide);
+        return _Verdict(
+          c,
+          _Outcome.unreachable,
+          serverSide: serverSide,
+          refused: refused,
+          unanswered: _relayUnanswered(c),
+        );
       }
       final proof = await _verifierFor(auth).check();
       _log.add(
@@ -711,7 +719,11 @@ class StormConnection {
       return switch (proof) {
         ServerProof.verified => _Verdict(c, _Outcome.proven, info: info),
         ServerProof.impostor => _Verdict(c, _Outcome.identityFailed),
-        ServerProof.unreachable => _Verdict(c, _Outcome.unreachable),
+        ServerProof.unreachable => _Verdict(
+          c,
+          _Outcome.unreachable,
+          unanswered: _relayUnanswered(c),
+        ),
       };
     }
 
@@ -721,16 +733,28 @@ class StormConnection {
         _log.add(
           '  $label: deadline (${candidateDeadline.inMilliseconds} ms) reached',
         );
-        return _Verdict(c, _Outcome.unreachable);
+        return _Verdict(
+          c,
+          _Outcome.unreachable,
+          unanswered: _relayUnanswered(c),
+        );
       },
     );
   }
 
-  bool _refusedByServerSide(ConnectionCandidate c, Object e) {
-    final url = c.relayUrl;
-    if (url == null) return isConnectionRefused(e);
-    return _trunks[url]?.helloRefusal == 'server_unreachable';
-  }
+  bool _relayRefusedServer(ConnectionCandidate c) =>
+      _trunks[c.relayUrl]?.helloRefusal == 'server_unreachable';
+
+  bool _relayUnanswered(ConnectionCandidate c) =>
+      c.relayUrl != null && !(_trunks[c.relayUrl]?.answered ?? false);
+
+  /// §8.6: a relay saying the server is not on it is proof. A refused direct
+  /// address is proof only while no relay in the same race went unanswered:
+  /// off the home network a LAN address is refused by whatever network the
+  /// device is on, and a silent relay says that network is the problem.
+  static bool _provesServerDown(List<_Verdict> verdicts) =>
+      verdicts.any((v) => v.serverSide) ||
+      (verdicts.any((v) => v.refused) && !verdicts.any((v) => v.unanswered));
 
   ServerProof _conclude(int epoch, int no, _RaceResult r) {
     // A race the Connection's end overtook adopts nothing (§8.3 rule 1).
@@ -993,11 +1017,24 @@ bool _sameRelays(List<RelayAdvert> a, List<RelayAdvert> b) {
 enum _Outcome { proven, identityFailed, unreachable }
 
 class _Verdict {
-  _Verdict(this.candidate, this.outcome, {this.info, this.serverSide = false});
+  _Verdict(
+    this.candidate,
+    this.outcome, {
+    this.info,
+    this.serverSide = false,
+    this.refused = false,
+    this.unanswered = false,
+  });
   final ConnectionCandidate candidate;
   final _Outcome outcome;
   final ServerInfo? info;
   final bool serverSide;
+
+  /// A direct address refused the connection.
+  final bool refused;
+
+  /// A relay candidate whose relay never sent a frame.
+  final bool unanswered;
 }
 
 class _RaceResult {
