@@ -468,7 +468,12 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
         version: ref.read(clientVersionProvider).value,
       );
       await widget.onPaired(route, paired);
-      if (mounted) Navigator.of(context).pop(true);
+      // Saving a session redirects away from /pairing, which takes this sheet
+      // down with the page under it while the save is still writing. Popping
+      // then would pop the page the router just showed, leaving nothing.
+      if (mounted && (ModalRoute.of(context)?.isCurrent ?? false)) {
+        Navigator.of(context).pop(true);
+      }
     } on AuthApiException catch (e) {
       if (!mounted) return;
       setState(() {

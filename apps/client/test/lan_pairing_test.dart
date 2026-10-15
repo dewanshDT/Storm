@@ -4,6 +4,7 @@ import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -259,6 +260,7 @@ void main() {
       int pairStatus = 200,
       String pairError = '',
       List<String>? seen,
+      bool routed = false,
     }) async {
       browser = FakeLanBrowser();
       final client = server(
@@ -269,7 +271,9 @@ void main() {
       );
       final c = ProviderContainer(
         overrides: [
-          settingsProvider.overrideWith(() => FixedSettings(settings)),
+          settingsProvider.overrideWith(
+            () => routed ? _SlowSave(settings) : FixedSettings(settings),
+          ),
           clientVersionProvider.overrideWith((ref) async => '0.0.0'),
           lanDiscoverySupportedProvider.overrideWithValue(supported),
           lanBrowserFactoryProvider.overrideWithValue(() => browser),
@@ -283,14 +287,50 @@ void main() {
           ),
         ],
       );
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: c,
-          child: MaterialApp(
-            theme: StormTheme.dark(),
-            home: const PairingScreen(),
+      final Widget app;
+      if (routed) {
+        // The app's own shape: saving a session redirects away from /pairing,
+        // which takes the sheet's route down with the page under it.
+        final refresh = ValueNotifier(0);
+        c.listen(settingsProvider, (_, _) => refresh.value++);
+        app = MaterialApp.router(
+          theme: StormTheme.dark(),
+          routerConfig: GoRouter(
+            initialLocation: '/pairing',
+            refreshListenable: refresh,
+            redirect: (_, state) {
+              final configured =
+                  c.read(settingsProvider).value?.isConfigured ?? false;
+              if (configured && state.matchedLocation == '/pairing') {
+                return '/notes';
+              }
+              return null;
+            },
+            routes: [
+              GoRoute(
+                path: '/pairing',
+                builder: (_, _) => const PairingScreen(),
+              ),
+              ShellRoute(
+                builder: (_, _, child) => Scaffold(body: child),
+                routes: [
+                  GoRoute(
+                    path: '/notes',
+                    builder: (_, _) => const Text('notes'),
+                  ),
+                ],
+              ),
+            ],
           ),
-        ),
+        );
+      } else {
+        app = MaterialApp(
+          theme: StormTheme.dark(),
+          home: const PairingScreen(),
+        );
+      }
+      await tester.pumpWidget(
+        UncontrolledProviderScope(container: c, child: app),
       );
       await tester.pump();
       return c;
@@ -394,6 +434,29 @@ void main() {
       expect(saved.serverPublicKey, pubkey);
       expect(saved.accessToken, 'sta_lan');
       expect(saved.relays.single.url, 'wss://relay.example');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('pairing lands on the notes, not on an empty navigator', (
+      tester,
+    ) async {
+      await pump(tester, routed: true);
+      browser.emit([advertised()]);
+      await tester.pump();
+      await tester.tap(find.text("Dewansh's Storm"));
+      await settle(tester);
+      await tester.enterText(
+        find.descendant(
+          of: find.byKey(const Key('lan-password')),
+          matching: find.byType(EditableText),
+        ),
+        password,
+      );
+      await tester.tap(find.byKey(const Key('lan-pair')));
+      await settle(tester);
+
+      expect(find.text('notes'), findsOneWidget);
+      expect(find.byType(LanPairSheet), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -600,4 +663,16 @@ void main() {
       );
     });
   });
+}
+
+/// Saves as the app does: the new state is published at once, and the writes
+/// to prefs and the keychain take a while after it.
+class _SlowSave extends FixedSettings {
+  _SlowSave(super.value);
+
+  @override
+  Future<void> save(Settings next) async {
+    state = AsyncData(next);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+  }
 }
