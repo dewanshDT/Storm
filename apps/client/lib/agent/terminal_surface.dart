@@ -3,12 +3,16 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm2/xterm.dart';
 
 import '../keyboard/storm_shortcut_maps.dart';
 import '../state/terminal_prefs.dart';
+import '../ui/controls.dart';
+import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 
 /// **The terminal-surface boundary** (freeze §10, gate Q5; decision 77d).
@@ -278,6 +282,11 @@ class StormTerminal {
   /// The screen's text, for tests.
   @visibleForTesting
   String get textForTest => _terminal.buffer.getText();
+
+  /// The link at [column] of buffer row [row], for tests.
+  @visibleForTesting
+  Uri? linkAtForTest(int column, int row) =>
+      terminalLinkAt(_terminal, CellOffset(column, row));
 }
 
 /// Forwards each decoded chunk to the terminal as it arrives.
@@ -316,6 +325,7 @@ class StormTerminalView extends StatelessWidget {
     this.readOnly = false,
     this.phone = false,
     this.prefs = const TerminalPrefs(),
+    this.openLink = _launch,
   });
 
   final StormTerminal terminal;
@@ -327,6 +337,27 @@ class StormTerminalView extends StatelessWidget {
   /// (handoff §3.6).
   final bool phone;
   final TerminalPrefs prefs;
+
+  /// Opens a link from the terminal (decision 122). Tests replace it.
+  final Future<bool> Function(Uri link) openLink;
+
+  static Future<bool> _launch(Uri link) => launchUrl(
+    link,
+    mode: LaunchMode.externalApplication,
+    webOnlyWindowName: '_blank',
+  );
+
+  /// A modifier-click opens the link under the pointer; a tap asks first,
+  /// because a tap is also how the terminal is focused (decision 122).
+  void _onTapUp(BuildContext context, TapUpDetails details, CellOffset cell) {
+    final link = terminalLinkAt(terminal._terminal, cell);
+    if (link == null) return;
+    if (details.kind == PointerDeviceKind.touch) {
+      _confirmLink(context, link, openLink);
+    } else if (_linkModifierPressed()) {
+      openLink(link);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -374,10 +405,152 @@ class StormTerminalView extends StatelessWidget {
           keyboardAppearance: Brightness.dark,
           // Agents redraw on resize; the terminal follows its box.
           autoResize: true,
+          onTapUp: (details, cell) => _onTapUp(context, details, cell),
         ),
       ),
     );
   }
+}
+
+/// xterm2's link modifier: Cmd on macOS, Ctrl elsewhere.
+bool _linkModifierPressed() => switch (defaultTargetPlatform) {
+  TargetPlatform.macOS => HardwareKeyboard.instance.isMetaPressed,
+  _ => HardwareKeyboard.instance.isControlPressed,
+};
+
+/// Agent output is untrusted, so only these open (decision 122).
+const _linkSchemes = {'http', 'https', 'mailto'};
+
+final _plainUrl = RegExp('(?:https?://|mailto:)[^\\s<>"\'`\uFFFD]+');
+
+/// The link at [cell] (decision 122): the OSC 8 target there, else a plain
+/// URL in the cell's wrapped line whose span covers it. Null unless the
+/// scheme is http, https or mailto.
+@visibleForTesting
+Uri? terminalLinkAt(Terminal terminal, CellOffset cell) {
+  final target = terminal.hyperlinkAt(cell);
+  if (target != null) return _allowedLink(target);
+  final lines = terminal.buffer.lines;
+  if (cell.y < 0 || cell.y >= lines.length) return null;
+  var first = cell.y;
+  while (first > 0 && lines[first].isWrapped) {
+    first--;
+  }
+  var last = cell.y;
+  while (last + 1 < lines.length && lines[last + 1].isWrapped) {
+    last++;
+  }
+  // One UTF-16 unit per cell, so an index in the text is a cell: an empty
+  // cell reads as a space, anything outside the BMP as U+FFFD.
+  final text = StringBuffer();
+  var at = 0;
+  for (var y = first; y <= last; y++) {
+    final line = lines[y];
+    if (y == cell.y) at = text.length + cell.x;
+    for (var x = 0; x < line.length; x++) {
+      final code = line.getCodePoint(x);
+      text.writeCharCode(switch (code) {
+        0 => 0x20,
+        > 0xffff => 0xfffd,
+        _ => code,
+      });
+    }
+  }
+  for (final match in _plainUrl.allMatches(text.toString())) {
+    final url = _trimUrl(match[0]!);
+    if (at >= match.start && at < match.start + url.length) {
+      return _allowedLink(url);
+    }
+  }
+  return null;
+}
+
+Uri? _allowedLink(String text) {
+  final uri = Uri.tryParse(text);
+  if (uri == null || !_linkSchemes.contains(uri.scheme.toLowerCase())) {
+    return null;
+  }
+  if (uri.scheme != 'mailto' && uri.host.isEmpty) return null;
+  return uri;
+}
+
+/// Prose punctuation after a URL, and a closing bracket it never opened.
+String _trimUrl(String url) {
+  while (url.isNotEmpty) {
+    final last = url[url.length - 1];
+    final opener = switch (last) {
+      ')' => '(',
+      ']' => '[',
+      '}' => '{',
+      _ => null,
+    };
+    final unbalanced =
+        opener != null &&
+        last.allMatches(url).length > opener.allMatches(url).length;
+    if (!'.,;:!?'.contains(last) && !unbalanced) break;
+    url = url.substring(0, url.length - 1);
+  }
+  return url;
+}
+
+/// The touch path: the link in full, then Open or Copy.
+Future<void> _confirmLink(
+  BuildContext context,
+  Uri link,
+  Future<bool> Function(Uri) openLink,
+) {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  return showStormSheet<void>(
+    context: context,
+    title: 'Link',
+    heightFactor: 0.4,
+    builder: (sheet) {
+      final t = sheet.tokens;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SelectableText(
+            '$link',
+            style: TextStyle(
+              fontFamily: StormTokens.monoFamily,
+              fontSize: t.labelSize,
+              color: t.text,
+            ),
+          ),
+          SizedBox(height: t.sp * 2),
+          Row(
+            children: [
+              Expanded(
+                child: StormButton.outline(
+                  label: 'Copy',
+                  expand: true,
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: '$link'));
+                    if (sheet.mounted) Navigator.of(sheet).pop();
+                    messenger?.showSnackBar(
+                      const SnackBar(content: Text('Link copied')),
+                    );
+                  },
+                ),
+              ),
+              SizedBox(width: t.sp),
+              Expanded(
+                child: StormButton.primary(
+                  label: 'Open',
+                  expand: true,
+                  onPressed: () {
+                    Navigator.of(sheet).pop();
+                    openLink(link);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    },
+  );
 }
 
 /// [base] with the height left under the last whole row split above and

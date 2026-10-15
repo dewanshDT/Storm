@@ -233,6 +233,11 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   reports the colour scheme to the agent on every non-identical theme while
   DEC 2031 is on; a report after the agent restored echo prints as
   `^[[?997;1n` in the scrollback.
+- **A terminal link opens only for `http`, `https` and `mailto`, and a tap
+  asks first** (decision 122). Agent output is untrusted and an OSC 8 link's
+  text can differ from its target, so the touch sheet shows the real target;
+  a tap is also how the terminal takes focus, so it never opens directly.
+  Only a Cmd/Ctrl-click opens at once.
 - **Storm never moves vault directories.** Changing the storage root points the
   server at directories someone already moved. A change that would orphan every
   registered vault is refused rather than applied quietly, and a vault whose
