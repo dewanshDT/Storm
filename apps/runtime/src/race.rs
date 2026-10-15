@@ -17,6 +17,10 @@
 //!    `identity_failed` (something answered and could not prove the key),
 //!    then `server_offline` (a relay is up and the server is not on it, or
 //!    the address refused), then the rest (`relay_down`, `unreachable`, …).
+//!    A refused address is `server_offline` only while no relay in the race
+//!    went unanswered: off the home network a LAN address is refused by the
+//!    network the machine is on, and a silent relay says that network is the
+//!    problem (§8.6).
 //! 5. After a win, `GET /v1/server` over the winner refreshes the relay set,
 //!    cached per `server_id`: the flags only seed it (Q11). Only the proven
 //!    winner's set for the pinned `server_id` is adopted, and when it carries
@@ -282,6 +286,7 @@ impl Connector for RaceConnector {
         if let Some(addr) = &self.options.direct {
             first.push(Candidate {
                 label: format!("direct {addr}"),
+                direct: true,
                 attempt: self.direct_attempt(addr.clone()),
             });
         }
@@ -289,6 +294,7 @@ impl Connector for RaceConnector {
             let tier = self.tier(&relay);
             let candidate = Candidate {
                 label: format!("relay {relay}"),
+                direct: false,
                 attempt: self.relay_attempt(relay),
             };
             match tier {
@@ -307,6 +313,7 @@ pub type Attempt<T> = Pin<Box<dyn Future<Output = Result<T, TransportError>> + S
 
 pub struct Candidate<T> {
     pub label: String,
+    pub direct: bool,
     pub attempt: Attempt<T>,
 }
 
@@ -325,11 +332,12 @@ pub async fn race<T>(
     rounds: Vec<Vec<Candidate<T>>>,
     deadline: Duration,
 ) -> Result<(String, T), TransportError> {
-    let mut failures: Vec<(String, TransportError)> = Vec::new();
+    let mut failures: Vec<(String, bool, TransportError)> = Vec::new();
     for round in rounds {
         let mut running: FuturesUnordered<_> = round
             .into_iter()
             .map(|c| async move {
+                let direct = c.direct;
                 let outcome = match tokio::time::timeout(deadline, c.attempt).await {
                     Ok(outcome) => outcome,
                     Err(_) => Err(TransportError::new(
@@ -337,24 +345,34 @@ pub async fn race<T>(
                         format!("no proof within {}s", deadline.as_secs()),
                     )),
                 };
-                (c.label, outcome)
+                (c.label, direct, outcome)
             })
             .collect();
-        while let Some((label, outcome)) = running.next().await {
+        while let Some((label, direct, outcome)) = running.next().await {
             match outcome {
                 Ok(t) => return Ok((label, t)),
                 Err(e) => {
                     tracing::debug!(storm_error = e.code, "{label} failed: {}", e.detail);
-                    failures.push((label, e));
+                    failures.push((label, direct, e));
                 }
             }
         }
     }
+    let network_in_doubt = failures.iter().any(|(_, direct, e)| {
+        !direct && matches!(e.code, "relay_down" | "relay_silent" | "handshake_timeout")
+    });
+    let code = |direct: bool, e: &TransportError| {
+        if direct && network_in_doubt && e.code == "server_offline" {
+            "unreachable"
+        } else {
+            e.code
+        }
+    };
     let Some(best) = failures
         .iter()
         .enumerate()
-        .max_by_key(|(i, (_, e))| (rank(e.code), std::cmp::Reverse(*i)))
-        .map(|(_, (_, e))| e.code)
+        .max_by_key(|(i, (_, direct, e))| (rank(code(*direct, e)), std::cmp::Reverse(*i)))
+        .map(|(_, (_, direct, e))| code(*direct, e))
     else {
         return Err(TransportError::new(
             "unreachable",
@@ -363,7 +381,7 @@ pub async fn race<T>(
     };
     let detail = failures
         .iter()
-        .map(|(label, e)| format!("{label}: {e}"))
+        .map(|(label, _, e)| format!("{label}: {e}"))
         .collect::<Vec<_>>()
         .join("; ");
     Err(TransportError::new(best, detail))
@@ -429,6 +447,7 @@ mod tests {
     fn candidate(label: &str, attempt: Attempt<&'static str>) -> Candidate<&'static str> {
         Candidate {
             label: label.into(),
+            direct: label == "direct",
             attempt,
         }
     }
@@ -548,6 +567,45 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(won, "public");
+    }
+
+    #[tokio::test]
+    async fn a_refused_address_beside_a_silent_relay_is_not_server_offline() {
+        for relay in ["relay_down", "relay_silent", "handshake_timeout"] {
+            let e = race(
+                vec![vec![
+                    candidate("direct", fails("server_offline")),
+                    candidate("self-hosted", fails(relay)),
+                ]],
+                LONG,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_ne!(e.code, "server_offline", "{relay}");
+        }
+        // With no relay to doubt the network by, a refusal still says the
+        // server is down; a relay's own `server_offline` always does.
+        let e = race(
+            vec![vec![candidate("direct", fails("server_offline"))]],
+            LONG,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.code, "server_offline");
+        let e = race(
+            vec![vec![
+                candidate("direct", fails("unreachable")),
+                candidate("self-hosted", fails("server_offline")),
+                candidate("other", fails("relay_down")),
+            ]],
+            LONG,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(e.code, "server_offline");
     }
 
     #[tokio::test]

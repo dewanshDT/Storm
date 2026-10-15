@@ -270,6 +270,12 @@ class SrpTrunk {
   String? get helloRefusal => _helloRefusal;
   String? _helloRefusal;
 
+  /// Whether the relay has sent anything at all. A relay that never answered
+  /// says the device's network is in doubt, which is what keeps a refused
+  /// direct address from reading as "server offline" (§8.6).
+  bool get answered => _answered;
+  bool _answered = false;
+
   final List<Completer<void>> _probes = [];
   int _openSlots = 0;
   final Queue<Completer<void>> _openWaiters = Queue();
@@ -370,6 +376,7 @@ class SrpTrunk {
       _fail('protocol_error');
       return;
     }
+    _answered = true;
     if (frame.type != 'PING' && frame.type != 'PONG') _streamFrames++;
     switch (frame.type) {
       case 'READY':

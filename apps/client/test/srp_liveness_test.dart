@@ -166,6 +166,61 @@ void main() {
       }
     });
 
+    // §8.6: a refused direct address says the server is down only while no
+    // relay went silent. Off the home network the LAN address is refused by
+    // the mobile network, and the silent relay says the device is offline.
+    StormConnection refusedDirect(List<RelayAdvert> relays) => StormConnection(
+      localAddress: 'http://192.168.1.13:8484',
+      client: MockClient(
+        (_) async =>
+            throw const SocketException('refused', osError: OSError('', 111)),
+      ),
+      token: 't',
+      serverId: 'srv_test',
+      relays: relays,
+    );
+
+    test('a refused direct address beside a silent relay is offline', () async {
+      final c = refusedDirect([
+        const RelayAdvert(
+          url: 'ws://127.0.0.1:1',
+          publicAddress: 'ws://127.0.0.1:1/connect/srv_test',
+        ),
+      ]);
+      try {
+        expect(await c.connect(), ServerProof.unreachable);
+        expect(c.status, ConnectionStatus.offline);
+      } finally {
+        c.dispose();
+      }
+    });
+
+    test('a refused direct address with no relay is server offline', () async {
+      final c = refusedDirect([]);
+      try {
+        expect(await c.connect(), ServerProof.unreachable);
+        expect(c.status, ConnectionStatus.serverOffline);
+      } finally {
+        c.dispose();
+      }
+    });
+
+    test('a refused direct address beside a relay that answered is server '
+        'offline', () async {
+      final relay = _Relay(refuseHello: 'rate_limited');
+      await relay.start();
+      final c = refusedDirect([
+        RelayAdvert(url: relay.origin, publicAddress: relay.connectUrl),
+      ]);
+      try {
+        expect(await c.connect(), ServerProof.unreachable);
+        expect(c.status, ConnectionStatus.serverOffline);
+      } finally {
+        c.dispose();
+        await relay.close();
+      }
+    });
+
     test('the race waits out the relay\'s HELLO hold, so its verdict is the '
         'race\'s', () async {
       // A real relay holds HELLO for 5 s. The race gives each candidate
