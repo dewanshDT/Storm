@@ -7,6 +7,7 @@ import {
   expectOpenAndAck,
   openStream,
   Peer,
+  preparedRegistration,
   register,
   requestHead,
   responseHead,
@@ -374,10 +375,11 @@ describe("a client trunk", () => {
 
   it("is held until a server registers during the wait", async () => {
     const serverId = uniqueId();
+    const finish = await preparedRegistration(serverId);
     const c = await Peer.dial(`/connect/${serverId}`);
     c.send({ v: 1, type: "HELLO", server_id: serverId });
     await sleep(100);
-    await register(serverId);
+    await finish();
     expect((await c.recv()).type).toBe("READY");
   });
 
