@@ -780,6 +780,39 @@ void main() {
       expect(c.read(settingsProvider).value!.baseUrl, isEmpty);
       await disposeShell(tester, c);
     });
+
+    testWidgets('disconnect revokes this device on the server, so pairing '
+        'again leaves no duplicate', (tester) async {
+      final c = shellContainer(
+        settings: const Settings(
+          baseUrl: 'http://test',
+          accessToken: 'sta_test',
+          deviceId: 'dev_this',
+          deviceSecret: 'sec',
+          theme: StormPreset.stormDark,
+          activeVault: FakeServer.primaryVault,
+        ),
+      );
+      serverOf(c).devices.addAll([
+        {'id': 'dev_this', 'name': 'Pixel 10'},
+        {'id': 'dev_other', 'name': 'Mac'},
+      ]);
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'connection');
+      await tapKey(tester, 'disconnect');
+      await tapKey(tester, 'confirm-disconnect');
+      expect(c.read(settingsProvider).value!.deviceId, isEmpty);
+      final devices = serverOf(c).devices;
+      expect(
+        devices.firstWhere((d) => d['id'] == 'dev_this')['revoked'],
+        isNotNull,
+      );
+      expect(
+        devices.firstWhere((d) => d['id'] == 'dev_other')['revoked'],
+        isNull,
+      );
+      await disposeShell(tester, c);
+    });
   });
 
   group('Advanced', () {

@@ -153,8 +153,14 @@ describe("after an eviction", () => {
     const { peer: server } = await register(serverId);
     const c = await client(serverId);
     await evict(serverId);
-    expectError(await c.recv(4000), "trunk_lost");
-    await server.expectClosed();
+    // Only the server falls silent, or the client could be reaped first.
+    const stop = c.keepAlive();
+    try {
+      expectError(await c.recv(4000), "trunk_lost");
+      await server.expectClosed();
+    } finally {
+      stop();
+    }
   });
 
   it("still finishes a supersession drain", async () => {

@@ -494,10 +494,17 @@ describe("trunk loss", () => {
     const { client: c, server } = await pair();
     const streamId = await openStream(c);
     await expectOpenAndAck(server);
-    const lost = await c.recv(4000);
-    expectError(lost, "trunk_lost");
-    expect(lost.stream_id).toBe(streamId);
-    await server.expectClosed();
+    // Only the server falls silent: a client that did too would be reaped at
+    // the same deadline, sometimes before it heard about its server (§5).
+    const stop = c.keepAlive();
+    try {
+      const lost = await c.recv(4000);
+      expectError(lost, "trunk_lost");
+      expect(lost.stream_id).toBe(streamId);
+      await server.expectClosed();
+    } finally {
+      stop();
+    }
   });
 
   it("is server_unreachable for a HELLO after the server went away, and reachable again after a restart", async () => {
