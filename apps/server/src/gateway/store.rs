@@ -144,6 +144,16 @@ const SCHEMA: &str = "
         PRIMARY KEY (connection_id, name)
     );
 
+    -- The Runtime Hosts a connection is scoped to (decision 121). No rows
+    -- means every host; a table rather than a column so the change stays
+    -- additive and no rewrite of the connection row clobbers it.
+    CREATE TABLE IF NOT EXISTS connection_hosts (
+        connection_id TEXT NOT NULL,
+        host_id       TEXT NOT NULL,
+        added_at      TEXT NOT NULL,
+        PRIMARY KEY (connection_id, host_id)
+    );
+
     -- Which OAuth client an `oauth` connection was authorized with, so a
     -- refresh uses the same one (decision 81g).
     CREATE TABLE IF NOT EXISTS connection_oauth (
@@ -551,8 +561,68 @@ impl GatewayDb {
             "DELETE FROM new_tools WHERE connection_id = ?1",
             params![id],
         )?;
+        tx.execute(
+            "DELETE FROM connection_hosts WHERE connection_id = ?1",
+            params![id],
+        )?;
         tx.commit()?;
         Ok(changed > 0)
+    }
+
+    // ---- host scope (decision 121) ----------------------------------------
+
+    /// The hosts the connection is scoped to, sorted. Empty means every host.
+    pub fn connection_hosts(&self, connection_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT host_id FROM connection_hosts WHERE connection_id = ?1 ORDER BY host_id",
+        )?;
+        let rows = stmt.query_map(params![connection_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether a session on `host_id` may use the connection.
+    pub fn in_host_scope(&self, connection_id: &str, host_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT NOT EXISTS (SELECT 1 FROM connection_hosts WHERE connection_id = ?1)
+                 OR EXISTS (SELECT 1 FROM connection_hosts
+                            WHERE connection_id = ?1 AND host_id = ?2)",
+            params![connection_id, host_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Replaces the connection's scope in one transaction: an empty list
+    /// scopes it back to every host. `hosts` is sorted and deduplicated;
+    /// returns whether the scope changed.
+    pub fn set_connection_hosts(
+        &mut self,
+        connection_id: &str,
+        hosts: &[String],
+        now: &str,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let current: Vec<String> = tx
+            .prepare(
+                "SELECT host_id FROM connection_hosts WHERE connection_id = ?1 ORDER BY host_id",
+            )?
+            .query_map(params![connection_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if current == hosts {
+            return Ok(false);
+        }
+        tx.execute(
+            "DELETE FROM connection_hosts WHERE connection_id = ?1",
+            params![connection_id],
+        )?;
+        for host in hosts {
+            tx.execute(
+                "INSERT OR IGNORE INTO connection_hosts (connection_id, host_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![connection_id, host, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     // ---- credentials ----------------------------------------------------
@@ -974,6 +1044,7 @@ mod tests {
             .unwrap();
         for t in [
             "calls",
+            "connection_hosts",
             "connections",
             "credentials",
             "meta",
@@ -1240,5 +1311,31 @@ mod tests {
             .unwrap();
         d.revoke_connection(&id, "t2").unwrap();
         assert!(d.new_tools(&id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_host_scope_round_trips_all_some_all_and_a_disconnect_clears_it() {
+        let dir = tempdir::TempDir::new("storm-gw-hosts").unwrap();
+        let (mut d, id) = with_connection(dir.path());
+        assert!(d.connection_hosts(&id).unwrap().is_empty());
+        let hosts = names(&["hst_A", "hst_B"]);
+        assert!(d.set_connection_hosts(&id, &hosts, "t").unwrap());
+        assert_eq!(d.connection_hosts(&id).unwrap(), hosts);
+        assert!(!d.set_connection_hosts(&id, &hosts, "t").unwrap());
+        assert!(
+            d.set_connection_hosts(&id, &names(&["hst_C"]), "t")
+                .unwrap()
+        );
+        assert_eq!(d.connection_hosts(&id).unwrap(), names(&["hst_C"]));
+        assert!(d.in_host_scope(&id, "hst_C").unwrap());
+        assert!(!d.in_host_scope(&id, "hst_A").unwrap());
+        assert!(d.set_connection_hosts(&id, &[], "t").unwrap());
+        assert!(d.connection_hosts(&id).unwrap().is_empty());
+        assert!(d.in_host_scope(&id, "hst_A").unwrap());
+
+        d.set_connection_hosts(&id, &names(&["hst_A"]), "t")
+            .unwrap();
+        d.revoke_connection(&id, "t2").unwrap();
+        assert!(d.connection_hosts(&id).unwrap().is_empty());
     }
 }

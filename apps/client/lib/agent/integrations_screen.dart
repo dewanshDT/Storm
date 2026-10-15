@@ -10,7 +10,8 @@ import '../ui/session_status.dart' show StatusPill;
 import '../ui/settings/settings_widgets.dart';
 import '../ui/states.dart';
 import '../ui/tokens.dart';
-import 'agent_state.dart' show sessionCredentialsProvider;
+import 'agent_models.dart' show AgentHost;
+import 'agent_state.dart' show agentApi, sessionCredentialsProvider;
 import 'integrations_api.dart';
 import 'oauth_flow.dart';
 import 'oauth_links.dart';
@@ -36,6 +37,18 @@ final openBrowserProvider = Provider<Future<bool> Function(Uri)>(
 /// Whether this platform can sign in with OAuth. Tests override it.
 final oauthSupportedProvider = Provider<bool>((ref) => oauthSupported);
 
+/// A connection's host scope in a few words (decision 121). [names] holds the
+/// enrolled hosts; a scope left with none of them reaches no host, and says so
+/// rather than naming a revoked one.
+String hostScopeLabel(List<String>? scope, Map<String, String> names) {
+  if (scope == null) return 'All hosts';
+  if (names.isNotEmpty && !scope.any(names.containsKey)) {
+    return 'No enrolled host';
+  }
+  if (scope.length == 1) return names[scope.single] ?? '1 host';
+  return '${scope.length} hosts';
+}
+
 /// Settings ▸ Integrations (spec §14, G-D21; decision 81h).
 ///
 /// The owner connects a service **once, here**, and every agent session —
@@ -51,6 +64,7 @@ class IntegrationsScreen extends ConsumerStatefulWidget {
 
 class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   List<Integration>? _items;
+  List<AgentHost>? _hosts;
   String? _error;
   bool _loading = false;
 
@@ -62,6 +76,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   void initState() {
     super.initState();
     _load();
+    _loadHosts();
     // A sign-in redirect this process was not waiting for (spec §10.4,
     // 81l): finish it here. The app root brings this screen up for one.
     _links.orphans.addListener(_relayOrphans);
@@ -102,6 +117,27 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     } finally {
       api.dispose();
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// The enrolled hosts, to name a connection's scope by and to choose from.
+  /// Without them a scope reads as a count. [quiet] keeps a failure off the
+  /// screen.
+  Future<List<AgentHost>?> _loadHosts({bool quiet = true}) async {
+    final api = agentApi(ref);
+    if (api == null) return null;
+    try {
+      final hosts = [
+        for (final h in await api.hosts())
+          if (h.status != 'revoked') h,
+      ];
+      if (mounted) setState(() => _hosts = hosts);
+      return hosts;
+    } catch (e) {
+      if (!quiet) _say(describeFailure(e));
+      return null;
+    } finally {
+      api.dispose();
     }
   }
 
@@ -215,6 +251,17 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     await _with((api) => api.update(i.id, toolAllowlist: chosen));
   }
 
+  Future<void> _chooseHosts(Integration i) async {
+    final hosts = await _loadHosts(quiet: false);
+    if (hosts == null || !mounted) return;
+    final chosen = await showDialog<({List<String>? hosts})>(
+      context: context,
+      builder: (_) => _HostsDialog(integration: i, hosts: hosts),
+    );
+    if (chosen == null) return;
+    await _with((api) => api.setHosts(i.id, chosen.hosts));
+  }
+
   Future<void> _disconnect(Integration i) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -248,6 +295,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   @override
   Widget build(BuildContext context) {
     final items = _items;
+    final names = {for (final h in _hosts ?? const <AgentHost>[]) h.id: h.name};
     return SettingsPage(
       title: 'Integrations',
       intro: 'Services your agents can use, such as Linear or GitHub.',
@@ -266,11 +314,13 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
           for (final i in items)
             _IntegrationTile(
               integration: i,
+              scope: hostScopeLabel(i.hosts, names),
               busy: _loading,
               canSignIn: ref.read(oauthSupportedProvider),
               onTest: () =>
                   _with((api) async => _reportCheck(await api.test(i.id))),
               onTools: () => _tools(i),
+              onHosts: () => _chooseHosts(i),
               onReconnect: () => _reconnect(i),
               onToggle: () =>
                   _with((api) => api.update(i.id, enabled: i.disabled)),
@@ -292,22 +342,28 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
 class _IntegrationTile extends StatelessWidget {
   const _IntegrationTile({
     required this.integration,
+    required this.scope,
     required this.busy,
     required this.canSignIn,
     required this.onTest,
     required this.onTools,
+    required this.onHosts,
     required this.onReconnect,
     required this.onToggle,
     required this.onDisconnect,
   });
 
   final Integration integration;
+
+  /// Which hosts may use it, in a few words.
+  final String scope;
   final bool busy;
 
   /// Whether this platform can run an OAuth sign-in (G-D13: not the web).
   final bool canSignIn;
   final VoidCallback onTest;
   final VoidCallback onTools;
+  final VoidCallback onHosts;
   final VoidCallback onReconnect;
   final VoidCallback onToggle;
   final VoidCallback onDisconnect;
@@ -332,6 +388,7 @@ class _IntegrationTile extends StatelessWidget {
             if (i.status == 'connected')
               '${i.toolAllowlist.length} '
                   '${i.toolAllowlist.length == 1 ? 'tool' : 'tools'} on',
+            scope,
           ].join(' · ');
     // An OAuth integration is reconnected by signing in, which the browser
     // cannot do (G-D13): it says where to do it instead of offering an action
@@ -452,6 +509,8 @@ class _IntegrationTile extends StatelessWidget {
                     onTest();
                   case 'tools':
                     onTools();
+                  case 'hosts':
+                    onHosts();
                   case 'reconnect':
                     onReconnect();
                   case 'toggle':
@@ -468,6 +527,10 @@ class _IntegrationTile extends StatelessWidget {
                     value: 'tools',
                     child: Text('Choose tools'),
                   ),
+                const PopupMenuItem(
+                  value: 'hosts',
+                  child: Text('Choose hosts'),
+                ),
                 PopupMenuItem(
                   value: 'reconnect',
                   enabled: reconnectHere,
@@ -839,6 +902,89 @@ class _ToolsDialogState extends State<_ToolsDialog> {
         FilledButton(
           key: const Key('save-tools'),
           onPressed: () => Navigator.of(context).pop(_on.toList()..sort()),
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+class _HostsDialog extends StatefulWidget {
+  const _HostsDialog({required this.integration, required this.hosts});
+
+  final Integration integration;
+  final List<AgentHost> hosts;
+
+  @override
+  State<_HostsDialog> createState() => _HostsDialogState();
+}
+
+class _HostsDialogState extends State<_HostsDialog> {
+  late bool _all = widget.integration.hosts == null;
+
+  // Only hosts still enrolled: a revoked one is not offered, so not kept.
+  late final Set<String> _on = {
+    for (final h in widget.hosts)
+      if (widget.integration.hosts?.contains(h.id) ?? false) h.id,
+  };
+
+  void _save() {
+    final hosts = _all ? null : (_on.toList()..sort());
+    Navigator.of(context).pop((hosts: hosts));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    // The server refuses an empty list: "All hosts" is the way out.
+    final empty = !_all && _on.isEmpty;
+    return AlertDialog(
+      title: Text('Hosts for ${widget.integration.displayName}'),
+      content: SizedBox(
+        width: 420,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Text(
+              'Agents can use it only in sessions on these hosts.',
+              style: TextStyle(fontSize: t.labelSize, color: t.text3),
+            ),
+            CheckboxListTile(
+              key: const Key('hosts-all'),
+              value: _all,
+              onChanged: (v) => setState(() => _all = v ?? false),
+              title: const Text('All hosts'),
+              subtitle: const Text('Including hosts enrolled later'),
+            ),
+            if (!_all)
+              for (final h in widget.hosts)
+                CheckboxListTile(
+                  key: Key('host-${h.id}'),
+                  value: _on.contains(h.id),
+                  onChanged: (v) => setState(
+                    () => v == true ? _on.add(h.id) : _on.remove(h.id),
+                  ),
+                  title: Text(h.name),
+                ),
+            if (empty)
+              Text(
+                widget.hosts.isEmpty
+                    ? 'No hosts are enrolled. Keep All hosts.'
+                    : 'Choose at least one host, or All hosts.',
+                key: const Key('hosts-empty'),
+                style: TextStyle(fontSize: t.labelSize, color: t.danger),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('save-hosts'),
+          onPressed: empty ? null : _save,
           child: const Text('Save'),
         ),
       ],
