@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -117,6 +118,54 @@ void main() {
       expect(fill('rail-notes'), Colors.transparent);
       await disposeShell(tester, w);
     });
+
+    testWidgets(
+      'every rail button is the same square, glyph centred, no label',
+      (tester) async {
+        final c = shellContainer();
+        await pumpShell(tester, c, size: wide);
+        Rect button(String key) => tester.getRect(
+          find.descendant(
+            of: find.byKey(Key(key)),
+            matching: find.byType(InkWell),
+          ),
+        );
+        final settings = button('rail-settings');
+        for (final key in ['rail-notes', 'rail-agents', 'rail-settings']) {
+          final box = button(key);
+          expect(box.width, box.height, reason: '$key is square');
+          expect(box.size, settings.size, reason: '$key matches the foot');
+          final glyph = tester.getRect(
+            find.descendant(
+              of: find.byKey(Key(key)),
+              matching: find.byWidgetPredicate(
+                (w) => w is SvgPicture || w is Icon,
+              ),
+            ),
+          );
+          expect(glyph.center.dx, closeTo(box.center.dx, 0.5), reason: key);
+          expect(glyph.center.dy, closeTo(box.center.dy, 0.5), reason: key);
+        }
+        for (final label in ['Notes', 'Agents']) {
+          expect(
+            find.descendant(
+              of: find.byType(ActivityRail),
+              matching: find.text(label),
+            ),
+            findsNothing,
+            reason: 'the label is the tooltip, not text on the rail',
+          );
+        }
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('rail-agents')),
+            matching: find.byType(SvgPicture),
+          ),
+          findsOneWidget,
+        );
+        await disposeShell(tester, c);
+      },
+    );
 
     testWidgets('each activity reopens where it was left', (tester) async {
       final c = shellContainer();
