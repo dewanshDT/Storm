@@ -404,6 +404,28 @@ jobs:
       - run: flutter pub get
       - run: flutter build windows --release
 
+  # The desktop runners are native code the Dart suite never compiles
+  # (decision 125): a template edit or a plugin that lacks Linux support
+  # surfaces only here.
+  client-linux:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'
+    name: client (linux build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - run: flutter pub get
+      - run: flutter build linux --release
+
   integration:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.live == 'true'
