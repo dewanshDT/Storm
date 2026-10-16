@@ -63,6 +63,40 @@ sudo storm-server status`;
       aria: `Download Storm for macOS (${this.tag})`,
     };
   },
+  /** Named without a version, like every Windows asset (decision 125d). */
+  get windows() {
+    const file = "storm-app-windows-x86_64.zip";
+    return {
+      id: "windows" as const,
+      platform: "Windows",
+      meta: "Windows 10/11 · x64",
+      blurb: "Native desktop client. Unzip anywhere and run storm.exe.",
+      note: "Not code-signed: SmartScreen may warn. Or install it with the PowerShell installer.",
+      file,
+      url: `${this.assetBase}/${file}`,
+      detect: "windows" as const,
+      action: "download" as const,
+      cta: "Download →",
+      aria: `Download Storm for Windows (${this.tag})`,
+    };
+  },
+  /** The .deb; the tarball is for other distributions (decision 125f). */
+  get linux() {
+    const file = `storm-app_${this.version}-1_amd64.deb`;
+    return {
+      id: "linux" as const,
+      platform: "Linux",
+      meta: "Debian · Ubuntu · x86_64",
+      blurb: "Native desktop client.",
+      note: `Other distributions: storm-app-${this.version}-x86_64-linux.tar.gz, or the installer's --app.`,
+      file,
+      url: `${this.assetBase}/${file}`,
+      detect: "linux" as const,
+      action: "download" as const,
+      cta: "Download →",
+      aria: `Download Storm for Linux (${this.tag})`,
+    };
+  },
   get android() {
     const file = `storm-${this.version}.apk`;
     return {
