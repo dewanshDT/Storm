@@ -18,6 +18,7 @@
 pub mod connections;
 pub mod crypto;
 pub mod oauth;
+pub mod provider;
 pub mod session;
 pub mod store;
 pub mod upstream;

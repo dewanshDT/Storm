@@ -1630,6 +1630,11 @@ pub struct LaunchedSession {
     #[serde(flatten)]
     pub session: SessionView,
     pub mcp: LaunchMcp,
+    /// The synced Claude login (decision 124): `synced`, `native`,
+    /// `old_host` or `expired`. Never the token.
+    pub credential: &'static str,
+    /// Said out loud when a ticked host's session runs on its own login.
+    pub credential_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1710,6 +1715,7 @@ pub async fn launch_session(
             .iter()
             .map(|c| (c.id.clone(), c.display_name.clone()))
             .collect(),
+        provider_credential: deliverable_credential(state, &req.host_id).await,
     };
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
@@ -1723,10 +1729,12 @@ pub async fn launch_session(
                 slug: c.slug,
             }),
     );
-    let (session, launch, outcome) = state
+    let (session, launch, outcome, credential) = state
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    let (credential, credential_notice) =
+        provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
         crate::agent::McpOutcome::Granted(g) => (
             g,
@@ -1775,6 +1783,8 @@ pub async fn launch_session(
             allow_vault_writes: launch.write_vault_id.is_some(),
             notice,
         },
+        credential,
+        credential_notice,
     })
 }
 
@@ -3534,6 +3544,59 @@ pub async fn oauth_callback(
     // §10 step 6: a test listing, which also turns every tool on.
     test_integration(state, actor, &c.id).await
 }
+
+// ---- token sync: the launch wire and the host's pull (decision 124, 124o) --
+
+pub(crate) mod provider_wire;
+pub use provider_wire::runtime_provider_credential;
+
+// STUB (124o) for 124n's owner operations, behind the token sync spec's §0.1
+// signatures. Delete this group on merge in favour of 124n's.
+use crate::gateway::provider::{Code, ProviderCredentialView, Secret, stub as provider_stub};
+
+pub async fn provider_credential_status(state: &Shared) -> ProviderCredentialView {
+    provider_stub::status(&state.state_dir)
+}
+
+#[allow(dead_code)]
+pub async fn put_provider_credential(
+    state: &Shared,
+    _actor: &Actor,
+    token: Secret,
+    minted_at: Option<String>,
+) -> Result<ProviderCredentialView, Code> {
+    provider_stub::put(&state.state_dir, token, minted_at)?;
+    Ok(provider_stub::status(&state.state_dir))
+}
+
+#[allow(dead_code)]
+pub async fn delete_provider_credential(state: &Shared, _actor: &Actor) -> Result<(), Code> {
+    provider_stub::delete(&state.state_dir);
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn set_provider_credential_hosts(
+    state: &Shared,
+    _actor: &Actor,
+    hosts: Vec<String>,
+) -> Result<ProviderCredentialView, Code> {
+    provider_stub::set_hosts(&state.state_dir, hosts);
+    Ok(provider_stub::status(&state.state_dir))
+}
+
+pub async fn deliverable_credential(state: &Shared, host_id: &str) -> Option<&'static str> {
+    provider_stub::deliverable(&state.state_dir, host_id)
+}
+
+pub async fn pull_provider_credential(
+    state: &Shared,
+    host: &str,
+    _session_id: &str,
+) -> Result<Secret, Code> {
+    provider_stub::pull(&state.state_dir, host)
+}
+// END STUB (124o)
 
 #[cfg(test)]
 mod tests {
