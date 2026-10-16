@@ -1,0 +1,45 @@
+/* Starlight's palette, mapped onto Storm's two identities (decision 107):
+   Storm dark is Starlight's default (dark) theme, SlowFlow earth its light one.
+   Values follow tokens.css / tokens.dart; Starlight's scale runs from "white"
+   (strongest text) through gray-1…6 to "black" (the page). */
+
+:root {
+  --sl-font: "IBM Plex Sans", system-ui, sans-serif;
+  --sl-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --sl-color-white: oklch(0.97 0.008 55);
+  --sl-color-gray-1: oklch(0.95 0.008 55);
+  --sl-color-gray-2: oklch(0.86 0.008 55);
+  --sl-color-gray-3: oklch(0.74 0.008 55);
+  --sl-color-gray-4: oklch(0.66 0.008 55);
+  --sl-color-gray-5: oklch(0.36 0.008 55);
+  --sl-color-gray-6: oklch(0.27 0.008 55);
+  --sl-color-black: oklch(0.22 0.008 55);
+
+  --sl-color-accent-low: oklch(0.3 0.05 293);
+  --sl-color-accent: oklch(0.68 0.15 293);
+  --sl-color-accent-high: oklch(0.85 0.08 293);
+}
+
+:root[data-theme="light"] {
+  --sl-color-white: oklch(0.14 0.022 62);
+  --sl-color-gray-1: oklch(0.18 0.022 62);
+  --sl-color-gray-2: oklch(0.26 0.022 62);
+  --sl-color-gray-3: oklch(0.34 0.022 62);
+  --sl-color-gray-4: oklch(0.4 0.022 62);
+  --sl-color-gray-5: oklch(0.7 0.022 62);
+  --sl-color-gray-6: oklch(0.79 0.022 62);
+  --sl-color-gray-7: oklch(0.82 0.022 62);
+  --sl-color-black: oklch(0.84 0.022 62);
+
+  --sl-color-accent-low: oklch(0.76 0.02 55);
+  --sl-color-accent: oklch(0.4 0.06 55);
+  --sl-color-accent-high: oklch(0.32 0.06 55);
+}
+
+.sl-markdown-content :is(h1, h2, h3),
+h1#_top {
+  font-family: "Newsreader", "Iowan Old Style", Georgia, serif;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}

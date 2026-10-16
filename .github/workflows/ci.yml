@@ -48,6 +48,7 @@ jobs:
             server:
               - *vectors
               - apps/server/**
+              - tools/www-facts/**
               - kit/**
               - deploy/**
             relay:
@@ -63,6 +64,7 @@ jobs:
             runtime:
               - *vectors
               - apps/runtime/**
+              - tools/www-facts/**
               - deploy/storm-runtime.service
               - deploy/runtime.toml.example
             installer:
@@ -81,9 +83,16 @@ jobs:
               - apps/runtime/**
               - tools/relay-conformance/**
               - kit/**
+            # check-claims reads more than the site: the MCP tool list is
+            # checked against mcp.rs, and the account phrasings against the
+            # root README, so a change to either must run it. docs/site/ is
+            # the docs' content and is built by this job.
             www:
               - apps/www/**
-              - docs/www/**
+              - apps/server/src/mcp.rs
+              - README.md
+              - docs/site/**
+              - tools/www-facts/**
               - Formula/**
               - deploy/storm.env.example
               - deploy/install.sh
@@ -107,6 +116,11 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The docs' CLI reference is this binary's --help, kept in
+      # apps/www/src/data/facts.json; a changed flag fails here until it is
+      # regenerated (`make www-facts`).
+      - run: cargo build
+      - run: python3 ../../tools/www-facts/generate.py --check --server target/debug/storm-server
 
   # Its own job, not a step in `server`: the relay is a standalone crate with
   # no workspace joining it to the server (R6), so it builds and caches on its
@@ -218,6 +232,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      - run: cargo build
+      - run: python3 ../../tools/www-facts/generate.py --check --runtime target/debug/storm-runtime
 
   # The same Runtime Host on a real Mac (decision 83). The PTY and the
   # syscalls under it differ there (macOS's poll(2) does not support devices),

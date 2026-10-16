@@ -1,0 +1,77 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import CodeBlock from "../components/CodeBlock.astro";
+import GetStorm from "../components/GetStorm.astro";
+import { release } from "../data/release";
+---
+
+<BaseLayout
+  title="Download"
+  description="Install the Storm server on Linux, macOS or Windows, then get the apps for macOS, Android and the web."
+>
+  <header class="page-hero wrap-narrow">
+    <p class="eyebrow">Download · {release.tag}</p>
+    <h1>Get Storm</h1>
+    <p class="lede">
+      First the server, on a machine you own. Then the apps, on every device
+      you use. The installer can set up both, and pair your phone at the end.
+    </p>
+  </header>
+
+  <section class="section wrap-narrow" id="server">
+    <h2>The server</h2>
+
+    <h3>Linux and macOS</h3>
+    <p class="support">
+      An interactive installer: the server and app, a Runtime Host for agents,
+      or everything. It shows its whole plan, every <code>sudo</code> step
+      included, before changing anything. Debian and Ubuntu use Storm’s signed
+      apt repository; macOS gets the release, checked against its checksums.
+    </p>
+    <CodeBlock code={release.installCommand} label="install" />
+
+    <h3>Windows</h3>
+    <p class="support">
+      In PowerShell — as administrator if you want the Runtime Host. The server
+      runs as you at logon, with your notes in <code>%USERPROFILE%\Storm</code>.
+      Not code-signed yet, so SmartScreen may warn.
+    </p>
+    <CodeBlock code={release.windowsInstallCommand} label="powershell" />
+
+    <p class="support">
+      Run either again any time to upgrade, pair a device or uninstall — your
+      notes are always kept. By hand, firewalls and every option:
+      <a href="/docs/install/server/">Install the server</a>.
+    </p>
+  </section>
+
+  <section class="section wrap" id="apps">
+    <GetStorm label="" id="apps-list" heading="The apps" displayHeading={false} />
+  </section>
+
+  <section class="section wrap-narrow" id="next">
+    <h2>Then</h2>
+    <p class="support">
+      Open the web app or one of the apps and
+      <a href="/docs/install/pair/">pair it</a>: the first device sets your
+      Storm’s password, and every device after that finds your Storm on your
+      network. The <a href="/docs/start/quickstart/">Quickstart</a> walks
+      through the rest, agents and AI apps included.
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    color: var(--text);
+  }
+  .section h3 {
+    margin: calc(var(--sp) * 4) 0 calc(var(--sp) * 1.5);
+    font-family: var(--font-sans);
+    font-size: var(--fs-md);
+    font-weight: 600;
+    color: var(--text);
+  }
+</style>

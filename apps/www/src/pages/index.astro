@@ -3,395 +3,269 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import BrandMark from "../components/BrandMark.astro";
 import CodeBlock from "../components/CodeBlock.astro";
 import { release } from "../data/release";
+import facts from "../data/facts.json";
 
-const bootstrap = release.installCommand;
+// Generated from apps/server/src/mcp.rs by tools/www-facts; CI fails when the
+// committed file is stale, so these lists cannot fall behind the server.
+const mcpReadTools = facts.mcp_tools.filter((t) => t.access === "read").map((t) => t.name);
+const mcpWriteTools = facts.mcp_tools.filter((t) => t.access === "write").map((t) => t.name);
+const mcpAgentTools = facts.mcp_tools.filter((t) => t.access === "agents").map((t) => t.name);
+const neverForAgents = facts.mcp_tools.filter((t) => !t.agents).map((t) => t.name);
+const mcpTools = [...mcpReadTools, ...mcpWriteTools];
 
-const mcpTools = [
-  "list_vaults",
-  "get_vault",
-  "search",
-  "get_note",
-  "get_related_notes",
-  "list_tags",
-  "recent_notes",
-  "get_note_history",
-  "get_note_version",
-  "create_note",
-  "update_note",
-  "delete_note",
+const platforms = [
+  { what: "Server", linux: "yes", macos: "yes", windows: "yes", android: "—", web: "—" },
+  { what: "Runtime Host (agents)", linux: "yes", macos: "yes", windows: "yes", android: "—", web: "—" },
+  { what: "App", linux: "web", macos: "yes", windows: "web", android: "yes", web: "yes" },
+];
+
+const docs = [
+  { href: "/docs/start/quickstart/", title: "Quickstart", body: "Server to phone in a few minutes." },
+  { href: "/docs/install/server/", title: "Install", body: "Linux, macOS, Windows; pairing; firewalls." },
+  { href: "/docs/notes/writing/", title: "Notes", body: "Writing, vaults, sync and conflicts." },
+  { href: "/docs/agents/sessions/", title: "Agents", body: "Sessions, Runtime Hosts, integrations." },
+  { href: "/docs/mcp/connect/", title: "MCP", body: "Connect Claude Code, Claude Desktop, Cursor." },
+  { href: "/docs/reference/mcp-tools/", title: "Reference", body: "Tools, CLIs and config, generated." },
 ];
 
 const description =
-  "Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients and MCP access for AI agents.";
+  "Storm is a self-hosted, Markdown-native knowledge system: notes on your own server, coding agents on your own machines, and MCP access for AI apps.";
 ---
 
 <BaseLayout title="Storm — Self-hosted knowledge" description={description}>
-  <!-- HERO -->
   <section class="hero" aria-labelledby="hero-heading">
-    <div class="wrap hero-inner">
-      <div class="hero-brand">
-        <BrandMark size="md" />
-      </div>
-      <p class="eyebrow">Self-hosted knowledge</p>
-      <h1 id="hero-heading" class="display">
-        Your knowledge.<br />On your infrastructure.
-      </h1>
-      <p class="lede">
-        Storm is a self-hosted, Markdown-native knowledge system with
-        cross-platform clients and first-class access for AI agents through MCP.
-      </p>
-      <div class="cta">
-        <a class="btn btn-primary" href="/install">Install Storm</a>
-        <a class="btn btn-ghost" href="/clients">Get a client</a>
-        <a class="btn btn-ghost" href="#docs">Read the docs</a>
-      </div>
-
-      <div class="hero-install">
-        <CodeBlock code={bootstrap} label="install" />
-        <p class="install-note">
-          Debian / Ubuntu apt bootstrap (from the apt repo). Then
-          <code>sudo storm-server up</code>.
-          <a href="/install">Full installation →</a>
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <div class="hero-brand"><BrandMark size="md" /></div>
+        <p class="eyebrow">Self-hosted notes · agents · MCP</p>
+        <h1 id="hero-heading" class="display">
+          Your knowledge.<br />On your infrastructure.
+        </h1>
+        <p class="lede">
+          Plain Markdown on a server you run, synced to every device and
+          offline-ready. Coding agents that start from a note, run on your own
+          machines, and write back what they learn.
         </p>
+        <div class="cta">
+          <a class="btn btn-primary" href="/download">Download</a>
+          <a class="btn btn-ghost" href="/docs/">Read the docs</a>
+          <a class="btn btn-ghost" href="https://github.com/dewanshDT/Storm" target="_blank" rel="noopener noreferrer">GitHub</a>
+        </div>
+        <div class="hero-install">
+          <CodeBlock code={release.installCommand} label="Linux · macOS" />
+          <p class="install-note">
+            Windows: <code>{release.windowsInstallCommand}</code> ·
+            <a href="/download">All options →</a>
+          </p>
+        </div>
       </div>
-
-      <p class="meta-row hero-meta" role="list">
-        <span role="listitem">Rust server</span>
-        <span role="listitem">Flutter client</span>
-        <span role="listitem">Markdown</span>
-        <span role="listitem">MCP</span>
-        <span role="listitem">Self-hosted</span>
-      </p>
+      <figure class="shot hero-shot">
+        <img
+          src="/screens/note-edited-by-session.webp"
+          width="1600"
+          height="1000"
+          alt="The Storm app on a desktop: a vault's folder tree, a note in Read mode whose version line says it was edited by an agent session, and its properties."
+        />
+        <figcaption>A note an agent edited, linking back to the session that did it.</figcaption>
+      </figure>
     </div>
   </section>
 
-  <!-- 01 FOUNDATION -->
-  <section class="section" id="foundation" aria-labelledby="foundation-h">
+  <section class="section" id="loop" aria-labelledby="loop-h">
     <div class="wrap">
-      <p class="section-label">01 · Foundation</p>
-      <h2 id="foundation-h">One source of truth.</h2>
-      <p class="support">
-        Storm keeps your knowledge as ordinary Markdown on storage you control.
-        Devices connect to the same server, while the underlying files remain
-        readable, portable, searchable, and easy to back up.
-      </p>
+      <p class="section-label">01 · The loop</p>
+      <h2 id="loop-h">From a note to an agent, and back.</h2>
+      <ol class="loop">
+        <li>
+          <span class="step mono">1</span>
+          <strong>Start from a note</strong>
+          <p>Press Start session on a plan, a bug, a spec. The note is the agent’s context.</p>
+        </li>
+        <li>
+          <span class="step mono">2</span>
+          <strong>It works on your machine</strong>
+          <p>Claude Code, OpenCode or a shell, in a workspace on a host you own. Drive it from any device.</p>
+        </li>
+        <li>
+          <span class="step mono">3</span>
+          <strong>It writes back</strong>
+          <p>What it learns lands in the one vault you let it write to, linked to the session.</p>
+        </li>
+      </ol>
+      <figure class="shot shot--wide">
+        <img
+          src="/screens/session-running.webp"
+          width="1600"
+          height="1000"
+          loading="lazy"
+          alt="The Agents view: running and ended sessions in a list, one session's terminal open, and its Context, Wrote and About panel."
+        />
+      </figure>
+    </div>
+  </section>
+
+  <section class="section" id="notes" aria-labelledby="notes-h">
+    <div class="wrap two-col">
+      <div>
+        <p class="section-label">02 · Notes</p>
+        <h2 id="notes-h">Your notes are just Markdown files.</h2>
+        <p class="support">
+          Folders of <code>.md</code> files under a storage root you choose —
+          greppable, backupable, readable by any other tool. Storm’s own records
+          live beside them, never inside.
+        </p>
+        <ul class="points">
+          <li><strong>Offline is normal.</strong> Edits queue on the device and send when the server is back.</li>
+          <li><strong>Edits merge.</strong> Two devices, one note: merged line by line, and a real conflict stays visible in the note itself.</li>
+          <li><strong>Your YAML stays yours.</strong> Typed properties edit single lines; key order and comments survive.</li>
+          <li><strong>Live everywhere.</strong> A change on one device — or in any editor on the server — appears on the others.</li>
+        </ul>
+        <a class="more" href="/docs/notes/writing/">Notes in the docs →</a>
+      </div>
       <div class="terminal-panel" aria-label="Storage root example">
         <div class="panel-head">storage root</div>
         <pre><code>vaults/
 ├── personal/
-├── work/
-└── projects/
-    └── storm.md
-
-state/          ← indexes · registry · auth.db (never inside vaults)</code></pre>
+│   ├── daily/
+│   └── projects/
+│       └── storm.md
+└── work/
+state/   ← indexes · account · agents (never inside vaults)</code></pre>
       </div>
     </div>
   </section>
 
-  <!-- 02 AI ACCESS -->
+  <section class="section" id="agents" aria-labelledby="agents-h">
+    <div class="wrap two-col two-col--shot">
+      <div>
+        <p class="section-label">03 · Agents</p>
+        <h2 id="agents-h">Run coding agents on your own machines.</h2>
+        <p class="support">
+          A Runtime Host runs on Linux, macOS or Windows — the server’s own box
+          or another — and connects out to your server, so it needs no open
+          port. It holds no notes: an agent reads and writes through Storm,
+          and only where you allowed it.
+        </p>
+        <ul class="points">
+          <li><strong>One terminal, every device.</strong> Start on the laptop, check in from the phone.</li>
+          <li><strong>Paste images</strong> into a session, on desktop, the web and Android.</li>
+          <li><strong>Resume</strong> an ended Claude Code or OpenCode session’s own conversation.</li>
+        </ul>
+        <div class="chips">
+          <div class="kv-chip"><span class="k">Agents</span><span class="v">Claude Code · OpenCode · shell</span></div>
+          <div class="kv-chip"><span class="k">Hosts</span><span class="v">Linux · macOS · Windows</span></div>
+        </div>
+        <a class="more" href="/docs/agents/sessions/">Agents in the docs →</a>
+      </div>
+      <figure class="shot shot--phone">
+        <img
+          src="/screens/phone-agents.webp"
+          width="520"
+          height="1125"
+          loading="lazy"
+          alt="The Agents list on an Android phone: running and ended sessions with the hosts they run on, and a New session button."
+        />
+      </figure>
+    </div>
+  </section>
+
   <section class="section" id="mcp" aria-labelledby="mcp-h">
     <div class="wrap">
-      <p class="section-label">02 · AI access</p>
-      <h2 id="mcp-h">Your agents can work with your knowledge.</h2>
-      <p class="support">
-        Storm exposes your vault through MCP, allowing compatible AI agents to
-        search, read, create, and modify knowledge while the underlying source
-        remains your Markdown vault. MCP is off by default; write tools require
-        writable mode.
-      </p>
-      <p class="support">
-        An agent authenticates with a key you mint in the app — shown once,
-        revocable, and accepted on <code>/mcp</code> and nowhere else. Your
-        password and your devices’ sessions never go into a config file.
-      </p>
-
-      <div class="mcp-stats">
-        <div class="kv-chip">
-          <span class="k">Tools</span>
-          <span class="v">12 when writable</span>
+      <p class="section-label">04 · Integrations &amp; MCP</p>
+      <h2 id="mcp-h">Your agents reach your tools. Your AI apps reach your notes.</h2>
+      <div class="two-col">
+        <div>
+          <h3>Integrations</h3>
+          <p class="support">
+            Connect Notion, Linear, GitHub or any MCP server once, in the app,
+            and choose which hosts may use it. Storm keeps the credential on
+            your server, encrypted; agents call through Storm and never see it,
+            and get only the tools you allow.
+          </p>
         </div>
-        <div class="kv-chip">
-          <span class="k">Protocol</span>
-          <span class="v">Streamable HTTP</span>
-        </div>
-        <div class="kv-chip">
-          <span class="k">Endpoint</span>
-          <span class="v">/mcp</span>
+        <div>
+          <h3>MCP</h3>
+          <p class="support">
+            Claude Code, Claude Desktop, Cursor and other AI apps read your
+            notes — and, if you allow it, write them — through Storm’s MCP
+            endpoint, each with its own revocable key. The app hands you the
+            config, including <code>storm-runtime mcp-connect</code>, which checks
+            it reached your server before it sends the key.
+          </p>
         </div>
       </div>
-
+      <div class="chips">
+        <div class="kv-chip"><span class="k">Tools</span><span class="v">{mcpReadTools.length} read · {mcpWriteTools.length} write</span></div>
+        <div class="kv-chip"><span class="k">Endpoint</span><span class="v">/mcp · off by default</span></div>
+      </div>
       <ul class="tool-list" aria-label="MCP tools">
         {mcpTools.map((name) => <li><code>{name}</code></li>)}
       </ul>
-
-      <div class="mcp-demo" aria-label="Conceptual MCP interaction (static)">
-        <p class="demo-label">Conceptual · not executed on this page</p>
-        <div class="demo-card">
-          <p class="demo-who">You</p>
-          <p class="demo-body">
-            What did I decide about Storm’s sync architecture?
-          </p>
-        </div>
-        <p class="demo-arrow" aria-hidden="true">↓</p>
-        <div class="demo-card demo-card--mono">
-          <p class="demo-who">Storm MCP</p>
-          <p class="demo-body">
-            <code>search(…)</code><br />
-            <code>get_note(…)</code>
-          </p>
-        </div>
-        <p class="demo-arrow" aria-hidden="true">↓</p>
-        <div class="demo-card">
-          <p class="demo-who">Agent</p>
-          <p class="demo-body">
-            You decided that the Rust server owns the canonical vault while
-            clients synchronize through the server.
-          </p>
-        </div>
-      </div>
+      <p class="support small">
+        Agents in a Storm session also get <code>{mcpAgentTools[0]}</code>,
+        which reads the note the session started from. They never get
+        {neverForAgents.map((n, i) => <>{i > 0 && ", "}<code>{n}</code></>)}.
+        <a href="/docs/reference/mcp-tools/">Every tool →</a>
+      </p>
     </div>
   </section>
 
-  <!-- 03 ARCHITECTURE -->
-  <section class="section" id="architecture" aria-labelledby="arch-h">
+  <section class="section" id="platforms" aria-labelledby="platforms-h">
     <div class="wrap">
-      <p class="section-label">03 · Architecture</p>
-      <h2 id="arch-h">One knowledge layer. Many interfaces.</h2>
-      <p class="support">
-        Flutter clients on macOS, Android, and web talk to a Rust sync server.
-        The server owns merge, search, and history. AI applications reach the
-        same vault through MCP.
-      </p>
-
-      <div class="arch" aria-label="Architecture diagram">
-        <div class="arch-row arch-clients">
-          <span class="arch-node">macOS</span>
-          <span class="arch-node">Android</span>
-          <span class="arch-node">Web</span>
-        </div>
-        <p class="arch-conn" aria-hidden="true">▼ REST · WebSocket</p>
-        <div class="arch-node arch-server">Storm server · Rust</div>
-        <p class="arch-conn" aria-hidden="true">▼</p>
-        <div class="arch-node">Markdown vaults</div>
-        <p class="arch-conn" aria-hidden="true">▼</p>
-        <div class="arch-node arch-muted">Your storage / NAS</div>
-        <div class="arch-mcp">
-          <span class="arch-node arch-mcp-node">AI applications</span>
-          <span class="arch-mcp-label">MCP</span>
-        </div>
+      <p class="section-label">05 · Platforms</p>
+      <h2 id="platforms-h">Runs where you do.</h2>
+      <div class="table-wrap">
+        <table class="matrix">
+          <thead>
+            <tr><th></th><th>Linux</th><th>macOS</th><th>Windows</th><th>Android</th><th>Web</th></tr>
+          </thead>
+          <tbody>
+            {platforms.map((p) => (
+              <tr>
+                <th scope="row">{p.what}</th>
+                {[p.linux, p.macos, p.windows, p.android, p.web].map((v) => (
+                  <td class:list={[v === "yes" && "yes", v === "—" && "no"]}>{v === "yes" ? "●" : v}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
+      <p class="support small">“web” means the web app, served by your own server.</p>
     </div>
   </section>
 
-  <!-- 04 STORAGE -->
-  <section class="section" id="storage" aria-labelledby="storage-h">
+  <section class="section" id="yours" aria-labelledby="yours-h">
     <div class="wrap">
-      <p class="section-label">04 · Storage</p>
-      <h2 id="storage-h">Your knowledge is just files.</h2>
-      <p class="support">
-        Storm stores knowledge as Markdown rather than locking it inside a
-        proprietary document format. Grep it, back it up, version it with the
-        tools you already use.
-      </p>
-      <div class="storage-grid">
-        <div class="terminal-panel" aria-label="Vault tree example">
-          <div class="panel-head">vault</div>
-          <pre><code>Daily/
-└── 2026-08-11<span class="ok">.md</span>
-Projects/
-├── Storm/
-└── Website/
-Resources/
-Archive/</code></pre>
-        </div>
-        <div class="chip-stack">
-          <span class="chip chip--amber">.md</span>
-          <span class="chip">git</span>
-          <span class="chip">backup</span>
-          <span class="chip">grep</span>
-          <span class="chip">scripts</span>
-        </div>
-      </div>
+      <p class="section-label">06 · Yours</p>
+      <h2 id="yours-h">Yours by construction.</h2>
+      <ul class="grid-points">
+        <li><strong>One account, yours.</strong> A password on your server. No cloud account, no identity provider.</li>
+        <li><strong>Every device pairs.</strong> Each gets its own credential, and checks your server’s identity before sending it.</li>
+        <li><strong>Files on disk.</strong> Leave whenever you like: your notes were Markdown all along.</li>
+        <li><strong>Nothing opened silently.</strong> The installer asks before allowing Storm on your local network — and only there.</li>
+      </ul>
     </div>
   </section>
 
-  <!-- 05 CLIENTS -->
-  <section class="section" id="client" aria-labelledby="client-h">
-    <div class="wrap">
-      <p class="section-label">05 · Clients</p>
-      <h2 id="client-h">One client across your devices.</h2>
-      <p class="support">
-        A single Flutter client provides the same Storm experience across
-        desktop, mobile, and web. Download a native build, or open the web UI
-        served by your server.
-      </p>
-      <div class="platform-row">
-        <div class="platform">
-          <span class="chip">macOS</span>
-          <p>Apple Silicon desktop client.</p>
-        </div>
-        <div class="platform">
-          <span class="chip">Android</span>
-          <p>Direct APK for your phone.</p>
-        </div>
-        <div class="platform">
-          <span class="chip">Web</span>
-          <p>Bundled with storm-server.</p>
-        </div>
-      </div>
-      <p class="cta-inline">
-        <a class="btn btn-primary" href="/clients">Get a client →</a>
-      </p>
-    </div>
-  </section>
-
-  <!-- 06 SYNC -->
-  <section class="section" id="sync" aria-labelledby="sync-h">
-    <div class="wrap">
-      <p class="section-label">06 · Synchronization</p>
-      <h2 id="sync-h">Work wherever you are.</h2>
-      <p class="support">
-        The server owns the canonical vault. Clients keep a local cache and an
-        outbox. When two devices diverge, Storm merges when it can — and when it
-        cannot, the conflict stays visible in the note file.
-      </p>
-      <div class="sync-states">
-        <article class="sync-card">
-          <p class="sync-status">
-            <span class="status-dot status-dot--synced" aria-hidden="true"></span>
-            Synced
-          </p>
-          <p>Your server is reachable. Local and remote agree.</p>
-        </article>
-        <article class="sync-card">
-          <p class="sync-status">
-            <span class="status-dot status-dot--offline" aria-hidden="true"></span>
-            Offline
-          </p>
-          <p>
-            Cached knowledge stays available. Creates and edits queue until the
-            server returns.
-          </p>
-        </article>
-        <article class="sync-card">
-          <p class="sync-status">
-            <span class="status-dot status-dot--conflict" aria-hidden="true"></span>
-            Conflict
-          </p>
-          <p>
-            Another device changed this note. Conflicting content remains visible
-            in the file — not a hidden sibling copy.
-          </p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- 07 INSTALLATION -->
-  <section class="section" id="installation" aria-labelledby="install-h">
-    <div class="wrap">
-      <p class="section-label">07 · Installation</p>
-      <h2 id="install-h">Run it on your own machine.</h2>
-      <p class="support">
-        Install the server, then get a client for your device.
-      </p>
-      <ol class="steps">
-        <li>
-          <span class="step-num mono">01</span>
-          <div>
-            <strong>Install the server</strong>
-            <p>Install storm-server on Debian or Ubuntu.</p>
-            <a href="/install">Install command →</a>
-          </div>
-        </li>
-        <li>
-          <span class="step-num mono">02</span>
-          <div>
-            <strong>Get a client</strong>
-            <p>Choose macOS, Android, or Web.</p>
-            <a href="/clients">Get a client →</a>
-          </div>
-        </li>
-        <li>
-          <span class="step-num mono">03</span>
-          <div>
-            <strong>Sign in</strong>
-            <p>
-              Pair the device with your server and create the first account —
-              it is the owner. No shared password, no cloud account.
-            </p>
-            <a href="/install#first-login">First login →</a>
-          </div>
-        </li>
-        <li>
-          <span class="step-num mono">04</span>
-          <div>
-            <strong>Update later</strong>
-            <p>
-              Refresh the server through apt when a new release lands. Restart
-              so the new binary is listening.
-            </p>
-            <a href="/install#update">Update command →</a>
-          </div>
-        </li>
-      </ol>
-    </div>
-  </section>
-
-  <!-- 08 DOCUMENTATION -->
   <section class="section" id="docs" aria-labelledby="docs-h">
     <div class="wrap">
-      <p class="section-label">08 · Documentation</p>
-      <h2 id="docs-h">Depth lives next to the code.</h2>
+      <p class="section-label">07 · Start</p>
+      <h2 id="docs-h">Run it on your own machine.</h2>
       <p class="support">
-        Storm does not ship a separate docs portal. Operator and architecture
-        detail stays in the repository.
+        One command installs the server and pairs your phone. The docs cover
+        the rest.
       </p>
-      <ul class="doc-list">
-        <li>
-          <a
-            href="https://github.com/dewanshDT/Storm/blob/main/deploy/README.md"
-            target="_blank"
-            rel="noopener noreferrer">Installation &amp; deploy</a
-          >
-          <span>deploy/README.md</span>
-        </li>
-        <li>
-          <a
-            href="https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md"
-            target="_blank"
-            rel="noopener noreferrer">Server &amp; MCP</a
-          >
-          <span>apps/server/README.md</span>
-        </li>
-        <li>
-          <a
-            href="https://github.com/dewanshDT/Storm/blob/main/apps/client/README.md"
-            target="_blank"
-            rel="noopener noreferrer">Client</a
-          >
-          <span>apps/client/README.md</span>
-        </li>
-        <li>
-          <a href="/how-it-works">Architecture</a>
-          <span>How it works</span>
-        </li>
-        <li>
-          <a
-            href="https://github.com/dewanshDT/Storm/tree/main/docs"
-            target="_blank"
-            rel="noopener noreferrer">Design briefs</a
-          >
-          <span>docs/</span>
-        </li>
-        <li>
-          <a
-            href="https://github.com/dewanshDT/Storm"
-            target="_blank"
-            rel="noopener noreferrer">Source</a
-          >
-          <span>github.com/dewanshDT/Storm</span>
-        </li>
+      <p class="cta"><a class="btn btn-primary" href="/download">Download Storm</a></p>
+      <ul class="doc-grid">
+        {docs.map((d) => (
+          <li>
+            <a href={d.href}>
+              <strong>{d.title}</strong>
+              <span>{d.body}</span>
+            </a>
+          </li>
+        ))}
       </ul>
     </div>
   </section>
@@ -402,426 +276,267 @@ Archive/</code></pre>
     padding: calc(var(--sp) * 8) 0 calc(var(--sp) * 7);
     border-bottom: var(--bw) solid var(--border);
   }
-
-  .hero-inner {
-    max-width: 44rem;
+  .hero-grid {
+    display: grid;
+    gap: calc(var(--sp) * 5);
+    align-items: center;
   }
-
+  @media (min-width: 1000px) {
+    .hero-grid {
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    }
+  }
   .hero-brand {
     margin-bottom: calc(var(--sp) * 3);
-    animation: rise 600ms var(--ease) both;
   }
-
   .hero .eyebrow {
     margin: 0 0 calc(var(--sp) * 2);
-    animation: rise 600ms var(--ease) 40ms both;
   }
-
   .display {
     margin: 0 0 calc(var(--sp) * 3);
     font-family: var(--font-body);
-    font-size: clamp(2.25rem, 5.5vw, 3.25rem);
+    font-size: clamp(2.25rem, 5vw, 3.25rem);
     font-weight: 500;
-    letter-spacing: -0.025em;
-    line-height: 1.12;
+    line-height: 1.08;
+    letter-spacing: -0.02em;
     color: var(--text);
-    animation: rise 600ms var(--ease) 80ms both;
   }
-
   .lede {
     margin: 0 0 calc(var(--sp) * 4);
-    max-width: 36rem;
     font-family: var(--font-body);
-    font-size: var(--fs-lg);
-    line-height: 1.65;
+    font-size: 1.15rem;
+    line-height: 1.6;
     color: var(--text2);
-    animation: rise 600ms var(--ease) 120ms both;
+    max-width: 36rem;
   }
-
   .cta {
     display: flex;
     flex-wrap: wrap;
-    gap: calc(var(--sp) * 1.25);
-    margin-bottom: calc(var(--sp) * 5);
-    animation: rise 600ms var(--ease) 160ms both;
+    gap: calc(var(--sp) * 1.5);
+    margin: 0 0 calc(var(--sp) * 4);
   }
-
   .hero-install {
-    animation: rise 600ms var(--ease) 200ms both;
+    max-width: 36rem;
   }
-
+  /* The install line is the call to action: wrap it rather than scroll it,
+     so the end of the command (`| sh`) is never hidden. Copy is unaffected. */
+  .hero-install :global(pre) {
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
   .install-note {
     margin: calc(var(--sp) * 1.5) 0 0;
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--text3);
-    line-height: 1.5;
-  }
-
-  .install-note code {
-    font: inherit;
-    color: var(--text2);
-  }
-
-  .hero-meta {
-    margin: calc(var(--sp) * 5) 0 0;
-    padding-top: calc(var(--sp) * 3);
-    border-top: var(--bw) solid var(--border);
-    animation: rise 600ms var(--ease) 240ms both;
-  }
-
-  .mcp-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: calc(var(--sp) * 1.25);
-    margin-bottom: calc(var(--sp) * 3);
-  }
-
-  .tool-list {
-    list-style: none;
-    margin: 0 0 calc(var(--sp) * 5);
-    padding: 0;
-    display: flex;
-    flex-wrap: wrap;
-    gap: calc(var(--sp) * 1);
-  }
-
-  .tool-list li {
-    margin: 0;
-  }
-
-  .tool-list code {
-    display: inline-block;
-    padding: calc(var(--sp) * 0.5) calc(var(--sp) * 1);
-    border: var(--bw) solid var(--border);
-    border-radius: var(--r-card);
-    background: var(--surface);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    color: var(--text2);
-  }
-
-  .mcp-demo {
-    max-width: 32rem;
-  }
-
-  .demo-label {
-    margin: 0 0 calc(var(--sp) * 2);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--text3);
-  }
-
-  .demo-card {
-    padding: calc(var(--sp) * 2) calc(var(--sp) * 2.5);
-    border: var(--bw) solid var(--border);
-    border-radius: var(--r-card);
-    background: var(--surface);
-  }
-
-  .demo-card--mono .demo-body {
-    font-family: var(--font-mono);
     font-size: var(--fs-sm);
-  }
-
-  .demo-who {
-    margin: 0 0 calc(var(--sp) * 0.75);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
     color: var(--text3);
   }
-
-  .demo-body {
-    margin: 0;
-    font-family: var(--font-body);
-    font-size: var(--fs-md);
-    line-height: 1.55;
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
     color: var(--text);
   }
-
-  .demo-body code {
-    font-family: var(--font-mono);
-    font-size: var(--fs-sm);
-    color: var(--accent);
-  }
-
-  .demo-arrow {
-    margin: calc(var(--sp) * 1) 0;
-    font-family: var(--font-mono);
-    color: var(--text3);
-    text-align: center;
-  }
-
-  .arch {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: calc(var(--sp) * 1.5);
-    padding: calc(var(--sp) * 3);
-    border: var(--bw) solid var(--border);
-    border-radius: var(--r-card);
-    background: var(--surface);
-    position: relative;
-  }
-
-  .arch-row {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: calc(var(--sp) * 1);
-  }
-
-  .arch-node {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: calc(var(--sp) * 1.25) calc(var(--sp) * 2);
-    border: var(--bw) solid var(--border);
-    border-radius: var(--r-card);
-    background: var(--bg);
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
-    color: var(--text);
-    text-align: center;
-  }
-
-  .arch-server {
-    background: var(--accent-soft);
-    border-color: color-mix(in oklab, var(--accent) 30%, var(--border));
-    color: var(--accent);
-    font-weight: 500;
-  }
-
-  .arch-muted {
-    color: var(--text2);
-  }
-
-  .arch-conn {
+  .shot {
     margin: 0;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text3);
   }
-
-  .arch-mcp {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: center;
-    gap: calc(var(--sp) * 1.5);
-    margin-top: calc(var(--sp) * 2);
-    padding-top: calc(var(--sp) * 2);
-    border-top: var(--bw) dashed var(--border);
+  .shot img {
     width: 100%;
+    border: var(--bw) solid var(--border);
+    border-radius: calc(var(--r-control) * 0.8);
+    box-shadow: var(--shadow);
+    background: var(--surface);
   }
-
-  .arch-mcp-label {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--accent);
+  .shot figcaption {
+    margin-top: calc(var(--sp) * 1.5);
+    font-size: var(--fs-sm);
+    color: var(--text3);
   }
-
-  .storage-grid {
+  .shot--wide {
+    max-width: 920px;
+    margin: 0 auto;
+  }
+  .shot--phone {
+    justify-self: center;
+    max-width: 260px;
+  }
+  .shot--phone img {
+    border-radius: 22px;
+  }
+  .loop {
+    list-style: none;
+    padding: 0;
+    margin: calc(var(--sp) * 3) 0 calc(var(--sp) * 5);
     display: grid;
     gap: calc(var(--sp) * 3);
-    align-items: start;
   }
-
-  @media (min-width: 720px) {
-    .storage-grid {
-      grid-template-columns: 1fr auto;
+  @media (min-width: 760px) {
+    .loop {
+      grid-template-columns: repeat(3, 1fr);
     }
   }
-
-  .chip-stack {
+  .loop li {
+    border-top: var(--bw) solid var(--border);
+    padding-top: calc(var(--sp) * 2);
+  }
+  .loop strong {
+    display: block;
+    margin: calc(var(--sp) * 1) 0 calc(var(--sp) * 0.75);
+    color: var(--text);
+  }
+  .loop p {
+    margin: 0;
+    color: var(--text2);
+    line-height: 1.55;
+  }
+  .step {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    color: var(--accent);
+  }
+  .two-col {
+    display: grid;
+    gap: calc(var(--sp) * 4);
+    align-items: start;
+  }
+  @media (min-width: 900px) {
+    .two-col {
+      grid-template-columns: 1fr 1fr;
+    }
+    .two-col--shot {
+      grid-template-columns: 1.4fr 1fr;
+      align-items: center;
+    }
+  }
+  .section h3 {
+    margin: calc(var(--sp) * 2) 0 calc(var(--sp) * 1);
+    font-family: var(--font-sans);
+    font-size: var(--fs-md);
+    font-weight: 600;
+    color: var(--text);
+  }
+  .points,
+  .grid-points {
+    list-style: none;
+    padding: 0;
+    margin: calc(var(--sp) * 2) 0;
+    display: grid;
+    gap: calc(var(--sp) * 1.5);
+  }
+  .points li,
+  .grid-points li {
+    color: var(--text2);
+    line-height: 1.55;
+  }
+  .points strong,
+  .grid-points strong {
+    color: var(--text);
+  }
+  @media (min-width: 760px) {
+    .grid-points {
+      grid-template-columns: 1fr 1fr;
+      gap: calc(var(--sp) * 3);
+    }
+  }
+  .more {
+    display: inline-block;
+    margin-top: calc(var(--sp) * 1);
+    font-size: var(--fs-sm);
+  }
+  .chips {
     display: flex;
     flex-wrap: wrap;
     gap: calc(var(--sp) * 1);
+    margin: calc(var(--sp) * 2) 0;
   }
-
-  .platform-row {
-    display: grid;
-    gap: calc(var(--sp) * 2);
-    margin-bottom: calc(var(--sp) * 4);
+  .tool-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 calc(var(--sp) * 2);
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--sp) * 0.75);
   }
-
-  @media (min-width: 720px) {
-    .platform-row {
-      grid-template-columns: repeat(3, 1fr);
-    }
-  }
-
-  .platform {
-    padding: calc(var(--sp) * 2.5);
-    border-top: var(--bw) solid var(--border);
-  }
-
-  .platform p {
-    margin: calc(var(--sp) * 1.5) 0 0;
-    font-family: var(--font-body);
-    font-size: var(--fs-md);
-    line-height: 1.55;
-    color: var(--text2);
-  }
-
-  .sync-states {
-    display: grid;
-    gap: calc(var(--sp) * 2);
-  }
-
-  @media (min-width: 720px) {
-    .sync-states {
-      grid-template-columns: repeat(3, 1fr);
-    }
-  }
-
-  .sync-card {
-    padding: calc(var(--sp) * 2.5);
+  .tool-list code {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: var(--fs-xs);
     border: var(--bw) solid var(--border);
     border-radius: var(--r-card);
     background: var(--surface);
+    color: var(--text2);
   }
-
-  .sync-status {
-    display: flex;
-    align-items: center;
-    gap: calc(var(--sp) * 1);
-    margin: 0 0 calc(var(--sp) * 1.5);
+  .small {
+    font-size: var(--fs-sm);
+  }
+  .table-wrap {
+    overflow-x: auto;
+  }
+  .matrix {
+    border-collapse: collapse;
+    min-width: 34rem;
+    width: 100%;
+    font-size: var(--fs-sm);
+  }
+  .matrix th,
+  .matrix td {
+    padding: calc(var(--sp) * 1.25) calc(var(--sp) * 1.5);
+    border-bottom: var(--bw) solid var(--border);
+    text-align: center;
+    color: var(--text2);
+  }
+  .matrix th[scope="row"] {
+    text-align: left;
+    color: var(--text);
+    font-weight: 500;
+  }
+  .matrix thead th {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--text);
-  }
-
-  .sync-card > p:last-child {
-    margin: 0;
-    font-family: var(--font-body);
-    font-size: var(--fs-md);
-    line-height: 1.55;
-    color: var(--text2);
-  }
-
-  .steps {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: 0;
-    border-top: var(--bw) solid var(--border);
-  }
-
-  .steps li {
-    display: grid;
-    grid-template-columns: 3rem 1fr;
-    gap: calc(var(--sp) * 2);
-    padding: calc(var(--sp) * 3) 0;
-    border-bottom: var(--bw) solid var(--border);
-  }
-
-  .step-num {
-    padding-top: 2px;
-  }
-
-  .steps strong {
-    display: block;
-    font-family: var(--font-sans);
-    font-size: var(--fs-md);
-    font-weight: 600;
-    color: var(--text);
-    margin-bottom: calc(var(--sp) * 0.75);
-  }
-
-  .steps p {
-    margin: 0 0 calc(var(--sp) * 1);
-    font-family: var(--font-body);
-    font-size: var(--fs-md);
-    line-height: 1.55;
-    color: var(--text2);
-  }
-
-  .steps code {
-    font-family: var(--font-mono);
-    font-size: 0.92em;
-    color: var(--text);
-  }
-
-  .steps a {
-    font-family: var(--font-sans);
-    font-size: var(--fs-sm);
-    font-weight: 600;
-    color: var(--accent);
-    text-decoration: none;
-  }
-
-  .steps a:hover {
-    color: var(--text);
-  }
-
-  .cta-inline {
-    margin: 0;
-  }
-
-  .doc-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: 0;
-    border-top: var(--bw) solid var(--border);
-  }
-
-  .doc-list li {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: calc(var(--sp) * 1) calc(var(--sp) * 2);
-    padding: calc(var(--sp) * 2) 0;
-    border-bottom: var(--bw) solid var(--border);
-  }
-
-  .doc-list a {
-    font-family: var(--font-sans);
-    font-size: var(--fs-md);
-    font-weight: 500;
-    color: var(--text);
-    text-decoration: none;
-  }
-
-  .doc-list a:hover {
-    color: var(--accent);
-  }
-
-  .doc-list span {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
     color: var(--text3);
   }
-
-  @media (max-width: 560px) {
-    .hero {
-      padding-top: calc(var(--sp) * 5);
+  .matrix .yes {
+    color: var(--accent);
+  }
+  .matrix .no {
+    color: var(--text3);
+  }
+  .doc-grid {
+    list-style: none;
+    padding: 0;
+    margin: calc(var(--sp) * 4) 0 0;
+    display: grid;
+    gap: calc(var(--sp) * 1.5);
+  }
+  @media (min-width: 640px) {
+    .doc-grid {
+      grid-template-columns: repeat(2, 1fr);
     }
-
-    .cta {
-      width: 100%;
+  }
+  @media (min-width: 1000px) {
+    .doc-grid {
+      grid-template-columns: repeat(3, 1fr);
     }
-
-    .cta .btn {
-      flex: 1 1 auto;
-    }
-
-    .steps li {
-      grid-template-columns: 2.5rem 1fr;
-    }
+  }
+  .doc-grid a {
+    display: block;
+    height: 100%;
+    padding: calc(var(--sp) * 2);
+    border: var(--bw) solid var(--border);
+    border-radius: var(--r-card);
+    background: var(--surface);
+    text-decoration: none;
+  }
+  .doc-grid a:hover {
+    border-color: var(--accent);
+  }
+  .doc-grid strong {
+    display: block;
+    color: var(--text);
+  }
+  .doc-grid span {
+    display: block;
+    margin-top: calc(var(--sp) * 0.5);
+    font-size: var(--fs-sm);
+    color: var(--text2);
   }
 </style>

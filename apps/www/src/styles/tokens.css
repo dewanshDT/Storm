@@ -43,3 +43,47 @@
   --content: 42rem;
   --wide: 68rem;
 }
+
+/* Storm dark — the app's own default (StormPreset.stormDark: bgL 22, hue 55,
+   chroma 8, accent 68/0.15/293), derived the way tokens.dart derives it. The
+   system setting decides, unless a choice made in the docs' theme picker says
+   otherwise; that choice is the `data-theme` BaseLayout and Starlight set. */
+:root[data-theme="dark"] {
+  --bg: oklch(0.22 0.008 55);
+  --surface: oklch(0.27 0.008 55);
+  --surface2: oklch(0.31 0.008 55);
+  --border: oklch(0.36 0.008 55);
+  --text: oklch(0.95 0.008 55);
+  --text2: oklch(0.74 0.008 55);
+  --text3: oklch(0.66 0.008 55);
+  --accent: oklch(0.68 0.15 293);
+  --accent-soft: oklch(0.3 0.05 293);
+  --on-accent: oklch(0.16 0.03 293);
+  --amber: oklch(0.74 0.14 68);
+  --amber-soft: oklch(0.3 0.05 68);
+  --green: oklch(0.74 0.13 148);
+  --danger: oklch(0.7 0.17 25);
+  --shadow: 0 8px 28px -10px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: oklch(0.22 0.008 55);
+    --surface: oklch(0.27 0.008 55);
+    --surface2: oklch(0.31 0.008 55);
+    --border: oklch(0.36 0.008 55);
+    --text: oklch(0.95 0.008 55);
+    --text2: oklch(0.74 0.008 55);
+    --text3: oklch(0.66 0.008 55);
+    --accent: oklch(0.68 0.15 293);
+    --accent-soft: oklch(0.3 0.05 293);
+    --on-accent: oklch(0.16 0.03 293);
+    --amber: oklch(0.74 0.14 68);
+    --amber-soft: oklch(0.3 0.05 68);
+    --green: oklch(0.74 0.13 148);
+    --danger: oklch(0.7 0.17 25);
+    --shadow: 0 8px 28px -10px rgba(0, 0, 0, 0.5);
+    color-scheme: dark;
+  }
+}

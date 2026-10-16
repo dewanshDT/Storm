@@ -1,0 +1,64 @@
+---
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+import facts from "../../../data/facts.json";
+
+// Generated: facts.json is read from apps/server/src/mcp.rs (tools/www-facts).
+const groups = [
+  {
+    slug: "read",
+    title: "Read",
+    intro: "Offered whenever MCP is on.",
+    tools: facts.mcp_tools.filter((t) => t.access === "read"),
+  },
+  {
+    slug: "write",
+    title: "Write",
+    intro:
+      "Offered only while Settings › AI access › Let them create, edit and delete is on. Updates carry the version you read, so a note edited elsewhere in the meantime is merged rather than overwritten.",
+    tools: facts.mcp_tools.filter((t) => t.access === "write"),
+  },
+  {
+    slug: "agents",
+    title: "Agent sessions only",
+    intro: "Offered to agents running in a Storm session, never to outside AI apps.",
+    tools: facts.mcp_tools.filter((t) => t.access === "agents"),
+  },
+];
+const neverForAgents = facts.mcp_tools.filter((t) => !t.agents).map((t) => t.name);
+---
+
+<StarlightPage
+  frontmatter={{
+    title: "MCP tools",
+    description: "Every tool Storm's MCP endpoint offers, generated from the server's source.",
+  }}
+  headings={groups.map((g) => ({ depth: 2, slug: g.slug, text: g.title }))}
+>
+  <p>
+    Storm serves MCP over Streamable HTTP at <code>/mcp</code>. Turn it on in
+    <strong>Settings › AI access</strong>; each AI app authenticates with its
+    own key from <strong>Settings › Devices &amp; access</strong>. This list is
+    generated from the server's source, so it is the set the current release
+    offers. Agents in a session never get {neverForAgents.map((n, i) => (
+      <>{i > 0 && ", "}<code>{n}</code></>
+    ))}.
+  </p>
+  {
+    groups.map((g) => (
+      <>
+        <h2 id={g.slug}>{g.title}</h2>
+        <p>{g.intro}</p>
+        <table>
+          <thead>
+            <tr><th>Tool</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            {g.tools.map((t) => (
+              <tr><td><code>{t.name}</code></td><td>{t.description}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      </>
+    ))
+  }
+</StarlightPage>

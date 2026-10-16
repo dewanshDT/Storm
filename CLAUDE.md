@@ -75,6 +75,8 @@ Practical consequences worth knowing before you start:
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
 | `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
+| `apps/www/` | The marketing site and the docs (Astro + Starlight). See `apps/www/README.md`. |
+| `docs/site/` | **The docs' pages** (`/docs`), markdown next to the code. A user-facing change updates its page here in the same PR. |
 | `docs/srp-v1.md` | A pointer: the normative relay spec is the vault note *Storm Relay Protocol*. `docs/srp-vectors.json` is its shared test vectors. |
 | *Storm Relay Dart Client* (vault) | The client half's accepted architecture. Read before writing any Dart SRP code. |
 | *Agent Runtime/V1 Specification Freeze* (vault) | What Agent Runtime V1 builds. Frozen; read it, then decision 77, before touching `apps/runtime` or `/v1/agent/*`. |

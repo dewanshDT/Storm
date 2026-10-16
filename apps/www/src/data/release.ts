@@ -26,6 +26,14 @@ export const release = {
     // sudo only for the steps that need it.
     return `curl -fsSL ${this.installScriptUrl} | sh`;
   },
+  /** Windows counterpart of install.sh (decision 99), from the same root. */
+  get windowsInstallCommand() {
+    return `irm ${this.aptRoot}install.ps1 | iex`;
+  },
+  /** Re-running the installer upgrades whatever it installed. */
+  get installerUpgradeCommand() {
+    return `curl -fsSL ${this.installScriptUrl} | sh -s -- upgrade`;
+  },
   /** Apt already registered — refresh binary + bundled web client. */
   get upgradeCommand() {
     return `sudo apt update
