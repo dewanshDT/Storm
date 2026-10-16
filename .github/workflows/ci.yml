@@ -12,7 +12,85 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # On a pull request each job runs only when something it reads changed;
+  # pushes to main and tags run everything. `all` covers what every job reads.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      all: ${{ github.event_name != 'pull_request' || steps.f.outputs.all == 'true' }}
+      server: ${{ steps.f.outputs.server }}
+      relay: ${{ steps.f.outputs.relay }}
+      relay_cf: ${{ steps.f.outputs.relay_cf }}
+      runtime: ${{ steps.f.outputs.runtime }}
+      installer: ${{ steps.f.outputs.installer }}
+      client: ${{ steps.f.outputs.client }}
+      live: ${{ steps.f.outputs.live }}
+      www: ${{ steps.f.outputs.www }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: f
+        with:
+          filters: |
+            all:
+              - .github/**
+              - Makefile
+            vectors: &vectors
+              - docs/*.json
+              - tools/srp-vectors/**
+              - tools/runtime-vectors/**
+            server:
+              - *vectors
+              - apps/server/**
+              - kit/**
+              - deploy/**
+            relay:
+              - *vectors
+              - apps/relay/**
+              - tools/relay-conformance/**
+              - deploy/storm-relay*
+              - deploy/journald*
+            relay_cf:
+              - *vectors
+              - apps/relay-cf/**
+              - tools/relay-conformance/**
+            runtime:
+              - *vectors
+              - apps/runtime/**
+              - deploy/storm-runtime.service
+              - deploy/runtime.toml.example
+            installer:
+              - deploy/install.sh
+              - tools/installer-tests/**
+            client:
+              - *vectors
+              - apps/client/**
+            # make test-live and test-browser build the server, relay and
+            # runtime and run the server's e2e suites against them.
+            live:
+              - *vectors
+              - apps/client/**
+              - apps/server/**
+              - apps/relay/**
+              - apps/runtime/**
+              - tools/relay-conformance/**
+              - kit/**
+            www:
+              - apps/www/**
+              - docs/www/**
+              - Formula/**
+              - deploy/storm.env.example
+              - deploy/install.sh
+              - apps/server/src/mcp.rs
   server:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.server == 'true'
     name: server (rust)
     runs-on: ubuntu-latest
     defaults:
@@ -35,6 +113,8 @@ jobs:
   # own. It had no CI at all until decision 68, so its only gate was a local
   # `make check`, and a green PR said nothing about it.
   relay:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.relay == 'true'
     name: relay (rust)
     runs-on: ubuntu-latest
     defaults:
@@ -74,6 +154,8 @@ jobs:
   # TypeScript, so its own job. The tests run inside workerd and read
   # docs/srp-vectors.json, the fourth implementation that file holds to.
   relay-cf:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.relay_cf == 'true'
     name: relay-cf (workers)
     runs-on: ubuntu-latest
     defaults:
@@ -95,6 +177,8 @@ jobs:
   # The 108a suite against the Worker under wrangler dev (decision 108c):
   # allowlist and TOFU, the 127.0.0.2 checks, no latency check.
   relay-conformance-cf:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.relay_cf == 'true'
     name: relay-conformance (workers)
     runs-on: ubuntu-latest
     steps:
@@ -116,6 +200,8 @@ jobs:
   # The Runtime Host: its own crate and its own job, for the relay's reason —
   # it never depends on apps/server and no workspace joins them (decision 77).
   runtime:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.runtime == 'true'
     name: runtime (rust)
     runs-on: ubuntu-latest
     defaults:
@@ -137,6 +223,8 @@ jobs:
   # syscalls under it differ there (macOS's poll(2) does not support devices),
   # so the suite runs on macOS rather than only cross-compiling for it.
   runtime-macos:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.runtime == 'true'
     name: runtime (rust, macOS)
     runs-on: macos-latest
     defaults:
@@ -158,6 +246,8 @@ jobs:
   # rather than only cross-checking for it. `tests/windows.rs` is the carrier's
   # suite; the POSIX ones are compiled out.
   runtime-windows:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.runtime == 'true'
     name: runtime (rust, Windows)
     runs-on: windows-latest
     defaults:
@@ -180,6 +270,8 @@ jobs:
   # The server on a Mac (decision 84d): the same suite, on FSEvents instead of
   # inotify, plus the LaunchAgent code compiled for real.
   server-macos:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.server == 'true'
     name: server (rust, macOS)
     runs-on: macos-latest
     defaults:
@@ -200,6 +292,8 @@ jobs:
   # ReadDirectoryChangesW and NTFS, plus the Scheduled Task code compiled for
   # real and its Windows-only tests (filename rules, `up`'s pure parts).
   server-windows:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.server == 'true'
     name: server (rust, Windows)
     runs-on: windows-latest
     defaults:
@@ -221,6 +315,8 @@ jobs:
   # The interactive installer (decision 84): shellcheck, then the bats suite
   # (arguments, detection, plans, secrets on stdin only, the TUI on a pty).
   installer:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.installer == 'true'
     name: installer (shell)
     runs-on: ubuntu-latest
     steps:
@@ -234,6 +330,8 @@ jobs:
 
   # The same suite under macOS's own bash 3.2 and BSD tools.
   installer-macos:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.installer == 'true'
     name: installer (shell, macOS)
     runs-on: macos-latest
     steps:
@@ -250,6 +348,8 @@ jobs:
           SHELLCHECK: shellcheck
           BATS: ${{ runner.temp }}/bats/bin/bats
   client:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'
     name: client (flutter)
     runs-on: ubuntu-latest
     defaults:
@@ -268,6 +368,8 @@ jobs:
       - run: flutter test
 
   integration:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.live == 'true'
     name: integration (client against a real server)
     runs-on: ubuntu-latest
     steps:
@@ -291,6 +393,8 @@ jobs:
         run: cat .dev/live-server.log || true
 
   browser:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.live == 'true'
     name: browser (web sign-in in Firefox)
     runs-on: ubuntu-latest
     steps:
@@ -317,6 +421,8 @@ jobs:
       - run: make test-browser
 
   www:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.www == 'true'
     name: www (astro)
     runs-on: ubuntu-latest
     defaults:
