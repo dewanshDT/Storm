@@ -494,6 +494,21 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/integrations/oauth/callback",
             post(integrations_callback),
         )
+        // Token sync (decision 124n): owner only, session tier. No route here
+        // returns the token.
+        .route(
+            "/v1/provider-credentials/claude-subscription",
+            get(provider_credential_get)
+                .put(provider_credential_put)
+                .delete(provider_credential_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::gateway::provider::MAX_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/v1/provider-credentials/claude-subscription/hosts",
+            patch(provider_credential_hosts).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
         .layer(axum::middleware::from_fn_with_state(
@@ -1567,6 +1582,48 @@ async fn integrations_delete(
 ) -> ApiResult<StatusCode> {
     crate::ops::delete_integration(&state, &actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Token sync (decision 124n) — owner only, in ops ------------------------
+
+type ProviderCredentialResult =
+    Result<Json<crate::gateway::provider::ProviderCredentialView>, crate::gateway::provider::Code>;
+
+async fn provider_credential_get(State(state): State<Shared>) -> ProviderCredentialResult {
+    Ok(Json(crate::ops::provider_credential_status(&state).await?))
+}
+
+/// The body is read as bytes and parsed into a redacting `Secret` by hand, so
+/// no extractor rejection can quote it.
+async fn provider_credential_put(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    body: axum::body::Bytes,
+) -> ProviderCredentialResult {
+    let body = crate::gateway::provider::PutBody::parse(&body)?;
+    Ok(Json(
+        crate::ops::put_provider_credential(&state, &actor, body.token, body.minted_at).await?,
+    ))
+}
+
+async fn provider_credential_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> Result<StatusCode, crate::gateway::provider::Code> {
+    crate::ops::delete_provider_credential(&state, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn provider_credential_hosts(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    body: axum::body::Bytes,
+) -> ProviderCredentialResult {
+    let body: crate::gateway::provider::HostsBody = serde_json::from_slice(&body)
+        .map_err(|_| crate::gateway::provider::Code::bad_request("bad_request_body"))?;
+    Ok(Json(
+        crate::ops::set_provider_credential_hosts(&state, &actor, body.hosts).await?,
+    ))
 }
 
 // ---- Agent Runtime: the host link and the agent routes (decision 77c) ------
@@ -8491,6 +8548,592 @@ pub(crate) mod tests {
             vec![serde_json::json!({"storm_error": "session_unknown"})]
         );
         assert_eq!(f.upstream_calls(), 1);
+    }
+
+    // ---- Token sync: the owner's routes (decision 124n) ---------------------
+
+    const CLAUDE_SUB: &str = "/v1/provider-credentials/claude-subscription";
+    const CLAUDE_SUB_HOSTS: &str = "/v1/provider-credentials/claude-subscription/hosts";
+    const SUB_CANARY: &str = "sk-ant-oat01-CANARY_124n-route-0123456789abcdef";
+
+    fn put_raw_with_auth(
+        path: &str,
+        body: &str,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn sync_token(app: &Router, bearer: &str, token: &str) -> serde_json::Value {
+        let (status, body) = send(
+            app,
+            put_json_with_auth(CLAUDE_SUB, serde_json::json!({"token": token}), bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    async fn security_events(state: &Shared) -> Vec<(String, String)> {
+        state.auth_db.lock().await.all_events().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_owner_syncs_scopes_replaces_and_removes_the_token_and_never_reads_it_back() {
+        let dir = tempdir::TempDir::new("storm-pc-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (host, _) = enroll_a_host(&app, &owner).await;
+        let mut seen = Vec::new();
+
+        let (status, absent) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            absent,
+            serde_json::json!({"kind": "claude_subscription_token", "present": false, "hosts": []})
+        );
+
+        // Pasted from a terminal: bracketed-paste markers and a newline.
+        let pasted = format!("\u{1b}[200~{SUB_CANARY}\r\n\u{1b}[201~");
+        let first = sync_token(&app, &owner, &pasted).await;
+        assert_eq!(first["present"], true);
+        assert_eq!(first["status"], "active");
+        assert_eq!(first["days_left"], 365);
+        assert_eq!(first["warn"], serde_json::Value::Null);
+        assert_eq!(first["fingerprint"].as_str().unwrap().len(), 8);
+        // Default none (AC-TS3): nothing is scoped by syncing.
+        assert_eq!(first["hosts"], serde_json::json!([]));
+        seen.push(first.clone());
+
+        let (status, scoped) = send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [host, host]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["hosts"], serde_json::json!([host]));
+        seen.push(scoped);
+
+        let (status, replaced) = send(
+            &app,
+            put_json_with_auth(
+                CLAUDE_SUB,
+                serde_json::json!({"token": format!("{SUB_CANARY}-two"), "minted_at": "2026-01-01"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replaced}");
+        assert_ne!(replaced["fingerprint"], first["fingerprint"]);
+        assert_eq!(replaced["minted_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(replaced["expires_at"], "2027-01-01T00:00:00Z");
+        assert_eq!(
+            replaced["hosts"],
+            serde_json::json!([host]),
+            "a replace keeps the scope"
+        );
+        seen.push(replaced);
+        seen.push(send(&app, get_with_auth(CLAUDE_SUB, &owner)).await.1);
+
+        let (status, _) = send(&app, delete_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, gone) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(gone["present"], false);
+        assert_eq!(
+            gone["hosts"],
+            serde_json::json!([]),
+            "a delete takes the scope too"
+        );
+        seen.push(gone);
+
+        for body in &seen {
+            assert!(!body.to_string().contains("CANARY"), "{body}");
+        }
+        let events = security_events(&state).await;
+        for kind in [
+            "provider_credential_set",
+            "provider_credential_hosts_changed",
+            "provider_credential_replaced",
+            "provider_credential_removed",
+        ] {
+            let detail = &events
+                .iter()
+                .find(|(k, _)| k == kind)
+                .unwrap_or_else(|| panic!("{kind} missing"))
+                .1;
+            let detail: serde_json::Value = serde_json::from_str(detail).unwrap();
+            assert_eq!(detail["kind"], "claude_subscription_token", "{kind}");
+        }
+        for (kind, detail) in &events {
+            assert!(!detail.contains("CANARY"), "{kind}: {detail}");
+        }
+        // The stored row is sealed: no file under state holds the canary.
+        for entry in walk(&state.state_dir) {
+            let bytes = std::fs::read(&entry).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(SUB_CANARY.len())
+                    .any(|w| w == SUB_CANARY.as_bytes()),
+                "{} holds the token in the clear",
+                entry.display()
+            );
+        }
+    }
+
+    fn walk(dir: &FsPath) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_badly_shaped_token_or_body_is_refused_without_echoing_it() {
+        let dir = tempdir::TempDir::new("storm-pc-shape").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        for token in [
+            "sk-ant-api03-CANARY_not_an_oauth_token_0123456789".to_string(),
+            "sk-ant-oat01-CANARY short".to_string(),
+            "sk-ant-oat01-CANARY".to_string(),
+            format!("sk-ant-oat01-CANARY{}", "a".repeat(400)),
+            format!("Bearer {SUB_CANARY}"),
+        ] {
+            let (status, body) = send(
+                &app,
+                put_json_with_auth(CLAUDE_SUB, serde_json::json!({"token": token}), &owner),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{token}");
+            assert_eq!(body["error"], "bad_token_shape");
+            assert!(!body.to_string().contains("CANARY"), "{body}");
+        }
+        for raw in [
+            format!("{{\"token\": \"{SUB_CANARY}\",}}"),
+            format!("{{\"token\": [\"{SUB_CANARY}\"]}}"),
+            format!("{{\"token\": \"{SUB_CANARY}\", \"minted_at\": 5}}"),
+        ] {
+            let (status, body) = send(&app, put_raw_with_auth(CLAUDE_SUB, &raw, &owner)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+            assert_eq!(body["error"], "bad_request_body");
+            assert!(!body.to_string().contains("CANARY"), "{body}");
+        }
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                CLAUDE_SUB,
+                serde_json::json!({"token": SUB_CANARY, "minted_at": "2999-01-01"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "bad_minted_at");
+        let huge = format!(
+            "{{\"token\": \"{SUB_CANARY}\", \"pad\": \"{}\"}}",
+            "x".repeat(5000)
+        );
+        let (status, body) = send(&app, put_raw_with_auth(CLAUDE_SUB, &huge, &owner)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!body.to_string().contains("CANARY"));
+        let (_, still) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(still["present"], false, "a refused body stored something");
+        for (kind, detail) in &security_events(&state).await {
+            assert!(!detail.contains("CANARY"), "{kind}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_scope_takes_only_live_hosts_and_a_revoked_host_leaves_it() {
+        let dir = tempdir::TempDir::new("storm-pc-scope").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (a, _) = enroll_a_host(&app, &owner).await;
+        let (b, _) = enroll_a_host(&app, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": ["hst_nope"]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "unknown_host");
+
+        // Chosen before a token exists, then the token arrives.
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [b, a]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        sync_token(&app, &owner, SUB_CANARY).await;
+        assert_eq!(
+            crate::ops::deliverable_credential(&state, &a),
+            Some("claude_subscription_token")
+        );
+        assert_eq!(
+            crate::ops::deliverable_credential(&state, "hst_other"),
+            None
+        );
+
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("/v1/agent/hosts/{a}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["hosts"], serde_json::json!([b]));
+        assert_eq!(crate::ops::deliverable_credential(&state, &a), None);
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a revoked host is not a target"
+        );
+        assert_eq!(body["error"], "unknown_host");
+
+        // Narrowing to none.
+        let (status, view) = send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": []}), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["hosts"], serde_json::json!([]));
+        assert_eq!(crate::ops::deliverable_credential(&state, &b), None);
+        let changes = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, _)| k == "provider_credential_hosts_changed")
+            .count();
+        assert_eq!(changes, 3, "set, revoked, narrowed");
+    }
+
+    #[tokio::test]
+    async fn only_the_owners_session_reaches_the_token_routes() {
+        let dir = tempdir::TempDir::new("storm-pc-tiers").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (_, host_token) = enroll_a_host(&app, &owner).await;
+        let (_, key) = send(
+            &app,
+            post_json_with_auth("/v1/keys", serde_json::json!({"name": "agent"}), &owner),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        let host = format!("Bearer {host_token}");
+        for auth in [
+            key.as_str(),
+            host.as_str(),
+            "Bearer sta_forged",
+            "Bearer nonsense",
+        ] {
+            for request in [
+                get_with_auth(CLAUDE_SUB, auth),
+                put_json_with_auth(CLAUDE_SUB, serde_json::json!({"token": SUB_CANARY}), auth),
+                delete_with_auth(CLAUDE_SUB, auth),
+                patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": []}), auth),
+            ] {
+                let (status, _) = send(&app, request).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{auth}");
+            }
+        }
+        let (status, _) = send(&app, get(CLAUDE_SUB)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["present"], false);
+
+        // Behind the route, `ops` refuses a non-session actor too.
+        let agent = Actor::Key {
+            key_id: "key_x".into(),
+            user_id: "usr_x".into(),
+        };
+        let token = crate::gateway::provider::Secret::new(SUB_CANARY.into());
+        let refused = crate::ops::put_provider_credential(&state, &agent, token, None)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert!(
+            crate::ops::delete_provider_credential(&state, &agent)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::ops::set_provider_credential_hosts(&state, &agent, Vec::new())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_key_shows_needs_resync_is_audited_once_and_is_never_delivered() {
+        let dir = tempdir::TempDir::new("storm-pc-lost").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (host, _) = enroll_a_host(&app, &owner).await;
+        send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [host]}),
+                &owner,
+            ),
+        )
+        .await;
+        let synced = sync_token(&app, &owner, SUB_CANARY).await;
+        // What `Gateway::open` does on finding the key gone (tested there).
+        let stamp = crate::index::now_rfc3339();
+        assert!(
+            crate::ops::gateway_store(&state)
+                .mark_provider_needs_resync(crate::gateway::provider::CREDENTIAL_ID, &stamp)
+                .unwrap()
+        );
+        state
+            .gateway
+            .provider_unreadable
+            .lock()
+            .unwrap()
+            .push(synced["fingerprint"].as_str().unwrap().into());
+        crate::ops::reconcile_single_user(&state).await.unwrap();
+        crate::ops::reconcile_single_user(&state).await.unwrap();
+
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["status"], "needs_resync");
+        assert_eq!(crate::ops::deliverable_credential(&state, &host), None);
+        let unreadable: Vec<_> = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, _)| k == "provider_credential_unreadable")
+            .collect();
+        assert_eq!(unreadable.len(), 1);
+        assert!(
+            unreadable[0]
+                .1
+                .contains(synced["fingerprint"].as_str().unwrap())
+        );
+
+        // A re-sync brings it back.
+        let again = sync_token(&app, &owner, SUB_CANARY).await;
+        assert_eq!(again["status"], "active");
+        assert!(crate::ops::deliverable_credential(&state, &host).is_some());
+    }
+
+    #[tokio::test]
+    async fn the_single_user_sweep_drops_a_token_another_account_left() {
+        let dir = tempdir::TempDir::new("storm-pc-sweep").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        sync_token(&app, &owner, SUB_CANARY).await;
+        crate::ops::gateway_store(&state)
+            .conn()
+            .execute(
+                "UPDATE provider_credentials SET owner_user_id = 'usr_gone'",
+                [],
+            )
+            .unwrap();
+        crate::ops::reconcile_single_user(&state).await.unwrap();
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["present"], false);
+        assert!(
+            security_events(&state)
+                .await
+                .iter()
+                .any(|(k, d)| k == "provider_credential_removed" && d.contains("single_user"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_warns_is_audited_once_and_is_not_delivered() {
+        let dir = tempdir::TempDir::new("storm-pc-expired").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (host, _) = enroll_a_host(&app, &owner).await;
+        send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [host]}),
+                &owner,
+            ),
+        )
+        .await;
+        // Minted 360 days ago: inside the 7-day window.
+        let minted = time::OffsetDateTime::now_utc() - time::Duration::days(360);
+        let (_, view) = send(
+            &app,
+            put_json_with_auth(
+                CLAUDE_SUB,
+                serde_json::json!({"token": SUB_CANARY,
+                                   "minted_at": crate::gateway::provider::format_time(minted)}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(view["warn"], "7d");
+        assert_eq!(view["days_left"], 5);
+        assert!(crate::ops::deliverable_credential(&state, &host).is_some());
+
+        crate::ops::gateway_store(&state)
+            .conn()
+            .execute(
+                "UPDATE provider_credentials SET expires_at = '2026-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+            assert_eq!(view["warn"], "expired");
+            assert_eq!(view["days_left"], 0);
+        }
+        assert_eq!(crate::ops::deliverable_credential(&state, &host), None);
+        assert_eq!(
+            crate::ops::provider_credential_availability(&state, &host),
+            crate::gateway::provider::Availability::Expired
+        );
+        let expired = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, _)| k == "provider_credential_expired")
+            .count();
+        assert_eq!(expired, 1, "provider_credential_expired is written once");
+    }
+
+    #[tokio::test]
+    async fn the_pull_is_the_starting_sessions_own_host_in_scope_and_nothing_else() {
+        let dir = tempdir::TempDir::new("storm-pc-pull").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (a, a_token) = enroll_a_host(&app, &owner).await;
+        let (b, _) = enroll_a_host(&app, &owner).await;
+        let mut links = Vec::new();
+        for host in [&a, &b] {
+            links.push(state.agent.connect_host(host).1);
+            state
+                .agent
+                .hello(host, serde_json::from_value(host_caps(true)).unwrap())
+                .unwrap();
+        }
+        let launch = |host: String, provider: &'static str| {
+            let app = app.clone();
+            let owner = owner.clone();
+            async move {
+                let (status, body) = send(
+                    &app,
+                    post_json_with_auth(
+                        "/v1/agent/sessions",
+                        serde_json::json!({"host_id": host, "workspace": "storm",
+                                           "provider": provider,
+                                           "terminal": {"cols": 80, "rows": 24}}),
+                        &owner,
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body["id"].as_str().unwrap().to_string()
+            }
+        };
+        let host_a = state.auth_db.lock().await.host_by_id(&a).unwrap().unwrap();
+        let host_b = state.auth_db.lock().await.host_by_id(&b).unwrap().unwrap();
+        let on_a = launch(a.clone(), "claude-code").await;
+        let shell_on_a = launch(a.clone(), "shell").await;
+        let on_b = launch(b.clone(), "claude-code").await;
+        let code = |r: Result<crate::gateway::provider::Secret, crate::gateway::provider::Code>| {
+            r.map(|_| "ok").unwrap_or_else(|c| c.code)
+        };
+
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
+            "host_not_in_scope"
+        );
+        send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
+        )
+        .await;
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
+            "no_credential"
+        );
+        sync_token(&app, &owner, SUB_CANARY).await;
+        let pulled = crate::ops::pull_provider_credential(&state, &host_a, &on_a)
+            .await
+            .unwrap();
+        assert_eq!(pulled.expose(), SUB_CANARY);
+        assert!(!format!("{pulled:?}").contains("CANARY"));
+        // Retries while starting are allowed.
+        assert!(
+            crate::ops::pull_provider_credential(&state, &host_a, &on_a)
+                .await
+                .is_ok()
+        );
+
+        for (host, session, want) in [
+            (&host_b, on_a.as_str(), "not_your_session"),
+            (&host_a, on_b.as_str(), "not_your_session"),
+            (&host_a, "ags_nope", "not_your_session"),
+            (&host_a, shell_on_a.as_str(), "wrong_provider"),
+            (&host_b, on_b.as_str(), "host_not_in_scope"),
+        ] {
+            assert_eq!(
+                code(crate::ops::pull_provider_credential(&state, host, session).await),
+                want,
+                "{session}"
+            );
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{on_a}/status"),
+                serde_json::json!({"status": "running"}),
+                &format!("Bearer {a_token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
+            "session_not_starting"
+        );
+
+        let events = security_events(&state).await;
+        let delivered: Vec<_> = events
+            .iter()
+            .filter(|(k, _)| k == "provider_credential_delivered")
+            .collect();
+        assert_eq!(delivered.len(), 2);
+        assert!(delivered[0].1.contains(&on_a) && delivered[0].1.contains(&a));
+        for (kind, detail) in &events {
+            assert!(!detail.contains("CANARY"), "{kind}: {detail}");
+        }
     }
 
     // ---- MCP Gateway: OAuth (decision 81g) --------------------------------
