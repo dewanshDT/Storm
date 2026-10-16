@@ -1,12 +1,14 @@
 # Storm
 
 Self-hosted, Markdown-native knowledge system. A Rust sync server owns the
-canonical vaults on infrastructure you control; Flutter clients on macOS,
-Android, and web keep pace, offline included. The same knowledge is available
-to AI agents through MCP, and an optional runtime host runs coding agents —
-Claude Code, OpenCode, a shell — in a workspace with a terminal you drive from
-the app. An optional relay reaches the server from outside your network
-without opening a port.
+canonical vaults on a Linux, macOS or Windows machine you control; Flutter
+clients on macOS, Android and web keep pace, offline included. The same
+knowledge is available to AI agents through MCP, along with integrations (any
+MCP server: Notion, Linear, …) whose credentials stay on the server. Optional
+Runtime Hosts — Linux, macOS or Windows — run coding agents (Claude Code,
+OpenCode, a shell) in a workspace with a terminal you drive from the app. An
+optional relay, self-hosted or on Cloudflare, reaches the server from outside
+your network without opening a port.
 
 > **Your knowledge. On your infrastructure.**
 
@@ -20,46 +22,25 @@ Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 │  editor · cache · outbox · sync     │      └───────┬───────┘
 │  Notes | Agents | Integrations      │              │
 └──────┬───────────────────┬──────────┘              │
-  REST + WebSocket     via storm-relay          MCP (/mcp)
-  (LAN)                (optional, SRP v1)            │
+  REST + WebSocket     via a relay              MCP (/mcp)
+  (LAN)                (optional, SRP v1:            │
+                        storm-relay or relay-cf)     │
 ┌──────┴───────────────────┬─────────────────────────┴──┐
 │  storm-server (Rust, axum)        ▲                    │
 │  3-way merge · FTS5 · watcher     │ dials out          │
 │  pairing + sessions · Agent Mgr   │                    │
+│  MCP Gateway (integrations)       │                    │
 └──────┬───────────────────┬───────┴──────────┬─────────┘
   vaults/*.md           state/          storm-runtime
   plain markdown        registry ·       PTY · workspaces
                         indexes ·        claude-code ·
                         auth.db ·        opencode · shell
-                        agent.db
+                        agent.db ·       (Linux · macOS ·
+                        gateway/          Windows)
 ```
 
 Notes stay ordinary `.md` files under a storage root you control. Storm’s own
 state lives in a sibling `state/` directory — never inside the vaults.
-
-## Screenshots
-
-The macOS client in the wide-screen layout: vault tree, a note in read mode,
-and its typed properties.
-
-<img src="docs/screenshots/desktop-wide.png" alt="The macOS client: sidebar with the vault's folder tree, the Global Todo note in read mode with rendered checklists, and the properties panel with tags and colour">
-
-The Android client, in the SlowFlow earth and Storm dark themes.
-
-<table>
-  <tr>
-    <td align="center"><img src="docs/screenshots/phone-dashboard.png" width="200" alt="Dashboard: note count, recently opened notes, and vault cards"><br><sub>Dashboard</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-folder.png" width="200" alt="A folder in the personal vault, listing subfolders and notes"><br><sub>Folders</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-read.png" width="200" alt="A note in read mode, with rendered checklists and inline code"><br><sub>Read mode</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-edit.png" width="200" alt="A note in edit mode, with the formatting toolbar above the keyboard"><br><sub>Edit mode</sub></td>
-  </tr>
-  <tr>
-    <td align="center"><img src="docs/screenshots/phone-vaults.png" width="200" alt="The vault switcher, with sync status"><br><sub>Vault switcher</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-appearance-dark.png" width="200" alt="Appearance settings in the Storm dark theme"><br><sub>Storm dark</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-appearance-earth.png" width="200" alt="Appearance settings in the SlowFlow earth theme"><br><sub>SlowFlow earth</sub></td>
-    <td align="center"><img src="docs/screenshots/phone-server-settings.png" width="200" alt="Server settings: vault root, MCP access, accounts"><br><sub>Server settings</sub></td>
-  </tr>
-</table>
 
 ## Install
 
@@ -122,10 +103,18 @@ phone to scan:
 sudo -u storm storm-server pair --state /srv/storm/state --qr
 ```
 
-You set the account's password on that first device. Add more devices from
-the app (Settings › Devices & access › Add a device); reset a forgotten
-password with `storm-server passwd`. Details:
+You set the account's password on that first device. After that, a device on
+the same network finds the server under **On this network** and pairs with the
+password: the server advertises itself over mDNS on LAN interfaces only, and
+the app checks the server's key before it sends anything (decision 118). Away
+from home, add a device from the app (Settings › Devices & access › Add a
+device). Reset a forgotten password with `storm-server passwd`. Details:
 [`deploy/README.md`](deploy/README.md#the-account).
+
+Storm never needs an inbound port and never opens one silently. The installers
+offer to allow the server's port from the local network only (ufw, firewalld,
+the Windows Private profile), and remote access goes out through a relay
+(decision 119; [`deploy/README.md`](deploy/README.md#firewalls)).
 
 ### Update
 
@@ -142,9 +131,9 @@ Clients (macOS zip, Android APK, web UI) are on [Releases](https://github.com/de
 ### Runtime Hosts (optional)
 
 `storm-runtime` runs agents on a machine for one Storm Server — the server's
-own box, or another. It is a separate package in the same apt repository, the
-server needs no inbound route to it, and it can read no vault: its own account
-is never in the server's group.
+own box, or another. The server needs no inbound route to it, and it can read
+no vault: it runs under its own service account, never in the server's group.
+The interactive installer sets one up and enrolls it; by hand on Linux:
 
 ```sh
 sudo apt install storm-runtime
@@ -155,11 +144,24 @@ sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```
 
+On **macOS** it is a LaunchDaemon under a hidden `_stormruntime` account:
+
+```sh
+brew tap dewanshdt/storm https://github.com/dewanshDT/Storm
+brew install storm-runtime
+sudo "$(brew --prefix)/bin/storm-runtime" install
+```
+
+On **Windows** it is the `StormRuntime` service under a virtual account,
+installed by `install.ps1` (above) or with `.\storm-runtime.exe install` from
+the release zip.
+
 Providers are `claude-code` (default), `opencode` and `shell`; workspaces and
-limits live in `/etc/storm-runtime/runtime.toml`, and a root outside
-`/var/lib/storm-runtime` needs a `ReadWritePaths` drop-in on the unit. Log the
-agent CLIs in once as `storm-runtime` (`claude`, `opencode auth login`) — the
-unit's `HOME` is its own, not yours. Setup and the package's guarantees:
+limits live in `runtime.toml`. Log the agent CLIs in once as the host's
+account (`claude`, `opencode auth login`) — its `HOME` is its own, not yours.
+Sessions are named by their agent, take pasted images, open links from the
+terminal, and an ended Claude Code or OpenCode session can be resumed in its
+own conversation. Paths per platform, setup and the guarantees:
 [`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). A Runtime
 Host connects to its server directly; the app reaches agent sessions through
 the relay like everything else.
@@ -177,6 +179,13 @@ traffic it carries, so run your own or use one you trust. Setup,
 TLS and key bindings: [`deploy/README.md`](deploy/README.md#relay-optional);
 wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 
+`apps/relay-cf` is the same relay as a Cloudflare Worker with Durable Objects,
+for running one on your own Cloudflare account without a public box
+([`deploy/README.md`](deploy/README.md#on-cloudflare-instead-optional)). Both
+pass the same conformance suite (`tools/relay-conformance`). A hosted one is
+deployed at `storm-relay.dewansh.space` for testing; it admits allowlisted
+servers only.
+
 ## Layout
 
 | Path | What |
@@ -184,10 +193,13 @@ wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 | [`apps/server`](apps/server/README.md) | Rust sync server — REST, WebSocket, MCP, auth, agent manager |
 | [`apps/runtime`](apps/runtime) | `storm-runtime`, the Agent Runtime Host — PTY, providers, workspaces (standalone crate, no workspace) |
 | [`apps/relay`](apps/relay) | `storm-relay`, the SRP v1 relay (standalone crate, no workspace) |
+| [`apps/relay-cf`](apps/relay-cf/README.md) | The same relay on Cloudflare Workers + Durable Objects (TypeScript) |
 | [`apps/client`](apps/client/README.md) | Flutter app — macOS, Android, web (Linux desktop deferred) |
 | [`apps/www`](apps/www/README.md) | Marketing site (Astro) → [storm.dewansh.space](https://storm.dewansh.space) |
-| [`deploy/`](deploy/README.md) | systemd units, apt bootstrap, backup, relay setup |
-| [`docs/`](docs) | Design briefs, editor findings, the relay spec and its test vectors |
+| [`deploy/`](deploy/README.md) | `install.sh` / `install.ps1`, systemd units, apt bootstrap, backup, relay and Runtime Host setup on Linux, macOS and Windows |
+| [`Formula/`](Formula) | The Homebrew formula for `storm-runtime` (this repository is the tap) |
+| [`tools/`](tools) | The relay conformance suite, vector generators, release checks |
+| [`docs/`](docs) | Design briefs, editor findings, the relay spec pointer and the shared test vectors |
 
 ## Development
 
@@ -218,14 +230,21 @@ each have their own; the runtime suite stands up its own server and host.
 
 ## MCP
 
-When enabled, the server exposes Storm over Streamable HTTP at `/mcp`: eleven
+When enabled, the server exposes Storm over Streamable HTTP at `/mcp`: twelve
 read tools (vaults, search, notes, related notes, tags, recents, history,
-versions, and scripts from the kit vault) always, plus five write tools
-(create / update / delete note, create / update script) in read-write mode.
-Off by default and switched at runtime from **Server ▸ AI access**; agents
-authenticate with MCP keys minted in the app. Updates carry a `base_version`
-into the same three-way merge the clients use. See
-[`apps/server/README.md`](apps/server/README.md#mcp).
+versions, the agent session's own context, and scripts from the kit vault)
+always, plus five write tools (create / update / delete note, create / update
+script) in read-write mode. Off by default and switched at runtime from
+**Server ▸ AI access**; AI apps authenticate with MCP keys minted in the app.
+Updates carry a `base_version` into the same three-way merge the clients use.
+See [`apps/server/README.md`](apps/server/README.md#mcp).
+
+**Agents on a Runtime Host** reach Storm and your integrations through the
+**MCP Gateway** instead: the server holds each integration's credential,
+encrypted, and the host only forwards calls, so an agent never sees a token.
+An agent writes only to the one vault chosen when its session starts, never
+gets `delete_note`, and an integration can be limited to the hosts you choose
+(decisions 81, 82, 121).
 
 **Connecting an AI app: `storm-runtime mcp-connect`** (since v0.10.0). A
 stdio adapter the AI app starts itself. It dials the server's LAN address first and falls back
