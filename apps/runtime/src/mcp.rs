@@ -126,6 +126,7 @@ pub fn provider_baseline(provider: &str, dir: &Path, workspace: &Path) -> Result
     Ok(LaunchExtras {
         args: Vec::new(),
         env,
+        ..Default::default()
     })
 }
 
@@ -205,6 +206,7 @@ pub fn write_provider_config(
                     "--strict-mcp-config".into(),
                 ],
                 env: Vec::new(),
+                ..Default::default()
             })
         }
         "opencode" => {
@@ -242,6 +244,7 @@ pub fn write_provider_config(
             Ok(LaunchExtras {
                 args: Vec::new(),
                 env: vec![("XDG_CONFIG_HOME".into(), xdg.into_os_string())],
+                ..Default::default()
             })
         }
         _ => Ok(LaunchExtras::default()),
@@ -579,7 +582,7 @@ mod tests {
                 .unwrap()
             };
             let plain = config("plain");
-            assert_eq!(with_opening_prompt(plain.clone(), provider, false), plain);
+            assert_eq!(with_opening_prompt(config("plain"), provider, false), plain);
             let with = with_opening_prompt(config("context"), provider, true);
             assert_eq!(
                 with.env.len(),

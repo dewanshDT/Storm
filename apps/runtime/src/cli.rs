@@ -194,11 +194,22 @@ impl Provider for CliProvider {
         // The session's own values last (AM32): its MCP config must win
         // over anything a provider env file says.
         env.extend(spec.launch.env.iter().cloned());
+        // Then a synced login's removals and its token (AM71).
+        for name in &spec.launch.env_remove {
+            if self.env.iter().any(|(k, _)| k == name) {
+                tracing::info!(session = %spec.session_id, variable = %name.to_string_lossy(), "synced login: ignoring it from the provider env file");
+            }
+            if std::env::var_os(name).is_some() {
+                tracing::info!(session = %spec.session_id, variable = %name.to_string_lossy(), "synced login: ignoring it from the daemon environment");
+            }
+        }
         let launch = Launch {
             program: program.clone(),
             args: self.args.iter().chain(&spec.launch.args).cloned().collect(),
             cwd: spec.workspace.clone(),
             env,
+            env_remove: spec.launch.env_remove,
+            secret_env: spec.launch.secret_env,
             tag: spec.session_id.clone(),
         };
         let spawned = pty::spawn(&launch, size)
