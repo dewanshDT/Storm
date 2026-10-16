@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-  Installs Storm on Windows: the server, the Runtime Host, or both (decision 99);
-  or, MCP only, storm-runtime on your PATH for AI apps (decision 105e).
+  Installs Storm on Windows: the server, the Runtime Host, the Storm app, or
+  any of them together (decisions 99, 125); or, MCP only, storm-runtime on your
+  PATH for AI apps (decision 105e).
 
 .DESCRIPTION
   The Windows counterpart of install.sh (decision 84). It downloads the release
@@ -20,6 +21,8 @@
   - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
     PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
     enrollment, no administrator.
+  - App: the Storm app in %LOCALAPPDATA%\Programs\Storm\App, with a Start-menu
+    shortcut. No administrator. A running Storm is closed first, never killed.
 
   Re-running it upgrades. It never deletes notes or workspaces, and sends nothing
   anywhere but GitHub.
@@ -36,6 +39,11 @@
   Install the Runtime Host. Needs an elevated PowerShell.
 .PARAMETER Mcp
   MCP only: put storm-runtime on your PATH for AI apps. No service.
+.PARAMETER App
+  Install the Storm app for you, with a Start-menu shortcut.
+.PARAMETER RemoveApp
+  Remove the Storm app and its shortcut. Its cache and sign-in stay in your
+  profile.
 .PARAMETER Version
   A release tag such as v0.8.0. Default: the latest release.
 .PARAMETER FromDir
@@ -57,6 +65,8 @@ param(
     [switch]$Server,
     [switch]$Runtime,
     [switch]$Mcp,
+    [switch]$App,
+    [switch]$RemoveApp,
     [string]$Version,
     [string]$FromDir,
     [string]$Workspace,
@@ -72,6 +82,7 @@ Set-StrictMode -Version 3
 $Repo = 'dewanshDT/Storm'
 $ServerZip = 'storm-server-windows-x86_64.zip'
 $RuntimeZip = 'storm-runtime-windows-x86_64.zip'
+$AppZip = 'storm-app-windows-x86_64.zip'
 $Port = 8484
 $RuleName = 'Storm Server'
 $FirewallPrompt = 'Allow devices on your local network to reach Storm directly? (Faster and more private than going through a relay. Storm stays unreachable from the internet.)'
@@ -93,21 +104,53 @@ function Ask($question, $default) {
     if ([string]::IsNullOrWhiteSpace($answer)) { $default } else { $answer.Trim() }
 }
 
+# Under the MCP connector's folder, so replacing the app never touches it.
+$appDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm\App'
+$appLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Storm.lnk'
+
+# Files in use cannot be replaced, and Storm saves as you type, so asking it to
+# close loses nothing. It is never killed: that could cut a write short.
+function Stop-StormApp {
+    $exe = Join-Path $appDir 'storm.exe'
+    $running = @(Get-Process -Name storm -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe })
+    if ($running.Count -eq 0) { return }
+    Say 'Closing Storm so it can be replaced.'
+    $running | ForEach-Object { [void]$_.CloseMainWindow() }
+    $running | ForEach-Object {
+        if (-not $_.WaitForExit(15000)) { Fail 'Storm did not close: quit it, then run this again' }
+    }
+}
+
+if ($RemoveApp) {
+    Step 'Removing the Storm app'
+    if ($DryRun) { Say "  remove   : $appDir and $appLink"; return }
+    Stop-StormApp
+    Remove-Item -Recurse -Force $appDir -ErrorAction SilentlyContinue
+    Remove-Item -Force $appLink -ErrorAction SilentlyContinue
+    Say "Removed. Its cache and sign-in are kept in $(Join-Path $env:APPDATA 'dev.storm\Storm')."
+    return
+}
+
 # --- what to install -----------------------------------------------------------
 
-if (-not $Server -and -not $Runtime -and -not $Mcp) {
-    if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, -Mcp' }
+if (-not $Server -and -not $Runtime -and -not $Mcp -and -not $App) {
+    if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, -Mcp, -App' }
     Say 'Storm for Windows. What should this machine run?'
     Say '  1) the server and the Runtime Host'
     Say '  2) the server only'
     Say '  3) the Runtime Host only (for a server elsewhere)'
     Say '  4) MCP only: let AI apps here reach your Storm (no service)'
+    Say '  5) the Storm app only (for a server elsewhere)'
     switch (Ask 'Choose' '1') {
         '1' { $Server = $true; $Runtime = $true }
         '2' { $Server = $true }
         '3' { $Runtime = $true }
         '4' { $Mcp = $true }
-        default { Fail 'choose 1, 2, 3 or 4' }
+        '5' { $App = $true }
+        default { Fail 'choose 1, 2, 3, 4 or 5' }
+    }
+    if ($Server -and -not ((Ask 'Also install the Storm app on this PC? (Y/n)' 'Y') -match '^[nN]')) {
+        $App = $true
     }
 }
 
@@ -138,6 +181,9 @@ if ($Runtime) {
 if ($Mcp) {
     Say "  mcp      : $RuntimeZip, checked; storm-runtime.exe into $mcpDir, on your PATH (no service)"
 }
+if ($App) {
+    Say "  app      : $AppZip, checked; into $appDir, a Start-menu shortcut (no administrator)"
+}
 if ($DryRun) { return }
 
 # --- download and check ----------------------------------------------------------
@@ -166,6 +212,25 @@ function Checked($name) {
     $dir = Join-Path $work ([IO.Path]::GetFileNameWithoutExtension($name))
     Expand-Archive -Path $path -DestinationPath $dir -Force
     $dir
+}
+
+# --- the app ---------------------------------------------------------------------
+
+# Before the server, so its first pairing can happen in this app.
+if ($App) {
+    Step 'Storm app'
+    $dir = Checked $AppZip
+    if (-not (Test-Path (Join-Path $dir 'storm.exe'))) { Fail "$AppZip has no storm.exe" }
+    Stop-StormApp
+    if (Test-Path $appDir) { Remove-Item -Recurse -Force $appDir }
+    New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+    Copy-Item -Recurse -Path (Join-Path $dir '*') -Destination $appDir
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($appLink)
+    $link.TargetPath = Join-Path $appDir 'storm.exe'
+    $link.WorkingDirectory = $appDir
+    $link.Description = 'Storm'
+    $link.Save()
+    Say "Installed in $appDir. Open it from the Start menu: Storm."
 }
 
 # --- the server ------------------------------------------------------------------
@@ -201,7 +266,12 @@ if ($Server) {
         $pw = $null
         if ($LASTEXITCODE -ne 0) { Fail 'setting the account password failed' }
     } elseif ($LASTEXITCODE -ne 0) {
-        Say "`nPair your first device: in the Storm app, add a server and scan this code."
+        if ($App) {
+            Say "`nPair this PC: open Storm from the Start menu and choose this server under On this network."
+            Say 'Or pair your phone: in the Storm app, add a server and scan this code.'
+        } else {
+            Say "`nPair your first device: in the Storm app, add a server and scan this code."
+        }
         & $serverBin pair --state $dataState --qr
         if ($Runtime -and -not $Yes) {
             # The Runtime Host enrolls with the account the first device creates.

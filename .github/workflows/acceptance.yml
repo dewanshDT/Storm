@@ -129,3 +129,65 @@ jobs:
           name: macos-acceptance
           path: apps/client/dist/*
           retention-days: 14
+
+  # The Windows app (decision 125d), packaged by the release's own script, so
+  # a tester gets the zip a release would ship.
+  windows:
+    name: windows (app)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: The latest release's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          echo "RELEASE_VERSION=${v#v}" >> "$GITHUB_ENV"
+      - name: Build Windows app
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build windows --release \
+            --build-name="${RELEASE_VERSION}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          tool/package_windows.sh "dist/storm-app-acceptance-${GITHUB_SHA::7}-windows-x86_64.zip" \
+            "acceptance ${GITHUB_SHA::7}"
+      # AC-D1–D3 as far as a runner can: the zip alone starts a window titled
+      # Storm (a missing DLL would leave a dialog with another title), and a
+      # second launch leaves one process.
+      - name: The zip starts, once
+        shell: pwsh
+        working-directory: apps/client
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'storm-smoke'
+          Expand-Archive (Get-Item dist/*.zip).FullName -DestinationPath $dir
+          $first = Start-Process (Join-Path $dir 'storm.exe') -PassThru
+          $title = ''
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 2
+            $first.Refresh()
+            if ($first.HasExited) { throw "storm.exe exited with $($first.ExitCode)" }
+            $title = $first.MainWindowTitle
+            if ($title) { break }
+          }
+          "window title: '$title'"
+          if ($title -ne 'Storm') { throw "expected a window titled Storm, got '$title'" }
+          $second = Start-Process (Join-Path $dir 'storm.exe') -PassThru -Wait
+          "second launch exited with $($second.ExitCode)"
+          $count = @(Get-Process -Name storm -ErrorAction SilentlyContinue).Count
+          Stop-Process -Id $first.Id
+          if ($second.ExitCode -ne 0) { throw 'the second launch failed' }
+          if ($count -ne 1) { throw "$count storm processes after a second launch" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance
+          path: apps/client/dist/*
+          retention-days: 14
