@@ -46,6 +46,7 @@ Map<String, dynamic> agentSession(
   List<Map<String, dynamic>>? integrations,
   String? harnessSession,
   String? resumedFrom,
+  String? activity,
 }) => {
   'id': id,
   'host_id': hostId,
@@ -68,6 +69,7 @@ Map<String, dynamic> agentSession(
   'write_vault_id': writeVaultId,
   'wrote_count': wroteCount,
   'integrations': ?integrations,
+  'activity': ?activity,
   'harness_session': harnessSession,
   'resumed_from': resumedFrom,
 };

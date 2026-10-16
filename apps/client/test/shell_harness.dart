@@ -174,6 +174,30 @@ Future<void> pumpShell(
   await tester.pumpAndSettle();
 }
 
+/// [pumpShell] for a screen that never settles (a running animation): the
+/// app is mounted and given time to load instead.
+Future<void> pumpShellFrames(
+  WidgetTester tester,
+  ProviderContainer c, {
+  Size size = const Size(411, 900),
+}) async {
+  tester.view.physicalSize = size;
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: c,
+      child: MaterialApp.router(
+        theme: StormTheme.dark(),
+        routerConfig: c.read(routerProvider),
+      ),
+    ),
+  );
+  for (var i = 0; i < 20; i++) {
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
 /// Unmount before disposing, so nothing rebuilds against a dead container.
 Future<void> disposeShell(WidgetTester tester, ProviderContainer c) async {
   await tester.pumpWidget(const SizedBox());

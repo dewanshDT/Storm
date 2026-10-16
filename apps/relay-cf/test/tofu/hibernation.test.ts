@@ -140,12 +140,12 @@ describe("after an eviction", () => {
     const { peer: server } = await register(serverId);
     server.silent(); // its own PINGs below are the heartbeat under test
     await evict(serverId);
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       await sleep(500);
       server.send({ v: 1, type: "PING" });
       expect((await server.recv()).type).toBe("PONG");
     }
-    // Past the 1.5 s deadline from registration, and still routed to.
+    // Past the 3 s deadline from registration, and still routed to.
     const c = await client(serverId);
     await openStream(c);
     await expectOpenAndAck(server);
@@ -157,7 +157,7 @@ describe("after an eviction", () => {
     server.silent();
     const c = await client(serverId);
     await evict(serverId);
-    expectError(await c.recv(4000), "trunk_lost");
+    expectError(await c.recv(8000), "trunk_lost");
     await server.expectClosed();
   });
 

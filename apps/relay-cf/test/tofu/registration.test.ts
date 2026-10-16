@@ -22,7 +22,7 @@ describe("registration", () => {
     expect(registered.v).toBe(1);
     expect(registered.trunk_id).toMatch(/^trk_/);
     expect(registered.public_address).toBe(`wss://relay.test/connect/${serverId}`);
-    // Three heartbeats to the test config's 1.5 s deadline; 15 s at 45 s.
+    // Three heartbeats to the test config's 3 s deadline; 15 s at 45 s.
     expect(registered.heartbeat_interval_secs).toBe(1);
   });
 

@@ -31,15 +31,19 @@ void main() {
   );
 
   group('live sessions are carried by the rail and the place picker', () {
-    testWidgets('wide: the rail badge counts live sessions', (tester) async {
+    testWidgets('wide: the rail carries no count (decision 123c)', (
+      tester,
+    ) async {
       final c = shellContainer(agentClient: running().client);
       await pumpShell(tester, c, size: wide);
 
-      final badge = find.byKey(const Key('rail-badge'));
-      expect(badge, findsOneWidget);
+      expect(find.byKey(const Key('rail-badge')), findsNothing);
       expect(
-        find.descendant(of: badge, matching: find.text('1')),
-        findsOneWidget,
+        find.descendant(
+          of: find.byKey(const Key('rail-agents')),
+          matching: find.text('1'),
+        ),
+        findsNothing,
       );
 
       await tester.tap(find.byKey(const Key('rail-agents')));
@@ -64,15 +68,34 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('no badge when nothing is live', (tester) async {
+    int frame(WidgetTester tester) => tester
+        .widget<IndexedStack>(find.byKey(const Key('rail-glyph-frames')))
+        .index!;
+
+    testWidgets('the alien steps only while a session is working', (
+      tester,
+    ) async {
+      final idle = shellContainer(agentClient: running().client);
+      await pumpShell(tester, idle, size: wide);
+      expect(frame(tester), 0);
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(frame(tester), 0, reason: 'running but idle: no animation');
+      await disposeShell(tester, idle);
+
+      // pumpShell settles, and a stepping alien never does: pump by hand.
       final c = shellContainer(
         agentClient: FakeAgentServer(
           hosts: [agentHost()],
-          sessions: [agentSession('ags_old', status: 'stopped')],
+          sessions: [agentSession('ags_live', activity: 'working')],
         ).client,
       );
-      await pumpShell(tester, c, size: wide);
-      expect(find.byKey(const Key('rail-badge')), findsNothing);
+      await pumpShellFrames(tester, c, size: wide);
+      final first = frame(tester);
+      await tester.pump(const Duration(milliseconds: 550));
+      final second = frame(tester);
+      await tester.pump(const Duration(milliseconds: 550));
+      expect(second, isNot(first), reason: 'it steps every 550 ms');
+      expect(frame(tester), first, reason: 'and comes back');
       await disposeShell(tester, c);
     });
 
