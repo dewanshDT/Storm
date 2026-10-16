@@ -1,0 +1,231 @@
+{
+  "mcp_tools": [
+    {
+      "name": "list_vaults",
+      "description": "List the vaults on this Storm server, with their ids, names and note counts. Call this first — every other tool needs a vault id.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "get_vault",
+      "description": "Describe one vault: its note count, its folders, and the description its owner wrote for it.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "search",
+      "description": "Full-text search one vault, returning matching notes with a highlighted snippet from each. The fastest way to find a note.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "get_note",
+      "description": "Read one note in full: its markdown content and its metadata.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "get_related_notes",
+      "description": "Notes related to this one: those linking to it, and those sharing its tags. Every relation is exact and says why it is one — there is no semantic guessing here.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "list_tags",
+      "description": "Every tag in a vault with how many notes carry it.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "recent_notes",
+      "description": "Notes opened most recently, across every vault. Good for 'what was I working on'.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "get_note_history",
+      "description": "A note's revision history: version numbers, when each was written and by which device. Content is not included — fetch one with get_note_version.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "get_note_version",
+      "description": "The full text of one earlier revision of a note.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "session_context",
+      "description": "Read the note this agent session was started from: its vault and note ids, title, path, version and full markdown. Takes no arguments.",
+      "access": "agents",
+      "agents": true
+    },
+    {
+      "name": "list_scripts",
+      "description": "The kit vault's canonical scripts: names, sizes, modified times, Sorted. Optionally filter to one topic with prefix (e.g. 'psi-item-import/').",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "get_script",
+      "description": "Fetch one canonical script from the kit vault by name (relative to its 'scripts/' root): its full text, size and vault-relative path.",
+      "access": "read",
+      "agents": true
+    },
+    {
+      "name": "create_note",
+      "description": "Create a new note. Fails if the path is already taken. The note is stamped `source: ai` in its frontmatter so it is obvious later who wrote it.",
+      "access": "write",
+      "agents": true
+    },
+    {
+      "name": "update_note",
+      "description": "Replace a note's content. Requires the base_version you read, so a note edited elsewhere is merged rather than overwritten. If the result says merged or conflict, the returned content is the server's — re-read before editing again.",
+      "access": "write",
+      "agents": true
+    },
+    {
+      "name": "delete_note",
+      "description": "Delete a note. Storm has no trash: the file is removed from the vault immediately. Only the server's version history still holds the text.",
+      "access": "write",
+      "agents": false
+    },
+    {
+      "name": "create_script",
+      "description": "Create a canonical script in the kit vault — the one place agents may store runnable code. name is relative to the vault's 'scripts/' root and must end in an allowed extension; content is the full text. Fails if the name is already taken; use update_script to change one. Scripts cannot be stored in any other vault.",
+      "access": "write",
+      "agents": true
+    },
+    {
+      "name": "update_script",
+      "description": "Replace an existing script in the kit vault. name must end in an allowed extension; content is the full text. Fails if no such script exists — use create_script to add one.",
+      "access": "write",
+      "agents": true
+    }
+  ],
+  "storm_server": {
+    "help": "Storm sync server\n\nUsage: storm-server [OPTIONS] <COMMAND>\n\nCommands:\n  serve            Run the sync server (what systemd starts)\n  up               Install and start the server as a service. Linux: write the env file and enable the systemd unit (as root). macOS: install a LaunchAgent that runs as you, with the notes in ~/Storm (decision 84d; not root)\n  down             Stop the service (and keep it from starting again)\n  status           Show the service's state and a local health probe\n  uninstall        macOS: stop the LaunchAgent and remove what `up` installed, keeping the notes. Linux: the package owns the install (`apt remove`)\n  dry-run          Report what an import would change, then exit without writing\n  passwd           Set the account's password — the recovery path when it is forgotten (A11). On a Storm not set up yet, this creates the account\n  single-user      Choose which account a pre-v6 server keeps when it becomes single-user (decision 82). Only needed when it has no active owner to keep\n  pair             Print a bootstrap pairing QR code for a fresh server (no account yet)\n  has-account      Exit 0 if this Storm has its account, 1 if not (decision 84). For the installer, which waits on a first device's pairing\n  host-enrollment  Mint a one-time Runtime Host enrollment string for a host on this machine, and print it for `storm-runtime enroll` to read (decision 84e). Run by whoever owns the state directory, like `passwd`. It is a secret, so it is printed only into a pipe, never to a terminal\n  qr               Draw TEXT as a scannable QR block, for the installer's download and web links\n  backup-db        Snapshot every vault index into DIR, then exit\n  storage-root     Print the storage root this server uses, from its registry\n  backup           Back up the vaults, the indexes and the account into `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones: `deploy/storm-backup.sh` without bash, for Windows' nightly task (decision 99, W-S3)\n  help             Print this message or the help of the given subcommand(s)\n\nOptions:\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n  -V, --version          Print version\n",
+    "commands": [
+      {
+        "name": "serve",
+        "summary": "Run the sync server (what systemd starts)",
+        "help": "Run the sync server (what systemd starts)\n\nUsage: storm-server serve [OPTIONS]\n\nOptions:\n      --vault-root <VAULT_ROOT>\n          Storage root — a directory holding one directory per vault\n          \n          [env: STORM_VAULT_ROOT=]\n\n      --vault <VAULT>\n          Deprecated: a single vault directory.\n          \n          Accepted for one release so an existing single-vault deployment starts without edits. The storage root becomes this directory's *parent* and this one directory is registered as a vault.\n\n      --state <STATE>\n          State directory for the registry and the per-vault SQLite indexes. Kept out of the vaults so they stay pure markdown\n          \n          [default: ./state]\n\n      --host <HOST>\n          [default: 127.0.0.1]\n\n      --port <PORT>\n          [default: 8484]\n\n      --web <WEB>\n          Directory holding the built Flutter web client, served at `/`\n\n      --mcp\n          Serve the Model Context Protocol endpoint at `/mcp`.\n          \n          Read-only tools over the same vaults and the same bearer token. Off by default: it is a new surface on the notes, and turning one on should be a decision rather than a side effect of upgrading.\n\n      --no-discovery\n          Do not advertise on the local network, and refuse pairing with the password, whatever the app's setting says (decision 118). Also `STORM_DISCOVERY=0`\n\n      --log-file <FILE>\n          Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "up",
+        "summary": "Install and start the server as a service. Linux: write the env file and enable the systemd unit (as root). macOS: install a LaunchAgent that runs as you, with the notes in ~/Storm (decision 84d; not root)",
+        "help": "Install and start the server as a service. Linux: write the env file and enable the systemd unit (as root). macOS: install a LaunchAgent that runs as you, with the notes in ~/Storm (decision 84d; not root)\n\nUsage: storm-server up [OPTIONS]\n\nOptions:\n      --data-root <DATA_ROOT>\n          Directory for vaults/, state/, and backups/ (default /srv/storm on Linux, ~/Storm on macOS).\n          \n          Ignored for a path that `--vault-root` / `--state` override individually — needed when vaults and state already live in different places.\n\n      --vault-root <VAULT_ROOT>\n          Override the storage root (default: `<data-root>/vaults`)\n\n      --state <STATE>\n          Override the state directory (default: `<data-root>/state`)\n\n      --host <HOST>\n          [default: 0.0.0.0]\n\n      --port <PORT>\n          [default: 8484]\n\n      --web <WEB>\n          Built Flutter web client directory (Linux: the package's /usr/share/storm/web; macOS: the `web/` beside this binary)\n\n      --log-file <FILE>\n          Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "down",
+        "summary": "Stop the service (and keep it from starting again)",
+        "help": "Stop the service (and keep it from starting again)\n\nUsage: storm-server down [OPTIONS]\n\nOptions:\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "status",
+        "summary": "Show the service's state and a local health probe",
+        "help": "Show the service's state and a local health probe\n\nUsage: storm-server status [OPTIONS]\n\nOptions:\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "uninstall",
+        "summary": "macOS: stop the LaunchAgent and remove what `up` installed, keeping the notes. Linux: the package owns the install (`apt remove`)",
+        "help": "macOS: stop the LaunchAgent and remove what `up` installed, keeping the notes. Linux: the package owns the install (`apt remove`)\n\nUsage: storm-server uninstall [OPTIONS]\n\nOptions:\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "dry-run",
+        "summary": "Report what an import would change, then exit without writing",
+        "help": "Report what an import would change, then exit without writing\n\nUsage: storm-server dry-run [OPTIONS]\n\nOptions:\n      --vault-root <VAULT_ROOT>\n          Storage root — a directory holding one directory per vault\n          \n          [env: STORM_VAULT_ROOT=]\n\n      --vault <VAULT>\n          Deprecated: a single vault directory.\n          \n          Accepted for one release so an existing single-vault deployment starts without edits. The storage root becomes this directory's *parent* and this one directory is registered as a vault.\n\n      --state <STATE>\n          State directory for the registry and the per-vault SQLite indexes. Kept out of the vaults so they stay pure markdown\n          \n          [default: ./state]\n\n      --log-file <FILE>\n          Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "passwd",
+        "summary": "Set the account's password — the recovery path when it is forgotten (A11). On a Storm not set up yet, this creates the account",
+        "help": "Set the account's password — the recovery path when it is forgotten (A11). On a Storm not set up yet, this creates the account\n\nUsage: storm-server passwd [OPTIONS]\n\nOptions:\n      --state <STATE>    State directory holding auth.db [default: ./state]\n      --password-stdin   Read the password from stdin instead of prompting\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "single-user",
+        "summary": "Choose which account a pre-v6 server keeps when it becomes single-user (decision 82). Only needed when it has no active owner to keep",
+        "help": "Choose which account a pre-v6 server keeps when it becomes single-user (decision 82). Only needed when it has no active owner to keep\n\nUsage: storm-server single-user [OPTIONS] --keep <KEEP>\n\nOptions:\n      --state <STATE>    State directory holding auth.db [default: ./state]\n      --keep <KEEP>      Every other account is deleted; `auth.db.pre-v6` is written first\n      --yes              Skip the confirmation prompt\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "pair",
+        "summary": "Print a bootstrap pairing QR code for a fresh server (no account yet)",
+        "help": "Print a bootstrap pairing QR code for a fresh server (no account yet)\n\nUsage: storm-server pair [OPTIONS]\n\nOptions:\n      --state <STATE>\n          State directory holding auth.db and the server identity\n          \n          [default: ./state]\n\n      --addr <ADDR>\n          Address the QR code tells the client to connect to\n\n      --qr\n          Also draw the URI as a scannable QR block.\n          \n          Opt-in rather than the default: the block is ~45 columns wide and is noise when the output is being read by a script, which is how the deploy scripts and `auth_e2e.py` consume this command.\n\n      --log-file <FILE>\n          Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "has-account",
+        "summary": "Exit 0 if this Storm has its account, 1 if not (decision 84). For the installer, which waits on a first device's pairing",
+        "help": "Exit 0 if this Storm has its account, 1 if not (decision 84). For the installer, which waits on a first device's pairing\n\nUsage: storm-server has-account [OPTIONS]\n\nOptions:\n      --state <STATE>    State directory holding auth.db [default: ./state]\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "host-enrollment",
+        "summary": "Mint a one-time Runtime Host enrollment string for a host on this machine, and print it for `storm-runtime enroll` to read (decision 84e). Run by whoever owns the state directory, like `passwd`. It is a secret, so it is printed only into a pipe, never to a terminal",
+        "help": "Mint a one-time Runtime Host enrollment string for a host on this machine, and print it for `storm-runtime enroll` to read (decision 84e). Run by whoever owns the state directory, like `passwd`. It is a secret, so it is printed only into a pipe, never to a terminal\n\nUsage: storm-server host-enrollment [OPTIONS]\n\nOptions:\n      --state <STATE>    State directory holding auth.db and the server identity [default: ./state]\n      --url <URL>        The address the host will reach this server at. Defaults to the loopback address on `STORM_PORT` (8484)\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "qr",
+        "summary": "Draw TEXT as a scannable QR block, for the installer's download and web links",
+        "help": "Draw TEXT as a scannable QR block, for the installer's download and web links\n\nUsage: storm-server qr [OPTIONS] <TEXT>\n\nArguments:\n  <TEXT>  \n\nOptions:\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "backup-db",
+        "summary": "Snapshot every vault index into DIR, then exit",
+        "help": "Snapshot every vault index into DIR, then exit\n\nUsage: storm-server backup-db [OPTIONS] <DIR>\n\nArguments:\n  <DIR>  Destination directory for the snapshots\n\nOptions:\n      --state <STATE>    State directory holding the registry and indexes [default: ./state]\n      --log-file <FILE>  Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help             Print help\n"
+      },
+      {
+        "name": "storage-root",
+        "summary": "Print the storage root this server uses, from its registry",
+        "help": "Print the storage root this server uses, from its registry.\n\nFor the nightly backup (decision 79). The stored root wins over `STORM_VAULT_ROOT`, which only seeds a first run, so a script that read the env file copied the wrong directory once the root was changed in the app. Exits 3, printing nothing, when there is no registry yet.\n\nUsage: storm-server storage-root [OPTIONS]\n\nOptions:\n      --state <STATE>\n          State directory holding vaults.json\n          \n          [default: ./state]\n\n      --log-file <FILE>\n          Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "backup",
+        "summary": "Back up the vaults, the indexes and the account into `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones: `deploy/storm-backup.sh` without bash, for Windows' nightly task (decision 99, W-S3)",
+        "help": "Back up the vaults, the indexes and the account into `DEST/<YYYY-MM-DD>/`, check the snapshots open, and prune old ones: `deploy/storm-backup.sh` without bash, for Windows' nightly task (decision 99, W-S3)\n\nUsage: storm-server backup [OPTIONS] --vault-root <VAULT_ROOT> --dest <DEST>\n\nOptions:\n      --vault-root <VAULT_ROOT>  The storage root to fall back on when the registry names none\n      --state <STATE>            State directory holding vaults.json and the databases [default: ./state]\n      --dest <DEST>              Where the dated backups go\n      --keep-days <KEEP_DAYS>    Dated backups older than this many days are removed [default: 30]\n      --log-file <FILE>          Append the log to this file instead of the terminal. Windows' windowless `storm-serverw` has no terminal (decision 99, W-S1)\n  -h, --help                     Print help\n"
+      }
+    ]
+  },
+  "storm_runtime": {
+    "help": "Storm Runtime Host\n\nUsage: storm-runtime <COMMAND>\n\nCommands:\n  enroll           Enroll this host with a Storm Server\n  serve            Run the host: connect to the server and run the agents it asks for\n  mcp-bridge       The agent's stdio MCP server for one gateway connection. Started by the agent CLI from the session's MCP config, never by hand: it reads its session handle and the daemon's socket from the environment, and holds no credential\n  mcp-connect      An external MCP client's stdio server for a Storm Server's `/mcp` (Claude Code, Cursor, Claude Desktop start it). Verifies the server's identity before sending anything\n  harness-session  Tells the host which conversation the agent is on, so Storm can resume it. Run by the agent's own hook or plugin, never by hand; reads the id from stdin (a Claude Code hook's input) when none is given\n  install          Install this host as a system service, as root. macOS: creates the `_stormruntime` account and `/Library/StormRuntime`, and loads the LaunchDaemon, which runs the host once it is enrolled. Windows (in an elevated shell): creates `C:\\ProgramData\\StormRuntime` and the `StormRuntime` service, which enrolling starts. Re-run it to upgrade. On Linux the package does this\n  uninstall        Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept\n  check            Check this host's enrollment: verify the server, prove the key, and ask the server who it thinks this host is\n  help             Print this message or the help of the given subcommand(s)\n\nOptions:\n  -h, --help     Print help\n  -V, --version  Print version\n",
+    "commands": [
+      {
+        "name": "enroll",
+        "summary": "Enroll this host with a Storm Server",
+        "help": "Enroll this host with a Storm Server.\n\nReads the enrollment string the app showed you from stdin, or prompts for it without echo. **Never pass it as an argument**: it carries a single-use secret, and arguments are visible to every user in `ps`.\n\nUsage: storm-runtime enroll [OPTIONS]\n\nOptions:\n      --state <STATE>\n          [env: STORM_RUNTIME_STATE=]\n          [default: /var/lib/storm-runtime]\n\n      --name <NAME>\n          How this host appears in the app. Defaults to the hostname\n\n      --force\n          Replace an existing enrollment\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "serve",
+        "summary": "Run the host: connect to the server and run the agents it asks for",
+        "help": "Run the host: connect to the server and run the agents it asks for\n\nUsage: storm-runtime serve [OPTIONS]\n\nOptions:\n      --state <STATE>      [env: STORM_RUNTIME_STATE=] [default: /var/lib/storm-runtime]\n      --config <CONFIG>    [env: STORM_RUNTIME_CONFIG=] [default: /etc/storm-runtime/runtime.toml]\n      --exclusive-account  Declare that this account runs nothing but this host (AM37): at startup and after shutdown, end every other process of it. Passed by the packaged service definitions; refused unless running as the service account, and never as root\n  -h, --help               Print help\n"
+      },
+      {
+        "name": "mcp-bridge",
+        "summary": "The agent's stdio MCP server for one gateway connection. Started by the agent CLI from the session's MCP config, never by hand: it reads its session handle and the daemon's socket from the environment, and holds no credential",
+        "help": "The agent's stdio MCP server for one gateway connection. Started by the agent CLI from the session's MCP config, never by hand: it reads its session handle and the daemon's socket from the environment, and holds no credential\n\nUsage: storm-runtime mcp-bridge <SLUG>\n\nArguments:\n  <SLUG>  The connection's slug\n\nOptions:\n  -h, --help  Print help\n"
+      },
+      {
+        "name": "mcp-connect",
+        "summary": "An external MCP client's stdio server for a Storm Server's `/mcp` (Claude Code, Cursor, Claude Desktop start it). Verifies the server's identity before sending anything",
+        "help": "An external MCP client's stdio server for a Storm Server's `/mcp` (Claude Code, Cursor, Claude Desktop start it). Verifies the server's identity before sending anything.\n\nThe key is read from STORM_MCP_KEY or --key-file, **never an argument**: arguments are visible to every user in `ps`.\n\nUsage: storm-runtime mcp-connect [OPTIONS] --server <SERVER> --pk <PK>\n\nOptions:\n      --server <SERVER>\n          The server's id (`srv_…`), as the app shows it\n\n      --pk <PK>\n          The server's public key, unpadded base64url, as the app shows it\n\n      --addr <ADDR>\n          The server's own address, e.g. `http://192.168.1.10:8484`. Optional when a --relay is given\n\n      --relay <RELAYS>\n          A relay that reaches the server (`wss://…`). Repeatable. Only a seed: the server's current relays are learned on each connect and cached\n\n      --key-file <KEY_FILE>\n          A file holding the `stk_` key, instead of STORM_MCP_KEY\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+      },
+      {
+        "name": "harness-session",
+        "summary": "Tells the host which conversation the agent is on, so Storm can resume it. Run by the agent's own hook or plugin, never by hand; reads the id from stdin (a Claude Code hook's input) when none is given",
+        "help": "Tells the host which conversation the agent is on, so Storm can resume it. Run by the agent's own hook or plugin, never by hand; reads the id from stdin (a Claude Code hook's input) when none is given\n\nUsage: storm-runtime harness-session [ID]\n\nArguments:\n  [ID]  \n\nOptions:\n  -h, --help  Print help\n"
+      },
+      {
+        "name": "install",
+        "summary": "Install this host as a system service, as root. macOS: creates the `_stormruntime` account and `/Library/StormRuntime`, and loads the LaunchDaemon, which runs the host once it is enrolled. Windows (in an elevated shell): creates `C:\\ProgramData\\StormRuntime` and the `StormRuntime` service, which enrolling starts. Re-run it to upgrade. On Linux the package does this",
+        "help": "Install this host as a system service, as root. macOS: creates the `_stormruntime` account and `/Library/StormRuntime`, and loads the LaunchDaemon, which runs the host once it is enrolled. Windows (in an elevated shell): creates `C:\\ProgramData\\StormRuntime` and the `StormRuntime` service, which enrolling starts. Re-run it to upgrade. On Linux the package does this\n\nUsage: storm-runtime install [OPTIONS]\n\nOptions:\n      --operator <OPERATOR>  Who shares the workspace root with the host. Defaults to the user who ran sudo\n  -h, --help                 Print help\n"
+      },
+      {
+        "name": "uninstall",
+        "summary": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept",
+        "help": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept\n\nUsage: storm-runtime uninstall [OPTIONS]\n\nOptions:\n      --purge  Also remove the host's identity, state, logs, config and account\n  -h, --help   Print help\n"
+      },
+      {
+        "name": "check",
+        "summary": "Check this host's enrollment: verify the server, prove the key, and ask the server who it thinks this host is",
+        "help": "Check this host's enrollment: verify the server, prove the key, and ask the server who it thinks this host is\n\nUsage: storm-runtime check [OPTIONS]\n\nOptions:\n      --state <STATE>  [env: STORM_RUNTIME_STATE=] [default: /var/lib/storm-runtime]\n  -h, --help           Print help\n"
+      }
+    ]
+  }
+}

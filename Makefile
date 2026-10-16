@@ -512,6 +512,12 @@ codegen:
 www:
 	cd $(WWW) && npm ci && npm run build
 
+## www-facts: regenerate apps/www/src/data/facts.json (MCP tools, CLI help) from source and binaries
+www-facts:
+	cd apps/server && cargo build
+	cd apps/runtime && cargo build
+	python3 tools/www-facts/generate.py --server apps/server/target/debug/storm-server --runtime apps/runtime/target/debug/storm-runtime
+
 ## www-dev: Astro dev server for the marketing site
 www-dev:
 	cd $(WWW) && npm install && npm run dev
@@ -544,6 +550,6 @@ clean:
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
-        dry-run server client web serve-web www www-dev www-check formula-check codegen clean \
+        dry-run server client web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

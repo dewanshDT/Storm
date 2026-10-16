@@ -50,6 +50,14 @@ export default defineConfig({
       // here, which is also where its place in the order is decided.
       sidebar: [
         { label: "Start here", items: ["docs/start/quickstart", "docs/start/concepts"] },
+        {
+          label: "Reference",
+          items: [
+            { label: "MCP tools", link: "/docs/reference/mcp-tools/" },
+            { label: "storm-server", link: "/docs/reference/cli/storm-server/" },
+            { label: "storm-runtime", link: "/docs/reference/cli/storm-runtime/" },
+          ],
+        },
       ],
     }),
   ],
