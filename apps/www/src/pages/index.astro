@@ -3,32 +3,17 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import BrandMark from "../components/BrandMark.astro";
 import CodeBlock from "../components/CodeBlock.astro";
 import { release } from "../data/release";
+import facts from "../data/facts.json";
 
 const bootstrap = release.installCommand;
 
-// Every tool in apps/server/src/mcp.rs. `make www-check` compares this list
-// with that file, so a tool added there fails CI until it is named here.
-const mcpReadTools = [
-  "list_vaults",
-  "get_vault",
-  "search",
-  "get_note",
-  "get_related_notes",
-  "list_tags",
-  "recent_notes",
-  "get_note_history",
-  "get_note_version",
-  "list_scripts",
-  "get_script",
-];
-const mcpWriteTools = [
-  "create_note",
-  "update_note",
-  "delete_note",
-  "create_script",
-  "update_script",
-];
-const mcpAgentTools = ["session_context"];
+
+// Generated from apps/server/src/mcp.rs by tools/www-facts; CI fails when the
+// committed file is stale, so these lists cannot fall behind the server.
+const mcpReadTools = facts.mcp_tools.filter((t) => t.access === "read").map((t) => t.name);
+const mcpWriteTools = facts.mcp_tools.filter((t) => t.access === "write").map((t) => t.name);
+const mcpAgentTools = facts.mcp_tools.filter((t) => t.access === "agents").map((t) => t.name);
+const neverForAgents = facts.mcp_tools.filter((t) => !t.agents).map((t) => t.name);
 const mcpTools = [...mcpReadTools, ...mcpWriteTools];
 
 const description =
@@ -142,7 +127,7 @@ state/          ← indexes · registry · auth.db (never inside vaults)</code><
       <p class="support">
         Agents in a Storm session also get <code>{mcpAgentTools[0]}</code>,
         which reads the note the session was started from. They never get
-        <code>delete_note</code>.
+        {neverForAgents.map((n, i) => <>{i > 0 && ", "}<code>{n}</code></>)}.
       </p>
 
       <div class="mcp-demo" aria-label="Conceptual MCP interaction (static)">

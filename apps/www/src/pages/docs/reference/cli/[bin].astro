@@ -1,0 +1,44 @@
+---
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+import facts from "../../../../data/facts.json";
+
+// Generated: each binary's own --help, captured by tools/www-facts and checked
+// in CI against a fresh build, so a flag here is a flag in the release.
+export function getStaticPaths() {
+  return [
+    {
+      params: { bin: "storm-server" },
+      props: {
+        cli: facts.storm_server,
+        description: "The server: run it, install it as a service, pair the first device, back it up.",
+      },
+    },
+    {
+      params: { bin: "storm-runtime" },
+      props: {
+        cli: facts.storm_runtime,
+        description: "The Runtime Host: enroll it, run it as a service, and connect AI apps with mcp-connect.",
+      },
+    },
+  ];
+}
+
+const { bin } = Astro.params;
+const { cli, description } = Astro.props;
+---
+
+<StarlightPage
+  frontmatter={{ title: bin, description }}
+  headings={cli.commands.map((c) => ({ depth: 2, slug: c.name, text: c.name }))}
+>
+  <p>{description} Generated from <code>{bin} --help</code>.</p>
+  <pre><code>{cli.help}</code></pre>
+  {
+    cli.commands.map((c) => (
+      <>
+        <h2 id={c.name}>{c.name}</h2>
+        <pre><code>{c.help}</code></pre>
+      </>
+    ))
+  }
+</StarlightPage>

@@ -6,7 +6,7 @@
 # 2. No page still describes the shared token, which stopped existing at the
 #    A10 cutover (M19).
 # 3. No page describes more than one account (decision 82).
-# 4. The MCP tools on the home page are the ones the server has.
+# 4. src/data/facts.json (the MCP tools) matches the server's source.
 #
 # The second one is why this file exists. `apps/www` kept telling people to
 # copy a token out of `storm.env` for thirteen days after the token was deleted,
@@ -66,27 +66,14 @@ if hits=$(grep -rniE "$accounts" src ../../docs/www ../../docs/site ../../README
 	status=1
 fi
 
-# --- 4. the MCP tools the home page names ------------------------------------
-# A typed list went stale at twelve while the server grew to seventeen. Every
-# #[tool] in mcp.rs must be on the page, and nothing that is not.
-mcp_rs=../server/src/mcp.rs
-server_tools=$(awk '/#\[tool\(/ { want = 1 } want && match($0, /async fn [a-z_]+/) { print substr($0, RSTART + 9, RLENGTH - 9); want = 0 }' "$mcp_rs" | sort)
-page_tools=$(awk '/^const mcp(Read|Write|Agent)Tools = \[/, /\];/' src/pages/index.astro | grep -oE '"[a-z_]+"' | tr -d '"' | sort)
-if [ -z "$server_tools" ]; then
-	echo "check-claims: found no #[tool] functions in $mcp_rs; the parser needs updating" >&2
-	status=1
-elif [ -z "$page_tools" ]; then
-	echo "check-claims: found no mcp{Read,Write,Agent}Tools lists in src/pages/index.astro" >&2
-	status=1
-elif [ "$server_tools" != "$page_tools" ]; then
-	echo "check-claims: the MCP tools on / do not match $mcp_rs" >&2
-	printf '%s\n' "$server_tools" >"${TMPDIR:-/tmp}/check-claims.server.$$"
-	printf '%s\n' "$page_tools" >"${TMPDIR:-/tmp}/check-claims.page.$$"
-	diff "${TMPDIR:-/tmp}/check-claims.server.$$" "${TMPDIR:-/tmp}/check-claims.page.$$" | grep '^[<>]' |
-		sed 's/^</  missing from the page:/; s/^>/  not a tool:/' >&2
-	rm -f "${TMPDIR:-/tmp}/check-claims.server.$$" "${TMPDIR:-/tmp}/check-claims.page.$$"
+# --- 4. the facts the site quotes ------------------------------------------
+# The MCP tool list on / and in the docs comes from src/data/facts.json, which
+# tools/www-facts generates from apps/server/src/mcp.rs. A typed list went
+# stale at twelve while the server grew to seventeen. The CLI sections of the
+# same file are checked by the server and runtime CI jobs, which build them.
+if ! python3 ../../tools/www-facts/generate.py --check; then
 	status=1
 fi
 
-[ "$status" -eq 0 ] && echo "check-claims: ok ($site_tag, no stale credential, account or tool copy)"
+[ "$status" -eq 0 ] && echo "check-claims: ok ($site_tag, no stale credential or account copy, facts current)"
 exit "$status"
