@@ -357,6 +357,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/runtime/sessions/{id}/mcp/{connection}",
             post(runtime_mcp),
         )
+        // Token sync (decision 124): the synced login for a starting session.
+        .route(
+            "/v1/runtime/sessions/{id}/provider-credential",
+            get(runtime_provider_credential),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -1848,6 +1853,19 @@ async fn runtime_image(
         .header(axum::http::header::CACHE_CONTROL, "no-store")
         .body(axum::body::Body::from(bytes.as_ref().clone()))
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn runtime_provider_credential(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let pulled = crate::ops::runtime_provider_credential(&state, &auth.host, &id).await?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(pulled),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -9043,7 +9061,7 @@ pub(crate) mod tests {
             links.push(state.agent.connect_host(host).1);
             state
                 .agent
-                .hello(host, serde_json::from_value(host_caps(true)).unwrap())
+                .hello(host, serde_json::from_value(sync_caps(true)).unwrap())
                 .unwrap();
         }
         let launch = |host: String, provider: &'static str| {
@@ -9067,15 +9085,13 @@ pub(crate) mod tests {
         };
         let host_a = state.auth_db.lock().await.host_by_id(&a).unwrap().unwrap();
         let host_b = state.auth_db.lock().await.host_by_id(&b).unwrap().unwrap();
-        let on_a = launch(a.clone(), "claude-code").await;
-        let shell_on_a = launch(a.clone(), "shell").await;
-        let on_b = launch(b.clone(), "claude-code").await;
         let code = |r: Result<crate::gateway::provider::Secret, crate::gateway::provider::Code>| {
             r.map(|_| "ok").unwrap_or_else(|c| c.code)
         };
 
+        let unticked = launch(a.clone(), "claude-code").await;
         assert_eq!(
-            code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
+            code(crate::ops::pull_provider_credential(&state, &host_a, &unticked).await),
             "host_not_in_scope"
         );
         send(
@@ -9083,11 +9099,15 @@ pub(crate) mod tests {
             patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
         )
         .await;
-        assert_eq!(
-            code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
-            "no_credential"
-        );
         sync_token(&app, &owner, SUB_CANARY).await;
+        // Widening reaches only launches told to pull.
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &unticked).await),
+            "host_not_in_scope"
+        );
+        let on_a = launch(a.clone(), "claude-code").await;
+        let shell_on_a = launch(a.clone(), "shell").await;
+        let on_b = launch(b.clone(), "claude-code").await;
         let pulled = crate::ops::pull_provider_credential(&state, &host_a, &on_a)
             .await
             .unwrap();
@@ -9126,6 +9146,18 @@ pub(crate) mod tests {
         assert_eq!(
             code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
             "session_not_starting"
+        );
+        let pending = launch(a.clone(), "claude-code").await;
+        let (status, _) = send(&app, delete_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
+        )
+        .await;
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &pending).await),
+            "no_credential"
         );
 
         let events = security_events(&state).await;
@@ -10028,5 +10060,398 @@ pub(crate) mod tests {
             assert!(!detail.contains(&secret), "{kind}: {detail}");
             assert!(!detail.contains("argon2"), "{kind}: {detail}");
         }
+    }
+
+    // ---- token sync: the launch wire and the pull route (decision 124) ---
+
+    const CANARY: &str = "sk-ant-oat01-CANARY-124o-0123456789abcdefghij";
+    const KIND: &str = crate::gateway::provider::KIND;
+
+    struct SyncFixture {
+        app: Router,
+        state: Shared,
+        owner: String,
+        owner_bearer: String,
+        host: String,
+        host_bearer: String,
+        link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+    }
+
+    fn sync_caps(can_sync: bool) -> serde_json::Value {
+        let mut caps = host_caps(true);
+        caps["providers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": "opencode", "kind": "cli", "interactions": ["terminal"], "available": true}));
+        if can_sync {
+            caps["provider_credentials"] = serde_json::json!([KIND]);
+        }
+        caps
+    }
+
+    async fn sync_fixture(dir: &FsPath, can_sync: bool) -> SyncFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host, token) = enroll_a_host(&app, &owner_bearer).await;
+        let link = online_host(&state, &host, can_sync);
+        SyncFixture {
+            app,
+            state,
+            owner,
+            owner_bearer,
+            host,
+            host_bearer: format!("Bearer {token}"),
+            link,
+        }
+    }
+
+    fn online_host(
+        state: &Shared,
+        host: &str,
+        can_sync: bool,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope> {
+        let (_, link) = state.agent.connect_host(host);
+        state
+            .agent
+            .hello(host, serde_json::from_value(sync_caps(can_sync)).unwrap())
+            .unwrap();
+        link
+    }
+
+    impl SyncFixture {
+        fn actor(&self) -> Actor {
+            Actor::Session {
+                user_id: self.owner.clone(),
+            }
+        }
+
+        async fn sync(&self, minted_at: Option<&str>) {
+            crate::ops::put_provider_credential(
+                &self.state,
+                &self.actor(),
+                crate::gateway::provider::Secret::new(CANARY.into()),
+                minted_at.map(Into::into),
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn tick(&self, hosts: &[&str]) {
+            crate::ops::set_provider_credential_hosts(
+                &self.state,
+                &self.actor(),
+                hosts.iter().map(|h| h.to_string()).collect(),
+            )
+            .await
+            .unwrap();
+        }
+
+        /// Launches on `host` without reporting it running: the session
+        /// stays `starting`, the only state a pull is allowed in.
+        async fn launch_on(&self, host: &str, provider: &str) -> serde_json::Value {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/agent/sessions",
+                    serde_json::json!({
+                        "host_id": host, "workspace": "storm", "provider": provider,
+                        "terminal": {"cols": 80, "rows": 24},
+                    }),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+
+        async fn launch(&self, provider: &str) -> serde_json::Value {
+            self.launch_on(&self.host.clone(), provider).await
+        }
+
+        fn start(&mut self) -> serde_json::Value {
+            let cmd = self.link.try_recv().unwrap();
+            let wire = serde_json::to_value(&cmd).unwrap();
+            assert_eq!(wire["type"], "start", "{wire}");
+            wire
+        }
+
+        async fn pull_as(&self, bearer: &str, session: &str) -> (StatusCode, HeaderMap, String) {
+            let response = self
+                .app
+                .clone()
+                .oneshot(get_with_auth(
+                    &format!("/v1/runtime/sessions/{session}/provider-credential"),
+                    bearer,
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+        }
+
+        async fn pull(&self, session: &str) -> (StatusCode, HeaderMap, String) {
+            self.pull_as(&self.host_bearer.clone(), session).await
+        }
+
+        async fn report(&self, session: &str, status: &str) {
+            let (code, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{session}/status"),
+                    serde_json::json!({"status": status}),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success(), "{code} {body}");
+        }
+    }
+
+    fn refusal_code(body: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn id_of(launched: &serde_json::Value) -> String {
+        launched["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_native_launch_sends_the_start_bytes_it_always_did() {
+        let dir = tempdir::TempDir::new("storm-ts-native").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        // A token synced but no host ticked (default none, AC-TS3).
+        f.sync(None).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["credential"], "native", "{launched}");
+        assert!(launched["credential_notice"].is_null(), "{launched}");
+        let wire = serde_json::to_string(&f.link.try_recv().unwrap()).unwrap();
+        let session = id_of(&launched);
+        let expected = format!(
+            r#"{{"cmd_seq":1,"type":"start","session":"{session}","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{{"cols":80,"rows":24}},"mcp":[{{"id":"storm","slug":"storm"}}]}}"#
+        );
+        assert_eq!(wire, expected);
+        let (status, _, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refusal_code(&body), "host_not_in_scope");
+    }
+
+    #[tokio::test]
+    async fn a_ticked_host_is_told_the_kind_and_pulls_the_token_while_starting() {
+        let dir = tempdir::TempDir::new("storm-ts-synced").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["credential"], "synced", "{launched}");
+        assert!(!launched.to_string().contains(CANARY));
+        let wire = f.start();
+        assert_eq!(wire["provider_credential"], KIND, "{wire}");
+        assert!(!wire.to_string().contains(CANARY), "{wire}");
+
+        let session = id_of(&launched);
+        let (status, headers, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(headers["cache-control"], "no-store");
+        let pulled: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(pulled["kind"], KIND);
+        assert_eq!(pulled["value"], CANARY);
+        assert!(pulled["expires_at"].is_string(), "{pulled}");
+        // A retry during `starting` is allowed: a blip must not fail a launch.
+        assert_eq!(f.pull(&session).await.0, StatusCode::OK);
+
+        // Once running, never again.
+        f.report(&session, "running").await;
+        let (status, headers, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(refusal_code(&body), "session_not_starting");
+        assert!(!body.contains(CANARY));
+        assert!(headers.get("cache-control").is_none());
+
+        let events = f.state.auth_db.lock().await.all_events().unwrap();
+        let delivered: Vec<_> = events
+            .iter()
+            .filter(|(k, _)| k == "provider_credential_delivered")
+            .collect();
+        assert_eq!(delivered.len(), 2, "{events:?}");
+        assert!(delivered[0].1.contains(&session), "{delivered:?}");
+        assert!(delivered[0].1.contains(KIND), "{delivered:?}");
+        assert!(delivered[0].1.contains("fingerprint"), "{delivered:?}");
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == "provider_credential_refused"
+                    && d.contains("session_not_starting")),
+            "{events:?}"
+        );
+        for (kind, detail) in &events {
+            assert!(!detail.contains(CANARY), "{kind}: {detail}");
+            assert!(!detail.contains("CANARY-124o"), "{kind}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pull_is_refused_for_another_hosts_session_and_unknown_ones() {
+        let dir = tempdir::TempDir::new("storm-ts-other").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        let (other, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let mut other_link = online_host(&f.state, &other, true);
+        f.sync(None).await;
+        // Both ticked, so only ownership can refuse it.
+        f.tick(&[&f.host.clone(), &other]).await;
+        let session = id_of(&f.launch("claude-code").await);
+        f.start();
+        let (status, _, body) = f.pull_as(&format!("Bearer {other_token}"), &session).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(refusal_code(&body), "not_your_session");
+        let (status, _, body) = f.pull("ags_NOPE").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(refusal_code(&body), "not_your_session");
+
+        // The other host's own session, launched while it was ticked.
+        let theirs = id_of(&f.launch_on(&other, "claude-code").await);
+        let wire = serde_json::to_value(other_link.try_recv().unwrap()).unwrap();
+        assert_eq!(wire["provider_credential"], KIND);
+        assert_eq!(f.pull(&theirs).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            f.pull_as(&format!("Bearer {other_token}"), &theirs).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn narrowing_and_removal_stop_the_pull_and_widening_waits_for_a_new_launch() {
+        let dir = tempdir::TempDir::new("storm-ts-scope").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        let host = f.host.clone();
+        f.sync(None).await;
+        f.tick(&[&host]).await;
+        let session = id_of(&f.launch("claude-code").await);
+        assert_eq!(f.start()["provider_credential"], KIND);
+        // Unticked while starting: the in-flight pull is refused (AC-TS5).
+        f.tick(&[]).await;
+        let (status, _, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refusal_code(&body), "host_not_in_scope");
+        // Widening does not reach a launch that was not told to pull.
+        let unsynced = f.launch("claude-code").await;
+        assert_eq!(unsynced["credential"], "native");
+        assert!(f.start().get("provider_credential").is_none());
+        f.tick(&[&host]).await;
+        let (status, _, body) = f.pull(&id_of(&unsynced)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refusal_code(&body), "host_not_in_scope");
+        // Removed: no field on a new launch, and a pending pull finds nothing
+        // (AC-TS4).
+        let pending = id_of(&f.launch("claude-code").await);
+        assert_eq!(f.start()["provider_credential"], KIND);
+        crate::ops::delete_provider_credential(&f.state, &f.actor())
+            .await
+            .unwrap();
+        f.tick(&[&host]).await;
+        let (status, _, body) = f.pull(&pending).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(refusal_code(&body), "no_credential");
+        let after = f.launch("claude-code").await;
+        assert_eq!(after["credential"], "native");
+        assert!(f.start().get("provider_credential").is_none());
+    }
+
+    #[tokio::test]
+    async fn other_providers_never_get_the_field_or_the_token() {
+        let dir = tempdir::TempDir::new("storm-ts-providers").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        for provider in ["opencode", "shell"] {
+            let launched = f.launch(provider).await;
+            assert_eq!(launched["credential"], "native", "{launched}");
+            assert!(f.start().get("provider_credential").is_none(), "{provider}");
+            let (status, _, body) = f.pull(&id_of(&launched)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{provider}");
+            assert_eq!(refusal_code(&body), "wrong_provider");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_old_host_launches_on_its_own_login_with_a_notice() {
+        let dir = tempdir::TempDir::new("storm-ts-old").unwrap();
+        let mut f = sync_fixture(dir.path(), false).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["status"], "starting", "{launched}");
+        assert_eq!(launched["credential"], "old_host");
+        let notice = launched["credential_notice"].as_str().unwrap();
+        assert!(notice.contains("build-vm"), "{notice}");
+        assert!(notice.contains("update storm-runtime"), "{notice}");
+        assert!(f.start().get("provider_credential").is_none());
+        let (status, _, _) = f.pull(&id_of(&launched)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_is_not_delivered_and_the_launch_says_so() {
+        let dir = tempdir::TempDir::new("storm-ts-expired").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(Some("2020-01-01T00:00:00Z")).await;
+        f.tick(&[&f.host.clone()]).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["credential"], "expired", "{launched}");
+        assert!(
+            launched["credential_notice"]
+                .as_str()
+                .unwrap()
+                .contains("re-sync"),
+            "{launched}"
+        );
+        assert!(f.start().get("provider_credential").is_none());
+    }
+
+    #[tokio::test]
+    async fn only_a_host_token_reaches_the_pull_route() {
+        let dir = tempdir::TempDir::new("storm-ts-tiers").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let session = id_of(&f.launch("claude-code").await);
+        f.start();
+        let (status, created) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let key = format!("Bearer {}", created["secret"].as_str().unwrap());
+        for bearer in [f.owner_bearer.clone(), key, "Bearer nonsense".into()] {
+            let (status, _, body) = f.pull_as(&bearer, &session).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{bearer}: {body}");
+            assert!(!body.contains(CANARY));
+        }
+        assert_eq!(f.pull(&session).await.0, StatusCode::OK);
+    }
+
+    #[test]
+    fn the_pulled_credential_never_debug_prints() {
+        let pulled = crate::ops::provider_wire::PulledCredential {
+            kind: KIND,
+            value: crate::gateway::provider::Secret::new(CANARY.into()),
+            expires_at: None,
+        };
+        let debug = format!("{pulled:?}");
+        assert!(!debug.contains("CANARY"), "{debug}");
+        assert!(serde_json::to_string(&pulled).unwrap().contains(CANARY));
     }
 }
