@@ -2,11 +2,10 @@
 import BrandMark from "./BrandMark.astro";
 
 const path = Astro.url.pathname.replace(/\/$/, "") || "/";
-const onHome = path === "/";
 
 const links = [
   { href: "/clients", label: "Clients" },
-  { href: onHome ? "#docs" : "/#docs", label: "Docs" },
+  { href: "/docs/", label: "Docs" },
   {
     href: "https://github.com/dewanshDT/Storm",
     label: "GitHub",

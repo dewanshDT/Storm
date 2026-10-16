@@ -1,6 +1,7 @@
 # storm (www)
 
-Marketing / home site for Storm. Astro, static. Milestone **M16**.
+Marketing site and docs for Storm. Astro, static, with Starlight for `/docs`.
+Milestone **M27** (vault: *Storm/Website/Website v2 — Plan*; decision 107).
 
 ## Routes
 
@@ -11,10 +12,31 @@ Marketing / home site for Storm. Astro, static. Milestone **M16**.
 | `/install` | Apt source, `storm-server up`, **first login**, link to clients | `docs/www/install.md` |
 | `/404` | Not-found page — links back to the four real routes | — |
 | `/how-it-works` | Architecture sketch; deep links to the repo | `docs/www/how-it-works.md` |
+| `/docs/…` | The docs (Starlight) | `docs/site/**/*.md` — the pages themselves |
 
-Canonical prose also lives in the personal vault as **Storm Website** notes
-(Home / Install / How it works). Edit those or `docs/www/`, then mirror into
-`src/pages/`.
+Canonical prose for the marketing pages also lives in the personal vault as
+**Storm Website** notes (Home / Install / How it works). Edit those or
+`docs/www/`, then mirror into `src/pages/`. M27 retires that mirror.
+
+## The docs
+
+The docs are markdown in the repo's **`docs/site/`**, next to the code they
+describe, so a feature and its page land in the same PR. `src/content.config.ts`
+loads them with Astro's `glob` loader and prefixes every id with `docs/`, so
+`docs/site/start/quickstart.md` serves at `/docs/start/quickstart/`.
+
+- **A new page goes in the sidebar in `astro.config.mjs`.** Starlight's
+  `autogenerate` matches files under `src/content/docs/`, which these are
+  not, so the sidebar lists pages by id.
+- Starlight's own 404 is off (`disable404Route`); `src/pages/404.astro` stays.
+- The site title is `src/components/DocsSiteTitle.astro`: the brand mark links
+  home, "Docs" links to `/docs/`.
+- Theme: `src/styles/starlight.css` maps Starlight's palette onto Storm dark
+  (dark) and SlowFlow earth (light). `tokens.css` has the same Storm dark for
+  the marketing pages, which follow the system setting unless the docs' theme
+  picker stored a choice (`starlight-theme`, read in `BaseLayout`).
+- Search is Pagefind, built at `npm run build`.
+- Edit links point at `staging`, where docs PRs land.
 
 ## Stack
 
@@ -109,5 +131,6 @@ build (`www` job in `ci.yml`); there is no deploy workflow.
 - Describe a credential the server no longer has. Authentication is per-device
   pairing plus sessions, and MCP clients use keys — `deploy/storm.env.example`
   and `deploy/README.md` are the source of truth, not memory
-- Market anything that is not released. The relay works on `staging` and is not
-  deployed; it does not belong on this site until it is
+- Market anything that is not released. The relay is released and is described
+  where the truth needs it (what it can read); promoting it waits on D3 in the
+  plan

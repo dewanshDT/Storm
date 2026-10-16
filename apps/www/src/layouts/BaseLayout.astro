@@ -32,7 +32,17 @@ const pageTitle =
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
-    <meta name="theme-color" content="#d4cbb8" />
+    <meta name="theme-color" content="#d4cbb8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1e1a17" media="(prefers-color-scheme: dark)" />
+    <script is:inline>
+      // The docs' theme picker (Starlight) stores its choice under this key.
+      // Applying it here, before first paint, keeps a reader who picked a
+      // theme in the docs from getting the other one on the home page.
+      try {
+        const t = localStorage.getItem("starlight-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch {}
+    </script>
     <link rel="canonical" href={canonical} />
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={description} />
