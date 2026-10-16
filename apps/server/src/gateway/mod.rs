@@ -51,6 +51,9 @@ pub struct Gateway {
     pub sessions: session::Sessions,
     /// One lock per OAuth connection, held across a refresh (single flight).
     refresh_locks: Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    /// Fingerprints of synced provider credentials this boot found unopenable
+    /// (decision 124), for `ops` to audit once `auth.db` is at hand.
+    pub provider_unreadable: Mutex<Vec<String>>,
 }
 
 /// An RFC 3339 instant `secs` from now, in the same format as
@@ -105,6 +108,15 @@ impl Gateway {
                  backup to avoid this)"
             );
         }
+        // Checked whether or not the active key was lost: any key a row names
+        // can go missing, and the token must then wait for a re-sync.
+        let provider_unreadable = provider::mark_unopenable(&db, &loaded.keyring, now)?;
+        if !provider_unreadable.is_empty() {
+            tracing::warn!(
+                "the synced Claude token was sealed under a data key that is missing; it is \
+                 not delivered until it is synced again (restore state/gateway/keys/ to avoid this)"
+            );
+        }
         let _ = db.prune_calls(now_ms(), store::CALLS_KEEP_ROWS);
         Ok(Self {
             store: Mutex::new(db),
@@ -113,6 +125,7 @@ impl Gateway {
             calls_since_prune: std::sync::atomic::AtomicU64::new(0),
             sessions: session::Sessions::default(),
             refresh_locks: Mutex::new(std::collections::HashMap::new()),
+            provider_unreadable: Mutex::new(provider_unreadable),
         })
     }
 
@@ -356,5 +369,100 @@ mod tests {
             }
         }
         drop(gw);
+    }
+
+    fn sync_token(gw: &Gateway, token: &str) {
+        let token = provider::Secret::new(token.to_string());
+        let sealed = gw
+            .keys
+            .seal(
+                provider::CREDENTIAL_ID,
+                provider::KIND,
+                token.expose().as_bytes(),
+            )
+            .unwrap();
+        gw.store
+            .lock()
+            .unwrap()
+            .put_provider_credential(&provider::Row {
+                id: provider::CREDENTIAL_ID.into(),
+                kind: provider::KIND.into(),
+                owner_user_id: "usr_A".into(),
+                sealed,
+                fingerprint: provider::fingerprint(&token),
+                minted_at: "2026-10-16T00:00:00Z".into(),
+                expires_at: "2027-10-16T00:00:00Z".into(),
+                status: provider::status::ACTIVE.into(),
+                created_at: "t".into(),
+                updated_at: "t".into(),
+            })
+            .unwrap();
+    }
+
+    fn synced(gw: &Gateway) -> provider::Row {
+        gw.store
+            .lock()
+            .unwrap()
+            .provider_credential(provider::KIND)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_lost_key_makes_the_synced_token_need_resync_and_the_server_still_starts() {
+        let dir = tempdir::TempDir::new("storm-gw-pc-lost").unwrap();
+        let first = Gateway::open(dir.path(), "t").unwrap();
+        sync_token(&first, "sk-ant-oat01-CANARY-lost-key-0123456789");
+        let key = first.keys.active_key_id().to_string();
+        let fp = synced(&first).fingerprint;
+        assert!(first.provider_unreadable.lock().unwrap().is_empty());
+        drop(first);
+        std::fs::remove_file(crypto::key_path(dir.path(), &key)).unwrap();
+
+        let again = Gateway::open(dir.path(), "t2").expect("a lost key is not a lockout");
+        let row = synced(&again);
+        assert_eq!(row.status, provider::status::NEEDS_RESYNC);
+        assert_eq!(*again.provider_unreadable.lock().unwrap(), vec![fp]);
+        assert!(again.keys.open(&row.id, &row.kind, &row.sealed).is_err());
+        drop(again);
+        // Reported once: the next boot has nothing new to say.
+        let third = Gateway::open(dir.path(), "t3").unwrap();
+        assert!(third.provider_unreadable.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_backup_restores_a_synced_token_that_opens() {
+        let dir = tempdir::TempDir::new("storm-gw-pc-backup").unwrap();
+        let state = dir.path().join("state");
+        let gw = Gateway::open(&state, "t").unwrap();
+        let canary = "sk-ant-oat01-CANARY-backup-0123456789";
+        sync_token(&gw, canary);
+        let key = gw.keys.active_key_id().to_string();
+        drop(gw);
+
+        let dest = dir.path().join("snapshot");
+        backup(&state, &dest).unwrap();
+        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::create_dir_all(state.join(GATEWAY_DIR)).unwrap();
+        std::fs::copy(db_path(&dest), db_path(&state)).unwrap();
+        crypto::create_private_dir(&crypto::keys_dir(&state)).unwrap();
+        std::fs::copy(
+            crypto::key_path(&dest, &key),
+            crypto::key_path(&state, &key),
+        )
+        .unwrap();
+
+        let restored = Gateway::open(&state, "t2").unwrap();
+        let row = synced(&restored);
+        assert_eq!(row.status, provider::status::ACTIVE);
+        let opened = restored.keys.open(&row.id, &row.kind, &row.sealed).unwrap();
+        assert_eq!(opened.expose(), canary.as_bytes());
+        let snapshot = std::fs::read(db_path(&dest)).unwrap();
+        assert!(
+            !snapshot
+                .windows(canary.len())
+                .any(|w| w == canary.as_bytes()),
+            "the backup holds the token in the clear"
+        );
     }
 }
