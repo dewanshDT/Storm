@@ -149,7 +149,7 @@ is never in the server's group.
 ```sh
 sudo apt install storm-runtime
 sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
-# In the app: Settings > Agents > Hosts > Enroll a host, then paste the string:
+# In the app: Settings › Hosts & default agent › Enroll a host, then paste the string:
 sudo -u storm-runtime storm-runtime enroll
 sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path

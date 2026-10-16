@@ -11,17 +11,18 @@ own machines, and gives AI apps access to your notes through MCP.
 
 - **[Quickstart](/docs/start/quickstart/)** — from nothing to a server, your
   first device and your phone.
-- **[Concepts](/docs/start/concepts/)** — the words the rest of these docs use:
-  vaults, devices, Runtime Hosts, sessions, integrations.
+- **[Concepts](/docs/start/concepts/)** — the words the rest of these docs use.
 
-## Still in the repository
+## Sections
 
-These docs are new and growing section by section. Until a topic has its own
-page here, its reference lives next to the code:
+| | |
+|---|---|
+| **[Install](/docs/install/server/)** | The server on Linux, macOS or Windows; the apps; pairing; firewalls; upgrades. |
+| **[Notes](/docs/notes/writing/)** | Writing, vaults and folders, sync and conflicts, shortcuts. |
+| **[Agents](/docs/agents/sessions/)** | Sessions, Runtime Hosts, integrations. |
+| **[MCP](/docs/mcp/connect/)** | Connecting Claude Code, Claude Desktop and other AI apps. |
+| **[Operate](/docs/operate/backups/)** | Backups, the security model, troubleshooting. |
+| **[Reference](/docs/reference/config/)** | Configuration, MCP tools and both command lines — generated from the release. |
 
-- [Install and deploy](https://github.com/dewanshDT/Storm/blob/main/deploy/README.md)
-  — packages, Runtime Hosts on Linux, macOS and Windows, backups, firewalls,
-  relays.
-- [Server and MCP](https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md)
-  — the API, MCP tools and keys.
-- [The app](https://github.com/dewanshDT/Storm/blob/main/apps/client/README.md).
+Packaging, release and development notes stay with the code, in
+[the repository](https://github.com/dewanshDT/Storm).
