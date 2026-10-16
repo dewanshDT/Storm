@@ -4,9 +4,12 @@ import CodeBlock from "../components/CodeBlock.astro";
 import { release } from "../data/release";
 
 const bootstrap = release.installCommand;
+const windows = release.windowsInstallCommand;
+const installerUpgrade = release.installerUpgradeCommand;
 const upgrade = release.upgradeCommand;
 
-const up = `sudo storm-server up
+const up = `curl -fsSL ${release.installScriptUrl} | sudo sh   # apt repo + storm-server only
+sudo storm-server up
 sudo storm-server status`;
 
 const upCustom = `sudo storm-server up \\
@@ -17,24 +20,22 @@ const upCustom = `sudo storm-server up \\
 const pair = `sudo -u storm storm-server pair \\
   --state /srv/storm/state --qr`;
 
-const accounts = `sudo -u storm storm-server user add <name> --state /srv/storm/state
-sudo -u storm storm-server user list --state /srv/storm/state
-sudo -u storm storm-server passwd <name> --state /srv/storm/state`;
+const passwd = `sudo -u storm storm-server passwd --state /srv/storm/state`;
 ---
 
 <BaseLayout
   title="Install"
-  description="Install storm-server from the apt repository on Debian or Ubuntu, then download clients from GitHub Releases."
+  description="Install Storm on Linux, macOS or Windows with the interactive installer, then pair your devices and download the apps."
 >
   <header class="page-hero wrap-narrow">
-    <p class="eyebrow">07 · Installation</p>
+    <p class="eyebrow">08 · Installation</p>
     <h1>Install Storm</h1>
     <p class="lede">
       One command on Linux (Debian/Ubuntu) or macOS opens an interactive
       installer: the server and app, a Runtime Host for agents, or everything,
-      with your phone paired and the runtime enrolled for you. It shows its
-      plan before changing anything; run it again to upgrade, pair a device or
-      uninstall. Then
+      with your phone paired and the runtime enrolled for you. Windows has its
+      own. Each shows its plan before changing anything; run it again to
+      upgrade, pair a device or uninstall. Then
       <a href="/clients">get a client</a>
       for your other devices.
     </p>
@@ -55,22 +56,44 @@ sudo -u storm storm-server passwd <name> --state /srv/storm/state`;
     <CodeBlock code={bootstrap} label="install" />
   </section>
 
+  <section class="section wrap-narrow" id="windows">
+    <h2>Windows</h2>
+    <p class="support">
+      In PowerShell — as administrator if you want the Runtime Host. It
+      installs the server, the Runtime Host, or both, after checking every
+      download against the release’s checksums. The server runs as you at
+      logon with no console window and your notes in
+      <code>%USERPROFILE%\Storm</code>; the Runtime Host is the
+      <code>StormRuntime</code> service under its own virtual account. Neither
+      is code-signed yet, so SmartScreen may warn.
+    </p>
+    <CodeBlock code={windows} label="powershell" />
+  </section>
+
   <section class="section wrap-narrow" id="update">
     <h2>Update</h2>
     <p class="support">
-      Once the apt source is registered, upgrade through apt — there is no
+      Run the installer again: it shows what is installed and offers to
+      upgrade it, and it never deletes notes or workspaces. On Windows, re-run
+      the PowerShell command above. If you run both the server and a Runtime
+      Host, upgrade both — newer features need both sides.
+    </p>
+    <CodeBlock code={installerUpgrade} label="update" />
+    <p class="support">
+      A server installed by hand on Linux upgrades through apt — there is no
       <code>storm-server upgrade</code>. That refreshes the binary and the web
       client under <code>/usr/share/storm/web</code>. Restart the unit so the
       new binary is what is listening; <code>/etc/storm/storm.env</code> is left
       alone across upgrades.
     </p>
-    <CodeBlock code={upgrade} label="update" />
+    <CodeBlock code={upgrade} label="update · apt" />
   </section>
 
   <section class="section wrap-narrow" id="start">
-    <h2>Start the server</h2>
+    <h2>Start the server by hand</h2>
     <p class="support">
-      <code>up</code> creates the <code>storm</code> user when it can, writes
+      The installer does this for you. By hand on Debian or Ubuntu, register
+      the apt repository and start the server: <code>up</code> creates the <code>storm</code> user when it can, writes
       <code>/etc/storm/storm.env</code> (mode 600), and enables the systemd
       unit. Default data root is <code>/srv/storm</code>. The web client is then
       at <code>http://&lt;host&gt;:{release.webPort}</code>.
@@ -87,36 +110,65 @@ sudo -u storm storm-server passwd <name> --state /srv/storm/state`;
   <section class="section wrap-narrow" id="first-login">
     <h2>First login</h2>
     <p class="support">
-      The first account on a server is always an <strong>owner</strong>.
-      Everything after it — more devices, more accounts, MCP keys — happens from
-      a client that is already signed in.
+      Storm is single-user: one account, with a password you set when the
+      first device pairs. Everything after that — more devices, MCP keys,
+      Runtime Hosts — is added from a client that is already signed in, under
+      <strong>Settings</strong>.
     </p>
 
     <h3>From a browser</h3>
     <p class="support">
       Open <code>http://&lt;host&gt;:{release.webPort}</code> on the same
       network. The page pairs itself with the server that served it, then asks
-      you to create that first account. Nothing to run on the host.
+      you to set your Storm’s password. Nothing to run on the host.
     </p>
 
     <h3>From the macOS or Android app</h3>
     <p class="support">
-      Print a single-use pairing code on the host and scan it in Storm.
-      <code>pair</code> works only while the server has no accounts — after
-      that, add a device from a client that is already signed in.
+      On your home network the app lists the Storms it finds under
+      <strong>On this network</strong>. Pick yours and enter your Storm’s
+      password. On a network your computer treats as public, or when the app
+      cannot see the server, scan a QR code instead: <strong>Settings ›
+      Devices &amp; access › Add a device</strong> on a device that is already
+      signed in shows one.
+    </p>
+    <p class="support">
+      The very first device has no password to enter yet. Set it up from the
+      browser, or print a single-use setup code on the host and scan it.
+      <code>pair</code> works only while the server has no account.
     </p>
     <CodeBlock code={pair} label="pair" />
 
     <h3>On the host</h3>
     <p class="support">
-      Accounts are managed on the box too, which is the recovery path for a
-      forgotten password. <strong>Run these as <code>storm</code>, not as
-      root</strong> — <code>auth.db</code> is created on first use, so a
+      A forgotten password is reset on the box, and on a server with no
+      account yet the same command creates it. <strong>Run it as
+      <code>storm</code>, not as root</strong> — <code>auth.db</code> is created on first use, so a
       root-owned database is one the service cannot write, and the symptom
       arrives much later as a login that fails with nothing useful in the
       journal.
     </p>
-    <CodeBlock code={accounts} label="accounts" />
+    <CodeBlock code={passwd} label="passwd" />
+  </section>
+
+  <section class="section wrap-narrow" id="firewalls">
+    <h2>Firewalls</h2>
+    <p class="support">
+      Storm needs no inbound port from the internet and never opens one
+      silently. On your home network it is faster and more private to let
+      devices reach Storm directly, so the installer <strong>asks</strong>
+      first, and only ever allows Storm’s port from your local network: ufw
+      rules from your local subnets, firewalld’s home zone (never public),
+      Windows’ <strong>Private</strong> networks only, and macOS’s own
+      <em>Allow incoming connections?</em> prompt. Say no and it prints the
+      command instead; uninstalling removes only what it added.
+    </p>
+    <p class="support">
+      On a network the computer treats as public, such as a café or hotel,
+      Storm does not announce itself and will not pair by password; scan a QR
+      code instead. <code>storm-server status</code> says whether the firewall
+      lets Storm in, and prints the command to fix it if not.
+    </p>
   </section>
 
   <section class="section wrap-narrow">
@@ -145,11 +197,24 @@ sudo -u storm storm-server passwd <name> --state /srv/storm/state`;
   <section class="section wrap-narrow">
     <h2>MCP</h2>
     <p class="support">
-      After the server is up, enable MCP from the client under Server → AI
-      access, or via the config API — it is off by default, and write tools need
-      writable mode. An MCP client authenticates with a <em>key</em> you mint in
-      the app, shown once and revocable; it is accepted on <code>/mcp</code> and
-      nowhere else. Details and the twelve tools are documented in
+      After the server is up, turn MCP on in the app under
+      <strong>Settings › AI access</strong> — it is off by default, and the
+      write tools need <em>Let them create, edit and delete</em>. An MCP client
+      authenticates with a <em>key</em> you mint under Devices &amp; access,
+      shown once and revocable; it is accepted on <code>/mcp</code> and nowhere
+      else.
+    </p>
+    <p class="support">
+      Making a key shows the config for your AI app, filled in for your
+      server. The recommended one runs <code>storm-runtime mcp-connect</code>,
+      a small adapter the app starts itself: it checks it reached your server
+      before sending the key, and if your server uses a relay the same config
+      keeps working away from home. It needs <code>storm-runtime</code> on that computer. The plain
+      HTTP entry also works, on your home network only.
+    </p>
+    <p class="support">
+      The tools are listed on the <a href="/#mcp">home page</a> and
+      documented in
       <a
         href="https://github.com/dewanshDT/Storm/blob/main/apps/server/README.md"
         target="_blank"

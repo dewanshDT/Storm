@@ -35,8 +35,9 @@ sudo storm-server status
 root by `apt-repo.yml`. Manual key + `sources.list` steps are in
 [release-secrets.md](release-secrets.md) if you prefer not to pipe to shell.
 
-`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600, with a
-generated token), and `systemctl enable --now storm-server`. The web client
+`up` creates the `storm` user, writes `/etc/storm/storm.env` (mode 600; it
+holds paths and the port, never a credential), and `systemctl enable --now
+storm-server`. The web client
 lives at `/usr/share/storm/web` and upgrades with the package.
 
 ## Updating (packaged)
@@ -934,7 +935,7 @@ the vault root), which must be refused.
 **Who can get in.** Storm has one account (decision 82), protected by a
 password hashed with Argon2id. Each device pairs — by QR, or on the LAN with
 the password (decision 118) — and gets its own device credential and session
-tokens, revocable in Settings › Access. MCP clients use separate keys. Logins
+tokens, revocable in Settings › Devices & access. MCP clients use separate keys. Logins
 are rate-limited per address.
 
 **How a client knows it reached your server.** Pairing pins the server's
@@ -961,7 +962,8 @@ can read a note, an index or `state/auth.db`. Check it with
 keeps the modes the NAS assigns.
 
 **One account sees every vault.** A second vault is organisation, not
-isolation.
+isolation. Agents are the exception: an agent session writes only to the
+vault chosen when it was started.
 
 `storm-server status` prints the server's name, id, key fingerprint and the
 relays it is registered with: what a device pairing from the LAN list shows,
