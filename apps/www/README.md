@@ -36,7 +36,7 @@ From repo root:
 ```sh
 make www-dev   # astro dev
 make www       # npm ci + production build → apps/www/dist
-make www-check # release tag is current + no stale credential copy
+make www-check # release tag, credential and account copy, MCP tool list
 ```
 
 `www-check` (`scripts/check-claims.sh`) is the one that matters, because the
@@ -51,6 +51,13 @@ will:
   cutover (M19); the pages said otherwise for thirteen days while CI stayed green.
   The check bans the phrasings, not the word — saying "there is no token" is
   the point.
+- **No page describes more than one account** (decision 82). `/install` told
+  people to run `storm-server user add` for three releases after it was
+  removed. The root `README.md` is checked too.
+- **The MCP tools on `/` are the server's.** Every `#[tool]` in
+  `apps/server/src/mcp.rs` must be in `index.astro`'s `mcpReadTools`,
+  `mcpWriteTools` or `mcpAgentTools`, and nothing else. A new tool fails CI
+  until the page names it (decision 107).
 
 It runs in the `www` CI job, which is why that job checks out with
 `fetch-depth: 0`.
@@ -95,7 +102,9 @@ build (`www` job in `ci.yml`); there is no deploy workflow.
 
 - Deploy into the apt Pages site root
 - Duplicate operator runbooks — link or quote `deploy/`
-- Add a full documentation corpus
+- Add a documentation corpus outside the M27 plan (decision 107): docs go
+  to `/docs` from `docs/site/`, moved out of `deploy/README.md` rather than
+  copied
 - Invent install commands, platforms, or MCP tools
 - Describe a credential the server no longer has. Authentication is per-device
   pairing plus sessions, and MCP clients use keys — `deploy/storm.env.example`

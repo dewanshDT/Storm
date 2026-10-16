@@ -58,9 +58,10 @@ that, authentication is per-device pairing plus sessions, and MCP clients use
 keys minted from the app. Set `STORM_VAULT_ROOT`
 in the environment to keep it stable.
 
-**v1 is LAN-only.** A single shared bearer token with no TLS is only defensible
-inside the LAN. TLS and per-device token rotation must land *before* this is
-ever reachable from outside it.
+**The server's own port is plain HTTP, so keep it on the LAN.** Credentials
+are per device (pairing, sessions, MCP keys), but nothing on that port is
+encrypted. Do not port-forward it; to reach it from outside, use the relay
+(`deploy/README.md`, *Relay*), which terminates TLS itself.
 
 ## Importing an existing Obsidian vault
 
@@ -165,8 +166,9 @@ excluded, so it cannot forge the message's field boundaries).
 `backup-db` snapshots it and copies the key files, and `deploy/README.md` says
 how to check a restore actually brought the identity back.
 
-Sessions and pairing are not built yet; the shared bearer token is unchanged.
-See decisions 52 / 52a / 52c.
+Pairing, sessions and MCP keys are the only credentials; the shared bearer
+token was removed at the A10 cutover. See decisions 52 / 52a / 52c and 82
+(single user).
 
 ### The account
 

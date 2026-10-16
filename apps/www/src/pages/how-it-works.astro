@@ -4,10 +4,10 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 
 <BaseLayout
   title="How it works"
-  description="Storm architecture: Flutter clients, a Rust sync server, plain Markdown vaults, and MCP for AI agents."
+  description="Storm architecture: Flutter clients, a Rust sync server, plain Markdown vaults, Runtime Hosts for agents, and MCP."
 >
   <header class="page-hero wrap-narrow">
-    <p class="eyebrow">03 · Architecture</p>
+    <p class="eyebrow">04 · Architecture</p>
     <h1>One knowledge layer. Many interfaces.</h1>
     <p class="lede">
       Storm is intentionally small. This page is the sketch; depth lives in the
@@ -24,18 +24,32 @@ import BaseLayout from "../layouts/BaseLayout.astro";
       Notes remain plain Markdown under a storage root you control. Compatible
       AI agents reach the same vault through MCP.
     </p>
-    <pre class="diagram" aria-label="Architecture sketch"><code>{`macOS · Android · Web
-          │  REST + WebSocket
-          ▼
-   storm-server (Rust / axum)
-          │
-   ┌──────┴──────┐
-   ▼             ▼
-vaults/*.md   state/
-plain md      indexes · registry · auth.db
-                     ▲
-                     │ MCP
-              AI applications`}</code></pre>
+    <p class="support">
+      Agents run on <strong>Runtime Hosts</strong> — <code>storm-runtime</code>
+      on Linux, macOS or Windows, on the server’s machine or another. A host
+      dials out to the server, so it needs no inbound port, and it holds no
+      notes: the agent reads and writes through the server like any other
+      client. Integrations you connect in the app are reached through the
+      server too, which keeps their credentials.
+    </p>
+    <p class="support">
+      Away from home the app can reach your server through a
+      <strong>relay</strong>. The server dials out to it, so nothing is
+      port-forwarded, and the app uses whichever of the server’s address and
+      its relays answers first. A relay stores nothing and checks no
+      credentials, but until end-to-end encryption it can read what it
+      carries: run your own, or use one you trust.
+    </p>
+    <pre class="diagram" aria-label="Architecture sketch"><code>{`macOS · Android · Web  AI applications
+       │ REST + WS        │ MCP
+       ▼                  ▼
+  storm-server (Rust / axum)  ◄──────  storm-runtime
+       │                     dials out Claude Code ·
+  ┌────┴─────┐                         OpenCode · shell
+  ▼          ▼
+vaults/    state/
+*.md       indexes · auth.db ·
+           agent.db · gateway.db`}</code></pre>
   </section>
 
   <section class="section wrap-narrow">
@@ -63,11 +77,16 @@ plain md      indexes · registry · auth.db
         device and replay when the server returns. Search remains server-side.
       </li>
       <li>
-        <strong>Accounts are local and yours.</strong> An owner account,
-        per-device pairing, sessions, and revocable keys for MCP clients — all
-        in <code>state/auth.db</code> on your server. No cloud account, no
-        third-party identity provider, no credential that leaves the network you
-        control. One person with several devices is the default, not the limit.
+        <strong>One account, and it is yours.</strong> Storm is single-user:
+        one password, per-device pairing and sessions, and revocable keys for
+        MCP clients — all in <code>state/auth.db</code> on your server. No cloud
+        account, no third-party identity provider, no credential that leaves
+        the network you control.
+      </li>
+      <li>
+        <strong>A Runtime Host is never an authority.</strong> It runs agents
+        and nothing else. The server decides who may start a session, which
+        vault an agent may write to, and which integration tools it may call.
       </li>
     </ul>
   </section>

@@ -18,7 +18,7 @@ Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 ┌──── clients (one Dart codebase) ────┐      ┌── AI agents ──┐
 │  macOS · Android · Web              │      │  MCP clients  │
 │  editor · cache · outbox · sync     │      └───────┬───────┘
-│  Notes | Agents (owner only)        │              │
+│  Notes | Agents | Integrations      │              │
 └──────┬───────────────────┬──────────┘              │
   REST + WebSocket     via storm-relay          MCP (/mcp)
   (LAN)                (optional, SRP v1)            │
@@ -78,7 +78,9 @@ runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
 `--dry-run`; `sh install.sh --help` lists the rest. **MCP only** (`--mcp`)
 will put just `storm-runtime` on a laptop's PATH for an AI app's
-`mcp-connect` (below); it is offered once a release carries `mcp-connect`.
+`mcp-connect` (below). `mcp-connect` shipped in v0.10.0, but the installer
+does not offer this mode yet: that release left `STORM_MCP_CONNECT_SINCE`
+empty.
 
 ### By hand (server on Debian / Ubuntu)
 
@@ -111,16 +113,19 @@ and enables the service; the web client is served from the same port.
 
 ### Pair the first device
 
-There is no shared token. Accounts, per-device sessions and MCP keys are the
-only credentials. While the server has no users, `pair` prints a single-use
-pairing URI — `--qr` also draws it as a code for a phone to scan:
+There is no shared token. Storm is single-user: one account, with per-device
+sessions and MCP keys as the only credentials. While the server has no account,
+`pair` prints a single-use pairing URI — `--qr` also draws it as a code for a
+phone to scan:
 
 ```sh
 sudo -u storm storm-server pair --state /srv/storm/state --qr
 ```
 
-The first account is an owner; add more from the app or with `storm-server
-user`. Details: [`deploy/README.md`](deploy/README.md#user-accounts).
+You set the account's password on that first device. Add more devices from
+the app (Settings › Devices & access › Add a device); reset a forgotten
+password with `storm-server passwd`. Details:
+[`deploy/README.md`](deploy/README.md#the-account).
 
 ### Update
 
@@ -131,8 +136,7 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
-Current release: **v0.3.1**. Clients (macOS zip, Android APK,
-web UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
+Clients (macOS zip, Android APK, web UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
 [Clients page](https://storm.dewansh.space/clients).
 
 ### Runtime Hosts (optional)
@@ -223,9 +227,8 @@ authenticate with MCP keys minted in the app. Updates carry a `base_version`
 into the same three-way merge the clients use. See
 [`apps/server/README.md`](apps/server/README.md#mcp).
 
-**Connecting an AI app: `storm-runtime mcp-connect`** *(unreleased: it lands
-with the next release; until then use the HTTP config)*. A stdio adapter the
-AI app starts itself. It dials the server's LAN address first and falls back
+**Connecting an AI app: `storm-runtime mcp-connect`** (since v0.10.0). A
+stdio adapter the AI app starts itself. It dials the server's LAN address first and falls back
 to the server's relays, so one config works at home and away, and before it
 sends the key anywhere it checks the server answers to the pinned public key.
 The key comes from `STORM_MCP_KEY` (or `--key-file`), never an argument. When
@@ -251,15 +254,17 @@ Bearer token) still works on the LAN, with no adapter and no identity check.
 
 ## Status
 
-M0–M15, M18 (desktop shortcuts) and M19 (auth phase 1 — server identity,
-accounts, pairing, sessions, MCP keys) are done; the shared token is gone.
-M20 (Agent Runtime V1 — runtime hosts, enrollment, agent sessions in a
-terminal) shipped decisions 77–78 in **v0.3.0** and the operator's first
-on-device fixes in **v0.3.1**; AM22, a host-owned terminal protocol, is
-drafted and awaiting approval. The relay is built, packaged and TLS-capable,
-and a Cloudflare Worker relay is deployed for testing. M16 (marketing site,
-live at [storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown
-read mode) are in progress. Per-vault authorization is its own later release.
+M0–M15 and M18–M26 are done; the newest release is on
+[GitHub Releases](https://github.com/dewanshDT/Storm/releases/latest). That
+covers auth (pairing by QR or, on your network, by password; sessions; MCP
+keys — the shared token is gone) and a single account (decision 82); the Agent
+Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions in a
+terminal you can resume; the MCP Gateway's integrations, each scoped to the
+hosts you choose; Storm v2's activity rail; the interactive installer; and the
+relay, which you can run yourself (a Cloudflare Worker relay is deployed for
+testing). M16 (marketing site, live at
+[storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown read
+mode) are in progress.
 
 Milestone status and the decision log are kept in the maintainer's notes, not
 in this repo. License: [MIT](LICENSE).

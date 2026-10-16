@@ -10,7 +10,7 @@ Content for route **`/`**. Parent: [[Storm Website]].
 ## Meta
 
 - **Title:** Storm
-- **Description:** Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients and MCP access for AI agents.
+- **Description:** Storm is a self-hosted, Markdown-native knowledge system with cross-platform clients, MCP access for AI agents, and coding agents that run on your own machines.
 - **Theme:** SlowFlow earth (warm paper) — see `apps/www/src/styles/tokens.css`
 
 ## Hero
@@ -25,7 +25,8 @@ Content for route **`/`**. Parent: [[Storm Website]].
 **Support**
 
 Storm is a self-hosted, Markdown-native knowledge system with cross-platform
-clients and first-class access for AI agents through MCP.
+clients, first-class access for AI agents through MCP, and coding agents that
+run on your own machines.
 
 **CTAs**
 
@@ -41,22 +42,40 @@ clients and first-class access for AI agents through MCP.
 curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
 ```
 
-**Metadata row:** Rust server · Flutter client · Markdown · MCP · Self-hosted
+**Install note:** an interactive installer for Linux (Debian/Ubuntu) and
+macOS — the server, the app, a Runtime Host, or everything. Links: Windows
+(`/install#windows`), full installation.
+
+**Metadata row:** Rust server · Flutter client · Markdown · MCP · Agents · Self-hosted
 
 ## Sections
 
 1. **01 · Foundation** — One source of truth. Storage-root tree; `state/` sibling.
-2. **02 · AI access** — 12 MCP tools (named); static conceptual demo. Off by
-   default, write tools need writable mode, and an agent authenticates with an
-   MCP key minted in the app (`stk_…`, `/mcp` only).
-3. **03 · Architecture** — Flutter clients ↔ Rust server ↔ Markdown vaults; MCP.
-4. **04 · Storage** — Ordinary `.md` files.
-5. **05 · Client** — macOS · Android · Web only (no fake screenshots).
-6. **06 · Synchronization** — Synced / Offline / Conflict status language.
-7. **07 · Installation** — Links into `/install`. Four steps: install, get a
-   client, **sign in** (pair the device, create the owner account — no shared
-   password, no cloud account), update later.
-8. **08 · Documentation** — Repo deep links only (no docs portal).
+2. **02 · AI access** — every MCP tool, named: the read and write lists in
+   `index.astro`, which `make www-check` compares with `mcp.rs`; agents also
+   get `session_context` and never `delete_note`. Static conceptual demo. Off
+   by default, the write tools need a second switch, and an agent
+   authenticates with an MCP key minted in the app (`stk_…`, `/mcp` only); the
+   app hands over the config, including `storm-runtime mcp-connect`.
+3. **03 · Agents** — Runtime Hosts run Claude Code, OpenCode or a shell on
+   Linux, macOS or Windows; start a session from a note, drive the terminal
+   from any device, paste images, resume an ended Claude Code / OpenCode
+   session; the agent writes only to the vault chosen at launch.
+   Integrations (Notion, Linear, …) are connected once in the app and scoped
+   to chosen Runtime Hosts (decision 121); the server keeps their
+   credentials, encrypted, and an agent gets only allowed tools.
+4. **04 · Architecture** — Flutter clients ↔ Rust server ↔ Markdown vaults;
+   MCP; Runtime Hosts dial out.
+5. **05 · Storage** — Ordinary `.md` files.
+6. **06 · Client** — macOS · Android · Web only (no fake screenshots).
+7. **07 · Synchronization** — Synced / Offline / Conflict status language.
+8. **08 · Installation** — Links into `/install`. Four steps: run the
+   installer (Linux, macOS, Windows), get a client, **sign in** (set the
+   Storm's password on the first device; later devices on the network find it
+   and pair with that password — one account, no cloud account), update by
+   re-running the installer.
+9. **09 · Documentation** — Repo deep links only (no docs portal yet; see
+   *Website v2 — Plan* in the vault).
 
 ## Design notes
 
