@@ -4,8 +4,8 @@ import BrandMark from "./BrandMark.astro";
 const path = Astro.url.pathname.replace(/\/$/, "") || "/";
 
 const links = [
-  { href: "/clients", label: "Clients" },
   { href: "/docs/", label: "Docs" },
+  { href: "/changelog", label: "Changelog" },
   {
     href: "https://github.com/dewanshDT/Storm",
     label: "GitHub",
@@ -41,8 +41,7 @@ const links = [
         links.map((link) => {
           const active =
             !link.external &&
-            (link.href === path ||
-              (link.href === "/clients" && path === "/clients"));
+            link.href.replace(/\/$/, "") === path;
           return (
             <a
               href={link.href}
@@ -57,10 +56,10 @@ const links = [
         })
       }
       <a
-        class:list={["btn", "btn-primary", "nav-install", path === "/install" && "is-active"]}
-        href="/install"
+        class:list={["btn", "btn-primary", "nav-install", path === "/download" && "is-active"]}
+        href="/download"
       >
-        Install
+        Download
       </a>
     </nav>
   </div>

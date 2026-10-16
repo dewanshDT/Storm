@@ -14,6 +14,13 @@ export default defineConfig({
   // element on the next line, so "Then\n<a>" rendered as "Then<a>" sitewide.
   compressHTML: false,
   site: "https://storm.dewansh.space",
+  // Old routes, kept working (decision 107): links to them are out in the
+  // wild — the app, release notes, the README.
+  redirects: {
+    "/install": "/download",
+    "/clients": "/download#apps",
+    "/how-it-works": "/docs/start/concepts/#how-it-fits-together",
+  },
   integrations: [
     sitemap(),
     // The docs live at /docs, written in the repo's docs/site/ (decision 107):

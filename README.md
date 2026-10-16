@@ -11,7 +11,8 @@ without opening a port.
 > **Your knowledge. On your infrastructure.**
 
 Site: [storm.dewansh.space](https://storm.dewansh.space) ·
-Clients: [storm.dewansh.space/clients](https://storm.dewansh.space/clients) ·
+Docs: [storm.dewansh.space/docs](https://storm.dewansh.space/docs/) ·
+Download: [storm.dewansh.space/download](https://storm.dewansh.space/download) ·
 Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 
 ```
@@ -137,7 +138,7 @@ sudo storm-server status
 ```
 
 Clients (macOS zip, Android APK, web UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
-[Clients page](https://storm.dewansh.space/clients).
+[Download page](https://storm.dewansh.space/download).
 
 ### Runtime Hosts (optional)
 
@@ -185,7 +186,7 @@ wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 | [`apps/runtime`](apps/runtime) | `storm-runtime`, the Agent Runtime Host — PTY, providers, workspaces (standalone crate, no workspace) |
 | [`apps/relay`](apps/relay) | `storm-relay`, the SRP v1 relay (standalone crate, no workspace) |
 | [`apps/client`](apps/client/README.md) | Flutter app — macOS, Android, web (Linux desktop deferred) |
-| [`apps/www`](apps/www/README.md) | Marketing site (Astro) → [storm.dewansh.space](https://storm.dewansh.space) |
+| [`apps/www`](apps/www/README.md) | Website and docs (Astro + Starlight) → [storm.dewansh.space](https://storm.dewansh.space); the docs' pages are [`docs/site/`](docs/site) |
 | [`deploy/`](deploy/README.md) | systemd units, apt bootstrap, backup, relay setup |
 | [`docs/`](docs) | Design briefs, editor findings, the relay spec and its test vectors |
 
@@ -262,7 +263,7 @@ Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions in a
 terminal you can resume; the MCP Gateway's integrations, each scoped to the
 hosts you choose; Storm v2's activity rail; the interactive installer; and the
 relay, which you can run yourself (a Cloudflare Worker relay is deployed for
-testing). M16 (marketing site, live at
+testing). M27 (the website and its docs, at
 [storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown read
 mode) are in progress.
 

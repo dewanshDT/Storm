@@ -1,4 +1,4 @@
-import { defineCollection } from "astro:content";
+import { defineCollection, z } from "astro:content";
 import { glob } from "astro/loaders";
 import { docsSchema } from "@astrojs/starlight/schema";
 
@@ -17,10 +17,21 @@ const toId = (entry: string) => {
 export const collections = {
   docs: defineCollection({
     loader: glob({
-      pattern: "**/[^_]*.{md,mdx}",
+      // releases/ is the changelog, its own collection below.
+      pattern: ["**/[^_]*.{md,mdx}", "!releases/**"],
       base: "../../docs/site",
       generateId: ({ entry }) => toId(entry),
     }),
     schema: docsSchema(),
+  }),
+  // One file per release, written during release prep; /changelog lists them
+  // and www-check refuses a release.ts tag that has none.
+  releases: defineCollection({
+    loader: glob({
+      pattern: "v*.md",
+      base: "../../docs/site/releases",
+      generateId: ({ entry }) => entry.replace(/\.md$/, ""),
+    }),
+    schema: z.object({ date: z.coerce.date(), summary: z.string() }),
   }),
 };

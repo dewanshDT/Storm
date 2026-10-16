@@ -89,7 +89,6 @@ jobs:
             # the docs' content and is built by this job.
             www:
               - apps/www/**
-              - docs/www/**
               - apps/server/src/mcp.rs
               - README.md
               - docs/site/**

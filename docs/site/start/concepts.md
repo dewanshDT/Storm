@@ -3,6 +3,25 @@ title: Concepts
 description: The parts of Storm and the words these docs use for them.
 ---
 
+## How it fits together
+
+```text
+macOS · Android · Web  AI applications
+       │ REST + WS        │ MCP
+       ▼                  ▼
+  storm-server (Rust / axum)  ◄──────  storm-runtime
+       │                     dials out Claude Code ·
+  ┌────┴─────┐                         OpenCode · shell
+  ▼          ▼
+vaults/    state/
+*.md       indexes · auth.db ·
+           agent.db · gateway.db
+```
+
+The apps talk to `storm-server` over HTTP and a live WebSocket; AI apps use
+its MCP endpoint; Runtime Hosts connect out to it. Notes stay ordinary files
+under `vaults/`, and the server's own records sit beside them in `state/`.
+
 ## The server
 
 `storm-server` is a program you run on Linux, macOS or Windows. It owns your

@@ -1,0 +1,82 @@
+---
+import { getCollection, render } from "astro:content";
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const semver = (id: string) => id.replace(/^v/, "").split(".").map(Number);
+const entries = (await getCollection("releases")).sort((a, b) => {
+  const [x, y] = [semver(a.id), semver(b.id)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return y[i] - x[i];
+  return 0;
+});
+const rendered = await Promise.all(entries.map(async (e) => ({ e, Content: (await render(e)).Content })));
+const fmt = (d: Date) => d.toISOString().slice(0, 10);
+---
+
+<BaseLayout title="Changelog" description="What each Storm release changed.">
+  <header class="page-hero wrap-narrow">
+    <p class="eyebrow">Changelog</p>
+    <h1>What changed</h1>
+    <p class="lede">
+      Every release, newest first. Downloads and checksums are on
+      <a href="https://github.com/dewanshDT/Storm/releases" target="_blank" rel="noopener noreferrer"
+        >GitHub Releases</a
+      >; to upgrade, see <a href="/docs/install/upgrade/">Upgrade and uninstall</a>.
+    </p>
+  </header>
+
+  {
+    rendered.map(({ e, Content }) => (
+      <section class="section wrap-narrow release" id={e.id}>
+        <p class="meta">
+          <a href={`#${e.id}`}>{e.id}</a> · {fmt(e.data.date)}
+        </p>
+        <h2>{e.data.summary}</h2>
+        <div class="body">
+          <Content />
+        </div>
+      </section>
+    ))
+  }
+
+  <section class="section wrap-narrow">
+    <p class="support">
+      Older releases are listed on
+      <a href="https://github.com/dewanshDT/Storm/releases" target="_blank" rel="noopener noreferrer"
+        >GitHub</a
+      >.
+    </p>
+  </section>
+</BaseLayout>
+
+<style>
+  .meta {
+    margin: 0 0 calc(var(--sp) * 1);
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--text3);
+  }
+  .meta a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .release h2 {
+    margin-top: 0;
+  }
+  .body {
+    font-family: var(--font-body);
+    font-size: 1.05rem;
+    line-height: 1.6;
+    color: var(--text2);
+  }
+  .body :global(li) {
+    margin: 0 0 calc(var(--sp) * 1);
+  }
+  .body :global(strong) {
+    color: var(--text);
+  }
+  .body :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    color: var(--text);
+  }
+</style>
