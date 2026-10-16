@@ -129,3 +129,36 @@ jobs:
           name: macos-acceptance
           path: apps/client/dist/*
           retention-days: 14
+
+  # The Linux app (decision 125f), packaged by the release's own script, on
+  # the release's runner and with its glibc ceiling.
+  linux:
+    name: linux (app)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: The latest release's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          echo "RELEASE_VERSION=${v#v}" >> "$GITHUB_ENV"
+      - name: Build Linux app
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build linux --release \
+            --build-name="${RELEASE_VERSION}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          STORM_MAX_GLIBC=2.35 tool/package_linux.sh "${RELEASE_VERSION}+acceptance.${GITHUB_SHA::7}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-acceptance
+          path: apps/client/dist/*
+          retention-days: 14

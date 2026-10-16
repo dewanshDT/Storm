@@ -247,3 +247,43 @@ sudo_marked_steps() {
   [[ "$output" == *"Remote access"*"coming soon"* ]]
   ! grep -q 'install\|up \|enroll' "$FAKE_LOG"
 }
+
+@test "linux with apt --yes --app: the storm-app package, under sudo" {
+  run storm_main --yes --app --from-dir "$ASSETS"
+  [ "$status" -eq 0 ]
+  grep -q 'apt-get install -y ./storm-app_0.6.0-1_amd64.deb' "$FAKE_LOG"
+  [ -x "$STORM_TEST_SYSROOT/usr/lib/storm-app/storm" ]
+  [ ! -e "$HOME/.local/share/storm-app" ]
+  marked=$(sudo_marked_steps "$output" | tr '\n' ' ')
+  used=$(sudo_steps_used | tr '\n' ' ')
+  [ "$marked" = "$used" ]
+  run storm_main --yes uninstall --app
+  [ "$status" -eq 0 ]
+  grep -q 'apt-get remove -y storm-app' "$FAKE_LOG"
+  [ ! -e "$STORM_TEST_SYSROOT/usr/lib/storm-app/storm" ]
+}
+
+@test "linux without apt --yes --app: into the home directory, a launcher, no sudo" {
+  os_release fedora
+  run storm_main --yes --app --from-dir "$ASSETS"
+  [ "$status" -eq 0 ]
+  app="$HOME/.local/share/storm-app"
+  [ -x "$app/storm" ]
+  [ "$(cat "$app/VERSION")" = 0.6.0 ]
+  [ ! -e "$app/share" ]
+  [ -f "$HOME/.local/share/icons/hicolor/256x256/apps/dev.storm.storm.png" ]
+  grep -qx "Exec=\"$app/storm\"" "$HOME/.local/share/applications/dev.storm.storm.desktop"
+  [ "$(readlink "$HOME/.local/bin/storm-app")" = "$app/storm" ]
+  ! grep -q 'apt-get' "$FAKE_LOG"
+  [ -z "$(sudo_steps_used)" ]
+  # A re-run keeps it; uninstall removes every file it placed.
+  run storm_main --yes --app --from-dir "$ASSETS"
+  [ "$status" -eq 0 ]
+  [ -x "$app/storm" ]
+  run storm_main --yes uninstall --app
+  [ "$status" -eq 0 ]
+  [ ! -e "$app" ]
+  [ ! -e "$HOME/.local/bin/storm-app" ]
+  [ ! -e "$HOME/.local/share/applications/dev.storm.storm.desktop" ]
+  [ ! -e "$HOME/.local/share/icons/hicolor/256x256/apps/dev.storm.storm.png" ]
+}
