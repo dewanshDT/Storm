@@ -12,14 +12,17 @@ interface Props {
   webOpenHref?: string;
   /** Footer link to server install docs */
   installHref?: string;
+  /** The section heading when displayHeading is off */
+  heading?: string;
 }
 
 const {
   label = "Clients",
   id = "clients",
   displayHeading = true,
-  webOpenHref = "/install#first-login",
-  installHref = "/install",
+  webOpenHref = "/docs/install/pair/",
+  installHref = "/docs/install/server/",
+  heading = "Get Storm",
 } = Astro.props;
 
 const { macos, android, web } = release;
@@ -40,7 +43,7 @@ const rows = [macos, android, web];
         Your devices.
       </h1>
     ) : (
-      <h2 id={`${id}-heading`}>Get Storm</h2>
+      <h2 id={`${id}-heading`}>{heading}</h2>
     )
   }
   <p class="support">
@@ -119,7 +122,7 @@ const rows = [macos, android, web];
           </p>
         </div>
         <div class="actions">
-          <a class="action action--ghost" href={`${id === "clients" ? "#web" : "/clients#web"}`}>
+          <a class="action action--ghost" href="#web">
             Use Web →
           </a>
         </div>

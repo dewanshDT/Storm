@@ -5,18 +5,31 @@ Milestone **M27** (vault: *Storm/Website/Website v2 — Plan*; decision 107).
 
 ## Routes
 
-| Path | Purpose | Copy |
+| Path | What | Source |
 |---|---|---|
-| `/` | Product story — knowledge, MCP, architecture, install CTA | `docs/www/home.md` |
-| `/clients` | Get Storm — macOS / Android / Web downloads | `docs/www/install.md` (clients) |
-| `/install` | Apt source, `storm-server up`, **first login**, link to clients | `docs/www/install.md` |
-| `/404` | Not-found page — links back to the four real routes | — |
-| `/how-it-works` | Architecture sketch; deep links to the repo | `docs/www/how-it-works.md` |
-| `/docs/…` | The docs (Starlight) | `docs/site/**/*.md` — the pages themselves |
+| `/` | The product: the loop, notes, agents, integrations and MCP, platforms | `src/pages/index.astro` |
+| `/download` | The server installers and the apps (`GetStorm`, driven by `release.ts`) | `src/pages/download.astro` |
+| `/changelog` | One entry per release, newest first | `docs/site/releases/vX.Y.Z.md` |
+| `/docs/…` | The docs (Starlight) | `docs/site/**/*.md`, and `src/pages/docs/` for generated Reference pages |
+| `/404` | Not found | `src/pages/404.astro` |
+| `/install`, `/clients`, `/how-it-works` | Redirects (`redirects` in `astro.config.mjs`) to `/download`, `/download#apps` and Concepts | — |
 
-Canonical prose for the marketing pages also lives in the personal vault as
-**Storm Website** notes (Home / Install / How it works). Edit those or
-`docs/www/`, then mirror into `src/pages/`. M27 retires that mirror.
+**Every sentence has one copy** (decision 107). Marketing copy is in the
+`.astro` pages, docs are in `docs/site/`, and generated facts are in
+`src/data/facts.json`. The vault's *Storm Website* notes are an index and the
+rules, not a second copy of the prose; `docs/www/` is gone.
+
+Screenshots in `public/screens/` are real app renders from the v2 acceptance
+set (`docs/design/acceptance/storm-v2/`), converted to WebP. Check what a
+fixture note *says* before using one: an acceptance note's text can describe
+behaviour that has since changed.
+
+## Releases
+
+Release prep (the vault's *Storm Releases*, decision 72) bumps `tag` in
+`src/data/release.ts` **and writes `docs/site/releases/<tag>.md`** —
+frontmatter `date` and `summary`, then the user-facing changes. `www-check`
+refuses a tag with no entry.
 
 ## The docs
 
