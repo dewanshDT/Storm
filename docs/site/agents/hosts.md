@@ -64,6 +64,10 @@ sudo -u storm-runtime -H claude                 # then /login
 sudo -u storm-runtime -H opencode auth login
 ```
 
+Or keep one Claude login in Storm and give it to the hosts you tick:
+[Claude login sync](/docs/agents/claude-login/) (optional, for your own
+machines only).
+
 The CLIs must be on a system path (`/usr/local/bin`, `/usr/bin`). The unit's
 `ProtectHome` hides `/home`, so a CLI installed into a user's home is reported
 as not installed.

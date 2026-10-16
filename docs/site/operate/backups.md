@@ -38,6 +38,13 @@ backup-db <dir>` uses SQLite's `VACUUM INTO`, which is correct against a live
 database, and writes everything in the same layout as `state/` — so restoring
 is a plain copy.
 
+`state/gateway/gateway.db` and its data key in `state/gateway/keys/` are
+snapshotted the same way, and together: they hold your integrations'
+credentials and, if you use [Claude login sync](/docs/agents/claude-login/),
+your Claude token, sealed under that key. **A backup with both holds your
+token**: protect it like the server. A restore without `keys/` still starts,
+and the app asks you to sync the token again.
+
 `vaults.json` is copied alongside them. Without it the snapshots are a pile of
 UUID-named directories nobody can match back to a vault.
 

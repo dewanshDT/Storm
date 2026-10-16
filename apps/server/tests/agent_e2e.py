@@ -608,6 +608,7 @@ args = ["-i"]
         logs = open(SERVER_LOG).read() + open(RUNTIME_LOG).read()
         check("no enrollment token", not re.search(r"sen_[0-9A-Z]{26}\.[A-Za-z0-9_-]{43}", logs))
         check("no host token", not re.search(r"sht_[A-Za-z0-9_-]{43}", logs))
+        check("no Claude subscription token", not re.search(r"sk-ant-oat01-[A-Za-z0-9_-]{20,}", logs))
     finally:
         for p in (runtime, server):
             if p and p.poll() is None:
