@@ -595,6 +595,41 @@ class _AddDialog extends StatefulWidget {
   State<_AddDialog> createState() => _AddDialogState();
 }
 
+/// Whether [url] is plain `http` to `localhost` or a loopback, RFC 1918,
+/// link-local or unique-local IP literal: the one case the server accepts
+/// without `https` (decision 126, AM-G13). Names are not resolved.
+@visibleForTesting
+bool isLanHttp(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null || uri.scheme != 'http' || uri.host.isEmpty) return false;
+  final host = uri.host.toLowerCase();
+  if (host == 'localhost') return true;
+  final v4 = host.split('.');
+  if (v4.length == 4) {
+    final o = v4.map(int.tryParse).toList();
+    if (o.any((n) => n == null || n < 0 || n > 255)) return false;
+    final (a, b) = (o[0]!, o[1]!);
+    return a == 127 ||
+        a == 10 ||
+        (a == 172 && b >= 16 && b < 32) ||
+        (a == 192 && b == 168) ||
+        (a == 169 && b == 254);
+  }
+  final List<int> v6;
+  try {
+    v6 = Uri.parseIPv6Address(host);
+  } on FormatException {
+    return false;
+  }
+  final loopback = v6.take(15).every((b) => b == 0) && v6[15] == 1;
+  final mapped =
+      v6.take(10).every((b) => b == 0) && v6[10] == 0xff && v6[11] == 0xff;
+  if (mapped) return isLanHttp('http://${v6.skip(12).join('.')}/');
+  return loopback ||
+      (v6[0] & 0xfe) == 0xfc || // unique local
+      (v6[0] == 0xfe && (v6[1] & 0xc0) == 0x80); // link local
+}
+
 class _AddDialogState extends State<_AddDialog> {
   final _name = TextEditingController();
   final _url = TextEditingController();
@@ -615,8 +650,15 @@ class _AddDialogState extends State<_AddDialog> {
     final name = _name.text.trim();
     final url = _url.text.trim();
     if (name.isEmpty) return setState(() => _problem = 'Give it a name.');
-    if (!url.startsWith('https://')) {
-      return setState(() => _problem = 'The address must start with https://');
+    if (!url.startsWith('https://') && !isLanHttp(url)) {
+      return setState(
+        () => _problem =
+            'The address must start with https://, or http:// for an '
+            'address on your local network',
+      );
+    }
+    if (_kind == 'oauth' && !url.startsWith('https://')) {
+      return setState(() => _problem = 'Sign-in needs an https:// address.');
     }
     if (_kind == 'static' && _token.text.trim().isEmpty) {
       return setState(() => _problem = 'Paste the token.');
@@ -657,6 +699,38 @@ class _AddDialogState extends State<_AddDialog> {
                 labelText: 'MCP server address',
                 hintText: 'https://mcp.notion.com/mcp',
               ),
+            ),
+            // Shown as soon as the address is plain http on the LAN, before
+            // anything is sent: the token travels unencrypted.
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _url,
+              builder: (context, value, _) {
+                if (!isLanHttp(value.text.trim())) {
+                  return const SizedBox.shrink();
+                }
+                return Padding(
+                  padding: EdgeInsets.only(top: t.sp * 0.75),
+                  child: Row(
+                    key: const Key('integration-http-warning'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(LucideIcons.circle_alert, size: 14, color: t.danger),
+                      SizedBox(width: t.sp * 0.5),
+                      Expanded(
+                        child: Text(
+                          'Not encrypted. Anyone on your network can read '
+                          'what Storm sends to this address, including the '
+                          'token. Use it only on a network you trust.',
+                          style: TextStyle(
+                            fontSize: t.labelSize,
+                            color: t.text2,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
             SizedBox(height: t.sp * 2),
             // One section: what the choice is, the choice, and what the

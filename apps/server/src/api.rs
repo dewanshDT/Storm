@@ -6691,7 +6691,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_http_upstream_needs_the_test_only_flag_and_a_disabled_one_is_not_probed() {
+    async fn a_public_http_upstream_needs_the_test_only_flag_and_a_disabled_one_is_not_probed() {
         let dir = tempdir::TempDir::new("storm-integrations-http").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let (_, owner) = owner_bearer(&state).await;
@@ -6699,12 +6699,16 @@ pub(crate) mod tests {
             &app,
             post_json_with_auth(
                 CONNECTIONS,
-                serde_json::json!({"display_name": "Plain", "url": "http://127.0.0.1:9/mcp", "auth_kind": "none"}),
+                serde_json::json!({"display_name": "Plain", "url": "http://mcp.example.com/mcp", "auth_kind": "none"}),
                 &owner,
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "http must need the flag");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "http to a public host must need the flag"
+        );
 
         let id = create_github(&app, &owner, "ghp_x").await["id"]
             .as_str()
