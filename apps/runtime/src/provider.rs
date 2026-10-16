@@ -126,8 +126,9 @@ pub enum InteractionSpec {
 
 /// Everything a host is told about a session (freeze §7.1).
 ///
-/// Never a user id or a credential: the host does not learn who owns a session.
-#[derive(Debug, Clone)]
+/// Never a user id, and a credential only as a [`LaunchExtras::secret_env`]
+/// value: the host does not learn who owns a session.
+#[derive(Debug)]
 pub struct SessionSpec {
     pub session_id: String,
     /// The workspace directory, already resolved inside a configured root.
@@ -142,10 +143,15 @@ pub struct SessionSpec {
 
 /// Per-session launch additions. Generic on purpose: the contract carries
 /// arguments and variables, and knows nothing of MCP (AM20).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct LaunchExtras {
     pub args: Vec<std::ffi::OsString>,
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// Removed from the child's environment after everything else, whatever
+    /// the daemon's environment or the provider's env file said.
+    pub env_remove: Vec<std::ffi::OsString>,
+    /// Like `env`, applied last, but never printed: `Debug` shows names only.
+    pub secret_env: Vec<(std::ffi::OsString, crate::credential::SecretOsString)>,
 }
 
 /// Where a session's output and its ending go. The runtime implements it.

@@ -113,6 +113,19 @@ pub fn merge_environment(
     env
 }
 
+/// A session's environment: `base`, then `overrides`, then `remove` taken
+/// out, then `last` (a synced session's credential), names without case.
+pub fn session_environment(
+    base: impl IntoIterator<Item = (String, String)>,
+    overrides: impl IntoIterator<Item = (String, String)>,
+    remove: &[String],
+    last: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut env = merge_environment(base, overrides);
+    env.retain(|(k, _)| !remove.iter().any(|r| r.eq_ignore_ascii_case(k)));
+    merge_environment(env, last)
+}
+
 /// The file names `command` may be, in the order `cmd` tries them: as given
 /// when it already has an extension, otherwise with each of `PATHEXT`'s.
 pub fn candidates(command: &str, pathext: &str) -> Vec<String> {
@@ -267,6 +280,27 @@ mod tests {
                 ("b".into(), "1".into()),
                 ("Path".into(), "C:\\new".into()),
                 ("TERM".into(), "xterm-256color".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_environment_removes_without_case_then_sets_its_secret() {
+        let env = session_environment(
+            [
+                ("anthropic_api_key".into(), "daemon".into()),
+                ("CLAUDE_CODE_OAUTH_TOKEN".into(), "daemon".into()),
+                ("KEEP".into(), "1".into()),
+            ],
+            [("ANTHROPIC_AUTH_TOKEN".into(), "envfile".into())],
+            &["ANTHROPIC_API_KEY".into(), "Anthropic_Auth_Token".into()],
+            [("CLAUDE_CODE_OAUTH_TOKEN".into(), "synced".into())],
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("CLAUDE_CODE_OAUTH_TOKEN".into(), "synced".into()),
+                ("KEEP".into(), "1".into()),
             ]
         );
     }

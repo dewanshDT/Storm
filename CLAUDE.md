@@ -632,6 +632,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   whose hosts are all revoked reaches nothing and never widens back to all.
   The per-call check (`host_not_in_scope`) is what makes narrowing cut off a
   live session — grants alone are fixed at launch. `storm` is never scoped.
+- **A synced Claude login reaches the CLI only as `CLAUDE_CODE_OAUTH_TOKEN`
+  in its process environment** (decision 124, AM71; `apps/runtime/src/credential.rs`).
+  Never argv, `--settings`, a file or a log: it is a `SecretOsString`, pulled
+  per launch and dropped once the CLI is spawned. Its pins live in the one
+  `claude-settings.json`, and an invalid `--settings` file is ignored by the
+  CLI with only a warning, so every value is a string (`"apiKeyHelper": ""`,
+  never `null`) and the file is re-read before launch. Any failure ends the
+  start; a synced session never falls back to the host's own login.
 
 From M26 (Windows — the vault's *Agent Runtime/Windows Runtime Host*, D16,
 and *Installer/Windows Server*; decision 99):
