@@ -132,7 +132,10 @@ pub fn validate_display_name(name: &str) -> Result<(), &'static str> {
 
 /// An upstream URL (spec §5, G-D15): absolute `https`, with a host, no
 /// userinfo (a credential in a URL is a credential in every log and every
-/// list), and no fragment.
+/// list), and no fragment. Plain `http` is allowed to a LAN-scoped IP literal
+/// or `localhost` only: a homelab MCP server rarely has a certificate, and
+/// the owner chose to send its token in the clear on their own network. A
+/// public host still needs `https`. (decision 126, AM-G13)
 ///
 /// **Not here: the private-range rule.** §10 applies it to OAuth discovery,
 /// where the URLs come from an upstream's metadata and are not the owner's.
@@ -141,24 +144,22 @@ pub fn validate_display_name(name: &str) -> Result<(), &'static str> {
 /// owner from themselves and break a homelab's main use. (decision 81c)
 ///
 /// `allow_http` exists for the test suites only (`serve
-/// --gateway-allow-http-upstreams`, hidden): a mock upstream on loopback has
-/// no certificate. Nothing in a real deployment sets it.
+/// --gateway-allow-http-upstreams`, hidden): it allows `http` to any host.
+/// Nothing in a real deployment sets it.
 pub fn validate_url(url: &str, allow_http: bool) -> Result<(), &'static str> {
     if url.len() > 2048 || url.chars().any(|c| c.is_control() || c == ' ') {
         return Err("the URL is too long or contains spaces or control characters");
     }
     let uri: axum::http::Uri = url.parse().map_err(|_| "the URL does not parse")?;
-    let scheme_ok = match uri.scheme_str() {
-        Some("https") => true,
-        Some("http") => allow_http,
-        _ => false,
-    };
-    if !scheme_ok {
+    if !matches!(uri.scheme_str(), Some("https" | "http")) {
         return Err("an integration URL must be https");
     }
     let Some(authority) = uri.authority() else {
         return Err("the URL has no host");
     };
+    if uri.scheme_str() == Some("http") && !allow_http && !is_lan_host(authority.host()) {
+        return Err("an integration URL must be https, or http to an address on the local network");
+    }
     if authority.as_str().contains('@') {
         return Err("the URL must not carry a username or password");
     }
@@ -169,6 +170,17 @@ pub fn validate_url(url: &str, allow_http: bool) -> Result<(), &'static str> {
         return Err("the URL must not have a fragment");
     }
     Ok(())
+}
+
+/// A loopback, RFC 1918, link-local or unique-local IP literal, or
+/// `localhost`. Names other than `localhost` are not resolved here: what a
+/// name points at can change after it is saved.
+fn is_lan_host(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    bare.eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(crate::discovery::is_lan_scoped)
 }
 
 /// Headers the HTTP client or the MCP transport owns. A static credential
@@ -284,10 +296,24 @@ pub(crate) mod tests {
         assert!(validate_url("https://mcp.notion.com/mcp", false).is_ok());
         assert!(validate_url("http://127.0.0.1:9/mcp", true).is_ok());
         assert!(validate_url("https://api.example.com:8443/mcp/?x=1", false).is_ok());
-        // The owner's own LAN MCP server is allowed (decision 81c).
+        // The owner's own LAN MCP server is allowed (decision 81c), over
+        // plain http too (decision 126).
         assert!(validate_url("https://192.168.1.20/mcp", false).is_ok());
+        for lan in [
+            "http://192.168.1.51:3001/mcp",
+            "http://10.0.0.5/mcp",
+            "http://127.0.0.1:9/mcp",
+            "http://localhost:3001/mcp",
+            "http://[fd00::1]:3001/mcp",
+            "http://[::1]/mcp",
+        ] {
+            assert!(validate_url(lan, false).is_ok(), "{lan}");
+        }
         for bad in [
             "http://mcp.notion.com/mcp",
+            "http://8.8.8.8/mcp",
+            "http://100.64.0.1/mcp",
+            "http://proxmox.lan/mcp",
             "mcp.notion.com/mcp",
             "https://user:pass@mcp.example.com/",
             "https://token@mcp.example.com/",

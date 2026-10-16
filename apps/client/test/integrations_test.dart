@@ -211,7 +211,27 @@ void main() {
     expect(find.textContaining('ghp_x'), findsNothing);
   });
 
-  testWidgets('a plain http address is refused before anything is sent', (
+  testWidgets('a plain http address on the internet is refused before '
+      'anything is sent', (tester) async {
+    final (client, seen) = server();
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('add-integration')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('integration-name')), 'X');
+    await tester.enterText(
+      find.byKey(const Key('integration-url')),
+      'http://mcp.example.com/mcp',
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('integration-http-warning')), findsNothing);
+    await tester.tap(find.byKey(const Key('integration-connect')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('https://'), findsWidgets);
+    expect(seen.where((r) => r.method == 'POST'), isEmpty);
+  });
+
+  testWidgets('a plain http address on the LAN is warned about and sent', (
     tester,
   ) async {
     final (client, seen) = server();
@@ -222,12 +242,46 @@ void main() {
     await tester.enterText(find.byKey(const Key('integration-name')), 'X');
     await tester.enterText(
       find.byKey(const Key('integration-url')),
-      'http://192.168.1.20/mcp',
+      'http://192.168.1.51:3001/mcp',
     );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('integration-http-warning')), findsOneWidget);
+    await tester.tap(find.text('Token'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('integration-token')), 'pve');
     await tester.tap(find.byKey(const Key('integration-connect')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('https://'), findsWidgets);
-    expect(seen.where((r) => r.method == 'POST'), isEmpty);
+    final create = seen.firstWhere(
+      (r) => r.method == 'POST' && r.url.path == '/v1/integrations/connections',
+    );
+    final body = jsonDecode(create.body) as Map<String, dynamic>;
+    expect(body['url'], 'http://192.168.1.51:3001/mcp');
+  });
+
+  test('only http to localhost or a LAN IP literal counts as LAN http', () {
+    for (final lan in [
+      'http://192.168.1.51:3001/mcp',
+      'http://10.0.0.5/mcp',
+      'http://172.16.0.1/mcp',
+      'http://127.0.0.1:9/mcp',
+      'http://localhost:3001/mcp',
+      'http://[fd00::1]:3001/mcp',
+      'http://[::1]/mcp',
+    ]) {
+      expect(isLanHttp(lan), isTrue, reason: lan);
+    }
+    for (final not in [
+      'https://192.168.1.51/mcp',
+      'http://mcp.example.com/mcp',
+      'http://8.8.8.8/mcp',
+      'http://172.32.0.1/mcp',
+      'http://100.64.0.1/mcp',
+      'http://proxmox.lan/mcp',
+      'http://[2001:db8::1]/mcp',
+      'nonsense',
+    ]) {
+      expect(isLanHttp(not), isFalse, reason: not);
+    }
   });
 
   /// The segment for `value` in the Add dialog's auth choice.
