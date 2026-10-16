@@ -83,12 +83,14 @@ jobs:
               - kit/**
             # check-claims reads more than the site: the MCP tool list is
             # checked against mcp.rs, and the account phrasings against the
-            # root README, so a change to either must run it.
+            # root README, so a change to either must run it. docs/site/ is
+            # the docs' content and is built by this job.
             www:
               - apps/www/**
               - docs/www/**
               - apps/server/src/mcp.rs
               - README.md
+              - docs/site/**
               - Formula/**
               - deploy/storm.env.example
               - deploy/install.sh
