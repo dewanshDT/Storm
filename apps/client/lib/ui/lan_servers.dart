@@ -29,7 +29,8 @@ bool lanDiscoverySupportedOn({
     !web &&
     (platform == TargetPlatform.android ||
         platform == TargetPlatform.macOS ||
-        platform == TargetPlatform.linux);
+        platform == TargetPlatform.linux ||
+        platform == TargetPlatform.windows);
 
 final lanDiscoverySupportedProvider = Provider<bool>(
   (ref) =>
@@ -47,7 +48,7 @@ final lanRouteOpenerProvider =
     );
 
 /// The name the pair sheet suggests: the phone's model ("Pixel 10"), the
-/// Mac's name, the Linux host's.
+/// Mac's or the PC's name, the Linux host's.
 final defaultDeviceNameProvider = FutureProvider<String>((ref) async {
   try {
     final info = DeviceInfoPlugin();
@@ -56,6 +57,8 @@ final defaultDeviceNameProvider = FutureProvider<String>((ref) async {
         return (await info.androidInfo).model;
       case TargetPlatform.macOS:
         return (await info.macOsInfo).computerName;
+      case TargetPlatform.windows:
+        return (await info.windowsInfo).computerName;
       case TargetPlatform.iOS:
         return (await info.iosInfo).name;
       default:
