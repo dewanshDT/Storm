@@ -797,28 +797,33 @@ class _WorkRow extends StatelessWidget {
               children: [
                 AgentMark(session: s, size: t.sp * 3.5),
                 SizedBox(width: t.sp * 1.25),
-                Flexible(
-                  child: Text(
-                    s.displayName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.uiSize,
-                      color: t.text,
-                    ),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          s.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontFamily: StormTokens.sansFamily,
+                            fontSize: t.uiSize,
+                            color: t.text,
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: t.sp * 1.25),
+                      Text(
+                        sessionWhen(s),
+                        style: TextStyle(
+                          fontFamily: StormTokens.monoFamily,
+                          fontSize: t.labelSize * 1.09,
+                          color: t.text3,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                SizedBox(width: t.sp * 1.25),
-                Text(
-                  sessionWhen(s),
-                  style: TextStyle(
-                    fontFamily: StormTokens.monoFamily,
-                    fontSize: t.labelSize * 1.09,
-                    color: t.text3,
-                  ),
-                ),
-                const Spacer(),
                 if (s.context != null) ...[
                   SizedBox(width: t.sp),
                   NoteContextChip(title: s.context!.title),
