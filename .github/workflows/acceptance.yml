@@ -129,3 +129,39 @@ jobs:
           name: macos-acceptance
           path: apps/client/dist/*
           retention-days: 14
+
+  # The Windows app (decision 125d), packaged by the release's own script, so
+  # a tester gets the zip a release would ship.
+  windows:
+    name: windows (app)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: The latest release's version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          echo "RELEASE_VERSION=${v#v}" >> "$GITHUB_ENV"
+      - name: Build Windows app
+        working-directory: apps/client
+        run: |
+          flutter pub get
+          flutter build windows --release \
+            --build-name="${RELEASE_VERSION}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          tool/package_windows.sh "dist/storm-app-acceptance-${GITHUB_SHA::7}-windows-x86_64.zip" \
+            "acceptance ${GITHUB_SHA::7}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance
+          path: apps/client/dist/*
+          retention-days: 14

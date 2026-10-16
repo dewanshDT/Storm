@@ -86,7 +86,8 @@ jobs:
 
   # deploy/install.ps1 end to end, from zips built here: the server for this
   # user, the Runtime Host as a service, enrolled through the pipe from the
-  # server beside it (no visible secret), and a first workspace.
+  # server beside it (no visible secret), a first workspace, and the app
+  # (decision 125d; a stand-in storm.exe, since the installer never runs it).
   installer:
     name: Windows installer (install.ps1)
     runs-on: windows-latest
@@ -111,19 +112,22 @@ jobs:
         run: |
           cargo build --manifest-path apps/server/Cargo.toml
           cargo build --manifest-path apps/runtime/Cargo.toml
-          New-Item -ItemType Directory dist, pkg/server/web, pkg/runtime | Out-Null
+          New-Item -ItemType Directory dist, pkg/server/web, pkg/runtime, pkg/app/data | Out-Null
           Copy-Item apps/server/target/debug/storm-server.exe, apps/server/target/debug/storm-serverw.exe pkg/server/
           Set-Content pkg/server/web/index.html '<!doctype html><title>Storm</title>'
           Copy-Item apps/runtime/target/debug/storm-runtime.exe pkg/runtime/
           Compress-Archive pkg/server/* dist/storm-server-windows-x86_64.zip
           Compress-Archive pkg/runtime/* dist/storm-runtime-windows-x86_64.zip
+          Copy-Item apps/runtime/target/debug/storm-runtime.exe pkg/app/storm.exe
+          Set-Content pkg/app/data/icudtl.dat 'stand-in'
+          Compress-Archive pkg/app/* dist/storm-app-windows-x86_64.zip
           Get-ChildItem dist/*.zip | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 $_).Hash.ToLower())  $($_.Name)"
           } | Set-Content dist/checksums.txt
       - name: Install everything
         shell: pwsh
         # The account from stdin, as install.sh's --password-stdin (84g).
-        run: "'ci-installer-password-1' | pwsh -NoProfile -File ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes -Workspace scratch -PasswordStdin"
+        run: "'ci-installer-password-1' | pwsh -NoProfile -File ./deploy/install.ps1 -FromDir dist -Server -Runtime -App -Yes -Workspace scratch -PasswordStdin"
       - name: Check it
         shell: pwsh
         run: |
@@ -134,6 +138,10 @@ jobs:
           & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" check
           Check 'the host is enrolled with the server beside it' ($LASTEXITCODE -eq 0)
           Check 'the first workspace exists' (Test-Path "$env:ProgramData\StormRuntime\workspaces\scratch")
+          $appDir = "$env:LOCALAPPDATA\Programs\Storm\App"
+          Check 'the app is installed with its data' ((Test-Path "$appDir\storm.exe") -and (Test-Path "$appDir\data\icudtl.dat"))
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'Storm.lnk'
+          Check 'the Start-menu shortcut opens it' ((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath -eq "$appDir\storm.exe")
           Check 'the firewall rule is private-only' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
           # Decision 119: status reads the rule and the network category.
           $status = & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" status | Out-String
@@ -141,8 +149,12 @@ jobs:
           Check 'status reads the rule (or the Private profile is off)' ($status -match "lan     : (open \(rule 'Storm Server', private networks, TCP 8484\)|no host firewall)")
           Check 'status says what the network is' ($status -match 'network : (trusted|untrusted)')
           Set-NetFirewallRule -DisplayName 'Storm Server' -Profile Any
-          ./deploy/install.ps1 -FromDir dist -Server -Runtime -Yes
+          Set-Content "$appDir\stale.txt" 'from an older version'
+          ./deploy/install.ps1 -FromDir dist -Server -Runtime -App -Yes
           Check 're-running upgrades in place' ($? -and (Get-Service StormRuntime).Status -eq 'Running')
+          Check 'an app upgrade replaces the folder' ((Test-Path "$appDir\storm.exe") -and -not (Test-Path "$appDir\stale.txt"))
+          ./deploy/install.ps1 -RemoveApp
+          Check 'RemoveApp removes the app and its shortcut' (-not (Test-Path $appDir) -and -not (Test-Path $lnk))
           Check 'a rule opened wider is narrowed back to private' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
           & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall --purge
           & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" uninstall
