@@ -1,0 +1,34 @@
+---
+import BrandMark from "./BrandMark.astro";
+---
+
+<span class="docs-title">
+  <a href="/" class="home" aria-label="Storm home"><BrandMark size="sm" /></a>
+  <a href="/docs/" class="label">Docs</a>
+</span>
+
+<style>
+  .docs-title {
+    display: inline-flex;
+    align-items: center;
+    gap: calc(var(--sp) * 1.5);
+  }
+
+  .docs-title a {
+    text-decoration: none;
+  }
+
+  .label {
+    font-family: var(--font-mono);
+    font-size: var(--fs-xs);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+    padding-left: calc(var(--sp) * 1.5);
+    border-left: var(--bw) solid var(--sl-color-hairline-light);
+  }
+
+  .label:hover {
+    color: var(--sl-color-white);
+  }
+</style>

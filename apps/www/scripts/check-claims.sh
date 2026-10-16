@@ -47,7 +47,7 @@ fi
 # Phrasings, not the bare word: the pages say "There is no token in that file"
 # on purpose, and a grep for `token` would forbid saying so.
 stale='generated token|token from|shared token|shared bearer|token in `?storm\.env|no accounts product'
-if hits=$(grep -rniE "$stale" src ../../docs/www 2>/dev/null); then
+if hits=$(grep -rniE "$stale" src ../../docs/www ../../docs/site 2>/dev/null); then
 	echo "check-claims: a page still describes the shared token or the pre-M19 identity model" >&2
 	echo "$hits" | sed 's/^/  /' >&2
 	echo "  There is no shared token. See deploy/storm.env.example and /install#first-login." >&2
@@ -59,7 +59,7 @@ fi
 # The site went on telling people to run `user add` for three releases. The
 # root README is in scope: it is the first page most people read.
 accounts='storm-server user |user add|user list|is (always )?an owner|add more (accounts|from the app)|more accounts|several devices is the default'
-if hits=$(grep -rniE "$accounts" src ../../docs/www ../../README.md 2>/dev/null); then
+if hits=$(grep -rniE "$accounts" src ../../docs/www ../../docs/site ../../README.md 2>/dev/null); then
 	echo "check-claims: a page still describes more than one account" >&2
 	echo "$hits" | sed 's/^/  /' >&2
 	echo "  Storm is single-user (decision 82): one account, \`storm-server passwd\` to reset it." >&2
