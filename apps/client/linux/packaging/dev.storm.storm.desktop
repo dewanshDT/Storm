@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Storm
+GenericName=Notes
+Comment=Your notes and agents, synced with your Storm server
+Exec=storm-app
+Icon=dev.storm.storm
+Terminal=false
+Categories=Office;TextEditor;
+Keywords=notes;markdown;agents;
+StartupWMClass=dev.storm.storm
+StartupNotify=true

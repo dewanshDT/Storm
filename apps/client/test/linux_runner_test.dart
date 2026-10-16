@@ -47,6 +47,14 @@ void main() {
     expect(raise, lessThan(build));
   });
 
+  // A dock groups a window with its launcher entry by this class, and on
+  // Wayland takes the window's icon from the entry it matches.
+  test('the packaged desktop entry names the application id', () {
+    final desktop = read('linux/packaging/dev.storm.storm.desktop');
+    expect(desktop, contains('StartupWMClass=dev.storm.storm'));
+    expect(desktop, contains('Icon=dev.storm.storm'));
+  });
+
   test('the window is titled Storm and carries the bundled icon', () {
     expect(app, contains('gtk_window_set_title(window, "Storm")'));
     expect(app, contains('"storm_icon.png"'));

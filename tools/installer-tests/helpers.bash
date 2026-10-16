@@ -45,7 +45,7 @@ setup_world() {
   done
   export PATH="$FAKE_DIR/bin:$FAKE_DIR/installed:$t/sysbin"
   export HOME="$t/home"
-  unset XDG_STATE_HOME
+  unset XDG_STATE_HOME XDG_DATA_HOME
   export STORM_INSTALL_TEST=1
   export STORM_TEST_SYSROOT="$t/sysroot"
   export STORM_TEST_OS_RELEASE="$t/os-release"
@@ -120,7 +120,7 @@ make_assets() {
     echo "readme" >"$stage/$d/README-macos.txt"
   done
   local names="$*"
-  [ -n "$names" ] || names="server-tar runtime-tar runtime-linux app-zip apk server-deb runtime-deb"
+  [ -n "$names" ] || names="server-tar runtime-tar runtime-linux app-zip apk server-deb runtime-deb app-deb app-tar"
   for n in $names; do
     case "$n" in
       server-tar) tar -C "$stage/server" -czf "$ASSETS/storm-server-$v-macos-universal.tar.gz" . ;;
@@ -130,6 +130,16 @@ make_assets() {
       apk) echo "apk" >"$ASSETS/storm-$v.apk" ;;
       server-deb) echo "deb" >"$ASSETS/storm-server_$v-1_amd64.deb" ;;
       runtime-deb) echo "deb" >"$ASSETS/storm-runtime_$v-1_amd64.deb" ;;
+      app-deb) echo "deb" >"$ASSETS/storm-app_$v-1_amd64.deb" ;;
+      app-tar)
+        # The layout tool/package_linux.sh writes.
+        mkdir -p "$stage/app/storm-app/share/applications" "$stage/app/storm-app/share/icons/hicolor/256x256/apps"
+        cp "$FAKE_DIR/tools/storm-runtime" "$stage/app/storm-app/storm"
+        echo "$v" >"$stage/app/storm-app/VERSION"
+        printf '[Desktop Entry]\nName=Storm\nExec=storm-app\n' >"$stage/app/storm-app/share/applications/dev.storm.storm.desktop"
+        echo png >"$stage/app/storm-app/share/icons/hicolor/256x256/apps/dev.storm.storm.png"
+        tar -C "$stage/app" -czf "$ASSETS/storm-app-$v-x86_64-linux.tar.gz" storm-app
+        ;;
     esac
   done
   (cd "$ASSETS" && sha256sum -- * >checksums.txt)

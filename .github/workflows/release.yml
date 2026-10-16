@@ -602,6 +602,37 @@ jobs:
           name: macos
           path: apps/client/dist/*
 
+  # The Linux app (decision 125f): the storm-app .deb, which apt-repo.yml
+  # publishes with the others, and a tarball install.sh unpacks into the home
+  # directory where there is no apt. Built on 22.04, the oldest glibc it
+  # supports, and refused if anything in the bundle needs newer.
+  app-linux:
+    name: app (Linux x86_64)
+    needs: check
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: Build and package
+        run: |
+          flutter pub get
+          flutter build linux --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          STORM_MAX_GLIBC=2.35 tool/package_linux.sh "${GITHUB_REF_NAME#v}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-linux
+          path: apps/client/dist/*
+
   web:
     name: web (zip)
     needs: check
@@ -629,7 +660,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, web]
+    needs: [server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-linux, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -700,6 +731,11 @@ jobs:
           \`brew tap dewanshdt/storm https://github.com/dewanshDT/Storm\` and
           \`brew install storm-runtime\`. Ad-hoc signed and not notarized, like
           the app. Setup is in \`deploy/README.md\` under "Runtime Hosts" > "macOS".
+
+          **Linux app:** \`storm-app_${VERSION}-1_amd64.deb\` (Debian and Ubuntu,
+          also from the apt repository: \`sudo apt install storm-app\`) or
+          \`storm-app-${VERSION}-x86_64-linux.tar.gz\` for any distribution.
+          The installer's \`--app\` picks the right one.
 
           **macOS:** the zip is ad-hoc signed and not notarized. Gatekeeper will
           quarantine a downloaded copy (arm64 only on \`macos-latest\`).
