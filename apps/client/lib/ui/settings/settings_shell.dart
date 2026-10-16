@@ -3,6 +3,8 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/claude_login_api.dart' show claudeLoginAttentionProvider;
+import '../../agent/claude_login_screen.dart';
 import '../../agent/hosts_screen.dart';
 import '../../agent/integrations_screen.dart';
 import '../../router.dart';
@@ -40,6 +42,7 @@ const kSettingsPages = [
   SettingsPageInfo('vaults', 'Vaults', storm: true),
   SettingsPageInfo('ai', 'AI access', storm: true),
   SettingsPageInfo('integrations', 'Integrations', storm: true),
+  SettingsPageInfo('claude-login', 'Claude login', storm: true),
   SettingsPageInfo('hosts', 'Hosts & default agent', storm: true),
   SettingsPageInfo('storage', 'Storage', storm: true),
   SettingsPageInfo('connection', 'Connection', storm: true),
@@ -58,6 +61,7 @@ Widget _pageFor(String id) => switch (id) {
   'vaults' => const VaultsPage(),
   'ai' => const AiPage(),
   'integrations' => const IntegrationsScreen(),
+  'claude-login' => const ClaudeLoginScreen(),
   'hosts' => const HostsScreen(),
   'storage' => const StoragePage(),
   'connection' => const ConnectionPage(),
@@ -90,16 +94,26 @@ class _FreshConfigState extends ConsumerState<_FreshConfig> {
   Widget build(BuildContext context) => widget.child;
 }
 
-/// The danger dot beside Integrations while a connection needs attention.
+/// The danger dot beside a page that needs the owner: a connection to fix,
+/// or a Claude login expiring, expired or unreadable.
 class _AttentionDot extends ConsumerWidget {
-  const _AttentionDot();
+  const _AttentionDot(this.page);
+
+  final String page;
+
+  static bool has(String page) =>
+      page == 'integrations' || page == 'claude-login';
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    if (!ref.watch(integrationsAttentionProvider)) return const SizedBox();
+    final on = switch (page) {
+      'integrations' => ref.watch(integrationsAttentionProvider),
+      _ => ref.watch(claudeLoginAttentionProvider),
+    };
+    if (!on) return const SizedBox();
     return Container(
-      key: const Key('integrations-attention'),
+      key: Key('$page-attention'),
       width: t.sp * 0.75,
       height: t.sp * 0.75,
       decoration: BoxDecoration(shape: BoxShape.circle, color: t.danger),
@@ -173,7 +187,7 @@ class SettingsNav extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (p.id == 'integrations') const _AttentionDot(),
+                if (_AttentionDot.has(p.id)) _AttentionDot(p.id),
               ],
             ),
           ),
@@ -226,7 +240,7 @@ class SettingsListScreen extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         spacing: t.sp,
         children: [
-          if (p.id == 'integrations') const _AttentionDot(),
+          if (_AttentionDot.has(p.id)) _AttentionDot(p.id),
           Icon(LucideIcons.chevron_right, size: t.uiSize, color: t.text3),
         ],
       ),
