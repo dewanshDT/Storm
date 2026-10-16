@@ -27,7 +27,7 @@ os.makedirs(INBOX, exist_ok=True)
 
 
 def record_env():
-    keys = ["XDG_CONFIG_HOME", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_DIR",
+    keys = ["XDG_CONFIG_HOME", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
             "STORM_HARNESS_HANDLE", "STORM_MCP_SOCK"]
     with open(os.path.join(HERE, "agent-env.json"), "w") as f:
         json.dump({"argv": sys.argv[1:], "env": {k: os.environ.get(k) for k in keys}}, f)
