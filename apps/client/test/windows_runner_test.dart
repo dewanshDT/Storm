@@ -55,4 +55,20 @@ void main() {
       contains('window.Create(kWindowTitle'),
     );
   });
+
+  // Without it a pasted image falls back to text (D15 AM45, decision 125c).
+  test('the runner answers storm/clipboard', () {
+    expect(
+      read('windows/runner/storm_clipboard.cpp'),
+      contains('"storm/clipboard"'),
+    );
+    expect(
+      read('windows/runner/flutter_window.cpp'),
+      contains('AttachStormClipboard('),
+    );
+    expect(
+      read('windows/runner/CMakeLists.txt'),
+      contains('"storm_clipboard.cpp"'),
+    );
+  });
 }

@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "storm_clipboard.h"
 
 namespace {
 
@@ -32,6 +33,7 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  clipboard_channel_ = AttachStormClipboard(flutter_controller_->engine()->messenger());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -47,6 +49,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  clipboard_channel_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
