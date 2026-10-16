@@ -122,6 +122,9 @@ icons_launcher:
     # icon slot; there is nowhere for one to go until there is a package.
     linux:
       enable: false
+    windows:
+      enable: true
+      image_path: "assets/icon/storm_icon.png"
     web:
       enable: true
       image_path: "assets/icon/storm_icon.png"
