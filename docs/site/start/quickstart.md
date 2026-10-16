@@ -81,4 +81,4 @@ with the configuration for your AI app, filled in for your server.
 ## Next
 
 - [Concepts](/docs/start/concepts/) explains what each of these pieces is.
-- The [install page](/install) has the by-hand steps, updates and firewalls.
+- [Install](/docs/install/server/) has the by-hand steps, updates and firewalls.

@@ -24,6 +24,7 @@ export default defineConfig({
         "How to install, use and run Storm: self-hosted Markdown notes, agents on your own machines, and MCP.",
       // src/pages/404.astro is the site's; Starlight's would replace it.
       disable404Route: true,
+      favicon: "/favicon.png",
       components: {
         SiteTitle: "./src/components/DocsSiteTitle.astro",
       },
@@ -51,8 +52,32 @@ export default defineConfig({
       sidebar: [
         { label: "Start here", items: ["docs/start/quickstart", "docs/start/concepts"] },
         {
+          label: "Install",
+          items: [
+            "docs/install/server",
+            "docs/install/apps",
+            "docs/install/pair",
+            "docs/install/firewalls",
+            "docs/install/upgrade",
+          ],
+        },
+        {
+          label: "Notes",
+          items: ["docs/notes/writing", "docs/notes/vaults", "docs/notes/sync", "docs/notes/shortcuts"],
+        },
+        {
+          label: "Agents",
+          items: ["docs/agents/sessions", "docs/agents/hosts", "docs/agents/integrations"],
+        },
+        { label: "MCP", items: ["docs/mcp/connect"] },
+        {
+          label: "Operate",
+          items: ["docs/operate/backups", "docs/operate/security", "docs/operate/troubleshooting"],
+        },
+        {
           label: "Reference",
           items: [
+            "docs/reference/config",
             { label: "MCP tools", link: "/docs/reference/mcp-tools/" },
             { label: "storm-server", link: "/docs/reference/cli/storm-server/" },
             { label: "storm-runtime", link: "/docs/reference/cli/storm-runtime/" },
