@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -768,6 +769,43 @@ void main() {
       await tester.tap(find.byKey(const Key('work-ags_site')));
       await tester.pumpAndSettle();
       expect(where(c).path, '/agents/s/ags_site');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('trailing labels sit flush right; a title takes the rest', (
+      tester,
+    ) async {
+      final long = 'work | sentiment analysis for messages ' * 3;
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          agentSession('ags_a', name: 'short', wroteCount: 2),
+          agentSession('ags_b', name: 'a somewhat longer title', wroteCount: 5),
+          agentSession('ags_c', name: long, wroteCount: 6),
+          agentSession(
+            'ags_d',
+            name: 'work | sentiment analysis',
+            wroteCount: 4,
+          ),
+        ],
+      );
+      final c = await open(tester, agents);
+      final rights = [
+        for (final n in [2, 5, 6, 4])
+          tester.getRect(find.text('wrote $n')).right,
+      ];
+      for (final r in rights) {
+        expect(r, closeTo(rights.first, 0.5));
+      }
+      final row = tester.getRect(find.byKey(const Key('work-ags_d')));
+      expect(rights.first, closeTo(row.right - 8, 8.5));
+      final title = tester.renderObject<RenderParagraph>(
+        find.descendant(
+          of: find.byKey(const Key('work-ags_d')),
+          matching: find.text('work | sentiment analysis'),
+        ),
+      );
+      expect(title.didExceedMaxLines, isFalse);
       await disposeShell(tester, c);
     });
   });
