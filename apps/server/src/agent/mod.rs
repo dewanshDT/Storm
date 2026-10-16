@@ -17,6 +17,7 @@
 //! `auth_db` guard once did.
 
 pub mod cache;
+pub mod credential;
 pub mod images;
 pub mod store;
 
@@ -29,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use cache::{OutputCache, Read};
+use credential::CredentialOutcome;
 use store::{Fallback, LaunchRecord, McpGrant, SessionRecord, Store, WriteRecord};
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
@@ -62,6 +64,12 @@ pub enum Command {
         /// fresh launch, so its bytes are unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<String>,
+        /// Token sync (decision 124): the host must pull this credential for
+        /// the session before starting it, and fail the start if it cannot.
+        /// A kind, never a value. Omitted when nothing is delivered, so the
+        /// bytes are unchanged for every other launch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_credential: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -176,6 +184,10 @@ pub struct Capabilities {
     /// new conversation under the old one's name.
     #[serde(default)]
     pub resume: Vec<String>,
+    /// The provider credential kinds the host can pull (decision 124). An old
+    /// host says nothing and is never told to pull.
+    #[serde(default)]
+    pub provider_credentials: Vec<String>,
 }
 
 impl Capabilities {
@@ -287,6 +299,9 @@ pub struct LaunchMeta {
     pub write_vault_id: Option<String>,
     /// Connection id → its display name now, kept with the grants.
     pub integration_names: HashMap<String, String>,
+    /// What token sync would deliver to this host (decision 124), before the
+    /// provider and the host's capability are known.
+    pub provider_credential: Option<&'static str>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -358,6 +373,9 @@ struct SessionLive {
     activity: Option<String>,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
+    /// The credential kind its `start` named (decision 124): the only one the
+    /// host may pull for it.
+    credential: Option<&'static str>,
 }
 
 impl SessionLive {
@@ -366,6 +384,7 @@ impl SessionLive {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
             version: watch::channel(0).0,
+            credential: None,
         }
     }
 
@@ -817,7 +836,7 @@ impl AgentManager {
         req: Launch,
         meta: LaunchMeta,
         offered_grants: Vec<McpGrant>,
-    ) -> AgentResult<(SessionRecord, LaunchRecord, McpOutcome)> {
+    ) -> AgentResult<(SessionRecord, LaunchRecord, McpOutcome, CredentialOutcome)> {
         if req.interaction != "terminal" {
             return Err(AgentError::BadRequest(
                 "V1 offers the terminal interaction only".into(),
@@ -936,6 +955,7 @@ impl AgentManager {
         let reads_storm = grants
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
+        let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
         let launch = {
             let mut store = self.store.lock().unwrap();
             let launch = LaunchRecord {
@@ -973,11 +993,13 @@ impl AgentManager {
             store.insert_integrations(&record.id, &integrations)?;
             launch
         };
+        let mut session_live = SessionLive::new();
+        session_live.credential = credential.kind();
         self.live
             .lock()
             .unwrap()
             .sessions
-            .insert(record.id.clone(), SessionLive::new());
+            .insert(record.id.clone(), session_live);
 
         let sent = self.send(
             &req.host_id,
@@ -990,6 +1012,7 @@ impl AgentManager {
                 mcp: grants,
                 context: reads_storm && launch.context.is_some(),
                 resume: resume.map(|(_, id)| id),
+                provider_credential: credential.kind().map(Into::into),
             },
         );
         let mut record = record;
@@ -1003,7 +1026,19 @@ impl AgentManager {
         }
         self.store.lock().unwrap().update(&record)?;
         self.bump(&record.id);
-        Ok((record, launch, outcome))
+        Ok((record, launch, outcome, credential))
+    }
+
+    /// The credential kind a session's `start` named, while the server still
+    /// holds it in memory (decision 124). Lost on a restart, which fails the
+    /// pull closed.
+    pub fn requested_credential(&self, session_id: &str) -> Option<&'static str> {
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)
+            .and_then(|s| s.credential)
     }
 
     /// Checks that `old` can be reopened by this launch, and returns it with
@@ -1556,6 +1591,7 @@ mod tests {
             heartbeat: false,
             images: true,
             resume: vec!["claude-code".into(), "opencode".into()],
+            provider_credentials: Vec::new(),
         }
     }
 
@@ -1620,6 +1656,7 @@ mod tests {
             meta,
             grants,
         )
+        .map(|(r, l, o, _)| (r, l, o))
     }
 
     fn resume(m: &AgentManager, old: &SessionRecord) -> AgentResult<SessionRecord> {
@@ -1639,7 +1676,7 @@ mod tests {
             LaunchMeta::default(),
             offered(),
         )
-        .map(|(r, _, _)| r)
+        .map(|(r, _, _, _)| r)
     }
 
     fn report_harness(m: &AgentManager, id: &str, harness: &str) {
@@ -2137,6 +2174,94 @@ mod tests {
         assert!(m.grants_of(&r.id).unwrap().is_empty());
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert!(wire.get("mcp").is_none(), "{wire}");
+        // Token sync (decision 124): nothing deliverable, nothing named.
+        assert!(wire.get("provider_credential").is_none(), "{wire}");
+        assert_eq!(m.requested_credential(&r.id), None);
+    }
+
+    fn launch_synced(
+        m: &AgentManager,
+        provider: Option<&str>,
+        deliverable: Option<&'static str>,
+    ) -> (SessionRecord, CredentialOutcome) {
+        let meta = LaunchMeta {
+            provider_credential: deliverable,
+            ..LaunchMeta::default()
+        };
+        let (r, _, _, c) = m
+            .launch(
+                "usr_OWNER",
+                Launch {
+                    host_id: "hst_A".into(),
+                    workspace: "storm".into(),
+                    provider: provider.map(Into::into),
+                    interaction: "terminal".into(),
+                    terminal: TerminalSize { cols: 80, rows: 24 },
+                    context: None,
+                    write_vault_id: None,
+                    allow_vault_writes: false,
+                    resume_of: None,
+                },
+                meta,
+                offered(),
+            )
+            .unwrap();
+        (r, c)
+    }
+
+    #[test]
+    fn start_names_the_credential_only_for_claude_code_on_a_capable_host() {
+        const KIND: &str = "claude_subscription_token";
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true), ("opencode", true), ("shell", true)]);
+        c.max_sessions = 0;
+        c.provider_credentials = vec![KIND.into()];
+        let mut rx = online(&m, "hst_A", c);
+        let (r, outcome) = launch_synced(&m, None, Some(KIND));
+        assert_eq!(outcome, CredentialOutcome::Synced(KIND));
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert_eq!(wire["provider_credential"], KIND, "{wire}");
+        assert_eq!(m.requested_credential(&r.id), Some(KIND));
+        // Not deliverable to this host: the bytes are the native ones.
+        let (r, outcome) = launch_synced(&m, None, None);
+        assert_eq!(outcome, CredentialOutcome::Native);
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("provider_credential").is_none(), "{wire}");
+        assert_eq!(m.requested_credential(&r.id), None);
+        // AC-TS17: other providers never.
+        for provider in ["opencode", "shell"] {
+            let (r, outcome) = launch_synced(&m, Some(provider), Some(KIND));
+            assert_eq!(outcome, CredentialOutcome::Native, "{provider}");
+            let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+            assert!(wire.get("provider_credential").is_none(), "{wire}");
+            assert_eq!(m.requested_credential(&r.id), None);
+        }
+
+        // A host that does not advertise the kind is an old host.
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("claude-code", true)]));
+        let (r, outcome) = launch_synced(&m, None, Some(KIND));
+        assert_eq!(outcome, CredentialOutcome::OldHost);
+        assert_eq!(r.status, "starting");
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("provider_credential").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn an_old_host_hello_has_no_provider_credentials() {
+        let hello: Hello = serde_json::from_value(serde_json::json!({
+            "version": "0.7.0", "providers": [], "workspaces": [], "max_sessions": 1,
+        }))
+        .unwrap();
+        assert!(hello.capabilities.provider_credentials.is_empty());
+        let hello: Hello = serde_json::from_value(serde_json::json!({
+            "providers": [], "provider_credentials": ["claude_subscription_token"],
+        }))
+        .unwrap();
+        assert_eq!(
+            hello.capabilities.provider_credentials,
+            ["claude_subscription_token"]
+        );
     }
 
     #[test]
@@ -2795,5 +2920,30 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["type"], "terminal.replay");
+
+        // A native `start` is byte for byte what it was before token sync.
+        let start = |provider_credential: Option<String>| Envelope {
+            cmd_seq: 1,
+            command: Command::Start {
+                session: "ags_X".into(),
+                workspace: "storm".into(),
+                provider: "claude-code".into(),
+                interaction: "terminal".into(),
+                terminal: TerminalSize { cols: 80, rows: 24 },
+                mcp: Vec::new(),
+                context: false,
+                resume: None,
+                provider_credential,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&start(None)).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24}}"#
+        );
+        let synced = start(Some("claude_subscription_token".into()));
+        assert_eq!(
+            serde_json::to_string(&synced).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
+        );
     }
 }
