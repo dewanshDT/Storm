@@ -683,9 +683,16 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
       _title(t, widget.server.name),
       SizedBox(height: t.sp * 2),
       Text(
-        'This Storm has no account yet. Set it up by scanning its setup QR: '
-        'run `storm-server pair --qr` on the server, or open the QR in its '
-        'log.',
+        // A desktop has no camera to scan with (decision 125): it pastes the
+        // link the same command prints above its QR.
+        widget.onScanQr != null
+            ? 'This Storm has no account yet. Set it up by scanning its setup '
+                  'QR: run `storm-server pair --qr` on the server, or open the '
+                  'QR in its log.'
+            : 'This Storm has no account yet. Set it up with its pairing '
+                  'link: run `storm-server pair` on the server, then choose '
+                  'Enter address manually and paste the storm://pair link it '
+                  'prints.',
         style: TextStyle(
           fontFamily: StormTokens.sansFamily,
           fontSize: t.uiSize,
