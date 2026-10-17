@@ -29,7 +29,8 @@ bool lanDiscoverySupportedOn({
     !web &&
     (platform == TargetPlatform.android ||
         platform == TargetPlatform.macOS ||
-        platform == TargetPlatform.linux);
+        platform == TargetPlatform.linux ||
+        platform == TargetPlatform.windows);
 
 final lanDiscoverySupportedProvider = Provider<bool>(
   (ref) =>
@@ -47,7 +48,7 @@ final lanRouteOpenerProvider =
     );
 
 /// The name the pair sheet suggests: the phone's model ("Pixel 10"), the
-/// Mac's name, the Linux host's.
+/// Mac's or the PC's name, the Linux host's.
 final defaultDeviceNameProvider = FutureProvider<String>((ref) async {
   try {
     final info = DeviceInfoPlugin();
@@ -56,6 +57,8 @@ final defaultDeviceNameProvider = FutureProvider<String>((ref) async {
         return (await info.androidInfo).model;
       case TargetPlatform.macOS:
         return (await info.macOsInfo).computerName;
+      case TargetPlatform.windows:
+        return (await info.windowsInfo).computerName;
       case TargetPlatform.iOS:
         return (await info.iosInfo).name;
       default:
@@ -680,9 +683,16 @@ class _LanPairSheetState extends ConsumerState<LanPairSheet> {
       _title(t, widget.server.name),
       SizedBox(height: t.sp * 2),
       Text(
-        'This Storm has no account yet. Set it up by scanning its setup QR: '
-        'run `storm-server pair --qr` on the server, or open the QR in its '
-        'log.',
+        // A desktop has no camera to scan with (decision 125): it pastes the
+        // link the same command prints above its QR.
+        widget.onScanQr != null
+            ? 'This Storm has no account yet. Set it up by scanning its setup '
+                  'QR: run `storm-server pair --qr` on the server, or open the '
+                  'QR in its log.'
+            : 'This Storm has no account yet. Set it up with its pairing '
+                  'link: run `storm-server pair` on the server, then choose '
+                  'Enter address manually and paste the storm://pair link it '
+                  'prints.',
         style: TextStyle(
           fontFamily: StormTokens.sansFamily,
           fontSize: t.uiSize,

@@ -11,7 +11,7 @@
 /// 5. Client logs in → session tokens.
 /// 6. Done — saved to Settings, router redirects to the dashboard.
 ///
-/// Or, on Android, macOS and Linux, pick the server from the "On this
+/// Or, on Android, macOS, Linux and Windows, pick the server from the "On this
 /// network" list and pair with the account password (decision 118,
 /// `lan_servers.dart`).
 library;

@@ -25,8 +25,8 @@ const {
   heading = "Get Storm",
 } = Astro.props;
 
-const { macos, android, web } = release;
-const rows = [macos, android, web];
+const { macos, windows, linux, android, web } = release;
+const rows = [macos, windows, linux, android, web];
 ---
 
 <section class="get-storm" id={id} aria-labelledby={`${id}-heading`} data-get-storm>
@@ -109,25 +109,6 @@ const rows = [macos, android, web];
       ))
     }
 
-    <li class="row row--muted" id="linux">
-      <div class="row-main">
-        <div class="info">
-          <div class="name-line">
-            <span class="name">Linux</span>
-          </div>
-          <p class="meta mono">Desktop client deferred</p>
-          <p class="blurb">
-            The web client works on Linux today. A native desktop build is not
-            shipping yet.
-          </p>
-        </div>
-        <div class="actions">
-          <a class="action action--ghost" href="#web">
-            Use Web →
-          </a>
-        </div>
-      </div>
-    </li>
   </ul>
 
   <div class="release-foot">
@@ -148,13 +129,21 @@ const rows = [macos, android, web];
 </section>
 
 <script>
-  function detectPlatform(): "mac" | "android" | "web" | null {
+  function detectPlatform():
+    | "mac"
+    | "windows"
+    | "linux"
+    | "android"
+    | "web"
+    | null {
     const ua = navigator.userAgent;
     if (/Android/i.test(ua)) return "android";
     if (/Mac OS X|Macintosh/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua)) {
       return "mac";
     }
-    if (/Win|Linux|CrOS/i.test(ua) && !/Android/i.test(ua)) return "web";
+    if (/Windows/i.test(ua)) return "windows";
+    if (/CrOS/i.test(ua)) return "web";
+    if (/Linux|X11/i.test(ua)) return "linux";
     return null;
   }
 
@@ -215,10 +204,6 @@ const rows = [macos, android, web];
 
   .row.is-current {
     background: color-mix(in oklab, var(--accent-soft) 40%, transparent);
-  }
-
-  .row--muted .name {
-    color: var(--text2);
   }
 
   .row-main {
@@ -300,10 +285,6 @@ const rows = [macos, android, web];
 
   .action:hover {
     color: var(--text);
-  }
-
-  .action--ghost {
-    color: var(--text2);
   }
 
   .file {

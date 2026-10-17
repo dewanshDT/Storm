@@ -39,7 +39,7 @@ the vault disagree, the vault is current.
 | Path | What |
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
-| `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
+| `apps/client/` | Flutter app — macOS, Windows, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `docs/prd.md` | Original brief. Superseded by the vault; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |

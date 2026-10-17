@@ -190,6 +190,7 @@ case "$name" in
         for a in "$@"; do
           case "$a" in
             *storm-server*) place "$FAKE_DIR/installed/storm-server" ;;
+            *storm-app*) place "$STORM_TEST_SYSROOT/usr/lib/storm-app/storm" ;;
             *storm-runtime*)
               place "$FAKE_DIR/installed/storm-runtime"
               # The package's postinst makes it.
@@ -202,6 +203,7 @@ case "$name" in
         for a in "$@"; do
           case "$a" in
             storm-server | storm-runtime) rm -f "$FAKE_DIR/installed/$a" ;;
+            storm-app) rm -f "$STORM_TEST_SYSROOT/usr/lib/storm-app/storm" ;;
           esac
         done
         ;;

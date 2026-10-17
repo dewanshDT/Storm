@@ -4,7 +4,7 @@ description: How to install, use and run Storm — self-hosted Markdown notes, c
 ---
 
 Storm keeps your notes as plain Markdown on a server you run, syncs them to
-the macOS, Android and web apps (offline included), runs coding agents on your
+the macOS, Windows, Linux, Android and web apps (offline included), runs coding agents on your
 own machines, and gives AI apps access to your notes through MCP.
 
 ## Start here
