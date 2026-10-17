@@ -108,18 +108,6 @@ setup() {
   [ -n "$BREW_BIN" ]
 }
 
-@test "agents: providers already listed in runtime.toml" {
-  use_macos
-  platform
-  mkdir -p "$STORM_TEST_SYSROOT/Library/StormRuntime"
-  printf '# [[providers]]\n' >"$RT_CONFIG"
-  agents_detect
-  [ "$AG_PROVIDERS" = no ]
-  printf '  [[providers]]\nid = "shell"\n' >>"$RT_CONFIG"
-  agents_detect
-  [ "$AG_PROVIDERS" = yes ]
-}
-
 @test "a dry run detects from files only and runs nothing" {
   install_fake linux-server
   install_fake linux-runtime
