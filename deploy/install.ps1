@@ -267,8 +267,8 @@ if ($Server) {
         if ($LASTEXITCODE -ne 0) { Fail 'setting the account password failed' }
     } elseif ($LASTEXITCODE -ne 0) {
         if ($App) {
-            Say "`nPair this PC: open Storm from the Start menu and choose this server under On this network."
-            Say 'Or pair your phone: in the Storm app, add a server and scan this code.'
+            Say "`nPair this PC: open Storm from the Start menu, choose Enter address manually, and paste the storm://pair link below."
+            Say 'Or pair your phone: in the Storm app, add a server and scan the code.'
         } else {
             Say "`nPair your first device: in the Storm app, add a server and scan this code."
         }
