@@ -66,6 +66,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod connection;
+pub mod credential;
 pub mod fake;
 pub mod harness;
 pub mod host;
