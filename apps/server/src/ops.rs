@@ -1631,6 +1631,11 @@ pub struct LaunchedSession {
     #[serde(flatten)]
     pub session: SessionView,
     pub mcp: LaunchMcp,
+    /// The synced Claude login (decision 124): `synced`, `native`,
+    /// `old_host` or `expired`. Never the token.
+    pub credential: &'static str,
+    /// Said out loud when a ticked host's session runs on its own login.
+    pub credential_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1711,6 +1716,7 @@ pub async fn launch_session(
             .iter()
             .map(|c| (c.id.clone(), c.display_name.clone()))
             .collect(),
+        provider_credential: deliverable_credential(state, &req.host_id),
     };
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
@@ -1724,10 +1730,12 @@ pub async fn launch_session(
                 slug: c.slug,
             }),
     );
-    let (session, launch, outcome) = state
+    let (session, launch, outcome, credential) = state
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    let (credential, credential_notice) =
+        provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
         crate::agent::McpOutcome::Granted(g) => (
             g,
@@ -1776,6 +1784,8 @@ pub async fn launch_session(
             allow_vault_writes: launch.write_vault_id.is_some(),
             notice,
         },
+        credential,
+        credential_notice,
     })
 }
 
@@ -3308,6 +3318,9 @@ pub fn sweep_gateway_sessions(state: &Shared) {
     }
 }
 
+pub(crate) mod provider_wire;
+pub use provider_wire::runtime_provider_credential;
+
 // ---- Token sync: the synced Claude subscription token (decision 124n) -------
 //
 // Session tier only (spec §0.3), so an `stk_` key or a host token never
@@ -3525,7 +3538,6 @@ pub async fn set_provider_credential_hosts(
 
 /// Spec §0.4 rules 2 and 3 for a launch on `host_id`: the kind to name in
 /// `start`, or `None`. Rules 1 (provider) and 4 (capability) are the launch's.
-#[allow(dead_code)] // the launch wire and pull route are 124o's
 pub fn deliverable_credential(state: &Shared, host_id: &str) -> Option<&'static str> {
     (provider_credential_availability(state, host_id) == Availability::Deliverable)
         .then_some(pc::KIND)
@@ -3534,7 +3546,6 @@ pub fn deliverable_credential(state: &Shared, host_id: &str) -> Option<&'static 
 /// Why a host would or would not get the token now, for the launch's
 /// `credential` outcome and notices (`expired` vs `native`). An error reads
 /// as `NotInScope`: fail closed, the session uses the host's own login.
-#[allow(dead_code)] // the launch wire and pull route are 124o's
 pub fn provider_credential_availability(state: &Shared, host_id: &str) -> Availability {
     let store = gateway_store(state);
     Availability::of(
@@ -3552,7 +3563,6 @@ pub fn provider_credential_availability(state: &Shared, host_id: &str) -> Availa
 /// The host's pull for its own starting session (§0.4), every check in the
 /// pinned order, each refusal a stable code and an audit row. The only path
 /// that opens the sealed token. Writes `provider_credential_delivered`.
-#[allow(dead_code)] // the launch wire and pull route are 124o's
 pub async fn pull_provider_credential(
     state: &Shared,
     host: &crate::auth::hosts::Host,
@@ -3580,6 +3590,11 @@ pub async fn pull_provider_credential(
     }
     if session.provider != "claude-code" {
         return Err(refuse(StatusCode::CONFLICT, "wrong_provider").await);
+    }
+    // Only a session whose `start` named the kind (AM72), so widening the
+    // scope never reaches a launch that was not told to pull.
+    if state.agent.requested_credential(session_id) != Some(pc::KIND) {
+        return Err(refuse(StatusCode::FORBIDDEN, "host_not_in_scope").await);
     }
     match provider_credential_availability(state, &host.id) {
         Availability::NotInScope => {
