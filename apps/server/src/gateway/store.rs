@@ -161,6 +161,34 @@ const SCHEMA: &str = "
         oauth_client  TEXT NOT NULL,
         updated_at    TEXT NOT NULL
     );
+
+    -- The single user's own Claude subscription token (decision 124, token
+    -- sync; `gateway::provider`). One row per kind; sealed, AAD = (id, kind).
+    -- Never in the clear. Not `credentials`: that table is keyed by connection,
+    -- and the connection sweeps would treat this row as one.
+    CREATE TABLE IF NOT EXISTS provider_credentials (
+        id            TEXT PRIMARY KEY,
+        kind          TEXT NOT NULL UNIQUE,
+        owner_user_id TEXT NOT NULL,
+        key_id        TEXT NOT NULL,
+        nonce         BLOB NOT NULL,
+        ciphertext    BLOB NOT NULL,
+        fingerprint   TEXT NOT NULL,
+        minted_at     TEXT NOT NULL,
+        expires_at    TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+    );
+
+    -- The hosts a provider credential is delivered to. NO ROWS = NO HOSTS
+    -- (opt-in), the inverse of connection_hosts (decision 121) on purpose.
+    CREATE TABLE IF NOT EXISTS provider_credential_hosts (
+        credential_id TEXT NOT NULL,
+        host_id       TEXT NOT NULL,
+        added_at      TEXT NOT NULL,
+        PRIMARY KEY (credential_id, host_id)
+    );
 ";
 
 /// One audit row. There is deliberately no field that could carry arguments
@@ -991,7 +1019,7 @@ impl GatewayDb {
             .optional()?)
     }
 
-    #[cfg(test)]
+    /// Also `gateway::provider`'s, whose rows live beside the connections'.
     pub(crate) fn conn(&self) -> &Sqlite {
         &self.conn
     }
@@ -1051,6 +1079,8 @@ mod tests {
             "new_tools",
             "oauth_clients",
             "oauth_flows",
+            "provider_credential_hosts",
+            "provider_credentials",
         ] {
             assert!(tables.contains(&t.to_string()), "missing table {t}");
         }
