@@ -564,12 +564,15 @@ Specification*; the slices are decisions 81 and 81a onward):
   `retry` and `no_cancel` mutations against the real build. A late answer to
   an elicitation is dropped, and elicitation ids are unique per upstream
   session so one can never answer another.
-- **A session's MCP config is AM32 exactly**: `claude-code` gets
+- **A session's MCP config is AM32 as amended by AM66**: every `opencode`
+  session gets `OPENCODE_DISABLE_PROJECT_CONFIG=1`, grants or not, and its
+  workspace's own `AGENTS.md` (else `CLAUDE.md`, else `CONTEXT.md`) back by
+  absolute path through `OPENCODE_CONFIG` (`mcp::provider_baseline`; a path
+  with a glob character is not restored). With grants, `claude-code` gets
   `--mcp-config … --strict-mcp-config`; `opencode` gets its own
-  `XDG_CONFIG_HOME`, `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `"<slug>_*":
-  "ask"`; everything else gets nothing. A config that cannot be written fails
-  the start rather than launching unconfined. It holds a handle and a socket
-  path, never a credential.
+  `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
+  config that cannot be written fails the start rather than launching
+  unconfined. It holds a handle and a socket path, never a credential.
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,

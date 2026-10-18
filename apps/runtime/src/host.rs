@@ -849,17 +849,28 @@ impl Host {
             refuse("not a session this provider can resume");
             return self.post_start_failure(&id).await;
         }
-        // The provider's MCP config (AM32). Written before the agent starts;
-        // a session whose config cannot be written does not start, rather
-        // than start without `--strict-mcp-config` and load the host's own
-        // MCP servers (G-D12).
-        let mut launch = match self.mcp_launch(&id, &provider_id, &mcp) {
+        // What the provider gets with or without grants (AM66), then its MCP
+        // config (AM32). Written before the agent starts; a session whose
+        // config cannot be written does not start, rather than start without
+        // `--strict-mcp-config` and load the host's own MCP servers (G-D12).
+        let session_dir = crate::mcp::session_dir(&self.state_dir, &id);
+        let mut launch = match crate::mcp::provider_baseline(&provider_id, &session_dir, &dir) {
             Ok(extras) => extras,
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the instructions config");
+                return self.post_start_failure(&id).await;
+            }
+        };
+        match self.mcp_launch(&id, &provider_id, &mcp) {
+            Ok(extras) => {
+                launch.args.extend(extras.args);
+                launch.env.extend(extras.env);
+            }
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
                 return self.post_start_failure(&id).await;
             }
-        };
+        }
         let events = Arc::new(Events {
             ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
             ended: Mutex::new(None),
