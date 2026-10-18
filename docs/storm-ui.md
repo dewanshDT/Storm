@@ -75,7 +75,8 @@ Every route is also the web client's URL.
 /agents/s/:id?tab=…        a session; tab = context | wrote | about
 /settings                  the list (phone) · This device (desk)
 /settings/:page            device · access · vaults · ai · integrations ·
-                           hosts · storage · connection · advanced · health
+                           claude-login · hosts · storage · connection ·
+                           advanced · health
 /add-device                a pairing QR for another device
 /gallery                   the token gallery, by typed URL only
 ```
@@ -188,7 +189,10 @@ A 460 modal (desk) or bottom sheet (phone): the **CONTEXT** box when started
 from a note (× removes it); Host (online only), Workspace (with the shared
 workspace warning), Agent (default marked); **Can write to** — defaults to the
 note's vault, "Read only" when off, disabled with "Off in Settings › AI
-access" when agent writes are off, absent for Shell; the risk box. Launch
+access" when agent writes are off, absent for Shell; for Claude Code, a line
+under Agent saying "Claude: your synced login" or "Claude: this host's own
+login" (with why, when a ticked host can't get it) by the server's rules;
+the risk box. Launch
 opens the session on Context (with a note) or About.
 
 ### Session
@@ -231,7 +235,13 @@ keys, shown once with a `claude mcp add` line and a stdio JSON entry for
 missing vault greyed and removable) · **AI access** (MCP read / write, and
 "Storm agents": allow writes when chosen at launch — independent of
 `mcp_writable`) · **Integrations** (connections, tests, tools review; a
-`danger` nav dot when one needs attention) · **Hosts & default agent** ·
+`danger` nav dot when one needs attention) · **Claude login** (decision
+124: sync one `claude setup-token` into an obscured field that is cleared on
+submit, with an optional mint date; status Not synced / Synced / Expires in n
+days / Expired / Needs re-sync, a banner at 30 and 7 days and a nav dot;
+Replace and Remove; one checkbox per enrolled host, all unticked by default,
+no "all hosts"; old hosts marked "update storm-runtime"; the single-user,
+terms and claude.ai-revocation notice) · **Hosts & default agent** ·
 **Storage** · **Connection** (address, route, pinned key, relays, Disconnect)
 · **Advanced** (MCP endpoint, versions, Re-pair) · **About & health** (the
 health rows with actions, compatibility). There is no Accounts section. A

@@ -2,6 +2,8 @@
 /// 77d). Field names are the server's; nothing here is invented.
 library;
 
+import 'claude_login_api.dart' show claudeCredentialNotice;
+
 /// A provider a host offers.
 class ProviderCap {
   ProviderCap({required this.id, required this.kind, required this.available});
@@ -41,6 +43,8 @@ class AgentHost {
     required this.lastSeen,
     this.workspaceRoots = const [],
     this.resumes = const [],
+    this.providerCredentials = const [],
+    this.capabilitiesKnown = false,
   });
 
   final String id;
@@ -60,7 +64,17 @@ class AgentHost {
   final int maxSessions;
   final String? lastSeen;
 
+  /// The synced credentials it can pull (decision 124); empty for an old
+  /// host.
+  final List<String> providerCredentials;
+
+  /// Whether it has said what it can do: an offline host has not.
+  final bool capabilitiesKnown;
+
   bool get online => status == 'online';
+
+  bool get receivesClaudeLogin =>
+      providerCredentials.contains('claude_subscription_token');
 
   factory AgentHost.fromJson(Map<String, dynamic> j) {
     final caps = j['capabilities'] as Map<String, dynamic>?;
@@ -84,6 +98,11 @@ class AgentHost {
       resumes: [
         for (final p in (caps?['resume'] as List? ?? const [])) p as String,
       ],
+      providerCredentials: [
+        for (final k in (caps?['provider_credentials'] as List? ?? const []))
+          k as String,
+      ],
+      capabilitiesKnown: caps != null,
     );
   }
 }
@@ -157,6 +176,7 @@ class AgentSession {
     this.wroteCount = 0,
     this.integrations,
     this.launchNotice,
+    this.credential,
     this.title,
     this.activity,
     this.harnessSession,
@@ -220,6 +240,10 @@ class AgentSession {
   /// Said at launch when the session got less than it asked for. Only on the
   /// launch answer.
   final String? launchNotice;
+
+  /// Which Claude login it launched with (decision 124): `synced`, `native`,
+  /// `old_host` or `expired`. Only on the launch answer.
+  final String? credential;
 
   bool get ended =>
       status == 'completed' || status == 'failed' || status == 'stopped';
@@ -311,12 +335,28 @@ class AgentSession {
               if (i is Map) '${i['display_name'] ?? i['slug'] ?? ''}',
           ]
         : null,
-    launchNotice: (j['mcp'] as Map?)?['notice'] as String?,
+    launchNotice: _launchNotice(j),
+    credential: j['credential'] as String?,
     title: j['title'] as String?,
     activity: j['activity'] as String?,
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
   );
+}
+
+/// Everything the launch answer says out loud: the MCP notice, then the
+/// Claude login's, unless the server already said it.
+String? _launchNotice(Map<String, dynamic> j) {
+  final mcp = (j['mcp'] as Map?)?['notice'] as String?;
+  final login =
+      j['credential_notice'] as String? ??
+      claudeCredentialNotice(j['credential'] as String?);
+  final notices = [
+    ?mcp,
+    if (login != null && !(mcp?.contains('synced Claude login') ?? false))
+      login,
+  ];
+  return notices.isEmpty ? null : notices.join('\n');
 }
 
 /// One thing a session wrote (`GET …/sessions/{id}/writes`): a note, or a
