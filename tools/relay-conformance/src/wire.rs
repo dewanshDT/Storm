@@ -292,6 +292,26 @@ impl Conn {
         self.send_binary(body_frame(kind, stream_id, payload)).await
     }
 
+    /// Sends one binary message as `pieces` WebSocket frames — continuation
+    /// frames, which §3 forbids a conforming sender to use. For the checks
+    /// that a relay bounds a message, not only a frame.
+    pub async fn send_fragmented(&self, bytes: &[u8], pieces: usize) -> Result<()> {
+        use tokio_tungstenite::tungstenite::protocol::frame::Frame as WsFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+        let size = bytes.len().div_ceil(pieces.max(1));
+        let chunks: Vec<&[u8]> = bytes.chunks(size).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let opcode = if i == 0 {
+                OpCode::Data(Data::Binary)
+            } else {
+                OpCode::Data(Data::Continue)
+            };
+            let frame = WsFrame::message(chunk.to_vec(), opcode, i + 1 == chunks.len());
+            self.send(Message::Frame(frame)).await?;
+        }
+        Ok(())
+    }
+
     /// The next frame, or an error naming what was being waited for.
     pub async fn next(&mut self, within: Duration) -> Result<Frame> {
         if self.closed {

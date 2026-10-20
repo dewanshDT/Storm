@@ -40,6 +40,7 @@ pub fn checks() -> Vec<Check> {
             a_body_over_16_mib_crosses_both_ways_in_256_kib_frames
         ),
         check!("§5.2", a_16_mib_frame_crosses_both_ways),
+        check!("§3", a_message_over_16_mib_ends_only_its_senders_trunk),
         check!("§5.2", a_response_streams_unbuffered),
         check!("§5.2", relay_peer_ip_is_the_socket_address_never_a_header),
         check!("§5.2", a_client_sent_relay_peer_ip_is_refused_even_null),
@@ -523,6 +524,53 @@ async fn a_16_mib_frame_crosses_both_ways(ctx: &Ctx) -> Result<()> {
     let (_, _, got) = pair.client.recv_body(STEP).await?;
     ensure!(got == payload, "the client got {} bytes", got.len());
     Ok(())
+}
+
+/// §3 as amended by decision 128f: an SRP message is at most 16 MiB, header
+/// included, and a relay MAY end a trunk whose peer sends a larger one, with
+/// `protocol_error`. A single frame over 16 MiB was always refused (the
+/// WebSocket frame limit); the gap was one **message** split into
+/// continuation frames, which a relay without a message ceiling buffers whole
+/// for any unauthenticated client. Only the sender's trunk ends: the origin
+/// and its other clients carry on.
+async fn a_message_over_16_mib_ends_only_its_senders_trunk(ctx: &Ctx) -> Result<()> {
+    let mut pair = ctx.stream().await?;
+    let id = pair.stream_id;
+    // 18 MiB in two 9 MiB frames: each frame is under any frame limit, the
+    // message is over the 16 MiB ceiling.
+    let message = body_frame_bytes(id, 18 * 1024 * 1024);
+    // The relay may close mid-send; only that the trunk ends matters.
+    let _ = pair.client.send_fragmented(&message, 2).await;
+
+    let deadline = Instant::now() + STEP;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match pair.client.next(left).await {
+            Ok(Frame::Closed) => break,
+            Ok(Frame::Text(v)) if v["type"] == "ERROR" => {
+                wire::check_error(&v, "protocol_error")?;
+            }
+            Ok(other) => bail!(
+                "a message over 16 MiB must end the sender's trunk, got {}",
+                other.describe()
+            ),
+            Err(_) => bail!("the relay kept a trunk that sent a message over 16 MiB"),
+        }
+    }
+
+    // Whatever reached the origin for the ended stream is not bob's.
+    while pair
+        .server
+        .next(std::time::Duration::from_millis(300))
+        .await
+        .is_ok_and(|f| !matches!(f, Frame::Closed))
+    {}
+    let mut bob = ctx.client(&ctx.relay, &pair.identity.server_id).await?;
+    trunk_still_serves(&mut pair.server, &mut bob).await
+}
+
+fn body_frame_bytes(stream_id: u32, len: usize) -> Vec<u8> {
+    wire::body_frame(BODY_REQUEST, stream_id, &random_bytes(len - 5))
 }
 
 async fn a_response_streams_unbuffered(ctx: &Ctx) -> Result<()> {

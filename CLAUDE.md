@@ -408,6 +408,12 @@ cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
   what a peer has read, so a `PONG` lost on a full queue reads as a stalled
   reader. storm-server queues them on its `Control` lane, outside the
   bounded queue.
+- **Every SRP socket is bounded at 16 MiB a message** (SRP §3, decision
+  128f): storm-relay's upgrade sets `max_message_size`, the Worker refuses a
+  larger message, and storm-server's and storm-runtime's clients pass a
+  `WebSocketConfig` with the same ceiling. A frame limit alone is not enough:
+  tungstenite's message default is 64 MiB, and a message split into
+  continuation frames was buffered whole for any unauthenticated client.
 - **Control before bulk** (SRP §5.2, decision 116b). Every sender — storm-server,
   storm-runtime's client, the Dart trunk, storm-relay — writes `PING`, `PONG`,
   `STREAM_ACK`, `CLOSE` and stream `ERROR` ahead of queued body frames and

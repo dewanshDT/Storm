@@ -179,7 +179,18 @@ async fn register_upgrade(
         tracing::info!("rate limiting /register");
         return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    ws.on_upgrade(move |socket| register::serve(socket, relay))
+    bounded(ws).on_upgrade(move |socket| register::serve(socket, relay))
+}
+
+/// SRP §3: a message is at most 16 MiB, header included. Without it the
+/// socket keeps tungstenite's 64 MiB message default, so any client — never
+/// authenticated (R12) — could make the relay buffer 64 MiB before a frame of
+/// it is read; a larger message now ends the trunk (decision 128f).
+pub const MAX_SRP_MESSAGE: usize = 16 * 1024 * 1024;
+
+fn bounded(ws: WebSocketUpgrade) -> WebSocketUpgrade {
+    ws.max_message_size(MAX_SRP_MESSAGE)
+        .max_frame_size(MAX_SRP_MESSAGE)
 }
 
 /// `?pubkey=` on the connect URL (§4.3). Read here and checked against
@@ -200,7 +211,8 @@ async fn connect_upgrade(
     ConnectInfo(PeerAddr(peer)): ConnectInfo<PeerAddr>,
     State(relay): State<Arc<Relay>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| connect::serve(socket, relay, server_id, query.pubkey, peer))
+    bounded(ws)
+        .on_upgrade(move |socket| connect::serve(socket, relay, server_id, query.pubkey, peer))
 }
 
 /// The address of the socket a connection arrived on, over plain TCP or TLS.
