@@ -33,7 +33,6 @@ SERVER_BIN="${STORM_SERVER_BIN:-/usr/bin/storm-server}"
 
 stamp="$(date -u +%Y-%m-%d)"
 dest="$STORM_BACKUP_DEST/$stamp"
-mkdir -p "$dest"
 
 echo "storm-backup: $stamp -> $dest"
 
@@ -57,10 +56,31 @@ else
     echo "  root:   $vault_root"
 fi
 
+# An unmounted share is an empty directory, and a mirror of it verifies and
+# holds nothing; thirty nights later the pruning has aged out every good copy
+# (decision 128j). The registry listing vaults is what says the root is wrong.
+# Checked before anything is written, so a refused night leaves no folder.
+if [ -z "$(find "$vault_root" -type f -print 2>/dev/null | head -n 1)" ] &&
+    grep -q '"dir"[[:space:]]*:' "$STORM_STATE/vaults.json" 2>/dev/null; then
+    echo "  ERROR: $vault_root holds no files, but $STORM_STATE/vaults.json lists vaults — is it mounted?" >&2
+    exit 1
+fi
+mkdir -p "$dest"
+
 # The vault is ordinary files; rsync is exactly right for it. --delete keeps
 # the mirror honest about deletions, and the dated directory means an
-# accidental wipe is still recoverable from yesterday's copy.
-rsync -a --delete "$vault_root/" "$dest/vaults/"
+# accidental wipe is still recoverable from yesterday's copy. --link-dest
+# makes each unchanged file a hard link into the newest earlier night, so
+# thirty nights cost one copy plus what changed; rsync writes a changed file
+# afresh, never through the link.
+prev="$(find "$STORM_BACKUP_DEST" -mindepth 1 -maxdepth 1 -type d \
+    -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' ! -name "$stamp" | sort | tail -n 1)"
+if [ -n "$prev" ] && [ -d "$prev/vaults" ]; then
+    rsync -a --delete --link-dest="$prev/vaults/" "$vault_root/" "$dest/vaults/"
+    echo "  linked: unchanged files to $(basename "$prev")"
+else
+    rsync -a --delete "$vault_root/" "$dest/vaults/"
+fi
 echo "  vaults: $(find "$dest/vaults" -type f | wc -l | tr -d ' ') files across \
 $(find "$dest/vaults" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ') vault(s)"
 

@@ -39,6 +39,10 @@ echo "== shellcheck (the body's line N is install.sh line N+$start)"
 "$SHELLCHECK" -s bash "$installer"
 "$SHELLCHECK" -s bash "$tmp/install-body.bash"
 "$SHELLCHECK" -s bash "$here/helpers.bash" "$here/fake/fake.sh" "$here/run.sh"
+# The nightly backup has no bats suite: apps/server/tests/backup_root.rs drives
+# it against the real binary. Linted here because this job is the one with
+# shellcheck.
+"$SHELLCHECK" -s bash "$root/deploy/storm-backup.sh"
 bash -n "$tmp/install-body.bash"
 echo "shellcheck: clean"
 
