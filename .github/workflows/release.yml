@@ -602,6 +602,36 @@ jobs:
           name: macos
           path: apps/client/dist/*
 
+  # The Windows app (decision 125d): a zip with the MSVC runtime beside the
+  # exe, named without a version like the other Windows assets, so
+  # install.ps1 and releases/latest/download always find it.
+  app-windows:
+    name: app (Windows x86_64)
+    needs: check
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - name: Build and package
+        run: |
+          flutter pub get
+          flutter build windows --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+          tool/package_windows.sh dist/storm-app-windows-x86_64.zip "${GITHUB_REF_NAME}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-windows
+          path: apps/client/dist/*
+
   # The Linux app (decision 125f): the storm-app .deb, which apt-repo.yml
   # publishes with the others, and a tarball install.sh unpacks into the home
   # directory where there is no apt. Built on 22.04, the oldest glibc it
@@ -660,7 +690,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: [server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-linux, web]
+    needs: [server, server-macos, server-windows, relay, runtime, runtime-macos, runtime-windows, android, macos, app-windows, app-linux, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -694,7 +724,9 @@ jobs:
 
           **Windows (decision 99):** in PowerShell,
           \`irm https://dewanshdt.github.io/Storm/install.ps1 | iex\` installs the
-          server, the Runtime Host, or both. By hand:
+          server, the Runtime Host, the Storm app, or any of them together. The
+          app alone is \`storm-app-windows-x86_64.zip\`: unzip it anywhere and run
+          \`storm.exe\`. By hand:
           \`storm-server-windows-x86_64.zip\` runs as you at logon (\`.\\storm-server.exe up\`),
           and \`storm-runtime-windows-x86_64.zip\` installs the Runtime Host as a
           Windows Service (\`.\\storm-runtime.exe install\` as administrator, then
