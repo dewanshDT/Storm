@@ -413,19 +413,11 @@ pub fn write_cache(path: &Path, server_id: &str, relays: &[String]) -> anyhow::R
     if let Some(dir) = path.parent() {
         crate::platform::create_private_dir(dir)?;
     }
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    {
-        use std::io::Write;
-        let mut file = crate::platform::open_private(
-            &tmp,
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true),
-        )?;
-        file.write_all(&serde_json::to_vec_pretty(&cache)?)?;
-    }
-    std::fs::rename(&tmp, path)?;
+    crate::fsutil::write_atomic(
+        path,
+        &serde_json::to_vec_pretty(&cache)?,
+        crate::fsutil::Access::Private,
+    )?;
     Ok(())
 }
 

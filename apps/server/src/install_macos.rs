@@ -320,10 +320,7 @@ fn write(path: &Path, body: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    crate::fsutil::write_atomic(path, body.as_bytes())
 }
 
 fn wait_healthy(port: u16) -> bool {

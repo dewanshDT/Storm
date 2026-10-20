@@ -68,6 +68,7 @@ pub mod config;
 pub mod connection;
 pub mod credential;
 pub mod fake;
+pub mod fsutil;
 pub mod harness;
 pub mod host;
 pub mod identity;

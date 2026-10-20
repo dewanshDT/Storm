@@ -696,10 +696,9 @@ class SyncEngine extends ChangeNotifier {
     for (final item in queued) {
       if (_disposed) return;
       try {
-        if (item.op == 'delete') {
-          await api.deleteNote(vaultId, item.noteId);
-          await cache.removeNote(vaultId, item.noteId);
-        } else if (item.op == 'move') {
+        // The outbox holds `update` and `move`; a delete is never queued, it
+        // goes to the server directly.
+        if (item.op == 'move') {
           // Move first, then push the content it was queued with. Both are
           // keyed by id, so neither depends on the path being current.
           final moved = await api.moveNote(
@@ -735,7 +734,7 @@ class SyncEngine extends ChangeNotifier {
         if (e.isNotFound) {
           // An edit outlives its note's deletion: it is kept as a new note
           // (decision 128c), never dropped.
-          if (item.op != 'delete' && item.content.isNotEmpty) {
+          if (item.content.isNotEmpty) {
             final kept = await _recover(item);
             if (kept != null) touched.addAll([item.noteId, kept]);
             continue;

@@ -481,10 +481,10 @@ impl AgentManager {
     pub fn set_default_provider(&self, provider: &str) -> Result<()> {
         let mut config = self.config.lock().unwrap();
         config.default_provider = Some(provider.to_string());
-        let tmp = self.config_path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&*config)?)?;
-        std::fs::rename(&tmp, &self.config_path)?;
-        Ok(())
+        crate::fsutil::write_atomic(
+            &self.config_path,
+            serde_json::to_string_pretty(&*config)?.as_bytes(),
+        )
     }
 
     // ---- the host link -------------------------------------------------

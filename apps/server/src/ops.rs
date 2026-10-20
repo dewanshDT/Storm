@@ -4304,7 +4304,6 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            bootstrap_nonce: None,
             listen_addr: "127.0.0.1:8484".into(),
             vault_policy: Arc::new(crate::auth::authz::StormPolicy),
             hasher: crate::auth::Hasher::new(),

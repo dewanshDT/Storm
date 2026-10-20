@@ -199,7 +199,10 @@ mod tests {
 
     #[test]
     fn empty_base_is_survivable() {
+        // No base means both sides are additions: neither device's text may
+        // be dropped, which is why an empty base is used on purpose.
         let out = reconcile("", "server\n", "client\n");
-        assert!(out.text().contains("server") || out.text().contains("client"));
+        assert!(out.text().contains("server"), "{}", out.text());
+        assert!(out.text().contains("client"), "{}", out.text());
     }
 }

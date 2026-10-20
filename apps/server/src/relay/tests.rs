@@ -519,7 +519,7 @@ async fn a_relay_that_refuses_registration_is_never_advertised() {
     // Give the supervisor time to try and be refused.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
-        registered.is_empty(),
+        registered.snapshot().is_empty(),
         "a relay that refused registration must not be advertised"
     );
     tunnels.shutdown().await;
@@ -570,7 +570,7 @@ async fn registered_relays_empties_when_the_trunk_drops() {
     // advertising a trunk that no longer exists.
     tunnels.shutdown().await;
     assert!(
-        registered.is_empty(),
+        registered.snapshot().is_empty(),
         "a dropped trunk must stop being advertised"
     );
 }
@@ -1506,7 +1506,7 @@ async fn a_relay_that_never_completes_its_handshake_does_not_block_startup() {
         "a silent relay delayed a LAN request by {elapsed:?}"
     );
     assert!(
-        registered.is_empty(),
+        registered.snapshot().is_empty(),
         "a relay stuck in its handshake is not registered"
     );
 
@@ -2615,7 +2615,7 @@ async fn a_relay_gone_silent_is_dropped_at_the_heartbeat_deadline_and_redialled(
     let registered_at = Instant::now();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    while !registered.is_empty() {
+    while !registered.snapshot().is_empty() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "a relay that stopped answering PING is still advertised after {:?}",

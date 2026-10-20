@@ -156,22 +156,7 @@ impl Vault {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let tmp = path.with_extension(format!(
-            "{}.storm-tmp",
-            path.extension()
-                .map(|e| e.to_string_lossy())
-                .unwrap_or_default()
-        ));
-        {
-            use std::io::Write;
-            let mut f = fs::File::create(&tmp)
-                .with_context(|| format!("creating temp file {}", tmp.display()))?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(&path, bytes)
     }
 
     /// Every non-markdown file in the vault — the attachments.
@@ -220,33 +205,14 @@ impl Vault {
         self.resolve(rel).map(|p| p.is_file()).unwrap_or(false)
     }
 
-    /// Writes atomically: temp file in the same directory, fsync, rename.
+    /// Writes atomically ([`crate::fsutil::write_atomic`]).
     pub fn write(&self, rel: &str, content: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        // Same directory as the target, so the rename stays within one
-        // filesystem and is therefore atomic.
-        let tmp = path.with_extension(format!(
-            "{}.storm-tmp",
-            path.extension()
-                .map(|e| e.to_string_lossy())
-                .unwrap_or_default()
-        ));
-
-        {
-            use std::io::Write;
-            let mut f = fs::File::create(&tmp)
-                .with_context(|| format!("creating temp file {}", tmp.display()))?;
-            f.write_all(content.as_bytes())?;
-            f.sync_all()?;
-        }
-
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(&path, content.as_bytes())
     }
 
     /// Deletes a note, pruning any directories it leaves empty.
