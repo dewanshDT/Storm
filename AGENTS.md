@@ -149,6 +149,12 @@ data quietly.
   128b): it is replayed onto the server's text (`replayEdit`), or, where its
   place cannot be found exactly once, kept on the base it was edited from and
   saved again so the server's diff3 merges it.
+- **An unsynced edit outlives its note's deletion** (decision 128c). When the
+  outbox's write gets a 404 because the note was deleted elsewhere, the edit
+  is kept as a new note at the note's path (`Name (recovered).md` if taken),
+  and the user is told; a remote delete or a 404 on open never drops the
+  cached copy of a queued edit. A recovery create whose answer never came is
+  not resent blind (SRP §8.5): the next attempt looks for it first.
 - **Notes are tracked by UUID, not path.** Renames and moves are metadata
   updates.
 

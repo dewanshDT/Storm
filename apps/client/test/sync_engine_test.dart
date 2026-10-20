@@ -676,6 +676,12 @@ void main() {
     );
   });
 
+  test('recovered paths keep the extension and count up', () {
+    expect(recoveredPath('Ideas.md', 1), 'Ideas (recovered).md');
+    expect(recoveredPath('Daily/Today.md', 2), 'Daily/Today (recovered 2).md');
+    expect(recoveredPath('NoExtension', 1), 'NoExtension (recovered)');
+  });
+
   group('eviction and queued edits (decision 128c)', () {
     test('a queued edit survives eviction even as the oldest note', () async {
       final v = FakeServer.primaryVault;

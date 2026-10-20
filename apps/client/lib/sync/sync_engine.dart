@@ -311,7 +311,10 @@ class SyncEngine extends ChangeNotifier {
       return await cache.note(vaultId, id) ?? _asCached(fresh);
     } on StormApiException catch (e) {
       // A definite answer from the server: it is reachable, the note is gone.
+      // Unless an edit to it is queued: then the cached copy is that edit's
+      // only home until the drain keeps it as a new note (decision 128c).
       if (e.isNotFound) {
+        if (await cache.outboxFor(vaultId, id) != null) return cached;
         await cache.removeNote(vaultId, id);
         return null;
       }
@@ -730,6 +733,13 @@ class SyncEngine extends ChangeNotifier {
         // The note was deleted elsewhere, or the server refused outright.
         // Retrying forever would wedge the queue behind one bad entry.
         if (e.isNotFound) {
+          // An edit outlives its note's deletion: it is kept as a new note
+          // (decision 128c), never dropped.
+          if (item.op != 'delete' && item.content.isNotEmpty) {
+            final kept = await _recover(item);
+            if (kept != null) touched.addAll([item.noteId, kept]);
+            continue;
+          }
           await cache.dequeue(vaultId, item.noteId);
           await cache.removeNote(vaultId, item.noteId);
           touched.add(item.noteId);
@@ -847,7 +857,11 @@ class SyncEngine extends ChangeNotifier {
     for (final change in changes) {
       if (_disposed) return false;
       if (change.kind == 'deleted') {
-        await cache.removeNote(vaultId, change.noteId);
+        // A queued edit's cached copy stays: the drain keeps that edit as a
+        // new note at its path (decision 128c).
+        if (await cache.outboxFor(vaultId, change.noteId) == null) {
+          await cache.removeNote(vaultId, change.noteId);
+        }
         touched.add(change.noteId);
         continue;
       }
@@ -1098,6 +1112,89 @@ class SyncEngine extends ChangeNotifier {
     );
   }
 
+  /// Notes whose recovery create may have reached the server without an
+  /// answer (§8.5): before creating again, look for it there.
+  final _recoveryUncertain = <String>{};
+
+  /// Keeps a queued edit whose note was deleted elsewhere as a new note at
+  /// the note's path, or `Name (recovered).md`, `(recovered 2)`… when that
+  /// is taken (decision 128c). Returns the new note's id, or null when it
+  /// could not be placed; the edit then stays queued.
+  ///
+  /// A create whose answer never came is not resent blind (§8.5): the next
+  /// attempt first looks for a note already holding exactly this text.
+  Future<String?> _recover(OutboxData item) async {
+    final cached = await cache.note(vaultId, item.noteId);
+    final base = item.newPath ?? cached?.path ?? '${item.noteId}.md';
+    final candidates = [
+      base,
+      for (var n = 1; n <= 20; n++) recoveredPath(base, n),
+    ];
+
+    WriteResult? result;
+    if (_recoveryUncertain.contains(item.noteId)) {
+      result = await _alreadyRecovered(item.content, candidates);
+    }
+    for (final path in candidates) {
+      if (result != null) break;
+      try {
+        result = await api.createNote(
+          vaultId: vaultId,
+          path: path,
+          content: item.content,
+        );
+      } on StormApiException catch (e) {
+        if (e.statusCode == 409) continue;
+        return null;
+      } catch (_) {
+        _recoveryUncertain.add(item.noteId);
+        rethrow;
+      }
+    }
+    if (result == null) return null;
+    _recoveryUncertain.remove(item.noteId);
+
+    final kept = result;
+    await _cache(
+      () => _storeWrite(kept.meta.id, kept),
+      'caching ${kept.meta.path}',
+    );
+    await cache.dequeue(vaultId, item.noteId);
+    await cache.removeNote(vaultId, item.noteId);
+    if (!_disposed) {
+      _recovered.add(
+        RecoveredNote(
+          oldId: item.noteId,
+          newId: kept.meta.id,
+          path: kept.meta.path,
+        ),
+      );
+    }
+    return kept.meta.id;
+  }
+
+  /// A note at one of [paths] whose body is exactly [content]'s — the create
+  /// that went out without an answer — or null.
+  Future<WriteResult?> _alreadyRecovered(
+    String content,
+    List<String> paths,
+  ) async {
+    final tree = await api.tree(vaultId);
+    for (final meta in tree.notes.where((n) => paths.contains(n.path))) {
+      final note = await api.note(vaultId, meta.id);
+      if (bodyOf(note.content) == bodyOf(content)) {
+        return WriteResult(
+          meta: note.meta,
+          content: note.content,
+          seq: 0,
+          merged: false,
+          conflict: false,
+        );
+      }
+    }
+    return null;
+  }
+
   Future<void> _storeWrite(String id, WriteResult result) async {
     final existing = await cache.note(vaultId, id);
     await cache.putNote(
@@ -1123,3 +1220,20 @@ class SyncEngine extends ChangeNotifier {
 }
 
 enum _Feed { closed, opening, open }
+
+/// `Ideas.md` → `Ideas (recovered).md`, then `Ideas (recovered 2).md`.
+@visibleForTesting
+String recoveredPath(String path, int n) {
+  final dot = path.toLowerCase().endsWith('.md')
+      ? path.length - 3
+      : path.length;
+  final suffix = n == 1 ? ' (recovered)' : ' (recovered $n)';
+  return '${path.substring(0, dot)}$suffix${path.substring(dot)}';
+}
+
+/// A note's text after its frontmatter, which the server re-stamps on create.
+String bodyOf(String content) {
+  if (!content.startsWith('---\n')) return content.trimLeft();
+  final end = content.indexOf('\n---\n', 4);
+  return end < 0 ? content.trimLeft() : content.substring(end + 5).trimLeft();
+}

@@ -97,6 +97,7 @@ class _StormAppState extends ConsumerState<StormApp>
         fontSize: settings?.fontSize,
       ),
       routerConfig: ref.watch(routerProvider),
+      scaffoldMessengerKey: rootMessengerKey,
     );
   }
 }
