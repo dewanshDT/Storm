@@ -73,6 +73,82 @@ pub async fn list_vaults(state: &Shared, actor: &Actor) -> ApiResult<Vec<VaultIn
     Ok(out)
 }
 
+#[derive(Debug, Serialize)]
+pub struct CreatedVault {
+    pub id: String,
+    pub name: String,
+    pub dir: String,
+}
+
+/// Registers a new vault directory under the storage root and opens its index.
+pub async fn create_vault(state: &Shared, name: &str) -> ApiResult<CreatedVault> {
+    let mut vaults = state.vaults.write().await;
+    let entry = vaults
+        .registry
+        .create(name, &crate::index::now_rfc3339())
+        .map_err(|e| bad_request(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+
+    let vault = crate::vault::Vault::new(vaults.registry.path_of(&entry))?;
+    let db = crate::db::Db::open(&state.state_dir.join(&entry.id).join("index.db"), &entry.id)?;
+    vaults.open.insert(
+        entry.id.clone(),
+        Arc::new(crate::api::VaultHandle {
+            indexer: tokio::sync::Mutex::new(crate::index::Indexer::new(vault, db)),
+        }),
+    );
+    Ok(CreatedVault {
+        id: entry.id,
+        name: entry.name,
+        dir: entry.dir,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenamedVault {
+    pub id: String,
+    pub name: String,
+}
+
+/// Renames a vault. Nothing to do to the open handle: it holds only the
+/// index, and the name lives in the registry, which every reader consults.
+pub async fn rename_vault(state: &Shared, vault: &str, name: &str) -> ApiResult<RenamedVault> {
+    let mut vaults = state.vaults.write().await;
+    let entry = vaults
+        .registry
+        .rename(vault, name)
+        .map_err(|e| bad_request(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+    Ok(RenamedVault {
+        id: entry.id,
+        name: entry.name,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemovedVault {
+    pub removed: String,
+    pub name: String,
+    /// Said explicitly so no caller has to guess.
+    pub files_kept_at: String,
+}
+
+/// Unregisters a vault. **Never deletes files.**
+pub async fn remove_vault(state: &Shared, vault: &str) -> ApiResult<RemovedVault> {
+    let mut vaults = state.vaults.write().await;
+    let entry = vaults
+        .registry
+        .remove(vault)
+        .map_err(|e| not_found(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+    vaults.open.remove(vault);
+    Ok(RemovedVault {
+        files_kept_at: vaults.registry.root.join(&entry.dir).display().to_string(),
+        removed: entry.id,
+        name: entry.name,
+    })
+}
+
 /// Where a vault keeps its own configuration, as an ordinary note so it syncs
 /// and stays greppable (decision 26).
 const VAULT_CONFIG_PATH: &str = "_storm/vault.md";
@@ -544,6 +620,198 @@ pub async fn delete_note(state: &Shared, actor: &Actor, vault: &str, id: &str) -
     let seq = ix.delete_note(id)?;
     broadcast_latest(state, &ix, seq);
     Ok(seq)
+}
+
+/// Moves a note to a new path. Identity is the id, so this is a metadata
+/// change with a new version, and an agent's move is provenance like its
+/// edits (decision 128h).
+pub async fn move_note(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+    new_path: &str,
+) -> ApiResult<crate::index::WriteResult> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let result = ix.move_note(id, new_path)?;
+    broadcast_latest(state, &ix, result.seq);
+    record_agent_write(state, actor, vault, &result.note, "edited");
+    Ok(result)
+}
+
+/// Records that a note was opened, feeding the cross-vault recents list.
+///
+/// Deliberately outside the change log: opening a note is not an edit, must
+/// not bump `version`, and must not wake every other device.
+pub async fn mark_opened(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let ix = handle.indexer.lock().await;
+    if ix.db.get_note(id)?.is_none() {
+        return Err(not_found("no such note"));
+    }
+    ix.db.touch_note_access(id, &crate::index::now_rfc3339())?;
+    Ok(())
+}
+
+// ---- tree and sync -----------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct Tree {
+    pub notes: Vec<NoteRow>,
+    pub folders: Vec<String>,
+    pub seq: i64,
+}
+
+pub async fn tree(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<Tree> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(Tree {
+        notes: ix.db.list_notes()?,
+        // Derived from note paths, union the ones created explicitly — only
+        // the union makes an empty folder visible.
+        folders: ix.all_folders()?,
+        seq: ix.db.latest_seq()?,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncPage {
+    pub changes: Vec<crate::db::Change>,
+    pub seq: i64,
+}
+
+/// The vault's changes after `since`, at most `limit` (clamped to 1–5000).
+pub async fn sync(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    since: i64,
+    limit: i64,
+) -> ApiResult<SyncPage> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(SyncPage {
+        changes: ix.db.changes_since(since, limit.clamp(1, 5000))?,
+        seq: ix.db.latest_seq()?,
+    })
+}
+
+// ---- folders -----------------------------------------------------------
+
+pub async fn create_folder(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.create_folder(path)?;
+    Ok(())
+}
+
+/// Refused rather than recursive: deleting someone's notes because they
+/// tapped "delete folder" is not something to do quietly.
+pub async fn delete_folder(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.delete_folder(path)?;
+    Ok(())
+}
+
+/// Renames a folder, returning how many notes moved with it.
+pub async fn rename_folder(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    from: &str,
+    to: &str,
+) -> ApiResult<usize> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let seqs = ix.rename_folder(from, to)?;
+    // One `moved` per contained note, so every client follows the rename
+    // rather than discovering it at the next full tree fetch.
+    for seq in &seqs {
+        broadcast_latest(state, &ix, *seq);
+        if matches!(actor, Actor::Agent { .. })
+            && let Some(change) = ix.db.changes_since(seq - 1, 1)?.into_iter().next()
+            && let Some(note) = ix.db.get_note(&change.note_id)?
+        {
+            record_agent_write(state, actor, vault, &note, "edited");
+        }
+    }
+    Ok(seqs.len())
+}
+
+pub async fn notes_by_tag(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    tag: &str,
+) -> ApiResult<Vec<NoteRow>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(ix.db.notes_with_tag(tag)?)
+}
+
+// ---- attachments -------------------------------------------------------
+
+pub async fn list_attachments(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+) -> ApiResult<Vec<crate::db::AttachmentRow>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(ix.db.list_attachments()?)
+}
+
+/// An attachment's bytes. Up to 64 MiB, so the file is found under the
+/// indexer lock and read off the runtime after it is released: a download
+/// never stalls the vault's note operations (decision 128g).
+pub async fn read_attachment(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<Vec<u8>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let file = handle.indexer.lock().await.attachment_file(path)?;
+    tokio::task::spawn_blocking(move || crate::vault::read_file(&file))
+        .await
+        .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)))?
+        .map_err(|e| crate::index::IndexError::from(e).into())
+}
+
+pub async fn put_attachment(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+    bytes: &[u8],
+) -> ApiResult<()> {
+    if bytes.is_empty() {
+        return Err(bad_request("empty upload"));
+    }
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.put_attachment(path, bytes)?;
+    Ok(())
+}
+
+pub async fn delete_attachment(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.delete_attachment(path)?;
+    Ok(())
 }
 
 // ---- search and tags ---------------------------------------------------
@@ -4046,6 +4314,182 @@ mod tests {
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
         })
+    }
+
+    // ---- vault operations through `ops` (decision 128h) ------------------
+
+    fn agent_writing_to(vault: &str) -> Actor {
+        Actor::Agent {
+            session_id: "ags_test".into(),
+            host_id: "hst_test".into(),
+            user_id: "usr_test".into(),
+            write_vault: Some(vault.into()),
+        }
+    }
+
+    fn owner() -> Actor {
+        Actor::Session {
+            user_id: "usr_test".into(),
+        }
+    }
+
+    /// Two vaults; the agent may write to `work` only.
+    async fn two_vaults(dir: &std::path::Path) -> (Shared, String, String) {
+        let state = server_state(dir);
+        let work = must(create_vault(&state, "work").await).id;
+        let home = must(create_vault(&state, "home").await).id;
+        (state, work, home)
+    }
+
+    fn refused(result: ApiResult<impl Sized>) -> (axum::http::StatusCode, String) {
+        match result {
+            Ok(_) => panic!("the write was allowed"),
+            Err(ApiError(status, message)) => (status, message),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_moves_a_note_only_in_its_write_vault_and_the_move_is_its_write() {
+        let dir = tempdir::TempDir::new("storm-ops-move").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        let mine = must(create_note(&state, &owner(), &work, "A.md", "a\n").await).note;
+        let theirs = must(create_note(&state, &owner(), &home, "B.md", "b\n").await).note;
+
+        let moved = must(move_note(&state, &agent, &work, &mine.id, "Done/A.md").await);
+        assert_eq!(moved.note.path, "Done/A.md");
+        let wrote = state.agent.latest_write(&work, &mine.id).unwrap().unwrap();
+        assert_eq!(wrote.session_id, "ags_test");
+        assert_eq!(wrote.version, Some(moved.note.version));
+
+        let (status, message) = refused(move_note(&state, &agent, &home, &theirs.id, "X.md").await);
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(message, crate::auth::authz::AGENT_WRITE_REFUSED);
+    }
+
+    #[tokio::test]
+    async fn an_agent_folder_rename_records_every_note_it_moved() {
+        let dir = tempdir::TempDir::new("storm-ops-rename").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        let a = must(create_note(&state, &owner(), &work, "Inbox/A.md", "a\n").await).note;
+        let b = must(create_note(&state, &owner(), &work, "Inbox/B.md", "b\n").await).note;
+
+        let moved =
+            must(rename_folder(&state, &agent_writing_to(&work), &work, "Inbox", "Done").await);
+        assert_eq!(moved, 2);
+        for id in [&a.id, &b.id] {
+            assert!(
+                state.agent.latest_write(&work, id).unwrap().is_some(),
+                "{id} has no provenance"
+            );
+        }
+        // An owner's rename is not an agent's write.
+        must(rename_folder(&state, &owner(), &work, "Done", "Archive").await);
+        assert_eq!(state.agent.writes_of("ags_test").unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn every_vault_write_refuses_an_agent_outside_its_write_vault() {
+        let dir = tempdir::TempDir::new("storm-ops-refuse").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        let note = must(create_note(&state, &owner(), &home, "N.md", "n\n").await).note;
+        must(create_folder(&state, &owner(), &home, "Keep").await);
+        must(put_attachment(&state, &owner(), &home, "a.png", &[1, 2, 3]).await);
+
+        for (what, result) in [
+            (
+                "create_folder",
+                create_folder(&state, &agent, &home, "New")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "delete_folder",
+                delete_folder(&state, &agent, &home, "Keep")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "rename_folder",
+                rename_folder(&state, &agent, &home, "Keep", "Kept")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "put_attachment",
+                put_attachment(&state, &agent, &home, "b.png", &[4])
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "delete_attachment",
+                delete_attachment(&state, &agent, &home, "a.png")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "mark_opened",
+                mark_opened(&state, &agent, &home, &note.id)
+                    .await
+                    .map(|_| ()),
+            ),
+        ] {
+            let (status, message) = refused(result);
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{what}");
+            assert_eq!(message, crate::auth::authz::AGENT_WRITE_REFUSED, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_reads_every_vault() {
+        let dir = tempdir::TempDir::new("storm-ops-read").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        must(create_note(&state, &owner(), &home, "Tagged.md", "#idea\n").await);
+        must(put_attachment(&state, &owner(), &home, "a.png", &[9, 9]).await);
+
+        let tree = must(tree(&state, &agent, &home).await);
+        assert_eq!(tree.notes.len(), 1);
+        let page = must(sync(&state, &agent, &home, 0, 100_000).await);
+        assert_eq!(page.seq, tree.seq);
+        assert!(!page.changes.is_empty());
+        assert_eq!(
+            must(notes_by_tag(&state, &agent, &home, "idea").await).len(),
+            1
+        );
+        assert_eq!(must(list_attachments(&state, &agent, &home).await).len(), 1);
+        assert_eq!(
+            must(read_attachment(&state, &agent, &home, "a.png").await),
+            vec![9, 9]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_upload_is_refused_before_anything_is_written() {
+        let dir = tempdir::TempDir::new("storm-ops-empty").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        let (status, _) = refused(put_attachment(&state, &owner(), &work, "a.png", &[]).await);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(must(list_attachments(&state, &owner(), &work).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_removed_vault_keeps_its_files_and_says_where() {
+        let dir = tempdir::TempDir::new("storm-ops-remove").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "Kept.md", "k\n").await);
+        let renamed = must(rename_vault(&state, &work, "Work").await);
+        assert_eq!(renamed.name, "Work");
+        let removed = must(remove_vault(&state, &work).await);
+        assert_eq!(removed.removed, work);
+        assert!(
+            std::path::Path::new(&removed.files_kept_at)
+                .join("Kept.md")
+                .exists()
+        );
+        let (status, _) = refused(tree(&state, &owner(), &work).await);
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
