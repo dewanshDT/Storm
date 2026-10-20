@@ -188,6 +188,10 @@ pub fn open_vaults(registry: &Registry, state_dir: &FsPath) -> anyhow::Result<Va
 /// request can't take down a 4 GB VM.
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
+/// A note's body ceiling (128-D8). Every other route keeps axum's 2 MiB
+/// default; a router-wide attachment limit once gave all of them 64 MiB.
+pub const MAX_NOTE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Errors rendered as JSON rather than bare status codes, so the Flutter
 /// client can show something useful.
 pub struct ApiError(pub StatusCode, pub String);
@@ -420,9 +424,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
-        .route("/v1/vaults/{vault}/notes", post(create_note))
+        .route(
+            "/v1/vaults/{vault}/notes",
+            post(create_note).layer(axum::extract::DefaultBodyLimit::max(MAX_NOTE_BYTES)),
+        )
         .route("/v1/vaults/{vault}/notes/{id}", get(get_note))
-        .route("/v1/vaults/{vault}/notes/{id}", put(put_note))
+        .route(
+            "/v1/vaults/{vault}/notes/{id}",
+            put(put_note).layer(axum::extract::DefaultBodyLimit::max(MAX_NOTE_BYTES)),
+        )
         .route("/v1/vaults/{vault}/notes/{id}", delete(delete_note))
         .route("/v1/vaults/{vault}/notes/{id}/move", post(move_note))
         .route("/v1/vaults/{vault}/notes/{id}/opened", post(mark_opened))
@@ -444,9 +454,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/vaults/{vault}/attachments/{*path}",
             get(get_attachment)
                 .put(put_attachment)
-                .delete(delete_attachment),
+                .delete(delete_attachment)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES)),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
         .route("/v1/auth/logout", post(logout_handler))
         .route("/v1/auth/sessions", get(list_sessions_handler))
         .route("/v1/auth/sessions/{id}", delete(revoke_session_handler))
@@ -3200,10 +3210,16 @@ async fn get_attachment(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let bytes = ix.attachment(&path)?;
-    drop(ix);
-    Ok(ranged(bytes, content_type_for(&path), &headers))
+    let file = handle.indexer.lock().await.attachment_file(&path)?;
+    // Up to 64 MiB read and hashed: off the runtime, and after the lock is
+    // released, so a download never stalls the vault's note operations.
+    let content_type = content_type_for(&path);
+    tokio::task::spawn_blocking(move || {
+        let bytes = crate::vault::read_file(&file).map_err(crate::index::IndexError::from)?;
+        Ok(ranged(bytes, content_type, &headers))
+    })
+    .await
+    .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)))?
 }
 
 /// A whole attachment, or the single range a resuming client asked for
@@ -3225,10 +3241,15 @@ fn ranged(bytes: Vec<u8>, content_type: &'static str, headers: &HeaderMap) -> Re
         .filter(|_| fresh)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_byte_range(v, len));
+    // An attachment is whatever was uploaded, served from the app's own
+    // origin: never sniffed into HTML, and sandboxed if a browser renders it
+    // (decision 128g, H1).
     let common = [
         (header::CONTENT_TYPE, content_type.to_string()),
         (header::ACCEPT_RANGES, "bytes".to_string()),
         (header::ETAG, etag),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        (header::CONTENT_SECURITY_POLICY, "sandbox".to_string()),
     ];
     match range {
         None => (common, bytes).into_response(),
@@ -10668,6 +10689,238 @@ pub(crate) mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+
+    /// Decision 128g: what the HTTP surface accepts and how it serves files.
+    mod http_surface {
+        use super::*;
+
+        const MIB: usize = 1024 * 1024;
+
+        struct Fixture {
+            _dir: tempdir::TempDir,
+            app: Router,
+            bearer: String,
+            vault: String,
+            vault_dir: std::path::PathBuf,
+        }
+
+        async fn fixture() -> Fixture {
+            let dir = tempdir::TempDir::new("storm-http-surface").unwrap();
+            let (app, _, state) = test_router_with_state(dir.path());
+            let (_, bearer) = owner_bearer(&state).await;
+            let (status, body) = send(
+                &app,
+                post_json_with_auth("/v1/vaults", serde_json::json!({"name": "notes"}), &bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let vault = body["id"].as_str().unwrap().to_string();
+            let vault_dir = dir.path().join("vaults").join("notes");
+            Fixture {
+                _dir: dir,
+                app,
+                bearer,
+                vault,
+                vault_dir,
+            }
+        }
+
+        impl Fixture {
+            fn notes(&self) -> String {
+                format!("/v1/vaults/{}/notes", self.vault)
+            }
+
+            async fn raw(&self, method: &str, uri: &str, body: Vec<u8>) -> Response {
+                let request = axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", &self.bearer)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap();
+                self.app.clone().oneshot(request).await.unwrap()
+            }
+
+            async fn create(&self, path: &str, content: &str) -> StatusCode {
+                let body = serde_json::json!({"path": path, "content": content});
+                self.raw("POST", &self.notes(), body.to_string().into_bytes())
+                    .await
+                    .status()
+            }
+
+            async fn note_id(&self, path: &str) -> String {
+                let (status, body) = send(
+                    &self.app,
+                    post_json_with_auth(
+                        &self.notes(),
+                        serde_json::json!({"path": path, "content": "# A\n"}),
+                        &self.bearer,
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body["note"]["id"].as_str().unwrap().to_string()
+            }
+
+            async fn put_note(&self, id: &str, content: &str) -> StatusCode {
+                let body = serde_json::json!({"base_version": 1, "content": content});
+                self.raw(
+                    "PUT",
+                    &format!("{}/{id}", self.notes()),
+                    body.to_string().into_bytes(),
+                )
+                .await
+                .status()
+            }
+
+            fn attachment_uri(&self, path: &str) -> String {
+                format!("/v1/vaults/{}/attachments/{path}", self.vault)
+            }
+        }
+
+        #[tokio::test]
+        async fn a_body_that_is_not_an_attachment_or_a_note_keeps_the_2_mib_default() {
+            let f = fixture().await;
+            let pad = "x".repeat(3 * MIB);
+            let body = format!("{{\"vault_root\": \"/nowhere\", \"pad\": \"{pad}\"}}");
+            let response = f.raw("PUT", "/v1/config", body.into_bytes()).await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        #[tokio::test]
+        async fn a_note_takes_up_to_16_mib() {
+            let f = fixture().await;
+            assert_eq!(
+                f.create("Big.md", &"x".repeat(3 * MIB)).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                f.create("Huge.md", &"x".repeat(17 * MIB)).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            let id = f.note_id("A.md").await;
+            assert_eq!(f.put_note(&id, &"y".repeat(3 * MIB)).await, StatusCode::OK);
+            assert_eq!(
+                f.put_note(&id, &"y".repeat(17 * MIB)).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+
+        #[tokio::test]
+        async fn an_attachment_still_takes_up_to_64_mib() {
+            let f = fixture().await;
+            let response = f
+                .raw("PUT", &f.attachment_uri("scan.pdf"), vec![7u8; 60 * MIB])
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = f
+                .raw("PUT", &f.attachment_uri("bigger.pdf"), vec![7u8; 65 * MIB])
+                .await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        /// H1: an attachment is whatever someone uploaded. Served from the
+        /// server's own origin, an HTML or SVG file would run as the web app.
+        #[tokio::test]
+        async fn an_attachment_is_served_unsniffed_and_sandboxed() {
+            let f = fixture().await;
+            let uri = f.attachment_uri("page.html");
+            let put = f
+                .raw("PUT", &uri, b"<script>alert(1)</script>".to_vec())
+                .await;
+            assert_eq!(put.status(), StatusCode::OK);
+            for range in [None, Some("bytes=0-3")] {
+                let mut request = axum::http::Request::builder()
+                    .uri(&uri)
+                    .header("authorization", &f.bearer);
+                if let Some(range) = range {
+                    request = request.header(header::RANGE, range);
+                }
+                let response = f
+                    .app
+                    .clone()
+                    .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success(), "{range:?}");
+                let headers = response.headers();
+                assert_eq!(headers["x-content-type-options"], "nosniff", "{range:?}");
+                assert_eq!(headers["content-security-policy"], "sandbox", "{range:?}");
+            }
+        }
+
+        /// E3: reading an attachment is file I/O of up to 64 MiB, and it must
+        /// not hold the vault's indexer lock while it happens.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_note_op_does_not_wait_for_an_attachment_read() {
+            let f = fixture().await;
+            let uri = f.attachment_uri("held-read.bin");
+            let put = f.raw("PUT", &uri, b"done".to_vec()).await;
+            assert_eq!(put.status(), StatusCode::OK);
+
+            let release = crate::vault::read_gate::hold("held-read.bin");
+            let request = get_with_auth(&uri, &f.bearer);
+            let app = f.app.clone();
+            let download = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            let created =
+                tokio::time::timeout(std::time::Duration::from_secs(5), f.create("B.md", "b\n"))
+                    .await;
+            // Let the read finish whatever happened, so a failure is a failure
+            // and not a hung test.
+            release.send(()).unwrap();
+            let response = download.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                created.expect("a note op waited for an attachment read"),
+                StatusCode::OK
+            );
+        }
+
+        /// B5: on a case-insensitive disk (macOS, Windows) `a.md` *is*
+        /// `A.md`, so "the destination exists" refused every case-only
+        /// rename. Linux runs it too; CI's macOS and Windows jobs are where it
+        /// fails without the fix.
+        #[tokio::test]
+        async fn a_note_can_be_renamed_by_case_alone() {
+            let f = fixture().await;
+            let id = f.note_id("Ideas.md").await;
+            let (status, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("{}/{id}/move", f.notes()),
+                    serde_json::json!({"new_path": "ideas.md"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let names: Vec<String> = std::fs::read_dir(&f.vault_dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".md"))
+                .collect();
+            assert_eq!(names, vec!["ideas.md".to_string()]);
+        }
+
+        #[tokio::test]
+        async fn a_folder_can_be_renamed_by_case_alone() {
+            let f = fixture().await;
+            f.note_id("Projects/A.md").await;
+            let (status, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{}/folders/rename", f.vault),
+                    serde_json::json!({"from": "Projects", "to": "projects"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(f.vault_dir.join("projects/A.md").exists());
         }
     }
 }

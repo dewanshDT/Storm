@@ -147,8 +147,7 @@ impl Vault {
 
     /// Reads a file as raw bytes — attachments are opaque blobs.
     pub fn read_bytes(&self, rel: &str) -> Result<Vec<u8>> {
-        let path = self.resolve(rel)?;
-        fs::read(&path).with_context(|| format!("reading {}", path.display()))
+        read_file(&self.resolve(rel)?)
     }
 
     /// Writes raw bytes atomically, same as [`Vault::write`].
@@ -266,7 +265,7 @@ impl Vault {
     pub fn rename(&self, from: &str, to: &str, keep: &HashSet<String>) -> Result<()> {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
-        if dst.exists() {
+        if dst.exists() && !same_entry_by_case(&src, &dst) {
             bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
@@ -310,7 +309,7 @@ impl Vault {
         if !src.is_dir() {
             bail!(Refusal::Missing(format!("no such folder: {from}")));
         }
-        if dst.exists() {
+        if dst.exists() && !same_entry_by_case(&src, &dst) {
             bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
@@ -488,6 +487,56 @@ pub fn windows_name_problem(name: &str) -> Option<&'static str> {
     reserved.then_some("it is a reserved device name")
 }
 
+/// Whether `dst` exists only because it is `src` spelled in another case:
+/// on a case-insensitive disk (macOS, Windows) `a.md` is `A.md`, and refusing
+/// it made a case-only rename impossible (decision 128g, B5). Where the two
+/// names are two files, it is a real destination and is not this.
+fn same_entry_by_case(src: &Path, dst: &Path) -> bool {
+    src != dst
+        && src.to_string_lossy().to_lowercase() == dst.to_string_lossy().to_lowercase()
+        && same_file::is_same_file(src, dst).unwrap_or(false)
+}
+
+/// Reads a whole file. A free function so an attachment can be read once
+/// the indexer lock is released (decision 128g).
+pub fn read_file(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    read_gate::wait(path);
+    fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// Lets a test hold a read of one file open, so "while a read is in
+/// progress" is a state it can observe rather than a race it hopes to win.
+#[cfg(test)]
+pub(crate) mod read_gate {
+    use std::path::Path;
+    use std::sync::{Mutex, mpsc};
+
+    static GATES: Mutex<Vec<(String, mpsc::Receiver<()>)>> = Mutex::new(Vec::new());
+
+    /// Holds the next read of a file named `name` until the sender sends or
+    /// is dropped.
+    pub fn hold(name: &str) -> mpsc::Sender<()> {
+        let (tx, rx) = mpsc::channel();
+        GATES.lock().unwrap().push((name.to_string(), rx));
+        tx
+    }
+
+    pub(super) fn wait(path: &Path) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let gate = {
+            let mut gates = GATES.lock().unwrap();
+            let at = gates.iter().position(|(n, _)| n == name);
+            at.map(|i| gates.remove(i).1)
+        };
+        if let Some(rx) = gate {
+            let _ = rx.recv();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +554,47 @@ mod tests {
 
     fn keeping(paths: &[&str]) -> HashSet<String> {
         paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// B5 (decision 128g): a case-only rename is a rename, on every disk.
+    #[test]
+    fn a_case_only_rename_is_allowed() {
+        let (_d, v) = temp_vault();
+        v.write("Note.md", "# n\n").unwrap();
+        v.rename("Note.md", "note.md", &nothing()).unwrap();
+        let names: Vec<_> = fs::read_dir(v.root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["note.md".to_string()]);
+
+        v.write("Projects/A.md", "# a\n").unwrap();
+        v.rename_dir("Projects", "projects").unwrap();
+        assert!(v.root().join("projects/A.md").exists());
+    }
+
+    #[test]
+    fn a_rename_onto_another_file_is_still_refused() {
+        let (_d, v) = temp_vault();
+        v.write("A.md", "a\n").unwrap();
+        v.write("B.md", "b\n").unwrap();
+        assert!(v.rename("A.md", "B.md", &nothing()).is_err());
+        assert_eq!(v.read("B.md").unwrap(), "b\n");
+    }
+
+    /// Where two names differing only by case are two files, the second is a
+    /// real destination and a rename must not clobber it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_case_only_rename_onto_a_distinct_file_is_refused() {
+        let (_d, v) = temp_vault();
+        v.write("Note.md", "upper\n").unwrap();
+        v.write("note.md", "lower\n").unwrap();
+        assert!(v.rename("Note.md", "note.md", &nothing()).is_err());
+        assert_eq!(v.read("note.md").unwrap(), "lower\n");
+        v.write("Dir/x.md", "x\n").unwrap();
+        v.write("dir/y.md", "y\n").unwrap();
+        assert!(v.rename_dir("Dir", "dir").is_err());
     }
 
     #[test]

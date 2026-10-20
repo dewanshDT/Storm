@@ -43,7 +43,8 @@ can list a vault's tags with counts and find notes that share them.
 ## Attachments
 
 **Attach a file** adds it to the vault and links it from the note. Images are
-shown under the note; the Markdown link stays visible and editable.
+shown under the note; the Markdown link stays visible and editable. A file can
+be up to 64 MiB, and a note itself up to 16 MiB.
 
 ## Appearance
 
