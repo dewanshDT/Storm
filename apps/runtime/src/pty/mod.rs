@@ -34,6 +34,10 @@ pub(crate) struct Launch {
     /// Set on top of the host's own environment, in order: a later entry
     /// wins.
     pub env: Vec<(OsString, OsString)>,
+    /// Taken out after `env`, from the host's environment too.
+    pub env_remove: Vec<OsString>,
+    /// Set after everything else.
+    pub secret_env: Vec<(OsString, crate::credential::SecretOsString)>,
     /// The session id, which marks everything the session starts. Unix
     /// finds what left the session by it; Windows' job holds everything
     /// already (AM52).

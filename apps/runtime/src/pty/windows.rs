@@ -236,7 +236,20 @@ fn environment_block(launch: &Launch) -> Vec<u16> {
         )
     };
     let host: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| lossy((&k, &v))).collect();
-    let env = wincmd::merge_environment(host, launch.env.iter().map(|(k, v)| lossy((k, v))));
+    let remove: Vec<String> = launch
+        .env_remove
+        .iter()
+        .map(|k| k.to_string_lossy().into_owned())
+        .collect();
+    let env = wincmd::session_environment(
+        host,
+        launch.env.iter().map(|(k, v)| lossy((k, v))),
+        &remove,
+        launch
+            .secret_env
+            .iter()
+            .map(|(k, v)| lossy((k, v.expose()))),
+    );
     let mut block: Vec<u16> = Vec::new();
     for (k, v) in env {
         block.extend(OsStr::new(&format!("{k}={v}")).encode_wide());

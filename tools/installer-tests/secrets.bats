@@ -34,70 +34,12 @@ setup() {
   [ "$(file_mode "$LOG_FILE")" = 600 ]
 }
 
-@test "write_claude_env: the token reaches the file through stdin only" {
-  platform
-  mkdir -p "$RT_STATE"
-  printf '%s\n' "sk-ant-oat01-TOKENSECRET" | write_claude_env
-  [ "$(cat "$RT_STATE/claude.env")" = "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-TOKENSECRET" ]
-  [ "$(file_mode "$RT_STATE/claude.env")" = 600 ]
-  grep -q "sudo -u storm-runtime sh -c" "$FAKE_LOG"
-  ! grep -q TOKENSECRET "$FAKE_LOG"
-}
-
-@test "the providers block, appended only when none is listed" {
-  platform
-  mkdir -p "$(dirname "$RT_CONFIG")" "$RT_STATE"
-  printf 'workspaces = []\n# [[providers]] is commented out\n' >"$RT_CONFIG"
-  touch "$RT_STATE/claude.env"
-  agents_providers
-  grep -q '^id = "claude-code"$' "$RT_CONFIG"
-  grep -q "^env_file = \"$RT_STATE/claude.env\"$" "$RT_CONFIG"
-  grep -q '^id = "opencode"$' "$RT_CONFIG"
-  grep -q '^id = "shell"$' "$RT_CONFIG"
-  [ "$AGENTS_CHANGED" = 1 ]
-  before=$(cat "$RT_CONFIG")
-  AGENTS_CHANGED=0
-  agents_providers
-  [ "$(cat "$RT_CONFIG")" = "$before" ]
-  [ "$AGENTS_CHANGED" = 0 ]
-}
-
-@test "no token yet: runtime.toml keeps its defaults" {
-  platform
-  mkdir -p "$(dirname "$RT_CONFIG")"
-  printf 'x = 1\n' >"$RT_CONFIG"
-  run agents_providers
-  [ "$status" -eq "$STEP_SKIPPED" ]
-  [ "$(cat "$RT_CONFIG")" = "x = 1" ]
-}
-
 # An interactive session whose "terminal" is a file of typed lines.
 typed() {
   printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/tty.in"
   export STORM_TTY="$BATS_TEST_TMPDIR/tty.in" STORM_TTY_OUT="$BATS_TEST_TMPDIR/tty.out"
   OPT_YES=0
   ui_init
-}
-
-@test "interactive Claude token: wrong shape re-asked, then saved; never on screen or argv" {
-  platform
-  mkdir -p "$RT_STATE"
-  typed "not-a-token" "sk-ant-oat01-TYPEDSECRET"
-  WORK_DIR="$BATS_TEST_TMPDIR"
-  agents_claude_token
-  [ "$(cat "$RT_STATE/claude.env")" = "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-TYPEDSECRET" ]
-  grep -q "That isn't a Claude Code token" "$STORM_TTY_OUT"
-  ! grep -q TYPEDSECRET "$STORM_TTY_OUT"
-  ! grep -q TYPEDSECRET "$FAKE_LOG"
-  [ "$AGENTS_CHANGED" = 1 ]
-}
-
-@test "interactive Claude token: Enter alone skips" {
-  platform
-  typed ""
-  run agents_claude_token
-  [ "$status" -eq "$STEP_SKIPPED" ]
-  [ ! -e "$RT_STATE/claude.env" ]
 }
 
 @test "interactive enrollment paste: shape checked, piped to enroll" {

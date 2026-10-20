@@ -384,8 +384,28 @@ jobs:
       - run: flutter test
 
   # The desktop runners are native code the Dart suite never compiles
-  # (decision 125): a template edit or a plugin that lacks Linux support
+  # (decision 125): a template edit or a plugin that lacks Windows support
   # surfaces only here.
+  client-windows:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'
+    name: client (windows build)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+  # The Linux runner, likewise: a template edit or a plugin that lacks Linux
+  # support surfaces only here.
   client-linux:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'

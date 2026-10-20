@@ -433,3 +433,35 @@ fn a_session_lists_its_members() {
     session.stop(Duration::from_millis(100));
     rec.wait_end();
 }
+
+/// AM71: a synced launch's removals reach the inherited environment and
+/// the provider's env file alike, and its secret is set after both.
+#[test]
+fn removals_reach_the_inherited_environment_and_the_secret_comes_last() {
+    use storm_runtime::credential::SecretOsString;
+    use storm_runtime::provider::LaunchExtras;
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "the test needs an inherited HOME"
+    );
+    let provider = sh("echo \"[$HOME|$ANTHROPIC_API_KEY|$KEEP|$TOKEN]\"").with_env([
+        ("ANTHROPIC_API_KEY", "from-env-file"),
+        ("TOKEN", "from-env-file"),
+        ("KEEP", "kept"),
+    ]);
+    let rec = Arc::new(Recorder::default());
+    let spec = SessionSpec {
+        session_id: format!("ags_CLIRM_{}", std::process::id()),
+        workspace: workspace(),
+        interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
+        launch: LaunchExtras {
+            env: vec![("TOKEN".into(), "from-launch".into())],
+            env_remove: vec!["HOME".into(), "ANTHROPIC_API_KEY".into(), "TOKEN".into()],
+            secret_env: vec![("TOKEN".into(), SecretOsString::new("synced"))],
+            ..Default::default()
+        },
+    };
+    let _session = provider.start(spec, rec.clone()).expect("start");
+    assert_eq!(rec.wait_end(), SessionEnd::Completed { exit_code: Some(0) });
+    assert!(rec.output().contains("[||kept|synced]"), "{}", rec.output());
+}

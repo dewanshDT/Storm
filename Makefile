@@ -232,6 +232,10 @@ test-live:
 	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
 	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
 		python3 "$$ROOT/$(SERVER)/tests/gateway_e2e.py"; \
+	echo "--- token sync e2e (its own server, a host behind a proxy and an old host; decision 124) ---"; \
+	SERVER_BIN="$$ROOT/$(SERVER)/target/debug/storm-server" \
+	RUNTIME_BIN="$$ROOT/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 "$$ROOT/$(SERVER)/tests/token_sync_e2e.py"; \
 	echo "--- auth e2e + client device tier (each needs a virgin server) ---"; \
 	rm -rf "$$ROOT/.dev/auth-vaults" "$$ROOT/.dev/auth-state"; \
 	mkdir -p "$$ROOT/.dev/auth-vaults/primary"; \
