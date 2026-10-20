@@ -107,7 +107,6 @@ impl ServerIdentity {
     /// this signs whatever a relay sends, exactly like [`sign_challenge`] signs
     /// whatever a client sends, so the same forgeable-field-boundary risk
     /// applies and the same guard belongs here rather than upstream.
-    #[allow(dead_code)] // Called by relay registration, landing in a parallel change.
     pub fn sign_relay_auth(&self, nonce: &str) -> std::result::Result<String, &'static str> {
         // Both fields, not just the nonce. They are two colon-delimited parts
         // of one signed string, so constraining one leaves the split
@@ -185,7 +184,6 @@ pub fn challenge_message(server_id: &str, nonce: &str) -> Vec<u8> {
 /// and a signature made for one must be structurally impossible to replay as
 /// the other. Two free functions make that a type-level fact instead of
 /// something a caller could get wrong by passing the wrong string.
-#[allow(dead_code)] // Called by `sign_relay_auth` and relay registration; tested directly here.
 pub fn relay_auth_message(server_id: &str, nonce: &str) -> Vec<u8> {
     format!("storm-relay-auth:v1:{server_id}:{nonce}").into_bytes()
 }

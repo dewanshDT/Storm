@@ -63,21 +63,12 @@ pub struct VaultEntry {
 #[derive(Debug, Clone, Default)]
 pub struct RegisteredRelays(Arc<RwLock<BTreeSet<String>>>);
 
-// Everything below `snapshot` is dead until the tunnel client exists — it is
-// the only thing that will ever know whether a registration succeeded, and it
-// is not written yet. Committed now rather than later on purpose: the *shape*
-// is what SRP v1 §4.4 pins, `/v1/server` already reports the set, and a
-// mutation API a future caller has to invent from scratch is one that gets
-// invented differently. Drop the allow when the tunnel client lands.
-#[allow(dead_code)]
+// The tunnel client is the only writer: it alone knows whether a
+// registration succeeded (SRP v1 §4.4).
 impl RegisteredRelays {
     /// The set, ordered, for putting on the wire.
     pub fn snapshot(&self) -> Vec<String> {
         self.read().iter().cloned().collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.read().is_empty()
     }
 
     /// Registration with `relay_url` succeeded — start advertising it.
@@ -93,11 +84,6 @@ impl RegisteredRelays {
     pub fn mark_unregistered(&self, relay_url: &str) {
         let url = normalize_relay_url(relay_url).unwrap_or_else(|_| relay_url.trim().to_string());
         self.write().remove(&url);
-    }
-
-    /// Every relay at once — a trunk supervisor shutting down.
-    pub fn clear(&self) {
-        self.write().clear();
     }
 
     // A poisoned lock means another thread panicked mid-update. The set is
@@ -121,9 +107,6 @@ impl RegisteredRelays {
 /// `/connect/<server_id>` to whatever is stored — a configured
 /// `wss://relay.example.com/foo` would derive an address the relay does not
 /// serve, and a client would spend its whole connection race discovering that.
-// Dead until something sets relays: the app's settings endpoint lives in
-// `api.rs` and does not exist yet. See the note above `impl RegisteredRelays`.
-#[allow(dead_code)]
 pub fn normalize_relay_url(url: &str) -> Result<String> {
     let trimmed = url.trim().trim_end_matches('/');
     let (plain, rest) = match trimmed.split_once("://") {
@@ -341,20 +324,11 @@ impl Registry {
     pub fn save(&self, state_dir: &Path) -> Result<()> {
         fs::create_dir_all(state_dir)
             .with_context(|| format!("creating state dir {}", state_dir.display()))?;
-        let path = state_dir.join(REGISTRY_FILE);
-        let tmp = path.with_extension("json.storm-tmp");
         let json = serde_json::to_string_pretty(self)?;
-        {
-            use std::io::Write;
-            let mut f =
-                fs::File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-            f.write_all(json.as_bytes())?;
-            f.write_all(b"\n")?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(
+            &state_dir.join(REGISTRY_FILE),
+            format!("{json}\n").as_bytes(),
+        )
     }
 
     pub fn agent_writes(&self) -> bool {
@@ -534,9 +508,6 @@ impl Registry {
     /// hold a trunk with must not keep being advertised.
     ///
     /// The caller persists: `save` after this, the way the MCP switches do.
-    // Dead until the settings endpoint in `api.rs` calls it. See the note above
-    // `impl RegisteredRelays`.
-    #[allow(dead_code)]
     pub fn set_relays(&mut self, urls: &[String]) -> Result<()> {
         let mut normalized = BTreeSet::new();
         for url in urls {
@@ -846,7 +817,7 @@ mod tests {
 
         let reg = Registry::load(&f.state, &f.root).unwrap();
         assert!(reg.relays.is_empty(), "defaults to none, does not fail");
-        assert!(reg.registered_relays.is_empty());
+        assert!(reg.registered_relays.snapshot().is_empty());
         assert!(reg.mcp_enabled, "the fields we kept must survive");
     }
 
@@ -930,7 +901,7 @@ mod tests {
         let again = Registry::load(&f.state, &f.root).unwrap();
         assert_eq!(again.relays.len(), 1, "configuration survives");
         assert!(
-            again.registered_relays.is_empty(),
+            again.registered_relays.snapshot().is_empty(),
             "registration does not — a restarted server is registered with nothing"
         );
     }
@@ -973,7 +944,7 @@ mod tests {
 
         reg.set_relays(&[]).unwrap();
         assert!(
-            reg.registered_relays.is_empty(),
+            reg.registered_relays.snapshot().is_empty(),
             "a relay nobody is holding a trunk with must stop being advertised"
         );
     }

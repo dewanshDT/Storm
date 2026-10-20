@@ -21,8 +21,8 @@ pub const EVENT_DEVICE_REVOKED: &str = "device_revoked";
 
 pub const PAIRED_BY_LAN_PASSWORD: &str = "lan_password";
 
-/// Recorded on devices this server minted for itself rather than paired.
-#[allow(dead_code)] // Used only by `create_synthetic`, which is wired by future CLI callers.
+/// Recorded on devices a test minted rather than paired.
+#[cfg(test)]
 pub const PLATFORM_SYNTHETIC: &str = "synthetic";
 
 /// A device row. **No `secret_hash`**, for the same reason [`super::users::User`]
@@ -96,7 +96,7 @@ impl AuthDb {
         self.find_device(id)
     }
 
-    #[allow(dead_code)] // Used only by `create_synthetic`.
+    #[cfg(test)]
     fn insert_device(&mut self, device: &Device, secret_hash: &[u8]) -> Result<()> {
         self.conn.execute(
             "INSERT INTO client_devices
@@ -185,7 +185,7 @@ fn row_to_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
 /// token the operator is handed; nothing will ever present this secret, and
 /// printing a second secret beside the token would only invite pasting the
 /// wrong one. Pairing mints — and hands over — its own.
-#[allow(dead_code)] // Called by `storm-server token` (not yet built) and tests.
+#[cfg(test)]
 pub fn create_synthetic(db: &mut AuthDb, name: &str, now: &str) -> Result<Device> {
     let name = name.trim();
     if name.is_empty() {
@@ -216,7 +216,7 @@ pub fn create_synthetic(db: &mut AuthDb, name: &str, now: &str) -> Result<Device
 
 /// Registers a device that was paired over the network.
 ///
-/// Unlike [`create_synthetic`], the secret is returned to the caller so it can
+/// Unlike `create_synthetic` (tests only), the secret is returned to the caller so it can
 /// be sent to the client exactly once. The plaintext is never stored or logged.
 pub fn create_paired(
     db: &mut AuthDb,

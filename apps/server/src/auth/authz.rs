@@ -44,7 +44,6 @@ pub enum Actor {
     Key {
         /// Which key acted. **For the audit trail, never for a decision** —
         /// see [`Actor::key_id`].
-        #[allow(dead_code)]
         key_id: String,
         user_id: String,
     },
@@ -58,7 +57,6 @@ pub enum Actor {
     /// `ops::integration_call` before this actor existed.
     Agent {
         session_id: String,
-        #[allow(dead_code)]
         host_id: String,
         user_id: String,
         /// The one vault this session may write to, chosen at launch. `None`
@@ -116,13 +114,18 @@ impl Actor {
     /// access decisions** — a policy that asks "is this a key?" is the branch
     /// this design exists to make unnecessary.
     ///
-    /// Asserted by `an_mcp_key_request_carries_its_owners_identity`; no
-    /// shipping caller yet, because the audit work that wants it belongs to a
-    /// later release.
-    #[allow(dead_code)]
+    /// Named in the `vault access refused` log line.
     pub fn key_id(&self) -> Option<&str> {
         match self {
             Actor::Key { key_id, .. } => Some(key_id),
+            _ => None,
+        }
+    }
+
+    /// The Runtime Host an agent acts from, for the same log line.
+    pub fn host_id(&self) -> Option<&str> {
+        match self {
+            Actor::Agent { host_id, .. } => Some(host_id),
             _ => None,
         }
     }

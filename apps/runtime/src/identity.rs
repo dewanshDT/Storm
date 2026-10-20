@@ -274,19 +274,12 @@ impl HostConfig {
     /// Written atomically (temp file, then rename), `0600`.
     pub fn save(&self, state_dir: &Path) -> Result<()> {
         let path = Self::path(state_dir);
-        let tmp = path.with_extension("json.tmp");
-        let mut file = crate::platform::open_private(
-            &tmp,
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true),
+        crate::fsutil::write_atomic(
+            &path,
+            serde_json::to_string_pretty(self)?.as_bytes(),
+            crate::fsutil::Access::Private,
         )
-        .with_context(|| format!("creating {}", tmp.display()))?;
-        file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        .with_context(|| format!("writing {}", path.display()))
     }
 
     /// The server refused this host's key (AM36): `host.json` becomes

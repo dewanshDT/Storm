@@ -79,12 +79,6 @@ pub struct AppState {
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
-    /// Bootstrap pairing nonce (plaintext), if one was created at boot when
-    /// the user table was empty. Needed to reconstruct the QR payload for
-    /// the console log. Not read after boot — the field exists so a future
-    /// CLI or settings surface can regenerate the QR without restarting.
-    #[allow(dead_code)]
-    pub bootstrap_nonce: Option<String>,
     /// The server's listen address, used as the `addr` hint in QR payloads.
     pub listen_addr: String,
     /// Decides whether an actor may reach a vault.
@@ -275,6 +269,8 @@ pub async fn vault_of(
     if let Decision::Deny(reason) = state.vault_policy.decide(actor, id, access) {
         tracing::info!(
             actor = actor.describe(),
+            key = actor.key_id(),
+            host = actor.host_id(),
             vault = id,
             ?access,
             reason,
@@ -1929,12 +1925,8 @@ async fn runtime_image_staged(
 struct ResizeRequest {
     cols: u16,
     rows: u16,
-    /// Whether this client just took focus. The PTY follows the most recently
-    /// active client either way (freeze §11.4); the flag is the client saying
-    /// "that is me now" without typing.
-    #[serde(default)]
-    #[allow(dead_code)]
-    focus: bool,
+    // Clients also send `focus` (freeze §11.4). Every resize is applied, so
+    // the PTY follows the most recently active client without reading it.
 }
 
 async fn agent_resize(
@@ -2094,28 +2086,6 @@ pub enum RequiredTier {
 #[derive(Clone)]
 pub struct HostAuth {
     pub host: crate::auth::hosts::Host,
-}
-
-/// A device that has proven it is paired with this server.
-///
-/// Set as a request extension by `require_auth` on device-tier and session-tier
-/// routes when the credential is a `StormDevice` header.
-#[derive(Clone)]
-pub struct DeviceAuth {
-    #[allow(dead_code)]
-    pub device: crate::auth::devices::Device,
-}
-
-/// A caller holding a valid MCP key (A14).
-///
-/// Set on `Mcp`-tier routes when the credential is `Bearer stk_…`. The
-/// authorization-facing identity is the `Actor::Key` inserted beside it; this
-/// carries the record itself, for handlers and audit rows that want the key's
-/// name or owner without a second lookup.
-#[derive(Clone)]
-pub struct KeyAuth {
-    #[allow(dead_code)] // Read by audit/logging work, not by the boundary.
-    pub authed: crate::auth::keys::AuthenticatedKey,
 }
 
 /// A caller that has proven who it is (user + device + session).
@@ -2285,7 +2255,6 @@ async fn require_auth(
         if device.is_revoked() {
             return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
         }
-        request.extensions_mut().insert(DeviceAuth { device });
         return next.run(request).await;
     }
 
@@ -2385,7 +2354,6 @@ async fn require_auth(
                 key_id: authed.key.id.clone(),
                 user_id: authed.account.id.clone(),
             });
-            request.extensions_mut().insert(KeyAuth { authed });
             return next.run(request).await;
         }
 
@@ -3613,7 +3581,6 @@ pub(crate) mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),

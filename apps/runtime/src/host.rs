@@ -392,9 +392,11 @@ impl Host {
             sessions: self.sessions.lock().unwrap().keys().cloned().collect(),
         };
         let path = self.state_dir.join(SESSIONS_FILE);
-        let tmp = path.with_extension("json.tmp");
-        let result = std::fs::write(&tmp, serde_json::to_vec(&table).unwrap_or_default())
-            .and_then(|_| std::fs::rename(&tmp, &path));
+        let result = crate::fsutil::write_atomic(
+            &path,
+            &serde_json::to_vec(&table).unwrap_or_default(),
+            crate::fsutil::Access::Default,
+        );
         if let Err(e) = result {
             tracing::error!(error = %e, "could not write {}", path.display());
         }

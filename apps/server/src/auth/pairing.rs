@@ -93,19 +93,7 @@ impl PairingPurpose {
 #[derive(Debug, Clone)]
 pub struct PairingSession {
     pub id: String,
-    #[allow(dead_code)] // Read by future audit/display; tested here.
-    pub purpose: PairingPurpose,
-    #[allow(dead_code)]
-    pub created_by: Option<String>,
-    #[allow(dead_code)]
-    pub created: String,
     pub expires: String,
-    #[allow(dead_code)]
-    pub consumed: Option<String>,
-    #[allow(dead_code)]
-    pub consumed_by: Option<String>,
-    #[allow(dead_code)]
-    pub attempts: i32,
 }
 
 /// The raw row returned by the DB lookup, before being mapped to a
@@ -258,13 +246,7 @@ pub fn create(
 
     let session = PairingSession {
         id: session_id,
-        purpose,
-        created_by: created_by.map(str::to_string),
-        created: now.to_string(),
         expires,
-        consumed: None,
-        consumed_by: None,
-        attempts: 0,
     };
 
     db.record_event(
@@ -502,8 +484,16 @@ mod tests {
 
         let (nonce, session) = create(&mut db, PairingPurpose::FirstUser, None, None, now).unwrap();
         assert!(session.id.starts_with("pair_"));
-        assert_eq!(session.purpose, PairingPurpose::FirstUser);
-        assert!(session.created_by.is_none());
+        let (purpose, created_by): (String, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT purpose, created_by FROM pairing_sessions WHERE id = ?1",
+                [&session.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(purpose, PairingPurpose::FirstUser.as_str());
+        assert!(created_by.is_none());
 
         let result = consume(
             &mut db,
@@ -625,7 +615,15 @@ mod tests {
             now,
         )
         .unwrap();
-        assert_eq!(session.created_by.as_deref(), Some(user.id.as_str()));
+        let created_by: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT created_by FROM pairing_sessions WHERE id = ?1",
+                [&session.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(created_by.as_deref(), Some(user.id.as_str()));
 
         let result = consume(&mut db, &nonce, "iPad", None, None, None, now).unwrap();
         assert!(!result.device_id.is_empty());

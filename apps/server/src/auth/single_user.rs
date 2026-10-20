@@ -65,7 +65,6 @@ fn checkpoint(step: u8) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(crate) enum Step {
     Detach = 1,
     RevokeDevices = 2,
