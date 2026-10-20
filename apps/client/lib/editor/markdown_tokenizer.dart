@@ -131,7 +131,11 @@ LineResult tokenizeLine(
       Token(offset, offset + line.length, TokenKind.frontmatter),
     ], BlockContext(inFrontmatter: !closing));
   }
-  if (lineIndex == 0 && line.trimRight() == '---') {
+  // A BOM before that fence still opens it (128e); the token covers the BOM
+  // too, so the line still tiles exactly.
+  if (lineIndex == 0 &&
+      (line.startsWith('\uFEFF') ? line.substring(1) : line).trimRight() ==
+          '---') {
     return LineResult([
       Token(offset, offset + line.length, TokenKind.frontmatter),
     ], const BlockContext(inFrontmatter: true));

@@ -552,6 +552,22 @@ mod tests {
     }
 
     #[test]
+    fn importing_a_bom_note_stamps_its_own_block() {
+        // Decision 128e: a note saved by a Windows editor with a UTF-8 BOM
+        // used to get a second block prepended, its own turned into body text.
+        let (_d, mut ix) = indexer();
+        ix.vault
+            .write("W.md", "\u{feff}---\ntitle: Win\n---\nbody\n")
+            .unwrap();
+        ix.reconcile(false).unwrap();
+        let after = ix.vault.read("W.md").unwrap();
+        assert!(after.starts_with("\u{feff}---\n"), "{after:?}");
+        assert_eq!(after.matches("---\n").count(), 2, "{after:?}");
+        assert!(after.contains("title: Win\n"));
+        assert!(after.ends_with("---\nbody\n"), "{after:?}");
+    }
+
+    #[test]
     fn imports_an_existing_obsidian_vault() {
         let (_d, mut ix) = indexer();
         // Notes as Obsidian leaves them: no id, arbitrary frontmatter, none.
