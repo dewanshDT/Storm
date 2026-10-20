@@ -379,6 +379,15 @@ client:
 # Overridable for a per-user install: make install-mac MAC_APPS=$HOME/Applications
 MAC_APPS ?= /Applications
 
+## app-linux: build the release Linux app and run it
+#
+# The bundle runs in place: build/linux/x64/release/bundle holds the binary,
+# lib/ and data/ side by side, and nothing outside it is needed. Building it
+# needs cmake, ninja, clang, pkg-config and the GTK 3 and libsecret headers.
+app-linux:
+	cd $(CLIENT) && flutter build linux --release
+	$(CLIENT)/build/linux/x64/release/bundle/storm
+
 ## install-mac: build the release app and install it into /Applications
 #
 # `flutter run -d macos` above is the dev loop and dies with the terminal; this
@@ -554,6 +563,6 @@ clean:
 	rm -rf .dev
 
 .PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
-        dry-run server client web serve-web www www-dev www-check www-facts formula-check codegen clean \
+        dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check
