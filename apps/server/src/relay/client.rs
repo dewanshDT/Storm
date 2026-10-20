@@ -33,6 +33,17 @@ use super::proto::{self, Inbound, RequestHead};
 use crate::auth::ServerIdentity;
 use crate::registry::RegisteredRelays;
 
+/// SRP §3: no message is over 16 MiB, header included (decision 128f). The
+/// relay enforces it too; bounding our own socket means a misbehaving relay
+/// cannot make this process buffer tungstenite's 64 MiB default either.
+const MAX_SRP_MESSAGE: usize = 16 * 1024 * 1024;
+
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_SRP_MESSAGE))
+        .max_frame_size(Some(MAX_SRP_MESSAGE))
+}
+
 /// Reconnect backoff bounds (§4.2). Doubling, with ±20 % jitter applied to
 /// each wait: a public relay that restarts has every server it carried
 /// redialling at once (decision 116f).
@@ -259,7 +270,7 @@ async fn run_once(
         // each waits out the relay's delayed ACK, ~40 ms a request (decision 91).
         result = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(&url, None, true),
+            tokio_tungstenite::connect_async_with_config(&url, Some(ws_config()), true),
         ) => {
             match result {
                 Ok(result) => result,
@@ -1113,6 +1124,13 @@ impl Drop for BodyReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trunk_socket_is_bounded_at_srp_s_16_mib() {
+        let config = ws_config();
+        assert_eq!(config.max_message_size, Some(16 * 1024 * 1024));
+        assert_eq!(config.max_frame_size, Some(16 * 1024 * 1024));
+    }
 
     async fn drain(body: Body) -> usize {
         axum::body::to_bytes(body, usize::MAX).await.unwrap().len()
