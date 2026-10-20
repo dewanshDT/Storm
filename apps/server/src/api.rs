@@ -10475,7 +10475,6 @@ pub(crate) mod tests {
     /// loses the user's work.
     mod index_errors {
         use super::*;
-        use std::os::unix::fs::PermissionsExt;
 
         struct Fixture {
             _dir: tempdir::TempDir,
@@ -10548,13 +10547,19 @@ pub(crate) mod tests {
                 send(&self.app, request).await.0
             }
 
+            /// A read-only vault directory is how these tests make a write fail
+            /// at the disk. Unix only: on Windows the directory attribute does
+            /// not stop a file being created in it.
+            #[cfg(unix)]
             fn read_only(&self, on: bool) {
+                use std::os::unix::fs::PermissionsExt;
                 let mode = if on { 0o555 } else { 0o755 };
                 std::fs::set_permissions(&self.vault_dir, std::fs::Permissions::from_mode(mode))
                     .unwrap();
             }
         }
 
+        #[cfg(unix)]
         #[tokio::test]
         async fn a_save_that_cannot_be_written_is_a_500_not_a_404() {
             let f = fixture().await;
@@ -10565,6 +10570,7 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         }
 
+        #[cfg(unix)]
         #[tokio::test]
         async fn a_delete_that_cannot_be_written_is_a_500_not_a_404() {
             let f = fixture().await;
