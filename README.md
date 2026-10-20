@@ -2,7 +2,7 @@
 
 Self-hosted, Markdown-native knowledge system. A Rust sync server owns the
 canonical vaults on infrastructure you control; Flutter clients on macOS,
-Android, and web keep pace, offline included. The same knowledge is available
+Windows, Linux, Android and the web keep pace, offline included. The same knowledge is available
 to AI agents through MCP, and an optional runtime host runs coding agents —
 Claude Code, OpenCode, a shell — in a workspace with a terminal you drive from
 the app. An optional relay reaches the server from outside your network
@@ -17,8 +17,9 @@ Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 
 ```
 ┌──── clients (one Dart codebase) ────┐      ┌── AI agents ──┐
-│  macOS · Android · Web              │      │  MCP clients  │
-│  editor · cache · outbox · sync     │      └───────┬───────┘
+│  macOS · Windows · Linux            │      │  MCP clients  │
+│  Android · Web                      │      └───────┬───────┘
+│  editor · cache · outbox · sync     │              │
 │  Notes | Agents | Integrations      │              │
 └──────┬───────────────────┬──────────┘              │
   REST + WebSocket     via storm-relay          MCP (/mcp)
@@ -64,10 +65,11 @@ The Android client, in the SlowFlow earth and Storm dark themes.
 
 ## Install
 
-One command, on Linux (Debian/Ubuntu) or macOS — an interactive installer
-that sets up any part of Storm on this machine: the server and app, a Runtime
-Host for agents, or everything, with your phone paired over the local network
-and the runtime enrolled for you:
+One command, on Linux or macOS — an interactive installer that sets up any
+part of Storm on this machine: the server and app, a Runtime Host for agents,
+or everything, with your phone paired over the local network and the runtime
+enrolled for you. On Linux the server and Runtime Host need Debian or Ubuntu;
+the desktop app installs on any distribution:
 
 ```sh
 curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh
@@ -78,10 +80,8 @@ re-running it is how you upgrade, check status, pair a device, enroll a
 runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
 `--dry-run`; `sh install.sh --help` lists the rest. **MCP only** (`--mcp`)
-will put just `storm-runtime` on a laptop's PATH for an AI app's
-`mcp-connect` (below). `mcp-connect` shipped in v0.10.0, but the installer
-does not offer this mode yet: that release left `STORM_MCP_CONNECT_SINCE`
-empty.
+puts just `storm-runtime` on a laptop's PATH for an AI app's `mcp-connect`
+(below).
 
 ### By hand (server on Debian / Ubuntu)
 
@@ -101,12 +101,15 @@ On **Windows**, in PowerShell (as administrator for the Runtime Host):
 irm https://dewanshdt.github.io/Storm/install.ps1 | iex
 ```
 
-It installs the server, the Runtime Host, or both. The server runs as you at
+It installs the server, the Runtime Host, the Storm app, or any of them
+together. The app goes into `%LOCALAPPDATA%\Programs\Storm\App` with a
+Start-menu entry, no administrator needed (`-App`). The server runs as you at
 logon, with no console window and your notes in `%USERPROFILE%\Storm`; the
 Runtime Host is the `StormRuntime` service under its own virtual account. By
 hand, `storm-server-windows-x86_64.zip` gives `.\storm-server.exe up`, and
-`storm-runtime-windows-x86_64.zip` gives `.\storm-runtime.exe install`
-(decision 99; [`deploy/README.md`](deploy/README.md#windows)).
+`storm-runtime-windows-x86_64.zip` gives `.\storm-runtime.exe install`, and
+`storm-app-windows-x86_64.zip` is the app: unzip it and run `storm.exe`
+(decisions 99, 125; [`deploy/README.md`](deploy/README.md#windows)).
 
 That URL is the **apt repository** root (not the marketing site). `up` creates
 the `storm` user and data root (`/srv/storm`), writes `/etc/storm/storm.env`
@@ -137,7 +140,8 @@ sudo systemctl restart storm-server
 sudo storm-server status
 ```
 
-Clients (macOS zip, Android APK, web UI) are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
+Clients (macOS zip, Windows zip, Linux `.deb` or tarball, Android APK, web UI)
+are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
 [Download page](https://storm.dewansh.space/download).
 
 ### Runtime Hosts (optional)
@@ -293,17 +297,18 @@ Bearer token) still works on the LAN, with no adapter and no identity check.
 
 ## Status
 
-M0–M15 and M18–M26 are done; the newest release is on
+M0–M16 and M18–M28 are done; the newest release is on
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases/latest). That
 covers auth (pairing by QR or, on your network, by password; sessions; MCP
 keys — the shared token is gone) and a single account (decision 82); the Agent
 Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions in a
 terminal you can resume; the MCP Gateway's integrations, each scoped to the
-hosts you choose; Storm v2's activity rail; the interactive installer; and the
+hosts you choose; a Claude login you set once in the app and share with the
+hosts you tick; the desktop app on macOS, Windows and Linux; Storm v2's activity rail; the interactive installer; and the
 relay, which you can run yourself (a Cloudflare Worker relay is deployed for
-testing). M27 (the website and its docs, at
-[storm.dewansh.space](https://storm.dewansh.space)) and M17 (Markdown read
-mode) are in progress.
+testing). The website and its docs are at
+[storm.dewansh.space](https://storm.dewansh.space) (M27). M17 (Markdown read
+mode) is in progress.
 
 Milestone status and the decision log are kept in the maintainer's notes, not
 in this repo. License: [MIT](LICENSE).

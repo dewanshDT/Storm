@@ -738,7 +738,7 @@ jobs:
 
           Install the server on Debian/Ubuntu by hand:
           \`\`\`
-          sudo apt install ./storm-server_${VERSION}_amd64.deb
+          sudo apt install ./storm-server_${VERSION}-1_amd64.deb
           sudo storm-server up
           \`\`\`
           Or keep an existing data directory:
