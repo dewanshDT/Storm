@@ -453,9 +453,7 @@ pub async fn create_note(
 ) -> ApiResult<crate::index::WriteResult> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .create_note(path, content)
-        .map_err(|e| crate::api::bad_request(e.to_string()))?;
+    let result = ix.create_note(path, content)?;
     broadcast_latest(state, &ix, result.seq);
     record_agent_write(state, actor, vault, &result.note, "created");
     Ok(result)
@@ -534,9 +532,7 @@ pub async fn update_note(
 ) -> ApiResult<crate::index::WriteResult> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .put_note(id, base_version, content, device_id)
-        .map_err(|e| not_found(e.to_string()))?;
+    let result = ix.put_note(id, base_version, content, device_id)?;
     broadcast_latest(state, &ix, result.seq);
     record_agent_write(state, actor, vault, &result.note, "edited");
     Ok(result)
@@ -545,7 +541,7 @@ pub async fn update_note(
 pub async fn delete_note(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<i64> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let seq = ix.delete_note(id).map_err(|e| not_found(e.to_string()))?;
+    let seq = ix.delete_note(id)?;
     broadcast_latest(state, &ix, seq);
     Ok(seq)
 }
@@ -828,8 +824,7 @@ pub async fn create_script(
     if ix.vault.exists(&rel) {
         return Err(conflict(format!("script “{name}” already exists")));
     }
-    ix.put_attachment(&rel, content.as_bytes())
-        .map_err(|e| bad_request(e.to_string()))?;
+    ix.put_attachment(&rel, content.as_bytes())?;
     record_agent_script_write(state, actor, &kit, &rel, "script_created");
     Ok(ScriptStored {
         name: name.to_string(),
@@ -853,8 +848,7 @@ pub async fn update_script(
     if !ix.vault.exists(&rel) {
         return Err(not_found("no such script"));
     }
-    ix.put_attachment(&rel, content.as_bytes())
-        .map_err(|e| bad_request(e.to_string()))?;
+    ix.put_attachment(&rel, content.as_bytes())?;
     record_agent_script_write(state, actor, &kit, &rel, "script_edited");
     Ok(ScriptStored {
         name: name.to_string(),

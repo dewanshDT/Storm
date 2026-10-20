@@ -9,7 +9,7 @@
 //!  * **Write** — the `PUT` path, including the 3-way merge. This is the only
 //!    place note content is written.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -26,6 +26,72 @@ use crate::vault::{self, Vault};
 /// in every single reconciliation. The server owns this field; clients never
 /// send a meaningful value for it.
 const VOLATILE: &str = "@@storm-modified@@";
+
+/// Why a vault operation failed, in the terms an API answers with (decision
+/// 128a). Only [`IndexError::NotFound`] may become a 404: a client discards a
+/// queued edit on 404, so an I/O failure must stay [`IndexError::Other`].
+#[derive(Debug, thiserror::Error)]
+pub enum IndexError {
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Exists(String),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error(transparent)]
+    Other(anyhow::Error),
+}
+
+impl From<anyhow::Error> for IndexError {
+    fn from(e: anyhow::Error) -> Self {
+        match e.downcast_ref::<vault::Refusal>() {
+            Some(vault::Refusal::Invalid(m)) => IndexError::Invalid(m.clone()),
+            Some(vault::Refusal::Exists(m)) => IndexError::Exists(m.clone()),
+            Some(vault::Refusal::Missing(m)) => IndexError::NotFound(m.clone()),
+            Some(vault::Refusal::NotEmpty(m)) => IndexError::Conflict(m.clone()),
+            None => IndexError::Other(e),
+        }
+    }
+}
+
+pub type IndexResult<T> = std::result::Result<T, IndexError>;
+
+fn no_note(id: &str) -> IndexError {
+    IndexError::NotFound(format!("no note with id {id}"))
+}
+
+/// The rule [`Vault::scan`] and the watcher apply: a note at any other path
+/// would be tombstoned by the next reconcile.
+fn require_markdown(path: &str) -> IndexResult<()> {
+    if is_markdown(path) {
+        Ok(())
+    } else {
+        Err(IndexError::Invalid(format!(
+            "a note's path must end in .md: {path}"
+        )))
+    }
+}
+
+fn is_markdown(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        == Some("md")
+}
+
+/// Attachments are every vault file that is not a note; the attachment
+/// routes must not be a way to write or delete one without the merge.
+fn refuse_markdown(path: &str) -> IndexResult<()> {
+    if is_markdown(path) {
+        Err(IndexError::Invalid(format!(
+            "{path} is a note, not an attachment"
+        )))
+    } else {
+        Ok(())
+    }
+}
 
 pub struct Indexer {
     pub vault: Vault,
@@ -195,9 +261,12 @@ impl Indexer {
         }
     }
 
-    pub fn create_note(&mut self, path: &str, content: &str) -> Result<WriteResult> {
+    pub fn create_note(&mut self, path: &str, content: &str) -> IndexResult<WriteResult> {
+        require_markdown(path)?;
         if self.vault.exists(path) {
-            return Err(anyhow!("a note already exists at {path}"));
+            return Err(IndexError::Exists(format!(
+                "a note already exists at {path}"
+            )));
         }
         let id = Uuid::new_v4().to_string();
         let now = now_rfc3339();
@@ -233,11 +302,8 @@ impl Indexer {
         base_version: i64,
         client_content: &str,
         device_id: Option<&str>,
-    ) -> Result<WriteResult> {
-        let current = self
-            .db
-            .get_note(id)?
-            .ok_or_else(|| anyhow!("no note with id {id}"))?;
+    ) -> IndexResult<WriteResult> {
+        let current = self.db.get_note(id)?.ok_or_else(|| no_note(id))?;
         let server_content = self.vault.read(&current.path)?;
 
         let outcome = if base_version == current.version {
@@ -296,11 +362,9 @@ impl Indexer {
             .collect()
     }
 
-    pub fn move_note(&mut self, id: &str, new_path: &str) -> Result<WriteResult> {
-        let current = self
-            .db
-            .get_note(id)?
-            .ok_or_else(|| anyhow!("no note with id {id}"))?;
+    pub fn move_note(&mut self, id: &str, new_path: &str) -> IndexResult<WriteResult> {
+        require_markdown(new_path)?;
+        let current = self.db.get_note(id)?.ok_or_else(|| no_note(id))?;
         self.vault
             .rename(&current.path, new_path, &self.protected_folders())?;
 
@@ -320,14 +384,11 @@ impl Indexer {
         })
     }
 
-    pub fn delete_note(&mut self, id: &str) -> Result<i64> {
-        let current = self
-            .db
-            .get_note(id)?
-            .ok_or_else(|| anyhow!("no note with id {id}"))?;
+    pub fn delete_note(&mut self, id: &str) -> IndexResult<i64> {
+        let current = self.db.get_note(id)?.ok_or_else(|| no_note(id))?;
         self.vault
             .delete(&current.path, &self.protected_folders())?;
-        self.db.delete_note(id, &now_rfc3339())
+        Ok(self.db.delete_note(id, &now_rfc3339())?)
     }
 
     // ---- folders -------------------------------------------------------
@@ -336,10 +397,12 @@ impl Indexer {
     ///
     /// Recording is the whole point: a folder that exists only as a directory
     /// disappears the moment the tree around it is tidied.
-    pub fn create_folder(&mut self, path: &str) -> Result<()> {
+    pub fn create_folder(&mut self, path: &str) -> IndexResult<()> {
         let clean = normalise_folder(path)?;
         if self.vault.exists(&clean) {
-            return Err(anyhow!("a note already exists at {clean}"));
+            return Err(IndexError::Exists(format!(
+                "a note already exists at {clean}"
+            )));
         }
         self.vault.create_dir(&clean)?;
         self.db.record_folder(&clean, &now_rfc3339())?;
@@ -349,15 +412,15 @@ impl Indexer {
     /// Removes an empty folder. Refuses while it still holds notes — deleting
     /// someone's notes because they tapped "delete folder" is not a thing this
     /// should ever do silently.
-    pub fn delete_folder(&mut self, path: &str) -> Result<()> {
+    pub fn delete_folder(&mut self, path: &str) -> IndexResult<()> {
         let clean = normalise_folder(path)?;
         let contained = self.db.notes_under(&clean)?;
         if !contained.is_empty() {
-            return Err(anyhow!(
+            return Err(IndexError::Conflict(format!(
                 "“{clean}” still holds {} note{}",
                 contained.len(),
                 if contained.len() == 1 { "" } else { "s" }
-            ));
+            )));
         }
         self.vault.remove_dir(&clean)?;
         self.db.forget_folder(&clean)?;
@@ -369,14 +432,16 @@ impl Indexer {
     /// One directory rename, then one index update per note, each appending a
     /// `moved` change so clients follow. Notes keep their ids — a move is a
     /// metadata change, not delete-plus-create.
-    pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<Vec<i64>> {
+    pub fn rename_folder(&mut self, from: &str, to: &str) -> IndexResult<Vec<i64>> {
         let from = normalise_folder(from)?;
         let to = normalise_folder(to)?;
         if from == to {
             return Ok(Vec::new());
         }
         if to.starts_with(&format!("{from}/")) {
-            return Err(anyhow!("cannot move a folder inside itself"));
+            return Err(IndexError::Invalid(
+                "cannot move a folder inside itself".into(),
+            ));
         }
 
         let notes = self.db.notes_under(&from)?;
@@ -424,23 +489,28 @@ impl Indexer {
     /// Attachments are opaque blobs: no parsing, no merge, last write wins by
     /// modification time. They live in the vault beside the notes, so the
     /// whole thing stays one tree of ordinary files.
-    pub fn put_attachment(&mut self, rel_path: &str, bytes: &[u8]) -> Result<()> {
+    pub fn put_attachment(&mut self, rel_path: &str, bytes: &[u8]) -> IndexResult<()> {
+        refuse_markdown(rel_path)?;
         self.vault.write_bytes(rel_path, bytes)?;
-        self.db.record_attachment(
+        Ok(self.db.record_attachment(
             rel_path,
             blake3::hash(bytes).to_hex().as_ref(),
             bytes.len() as i64,
             &now_rfc3339(),
-        )
+        )?)
     }
 
-    pub fn attachment(&self, rel_path: &str) -> Result<Vec<u8>> {
-        self.vault.read_bytes(rel_path)
+    pub fn attachment(&self, rel_path: &str) -> IndexResult<Vec<u8>> {
+        if !self.vault.exists(rel_path) {
+            return Err(IndexError::NotFound(format!("no attachment at {rel_path}")));
+        }
+        Ok(self.vault.read_bytes(rel_path)?)
     }
 
-    pub fn delete_attachment(&mut self, rel_path: &str) -> Result<()> {
+    pub fn delete_attachment(&mut self, rel_path: &str) -> IndexResult<()> {
+        refuse_markdown(rel_path)?;
         self.vault.delete(rel_path, &self.protected_folders())?;
-        self.db.remove_attachment(rel_path)
+        Ok(self.db.remove_attachment(rel_path)?)
     }
 
     /// Re-reads one file after the watcher saw it change externally.
@@ -510,10 +580,12 @@ fn normalise(content: &str) -> String {
 /// `Vault::resolve` already rejects `..`, absolute paths and dotted segments;
 /// running the folder through it here means the folder API cannot be a way
 /// around the checks the note API enforces.
-fn normalise_folder(path: &str) -> Result<String> {
+fn normalise_folder(path: &str) -> IndexResult<String> {
     let clean = path.trim().trim_matches('/');
     if clean.is_empty() {
-        return Err(anyhow!("the vault root is not a folder you can change"));
+        return Err(IndexError::Invalid(
+            "the vault root is not a folder you can change".into(),
+        ));
     }
     Ok(clean.to_string())
 }

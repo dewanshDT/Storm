@@ -204,6 +204,29 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+/// The one place a vault operation's failure becomes a status (decision 128a).
+///
+/// A 404 is reserved for a note or folder that does not exist: the client's
+/// outbox discards a queued edit on 404, so a write that failed for any other
+/// reason answers 500, which it keeps queued and retries.
+impl From<crate::index::IndexError> for ApiError {
+    fn from(e: crate::index::IndexError) -> Self {
+        use crate::index::IndexError as E;
+        match e {
+            E::NotFound(m) => not_found(m),
+            E::Exists(m) | E::Conflict(m) => conflict(m),
+            E::Invalid(m) => bad_request(m),
+            E::Other(e) => {
+                tracing::error!(error = format!("{e:#}"), "a vault operation failed");
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the server could not complete that change".into(),
+                )
+            }
+        }
+    }
+}
+
 pub fn bad_request(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
@@ -3030,9 +3053,7 @@ async fn move_note(
 ) -> ApiResult<Json<crate::index::WriteResult>> {
     let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .move_note(&id, &body.new_path)
-        .map_err(|e| bad_request(e.to_string()))?;
+    let result = ix.move_note(&id, &body.new_path)?;
     crate::ops::broadcast_latest(&state, &ix, result.seq);
     Ok(Json(result))
 }
@@ -3061,8 +3082,7 @@ async fn create_folder(
 ) -> ApiResult<Json<serde_json::Value>> {
     let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
-    ix.create_folder(&body.path)
-        .map_err(|e| bad_request(e.to_string()))?;
+    ix.create_folder(&body.path)?;
     Ok(Json(serde_json::json!({ "path": body.path })))
 }
 
@@ -3075,8 +3095,7 @@ async fn delete_folder(
     let mut ix = handle.indexer.lock().await;
     // Refused rather than recursive: deleting someone's notes because they
     // tapped "delete folder" is not something to do quietly.
-    ix.delete_folder(&path)
-        .map_err(|e| conflict(e.to_string()))?;
+    ix.delete_folder(&path)?;
     Ok(Json(serde_json::json!({ "deleted": path })))
 }
 
@@ -3094,9 +3113,7 @@ async fn rename_folder(
 ) -> ApiResult<Json<serde_json::Value>> {
     let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let seqs = ix
-        .rename_folder(&body.from, &body.to)
-        .map_err(|e| bad_request(e.to_string()))?;
+    let seqs = ix.rename_folder(&body.from, &body.to)?;
     // One `moved` per contained note, so every client follows the rename
     // rather than discovering it at the next full tree fetch.
     for seq in &seqs {
@@ -3184,7 +3201,7 @@ async fn get_attachment(
 ) -> ApiResult<Response> {
     let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
     let ix = handle.indexer.lock().await;
-    let bytes = ix.attachment(&path).map_err(|e| not_found(e.to_string()))?;
+    let bytes = ix.attachment(&path)?;
     drop(ix);
     Ok(ranged(bytes, content_type_for(&path), &headers))
 }
@@ -3276,8 +3293,7 @@ async fn put_attachment(
     }
     let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
-    ix.put_attachment(&path, &body)
-        .map_err(|e| bad_request(e.to_string()))?;
+    ix.put_attachment(&path, &body)?;
     Ok(Json(
         serde_json::json!({ "path": path, "size": body.len() }),
     ))
@@ -3290,8 +3306,7 @@ async fn delete_attachment(
 ) -> ApiResult<Json<serde_json::Value>> {
     let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
     let mut ix = handle.indexer.lock().await;
-    ix.delete_attachment(&path)
-        .map_err(|e| not_found(e.to_string()))?;
+    ix.delete_attachment(&path)?;
     Ok(Json(serde_json::json!({ "deleted": path })))
 }
 
@@ -10586,7 +10601,10 @@ pub(crate) mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(f.vault_dir.join("A.md").is_file(), "the refused move left the note alone");
+            assert!(
+                f.vault_dir.join("A.md").is_file(),
+                "the refused move left the note alone"
+            );
         }
 
         #[tokio::test]
@@ -10619,7 +10637,10 @@ pub(crate) mod tests {
             f.note_id("N.md").await;
             let before = std::fs::read_to_string(f.vault_dir.join("N.md")).unwrap();
             assert_eq!(f.attachment("PUT", "N.md").await, StatusCode::BAD_REQUEST);
-            assert_eq!(f.attachment("DELETE", "N.md").await, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                f.attachment("DELETE", "N.md").await,
+                StatusCode::BAD_REQUEST
+            );
             assert_eq!(
                 std::fs::read_to_string(f.vault_dir.join("N.md")).unwrap(),
                 before
