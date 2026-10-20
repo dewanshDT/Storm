@@ -1017,6 +1017,10 @@ final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
 /// trigger a refetch of the tree, the tags and every open backlinks panel.
 final vaultRevisionProvider = StateProvider<int>((ref) => 0);
 
+/// The app's one [ScaffoldMessenger], for notices that belong to no screen —
+/// a recovered edit can land while any page is open.
+final rootMessengerKey = GlobalKey<ScaffoldMessengerState>();
+
 /// Keeps the open note and the vault views in step with incoming changes.
 ///
 /// Instantiated by the shell; nothing else depends on its value.
@@ -1034,7 +1038,25 @@ final syncListenerProvider = Provider<void>((ref) {
     ref.read(vaultRevisionProvider.notifier).state++;
   });
 
-  ref.onDispose(sub.cancel);
+  // An edit kept as a new note after its note was deleted elsewhere
+  // (decision 128c): the open session follows it, and the user is told.
+  final recovered = engine.recovered.listen((r) {
+    final session = ref.read(noteSessionProvider);
+    if (session.noteId == r.oldId) session.followRecovered(r);
+    rootMessengerKey.currentState?.showSnackBar(
+      SnackBar(
+        content: Text(
+          'A note you edited was deleted on another device. Your edit was '
+          'kept as ${r.path}.',
+        ),
+      ),
+    );
+  });
+
+  ref.onDispose(() {
+    sub.cancel();
+    recovered.cancel();
+  });
 });
 
 /// The vault tree — server when reachable, cache when not.

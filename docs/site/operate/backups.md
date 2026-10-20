@@ -12,7 +12,13 @@ Three things are backed up, for different reasons:
 
 - **the storage root** — every vault's notes. Plain files, so
   `rsync -a --delete` into a dated directory. Dating it means an accidental
-  mass-delete is still recoverable from yesterday. **It is the root the server
+  mass-delete is still recoverable from yesterday. A file that has not changed
+  since the night before is a hard link to that night's copy, so a month of
+  nights costs one copy plus what changed (Windows' `storm-server backup`
+  copies in full). **A root that holds no files while the registry lists
+  vaults is refused** — the backup exits with an `ERROR` and writes nothing,
+  because that is what an unmounted share looks like, and copying it would
+  leave a night that verifies and holds no notes. **It is the root the server
   actually uses** (`storm-server storage-root` prints it), which is not
   necessarily `STORM_VAULT_ROOT`: that only seeds a first run, and a root
   changed in the app is never written back to it. The log's `root:` line names

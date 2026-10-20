@@ -69,6 +69,7 @@ jobs:
               - deploy/runtime.toml.example
             installer:
               - deploy/install.sh
+              - deploy/storm-backup.sh
               - tools/installer-tests/**
             client:
               - *vectors

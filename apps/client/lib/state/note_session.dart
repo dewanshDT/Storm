@@ -291,6 +291,17 @@ class NoteSession extends ChangeNotifier {
     return error;
   }
 
+  /// Moves the session to the note its edit was kept as, after the note it
+  /// had open was deleted elsewhere (decision 128c).
+  Future<void> followRecovered(RecoveredNote recovered) async {
+    await open(recovered.newId);
+    if (_closed || _noteId != recovered.newId) return;
+    _notice =
+        'This note was deleted on another device. Your edit was kept as '
+        '${recovered.path}.';
+    notifyListeners();
+  }
+
   /// Called when the sync engine sees this note change on the server.
   ///
   /// A local edit always wins the race — replacing the buffer under someone's
