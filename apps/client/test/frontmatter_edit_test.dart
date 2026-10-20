@@ -395,4 +395,24 @@ void main() {
       });
     });
   });
+
+  group('a leading BOM (decision 128e)', () {
+    const bom = '\uFEFF';
+
+    test('a property is set inside the block after the BOM', () {
+      final out = setScalar(
+        '$bom---\ntitle: Win\n---\nbody\n',
+        'status',
+        'draft',
+      );
+      expect(out, '$bom---\ntitle: Win\nstatus: draft\n---\nbody\n');
+    });
+
+    test('a new block goes after the BOM, never before it', () {
+      final out = ensureBlock('${bom}body\n');
+      expect(out, '$bom---\n---\n\nbody\n');
+      expect(out.indexOf(bom), 0);
+      expect(out.lastIndexOf(bom), 0);
+    });
+  });
 }

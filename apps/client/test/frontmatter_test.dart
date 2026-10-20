@@ -137,4 +137,25 @@ void main() {
       expect(readProperties(split('# Note\n').frontmatter), isEmpty);
     });
   });
+
+  group('a leading BOM (decision 128e)', () {
+    const bom = '\uFEFF';
+
+    test('belongs to no block, but the block after it is found', () {
+      final parts = split('$bom---\ntitle: Win\n---\nbody\n');
+      expect(parts.hasFrontmatter, isTrue);
+      expect(parts.frontmatter, '$bom---\ntitle: Win\n---\n');
+      expect(parts.body, 'body\n');
+    });
+
+    test('round-trips byte for byte', () {
+      for (final note in [
+        '$bom---\nid: a\n---\n\n# T\n',
+        '${bom}plain\n',
+        '$bom---\nunterminated\n',
+      ]) {
+        expect(split(note).join(), note);
+      }
+    });
+  });
 }

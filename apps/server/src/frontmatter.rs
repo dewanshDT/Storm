@@ -364,6 +364,30 @@ mod tests {
         assert!(out.contains("title: keep me"));
     }
 
+    // ---- a leading BOM (decision 128e) ---------------------------------
+
+    #[test]
+    fn a_bom_before_the_fence_does_not_hide_the_block() {
+        let note = "\u{feff}---\ntitle: Win\n---\nbody\n";
+        let p = parse(note);
+        let fm = p.frontmatter.expect("the block after the BOM");
+        assert_eq!(fm.raw, "title: Win\n");
+        assert_eq!(&note[p.body_start..], "body\n");
+    }
+
+    #[test]
+    fn stamping_a_bom_note_keeps_one_block_and_the_bom_first() {
+        let note = "\u{feff}---\ntitle: Win\n---\nbody\n";
+        let out = set_scalars(note, &[("id", "abc")]);
+        assert_eq!(out, "\u{feff}---\nid: abc\ntitle: Win\n---\nbody\n");
+    }
+
+    #[test]
+    fn a_new_block_goes_after_the_bom() {
+        let out = set_scalars("\u{feff}body\n", &[("id", "abc")]);
+        assert_eq!(out, "\u{feff}---\nid: abc\n---\n\nbody\n");
+    }
+
     #[test]
     fn is_idempotent() {
         let once = set_scalars(MESSY, &[("id", "abc"), ("modified", "t")]);
