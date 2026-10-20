@@ -6,6 +6,7 @@ import '../api/models.dart';
 import '../editor/frontmatter.dart' as fm;
 import '../editor/frontmatter_edit.dart' as fme;
 import '../sync/sync_engine.dart';
+import 'replay_edit.dart';
 
 /// How long typing must pause before a save fires.
 const kSaveDebounce = Duration(milliseconds: 800);
@@ -29,6 +30,9 @@ enum SaveState { idle, dirty, saving, saved, queued, failed }
 ///    version this client never saw, so the server's text **replaces** the
 ///    buffer — keeping our own would make the next save race a version we
 ///    never had;
+///  * …except for what was typed while that save was in flight, which is
+///    replayed onto the server's text, or kept on the old base when it cannot
+///    be placed, so the server merges it (decision 128b);
 ///  * an edit is never marked saved until the server has the exact bytes.
 class NoteSession extends ChangeNotifier {
   NoteSession(this._engine);
@@ -84,6 +88,9 @@ class NoteSession extends ChangeNotifier {
 
   Timer? _debounce;
   bool _closed = false;
+
+  /// The save in flight, so [flush] can wait for it.
+  Future<void>? _inFlight;
 
   bool get isOpen => _noteId != null;
   bool get isDirty =>
@@ -180,11 +187,19 @@ class NoteSession extends ChangeNotifier {
   }
 
   /// Saves now, cancelling any pending debounce.
-  Future<void> save() async {
+  Future<void> save() {
     _debounce?.cancel();
+    if (_saveState == SaveState.saving) return _inFlight ?? Future.value();
+    final saving = _save();
+    _inFlight = saving;
+    return saving.whenComplete(() {
+      if (identical(_inFlight, saving)) _inFlight = null;
+    });
+  }
+
+  Future<void> _save() async {
     final id = _noteId;
-    if (id == null || _saveState == SaveState.saving) return;
-    if (_saveState != SaveState.dirty) return;
+    if (id == null || _saveState != SaveState.dirty) return;
 
     _saveState = SaveState.saving;
     _error = null;
@@ -208,19 +223,26 @@ class NoteSession extends ChangeNotifier {
         _notice =
             'Another device edited this note at the same time. Both '
             'versions are kept below — delete the markers once resolved.';
-        _adopt(outcome.content!, outcome.version!);
+        _adoptKeepingTyping(sent, outcome);
         return;
 
       case SaveStatus.merged:
         _hasConflict = false;
         _notice = "Merged with another device's changes.";
-        _adopt(outcome.content!, outcome.version!);
+        _adoptKeepingTyping(sent, outcome);
         return;
 
       case SaveStatus.queued:
         // Offline. The edit is durable in the outbox, but the server does not
         // have it yet, so the base version deliberately does not advance.
-        _saveState = SaveState.queued;
+        if (_buffer != sent) {
+          // Typed while it was being queued: the outbox holds only what was
+          // sent, so the rest must go through another save.
+          _saveState = SaveState.dirty;
+          _debounce = Timer(kSaveDebounce, () => save());
+        } else {
+          _saveState = SaveState.queued;
+        }
         notifyListeners();
         return;
 
@@ -247,9 +269,26 @@ class NoteSession extends ChangeNotifier {
     }
   }
 
+  /// Waits for any save in flight, then saves what is still unsaved.
+  ///
+  /// Returns null when the server has the buffer or the outbox holds it.
+  /// A save the server refused leaves the edit only in this buffer, so it is
+  /// queued anyway before the caller moves on: the outbox keeps retrying
+  /// a refusal rather than dropping it, and the error is returned to show.
   Future<String?> flush() async {
-    if (isDirty) await save();
-    return _error;
+    await _inFlight;
+    if (_saveState == SaveState.dirty) await save();
+    final id = _noteId;
+    if (id == null || _saveState != SaveState.dirty) return null;
+    final error = _error ?? 'The server did not take the change.';
+    await _engine.keepUnsent(
+      id: id,
+      baseVersion: _baseVersion,
+      content: _buffer,
+    );
+    _saveState = SaveState.queued;
+    notifyListeners();
+    return error;
   }
 
   /// Called when the sync engine sees this note change on the server.
@@ -295,6 +334,28 @@ class NoteSession extends ChangeNotifier {
     // Raw, so neither side is quoted differently from the other.
     return fme.setScalar(a, 'modified', blank, raw: true) ==
         fme.setScalar(b, 'modified', blank, raw: true);
+  }
+
+  /// Adopts a `merged` or `conflicted` answer without losing what was typed
+  /// while it was in flight (decision 128b).
+  void _adoptKeepingTyping(String sent, SaveOutcome outcome) {
+    final server = outcome.content!;
+    final version = outcome.version!;
+    if (_buffer == sent) {
+      _adopt(server, version);
+      return;
+    }
+    final replayed = replayEdit(sent: sent, edited: _buffer, server: server);
+    if (replayed != null) {
+      _buffer = replayed;
+      _baseVersion = version;
+      _revision++;
+    }
+    // Otherwise keep the buffer on the base it was edited from: the next save
+    // sends that base, and the server's diff3 places the typing.
+    _saveState = SaveState.dirty;
+    _debounce = Timer(kSaveDebounce, () => save());
+    notifyListeners();
   }
 
   /// Replaces the buffer with authoritative text.

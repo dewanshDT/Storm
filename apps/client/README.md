@@ -197,9 +197,17 @@ disappear. `NoteSession` (`lib/state/note_session.dart`) owns it:
    Keeping our own text here would make the next save race a version we don't
    have.
 3. If the user typed while a save was in flight, the session stays `dirty`
-   rather than claiming `saved`, so the newer keystrokes aren't lost.
-4. A failed save also stays `dirty`. The edit exists only in this buffer, and
-   marking it `failed` alone would invite losing it.
+   rather than claiming `saved`, so the newer keystrokes aren't lost. That
+   holds for every answer (decision 128b): on `merged` or `conflict` the
+   typing is replayed onto the server's text (`lib/state/replay_edit.dart`),
+   or kept on its old base when its place is ambiguous so the server merges
+   it; on `queued` it is saved again rather than left out of the outbox.
+4. A refused save (a `4xx`) stays `dirty`. The edit exists only in this
+   buffer, and marking it `failed` alone would invite losing it. A `5xx` is
+   the server failing rather than refusing, so it is queued and retried.
+5. Leaving a note goes through `NoteSession.flush()`: it waits for a save in
+   flight, and an edit the server refused is put in the outbox rather than
+   left in a buffer the next note replaces, with a message saying so.
 
 Conflicts arrive as text with git-style markers, with the client's own edit on
 the `ours` side. A banner explains it; you resolve by deleting the markers.

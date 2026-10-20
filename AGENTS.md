@@ -143,6 +143,10 @@ data quietly.
   overlap silently corrupts rendered text and every caret offset after it.
 - **A `merged` or `conflict` response means the client adopts the server's
   text.** Keeping local text makes the next save race a version it never had.
+  **What was typed while that save was in flight is never dropped** (decision
+  128b): it is replayed onto the server's text (`replayEdit`), or, where its
+  place cannot be found exactly once, kept on the base it was edited from and
+  saved again so the server's diff3 merges it.
 - **Notes are tracked by UUID, not path.** Renames and moves are metadata
   updates.
 

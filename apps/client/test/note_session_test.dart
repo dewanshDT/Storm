@@ -160,8 +160,10 @@ void main() {
   });
 
   test('a rejected save stays dirty so the edit is not lost', () async {
+    // A refusal is a 4xx. A 5xx is the server failing, which is queued
+    // instead (decision 128b; `sync_engine_test`).
     await open();
-    server.failWith = 500;
+    server.failWith = 403;
 
     session.edit('precious edit\n');
     await session.save();
@@ -252,7 +254,7 @@ void main() {
     test('a conflicted answer keeps what was typed too', () async {
       await open(content: 'line\n');
       server.conflictInstead =
-          '<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\nline\n';
+          '<<<<<<< ours\nline\nnew\n=======\nline\nother\n>>>>>>> theirs\n';
 
       session.edit('line\nnew\n');
       final saving = session.save();

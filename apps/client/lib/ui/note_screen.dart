@@ -78,14 +78,28 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     // a build.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
-      final session = ref.read(noteSessionProvider);
-      if (session.isDirty) await session.save();
+      await _flushBeforeLeaving();
       if (!mounted) return;
       ref.read(openNoteIdProvider.notifier).state = widget.noteId;
       await ref.read(noteSessionProvider).open(widget.noteId);
       if (!mounted) return;
       unawaited(_recordOpen());
     });
+  }
+
+  /// Saves what is unsaved before the session moves to another note or path.
+  ///
+  /// Opening a note replaces the buffer, so an edit the server refused would
+  /// otherwise go with it. [NoteSession.flush] keeps it in the outbox instead,
+  /// and this says so (decision 128b).
+  Future<void> _flushBeforeLeaving() async {
+    final error = await ref.read(noteSessionProvider).flush();
+    if (error != null && mounted) {
+      _toast(
+        "Couldn't save your last change ($error). It is kept on this "
+        'device and will be retried.',
+      );
+    }
   }
 
   /// Tells the server this note was opened, for the cross-vault recents.
@@ -142,8 +156,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     }
     if (found.id == widget.noteId) return;
 
-    final session = ref.read(noteSessionProvider);
-    if (session.isDirty) await session.save();
+    await _flushBeforeLeaving();
     if (!mounted) return;
     context.push(Routes.note(VaultGate.of(context), found.id));
   }
@@ -206,7 +219,8 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
     );
     if (path == null || path == note.path || !mounted) return;
 
-    if (session.isDirty) await session.save();
+    await _flushBeforeLeaving();
+    if (!mounted) return;
     final outcome = await ref
         .read(syncEngineProvider)
         .move(id: note.id, newPath: path);
