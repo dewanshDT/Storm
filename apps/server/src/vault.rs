@@ -265,7 +265,7 @@ impl Vault {
     pub fn rename(&self, from: &str, to: &str, keep: &HashSet<String>) -> Result<()> {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
-        if dst.exists() {
+        if dst.exists() && !same_entry_by_case(&src, &dst) {
             bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
@@ -309,7 +309,7 @@ impl Vault {
         if !src.is_dir() {
             bail!(Refusal::Missing(format!("no such folder: {from}")));
         }
-        if dst.exists() {
+        if dst.exists() && !same_entry_by_case(&src, &dst) {
             bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
@@ -485,6 +485,16 @@ pub fn windows_name_problem(name: &str) -> Option<&'static str> {
             && stem.as_bytes()[3].is_ascii_digit()
             && stem.as_bytes()[3] != b'0');
     reserved.then_some("it is a reserved device name")
+}
+
+/// Whether `dst` exists only because it is `src` spelled in another case:
+/// on a case-insensitive disk (macOS, Windows) `a.md` is `A.md`, and refusing
+/// it made a case-only rename impossible (decision 128g, B5). Where the two
+/// names are two files, it is a real destination and is not this.
+fn same_entry_by_case(src: &Path, dst: &Path) -> bool {
+    src != dst
+        && src.to_string_lossy().to_lowercase() == dst.to_string_lossy().to_lowercase()
+        && same_file::is_same_file(src, dst).unwrap_or(false)
 }
 
 /// Reads a whole file. A free function so an attachment can be read once

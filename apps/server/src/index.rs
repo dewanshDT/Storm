@@ -572,11 +572,18 @@ impl Indexer {
         )?)
     }
 
+    #[cfg(test)]
     pub fn attachment(&self, rel_path: &str) -> IndexResult<Vec<u8>> {
+        Ok(crate::vault::read_file(&self.attachment_file(rel_path)?)?)
+    }
+
+    /// Where an attachment is on disk, so it can be read once the indexer
+    /// lock is released (decision 128g).
+    pub fn attachment_file(&self, rel_path: &str) -> IndexResult<std::path::PathBuf> {
         if !self.vault.exists(rel_path) {
             return Err(IndexError::NotFound(format!("no attachment at {rel_path}")));
         }
-        Ok(self.vault.read_bytes(rel_path)?)
+        Ok(self.vault.resolve(rel_path)?)
     }
 
     pub fn delete_attachment(&mut self, rel_path: &str) -> IndexResult<()> {

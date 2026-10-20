@@ -141,6 +141,14 @@ server could not complete (a full disk, a permission error, an NFS failure) is
 `500`, which the client keeps queued and retries. The attachment routes refuse
 `.md` paths: a note is written only through the note routes, with their merge.
 
+**Request bodies are capped per route** (decision 128g): an attachment upload
+at 64 MiB, a note's create or save at 16 MiB, and everything else at axum's
+2 MiB default; anything larger is `413`. An attachment is served with
+`X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`, so an
+uploaded HTML or SVG file never runs as the app, and it is read after the
+vault's lock is released, so a download never stalls note operations. A rename
+that changes only a name's case works on case-insensitive disks too.
+
 ### Server identity
 
 On first boot the server mints itself an identity and keeps it in

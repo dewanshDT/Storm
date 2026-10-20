@@ -188,6 +188,10 @@ pub fn open_vaults(registry: &Registry, state_dir: &FsPath) -> anyhow::Result<Va
 /// request can't take down a 4 GB VM.
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
+/// A note's body ceiling (128-D8). Every other route keeps axum's 2 MiB
+/// default; a router-wide attachment limit once gave all of them 64 MiB.
+pub const MAX_NOTE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Errors rendered as JSON rather than bare status codes, so the Flutter
 /// client can show something useful.
 pub struct ApiError(pub StatusCode, pub String);
@@ -420,9 +424,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
-        .route("/v1/vaults/{vault}/notes", post(create_note))
+        .route(
+            "/v1/vaults/{vault}/notes",
+            post(create_note).layer(axum::extract::DefaultBodyLimit::max(MAX_NOTE_BYTES)),
+        )
         .route("/v1/vaults/{vault}/notes/{id}", get(get_note))
-        .route("/v1/vaults/{vault}/notes/{id}", put(put_note))
+        .route(
+            "/v1/vaults/{vault}/notes/{id}",
+            put(put_note).layer(axum::extract::DefaultBodyLimit::max(MAX_NOTE_BYTES)),
+        )
         .route("/v1/vaults/{vault}/notes/{id}", delete(delete_note))
         .route("/v1/vaults/{vault}/notes/{id}/move", post(move_note))
         .route("/v1/vaults/{vault}/notes/{id}/opened", post(mark_opened))
@@ -444,9 +454,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/vaults/{vault}/attachments/{*path}",
             get(get_attachment)
                 .put(put_attachment)
-                .delete(delete_attachment),
+                .delete(delete_attachment)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES)),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
         .route("/v1/auth/logout", post(logout_handler))
         .route("/v1/auth/sessions", get(list_sessions_handler))
         .route("/v1/auth/sessions/{id}", delete(revoke_session_handler))
@@ -3200,10 +3210,16 @@ async fn get_attachment(
     headers: HeaderMap,
 ) -> ApiResult<Response> {
     let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let bytes = ix.attachment(&path)?;
-    drop(ix);
-    Ok(ranged(bytes, content_type_for(&path), &headers))
+    let file = handle.indexer.lock().await.attachment_file(&path)?;
+    // Up to 64 MiB read and hashed: off the runtime, and after the lock is
+    // released, so a download never stalls the vault's note operations.
+    let content_type = content_type_for(&path);
+    tokio::task::spawn_blocking(move || {
+        let bytes = crate::vault::read_file(&file).map_err(crate::index::IndexError::from)?;
+        Ok(ranged(bytes, content_type, &headers))
+    })
+    .await
+    .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)))?
 }
 
 /// A whole attachment, or the single range a resuming client asked for
@@ -3225,10 +3241,15 @@ fn ranged(bytes: Vec<u8>, content_type: &'static str, headers: &HeaderMap) -> Re
         .filter(|_| fresh)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_byte_range(v, len));
+    // An attachment is whatever was uploaded, served from the app's own
+    // origin: never sniffed into HTML, and sandboxed if a browser renders it
+    // (decision 128g, H1).
     let common = [
         (header::CONTENT_TYPE, content_type.to_string()),
         (header::ACCEPT_RANGES, "bytes".to_string()),
         (header::ETAG, etag),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        (header::CONTENT_SECURITY_POLICY, "sandbox".to_string()),
     ];
     match range {
         None => (common, bytes).into_response(),
