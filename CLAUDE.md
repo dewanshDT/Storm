@@ -73,7 +73,7 @@ Practical consequences worth knowing before you start:
 | `apps/relay-cf/` | The same relay on Cloudflare Workers + Durable Objects (decision 108b). TypeScript; nothing in it may live only in memory, since hibernation evicts it. |
 | `apps/server/src/gateway/` | The MCP Gateway's store, data key and upstream client (M21, decision 81). Policy stays in `ops.rs`. |
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
-| `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
+| `apps/client/` | Flutter app — macOS, Windows, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `apps/www/` | The marketing site and the docs (Astro + Starlight). See `apps/www/README.md`. |
 | `docs/site/` | **The docs' pages** (`/docs`), markdown next to the code. A user-facing change updates its page here in the same PR. |
@@ -606,8 +606,9 @@ Specification*; the slices are decisions 81 and 81a onward):
     deep linking is off on Android, so the link never becomes a page route.
   - The macOS Release app no longer grants `network.server`, and the
     entitlements test holds that.
-  - PR CI never compiles the native projects; push to `acceptance/*` and
-    the acceptance workflow does.
+  - PR CI never compiles the Android or macOS projects; push to
+    `acceptance/*` and the acceptance workflow does. The Windows and Linux
+    runners are built on every client change (decision 125).
 
   **"Can write to" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
@@ -667,6 +668,26 @@ and *Installer/Windows Server*; decision 99):
 - **`storm-server` is a library with two binaries.** `storm-serverw` is the
   same program for the Windows GUI subsystem, which the logon task runs so no
   console opens; it logs only through `--log-file`.
+
+From M28 (desktop clients — the vault's *Desktop Clients — decision 125*):
+
+- **One Storm per user on a desktop** (125b). Two instances would open one
+  drift cache and replay one outbox. Windows takes the named mutex
+  `Local\dev.storm.storm` in `main.cpp` before the engine starts; Linux keeps
+  GApplication's uniqueness on, so a second launch is an `activate` in the
+  running process, which raises the window and never builds a second engine.
+- **The data directory is named by the runner, so its names are frozen.**
+  `path_provider` builds it from `Runner.rc`'s `CompanyName`/`ProductName` on
+  Windows and from `APPLICATION_ID` on Linux; the drift cache, prefs and
+  secure store live there. The runner tests guard all three.
+- **A desktop package carries what the machine may lack.** The Windows zip
+  has the MSVC runtime beside `storm.exe` (`tool/package_windows.sh` fails
+  without it). The Linux packages are built on Ubuntu 22.04 and refused if
+  the bundle needs a glibc newer than `STORM_MAX_GLIBC` (2.35): the runner
+  and plugins link against the build machine's glibc, and a newer build
+  does not start on Debian 12.
+- **The installers never kill a running Storm**: `install.ps1` asks it to
+  close (it saves as you type) and stops if it does not.
 
 ## Style
 

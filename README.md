@@ -223,7 +223,7 @@ token, use **Replace token**, and revoke the old one.
 | [`apps/server`](apps/server/README.md) | Rust sync server — REST, WebSocket, MCP, auth, agent manager |
 | [`apps/runtime`](apps/runtime) | `storm-runtime`, the Agent Runtime Host — PTY, providers, workspaces (standalone crate, no workspace) |
 | [`apps/relay`](apps/relay) | `storm-relay`, the SRP v1 relay (standalone crate, no workspace) |
-| [`apps/client`](apps/client/README.md) | Flutter app — macOS, Android, web (Linux desktop deferred) |
+| [`apps/client`](apps/client/README.md) | Flutter app — macOS, Windows, Linux, Android, web |
 | [`apps/www`](apps/www/README.md) | Website and docs (Astro + Starlight) → [storm.dewansh.space](https://storm.dewansh.space); the docs' pages are [`docs/site/`](docs/site) |
 | [`deploy/`](deploy/README.md) | systemd units, apt bootstrap, backup, relay setup |
 | [`docs/`](docs) | Design briefs, editor findings, the relay spec and its test vectors |
