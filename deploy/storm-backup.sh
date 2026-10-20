@@ -23,8 +23,10 @@ ENV_FILE="${STORM_ENV_FILE:-/etc/storm/storm.env}"
 # this is run by hand and the values are not already here (decision 75).
 if [ -z "${STORM_VAULT_ROOT:-}" ]; then
     [ -r "$ENV_FILE" ] || { echo "cannot read $ENV_FILE" >&2; exit 1; }
+    set -a
     # shellcheck disable=SC1090
-    set -a; . "$ENV_FILE"; set +a
+    . "$ENV_FILE"
+    set +a
 fi
 
 : "${STORM_VAULT_ROOT:?}" "${STORM_STATE:?}" "${STORM_BACKUP_DEST:?}"

@@ -75,6 +75,7 @@ fn run_native(vault_root: &Path, state: &Path, dest: &Path) -> std::process::Out
         .expect("running storm-server backup")
 }
 
+#[cfg(unix)]
 fn only_day(dest: &Path) -> std::path::PathBuf {
     let days: Vec<_> = fs::read_dir(dest)
         .unwrap()
