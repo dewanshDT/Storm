@@ -178,6 +178,44 @@ traffic it carries, so run your own or use one you trust. Setup,
 TLS and key bindings: [`deploy/README.md`](deploy/README.md#relay-optional);
 wire spec: [`docs/srp-v1.md`](docs/srp-v1.md).
 
+## Claude login sync (optional)
+
+Storm can keep **your own** Claude subscription login and give it to the
+Runtime Hosts you choose, so you sign in once instead of on every machine.
+
+How it works: you run `claude setup-token` in a terminal outside Storm,
+approve it in your browser, and paste the token into **Settings ▸ Claude
+login**. Storm stores it encrypted on your Storm server. When a Claude Code
+session starts on a host you have ticked, Storm hands the token to that
+session. Claude Code then talks to Anthropic directly; Storm never sees your
+prompts or Anthropic's replies. No host gets the token until you tick it.
+
+**This is for one person, on their own machines, for their own work.**
+Storm has a single user. Do not use this feature to share a Claude account,
+to give other people access to your plan, or on machines you do not control.
+
+**You are responsible for following Anthropic's terms.** Anthropic's
+documentation says third-party developers "may not collect, store, or
+intermediate Claude.ai credentials or session tokens". Storm stores your
+token at your request, on your server. If you are not comfortable with that
+risk to your account, don't turn this on: log in on each host instead (see
+`deploy/README.md`).
+
+Know what you are turning on:
+
+- Every agent session on a ticked host can read the token.
+- It is one token for all ticked hosts, valid for a year. Revoking it signs
+  out every host at once.
+- Your Storm server and its backups hold the token, encrypted, next to the
+  key that opens it. Protect them like the token itself.
+- Removing it in Storm stops new sessions from getting it. It does not
+  revoke it, and sessions that are already running keep it until they end.
+
+To revoke the token, go to your Claude account settings on claude.ai and
+remove it there, then end any running sessions on ticked hosts. Then remove
+it in **Settings ▸ Claude login**. To renew it before it expires, mint a new
+token, use **Replace token**, and revoke the old one.
+
 ## Layout
 
 | Path | What |

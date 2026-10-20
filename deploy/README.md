@@ -413,6 +413,17 @@ Moved to the docs: [Runtime Hosts](../docs/site/agents/hosts.md) and
 [Runtime Hosts › Windows](../docs/site/agents/hosts.md#windows). The server on Windows:
 [Install the server › Windows](../docs/site/install/server.md#windows).
 
+### Claude Code: Claude login sync (optional)
+
+Instead of logging Claude Code in on each host, you can keep **your own**
+Claude subscription login in Storm and give it to the hosts you tick. It is
+for one person, on their own machines, and the Anthropic terms risk is
+yours: read [the README section](../README.md#claude-login-sync-optional)
+and [Claude login sync](../docs/site/agents/claude-login.md) before turning
+it on. To revoke the token, remove it in your Claude account settings on
+claude.ai. A host's own login (its `claude.env` or `/login`) is untouched and
+comes back when you untick it.
+
 ### Never share an account with the vaults
 
 [Runtime Hosts › Never share an account with the vaults](../docs/site/agents/hosts.md#never-share-an-account-with-the-vaults).

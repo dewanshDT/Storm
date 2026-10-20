@@ -8,6 +8,8 @@ import 'package:http/http.dart' as http;
 
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/claude_login_api.dart'
+    show claudeLoginApiFactoryProvider;
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart'
     show integrationsApiFactoryProvider, oauthSupportedProvider;
@@ -130,6 +132,7 @@ ProviderContainer shellContainer({
                 client: integrationsClient,
               ),
       ),
+      claudeLoginApiFactoryProvider.overrideWithValue(null),
       terminalStreamFactoryProvider.overrideWithValue(
         terminalStream ?? (_, _) => StreamController<TerminalEvent>().stream,
       ),

@@ -404,9 +404,8 @@ jobs:
       - run: flutter pub get
       - run: flutter build windows --release
 
-  # The desktop runners are native code the Dart suite never compiles
-  # (decision 125): a template edit or a plugin that lacks Linux support
-  # surfaces only here. 22.04 and the glibc ceiling are the release's: a
+  # The Linux runner, likewise: a template edit or a plugin that lacks Linux
+  # support surfaces only here. 22.04 and the glibc ceiling are the release's: a
   # bundle built against a newer glibc refuses to start on Debian 12.
   client-linux:
     needs: changes

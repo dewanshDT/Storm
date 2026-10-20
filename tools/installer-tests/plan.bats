@@ -69,7 +69,7 @@ dry() {
   [[ "$output" == *"Enroll this runtime with your Storm server (paste its enrollment string)"* ]]
   [[ "$output" == *"<the enrollment string> | sudo -u storm-runtime storm-runtime enroll"* ]]
   [[ "$output" != *"storm-server"* ]]
-  [[ "$output" == *"Agent logins need a terminal"* ]]
+  [[ "$output" == *"Agent logins: Claude Code signs in from the Storm app"* ]]
   run assert_sudo_marks_consistent "$output"
   [ "$status" -eq 0 ]
   [ ! -s "$FAKE_LOG" ]
@@ -263,4 +263,15 @@ dry() {
   make_assets 0.6.0 server-deb runtime-deb
   dry --app
   [[ "$output" == *"Desktop app is unavailable: there's no storm-app_*.deb in $ASSETS"* ]]
+}
+
+@test "agents never ask for a login, interactive or not (decision 124s)" {
+  dry --runtime --agents --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"setup-token"* ]]
+  [[ "$output" != *"auth login"*"sudo"* ]]
+  [[ "$output" != *"claude.env"* ]]
+  descs=$(plan_descs "$output")
+  [[ "$descs" != *"Log "*" in for the host"* ]]
+  [[ "$output" == *"Settings › Claude login"* ]]
 }
