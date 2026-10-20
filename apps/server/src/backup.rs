@@ -5,7 +5,8 @@
 //! Into `<dest>/<YYYY-MM-DD>/`: a mirror of the vaults (from the stored
 //! storage root, which wins over the flag), the index and auth snapshots
 //! (`backup-db`), a check that the snapshots open, then pruning of dated
-//! folders past `keep_days`.
+//! folders past `keep_days`. Unlike the script it copies every file in full:
+//! NTFS hard links are possible but the script's `--link-dest` is not ported.
 
 use std::path::{Path, PathBuf};
 
@@ -20,17 +21,26 @@ pub fn run(vault_root: &Path, state: &Path, dest_root: &Path, keep_days: u32) ->
     let today = time::OffsetDateTime::now_utc().date();
     let stamp = today.format(STAMP)?;
     let dest = dest_root.join(&stamp);
-    std::fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
     tracing::info!(dest = %dest.display(), "backup: {stamp}");
 
     // The stored root wins, as in the script: a root chosen in the app must
     // be what is backed up.
-    let stored = crate::registry::Registry::load(state, Path::new(""))?.root;
-    let root = if stored.as_os_str().is_empty() {
+    let registry = crate::registry::Registry::load(state, Path::new(""))?;
+    let root = if registry.root.as_os_str().is_empty() {
         vault_root.to_path_buf()
     } else {
-        stored
+        registry.root
     };
+    // As in the script (decision 128j): an empty root while the registry
+    // lists vaults is an unmounted share, and backing it up would age out
+    // every good night. Refused before anything is written.
+    if !registry.vaults.is_empty() && !holds_a_file(&root) {
+        anyhow::bail!(
+            "{} holds no files, but the registry lists vaults — is it mounted?",
+            root.display()
+        );
+    }
+    std::fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
     let vaults = dest.join("vaults");
     if vaults.exists() {
         std::fs::remove_dir_all(&vaults)
@@ -74,6 +84,18 @@ pub fn expired(dest_root: &Path, today: Date, keep_days: u32) -> Result<Vec<Path
     }
     out.sort();
     Ok(out)
+}
+
+/// Whether any regular file is under `dir`. Unreadable counts as empty.
+fn holds_a_file(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| match entry.file_type() {
+        Ok(kind) if kind.is_file() => true,
+        Ok(kind) if kind.is_dir() => holds_a_file(&entry.path()),
+        _ => false,
+    })
 }
 
 /// Copies the tree at `from` to `to` (which must not exist), files and
