@@ -314,11 +314,16 @@ String renameKey(String content, String from, String to) {
 }
 
 /// Gives [content] a frontmatter block if it has none, changing nothing else.
+///
+/// A leading BOM stays first: a block written before it would leave the BOM
+/// mid-file, where it is no longer a BOM but a stray character (128e).
 String ensureBlock(String content) {
   if (fm.split(content).hasFrontmatter) return content;
-  final eol = detectEol(content);
-  final separator = content.isEmpty || content.startsWith('\n') ? '' : eol;
-  return '---$eol---$eol$separator$content';
+  final lead = content.startsWith(fm.bom) ? fm.bom : '';
+  final rest = content.substring(lead.length);
+  final eol = detectEol(rest);
+  final separator = rest.isEmpty || rest.startsWith('\n') ? '' : eol;
+  return '$lead---$eol---$eol$separator$rest';
 }
 
 // ---- encoding ----------------------------------------------------------

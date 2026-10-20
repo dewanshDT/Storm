@@ -34,8 +34,12 @@ class NoteParts {
 /// A block only counts when `---` is the very first line, and only when a
 /// closing `---` exists — an unterminated block is body text, not metadata.
 /// Treating it as metadata would swallow the whole note.
+///
+/// A UTF-8 BOM before that line is carried with the block (decision 128e,
+/// mirroring `frontmatter.rs`): Windows editors write one, and the body the
+/// editor shows must not start with it.
 NoteParts split(String content) {
-  if (!_isFence(_firstLine(content))) {
+  if (!_isFence(_withoutBom(_firstLine(content)))) {
     return NoteParts(frontmatter: '', body: content);
   }
 
@@ -57,6 +61,11 @@ NoteParts split(String content) {
 }
 
 String _firstLine(String s) => _lineAt(s, 0);
+
+/// The byte-order mark a note may open with.
+const bom = '\uFEFF';
+
+String _withoutBom(String s) => s.startsWith(bom) ? s.substring(1) : s;
 
 /// The line starting at [from], including its trailing newline if present.
 String _lineAt(String s, int from) {

@@ -171,7 +171,9 @@ data quietly.
   passes every other byte through. Running a user's YAML through a serializer
   reorders keys and drops comments, dirtying the whole vault. There are two
   writers and both obey this: `frontmatter.rs` `set_scalars` on the server, and
-  `lib/editor/frontmatter_edit.dart` on the client.
+  `lib/editor/frontmatter_edit.dart` on the client. **A leading UTF-8 BOM is
+  part of no block and always stays at byte 0** (decision 128e): both sides
+  look past it for the opening fence, and a new block is written after it.
 - **A value that spans lines is spliced as a range, never as one line.** The
   server's writer replaces a key's single line, which is right for stamping
   `id` and wrong for anything else: aimed at a `tags:` block list it orphans
