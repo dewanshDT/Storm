@@ -63,4 +63,17 @@ void main() {
       contains('assets/icon/storm_icon.png'),
     );
   });
+
+  // Without it a pasted image falls back to text (D15 AM45, decision 125c).
+  test('the runner answers storm/clipboard', () {
+    expect(
+      read('linux/runner/storm_clipboard.cc'),
+      contains('"storm/clipboard"'),
+    );
+    expect(app, contains('storm_clipboard_attach(view)'));
+    expect(
+      read('linux/runner/CMakeLists.txt'),
+      contains('"storm_clipboard.cc"'),
+    );
+  });
 }
