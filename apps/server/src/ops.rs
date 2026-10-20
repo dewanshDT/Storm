@@ -1399,6 +1399,7 @@ pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     // them itself when it is next refused.
     state.agent.revoke_host(host_id).map_err(internal)?;
     sweep_gateway_sessions(state);
+    forget_provider_credential_host(state, host_id).await;
     Ok(())
 }
 
@@ -1630,6 +1631,11 @@ pub struct LaunchedSession {
     #[serde(flatten)]
     pub session: SessionView,
     pub mcp: LaunchMcp,
+    /// The synced Claude login (decision 124): `synced`, `native`,
+    /// `old_host` or `expired`. Never the token.
+    pub credential: &'static str,
+    /// Said out loud when a ticked host's session runs on its own login.
+    pub credential_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1710,6 +1716,7 @@ pub async fn launch_session(
             .iter()
             .map(|c| (c.id.clone(), c.display_name.clone()))
             .collect(),
+        provider_credential: deliverable_credential(state, &req.host_id),
     };
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
@@ -1723,10 +1730,12 @@ pub async fn launch_session(
                 slug: c.slug,
             }),
     );
-    let (session, launch, outcome) = state
+    let (session, launch, outcome, credential) = state
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    let (credential, credential_notice) =
+        provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
         crate::agent::McpOutcome::Granted(g) => (
             g,
@@ -1775,6 +1784,8 @@ pub async fn launch_session(
             allow_vault_writes: launch.write_vault_id.is_some(),
             notice,
         },
+        credential,
+        credential_notice,
     })
 }
 
@@ -3248,6 +3259,7 @@ async fn connect_builtin(
 /// Retires what removed accounts left in `agent.db`/`gateway.db` (decision 82,
 /// invariant I4). Runs on every boot; idempotent.
 pub async fn reconcile_single_user(state: &Shared) -> anyhow::Result<()> {
+    reconcile_provider_credential(state).await?;
     let account = {
         let auth_db = state.auth_db.lock().await;
         auth_db.account()?
@@ -3304,6 +3316,404 @@ pub fn sweep_gateway_sessions(state: &Shared) {
             state.gateway.sessions.close_session(&session);
         }
     }
+}
+
+pub(crate) mod provider_wire;
+pub use provider_wire::runtime_provider_credential;
+
+// ---- Token sync: the synced Claude subscription token (decision 124n) -------
+//
+// Session tier only (spec §0.3), so an `stk_` key or a host token never
+// reaches these. No function here returns the token except
+// `pull_provider_credential`, for the host's own starting session.
+
+use crate::gateway::provider::{
+    self as pc, Availability, CREDENTIAL_ID, Code, HostId, ProviderCredentialView, Secret,
+};
+
+fn pc_owner_only(actor: &Actor) -> Result<(), Code> {
+    match actor {
+        Actor::Session { .. } => Ok(()),
+        _ => Err(Code::new(axum::http::StatusCode::FORBIDDEN, "owner_only")),
+    }
+}
+
+/// One `security_events` row: the kind and the fingerprint, never the token.
+fn pc_event(
+    auth_db: &crate::auth::AuthDb,
+    event: &str,
+    user: Option<&str>,
+    now: &str,
+    mut detail: serde_json::Value,
+) {
+    detail["kind"] = serde_json::json!(pc::KIND);
+    if let Err(e) = auth_db.record_event(event, user, None, now, &detail.to_string()) {
+        tracing::warn!(error = %e, event, "could not record a token-sync security event");
+    }
+}
+
+fn pc_view(state: &Shared, now: time::OffsetDateTime) -> Result<ProviderCredentialView, Code> {
+    let store = gateway_store(state);
+    let row = store
+        .provider_credential(pc::KIND)
+        .map_err(Code::internal)?;
+    let hosts = store
+        .provider_credential_hosts(CREDENTIAL_ID)
+        .map_err(Code::internal)?;
+    Ok(ProviderCredentialView::of(row.as_ref(), hosts, now))
+}
+
+/// Writes `provider_credential_expired` the first time the server sees the
+/// row past its expiry; a marker in `meta`, keyed by the expiry, makes it once
+/// per token across restarts.
+async fn pc_note_expiry(state: &Shared, now: time::OffsetDateTime) {
+    let due = {
+        let store = gateway_store(state);
+        let Ok(Some(row)) = store.provider_credential(pc::KIND) else {
+            return;
+        };
+        let marker = format!("provider_credential_expired:{}", row.id);
+        if !row.is_expired(now)
+            || store.meta(&marker).ok().flatten() == Some(row.expires_at.clone())
+        {
+            return;
+        }
+        if store.set_meta(&marker, &row.expires_at).is_err() {
+            return;
+        }
+        row
+    };
+    let auth_db = state.auth_db.lock().await;
+    pc_event(
+        &auth_db,
+        pc::event::EXPIRED,
+        Some(&due.owner_user_id),
+        &crate::index::now_rfc3339(),
+        serde_json::json!({"fingerprint": due.fingerprint, "expires_at": due.expires_at}),
+    );
+}
+
+pub async fn provider_credential_status(state: &Shared) -> Result<ProviderCredentialView, Code> {
+    let now = time::OffsetDateTime::now_utc();
+    pc_note_expiry(state, now).await;
+    pc_view(state, now)
+}
+
+/// Creates or replaces the token in place (§3): the scope is kept, the
+/// status goes back to `active`.
+pub async fn put_provider_credential(
+    state: &Shared,
+    actor: &Actor,
+    token: Secret,
+    minted_at: Option<String>,
+) -> Result<ProviderCredentialView, Code> {
+    pc_owner_only(actor)?;
+    put_provider_credential_at(
+        state,
+        actor,
+        token,
+        minted_at,
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+}
+
+async fn put_provider_credential_at(
+    state: &Shared,
+    actor: &Actor,
+    token: Secret,
+    minted_at: Option<String>,
+    now: time::OffsetDateTime,
+) -> Result<ProviderCredentialView, Code> {
+    let token = pc::normalize_token(&token)?;
+    let minted = pc::minted_at(minted_at.as_deref(), now)?;
+    let stamp = pc::format_time(now);
+    let sealed = state
+        .gateway
+        .keys
+        .seal(CREDENTIAL_ID, pc::KIND, token.expose().as_bytes())
+        .map_err(Code::internal)?;
+    let row = pc::Row {
+        id: CREDENTIAL_ID.into(),
+        kind: pc::KIND.into(),
+        owner_user_id: actor.user_id().to_string(),
+        sealed,
+        fingerprint: pc::fingerprint(&token),
+        minted_at: pc::format_time(minted),
+        expires_at: pc::format_time(pc::expires_at(minted)),
+        status: pc::status::ACTIVE.into(),
+        created_at: stamp.clone(),
+        updated_at: stamp.clone(),
+    };
+    drop(token);
+    let previous = gateway_store(state)
+        .put_provider_credential(&row)
+        .map_err(Code::internal)?;
+    let auth_db = state.auth_db.lock().await;
+    let (event, detail) = match previous {
+        Some(previous) => (
+            pc::event::REPLACED,
+            serde_json::json!({"fingerprint": row.fingerprint, "previous_fingerprint": previous,
+                               "minted_at": row.minted_at}),
+        ),
+        None => (
+            pc::event::SET,
+            serde_json::json!({"fingerprint": row.fingerprint, "minted_at": row.minted_at}),
+        ),
+    };
+    pc_event(&auth_db, event, Some(actor.user_id()), &stamp, detail);
+    drop(auth_db);
+    pc_view(state, now)
+}
+
+/// Removes the token and its scope (§3). Stops delivery; it does not revoke
+/// the token at Anthropic. Removing nothing is still `204`.
+pub async fn delete_provider_credential(state: &Shared, actor: &Actor) -> Result<(), Code> {
+    pc_owner_only(actor)?;
+    let row = {
+        let store = gateway_store(state);
+        let row = store
+            .provider_credential(pc::KIND)
+            .map_err(Code::internal)?;
+        store
+            .delete_provider_credential(CREDENTIAL_ID)
+            .map_err(Code::internal)?;
+        row
+    };
+    if let Some(row) = row {
+        let auth_db = state.auth_db.lock().await;
+        pc_event(
+            &auth_db,
+            pc::event::REMOVED,
+            Some(actor.user_id()),
+            &crate::index::now_rfc3339(),
+            serde_json::json!({"fingerprint": row.fingerprint}),
+        );
+    }
+    Ok(())
+}
+
+/// Replaces the scope (§4). `[]` is none, the default; each id must be an
+/// enrolled, non-revoked host. Allowed before a token exists.
+pub async fn set_provider_credential_hosts(
+    state: &Shared,
+    actor: &Actor,
+    hosts: Vec<HostId>,
+) -> Result<ProviderCredentialView, Code> {
+    pc_owner_only(actor)?;
+    let mut hosts = hosts;
+    hosts.sort();
+    hosts.dedup();
+    let auth_db = state.auth_db.lock().await;
+    for host in &hosts {
+        match auth_db.host_by_id(host).map_err(Code::internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(Code::bad_request("unknown_host")),
+        }
+    }
+    let now = crate::index::now_rfc3339();
+    let (changed, fingerprint) = {
+        let store = gateway_store(state);
+        let changed = store
+            .set_provider_credential_hosts(CREDENTIAL_ID, &hosts, &now)
+            .map_err(Code::internal)?;
+        let fp = store
+            .provider_credential(pc::KIND)
+            .map_err(Code::internal)?
+            .map(|r| r.fingerprint);
+        (changed, fp)
+    };
+    if changed {
+        pc_event(
+            &auth_db,
+            pc::event::HOSTS_CHANGED,
+            Some(actor.user_id()),
+            &now,
+            serde_json::json!({"fingerprint": fingerprint, "hosts": hosts}),
+        );
+    }
+    drop(auth_db);
+    pc_view(state, time::OffsetDateTime::now_utc())
+}
+
+/// Spec §0.4 rules 2 and 3 for a launch on `host_id`: the kind to name in
+/// `start`, or `None`. Rules 1 (provider) and 4 (capability) are the launch's.
+pub fn deliverable_credential(state: &Shared, host_id: &str) -> Option<&'static str> {
+    (provider_credential_availability(state, host_id) == Availability::Deliverable)
+        .then_some(pc::KIND)
+}
+
+/// Why a host would or would not get the token now, for the launch's
+/// `credential` outcome and notices (`expired` vs `native`). An error reads
+/// as `NotInScope`: fail closed, the session uses the host's own login.
+pub fn provider_credential_availability(state: &Shared, host_id: &str) -> Availability {
+    let store = gateway_store(state);
+    Availability::of(
+        &store,
+        &state.gateway.keys,
+        host_id,
+        time::OffsetDateTime::now_utc(),
+    )
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "token sync: could not read the scope; not delivering");
+        Availability::NotInScope
+    })
+}
+
+/// The host's pull for its own starting session (§0.4), every check in the
+/// pinned order, each refusal a stable code and an audit row. The only path
+/// that opens the sealed token. Writes `provider_credential_delivered`.
+pub async fn pull_provider_credential(
+    state: &Shared,
+    host: &crate::auth::hosts::Host,
+    session_id: &str,
+) -> Result<Secret, Code> {
+    use axum::http::StatusCode;
+    let now = time::OffsetDateTime::now_utc();
+    let refuse = |status, code: &'static str| async move {
+        let auth_db = state.auth_db.lock().await;
+        pc_event(
+            &auth_db,
+            "provider_credential_refused",
+            None,
+            &crate::index::now_rfc3339(),
+            serde_json::json!({"reason": code, "host_id": host.id, "session_id": session_id}),
+        );
+        Code::new(status, code)
+    };
+    let session = match state.agent.get(session_id) {
+        Ok(s) if s.host_id == host.id => s,
+        _ => return Err(refuse(StatusCode::NOT_FOUND, "not_your_session").await),
+    };
+    if session.status != "starting" {
+        return Err(refuse(StatusCode::CONFLICT, "session_not_starting").await);
+    }
+    if session.provider != "claude-code" {
+        return Err(refuse(StatusCode::CONFLICT, "wrong_provider").await);
+    }
+    // Only a session whose `start` named the kind (AM72), so widening the
+    // scope never reaches a launch that was not told to pull.
+    if state.agent.requested_credential(session_id) != Some(pc::KIND) {
+        return Err(refuse(StatusCode::FORBIDDEN, "host_not_in_scope").await);
+    }
+    match provider_credential_availability(state, &host.id) {
+        Availability::NotInScope => {
+            return Err(refuse(StatusCode::FORBIDDEN, "host_not_in_scope").await);
+        }
+        Availability::Deliverable => {}
+        Availability::Expired => {
+            pc_note_expiry(state, now).await;
+            return Err(refuse(StatusCode::NOT_FOUND, "no_credential").await);
+        }
+        Availability::Absent | Availability::NeedsResync => {
+            return Err(refuse(StatusCode::NOT_FOUND, "no_credential").await);
+        }
+    }
+    let row = gateway_store(state)
+        .provider_credential(pc::KIND)
+        .map_err(Code::internal)?
+        .ok_or_else(|| Code::new(StatusCode::NOT_FOUND, "no_credential"))?;
+    let opened = state.gateway.keys.open(&row.id, &row.kind, &row.sealed);
+    let token = match opened
+        .ok()
+        .and_then(|p| String::from_utf8(p.expose().to_vec()).ok())
+    {
+        Some(t) => Secret::new(t),
+        None => {
+            // A row that no longer authenticates is never retried as if it
+            // might: it waits for a re-sync, like a lost key.
+            let stamp = crate::index::now_rfc3339();
+            let _ = gateway_store(state).mark_provider_needs_resync(&row.id, &stamp);
+            let auth_db = state.auth_db.lock().await;
+            pc_event(
+                &auth_db,
+                pc::event::UNREADABLE,
+                Some(&row.owner_user_id),
+                &stamp,
+                serde_json::json!({"fingerprint": row.fingerprint}),
+            );
+            drop(auth_db);
+            return Err(refuse(StatusCode::NOT_FOUND, "no_credential").await);
+        }
+    };
+    let auth_db = state.auth_db.lock().await;
+    pc_event(
+        &auth_db,
+        pc::event::DELIVERED,
+        Some(&session.owner_user_id),
+        &crate::index::now_rfc3339(),
+        serde_json::json!({"fingerprint": row.fingerprint, "host_id": host.id,
+                           "session_id": session_id}),
+    );
+    Ok(token)
+}
+
+/// At boot, from `reconcile_single_user`: audits what `Gateway::open` found
+/// unreadable, and drops a token some other account left (decision 82).
+async fn reconcile_provider_credential(state: &Shared) -> anyhow::Result<()> {
+    let unreadable = std::mem::take(&mut *state.gateway.provider_unreadable.lock().unwrap());
+    let now = crate::index::now_rfc3339();
+    let auth_db = state.auth_db.lock().await;
+    for fingerprint in unreadable {
+        pc_event(
+            &auth_db,
+            pc::event::UNREADABLE,
+            None,
+            &now,
+            serde_json::json!({"fingerprint": fingerprint, "reason": "data_key_missing"}),
+        );
+    }
+    let Some(account) = auth_db.account()? else {
+        return Ok(());
+    };
+    let orphan = {
+        let store = gateway_store(state);
+        match store.provider_credential(pc::KIND)? {
+            Some(row) if row.owner_user_id != account.id => {
+                store.delete_provider_credential(&row.id)?;
+                Some(row)
+            }
+            _ => None,
+        }
+    };
+    if let Some(row) = orphan {
+        pc_event(
+            &auth_db,
+            pc::event::REMOVED,
+            Some(&account.id),
+            &now,
+            serde_json::json!({"fingerprint": row.fingerprint, "former_owner": row.owner_user_id,
+                               "reason": "single_user"}),
+        );
+    }
+    Ok(())
+}
+
+/// A revoked host leaves the token's scope (§4); its row would be inert, but
+/// a stale tick is not left to look like a choice.
+async fn forget_provider_credential_host(state: &Shared, host_id: &str) {
+    let removed = gateway_store(state).remove_provider_credential_host(host_id);
+    let Ok(removed) = removed else {
+        tracing::warn!(
+            host_id,
+            "token sync: could not drop a revoked host from the scope"
+        );
+        return;
+    };
+    if removed.is_empty() {
+        return;
+    }
+    let hosts = gateway_store(state)
+        .provider_credential_hosts(CREDENTIAL_ID)
+        .unwrap_or_default();
+    let auth_db = state.auth_db.lock().await;
+    pc_event(
+        &auth_db,
+        pc::event::HOSTS_CHANGED,
+        None,
+        &crate::index::now_rfc3339(),
+        serde_json::json!({"hosts": hosts, "removed": host_id, "reason": "host_revoked"}),
+    );
 }
 
 // ---- MCP Gateway: OAuth (decision 81g, spec §10) ----------------------------

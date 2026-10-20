@@ -220,6 +220,8 @@ def main():
         f.write("# Seed\n")
     for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw", "hs"):
         os.makedirs(os.path.join(WORKSPACES, ws))
+    with open(os.path.join(WORKSPACES, "oc", "AGENTS.md"), "w") as f:
+        f.write("the repository's instructions\n")
     os.makedirs(UP_STATE)
     with open(CANARY_FILE, "w") as f:
         f.write(CANARY)
@@ -484,13 +486,16 @@ args = ["-i"]
         check("and runs once", len(after) == 4 and
               len([m for m in a.transcript(slug) if m.get("id") == 51]) == 1, after)
 
-        print("\n=== OpenCode's launch (AM32) ===")
+        print("\n=== OpenCode's launch (AM32, AM66) ===")
         oc = Agent("oc")
         rec = launch("opencode", "oc")
         env = wait(oc.env, "the agent's record of its launch")
         xdg = env["env"]["XDG_CONFIG_HOME"]
         check("it gets XDG_CONFIG_HOME=<session>/xdg", xdg and xdg.endswith(f"{rec['id']}/xdg"), env)
         check("it gets OPENCODE_DISABLE_PROJECT_CONFIG=1", env["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1")
+        instructions = json.load(open(env["env"]["OPENCODE_CONFIG"]))["instructions"]
+        check("its OPENCODE_CONFIG names the workspace's AGENTS.md by absolute path",
+              instructions == [os.path.realpath(os.path.join(WORKSPACES, "oc", "AGENTS.md"))], instructions)
         occfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json")))
         check("every connection asks before a tool",
               occfg["permission"].get(f"{slug}_*") == "ask" and occfg["permission"].get("storm_*") == "ask", occfg)
