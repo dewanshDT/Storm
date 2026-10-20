@@ -13,6 +13,7 @@ import '../ui/widgets.dart' show PopoverItem;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'claude_login_api.dart';
 import 'integrations_api.dart' show integrationNamesOn;
 
 typedef NoteRef = ({String vaultId, String noteId});
@@ -231,6 +232,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       host?.id,
     );
     final hostName = host?.name ?? 'the host';
+    final claudeLogin = ref.watch(claudeLoginSummaryProvider).value;
     final ctx = _context;
 
     final children = <Widget>[
@@ -321,6 +323,8 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             onChanged: (p) => setState(() => _provider = _chosen = p),
           ),
         ),
+        if (_provider == 'claude-code' && host != null && claudeLogin != null)
+          _ClaudeLoginLine(login: claudeLogin, host: host),
         if (!shell)
           _Field(
             label: 'Can write to',
@@ -557,7 +561,60 @@ class _ContextBox extends ConsumerWidget {
   }
 }
 
-/// A 96px label column and the control beside it.
+/// Which Claude login the session will use (decision 124, spec §4), by the
+/// server's own rules, under the Agent field.
+class _ClaudeLoginLine extends StatelessWidget {
+  const _ClaudeLoginLine({required this.login, required this.host});
+
+  final ClaudeLogin login;
+  final AgentHost host;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final route = claudeLoginRoute(login, host);
+    final soon =
+        route == ClaudeLoginRoute.synced &&
+        login.warn == '7d' &&
+        login.daysLeft != null;
+    final text = switch (route) {
+      ClaudeLoginRoute.synced =>
+        soon
+            ? 'Claude: your synced login · expires in ${login.daysLeft} '
+                  '${login.daysLeft == 1 ? 'day' : 'days'}, replace it in Settings'
+            : 'Claude: your synced login',
+      ClaudeLoginRoute.own => "Claude: this host's own login",
+      ClaudeLoginRoute.oldHost =>
+        "Claude: this host's own login · ${host.name} can't receive your "
+            'synced login, update storm-runtime',
+      ClaudeLoginRoute.expired =>
+        "Claude: this host's own login · your synced login has expired, "
+            're-sync it in Settings',
+      ClaudeLoginRoute.needsResync =>
+        "Claude: this host's own login · your synced login can't be read, "
+            'sync it again in Settings',
+    };
+    final warn =
+        soon ||
+        route == ClaudeLoginRoute.expired ||
+        route == ClaudeLoginRoute.needsResync ||
+        route == ClaudeLoginRoute.oldHost;
+    return Padding(
+      padding: EdgeInsets.only(left: t.sp * 13.25),
+      child: Text(
+        text,
+        key: Key('launcher-claude-login-${route.name}'),
+        style: TextStyle(
+          fontFamily: StormTokens.sansFamily,
+          fontSize: t.labelSize * 1.09,
+          height: 1.45,
+          color: warn ? t.danger : t.text3,
+        ),
+      ),
+    );
+  }
+}
+
 /// A host with nothing to work in yet: where a workspace goes, and a way to
 /// look again once one is there.
 class _NoWorkspaces extends StatelessWidget {

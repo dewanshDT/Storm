@@ -2452,7 +2452,6 @@ agents_find() {
 agents_detect() {
   local p
   CLAUDE_BIN="" OPENCODE_BIN="" CLAUDE_IN_HOME="" OPENCODE_IN_HOME="" BREW_BIN=""
-  AG_TOKEN=unknown AG_PROVIDERS=unknown
   CLAUDE_BIN=$(agents_find claude) || CLAUDE_BIN=""
   OPENCODE_BIN=$(agents_find opencode) || OPENCODE_BIN=""
   for p in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" "$HOME/.npm-global/bin/claude"; do
@@ -2473,22 +2472,16 @@ agents_detect() {
       if [ -z "$BREW_BIN" ] && [ -x "$p" ]; then BREW_BIN=$p; fi
     done
   fi
-  if [ -r "$RT_CONFIG" ]; then
-    if grep -Eq '^[[:space:]]*\[\[providers\]\]' "$RT_CONFIG"; then AG_PROVIDERS=yes; else AG_PROVIDERS=no; fi
-  fi
-  if [ "$OPT_DRY_RUN" != 1 ] && [ "$RT_INSTALLED" = 1 ] && can_sudo_quietly; then
-    if probe as_root -n test -f "$RT_STATE/claude.env"; then AG_TOKEN=yes; else AG_TOKEN=no; fi
-  fi
   return 0
 }
 
 agents_status_line() {
-  printf 'Claude Code: %s %s OpenCode: %s %s token: %s %s providers listed: %s' "${CLAUDE_BIN:-not where the host can run it}" "$G_DOT" \
-    "${OPENCODE_BIN:-not where the host can run it}" "$G_DOT" "$AG_TOKEN" "$G_DOT" "$AG_PROVIDERS"
+  printf 'Claude Code: %s %s OpenCode: %s' "${CLAUDE_BIN:-not where the host can run it}" "$G_DOT" \
+    "${OPENCODE_BIN:-not where the host can run it}"
 }
 
 agents_plan() {
-  local mode env_file restart home_note brew_hint=""
+  local mode home_note brew_hint=""
   mode=$(comp_mode agents)
   [ "$mode" = uninstall ] && return 0
   if [ "$RT_INSTALLED" != 1 ] && ! in_sel runtime; then
@@ -2513,23 +2506,8 @@ agents_plan() {
     fi
     [ -n "$OPENCODE_IN_HOME" ] && plan_note "Found $OPENCODE_IN_HOME, which $RT_ACCOUNT can't run. $home_note"
   fi
-  if [ "$INTERACTIVE" != 1 ]; then
-    plan_note "Agent logins need a terminal: re-run the installer, choose Custom… and tick Agent CLIs."
-    return 0
-  fi
-  env_file="$RT_STATE/claude.env"
-  plan_add fg 1 "Log Claude Code in for the host (a token from claude setup-token)" \
-    "claude setup-token   # you, in another window\nprintf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\\\n' <token> | (cd / && sudo -u $RT_ACCOUNT sh -c 'umask 077; cat > $(shq "$env_file")')" \
-    agents_configure claude-token
-  plan_add fg 1 "Name the providers in runtime.toml (only if it lists none)" \
-    "printf '[[providers]] id = \"claude-code\" env_file = …' | sudo tee -a $(shq "$RT_CONFIG")" agents_configure providers
-  if [ "$OS" = macos ]; then
-    restart="sudo launchctl kickstart -k system/dev.storm.runtime"
-  else
-    restart="sudo systemctl try-restart storm-runtime"
-  fi
-  plan_add fg 1 "Restart the Runtime Host if its logins changed" "$restart" agents_configure restart
-  plan_add fg 1 "Log OpenCode in for the host" "cd / && sudo -u $RT_ACCOUNT -H opencode auth login" agents_configure opencode-login
+  # No agent login here (decision 124s): the app syncs Claude Code's token.
+  plan_note "Agent logins: Claude Code signs in from the Storm app (Settings › Claude login, then tick this host); OpenCode from a Storm shell session on this host (opencode auth login)."
   return 0
 }
 
@@ -2540,101 +2518,9 @@ agents_install() {
   esac
 }
 
-claude_token_ok() {
-  case "$1" in
-    *[[:space:]]*) return 1 ;;
-    sk-ant-?*) return 0 ;;
-  esac
-  return 1
-}
-
-# The token arrives on stdin and leaves on stdin: never in an argument.
-write_claude_env() {
-  local target="$RT_STATE/claude.env"
-  {
-    printf 'CLAUDE_CODE_OAUTH_TOKEN='
-    cat
-  } | (
-    # shellcheck disable=SC2016
-    cd / && run_as "$RT_ACCOUNT" sh -c 'umask 077; cat > "$1"' sh "$target"
-  )
-}
-
-providers_block() {
-  printf '\n[[providers]]\nid = "claude-code"\nenv_file = "%s"\n\n[[providers]]\nid = "opencode"\n\n[[providers]]\nid = "shell"\n' "$RT_STATE/claude.env"
-}
-
-agents_configure() {
-  case "$1" in
-    claude-token) agents_claude_token ;;
-    providers) agents_providers ;;
-    restart) agents_restart ;;
-    opencode-login) agents_opencode_login ;;
-  esac
-}
-
 agents_verify() {
   agents_detect
   [ -n "$CLAUDE_BIN" ] || [ -n "$OPENCODE_BIN" ]
-}
-
-agents_claude_token() {
-  local rc
-  [ "$INTERACTIVE" = 1 ] || return "$STEP_SKIPPED"
-  if as_root test -f "$RT_STATE/claude.env"; then
-    ui_confirm "Claude Code already has a token for the host. Replace it?" n || return "$STEP_SKIPPED"
-  fi
-  ui_info "Claude Code's own login needs a Keychain the host's account doesn't have,"
-  ui_info "so the host uses a long-lived token instead:"
-  ui_info "  1. In another terminal window, run:  ${C_BOLD}claude setup-token${C_RESET}"
-  ui_info "  2. Paste the token here. It isn't shown, logged, or put on a command line."
-  ui_secret_pipe "Claude Code token (Enter alone skips)" claude_token_ok \
-    "That isn't a Claude Code token: those start with sk-ant-" write_claude_env
-  rc=$?
-  case "$rc" in
-    0)
-      AGENTS_CHANGED=1
-      ui_ok "Saved for $RT_ACCOUNT in $RT_STATE/claude.env (mode 0600)"
-      ;;
-    "$STEP_SKIPPED") ;;
-    *) ui_fail "Couldn't write $RT_STATE/claude.env" ;;
-  esac
-  return "$rc"
-}
-
-agents_providers() {
-  if as_root grep -Eq '^[[:space:]]*\[\[providers\]\]' "$RT_CONFIG" 2>/dev/null; then
-    ui_ok "runtime.toml already lists its providers; left as it is"
-    return 0
-  fi
-  if ! as_root test -f "$RT_STATE/claude.env"; then
-    ui_note "No Claude Code token yet, so runtime.toml keeps its defaults"
-    return "$STEP_SKIPPED"
-  fi
-  providers_block | as_root tee -a "$RT_CONFIG" >/dev/null || return 1
-  AGENTS_CHANGED=1
-  ui_ok "Listed claude-code (with the token), opencode and shell in $RT_CONFIG"
-}
-
-agents_restart() {
-  [ "${AGENTS_CHANGED:-0}" = 1 ] || return "$STEP_SKIPPED"
-  rt_enrolled_now || return "$STEP_SKIPPED"
-  if [ "$OS" = macos ]; then
-    as_root launchctl kickstart -k system/dev.storm.runtime
-  else
-    as_root systemctl try-restart storm-runtime
-  fi
-}
-
-agents_opencode_login() {
-  local oc=$OPENCODE_BIN
-  [ -n "$oc" ] || oc=$(agents_find opencode) || oc=""
-  if [ -z "$oc" ]; then
-    ui_note "OpenCode isn't installed where $RT_ACCOUNT can run it; skipped"
-    return "$STEP_SKIPPED"
-  fi
-  ui_confirm "Log OpenCode in for the host now? It asks for a provider, then its key." y || return "$STEP_SKIPPED"
-  (cd / && run_as -H "$RT_ACCOUNT" "$oc" auth login) <&"$UI_IN" >&"$UI_FD" 2>&"$UI_FD"
 }
 
 # The CLIs are yours (Homebrew's); the host's logins live in its state.
@@ -3021,7 +2907,7 @@ fetch_asset() {
 # ------------------------------------------------------------ the plan
 
 plan_reset() {
-  PLAN_N=0 PLAN_NOTES_N=0 PLAN_KEYS=" " AGENTS_CHANGED=0
+  PLAN_N=0 PLAN_NOTES_N=0 PLAN_KEYS=" "
   PLAN_KIND=() PLAN_SUDO=() PLAN_DESC=() PLAN_CMD=() PLAN_RUN=() PLAN_RESULT=() PLAN_NOTES=()
 }
 

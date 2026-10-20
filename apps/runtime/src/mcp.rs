@@ -94,15 +94,73 @@ fn bridge_entry(exe: &Path, slug: &str, handle: &str, socket: &Path) -> (Vec<Str
     (command, env)
 }
 
+/// OpenCode's own order for a project's instruction file.
+pub const OPENCODE_INSTRUCTION_FILES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
+pub const OPENCODE_INSTRUCTIONS: &str = "opencode-instructions.json";
+
+/// What every session of `provider` gains, with or without grants (AM66):
+/// `opencode` gets `OPENCODE_DISABLE_PROJECT_CONFIG=1`, so a repository's
+/// `opencode.json` cannot redirect a provider. The flag also drops the
+/// workspace's instruction file, so the first of
+/// [`OPENCODE_INSTRUCTION_FILES`] in `workspace` (not above it) is named by
+/// absolute path in `<dir>/opencode-instructions.json`, passed as
+/// `OPENCODE_CONFIG`. OpenCode concatenates that `instructions` array with
+/// the operator's, so neither replaces the other. Everything else: nothing.
+pub fn provider_baseline(provider: &str, dir: &Path, workspace: &Path) -> Result<LaunchExtras> {
+    if provider != "opencode" {
+        return Ok(LaunchExtras::default());
+    }
+    let mut env = vec![("OPENCODE_DISABLE_PROJECT_CONFIG".into(), "1".into())];
+    if let Some(file) = opencode_instruction_file(workspace) {
+        let path = dir.join(OPENCODE_INSTRUCTIONS);
+        private_dir(dir)?;
+        write_private(
+            &path,
+            &serde_json::to_vec_pretty(&json!({
+                "$schema": "https://opencode.ai/config.json",
+                "instructions": [file],
+            }))?,
+        )?;
+        env.push(("OPENCODE_CONFIG".into(), path.into_os_string()));
+    }
+    Ok(LaunchExtras {
+        args: Vec::new(),
+        env,
+        ..Default::default()
+    })
+}
+
+fn opencode_instruction_file(workspace: &Path) -> Option<String> {
+    let found = OPENCODE_INSTRUCTION_FILES
+        .iter()
+        .map(|name| workspace.join(name))
+        .find(|p| p.is_file())?;
+    let found = found.to_string_lossy();
+    // A canonical Windows path is `\\?\…`; OpenCode wants the plain form.
+    let found = if cfg!(windows) {
+        crate::platform::winsvc::normalize(&found)
+    } else {
+        found.into_owned()
+    };
+    // OpenCode globs an absolute `instructions` entry, so such a path could
+    // match some other file, or none.
+    if found.contains(['*', '?', '[', ']', '{', '}']) {
+        tracing::warn!(path = %found, "not restoring an instruction file whose path holds a glob character");
+        return None;
+    }
+    Some(found)
+}
+
 /// Writes the provider's MCP config into `dir` and returns what its launch
-/// gains (AM32, exactly):
+/// gains (AM32 as amended by AM66):
 /// - **`claude-code`**: `--mcp-config <dir>/mcp.json --strict-mcp-config`,
 ///   one stdio server per slug. Only the session's servers load.
 /// - **`opencode`**: `XDG_CONFIG_HOME=<dir>/xdg` with the session config in
-///   `<dir>/xdg/opencode/opencode.json`, `OPENCODE_DISABLE_PROJECT_CONFIG=1`,
-///   and `permission: {"<slug>_*": "ask"}` for every connection. All three are
-///   required: OpenCode merges every other config source with the global one,
-///   and runs MCP tools without asking by default (G2).
+///   `<dir>/xdg/opencode/opencode.json`, and `permission: {"<slug>_*": "ask"}`
+///   for every connection. Both are required, with
+///   [`provider_baseline`]'s `OPENCODE_DISABLE_PROJECT_CONFIG=1`: OpenCode
+///   merges every other config source with the global one, and runs MCP
+///   tools without asking by default (G2).
 /// - anything else, `shell` included: nothing (G-D9).
 ///
 /// `opencode_settings` is the `runtime.toml` provider entry's `settings`:
@@ -148,6 +206,7 @@ pub fn write_provider_config(
                     "--strict-mcp-config".into(),
                 ],
                 env: Vec::new(),
+                ..Default::default()
             })
         }
         "opencode" => {
@@ -184,10 +243,8 @@ pub fn write_provider_config(
             )?;
             Ok(LaunchExtras {
                 args: Vec::new(),
-                env: vec![
-                    ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
-                    ("OPENCODE_DISABLE_PROJECT_CONFIG".into(), "1".into()),
-                ],
+                env: vec![("XDG_CONFIG_HOME".into(), xdg.into_os_string())],
+                ..Default::default()
             })
         }
         _ => Ok(LaunchExtras::default()),
@@ -334,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_gets_its_own_config_home_no_project_config_and_ask_for_every_slug() {
+    fn opencode_gets_its_own_config_home_and_ask_for_every_slug() {
         let dir = tempfile::tempdir().unwrap();
         let session = dir.path().join("ags_X");
         // A host setting may set a model; it may not add an MCP server, nor
@@ -357,16 +414,10 @@ mod tests {
         assert!(extras.args.is_empty());
         assert_eq!(
             extras.env,
-            vec![
-                (
-                    OsString::from("XDG_CONFIG_HOME"),
-                    session.join("xdg").into_os_string()
-                ),
-                (
-                    OsString::from("OPENCODE_DISABLE_PROJECT_CONFIG"),
-                    OsString::from("1")
-                ),
-            ]
+            vec![(
+                OsString::from("XDG_CONFIG_HOME"),
+                session.join("xdg").into_os_string()
+            )]
         );
         let config: Value = serde_json::from_slice(
             &std::fs::read(session.join("xdg/opencode/opencode.json")).unwrap(),
@@ -382,6 +433,103 @@ mod tests {
             config["mcp"]["github"]["command"],
             json!(["/usr/bin/storm-runtime", "mcp-bridge", "github"])
         );
+    }
+
+    fn flag_count(extras: &LaunchExtras) -> usize {
+        extras
+            .env
+            .iter()
+            .filter(|(k, v)| k == "OPENCODE_DISABLE_PROJECT_CONFIG" && v == "1")
+            .count()
+    }
+
+    #[test]
+    fn every_opencode_session_skips_project_config_once_with_or_without_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for provider in ["opencode", "claude-code", "shell", "fake"] {
+            for grants in [vec![], grants()] {
+                let session = dir.path().join(format!("{provider}-{}", grants.len()));
+                let mut launch = provider_baseline(provider, &session, workspace.path()).unwrap();
+                let mcp = write_provider_config(
+                    provider,
+                    &session,
+                    &grants,
+                    "h",
+                    Path::new("/s"),
+                    Path::new("/x"),
+                    None,
+                )
+                .unwrap();
+                launch.env.extend(mcp.env);
+                let expected = usize::from(provider == "opencode");
+                assert_eq!(flag_count(&launch), expected, "{provider}, {grants:?}");
+            }
+        }
+    }
+
+    fn instructions(workspace: &Path, session: &Path) -> Option<Value> {
+        let extras = provider_baseline("opencode", session, workspace).unwrap();
+        assert_eq!(flag_count(&extras), 1);
+        let path = session.join(OPENCODE_INSTRUCTIONS);
+        let named = extras
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG")
+            .map(|(_, v)| v.clone());
+        match named {
+            Some(v) => {
+                assert_eq!(v, path.clone().into_os_string());
+                crate::platform::assert_private(&path, 0o600);
+                Some(serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap())
+            }
+            None => {
+                assert!(!path.exists());
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn the_workspaces_instruction_file_comes_back_by_absolute_path_in_opencodes_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("app");
+        std::fs::create_dir(&workspace).unwrap();
+        // Only the workspace itself is looked in, never above it.
+        std::fs::write(dir.path().join("AGENTS.md"), "parent").unwrap();
+        assert_eq!(instructions(&workspace, &dir.path().join("ags_0")), None);
+        let mut expected = None;
+        for name in ["CONTEXT.md", "CLAUDE.md", "AGENTS.md"] {
+            std::fs::write(workspace.join(name), "x").unwrap();
+            expected = Some(workspace.join(name).display().to_string());
+            let config =
+                instructions(&workspace, &dir.path().join(format!("ags_{name}"))).expect(name);
+            assert_eq!(config["instructions"], json!([expected]), "{name}");
+            assert_eq!(config.as_object().unwrap().len(), 2);
+        }
+        assert!(Path::new(expected.as_deref().unwrap()).is_absolute());
+        // A directory named like the file is not one.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join("AGENTS.md")).unwrap();
+        assert_eq!(instructions(&other, &dir.path().join("ags_dir")), None);
+    }
+
+    #[test]
+    fn a_path_with_a_glob_character_is_not_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, name) in ["a*b", "a?b", "a[1]", "a{b,c}"].into_iter().enumerate() {
+            if cfg!(windows) && name.contains(['*', '?']) {
+                continue;
+            }
+            let workspace = dir.path().join(name);
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::write(workspace.join("AGENTS.md"), "x").unwrap();
+            assert_eq!(
+                instructions(&workspace, &dir.path().join(format!("ags_{i}"))),
+                None,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -434,7 +582,7 @@ mod tests {
                 .unwrap()
             };
             let plain = config("plain");
-            assert_eq!(with_opening_prompt(plain.clone(), provider, false), plain);
+            assert_eq!(with_opening_prompt(config("plain"), provider, false), plain);
             let with = with_opening_prompt(config("context"), provider, true);
             assert_eq!(
                 with.env.len(),

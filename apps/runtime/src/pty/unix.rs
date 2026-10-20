@@ -33,6 +33,10 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
         .args(&launch.args)
         .current_dir(&launch.cwd)
         .envs(launch.env.iter().map(|(k, v)| (k, v)));
+    for name in &launch.env_remove {
+        command.env_remove(name);
+    }
+    command.envs(launch.secret_env.iter().map(|(k, v)| (k, v.expose())));
     let child = spawn_on(&mut command, &slave)?;
     // The parent's copy must go, or the master never sees end-of-file.
     drop(slave);
