@@ -78,7 +78,7 @@ Components:
   --mcp                MCP only: storm-runtime on PATH so AI apps here can reach
                        your Storm (mcp-connect); no host, no service
   --agents             Claude Code / OpenCode for the Runtime Host
-  --app                the desktop app (macOS; on Linux, the web client's address)
+  --app                the desktop app (macOS; Linux: the apt package, or in your home)
   --mobile             phone or tablet: pairing QR, Android APK QR, web address
 
 Options:
@@ -383,6 +383,12 @@ set_paths() {
       SRV_DROPIN="$root/etc/systemd/system/storm-server.service.d/data-root.conf"
       DEFAULT_DATA="$root/srv/storm"
       APP_DIR=""
+      # The app (decision 125f): the storm-app package, or the tarball in the
+      # user's home where there is no apt.
+      APP_PKG_BIN="$root/usr/lib/storm-app/storm"
+      APP_SHARE="${XDG_DATA_HOME:-$HOME/.local/share}"
+      APP_USER_DIR="$APP_SHARE/storm-app"
+      APP_BIN_DIR="$HOME/.local/bin"
       AGENT_BIN_DIRS="$root/usr/local/bin $root/usr/bin"
       KEYRING_DIR="$root/usr/share/keyrings"
       KEYRING_PATH="$KEYRING_DIR/storm.gpg"
@@ -1035,6 +1041,8 @@ asset_name() {
     runtime-macos) printf 'storm-runtime-%s-macos-universal.tar.gz' "$2" ;;
     runtime-linux) printf 'storm-runtime-%s-x86_64-linux' "$2" ;;
     app-macos) printf 'Storm-%s-macos-arm64.zip' "$2" ;;
+    app-linux) printf 'storm-app-%s-x86_64-linux.tar.gz' "$2" ;;
+    app-deb) printf 'storm-app_%s-1_amd64.deb' "$2" ;;
     apk) printf 'storm-%s.apk' "$2" ;;
     *) return 1 ;;
   esac
@@ -1247,7 +1255,7 @@ comp_blurb() {
     mcp) printf 'storm-runtime on PATH for AI apps (mcp-connect); no host, no service' ;;
     agents) printf 'Claude Code and OpenCode for the runtime' ;;
     app)
-      if [ "$OS" = macos ]; then printf 'Storm.app in /Applications'; else printf 'the web client (no Linux desktop app yet)'; fi
+      if [ "$OS" = macos ]; then printf 'Storm.app in /Applications'; else printf 'the Storm app for this desktop'; fi
       ;;
     mobile) printf 'pairing QR, Android APK, web address' ;;
     relay) printf 'reach this machine from anywhere' ;;
@@ -2535,28 +2543,75 @@ app_available() {
       REASON="$name isn't in v$REL_VERSION's checksums.txt"
       return 1
       ;;
-    linux) return 0 ;;
+    linux)
+      if [ "$ARCH" != x86_64 ]; then
+        REASON="the Storm app for Linux is built for x86_64 (this machine is $ARCH); use your Storm server's web client"
+        return 1
+      fi
+      if [ "$(app_kind)" = package ]; then
+        linux_pkg_available app || return 1
+        [ -n "$OPT_FROM_DIR" ] && return 0
+        name=$(asset_name app-deb "$REL_VERSION")
+      else
+        name=$(asset_name app-linux "$REL_VERSION")
+      fi
+      release_ok || return 1
+      checksum_has "$name" && return 0
+      REASON="$name isn't in v$REL_VERSION's checksums.txt; use your Storm server's web client"
+      return 1
+      ;;
   esac
-  REASON="the installer supports macOS and Debian/Ubuntu Linux"
+  REASON="the installer supports macOS and Linux"
   return 1
+}
+
+# Linux: the package where apt is, the tarball in the home directory elsewhere.
+# An app already installed keeps its kind, so a re-run never adds a second copy.
+app_kind() {
+  if [ -x "$APP_USER_DIR/storm" ]; then
+    printf user
+  elif [ -x "$APP_PKG_BIN" ]; then
+    printf package
+  elif [ "$DEBIAN_LIKE" = 1 ] && command -v apt-get >/dev/null 2>&1; then
+    printf package
+  else
+    printf user
+  fi
 }
 
 app_detect() {
   APP_INSTALLED=0 APP_VERSION=""
-  [ "$OS" = macos ] || return 0
-  [ -d "$APP_DIR/Storm.app" ] || return 0
-  APP_INSTALLED=1
-  APP_VERSION=$(probe defaults read "$APP_DIR/Storm.app/Contents/Info" CFBundleShortVersionString) || APP_VERSION=""
+  case "$OS" in
+    macos)
+      [ -d "$APP_DIR/Storm.app" ] || return 0
+      APP_INSTALLED=1
+      APP_VERSION=$(probe defaults read "$APP_DIR/Storm.app/Contents/Info" CFBundleShortVersionString) || APP_VERSION=""
+      ;;
+    linux)
+      if [ -x "$APP_USER_DIR/storm" ]; then
+        APP_INSTALLED=1
+        APP_VERSION=$(head -n 1 "$APP_USER_DIR/VERSION" 2>/dev/null) || APP_VERSION=""
+      elif [ -x "$APP_PKG_BIN" ]; then
+        APP_INSTALLED=1
+        # dpkg-query's own field syntax, not a shell expansion.
+        # shellcheck disable=SC2016
+        APP_VERSION=$(probe dpkg-query -W -f '${Version}' storm-app) || APP_VERSION=""
+        APP_VERSION=${APP_VERSION%-*}
+      fi
+      ;;
+  esac
   return 0
 }
 
 app_status_line() {
-  if [ "$OS" != macos ]; then
-    printf 'none for Linux: use the web client'
-  elif [ "$APP_INSTALLED" = 1 ]; then
-    printf 'installed%s (%s/Storm.app)' "${APP_VERSION:+ v$APP_VERSION}" "$APP_DIR"
-  else
+  if [ "$APP_INSTALLED" != 1 ]; then
     printf 'not installed'
+  elif [ "$OS" = macos ]; then
+    printf 'installed%s (%s/Storm.app)' "${APP_VERSION:+ v$APP_VERSION}" "$APP_DIR"
+  elif [ "$(app_kind)" = user ]; then
+    printf 'installed%s (%s)' "${APP_VERSION:+ v$APP_VERSION}" "$APP_USER_DIR"
+  else
+    printf 'installed%s (the storm-app package)' "${APP_VERSION:+ v$APP_VERSION}"
   fi
 }
 
@@ -2565,15 +2620,38 @@ app_dest() {
   if [ -w "$APP_DIR" ]; then printf '%s' "$APP_DIR"; else printf '%s' "$HOME/Applications"; fi
 }
 
+app_user_files() {
+  printf '%s\n' "$APP_USER_DIR" "$APP_BIN_DIR/storm-app" \
+    "$APP_SHARE/applications/dev.storm.storm.desktop" \
+    "$APP_SHARE/icons/hicolor/256x256/apps/dev.storm.storm.png" \
+    "$APP_SHARE/icons/hicolor/512x512/apps/dev.storm.storm.png"
+}
+
 app_plan() {
-  local mode dest disp
+  local mode dest disp f
   mode=$(comp_mode app)
-  if [ "$OS" != macos ]; then
-    [ "$mode" = uninstall ] && return 0
-    if [ "$LOCAL_SERVER" = 1 ]; then
-      plan_add fg 0 "Show the web client's address (there's no Linux desktop app yet)" "$(srv_bin_display) qr $(web_url)" app_configure web
+  if [ "$OS" = linux ]; then
+    if [ "$mode" = uninstall ]; then
+      if [ "$(app_kind)" = package ]; then
+        plan_add spin 1 "Remove the storm-app package" "sudo apt-get remove -y storm-app" app_uninstall package
+      else
+        disp=""
+        while IFS= read -r f; do disp="${disp:+$disp\n}rm -rf $(shq "$f")"; done <<EOF
+$(app_user_files)
+EOF
+        plan_add spin 0 "Remove the Storm app from $APP_USER_DIR and its launcher entry" "$disp" app_uninstall user
+      fi
+      return 0
+    fi
+    [ "$mode" = keep ] && return 0
+    if [ "$(app_kind)" = package ]; then
+      if [ -z "$OPT_FROM_DIR" ]; then apt_plan_repo; fi
+      plan_add spin 1 "Install the storm-app package" "$(apt_install_display app "$mode")" app_install package "$mode"
     else
-      plan_note "Desktop app: there's none for Linux yet; use your Storm server's web client."
+      plan_fetch app app-linux
+      disp="cp -R storm-app $(shq "$APP_USER_DIR")\ncp -R storm-app/share/. $(shq "$APP_SHARE")"
+      disp="$disp\nln -sfn $(shq "$APP_USER_DIR/storm") $(shq "$APP_BIN_DIR/storm-app")"
+      plan_add spin 0 "Install the Storm app into $APP_USER_DIR, with a launcher entry (no root)" "$disp" app_install user
     fi
     return 0
   fi
@@ -2591,6 +2669,14 @@ app_plan() {
 }
 
 app_install() {
+  case "$1" in
+    package) apt_install_pkg storm-app "${2:-install}" ;;
+    user) app_install_user ;;
+    *) app_install_macos "$1" ;;
+  esac
+}
+
+app_install_macos() {
   local dest=$1 zip x
   zip="$WORK_DIR/app/$(asset_name app-macos "$REL_VERSION")"
   x="$WORK_DIR/app/x"
@@ -2609,22 +2695,47 @@ app_install() {
   ditto "$x/Storm.app" "$dest/Storm.app"
 }
 
-app_configure() {
-  case "$1" in
-    web)
-      ui_info "There's no Linux desktop app yet. Open the web client in a browser:"
-      ui_info "  ${C_BOLD}$(web_url)${C_RESET}"
-      show_qr "$(web_url)"
-      ;;
-  esac
+# The tarball, unpacked by fetch_asset, into the home directory. A running
+# Storm keeps its old files (they stay open after the unlink) until it quits.
+app_install_user() {
+  local src="$WORK_DIR/app/storm-app" desktop="$APP_SHARE/applications/dev.storm.storm.desktop"
+  if [ ! -x "$src/storm" ]; then
+    echo "the tarball has no storm-app/storm"
+    return 1
+  fi
+  mkdir -p "$APP_SHARE" "$APP_BIN_DIR" || return 1
+  rm -rf "$APP_USER_DIR" || return 1
+  cp -R "$src" "$APP_USER_DIR" || return 1
+  rm -rf "$APP_USER_DIR/share"
+  cp -R "$src/share/." "$APP_SHARE/" || return 1
+  # The launcher needs the absolute path: ~/.local/bin is often not on the
+  # desktop session's PATH.
+  sed "s|^Exec=.*|Exec=\"$APP_USER_DIR/storm\"|" "$src/share/applications/dev.storm.storm.desktop" >"$desktop" || return 1
+  ln -sfn "$APP_USER_DIR/storm" "$APP_BIN_DIR/storm-app" || return 1
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APP_SHARE/applications" >/dev/null 2>&1 || :
+  fi
+  return 0
 }
 
 app_verify() {
-  [ "$OS" != macos ] || [ -d "$(app_dest)/Storm.app" ]
+  case "$OS" in
+    macos) [ -d "$(app_dest)/Storm.app" ] ;;
+    linux) [ -x "$APP_USER_DIR/storm" ] || [ -x "$APP_PKG_BIN" ] ;;
+  esac
 }
 
 app_uninstall() {
-  rm -rf "$APP_DIR/Storm.app"
+  local f
+  case "${1:-}" in
+    package) as_root env DEBIAN_FRONTEND=noninteractive apt-get remove -y storm-app ;;
+    user)
+      while IFS= read -r f; do rm -rf "$f" || return 1; done <<EOF
+$(app_user_files)
+EOF
+      ;;
+    *) rm -rf "$APP_DIR/Storm.app" ;;
+  esac
 }
 
 # ------------------------------------------------------------ component: mobile
@@ -2762,7 +2873,7 @@ apt_install_pkg() {
 plan_fetch() {
   local c=$1 name disp
   plan_once "fetch-$c" || return 0
-  name=$(asset_name "$c-macos" "$REL_VERSION")
+  name=$(asset_name "${2:-$c-macos}" "$REL_VERSION")
   if [ -n "$OPT_FROM_DIR" ]; then
     disp="cp $(shq "$OPT_FROM_DIR/$name") ."
   else
@@ -2976,10 +3087,6 @@ choose_mode() {
       return 0
       ;;
   esac
-  if [ "$c" = app ] && [ "$OS" != macos ]; then
-    set_mode "$c" install
-    return 0
-  fi
   if ! comp_installed "$c"; then
     set_mode "$c" install
     return 0
