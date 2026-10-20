@@ -40,10 +40,8 @@ its pinned key, its LAN address and its registered relays. The raw HTTP entry
 is under *Other clients (HTTP, LAN only)*.
 
 To put the binary on a computer that is not a Runtime Host, the installer has
-an **MCP only** choice (`--mcp`; `install.ps1 -Mcp` on Windows). **The
-installer does not offer it yet:** it appears once a release turns it on.
-Until then, install the Runtime Host package or the release's `storm-runtime`
-binary, or use the HTTP entry below. When it is offered, it downloads `storm-runtime` from the release (the Linux x86_64 binary, or the
+an **MCP only** choice (`--mcp`; `install.ps1 -Mcp` on Windows), from
+v0.11.0. It downloads `storm-runtime` from the release (the Linux x86_64 binary, or the
 macOS universal tarball), checks it against `checksums.txt` and copies it to
 `/usr/local/bin/storm-runtime`, the one `sudo` step. On Linux a machine with
 the `storm-runtime` package already has it on PATH, so there is nothing to do;

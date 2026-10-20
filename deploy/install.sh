@@ -44,8 +44,8 @@ STORM_DEFAULT_PORT=8484
 STORM_COMPONENTS="server runtime mcp agents app mobile relay"
 # The first release with a macOS server tarball.
 STORM_MACOS_SERVER_SINCE="0.6.0"
-# The first release whose storm-runtime has `mcp-connect`; empty until one does.
-STORM_MCP_CONNECT_SINCE=""
+# The first release whose storm-runtime has `mcp-connect` (decision 105).
+STORM_MCP_CONNECT_SINCE="0.10.0"
 # A step returns this when the person chose to skip it.
 STEP_SKIPPED=10
 # Seconds between polls (health, account). Tests set it to 0.

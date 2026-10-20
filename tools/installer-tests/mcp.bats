@@ -26,6 +26,7 @@ typed() {
 }
 
 @test "from a release: unavailable until a release has mcp-connect" {
+  STORM_MCP_CONNECT_SINCE=""
   run storm_main --yes --dry-run --version v0.6.0 --mcp
   [ "$status" -eq 1 ]
   [[ "$output" == *"MCP connector is unavailable: mcp-connect isn't in a Storm release yet"* ]]
