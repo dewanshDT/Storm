@@ -15,6 +15,9 @@ import '../api/server_verifier.dart';
 import '../api/storm_connection.dart';
 import '../api/storm_api.dart';
 import '../cache/cache_db.dart';
+import 'recovered_note.dart';
+
+export 'recovered_note.dart';
 
 /// What happened to a save.
 enum SaveStatus {
@@ -169,6 +172,9 @@ class SyncEngine extends ChangeNotifier {
   final _changes = StreamController<Set<String>>.broadcast();
   Stream<Set<String>> get changes => _changes.stream;
 
+  final _recovered = StreamController<RecoveredNote>.broadcast();
+  Stream<RecoveredNote> get recovered => _recovered.stream;
+
   WebSocketChannel? _ws;
   StreamSubscription? _wsSub;
   StreamSubscription? _sseSub;
@@ -259,6 +265,7 @@ class SyncEngine extends ChangeNotifier {
     _ws?.sink.close();
     _sseSub?.cancel();
     _changes.close();
+    _recovered.close();
     super.dispose();
   }
 
