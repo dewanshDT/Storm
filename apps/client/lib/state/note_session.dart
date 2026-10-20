@@ -247,6 +247,11 @@ class NoteSession extends ChangeNotifier {
     }
   }
 
+  Future<String?> flush() async {
+    if (isDirty) await save();
+    return _error;
+  }
+
   /// Called when the sync engine sees this note change on the server.
   ///
   /// A local edit always wins the race — replacing the buffer under someone's
