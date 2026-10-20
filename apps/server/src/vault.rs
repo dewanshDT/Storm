@@ -20,6 +20,23 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
+/// A request the vault refuses on policy, as opposed to an I/O failure.
+///
+/// Typed so a caller can answer 400 or 409 for these and 500 for anything
+/// else (decision 128a): a client discards a queued edit on 404, so a disk
+/// error must never look like a missing note.
+#[derive(Debug, thiserror::Error)]
+pub enum Refusal {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Exists(String),
+    #[error("{0}")]
+    Missing(String),
+    #[error("{0}")]
+    NotEmpty(String),
+}
+
 pub struct Vault {
     root: PathBuf,
 }
@@ -54,11 +71,13 @@ impl Vault {
     /// to create.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         if rel.is_empty() {
-            bail!("empty path");
+            bail!(Refusal::Invalid("empty path".into()));
         }
         let candidate = Path::new(rel);
         if candidate.is_absolute() {
-            bail!("absolute paths are not allowed: {rel}");
+            bail!(Refusal::Invalid(format!(
+                "absolute paths are not allowed: {rel}"
+            )));
         }
 
         let mut out = self.root.clone();
@@ -67,19 +86,27 @@ impl Vault {
                 Component::Normal(part) => {
                     let s = part.to_string_lossy();
                     if s.starts_with('.') {
-                        bail!("hidden path segments are not allowed: {rel}");
+                        bail!(Refusal::Invalid(format!(
+                            "hidden path segments are not allowed: {rel}"
+                        )));
                     }
                     if cfg!(windows)
                         && let Some(why) = windows_name_problem(&s)
                     {
-                        bail!("{why}, which Windows cannot store: {rel}");
+                        bail!(Refusal::Invalid(format!(
+                            "{why}, which Windows cannot store: {rel}"
+                        )));
                     }
                     out.push(part);
                 }
                 Component::CurDir => {}
-                Component::ParentDir => bail!("path escapes the vault: {rel}"),
+                Component::ParentDir => {
+                    bail!(Refusal::Invalid(format!("path escapes the vault: {rel}")))
+                }
                 Component::RootDir | Component::Prefix(_) => {
-                    bail!("absolute paths are not allowed: {rel}")
+                    bail!(Refusal::Invalid(format!(
+                        "absolute paths are not allowed: {rel}"
+                    )))
                 }
             }
         }
@@ -93,7 +120,9 @@ impl Vault {
                     .canonicalize()
                     .with_context(|| format!("resolving {}", probe.display()))?;
                 if !real.starts_with(&self.root) {
-                    bail!("path escapes the vault via a symlink: {rel}");
+                    bail!(Refusal::Invalid(format!(
+                        "path escapes the vault via a symlink: {rel}"
+                    )));
                 }
                 break;
             }
@@ -228,7 +257,7 @@ impl Vault {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
         if dst.exists() {
-            bail!("destination already exists: {to}");
+            bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
@@ -244,7 +273,7 @@ impl Vault {
     pub fn create_dir(&self, rel: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         if path.is_file() {
-            bail!("a file already exists at {rel}");
+            bail!(Refusal::Exists(format!("a file already exists at {rel}")));
         }
         fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
         Ok(())
@@ -254,11 +283,11 @@ impl Vault {
     pub fn remove_dir(&self, rel: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         if !path.is_dir() {
-            bail!("no such folder: {rel}");
+            bail!(Refusal::Missing(format!("no such folder: {rel}")));
         }
         let empty = fs::read_dir(&path)?.next().is_none();
         if !empty {
-            bail!("folder is not empty: {rel}");
+            bail!(Refusal::NotEmpty(format!("folder is not empty: {rel}")));
         }
         fs::remove_dir(&path).with_context(|| format!("removing {}", path.display()))?;
         Ok(())
@@ -269,10 +298,10 @@ impl Vault {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
         if !src.is_dir() {
-            bail!("no such folder: {from}");
+            bail!(Refusal::Missing(format!("no such folder: {from}")));
         }
         if dst.exists() {
-            bail!("destination already exists: {to}");
+            bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;

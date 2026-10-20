@@ -239,7 +239,8 @@ void main() {
     // client's trunk (decision 100).
     final (bigTrunk, bigApi) = freshRelayed();
     addTearDown(bigTrunk.dispose);
-    final path = scratch('20m-up');
+    final path =
+        'RelayTest/${DateTime.now().microsecondsSinceEpoch}-20m-up.bin';
     final bytes = pattern(20 * 1024 * 1024);
     await bigApi.uploadAttachment(vaultId, path, bytes).timeout(deadline);
     expect(await direct.attachment(vaultId, path), bytes);

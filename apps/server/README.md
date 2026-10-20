@@ -133,6 +133,14 @@ Everything note-shaped is scoped to a vault:
 A vault id that was never registered is a `404`; one whose directory has gone
 is a `409`, and stays in the registry rather than disappearing.
 
+**A `404` means only that the note, folder or attachment does not exist**
+(decision 128a). The client's outbox discards a queued edit on `404`, so every
+other failure answers something else: a path that is taken is `409`, a path
+that is invalid or a note path not ending in `.md` is `400`, and a write the
+server could not complete (a full disk, a permission error, an NFS failure) is
+`500`, which the client keeps queued and retries. The attachment routes refuse
+`.md` paths: a note is written only through the note routes, with their merge.
+
 ### Server identity
 
 On first boot the server mints itself an identity and keeps it in
